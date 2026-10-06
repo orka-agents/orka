@@ -50,11 +50,27 @@ func (h *Handlers) ImportNativeSession(c fiber.Ctx) error {
 	if len(validation.IsDNS1123Subdomain(name)) != 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "session name must be a DNS subdomain")
 	}
-	if len(c.Body()) > 2*maxNativeSessionBundleBytes {
+	const maxRequestBytes = 2 * maxNativeSessionBundleBytes
+	if c.Request().Header.ContentLength() > maxRequestBytes {
+		c.RequestCtx().SetConnectionClose()
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "native session request is too large")
+	}
+	var body []byte
+	if stream := c.Request().BodyStream(); stream != nil {
+		body, err = io.ReadAll(io.LimitReader(stream, maxRequestBytes+1))
+		if err != nil {
+			c.RequestCtx().SetConnectionClose()
+			return fiber.NewError(fiber.StatusBadRequest, "invalid native session request")
+		}
+	} else {
+		body = c.BodyRaw()
+	}
+	if len(body) > maxRequestBytes {
+		c.RequestCtx().SetConnectionClose()
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "native session request is too large")
 	}
 	var request nativeSessionImportRequest
-	decoder := json.NewDecoder(bytes.NewReader(c.Body()))
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid native session request")

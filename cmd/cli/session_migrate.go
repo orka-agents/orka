@@ -15,9 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/cli/client"
 	"github.com/orka-agents/orka/internal/codexstate"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 type migrationState struct {
@@ -30,6 +33,52 @@ type migrationState struct {
 	CWD         string `json:"cwd,omitempty"`
 	OperationID string `json:"operationID"`
 	Data        []byte `json:"data"`
+}
+
+// Automatic migrations use a dedicated tunnel, since the general port-forward
+// cache does not record its cluster. Its local port is transport, not identity.
+func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), error) {
+	server, _ := cmd.Flags().GetString("server")
+	if server == "" {
+		server = loadConfig().Server
+	}
+	if server != "" {
+		return newClientFromCmdWithServer(cmd, server), server, func() {}, nil
+	}
+	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
+	restConfig, err := buildRESTConfig(kubeconfigPath)
+	if err != nil {
+		return newClientFromCmdWithServer(cmd, defaultServer), defaultServer, func() {}, nil
+	}
+	// Resolve the same namespace defaults without selecting a transport yet.
+	c := newClientFromCmdWithServer(cmd, defaultServer)
+	serviceNamespace, serviceName := discoverService(kubeconfigPath, c.Namespace)
+	if serviceName == "" {
+		return c, defaultServer, func() {}, nil
+	}
+	kube, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, "", nil, errors.New("resolve native migration target")
+	}
+	service, err := kube.CoreV1().Services(serviceNamespace).Get(cmd.Context(), serviceName, metav1.GetOptions{})
+	if err != nil || service.UID == "" {
+		return nil, "", nil, errors.New("resolve native migration service identity")
+	}
+	identity, err := json.Marshal(struct {
+		Cluster   string
+		Namespace string
+		Service   string
+		UID       string
+	}{restConfig.Host, serviceNamespace, serviceName, string(service.UID)})
+	if err != nil {
+		return nil, "", nil, err
+	}
+	port, _, cleanup, err := startPortForward(kubeconfigPath, serviceNamespace, serviceName)
+	if err != nil {
+		return nil, "", nil, errors.New("connect native migration service")
+	}
+	c.BaseURL = fmt.Sprintf("http://localhost:%d", port)
+	return c, "kubernetes:" + codexstate.DataDigest(identity), cleanup, nil
 }
 
 func migrationDir(name string, create bool) (string, error) {
@@ -186,8 +235,12 @@ func newSessionMigrateImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c := newClientFromCmd(cmd)
-			expected := migrationState{Direction: "import", Server: c.BaseURL, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, Thread: thread}
+			c, target, cleanup, err := newMigrationClient(cmd)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			expected := migrationState{Direction: "import", Server: target, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, Thread: thread}
 			saved, err := readMigrationState(resolvedJournal, expected)
 			if err != nil {
 				return err
@@ -251,8 +304,12 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c := newClientFromCmd(cmd)
-			expected := migrationState{Direction: "export", Server: c.BaseURL, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, CWD: resolvedCWD}
+			c, target, cleanup, err := newMigrationClient(cmd)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			expected := migrationState{Direction: "export", Server: target, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, CWD: resolvedCWD}
 			saved, err := readMigrationState(resolvedJournal, expected)
 			if err != nil {
 				return err

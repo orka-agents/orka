@@ -1,9 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,7 +42,7 @@ func nativeAPIApp(t *testing.T, cfg HandlersConfig, middleware fiber.Handler) *f
 	t.Helper()
 	cfg.Client = fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
 	h := NewHandlers(cfg)
-	app := fiber.New()
+	app := fiber.New(fiber.Config{BodyLimit: defaultAPIRequestBodyLimit, StreamRequestBody: true})
 	if middleware != nil {
 		app.Use(middleware)
 	}
@@ -242,4 +246,101 @@ func TestNativeSessionMigrationAPIRejectsMalformedBundles(t *testing.T) {
 	sessions, err := s.ListSessions(t.Context(), "default")
 	require.NoError(t, err)
 	require.Empty(t, sessions)
+}
+
+type nativeSessionCountingReader struct {
+	io.Reader
+	bytesRead int
+}
+
+func (r *nativeSessionCountingReader) Read(data []byte) (int, error) {
+	n, err := r.Reader.Read(data)
+	r.bytesRead += n
+	return n, err
+}
+
+func TestNativeSessionMigrationAPIBoundsStreamedRequests(t *testing.T) {
+	const limit = 2 * maxNativeSessionBundleBytes
+	for _, chunked := range []bool{false, true} {
+		name := "content-length"
+		if chunked {
+			name = "chunked"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := nativeAPIStore(t)
+			reader := &nativeSessionCountingReader{Reader: bytes.NewReader(bytes.Repeat([]byte{' '}, 2*limit))}
+			app := nativeAPIApp(t, HandlersConfig{SessionStore: s}, func(c fiber.Ctx) error {
+				length := 2 * limit
+				if chunked {
+					length = -1
+				}
+				c.Request().SetBodyStream(reader, length)
+				return c.Next()
+			})
+			response, err := app.Test(httptest.NewRequest(http.MethodPost, "/sessions/oversized/native", nil))
+			require.NoError(t, err)
+			require.Equal(t, http.StatusRequestEntityTooLarge, response.StatusCode)
+			_ = response.Body.Close()
+			if chunked {
+				require.Equal(t, limit+1, reader.bytesRead)
+			} else {
+				require.Zero(t, reader.bytesRead)
+			}
+			_, err = s.GetSession(t.Context(), "default", "oversized")
+			require.ErrorIs(t, err, store.ErrNotFound)
+		})
+	}
+}
+
+func TestNativeSessionMigrationAPIAcceptsChunkedRequest(t *testing.T) {
+	s := nativeAPIStore(t)
+	snapshot := storetest.NativeSessionSnapshot(t, "chunked native history")
+	body, err := json.Marshal(nativeSessionImportRequest{OperationID: "chunked-operation", Data: snapshot.Data})
+	require.NoError(t, err)
+	reader := &nativeSessionCountingReader{Reader: bytes.NewReader(body)}
+	app := nativeAPIApp(t, HandlersConfig{SessionStore: s}, func(c fiber.Ctx) error {
+		c.Request().SetBodyStream(reader, -1)
+		return c.Next()
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/sessions/chunked/native", nil), fiber.TestConfig{Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	_ = response.Body.Close()
+	require.Equal(t, len(body), reader.bytesRead)
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions/chunked/native", nil), fiber.TestConfig{Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var export nativeSessionExportResponse
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&export))
+	_ = response.Body.Close()
+	require.Equal(t, snapshot.Data, export.Data)
+}
+
+func TestNativeSessionMigrationAPIRejectsUnfinishedOversizedChunk(t *testing.T) {
+	s := nativeAPIStore(t)
+	app := nativeAPIApp(t, HandlersConfig{SessionStore: s}, nil)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	serveErrors := make(chan error, 1)
+	go func() { serveErrors <- app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() {
+		_ = app.Shutdown()
+		<-serveErrors
+	})
+	connection, err := net.Dial("tcp4", listener.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = connection.Close() })
+	require.NoError(t, connection.SetDeadline(time.Now().Add(5*time.Second)))
+	const oversized = 2*maxNativeSessionBundleBytes + 1
+	_, err = fmt.Fprintf(connection, "POST /sessions/oversized/native HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n", 2*oversized)
+	require.NoError(t, err)
+	_, err = connection.Write(bytes.Repeat([]byte{' '}, oversized))
+	require.NoError(t, err)
+	// Do not finish the chunk or request. The route must return at its limit.
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusRequestEntityTooLarge, response.StatusCode)
+	_ = response.Body.Close()
+	_, err = s.GetSession(t.Context(), "default", "oversized")
+	require.ErrorIs(t, err, store.ErrNotFound)
 }

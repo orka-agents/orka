@@ -11,6 +11,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -288,8 +289,9 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	})
 }
 
-// Recovery uses the exact surviving built-in RuntimePool incarnation. Losing
-// that incarnation cannot be interpreted as a successful native checkpoint.
+// Recovery captures the exact surviving built-in RuntimePool incarnation.
+// Before a checkpoint or capture intent exists, confirmed pool replacement or
+// deletion permits canonical settlement through the existing cleanup gates.
 func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) error {
 	if session == nil || session.Turn == nil || session.Turn.SkipTranscriptAppend {
 		return nil
@@ -318,20 +320,9 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 		}
 	}
 	execution := task.Status.Execution
-	pool := &corev1alpha1.RuntimePool{}
-	if execution == nil || execution.RuntimePoolName == "" {
-		if !nativeRequired {
-			return nil
-		}
-		return fmt.Errorf("%w: native capture recovery requires its exact RuntimePool", store.ErrConflict)
-	}
-	if err := d.APIReader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: execution.RuntimePoolName}, pool); err != nil {
+	pool, err := d.nativeCaptureRecoveryPool(ctx, task, nativeRequired)
+	if err != nil || pool == nil {
 		return err
-	}
-	active := pool.Status.ActiveInstance
-	if string(pool.UID) != execution.RuntimePoolUID || active == nil || active.RuntimeInstanceID != execution.RuntimeInstanceID ||
-		active.BootID != execution.RuntimeSessionSupervisorBootID || pool.Spec.Runtime.Profile.Digest != execution.RuntimeSessionProfileDigest {
-		return fmt.Errorf("%w: native capture runtime was replaced before its durable receipt", store.ErrConflict)
 	}
 	if pool.Spec.Runtime.Profile.ProviderKind != runtimePoolProviderCodex {
 		if nativeRequired {
@@ -356,6 +347,34 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 	runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID)
 	runtimeFence.RuntimeSessionGeneration = uint64(execution.RuntimeSessionGeneration)
 	return d.captureTaskNativeSession(ctx, runtimeClient, task, runtimeFence, session)
+}
+
+func (d *ACPDispatcher) nativeCaptureRecoveryPool(ctx context.Context, task *corev1alpha1.Task, nativeRequired bool) (*corev1alpha1.RuntimePool, error) {
+	execution := task.Status.Execution
+	pool := &corev1alpha1.RuntimePool{}
+	if execution == nil || execution.RuntimePoolName == "" {
+		if !nativeRequired {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: native capture recovery requires its exact RuntimePool", store.ErrConflict)
+	}
+	if err := d.APIReader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: execution.RuntimePoolName}, pool); err != nil {
+		if !nativeRequired && apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	active := pool.Status.ActiveInstance
+	changedPoolUID := pool.UID != "" && execution.RuntimePoolUID != "" && string(pool.UID) != execution.RuntimePoolUID
+	changedInstance := active != nil && active.RuntimeInstanceID != "" && active.RuntimeInstanceID != execution.RuntimeInstanceID
+	if !nativeRequired && (changedPoolUID || changedInstance) {
+		return nil, nil
+	}
+	if string(pool.UID) != execution.RuntimePoolUID || active == nil || active.RuntimeInstanceID != execution.RuntimeInstanceID ||
+		active.BootID != execution.RuntimeSessionSupervisorBootID || pool.Spec.Runtime.Profile.Digest != execution.RuntimeSessionProfileDigest {
+		return nil, fmt.Errorf("%w: native capture runtime was replaced before its durable receipt", store.ErrConflict)
+	}
+	return pool, nil
 }
 
 // Poisoned workspace validation cannot produce a native checkpoint. Callers

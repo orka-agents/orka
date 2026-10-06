@@ -78,7 +78,9 @@ Migration does not copy source authentication or source policy into authority.
 Retain the journal and repeat the same command after an uncertain response. The
 CLI reuses its saved bundle and operation ID. Export also reuses the same frozen
 SessionKit install plan and receipt. Changing the target, bundle, or cwd with
-that journal is rejected.
+that journal is rejected. Automatic port-forward retries use the Kubernetes
+cluster and Service identity rather than the local port. Recreating the Service
+requires a new journal; an explicit server URL must stay unchanged.
 
 An uncertain runtime install retains its target and frozen journal and closes
 pool admission. Exact create retries report that retained outcome without
@@ -100,7 +102,16 @@ If a native-continuity Session cannot produce a supported checkpoint, Orka
 retains the runtime evidence and blocks finalization. It does not silently start
 a new provider thread. An ordinary Session with no native checkpoint may use
 canonical continuity after a terminal format or size rejection, but only after
-the runtime proves process exit.
+the runtime proves process exit. Before a capture intent or native checkpoint
+exists, canonical recovery also remains available after the exact runtime has
+been retired or replaced. A surviving native-capable runtime still produces
+its first checkpoint.
+
+Normal pool drain preserves resident native evidence until the controller
+commits the checkpoint and deletes the runtime. Uncommitted native state uses
+the runtime Pod's temporary storage; a forced Pod loss can destroy it. Recovery
+with native continuity or a capture intent then blocks on the missing exact
+runtime or capture receipt.
 
 Native bundles are private Session data, accessible only through the migration
 endpoint. Export requires `get` on `core.orka.ai/sessions`. Import requires

@@ -132,6 +132,188 @@ func TestACPDispatcherFirstNativeCaptureRecoveryPreservesExactEvidence(t *testin
 	}
 }
 
+type nativeRecoveryPoolReadFailure struct {
+	client.Reader
+}
+
+func (r nativeRecoveryPoolReadFailure) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	if _, isPool := object.(*corev1alpha1.RuntimePool); isPool {
+		return errors.New("injected transient pool read failure")
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
+}
+
+func TestACPDispatcherFirstNativeCaptureRecoveryAfterPoolRetirement(t *testing.T) {
+	tests := []struct {
+		name       string
+		poolChange string
+		native     bool
+		pending    bool
+		settles    bool
+	}{
+		{name: "deleted-pool", poolChange: "deleted", settles: true},
+		{name: "replaced-pool", poolChange: "uid", settles: true},
+		{name: "replaced-instance", poolChange: "instance", settles: true},
+		{name: "missing-active-status", poolChange: "nil-active"},
+		{name: "empty-instance", poolChange: "empty-instance"},
+		{name: "same-instance-changed-boot", poolChange: "boot"},
+		{name: "same-instance-changed-profile", poolChange: "profile"},
+		{name: "transient-pool-read", poolChange: "read-error"},
+		{name: "transient-runtime-probe", poolChange: "probe-error"},
+		{name: "native-checkpoint-deleted-pool", poolChange: "deleted", native: true},
+		{name: "native-checkpoint-replaced-pool", poolChange: "uid", native: true},
+		{name: "pending-capture-deleted-pool", poolChange: "deleted", pending: true},
+		{name: "pending-capture-replaced-instance", poolChange: "instance", pending: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			snapshot := storetest.NativeSessionSnapshot(t, "native recovery after exact pool retirement")
+			captures, deletes, prompts := 0, 0, 0
+			probeFailure := false
+			var persistence *sqlite.Store
+			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-retired-"+test.name, "77777777-7777-7777-7777-777777777777",
+				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+					runtimeServer := newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
+						nativeSnapshot: &snapshot,
+						onNativeCapture: func(harnessv2.CaptureNativeSessionRequest) error {
+							captures++
+							return &harnessv2.ClientError{Code: harnessv2.ErrorCodeSessionPoisoned, StatusCode: http.StatusConflict}
+						},
+						onDelete: func(harnessv2.DeleteRuntimeSessionRequest) { deletes++ },
+						onPrompt: func(harnessv2.StartPromptRequest) { prompts++ },
+					}, func(harnessv2.CreateRuntimeSessionRequest) {
+						require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, "default", "retired-native-recovery", "retired-native-owner"))
+					})
+					t.Cleanup(runtimeServer.Close)
+					return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+						if probeFailure && (request.URL.Path == harnessv2.StatusPath || request.URL.Path == harnessv2.CapabilitiesPath) {
+							w.WriteHeader(http.StatusServiceUnavailable)
+							return
+						}
+						runtimeServer.Config.Handler.ServeHTTP(w, request)
+					}))
+				}, func(task *corev1alpha1.Task) {
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "retired-native-recovery", Create: true, Append: true}
+				})
+			defer fixture.stop()
+			persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+			failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
+			fixture.dispatcher.Store, fixture.dispatcher.EventStore = failure, persistence
+			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+				SessionControls: failure, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
+				NewSessionUID: func() (string, error) { return "retired-native-owner", nil },
+			})
+			require.NoError(t, err)
+			fixture.dispatcher.Sessions = continuity
+			if test.native {
+				staged := snapshot
+				staged.RuntimeSessionUID, staged.RuntimeProfileDigest, staged.WorkingDirectory = "", "", ""
+				_, err = persistence.StageNativeSessionImport(ctx, store.NativeSessionImport{
+					Namespace: "default", SessionName: "retired-native-recovery", OperationID: "import-retired-native",
+					RequestDigest: store.NativeSessionImportDigest("default", "retired-native-recovery", snapshot.DataDigest), Snapshot: staged,
+				})
+				require.NoError(t, err)
+				require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, "default", "retired-native-recovery", "retired-native-owner"))
+			}
+			reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+			require.NoError(t, err)
+			require.NotNil(t, reserved)
+			require.ErrorContains(t, fixture.dispatcher.executeReservedTask(ctx, reserved, target), "injected terminal delivery transition failure")
+			current := fixture.currentTask(t, ctx)
+			require.Empty(t, current.Annotations[nativeCaptureIntentAnnotation])
+			require.Zero(t, captures)
+			require.Zero(t, deletes)
+			failure.fail = false
+			fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+			require.NoError(t, err)
+			require.NoError(t, fixture.dispatcher.transitionDelivery(ctx, fixture.attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryNoChange, "recover-retired-delivery", ""))
+			if test.pending {
+				require.ErrorContains(t, fixture.dispatcher.recoverStaleTask(ctx, current, fence), "capture private native Session")
+				current = fixture.currentTask(t, ctx)
+				require.NotEmpty(t, current.Annotations[nativeCaptureIntentAnnotation])
+				require.Equal(t, 1, captures)
+			}
+			control, err := persistence.GetSessionControl(ctx, "default", "retired-native-recovery")
+			require.NoError(t, err)
+			require.NotNil(t, control.Lease)
+			before, err := persistence.LoadTranscript(ctx, control.Namespace, control.SessionName, 100)
+			require.NoError(t, err)
+			pool := &corev1alpha1.RuntimePool{}
+			require.NoError(t, fixture.kubeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: current.Status.Execution.RuntimePoolName}, pool))
+			// The lifecycle owner proves exact authenticated quiescence and
+			// persists its receipt before forgetting or replacing this pool.
+			drained := dispatcherRuntimeStatusResponseForPool(harnessv2.ProfileDigest(pool.Spec.Runtime.Profile.Digest), string(pool.UID), harnessv2.RuntimeSessionDescriptor{})
+			drained.Lifecycle, drained.Drain = harnessv2.SupervisorLifecycleDraining, harnessv2.DrainStatus{Requested: true}
+			reconciler := &RuntimePoolReconciler{Client: fixture.kubeClient, APIReader: fixture.kubeClient}
+			require.NoError(t, reconciler.recordDrainedRuntimePoolTaskCleanup(ctx, pool, pool.Status.ActiveInstance, drained))
+			current = fixture.currentTask(t, ctx)
+			require.True(t, runtimeSessionCleanupCompleteForUID(current, current.UID))
+			switch test.poolChange {
+			case "deleted":
+				require.NoError(t, fixture.kubeClient.Delete(ctx, pool))
+			case "uid":
+				require.NoError(t, fixture.kubeClient.Delete(ctx, pool))
+				pool.UID, pool.ResourceVersion = "replacement-pool-uid", ""
+				require.NoError(t, fixture.kubeClient.Create(ctx, pool))
+			case "instance":
+				pool.Status.ActiveInstance.RuntimeInstanceID = "replacement-pod.replacement-boot"
+				require.NoError(t, fixture.kubeClient.Status().Update(ctx, pool))
+			case "nil-active":
+				pool.Status.ActiveInstance = nil
+				require.NoError(t, fixture.kubeClient.Status().Update(ctx, pool))
+			case "empty-instance":
+				pool.Status.ActiveInstance.RuntimeInstanceID = ""
+				require.NoError(t, fixture.kubeClient.Status().Update(ctx, pool))
+			case "boot":
+				pool.Status.ActiveInstance.BootID = "unverified-boot"
+				require.NoError(t, fixture.kubeClient.Status().Update(ctx, pool))
+			case "profile":
+				pool.Spec.Runtime.Profile.Digest = "sha256:" + strings.Repeat("b", 64)
+				require.NoError(t, fixture.kubeClient.Update(ctx, pool))
+			case "probe-error":
+				probeFailure = true
+			}
+			restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: failure,
+				ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs}
+			if test.poolChange == "read-error" {
+				restarted.APIReader = nativeRecoveryPoolReadFailure{Reader: fixture.kubeClient}
+			}
+			err = restarted.recoverStaleTask(ctx, current, fence)
+			settled, controlErr := persistence.GetSessionControl(ctx, control.Namespace, control.SessionName)
+			require.NoError(t, controlErr)
+			history, historyErr := persistence.LoadTranscript(ctx, control.Namespace, control.SessionName, 100)
+			require.NoError(t, historyErr)
+			if test.settles {
+				require.NoError(t, err)
+				require.Nil(t, settled.Lease, "confirmed retirement before the first capture must allow canonical settlement")
+				require.Len(t, history, len(before)+2)
+				require.Equal(t, corev1alpha1.TaskPhaseSucceeded, fixture.currentTask(t, ctx).Status.Phase)
+			} else {
+				require.Error(t, err)
+				require.Equal(t, control.Lease, settled.Lease)
+				require.Equal(t, before, history, "native obligations and ambiguous runtime loss must retain canonical history")
+			}
+			if test.native {
+				record, recordErr := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+				require.NoError(t, recordErr)
+				require.Equal(t, snapshot.DataDigest, record.Snapshot.DataDigest)
+			} else {
+				_, recordErr := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+				require.ErrorIs(t, recordErr, store.ErrNotFound)
+			}
+			captureCount := 0
+			if test.pending {
+				captureCount = 1
+			}
+			require.Equal(t, captureCount, captures, "recovery must not recapture or create an intent for a lost or ambiguous runtime")
+			require.Zero(t, deletes, "durable retirement proof must prevent a DELETE against the replacement runtime")
+			require.Equal(t, 1, prompts, "accepted prompts must never replay")
+		})
+	}
+}
+
 func TestACPDispatcherPoisonedWorkspaceFailureDoesNotAttemptNativeCapture(t *testing.T) {
 	for _, validationError := range []bool{false, true} {
 		name := "read-only-modified"
