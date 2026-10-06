@@ -3018,7 +3018,7 @@ func TestRepositoryMonitorStatusCountsIncludesTerminalBlockedReviewVerdicts(t *t
 		{Number: 4, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictStale},
 		{Number: 5, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictNeedsHuman},
 		{Number: 6, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictSecuritySensitive},
-		{Number: 7, State: repositoryMonitorItemStateOpen, HeadSHA: "head-7", LastReviewedHeadSHA: "head-7", LastVerdict: repositoryMonitorReviewVerdictPassed, RepairState: repositoryMonitorRepairPhaseSucceeded},
+		{Number: 7, State: repositoryMonitorItemStateOpen, HeadSHA: "head-7", LastReviewedHeadSHA: "head-7", LastVerdict: repositoryMonitorReviewVerdictPassed, RepairState: repositoryMonitorRepairPhaseSucceeded, AutomergeState: repositoryMonitorAutomergeStateMergeReady},
 		{Number: 8, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictNeedsChanges},
 		{Number: 9, State: repositoryMonitorItemStateOutOfScope, LastVerdict: repositoryMonitorReviewVerdictFailed},
 	}

@@ -89,6 +89,14 @@ Monitor runs classify transient infrastructure failures into low-cardinality sta
 
 Use `orka monitor events <monitor> --event-type run_failed` or the dashboard audit/timeline panels to see the state attached to failed runs.
 
+Controller-created PRs start a targeted inventory run. Transient failures have bounded retries. If that run fails terminally before creating a PR inventory item, correcting credentials alone does not restart discovery when no schedule or PR event queues another inventory run. After correcting the cause, create a fresh targeted run without a head SHA so inventory fetches the current PR:
+
+```bash
+orka monitor run orka-main --namespace orka --target-kind pull_request --target-number 456
+```
+
+Automatic rediscovery after credential correction remains a follow-up. Direct PR review commands require an existing inventory item and its current head SHA.
+
 
 ## Fake-GitHub validation
 
