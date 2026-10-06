@@ -114,12 +114,28 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorWorkflowPoll(ctx con
 		}
 	}
 	now := time.Now()
-	recent, _, err := r.Store.ListMonitorRuns(ctx, store.MonitorRunFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 1})
-	if err != nil {
-		return err
-	}
-	if len(recent) > 0 && now.Sub(recent[0].StartedAt) < repositoryMonitorWorkflowPollInterval {
-		return nil
+	// Only runs that inventory pull requests throttle their workflow poll.
+	// Bound the scan to the cooldown window, including full inventory runs.
+	cursor := ""
+	for {
+		recent, next, err := r.Store.ListMonitorRuns(ctx, store.MonitorRunFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 200, Cursor: cursor})
+		if err != nil {
+			return err
+		}
+		for _, run := range recent {
+			if now.Sub(run.StartedAt) >= repositoryMonitorWorkflowPollInterval {
+				next = ""
+				break
+			}
+			switch strings.TrimSpace(run.TargetKind) {
+			case "", repositoryMonitorPullRequestKind:
+				return nil
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
 	}
 	id := "workflow-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, now.Unix()/30))
 	if err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}); err != nil && !strings.Contains(strings.ToLower(err.Error()), "constraint") {

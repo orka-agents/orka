@@ -37,6 +37,8 @@ Before disabling readiness publication, deleting a monitor, or changing its repo
 - `orka:pause` blocks further workflow actions and readiness. A running bounded Task may finish, including publication. Removing the label queues fresh reconciliation; unresolved plans still block implementation.
 - Policy labels follow current GitHub repository state. `triggers.github.labels.requireActorPermission` authorizes command and webhook intake; it does not override GitHub permissions for editing policy labels. A rejected pause-label webhook does not queue a run, but later inventory still observes the repository's labels.
 
+Pause-label intake and workflow reconciliation can update the same item concurrently. A stale write can overwrite the stored label or workflow progress. Coordinating these writes atomically remains a follow-up; the current workflow does not guarantee pause enforcement across this race.
+
 ## CLI quick reference
 
 ```bash
