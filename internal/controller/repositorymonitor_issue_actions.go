@@ -831,7 +831,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(
 			}
 		}
 		handled, applyErr := r.applyIssueActionRecord(ctx, monitor, item, record, task)
-		if applyErr == nil && actionKind == repositoryMonitorIssueActionImplementation {
+		if applyErr == nil && actionKind == repositoryMonitorIssueActionImplementation && item.WorkflowPhase != repositoryMonitorIssuePhasePaused {
 			applyErr = r.cleanupRepositoryMonitorRuntimeAuthSnapshot(ctx, monitor, task)
 		}
 		return handled, applyErr
@@ -879,7 +879,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(
 		}
 	}
 	handled, err := r.applyIssueActionRecord(ctx, monitor, item, record, task)
-	if err == nil && actionKind == repositoryMonitorIssueActionImplementation {
+	if err == nil && actionKind == repositoryMonitorIssueActionImplementation && item.WorkflowPhase != repositoryMonitorIssuePhasePaused {
 		err = r.cleanupRepositoryMonitorRuntimeAuthSnapshot(ctx, monitor, task)
 	}
 	return handled, err
@@ -959,6 +959,19 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 	); err != nil {
 		return err
 	}
+	if len(snapshots.Items) == 0 {
+		return nil
+	}
+	items, err := r.listRepositoryMonitorIssueItems(ctx, monitor)
+	if err != nil {
+		return err
+	}
+	awaitingTasks := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if repositoryMonitorIssuePhaseAwaitingTask(item.WorkflowPhase) {
+			awaitingTasks[item.LastActionTaskName] = struct{}{}
+		}
+	}
 	for i := range snapshots.Items {
 		snapshot := &snapshots.Items[i]
 		taskName := strings.TrimSpace(snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthTask])
@@ -966,7 +979,20 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 			continue
 		}
 		var task corev1alpha1.Task
-		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &task); err != nil {
+		err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &task)
+		if err == nil {
+			if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+				continue
+			}
+			if _, awaiting := awaitingTasks[taskName]; awaiting {
+				continue
+			}
+			// A settled result no longer needs this credential. Sweep it again
+			// after transient cleanup failures even while its Task is retained.
+			if err := r.cleanupRepositoryMonitorRuntimeAuthSnapshotReference(ctx, monitor, snapshot.Namespace, snapshot.Name); err != nil {
+				return err
+			}
+		} else {
 			if !apierrors.IsNotFound(err) {
 				return err
 			}

@@ -21,6 +21,10 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 		configure       func(*corev1alpha1.RepositoryMonitor, *githubLabelWebhookPayload)
 		wantQueued      bool
 		wantPermissions int32
+		wantUnavailable bool
+		blankToken      bool
+		permission      string
+		writeMonitor    bool
 	}{
 		{name: "command_labels_disabled", wantQueued: true, wantPermissions: 1, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
 			m.Spec.Triggers.GitHub.Labels.Enabled = false
@@ -60,19 +64,84 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 			m.Spec.Triggers.GitHub.Labels.Enabled = false
 			m.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionAdmin
 		}},
+		{name: "read_credential_without_forge", wantQueued: true, wantPermissions: 1, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = nil
+			m.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+		}},
+		{name: "legacy_read_credential_without_forge", wantQueued: true, wantPermissions: 1, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = nil
+			m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+		}},
+		{name: "missing_permission_credentials", wantUnavailable: true, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = nil
+		}},
+		{name: "blank_permission_credentials", wantUnavailable: true, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: " "}
+			m.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: " "}
+			m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: " "}
+		}},
+		{name: "missing_read_secret", wantUnavailable: true, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = nil
+			m.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: "missing"}
+		}},
+		{name: "blank_read_secret", wantUnavailable: true, blankToken: true, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = nil
+			m.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+		}},
+		{name: "invalid_forge_does_not_fall_back", wantUnavailable: true, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "missing"}
+			m.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+		}},
+		{name: "read_credential_rejects_sender", wantPermissions: 1, permission: githubPermissionRead, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = nil
+			m.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+		}},
+		{name: "read_only_monitor_does_not_abort_later_command", wantQueued: true, wantPermissions: 1, writeMonitor: true, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.ForgeCredentialRef = nil
+			m.Spec.ReadCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+		}},
 	} {
 		for _, action := range []string{githubWebhookActionLabeled, githubWebhookActionUnlabeled} {
 			t.Run(tc.name+"/"+action, func(t *testing.T) {
 				var permissionCalls atomic.Int32
+				var mutationCalls atomic.Int32
 				permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					if tc.writeMonitor && req.Method == http.MethodDelete && req.URL.Path == "/repos/sozercan/vekil/issues/12/labels/hold" {
+						if req.Header.Get("Authorization") != "Bearer write-test-token" {
+							t.Error("write command used a read credential for label consumption")
+						}
+						mutationCalls.Add(1)
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
 					permissionCalls.Add(1)
 					if req.Method != http.MethodGet || req.URL.Path != "/repos/sozercan/vekil/collaborators/octocat/permission" {
 						t.Errorf("unexpected permission request: %s %s", req.Method, req.URL.Path)
 						w.WriteHeader(http.StatusForbidden)
 						return
 					}
+					wantAuthorization := "Bearer test-token"
+					if tc.writeMonitor && permissionCalls.Load() == 2 {
+						wantAuthorization = "Bearer write-test-token"
+					}
+					if req.Header.Get("Authorization") != wantAuthorization {
+						t.Error("permission lookup used the wrong credential role")
+					}
 					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{"permission":"write"}`))
+					permission := tc.permission
+					if permission == "" {
+						permission = githubPermissionWrite
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"permission": permission})
 				}))
 				t.Cleanup(permissionServer.Close)
 				secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
@@ -99,7 +168,30 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 					payload.Issue = &githubWebhookIssue{Number: 12, State: "open", Labels: labels}
 				}
 				tc.configure(monitor, &payload)
-				fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+				readSecret := githubWebhookGitSecret()
+				if tc.blankToken {
+					readSecret.Data = map[string][]byte{"token": []byte(" ")}
+				}
+				fc := newGitHubWebhookFakeClient(t, monitor, readSecret)
+				if tc.writeMonitor {
+					later := monitor.DeepCopy()
+					later.Name = "zz-write-monitor"
+					later.ResourceVersion = ""
+					later.Spec.Triggers.GitHub.Labels.Enabled = true
+					later.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels = true
+					later.Spec.Triggers.GitHub.Labels.Issues.Implement = "hold"
+					later.Spec.Policy.PauseLabels = []string{"other-pause"}
+					forgeSecret := githubWebhookGitSecret()
+					forgeSecret.Name = "write-forge"
+					forgeSecret.Data = map[string][]byte{"token": []byte("write-test-token")}
+					later.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: forgeSecret.Name}
+					if err := fc.Create(t.Context(), later); err != nil {
+						t.Fatal(err)
+					}
+					if err := fc.Create(t.Context(), forgeSecret); err != nil {
+						t.Fatal(err)
+					}
+				}
 				db := setupGitHubWebhookMonitorStore(t)
 				server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: db})
 				storedLabels := `["bug"]`
@@ -117,6 +209,9 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 				wantStatus, wantRuns := http.StatusAccepted, 0
 				if tc.wantQueued {
 					wantStatus, wantRuns = http.StatusCreated, 1
+				}
+				if tc.wantUnavailable {
+					wantStatus = http.StatusServiceUnavailable
 				}
 				if resp.StatusCode != wantStatus {
 					t.Fatalf("status=%d, want %d; body: %s", resp.StatusCode, wantStatus, readRespBody(t, resp))
@@ -139,12 +234,29 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 				if item.LabelsJSON != wantLabels || item.WorkflowPhase != "implementing" || item.LastActionTaskName != "active-task" || item.SnapshotDigest != "original" {
 					t.Fatalf("pause changed the wrong stored state: %+v", item)
 				}
-				if got := permissionCalls.Load(); got != tc.wantPermissions {
-					t.Fatalf("permission calls=%d, want %d", got, tc.wantPermissions)
+				wantPermissions := tc.wantPermissions
+				if tc.writeMonitor && action == githubWebhookActionLabeled {
+					wantPermissions++
+				}
+				if got := permissionCalls.Load(); got != wantPermissions {
+					t.Fatalf("permission calls=%d, want %d", got, wantPermissions)
 				}
 				commands, _, err := db.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 10})
 				if err != nil || len(commands) != 0 {
 					t.Fatalf("pause created commands: %+v, err=%v", commands, err)
+				}
+				if tc.writeMonitor {
+					laterCommands, _, err := db.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: "zz-write-monitor", Limit: 10})
+					wantCommands := 0
+					if action == githubWebhookActionLabeled {
+						wantCommands = 1
+					}
+					if err != nil || len(laterCommands) != wantCommands || mutationCalls.Load() != int32(wantCommands) {
+						t.Fatalf("later write command was skipped: commands=%+v, mutations=%d, err=%v", laterCommands, mutationCalls.Load(), err)
+					}
+					if wantCommands == 1 && (laterCommands[0].Intent != githubActionImplement || laterCommands[0].Status != githubCommandStatusAccepted) {
+						t.Fatalf("later command was not accepted: %+v", laterCommands[0])
+					}
 				}
 				assertNoTasks(t, fc)
 			})

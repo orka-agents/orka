@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,21 @@ func repositoryMonitorAcceptsPauseEvent(monitor *corev1alpha1.RepositoryMonitor,
 	return target.Kind == repositoryMonitorTargetKindIssue && monitor.Spec.Targets.Issues.Enabled
 }
 
+func (h *Handlers) repositoryMonitorPauseActorPermission(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, actor string) (string, error) {
+	permissionMonitor := monitor
+	if repositoryMonitorCredentialRefName(monitor.Spec.ForgeCredentialRef) == "" {
+		_, readRef := repositoryMonitorEffectiveReadCredential(monitor.Spec)
+		if repositoryMonitorCredentialRefName(readRef) == "" {
+			return "", fmt.Errorf("pause-label permission checks require a forge or read credential")
+		}
+		// Permission lookup is a read-only GET. Reuse its existing token validation
+		// without changing the forge requirement for any mutation command.
+		permissionMonitor = monitor.DeepCopy()
+		permissionMonitor.Spec.ForgeCredentialRef = readRef
+	}
+	return h.repositoryMonitorCommandActorPermission(ctx, permissionMonitor, repo, actor)
+}
+
 func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, payload githubLabelWebhookPayload) (githubRepositoryMonitorEventResult, error) {
 	var result githubRepositoryMonitorEventResult
 	if h.repositoryMonitorStore == nil || (payload.Action != githubWebhookActionLabeled && payload.Action != githubWebhookActionUnlabeled) {
@@ -65,7 +81,7 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 			continue
 		}
 		result.Matched++
-		permission, err := h.repositoryMonitorCommandActorPermission(c.Context(), monitor, payload.Repository, payload.Sender.Login)
+		permission, err := h.repositoryMonitorPauseActorPermission(c.Context(), monitor, payload.Repository, payload.Sender.Login)
 		if err != nil {
 			return result, fiber.NewError(fiber.StatusServiceUnavailable, "cannot verify pause-label sender permission")
 		}
