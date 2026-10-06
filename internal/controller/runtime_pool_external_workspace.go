@@ -227,6 +227,18 @@ func (r *RuntimePoolReconciler) externalPoolProgress(ctx context.Context, pool *
 }
 
 func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret) (ctrl.Result, error) {
+	registration := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, registration); err != nil {
+		return ctrl.Result{}, err
+	}
+	if registration.UID != w.Spec.ProviderBinding.UID || registration.Spec.ControllerName != w.Labels[workspacev1alpha1.ProviderControllerLabel] ||
+		registration.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(registration) {
+		return ctrl.Result{}, fmt.Errorf("workspace provider no longer matches the admitted identity and capabilities")
+	}
+	nativeProcess := slices.Contains(registration.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)
+	if !nativeProcess && slices.Contains(pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+		return ctrl.Result{}, fmt.Errorf("workspace provider does not support required native-process materialization")
+	}
 	publicKey, err := harnessv2.CredentialBootstrapPublicKey(auth.Data[runtimePoolBootstrapSigningSeedKey])
 	if err != nil {
 		return ctrl.Result{}, err
@@ -243,6 +255,9 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	template.Spec.Containers[0].Command = []string{"/usr/local/bin/orka-acp-runtime"}
 	template.Spec.RestartPolicy = corev1.RestartPolicyNever
 	template.Namespace = cfg.namespace
+	if nativeProcess {
+		template = runtimePoolNativeProcessTemplate(template)
+	}
 	if slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		template = runtimePoolDurableWorkspaceTemplate(template)
 		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "ORKA_ACP_DURABLE_WORKSPACE_KEY", Value: "shared"})
@@ -257,17 +272,27 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		Runtime: &workspacev1alpha1.RuntimeWorkload{BootstrapPort: runtimePoolPort, PoolBinding: workspacev1alpha1.ImmutableObjectBinding{Name: pool.Name, UID: pool.UID, Generation: pool.Generation, ProfileHash: pool.Spec.Runtime.Profile.Digest}, ClassBinding: w.Spec.ClassBinding, Protocol: harnessv2.ProtocolVersion, ContainerName: container.Name, Template: template},
 	}
 	network := &networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}}
+	if nativeProcess {
+		// Native infrastructure/router ingress is operator-managed. Freeze only
+		// runtime egress here; Pod ingress rules do not describe that topology.
+		network.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}
+	}
 	policies := &networkingv1.NetworkPolicyList{}
 	if err := uncachedReader(r.APIReader, r.Client).List(ctx, policies, client.InNamespace(cfg.namespace), client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
 		return ctrl.Result{}, err
 	}
 	slices.SortFunc(policies.Items, func(a, b networkingv1.NetworkPolicy) int { return strings.Compare(a.Name, b.Name) })
 	for _, p := range policies.Items {
-		network.Ingress = append(network.Ingress, p.Spec.Ingress...)
+		if !nativeProcess {
+			network.Ingress = append(network.Ingress, p.Spec.Ingress...)
+		}
 		network.Egress = append(network.Egress, p.Spec.Egress...)
 	}
 	request.Runtime.NetworkPolicy = network
 	request.Runtime.RequiredFeatures = append([]workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureACPRuntime}, pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures...)
+	if nativeProcess && !slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+		request.Runtime.RequiredFeatures = append(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)
+	}
 	if request.RestoreFrom != nil {
 		request.Runtime.RequiredFeatures = append(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureRestore, workspacev1alpha1.WorkspaceFeatureCheckpoint)
 	}
@@ -298,6 +323,10 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Context, request *workspacev1alpha1.WorkloadRequest, evidence *workspacev1alpha1.StartupEvidence) (*corev1.Pod, error) {
 	if request == nil || request.Runtime == nil || evidence == nil {
 		return nil, fmt.Errorf("runtime startup evidence is incomplete")
+	}
+	nativeProcess := slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)
+	if nativeProcess != (evidence.Process != nil) || (nativeProcess && evidence.Pod != nil) {
+		return nil, fmt.Errorf("startup evidence does not match the frozen runtime materialization kind")
 	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	if evidence.Process != nil {

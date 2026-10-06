@@ -20,6 +20,7 @@ import (
 func TestExternalRuntimePoolDispatchUsesPinnedNativeRouterEndpoint(t *testing.T) {
 	ctx := context.Background()
 	f := newExternalRuntimePoolFixture(t)
+	f.advertiseNativeProcess(t)
 	w, worker := f.materialize(t)
 	const endpoint = "http://native-router.example:80/actor-runtime"
 	startup := w.Status.Allocation.Startup

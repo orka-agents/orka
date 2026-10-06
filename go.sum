@@ -262,6 +262,12 @@ github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJw
 github.com/opencontainers/image-spec v1.1.1/go.mod h1:qpqAh3Dmcf36wStyyWU+kCeDgrGnAve2nCC8+7h8Q0M=
 github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006015957-63f33e3dd3e4 h1:DosB095PVK5IUzSzTefscMzCQAdKraAaKZhe5RNLr9A=
 github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006015957-63f33e3dd3e4/go.mod h1:dsKBQ/2itZemNxHbQ0cI+s+KFMA0xlkykNWWTp+jKMc=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006073538-33aa5820d3c8 h1:s4znKyAiRTKdsUEWTZEeBg9dkEt3xad2EWlUWcOFMY4=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006073538-33aa5820d3c8/go.mod h1:dsKBQ/2itZemNxHbQ0cI+s+KFMA0xlkykNWWTp+jKMc=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006074643-4f1af0392a2a h1:9rwDHJmsuAhZN4EtseB4KYRl6DiKZuO3o+rpS6K4pyg=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006074643-4f1af0392a2a/go.mod h1:dsKBQ/2itZemNxHbQ0cI+s+KFMA0xlkykNWWTp+jKMc=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006082136-a9e021e537d9 h1:R7s44RXbxKZZuD9xERJtQsKodSlCoNNCWicrQxwq9fU=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.1.0.20261006082136-a9e021e537d9/go.mod h1:dsKBQ/2itZemNxHbQ0cI+s+KFMA0xlkykNWWTp+jKMc=
 github.com/pb33f/ordered-map/v2 v2.3.1 h1:5319HDO0aw4DA4gzi+zv4FXU9UlSs3xGZ40wcP1nBjY=
 github.com/pb33f/ordered-map/v2 v2.3.1/go.mod h1:qxFQgd0PkVUtOMCkTapqotNgzRhMPL7VvaHKbd1HnmQ=
 github.com/philhofer/fwd v1.2.0 h1:e6DnBTl7vGY+Gz322/ASL4Gyp1FspeMvx1RNDoToZuM=

@@ -29,6 +29,44 @@ const (
 
 var errWorkspaceCredentialConflict = errors.New("workspace supervisor credential bootstrap conflict")
 
+// Native processes use a fresh writable container filesystem for scratch.
+// Keep the special durable-workspace mount separate from Pod volume declarations.
+func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+	result := *template.DeepCopy()
+	// The pinned native runtime runs the supervisor as root under gVisor. Its
+	// public API supports capabilities, but no Kubernetes seccomp or privilege-
+	// escalation controls. Publish only the guarantees it can enforce.
+	result.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsUser: new(int64(0)), RunAsGroup: new(int64(0)), RunAsNonRoot: new(false)}
+	// Native worker placement is fixed by the provider's pinned Linux WorkerPool.
+	result.Spec.NodeSelector = nil
+	scratch := map[string]bool{}
+	volumes := result.Spec.Volumes[:0]
+	for _, volume := range result.Spec.Volumes {
+		if volume.EmptyDir != nil {
+			scratch[volume.Name] = true
+			continue
+		}
+		volumes = append(volumes, volume)
+	}
+	result.Spec.Volumes = volumes
+	for i := range result.Spec.Containers {
+		container := &result.Spec.Containers[i]
+		var capabilities *corev1.Capabilities
+		if container.SecurityContext != nil && container.SecurityContext.Capabilities != nil {
+			capabilities = container.SecurityContext.Capabilities.DeepCopy()
+		}
+		container.SecurityContext = &corev1.SecurityContext{RunAsUser: new(int64(0)), RunAsGroup: new(int64(0)), RunAsNonRoot: new(false), Privileged: new(false), ReadOnlyRootFilesystem: new(false), Capabilities: capabilities}
+		mounts := container.VolumeMounts[:0]
+		for _, mount := range container.VolumeMounts {
+			if !scratch[mount.Name] {
+				mounts = append(mounts, mount)
+			}
+		}
+		container.VolumeMounts = mounts
+	}
+	return result
+}
+
 func runtimePoolWorkspaceBootstrapTemplate(
 	template corev1.PodTemplateSpec,
 	nonce, publicKey string,

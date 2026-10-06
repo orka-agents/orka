@@ -24,6 +24,18 @@ core independently checks accessible compute/storage, performs the sealed
 bootstrap exchange, and opens admission only after the authenticated v2 probe.
 Generation acknowledgement is asynchronous and does not authorize prompt dispatch.
 
+`runtime.native-process` declares a fresh writable container filesystem, exact
+process startup evidence, and operator-managed infrastructure/router ingress.
+Core freezes that capability before hashing the request, omits Kubernetes scratch
+mounts, and publishes only runtime Egress policy. The native supervisor intent
+declares UID/GID 0 and its exact capability set. The pinned gVisor backend does not
+support Kubernetes seccomp profiles or allowPrivilegeEscalation controls, so Core
+omits those fields and its Pod node selector from fresh native requests. Native
+placement uses the provider's pinned Linux WorkerPool. Pod-backed requests retain their
+scratch mounts and Ingress/Egress policy. Existing admitted requests keep their
+original layout and cannot switch startup evidence kinds. Native operators must
+confine worker and router ingress while permitting Orka's authenticated routes.
+
 Private runtime credentials stay core-owned. Retirement closes admission and
 drains the authenticated instance before the provider receives exact sequence
 and instance authorization. A missing provider response retains both ownership

@@ -542,6 +542,7 @@ func TestExternalRuntimePoolCancellationBeforeReplacementStartup(t *testing.T) {
 func TestExternalRuntimePoolNativeTerminationDoesNotRequireWorkerDeletion(t *testing.T) {
 	ctx := context.Background()
 	f := newExternalRuntimePoolFixture(t)
+	f.advertiseNativeProcess(t)
 	workspace, worker := f.materialize(t)
 	workspace.Status.Allocation.Startup.Pod = nil
 	workspace.Status.Allocation.Startup.Process = &workspacev1alpha1.NativeProcessEvidence{Namespace: "native", Name: "process", UID: workspace.Status.Allocation.Identity.InstanceID, Version: 1, Worker: workspacev1alpha1.PodReference{Namespace: worker.Namespace, Name: worker.Name, UID: worker.UID}, ChallengeSHA256: "sha256:" + strings.Repeat("a", 64)}

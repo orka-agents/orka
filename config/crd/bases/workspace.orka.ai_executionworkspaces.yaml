@@ -797,8 +797,10 @@ spec:
                         type: string
                       networkPolicy:
                         description: |-
-                          NetworkPolicy carries the admitted network rules. The provider applies
-                          these to the exact workload placement before reporting startup readiness.
+                          NetworkPolicy carries the admitted network permission envelope. Before
+                          reporting startup readiness, the provider ensures required isolation
+                          directions are applied and no selecting policy grants permissions outside
+                          these rules.
                         properties:
                           egress:
                             description: |-
