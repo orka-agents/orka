@@ -114,9 +114,12 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 	}
 	run, err := r.repositoryMonitorCommandRun(ctx, monitor, command, runID)
 	if errors.Is(err, store.ErrNotFound) {
-		return false, false, nil
+		return false, false, r.queueRepositoryMonitorCommandWorkAction(ctx, monitor, command, &store.MonitorRun{ID: runID})
 	}
 	if err != nil {
+		return false, false, err
+	}
+	if err := r.queueRepositoryMonitorCommandWorkAction(ctx, monitor, command, run); err != nil {
 		return false, false, err
 	}
 	if run.Phase == repositoryMonitorRunPhaseSucceeded {
@@ -200,6 +203,12 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 		return true, false, r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, run, "retry_attempts_exhausted")
 	}
 	return true, false, r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, run, run.Error)
+}
+
+func (r *RepositoryMonitorReconciler) queueRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, run *store.MonitorRun) error {
+	// Restore a partial or legacy handoff before inventory can publish readiness,
+	// including when its command run was already queued.
+	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusQueued, "", "", "")
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCommandRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, runID string) (*store.MonitorRun, error) {

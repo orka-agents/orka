@@ -895,7 +895,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 			return "", 0, 0, err
 		}
 		for _, command := range commands {
-			if command.Source != "controller_policy" {
+			if command.Source != repositoryMonitorControllerPolicySource {
 				continue
 			}
 			switch command.Intent {
@@ -1348,9 +1348,13 @@ func repositoryMonitorResetItemAfterRepairPush(item *store.MonitorItem) {
 
 // A branch may move while an older repair finishes. Only work or terminal
 // evidence for the current head can affect current readiness.
+//
+//nolint:gocyclo // Project task, mutation, and pre-Task terminal evidence together.
 func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, head string) (string, error) {
 	cursor, state := "", ""
 	var latest time.Time
+	projectedJobs := map[string]struct{}{}
+	projectedCommands := map[string]struct{}{}
 	for {
 		jobs, next, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: number, Limit: 200, Cursor: cursor})
 		if err != nil {
@@ -1370,6 +1374,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx co
 				}
 				continue
 			}
+			projectedJobs[job.ID] = struct{}{}
 			if state == "" || job.CreatedAt.After(latest) {
 				state, latest = job.Phase, job.CreatedAt
 			}
@@ -1390,9 +1395,57 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx co
 			case repositoryMonitorAutomergeStateStarted, repositoryMonitorUpdateBranchSubmitting, repositoryMonitorAutomergeStatePending:
 				return repositoryMonitorRepairPhaseQueued, nil
 			case repositoryMonitorRunPhaseFailed, repositoryMonitorRunPhaseSucceeded:
+				projectedCommands[mutation.CommandEventID] = struct{}{}
 				if state == "" || mutation.CreatedAt.After(latest) {
 					state, latest = mutation.Status, mutation.CreatedAt
 				}
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	// Pre-Task failures have no terminal job or branch mutation to project.
+	// The terminal action distinguishes failures and policy blocks from a
+	// successful or cancelled command, whose Error may also contain a reason.
+	cursor = ""
+	for {
+		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: number, Limit: 200, Cursor: cursor})
+		if err != nil {
+			return "", err
+		}
+		for _, command := range commands {
+			if command.Source != repositoryMonitorControllerPolicySource || command.HeadSHA != head {
+				continue
+			}
+			if command.Status != repositoryMonitorCommandAccepted && command.Status != repositoryMonitorCommandProcessed {
+				continue
+			}
+			switch command.Intent {
+			case repositoryMonitorCommandIntentFix, repositoryMonitorCommandIntentFixCI, repositoryMonitorCommandIntentUpdateBranch:
+			default:
+				continue
+			}
+			if _, projected := projectedJobs["repair-"+repositoryMonitorShortHash(command.ID)]; projected {
+				continue
+			}
+			if _, projected := projectedCommands[command.ID]; projected {
+				continue
+			}
+			actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent))
+			action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, actionID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return "", err
+			}
+			if action.Status != repositoryMonitorWorkActionStatusFailed && action.Status != repositoryMonitorWorkActionStatusBlocked {
+				continue
+			}
+			if state == "" || command.CreatedAt.After(latest) {
+				state, latest = repositoryMonitorRepairPhaseFailed, command.CreatedAt
 			}
 		}
 		if next == "" {

@@ -83,6 +83,14 @@ func TestRepositoryMonitorAutomaticRepairRecoversExhaustedPreTaskCommands(t *tes
 				if err := db.UpdateCommandEvent(ctx, &command); err != nil {
 					t.Fatal(err)
 				}
+				action, err := db.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				action.Status, action.Error, action.CompletedAt = repositoryMonitorWorkActionStatusFailed, command.Error, &now
+				if err := db.UpdateWorkAction(ctx, action); err != nil {
+					t.Fatal(err)
+				}
 				run, err := db.GetMonitorRun(ctx, monitor.Namespace, repositoryMonitorCommandRunIDFromCommand(command.ID))
 				if err != nil {
 					t.Fatal(err)
@@ -92,8 +100,8 @@ func TestRepositoryMonitorAutomaticRepairRecoversExhaustedPreTaskCommands(t *tes
 					t.Fatal(err)
 				}
 				item.RepairState, err = r.repositoryMonitorRepairStateForHead(ctx, monitor, pr.Number, pr.HeadSHA)
-				if err != nil || item.RepairState != "" {
-					t.Fatalf("missing Task blocks next repair: state=%q err=%v", item.RepairState, err)
+				if err != nil || item.RepairState != repositoryMonitorRepairPhaseFailed {
+					t.Fatalf("exhausted pre-Task failure was lost: state=%q err=%v", item.RepairState, err)
 				}
 			}
 			if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{}, "orka-agents", "orka", pr, item); err != nil || !handled || item.SkipReason != wantReason {
