@@ -12,8 +12,6 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/e2e-common.sh"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
-# shellcheck source=scripts/lib/e2e-admission-tls.sh
-. "${script_dir}/lib/e2e-admission-tls.sh"
 
 agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v1.0.3}"
 kind_cluster="${KIND_CLUSTER:-orka-live-agent-sandbox-e2e}"
@@ -853,18 +851,6 @@ patch_controller_for_agent_sandbox() {
   local workspace_api="false"
   if [[ "${suspend_resume_enabled}" == "1" ]]; then
     workspace_api="true"
-    # The dedicated admission runtime below is the API server boundary. These
-    # controller flags also register equivalent local handlers, so give the
-    # manager webhook server a certificate even though no Service routes to it.
-    local webhook_cert_dir
-    webhook_cert_dir="$(mktemp -d "${work_dir}/webhook-certs.XXXXXX")"
-    openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-      -keyout "${webhook_cert_dir}/tls.key" -out "${webhook_cert_dir}/tls.crt" \
-      -subj "/CN=${orka_controller_deployment}.${orka_namespace}.svc" >/dev/null 2>&1
-    kubectl -n "${orka_namespace}" create secret tls orka-webhook-serving-certs \
-      --cert="${webhook_cert_dir}/tls.crt" --key="${webhook_cert_dir}/tls.key" \
-      --dry-run=client -o yaml | kubectl apply -f -
-    rm -rf "${webhook_cert_dir}"
   fi
 
   log "Configuring Orka controller for agent-sandbox"
@@ -900,24 +886,10 @@ patch_controller_for_agent_sandbox() {
           | .args = ((.args // []) | upsert_arg("--acp-workspace-dispatch-enabled"; "true"))
           | .args = ((.args // []) | upsert_arg("--acp-e2e-prompt-write-ambiguity-marker"; $ambiguityMarker))
           | (if $workspaceAPI == "true" then
-              .args = ((.args // [])
-                | upsert_arg("--enable-workspace-provider-api"; "true")
-                | upsert_arg("--workspace-class-use-admission-enabled"; "true")
-                | upsert_arg("--task-provenance-admission-enabled"; "true"))
-              | .volumeMounts = (((.volumeMounts // []) | map(select(.name != "webhook-serving-certs"))) + [{
-                  "name": "webhook-serving-certs",
-                  "mountPath": "/tmp/k8s-webhook-server/serving-certs",
-                  "readOnly": true
-                }])
+              .args = ((.args // []) | upsert_arg("--enable-workspace-provider-api"; "true"))
             else . end)
         else . end
       )
-      | (if $workspaceAPI == "true" then
-          .spec.template.spec.volumes = (((.spec.template.spec.volumes // []) | map(select(.name != "webhook-serving-certs"))) + [{
-            "name": "webhook-serving-certs",
-            "secret": { "secretName": "orka-webhook-serving-certs" }
-          }])
-        else . end)
     ' | kubectl apply -f -
 
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
@@ -3435,10 +3407,6 @@ main() {
     codex_runtime_ref="$(orka_kind_registry_push "${acp_codex_runtime_image}" "orka/acp-codex-runtime")"
   fi
 
-  log "Bootstrapping test-only admission TLS"
-  orka_e2e_remove_admission_webhooks
-  orka_e2e_bootstrap_admission_tls kubectl "${orka_namespace}"
-
   if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     deploy_responses_fixture
   fi
@@ -3452,8 +3420,6 @@ main() {
     ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
-  log "Deploying fail-closed Orka admission with the controller image under test"
-  orka_e2e_deploy_admission "${manager_ref}" kubectl "${orka_namespace}"
   ensure_api_client_identity
   deploy_sandbox_router
   patch_controller_for_agent_sandbox

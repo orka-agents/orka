@@ -25,8 +25,6 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../../.." && pwd)"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${repo_root}/scripts/lib/kind-local-registry.sh"
-# shellcheck source=scripts/lib/e2e-admission-tls.sh
-. "${repo_root}/scripts/lib/e2e-admission-tls.sh"
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -72,10 +70,6 @@ log "Ensuring namespaces ${namespace}, ${demo_namespace}, and vekil-system"
 # make deploy adopts the controller namespace only when it already carries the
 # static harness-v2 identity label, so create it through the same helper.
 bash "${repo_root}/scripts/lib/ensure-static-mode-namespace.sh" kubectl "${namespace}" harness-v2
-# The fail-closed admission webhook needs its serving certificate before
-# make deploy applies the production ACP topology.
-log "Ensuring the admission webhook TLS secret in ${namespace}"
-orka_e2e_bootstrap_admission_tls kubectl "${namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace vekil-system         --dry-run=client -o yaml | kubectl apply -f -
 

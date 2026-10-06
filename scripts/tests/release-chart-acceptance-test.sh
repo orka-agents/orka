@@ -13,18 +13,13 @@ for command in helm jq kubectl openssl python3; do
   command -v "${command}" >/dev/null 2>&1 || fail "missing required command: ${command}"
 done
 
-# Generate actual certificates. A Kustomize Service certificate cannot pass
-# the packaged chart's admission requests.
+# Generate actual certificates for the packaged chart's webhook Service.
 mkdir "${test_root}/tls"
 live_acp_release_chart_tls "${test_root}/tls"
 openssl verify -CAfile "${test_root}/tls/ca.crt" -verify_hostname orka-webhook.orka-system.svc \
   "${test_root}/tls/tls.crt" >/dev/null 2>&1
 openssl verify -CAfile "${test_root}/tls/ca.crt" -verify_hostname orka-webhook.orka-system.svc.cluster.local \
   "${test_root}/tls/tls.crt" >/dev/null 2>&1
-if openssl verify -CAfile "${test_root}/tls/ca.crt" -verify_hostname orka-admission.orka-system.svc \
-  "${test_root}/tls/tls.crt" >/dev/null 2>&1; then
-  fail "chart certificate unexpectedly authenticates the Kustomize Service"
-fi
 printf '%s\n' 'ok - admission certificate authenticates the packaged chart Service'
 
 python3 - "${test_root}/candidate.json" <<'PY'

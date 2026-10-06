@@ -14,7 +14,7 @@ import (
 
 func TestCheckpointSourceWebhookMatchesSharedAdmission(t *testing.T) {
 	shared, err := os.ReadFile(filepath.Join(
-		"..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml"))
+		"..", "..", "..", "config", "controller-webhook", "validating_webhook.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

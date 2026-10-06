@@ -128,9 +128,6 @@ publisher="$(orka_kind_registry_push "orka-approval-publisher:$run_id" orka/appr
 make install
 "$python" "$fixture/e2e.py" secrets --work "$work" --context "$context" --cluster "$cluster"
 kubectl --context "$context" create namespace vekil-system
-# shellcheck source=lib/e2e-admission-tls.sh
-source "$root/scripts/lib/e2e-admission-tls.sh"
-orka_e2e_bootstrap_admission_tls
 unused="example.invalid/unused@sha256:$(printf '0%.0s' {1..64})"
 make deploy IMG="$controller" WORKSPACE_PUBLISHER_IMG="$publisher" \
   ACP_CODEX_RUNTIME_IMG="$unused" ACP_CLAUDE_RUNTIME_IMG="$unused" \

@@ -114,11 +114,6 @@ deploy_orka() {
   make -C "${ROOT_DIR}" manifests generate
   make -C "${ROOT_DIR}" install
   make -C "${ROOT_DIR}" kustomize
-  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
-    log "Bootstrapping test-only admission TLS"
-    orka_e2e_remove_admission_webhooks
-    orka_e2e_bootstrap_admission_tls kubectl "${ORKA_NAMESPACE}"
-  fi
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
@@ -176,12 +171,23 @@ deploy_orka() {
 
   bash "${ROOT_DIR}/scripts/lib/ensure-static-mode-namespace.sh" \
     kubectl "${ORKA_NAMESPACE}" harness-v2
-  "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
-  grant_substrate_worker_access
+  local workload_dir="${tmp_config}/config/acp-workload"
   if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
-    log "Deploying the dedicated fail-closed admission runtime"
-    orka_e2e_deploy_admission "${controller_image}" kubectl "${ORKA_NAMESPACE}"
+    # Serve the fail-closed admission webhooks from the controller, as make
+    # deploy does; the controller issues their certificate.
+    workload_dir="${tmp_config}/config/substrate-workload"
+    mkdir -p "${workload_dir}"
+    cat >"${workload_dir}/kustomization.yaml" <<'EOF_SUBSTRATE_WORKLOAD'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../acp-workload
+components:
+  - ../controller-webhook
+EOF_SUBSTRATE_WORKLOAD
   fi
+  "${ROOT_DIR}/bin/kustomize" build "${workload_dir}" | kubectl apply -f -
+  grant_substrate_worker_access
   # Substrate actor traffic originates from its single-workload WorkerPool Pod
   # in ate-demo rather than a native orka-runtimes Pod. Keep the same
   # authenticated proxy boundary while allowing only that provider namespace.
@@ -218,18 +224,6 @@ deploy_orka() {
   local workspace_api="false"
   if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     workspace_api="true"
-    # The dedicated admission runtime above is the API server boundary. These
-    # controller flags also register equivalent local handlers, so give the
-    # manager webhook server a certificate even though no Service routes to it.
-    local webhook_cert_dir
-    webhook_cert_dir="$(mktemp -d "${TMP_ROOT}/webhook-certs.XXXXXX")"
-    openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-      -keyout "${webhook_cert_dir}/tls.key" -out "${webhook_cert_dir}/tls.crt" \
-      -subj "/CN=orka-controller-manager.orka-system.svc" >/dev/null 2>&1
-    kubectl -n orka-system create secret tls orka-webhook-serving-certs \
-      --cert="${webhook_cert_dir}/tls.crt" --key="${webhook_cert_dir}/tls.key" \
-      --dry-run=client -o yaml | kubectl apply -f -
-    rm -rf "${webhook_cert_dir}"
   fi
   patch="$(jq -cn \
     --arg bootstrap_secret_name "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
@@ -309,25 +303,20 @@ deploy_orka() {
                   "--acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy",
                   "--acp-provider-proxy-token-file=/var/run/orka/provider-auth/token"
                 ] + (if $workspaceAPI == "true" then [
+                  # This strategic patch replaces args, so restate the
+                  # controller-webhook component flags: the controller serves
+                  # the fail-closed webhooks and manages their certificate.
                   "--enable-workspace-provider-api=true",
                   "--workspace-class-use-admission-enabled=true",
-                  "--task-provenance-admission-enabled=true"
-                ] else [] end)),
-                volumeMounts: (if $workspaceAPI == "true" then [
-                  {
-                    name: "webhook-serving-certs",
-                    mountPath: "/tmp/k8s-webhook-server/serving-certs",
-                    readOnly: true
-                  }
-                ] else [] end)
+                  "--task-provenance-admission-enabled=true",
+                  "--task-provenance-admission-trusted-users=system:serviceaccount:orka-system:orka-controller-manager",
+                  "--webhook-cert-path=/var/run/orka/webhook/tls",
+                  "--webhook-cert-rotation-secret=orka-webhook-tls",
+                  "--webhook-cert-rotation-webhook=orka-admission",
+                  "--webhook-cert-rotation-dns-name=orka-webhook.orka-system.svc"
+                ] else [] end))
               }
-            ],
-            volumes: (if $workspaceAPI == "true" then [
-              {
-                name: "webhook-serving-certs",
-                secret: { secretName: "orka-webhook-serving-certs" }
-              }
-            ] else [] end)
+            ]
           }
         }
       }

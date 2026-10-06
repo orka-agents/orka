@@ -21,7 +21,7 @@ on:
       - "scripts/fixtures/substrate-conformance/**"
       - "scripts/lib/substrate-*.sh"
       - "scripts/generate-substrate-proto.sh"
-      - "scripts/lib/e2e-admission-tls.sh"
+      - "config/controller-webhook/**"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
   push:
@@ -43,7 +43,7 @@ on:
       - "scripts/fixtures/substrate-conformance/**"
       - "scripts/lib/substrate-*.sh"
       - "scripts/generate-substrate-proto.sh"
-      - "scripts/lib/e2e-admission-tls.sh"
+      - "config/controller-webhook/**"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
 

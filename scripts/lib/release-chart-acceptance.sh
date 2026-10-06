@@ -82,8 +82,8 @@ output.write_text(json.dumps(values) + "\n")
 PY
 }
 
-# The packaged chart serves admission through orka-webhook, not the Kustomize
-# installation's orka-admission Service.
+# The packaged chart serves admission through its release-local orka-webhook
+# Service.
 live_acp_release_chart_tls() (
   set -Eeuo pipefail
   umask 077

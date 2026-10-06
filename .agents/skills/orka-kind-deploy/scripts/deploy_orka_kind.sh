@@ -7,8 +7,8 @@ usage() {
 Usage: deploy_orka_kind.sh [--repo PATH] [--cluster NAME] [--context NAME] [--controller-image IMAGE]
 
 Rebuild all Orka images, load them into a local kind cluster, publish them to
-its local registry, and deploy digest-pinned workloads. Bootstrap test-only
-admission TLS when absent and wait for all five Deployments to roll out.
+its local registry, and deploy digest-pinned workloads. Wait for all four
+Deployments to roll out; the controller manages its admission certificate.
 
 Pass --cluster or --context explicitly; current-context is never used.
 When --cluster is provided without --context, the script uses the standard
@@ -30,26 +30,6 @@ context_cluster_for() {
 
   kubectl --context "$context" config view -o jsonpath='{range .contexts[*]}{.name}{"\t"}{.context.cluster}{"\n"}{end}' \
     | awk -F'\t' -v context="$context" '$1 == context { print $2; exit }'
-}
-
-validate_admission_tls() {
-  local secret="$1" cert private_key ca cert_public_key key_public_key san_extension
-  jq -e '
-    .type == "kubernetes.io/tls" and
-    (.data["tls.crt"] | type == "string" and length > 0) and
-    (.data["tls.key"] | type == "string" and length > 0) and
-    (.data["ca.crt"] | type == "string" and length > 0)
-  ' <<<"$secret" >/dev/null || return 1
-  cert="$(jq -er '.data["tls.crt"]' <<<"$secret" | base64 -d)" || return 1
-  private_key="$(jq -er '.data["tls.key"]' <<<"$secret" | base64 -d)" || return 1
-  ca="$(jq -er '.data["ca.crt"]' <<<"$secret" | base64 -d)" || return 1
-  cert_public_key="$(openssl x509 -in <(printf '%s\n' "$cert") -pubkey -noout)" || return 1
-  key_public_key="$(openssl pkey -in <(printf '%s\n' "$private_key") -passin pass: -pubout)" || return 1
-  [[ "$cert_public_key" == "$key_public_key" ]] || return 1
-  san_extension="$(openssl x509 -in <(printf '%s\n' "$cert") -noout -ext subjectAltName)" || return 1
-  [[ "$san_extension" == *"X509v3 Subject Alternative Name"* ]] || return 1
-  openssl verify -x509_strict -purpose sslserver -verify_hostname "orka-admission.$namespace.svc" \
-    -CAfile <(printf '%s\n' "$ca") -untrusted <(printf '%s\n' "$cert") <(printf '%s\n' "$cert")
 }
 
 repo_root=""
@@ -88,7 +68,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for cmd in base64 curl docker git jq kind kubectl make openssl; do
+for cmd in base64 curl docker git jq kind kubectl make; do
   require_cmd "$cmd"
 done
 
@@ -180,18 +160,6 @@ echo "Controller image: $controller_image"
 
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "$repo_root/scripts/lib/kind-local-registry.sh"
-# shellcheck source=scripts/lib/e2e-admission-tls.sh
-. "$repo_root/scripts/lib/e2e-admission-tls.sh"
-
-# The test CA and serving certificate last seven days. Their renewal must not
-# silently remove shared admission webhooks or bypass other controllers' trust.
-admission_tls="$("${kube_cmd[@]}" -n "$namespace" get secret orka-admission-tls --ignore-not-found -o json)"
-if [[ -n "$admission_tls" ]] && ! validate_admission_tls "$admission_tls" >/dev/null 2>&1; then
-  echo "$namespace/orka-admission-tls has expired, missing, or invalid TLS data." >&2
-  echo "Use a fresh kindctl cluster, or coordinate TLS renewal using config/orka-admission-webhooks/README.md before retrying." >&2
-  exit 1
-fi
-unset admission_tls
 
 ai_worker_image="${AI_WORKER_IMG:-ghcr.io/orka-agents/orka/ai-worker:kind}"
 general_worker_image="${GENERAL_WORKER_IMG:-ghcr.io/orka-agents/orka/general-worker:kind}"
@@ -224,11 +192,6 @@ general_worker_ref="$(set -e; orka_kind_registry_push "$general_worker_image" or
 (
   cd "$repo_root"
   make install KUBECTL="$kubectl_wrapper"
-  # Reuse existing TLS on redeploy; rotating its CA would invalidate live webhooks.
-  admission_tls="$("${kube_cmd[@]}" -n "$namespace" get secret orka-admission-tls --ignore-not-found -o name)"
-  if [[ -z "$admission_tls" ]]; then
-    orka_e2e_bootstrap_admission_tls "$kubectl_wrapper" "$namespace"
-  fi
   # The production overlay includes an ingress policy here even without a Vekil proxy.
   vekil_namespace="$("${kube_cmd[@]}" get namespace vekil-system --ignore-not-found -o name)"
   if [[ -z "$vekil_namespace" ]]; then
@@ -241,7 +204,7 @@ general_worker_ref="$(set -e; orka_kind_registry_push "$general_worker_image" or
     AI_WORKER_IMG="$ai_worker_ref" GENERAL_WORKER_IMG="$general_worker_ref"
 )
 
-for deployment in orka-controller-manager orka-workspace-publisher orka-provider-auth-proxy orka-scm-egress-proxy orka-admission; do
+for deployment in orka-controller-manager orka-workspace-publisher orka-provider-auth-proxy orka-scm-egress-proxy; do
   "${kube_cmd[@]}" -n "$namespace" rollout status "deployment/$deployment" --timeout=180s
 done
 "${kube_cmd[@]}" -n "$namespace" get pods,svc,deploy

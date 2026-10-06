@@ -1,4 +1,10 @@
-package main
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package admission
 
 import (
 	"bytes"
@@ -15,10 +21,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	orkaadmission "github.com/orka-agents/orka/internal/admission"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
-type standaloneCheckpointAuthorizer struct {
+type registeredCheckpointAuthorizer struct {
 	calls     int
 	namespace string
 	workspace string
@@ -26,17 +32,17 @@ type standaloneCheckpointAuthorizer struct {
 	err       error
 }
 
-func (*standaloneCheckpointAuthorizer) Authorize(context.Context, string, string, authenticationv1.UserInfo) error {
+func (*registeredCheckpointAuthorizer) Authorize(context.Context, string, string, authenticationv1.UserInfo) error {
 	return errors.New("checkpoint admission must authorize its source workspace")
 }
 
-func (*standaloneCheckpointAuthorizer) AuthorizeCheckpoint(
+func (*registeredCheckpointAuthorizer) AuthorizeCheckpoint(
 	context.Context, string, string, authenticationv1.UserInfo,
 ) error {
 	return errors.New("checkpoint admission must authorize its source workspace")
 }
 
-func (a *standaloneCheckpointAuthorizer) AuthorizeCheckpointSource(
+func (a *registeredCheckpointAuthorizer) AuthorizeCheckpointSource(
 	_ context.Context, namespace, workspace string, caller authenticationv1.UserInfo,
 ) error {
 	a.calls++
@@ -44,10 +50,14 @@ func (a *standaloneCheckpointAuthorizer) AuthorizeCheckpointSource(
 	return a.err
 }
 
-func TestStandaloneCheckpointAdmissionAuthorizesDecodedSource(t *testing.T) {
-	authorizer := &standaloneCheckpointAuthorizer{}
+func TestRegisteredCheckpointAdmissionAuthorizesDecodedSource(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	authorizer := &registeredCheckpointAuthorizer{}
 	server := webhook.NewServer(webhook.Options{})
-	orkaadmission.RegisterWorkspaceClassUseWebhooks(server, admissionScheme, authorizer)
+	RegisterWorkspaceClassUseWebhooks(server, scheme, authorizer)
 	review := admissionv1.AdmissionReview{
 		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
 		Request: &admissionv1.AdmissionRequest{
@@ -67,7 +77,7 @@ func TestStandaloneCheckpointAdmissionAuthorizesDecodedSource(t *testing.T) {
 		if denied {
 			authorizer.err = errors.New("source access denied")
 		}
-		request := httptest.NewRequest(http.MethodPost, orkaadmission.CheckpointSourceUseWebhookPath, bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, CheckpointSourceUseWebhookPath, bytes.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
 		server.WebhookMux().ServeHTTP(response, request)

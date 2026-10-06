@@ -275,7 +275,7 @@ on_exit() {
 
 # Generate a throwaway CA plus serving certificate for one in-cluster Service
 # DNS name and leave ca.crt/tls.crt/tls.key in the given output directory.
-# Modeled on scripts/lib/e2e-admission-tls.sh; test-only, 7-day validity.
+# Test-only, 7-day validity.
 generate_service_tls() {
   local service_dns="$1"
   local out_dir="$2"

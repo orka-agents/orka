@@ -33,20 +33,16 @@ declare that mode and the `orka-system` watch namespace. A missing controller
 is recoverable only under that retained namespace claim. Settle or retire older
 installations and deploy this overlay as a fresh installation and namespace.
 
-This overlay deploys the replicated `orka-admission` runtime but not the
-cluster-scoped `ValidatingWebhookConfiguration`. Provision
-`orka-system/orka-admission-tls` first, wait for both admission endpoints, and
-smoke-test every retained handler before the designated cluster admission
-owner applies `config/orka-admission-webhooks`. A shared admission owner must
-configure every isolated controller ServiceAccount as an exact trusted
-username; individual releases must not race to own the webhook configuration.
-
-The first workload wave leaves cross-Task ancestry trust disabled. After the
-platform owner installs the webhook and verifies that it rejects unauthorized
-Task provenance changes, enable `--task-provenance-admission-external=true` in
-the controller's post-admission configuration and roll out that change. Keep
-the flag disabled if the webhook wave is omitted. Disable the flag and finish
-the controller rollout before removing the webhook configuration.
+The `../controller-webhook` component makes the controller serve the
+fail-closed `orka-admission` webhooks, scoped to `orka-system`, as the Helm
+chart does. The controller's certificate rotator fills the empty
+`orka-webhook-tls` Secret, renews it before expiry, and injects its CA into the
+webhook configuration, so no certificate needs to be provisioned. The deploy
+script applies the webhook configuration with the other prerequisites, waits
+for the controller to become ready (which requires the CA injection), and then
+removes the standalone `orka-admission` runtime left by earlier releases.
+Webhook-protected writes are rejected while no controller Pod is serving, for
+example between the old and new Pod of a `Recreate` rollout.
 
 For same-cluster v1/v2 operation, deploy v1 as a separate release with a
 different release namespace, watched namespace, endpoint, RBAC, storage, and

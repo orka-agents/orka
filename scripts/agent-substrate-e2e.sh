@@ -17,7 +17,6 @@ SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY=token
 PORT_FORWARD_PIDS=()
 source "${ROOT_DIR}/scripts/lib/substrate-upstream.sh"
 source "${ROOT_DIR}/scripts/lib/substrate-orka-local.sh"
-source "${ROOT_DIR}/scripts/lib/e2e-admission-tls.sh"
 source "${ROOT_DIR}/scripts/lib/redact.sh"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }

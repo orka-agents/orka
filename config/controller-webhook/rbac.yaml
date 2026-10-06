@@ -1,0 +1,36 @@
+# The certificate rotator watches webhook configurations cluster-wide and
+# rewrites only the orka-admission caBundle. list/watch cannot be name-scoped.
+# Secret access comes from the controller's existing orka-system Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orka-webhook-cert-rotation
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations]
+    verbs: [get, list, watch]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations]
+    resourceNames: [orka-admission]
+    verbs: [update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orka-webhook-cert-rotation
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-webhook-cert-rotation
+subjects:
+  - kind: ServiceAccount
+    name: orka-controller-manager
+    namespace: orka-system

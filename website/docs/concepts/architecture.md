@@ -159,10 +159,8 @@ The class-based workspace path requires these gates:
 - the provider flag — `--agent-sandbox-enabled` or `--substrate-enabled`
 
 The controller refuses to start with the provider API enabled unless both admission gates
-are enabled. They require working TLS-backed webhooks with a serving certificate and
-trusted CA bundle. For Kustomize, install `config/orka-admission` and meet its readiness,
-trusted-identity, and AdmissionReview smoke-test prerequisites before applying
-`config/orka-admission-webhooks`. See the [admission installation requirements](../reference/configuration.md#who-is-allowed-to-use-a-class).
+are enabled. Both the Helm chart and `make deploy` run these webhooks in the controller,
+which issues and renews their certificate. See the [admission installation requirements](../reference/configuration.md#who-is-allowed-to-use-a-class).
 Without the dispatch gate, Tasks that reference a class are still rejected.
 
 | CRD | Group | Purpose |

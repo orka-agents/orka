@@ -23,8 +23,6 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/redact.sh"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
-# shellcheck source=scripts/lib/e2e-admission-tls.sh
-. "${script_dir}/lib/e2e-admission-tls.sh"
 
 e2e_run_id="$(sanitize_image_tag "${ORKA_SECURITY_SCAN_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 default_kind_suffix="${e2e_run_id:0:32}"
@@ -1268,9 +1266,6 @@ main() {
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
   fake_runtime_ref="$(orka_kind_registry_push "${fake_runtime_image}" "orka/acp-security-fixture")"
-
-  log "Bootstrapping test-only admission TLS"
-  orka_e2e_bootstrap_admission_tls
 
   log "Deploying Orka manager with the deterministic digest-pinned Orka harness v2 fixture"
   local placeholder_digest

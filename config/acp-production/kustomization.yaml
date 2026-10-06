@@ -5,10 +5,11 @@ kind: Kustomization
 # its explicit vekil-system namespace.
 resources:
   - ../acp-workload
-  # Runtime resources only. The fail-closed webhook base is applied after TLS,
-  # endpoint, and handler-smoke checks.
-  - ../orka-admission
   - ../vekil-ingress
+# The controller serves the fail-closed admission webhooks and manages their
+# certificate.
+components:
+  - ../controller-webhook
 configMapGenerator:
   - name: acp-runtime-images
     namespace: orka-system
