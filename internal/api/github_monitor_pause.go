@@ -20,6 +20,27 @@ func repositoryMonitorAPIPauseLabels(monitor *corev1alpha1.RepositoryMonitor) []
 	return monitor.Spec.Policy.PauseLabels
 }
 
+func repositoryMonitorAcceptsPauseEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
+	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || target.IncompletePR {
+		return false
+	}
+	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(repo.FullName), owner+"/"+repository) {
+		return false
+	}
+	if strings.TrimSpace(target.State) != "" && !strings.EqualFold(strings.TrimSpace(target.State), "open") {
+		return false
+	}
+	if target.IsPR {
+		if !repositoryMonitorPullRequestsEnabled(monitor.Spec) || target.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts {
+			return false
+		}
+		return target.BaseBranch == "" || strings.TrimSpace(target.BaseBranch) == effectiveRepositoryMonitorBranch(monitor)
+	}
+	// Pause is policy intake, independent of command enablement and issue filters.
+	return target.Kind == repositoryMonitorTargetKindIssue && monitor.Spec.Targets.Issues.Enabled
+}
+
 func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, payload githubLabelWebhookPayload) (githubRepositoryMonitorEventResult, error) {
 	var result githubRepositoryMonitorEventResult
 	if h.repositoryMonitorStore == nil || (payload.Action != githubWebhookActionLabeled && payload.Action != githubWebhookActionUnlabeled) {
@@ -40,7 +61,7 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
 		matches := repositoryMonitorWebhookMatchingLabel(repositoryMonitorAPIPauseLabels(monitor), []string{payload.Label.Name}) != ""
-		if !matches || !repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, commandIntentResume) {
+		if !matches || !repositoryMonitorAcceptsPauseEvent(monitor, payload.Repository, target) {
 			continue
 		}
 		result.Matched++

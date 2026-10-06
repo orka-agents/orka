@@ -264,7 +264,7 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 	}
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
-		if (payload.Action == githubWebhookActionLabeled || payload.Action == githubWebhookActionUnlabeled) && repositoryMonitorWebhookMatchingLabel(repositoryMonitorAPIPauseLabels(monitor), []string{payload.Label.Name}) != "" && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, commandIntentResume) {
+		if (payload.Action == githubWebhookActionLabeled || payload.Action == githubWebhookActionUnlabeled) && repositoryMonitorWebhookMatchingLabel(repositoryMonitorAPIPauseLabels(monitor), []string{payload.Label.Name}) != "" && repositoryMonitorAcceptsPauseEvent(monitor, payload.Repository, target) {
 			continue
 		}
 		if intent, isCommand := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name); isCommand && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, intent) {

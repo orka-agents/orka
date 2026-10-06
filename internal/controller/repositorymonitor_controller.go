@@ -294,6 +294,13 @@ func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorS
 			return fmt.Errorf("implementation label must not also be a pause or protected label")
 		}
 	}
+	if spec.Targets.Issues.Enabled && spec.Triggers.GitHub.Labels.Enabled && spec.Triggers.GitHub.Labels.ConsumeCommandLabels {
+		for _, required := range spec.Targets.Issues.IncludeLabels {
+			if strings.EqualFold(strings.TrimSpace(required), label) {
+				return fmt.Errorf("spec.targets.issues.includeLabels must not contain the implementation label when command labels are consumed")
+			}
+		}
+	}
 	return nil
 }
 

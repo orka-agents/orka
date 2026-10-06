@@ -27,7 +27,7 @@ Before disabling readiness publication, deleting a monitor, or changing its repo
 ## Safety model
 
 - Issue and PR text is untrusted input.
-- Read-only agents never receive GitHub mutation credentials or direct Git credentials. Claude and OpenCode roles receive only scoped read tools with Bash denied. A Codex agent is accepted only as the pull-request reviewer, where it runs inside the RuntimeSession boundary with controller-rejected elevation requests and read-intent delta classification; the issue triage, research, and planning roles require Claude or OpenCode. Copilot and external `runtimeRef` runtimes are rejected for this hardened mode.
+- Read-only agents never receive GitHub mutation credentials or direct Git credentials. Claude and OpenCode roles receive only scoped read tools with Bash denied. The controller supports Codex for pull-request review and read-only issue triage, research, and planning. Codex runs inside the RuntimeSession boundary with controller-rejected elevation requests and read-intent delta classification. The monitor API currently accepts Codex only for the reviewer role. Copilot and external `runtimeRef` runtimes are rejected for this hardened mode.
 - Implementation agents receive only runtime model credentials and a pre-cloned writable workspace, never Git push credentials. Codex and Claude are supported; Copilot is rejected because its runtime credential can mutate GitHub.
 - Code-changing tasks must produce a validated patch artifact before any branch push.
 - GitHub writes are controller-owned and recorded in `github_mutation_records`.
@@ -103,17 +103,6 @@ make repository-monitor-validate
 The suite covers durable command intake, replay/coalescing, guard-label blocking, issue implementation to PR, stop/resume late-task safety, and PR review/repair/readiness against fake GitHub servers. The `Repository Monitor Smoke` GitHub Actions workflow runs the same fake-GitHub E2E script on relevant PRs.
 
 Patch previews are available through `orka monitor issue patch preview <monitor> <issue-number>` or `GET /api/v1/monitors/implementation-jobs/{id}/patch-preview`; the endpoint returns safe `orka.patch.v1` metadata instead of blindly streaming arbitrary task output.
-
-
-## Live GitHub/kind preflight
-
-The optional live/manual E2E requires Docker, kind, kubectl, the local Orka images, and a target GitHub repository/issue. Check local prerequisites without changing the cluster with:
-
-```bash
-make repository-monitor-live-preflight
-```
-
-If Docker is not running, the preflight exits before creating or modifying a kind cluster.
 
 
 ## Completion audit helper
