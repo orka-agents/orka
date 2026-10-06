@@ -265,6 +265,21 @@ func TestValidateProviderSpec(t *testing.T) {
 				p.Spec.OAuth.Scopes.Read = append(p.Spec.OAuth.Scopes.Read, strconv.Itoa(i)+strings.Repeat("r", 200))
 			}
 		}, want: "oauth.scopes must encode to at most 2048 bytes"},
+		{name: "templated tool url", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/repos/{{repo}}/issues"
+		}, want: "absolute HTTPS URL"},
+		{name: "templated tool url query", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/search/issues?q={{q}}"
+		}, want: "must not contain template placeholders"},
+		{name: "oversized tool header value", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"Accept": strings.Repeat("a", 1025)}
+		}, want: "values at most 1024 bytes"},
+		{name: "oversized tool headers in total", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{}
+			for i := range 5 {
+				p.Spec.Tools[2].HTTP.Headers["X-Hint-"+strconv.Itoa(i)] = strings.Repeat("a", 1000)
+			}
+		}, want: "headers must total at most 4096 bytes"},
 		{name: "oversized scope", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.Scopes.Read = []string{strings.Repeat("a", 257)}
 		}, want: "at most 256 bytes"},
