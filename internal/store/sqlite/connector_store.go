@@ -907,16 +907,23 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 	// and revoking a rotated token can revoke the whole grant at providers
 	// that detect reuse.
 	if retirement != retireGrant && !revocableUntil.Valid {
-		result, err := tx.ExecContext(ctx, `DELETE FROM connector_retired_credentials WHERE id IN (
-			SELECT id FROM connector_retired_credentials
-			WHERE connection_uid = ? AND consent_grant = 0 AND revocable_until IS NULL
-			ORDER BY id DESC LIMIT -1 OFFSET ?)`, ref.ConnectionUID, maxRefreshRetiredConnectorCredentials)
-		if err != nil {
-			return fmt.Errorf("bound refresh-retired connector credentials: %w", err)
-		}
-		if dropped, _ := result.RowsAffected(); dropped > 0 {
-			s.pendingWALTruncate.Store(true)
-		}
+		return s.boundRefreshRetiredTx(ctx, tx, ref.ConnectionUID)
+	}
+	return nil
+}
+
+// boundRefreshRetiredTx keeps only the newest refresh-retired grants a
+// Connection holds until disconnect; see retireConnectorCredentialTx.
+func (s *Store) boundRefreshRetiredTx(ctx context.Context, tx *sql.Tx, connectionUID string) error {
+	result, err := tx.ExecContext(ctx, `DELETE FROM connector_retired_credentials WHERE id IN (
+		SELECT id FROM connector_retired_credentials
+		WHERE connection_uid = ? AND consent_grant = 0 AND revocable_until IS NULL
+		ORDER BY id DESC LIMIT -1 OFFSET ?)`, connectionUID, maxRefreshRetiredConnectorCredentials)
+	if err != nil {
+		return fmt.Errorf("bound refresh-retired connector credentials: %w", err)
+	}
+	if dropped, _ := result.RowsAffected(); dropped > 0 {
+		s.pendingWALTruncate.Store(true)
 	}
 	return nil
 }
@@ -1541,6 +1548,13 @@ func (s *Store) RetireConnectorCredential(ctx context.Context, ref store.Connect
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		ref.ConnectionUID, row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, revocableUntil, now); err != nil {
 		return fmt.Errorf("retire connector credential: %w", err)
+	}
+	// Refresh material retired here is bounded like any rotated grant, so a
+	// store that keeps failing replacement cannot grow custody without limit.
+	if !revocableUntil.Valid {
+		if err := s.boundRefreshRetiredTx(ctx, tx, ref.ConnectionUID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

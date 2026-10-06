@@ -1027,3 +1027,40 @@ func TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails(t *testing.T) {
 		t.Fatalf("retired = %+v retires = %d, want the issued pair retired after one retry", retired, flaky.retires)
 	}
 }
+
+// disconnectingCustody starts a disconnect the moment custody is read, as a
+// finalizer racing a resolution would.
+type disconnectingCustody struct {
+	*sqlite.Store
+	onRead func()
+}
+
+func (d *disconnectingCustody) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
+	credential, err := d.Store.GetConnectorCredential(ctx, ref)
+	if d.onRead != nil {
+		d.onRead()
+		d.onRead = nil
+	}
+	return credential, err
+}
+
+// TestResolveRechecksDisconnectAfterReadingCustody covers a disconnect that
+// begins after the Connection was read but before custody was: the fresh
+// token is not released.
+func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	h.source.Credentials = &disconnectingCustody{Store: h.store, onRead: func() {
+		live := h.reload()
+		live.Finalizers = append(live.Finalizers, "orka.ai/test-hold")
+		if err := h.client.Update(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.client.Delete(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil {
+		t.Fatalf("credential = %+v, want refusal once the disconnect began", got)
+	}
+}

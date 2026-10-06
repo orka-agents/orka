@@ -1297,3 +1297,24 @@ func TestConnectorReplaceBoundsRotatedRefreshGrants(t *testing.T) {
 		t.Fatalf("retired range = %s..%s, want the newest rotated-away grants", oldest, newest)
 	}
 }
+
+// TestConnectorRetireBoundsRefreshMaterial covers the fallback that retires
+// refreshed material custody could not store: it is bounded like any
+// rotated grant.
+func TestConnectorRetireBoundsRefreshMaterial(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	ref := store.ConnectorCredentialRef{ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", SubjectDigest: "digest-a", Provider: "github"}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_current", RefreshToken: "ghr_current"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range maxRefreshRetiredConnectorCredentials + 5 {
+		if err := s.RetireConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: fmt.Sprintf("gho_%d", i), RefreshToken: fmt.Sprintf("ghr_%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
+	if err != nil || len(retired) != maxRefreshRetiredConnectorCredentials {
+		t.Fatalf("retired = %d err = %v, want %d", len(retired), err, maxRefreshRetiredConnectorCredentials)
+	}
+}
