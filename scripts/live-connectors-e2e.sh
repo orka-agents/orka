@@ -84,6 +84,9 @@ pf_log="${workdir}/port-forward.log"
 
 cleanup() {
   status=$?
+  # Teardown must run to the end whatever a diagnostic below returns:
+  # errexit stays active inside an EXIT trap, so it is switched off here.
+  set +e
   for pid in "${api_pf_pid}" "${fixture_pf_pid}" "${fixture_tls_pf_pid}"; do
     if [[ -n "${pid}" ]]; then kill "${pid}" >/dev/null 2>&1 || true; wait "${pid}" 2>/dev/null || true; fi
   done
@@ -94,7 +97,7 @@ cleanup() {
       kubectl -n "${namespace}" logs deployment/"${deployment}" --tail=300 2>/dev/null || true
       kubectl -n "${namespace}" logs deployment/connectors-fixture --tail=100 2>/dev/null || true
       kubectl -n "${namespace}" logs -l orka.ai/task-name --tail=200 --all-containers=true 2>/dev/null || true
-      [[ -f "${pf_log}" ]] && { printf '%s\n' '--- port-forward log ---'; cat "${pf_log}"; }
+      if [[ -f "${pf_log}" ]]; then printf '%s\n' '--- port-forward log ---'; cat "${pf_log}"; fi
     } | redact_all >&2
   fi
   # Only a registry and a cluster this run created are torn down.
@@ -418,11 +421,12 @@ spec:
     maxIterations: 3
     approvalRequiredTools: [itemswrite]
 YAML
+provider_ready='[.status.conditions[]? | select(.type=="Accepted" or .type=="ResolvedRefs") | select(.status=="True")] | length == 2'
 for ((i = 0; i < 60; i++)); do
-  if kubectl -n "${namespace}" get connectorprovider fixture -o json | jq -e '[.status.conditions[]? | select(.type=="Accepted" or .type=="ResolvedRefs") | select(.status=="True")] | length == 2' >/dev/null 2>&1; then break; fi
+  if kubectl -n "${namespace}" get connectorprovider fixture -o json | jq -e "${provider_ready}" >/dev/null 2>&1; then break; fi
   sleep 2
 done
-kubectl -n "${namespace}" get connectorprovider fixture -o json | jq -e '[.status.conditions[]? | select(.status=="True")] | length >= 2' >/dev/null \
+kubectl -n "${namespace}" get connectorprovider fixture -o json | jq -e "${provider_ready}" >/dev/null \
   || { kubectl -n "${namespace}" get connectorprovider fixture -o yaml | redact_all >&2; die "ConnectorProvider was not accepted"; }
 
 log "Signing in as ${subject} through the OIDC fixture"
@@ -535,6 +539,8 @@ log "No token material in controller logs"
 # Every controller container is read, including the previous instance of
 # one that restarted, and the pods must be the ones the lane started with:
 # a replaced or restarted container's earlier output is part of the check.
+# The kubelet keeps only the immediately previous instance's logs, so a
+# container that restarted more than once fails the check outright.
 current_pods="$(controller_pod_names)"
 [[ "${current_pods}" == "${controller_pods}" ]] \
   || die "the controller pods changed during the lane (${controller_pods} -> ${current_pods}); their earlier logs cannot be checked for leaks"
@@ -542,8 +548,12 @@ current_pods="$(controller_pod_names)"
 for pod in ${controller_pods}; do
   kubectl -n "${namespace}" logs pod/"${pod}" --all-containers=true >> "${workdir}/controller.log" \
     || die "could not read the controller logs of ${pod} for the leak check"
-  restarted="$(kubectl -n "${namespace}" get pod "${pod}" -o json | jq -r '.status.containerStatuses[]? | select(.restartCount > 0) | .name')" \
+  restarts="$(kubectl -n "${namespace}" get pod "${pod}" -o json | jq -c '[.status.containerStatuses[]? | {name, restartCount}]')" \
     || die "could not read the container restarts of ${pod} for the leak check"
+  if jq -e 'any(.[]; .restartCount > 1)' <<<"${restarts}" >/dev/null; then
+    die "a controller container of ${pod} restarted more than once; logs of instances before the previous one are gone, so the leak check cannot cover them"
+  fi
+  restarted="$(jq -r '.[] | select(.restartCount > 0) | .name' <<<"${restarts}")"
   for container in ${restarted}; do
     kubectl -n "${namespace}" logs pod/"${pod}" -c "${container}" --previous >> "${workdir}/controller.log" \
       || die "container ${container} of ${pod} restarted and its previous logs cannot be read for the leak check"
