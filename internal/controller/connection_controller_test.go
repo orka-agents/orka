@@ -433,14 +433,15 @@ func TestConnectionRequestsForProvider(t *testing.T) {
 }
 
 type fakeConnectorCredentialStore struct {
-	credentials        map[string]store.ConnectorCredential
-	retired            map[string][]store.ConnectorCredential
-	consents           map[string]int
-	parked             map[string][]store.ConnectorCompletion
-	deleted            []string
-	tombstoned         []string
-	deletedCompletions []string
-	grants             map[string]int64
+	credentials          map[string]store.ConnectorCredential
+	retired              map[string][]store.ConnectorCredential
+	consents             map[string]int
+	parked               map[string][]store.ConnectorCompletion
+	deleted              []string
+	tombstoned           []string
+	deletedCompletions   []string
+	failCompletionDelete bool
+	grants               map[string]int64
 	// getErr, when set, fails custody reads as a transient store error.
 	getErr error
 }
@@ -516,6 +517,9 @@ func (f *fakeConnectorCredentialStore) PeekConnectorCompletion(context.Context, 
 }
 
 func (f *fakeConnectorCredentialStore) DeleteConnectorCompletion(_ context.Context, nonce string) error {
+	if f.failCompletionDelete {
+		return errors.New("database is locked")
+	}
 	for uid, completions := range f.parked {
 		kept := completions[:0]
 		for _, completion := range completions {
@@ -679,8 +683,13 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
 	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
-	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err != nil {
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}})
+	if err != nil {
 		t.Fatal(err)
+	}
+	// The live completion is reaped when it expires, with no polling.
+	if result.RequeueAfter < 4*time.Minute || result.RequeueAfter > 5*time.Minute+2*time.Second {
+		t.Fatalf("RequeueAfter = %v, want just past the live completion's expiry", result.RequeueAfter)
 	}
 	if len(revoker.tokens) != 0 {
 		t.Fatalf("revoked = %v, want no revocation of tokens nobody committed", revoker.tokens)
@@ -690,6 +699,31 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	}
 	if remaining := credentials.parked[string(connection.UID)]; len(remaining) != 1 || remaining[0].Nonce != "live" {
 		t.Fatalf("remaining completions = %+v", remaining)
+	}
+}
+
+// TestConnectionReconcilerRetriesFailedCompletionCleanup covers an expired
+// completion whose deletion fails: with no periodic requeue, the failure
+// itself schedules the retry.
+func TestConnectionReconcilerRetriesFailedCompletionCleanup(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	credentials := newFakeConnectorCredentialStore()
+	credentials.failCompletionDelete = true
+	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
+		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale"}},
+	}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > connectionRevocationRetry+2*time.Second {
+		t.Fatalf("RequeueAfter = %v, want a retry of the failed cleanup", result.RequeueAfter)
 	}
 }
 
@@ -927,6 +961,10 @@ func TestConnectionNextPassFollowsExpiry(t *testing.T) {
 	connection.Status.ExpiresAt = &past
 	if got := connectionNextPass(connection, now, time.Time{}); got != 0 {
 		t.Fatalf("past expiry = %v, want no requeue", got)
+	}
+	// A kept completion whose deadline passed during the pass is still due.
+	if got := connectionNextPass(connection, now, now.Add(-time.Millisecond)); got != time.Second {
+		t.Fatalf("elapsed completion deadline = %v, want a prompt requeue", got)
 	}
 }
 
