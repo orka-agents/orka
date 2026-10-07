@@ -7,6 +7,8 @@
 # Uses agg (https://github.com/asciinema/agg). GIFs land next to the casts as
 # demo/casts/<name>.gif and are gitignored like the casts. Idle time is
 # already capped at record time, so the GIF length matches playback.
+# RENDER_SPEED, RENDER_FONT_SIZE (16), and RENDER_LAST_FRAME (seconds the
+# final frame holds, 3) adjust the output.
 set -eu -o pipefail
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -30,10 +32,12 @@ for name in $names; do
     exit 1
   }
   echo "==> rendering $name"
+  # Render at the size the cast was recorded with.
+  read -r cols rows < <(head -n 1 "$cast" | jq -r '[.term.cols // 100, .term.rows // 28] | @tsv')
   agg "$cast" "demo/casts/$name.gif" \
-    --cols 100 --rows 28 \
-    --font-size 16 \
+    --cols "$cols" --rows "$rows" \
+    --font-size "${RENDER_FONT_SIZE:-16}" \
     --theme monokai \
     --speed "${RENDER_SPEED:-1.0}" \
-    --last-frame-duration 3 2>&1 | tr "\r" "\n" | tail -n 1
+    --last-frame-duration "${RENDER_LAST_FRAME:-3}" 2>&1 | tr "\r" "\n" | tail -n 1
 done

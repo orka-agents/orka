@@ -55,6 +55,10 @@ for name in "${demos[@]}"; do
       ;;
   esac
 
+  # Demo 14 is embedded in a 16:9 slide; its task table needs 116 columns.
+  size=100x28
+  [[ $name == 14-fibey-alert-flow ]] && size=116x28
+
   echo "==> recording $name"
   # --return propagates the script's exit status. Without it asciinema exits 0
   # no matter what happened inside, so a demo that aborted under `pe` would
@@ -63,7 +67,7 @@ for name in "${demos[@]}"; do
     --overwrite \
     --headless \
     --return \
-    --window-size 100x28 \
+    --window-size "$size" \
     --idle-time-limit 2 \
     --title "${title:-$name}" \
     --command "bash $script"

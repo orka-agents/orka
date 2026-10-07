@@ -37,7 +37,9 @@ Orka records the coordinator's model calls, and the walkthrough checks them
 against Azure Monitor's per-minute token meter for the coordinator's
 deployment. External runtimes do not report token counts to Orka today, so
 Fibey's tokens come from its own deployment's Azure meter. Keep other callers
-off both deployments while recording. The estimate applies the Azure Retail
+off both deployments while recording and for two minutes before: Azure can
+book a call in the following minute, so a call just before the alert lands in
+the run's first minute and the check fails. The estimate applies the Azure Retail
 Prices API's Global Standard rates for each model; it is not an invoice.
 
 ## Prepare
@@ -76,6 +78,17 @@ unchanged, the coordinator's answer contains the receipt, and the gateway
 returned that same answer. Orka's token record for the coordinator must match
 its deployment's Azure meter exactly. Full responses, events, meters, and prices stay in
 `demo/setup/state/14-fibey-alert-flow/runs/<run-id>/`.
+
+## Record
+
+The recording is cut for the Ignite demo slide, where Mark narrates over it
+live after the slides introduce Orka. Each step gets a clean screen numbered
+like the flow slide, and the last frame holds on the record.
+
+```sh
+demo/record.sh 14-fibey-alert-flow
+RENDER_FONT_SIZE=24 RENDER_LAST_FRAME=8 demo/render.sh 14-fibey-alert-flow
+```
 
 ## Checks without a model
 

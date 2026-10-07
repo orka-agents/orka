@@ -69,7 +69,7 @@ wait_event() {
     case $phase in
       Rejected|DeadLettered|Expired) echo "Orka ended this alert in $phase; see $file." >&2; return 1 ;;
     esac
-    if { [[ $1 == dispatched ]] && jq -e '.taskName != null and .taskUid != ""' "$file" >/dev/null; } ||
+    if { [[ $1 == dispatched ]] && jq -e '(.taskName // "") != "" and (.taskUid // "") != ""' "$file" >/dev/null; } ||
        { [[ $1 == completed && $phase == Completed ]] && jq -e '.deliveryId != null and .deliveryId != ""' "$file" >/dev/null; }; then
       cp "$file" "raw/event-$2.json"
       return 0
@@ -93,68 +93,78 @@ work_orders="curl -s 'localhost:$simulator_port/counts?runID=$alert_id' | jq ."
 snapshot initial
 python3 "$here/check.py" initial
 
-banner 'Orka — from equipment alert to approved work order' \
-  'An alert arrives through the gateway. Orka runs a data-analysis job on AKS and a specialist agent in Microsoft Foundry. Mark approves the work order before it runs.'
+# Mark narrates this video live after the slides introduce Orka and the flow,
+# so each step gets a clean screen with only its evidence. Step numbers match
+# the flow slide.
+step() { printf '\033[H\033[2J'; chapter "$1"; }
 
-chapter '1. An alert comes in through the gateway'
-say 'The plant'"'"'s monitoring system sends a pressure alert to Orka'"'"'s gateway over A2A.'
-# The A2A client plays the monitoring system; its reply is kept for the checks.
+step '1 · Alert in, through the gateway'
+aside 'Recorded live on AKS and Microsoft Foundry. Waiting time is shortened.'
+# The A2A client plays the plant's monitoring system; its reply is kept for the checks.
 a2a -message-id "$alert_id" -context-id "$conversation" -return-immediately -text "$(cat alert.txt)" >raw/admission.json
 task_ref=$(jq -er '.id' raw/admission.json)
 event_id=$(python3 "$here/check.py" event-id raw/admission.json)
 wait_event dispatched dispatched
 coordinator=$(jq -er '.taskName' raw/event-dispatched.json)
 pe 'orka gateway events get "$event_id"'
-ok 'Orka recorded the alert and gave it to the coordinator as a Task.'
+ok 'Orka opened one Task for the alert.'
+nap 1.5
 
-chapter '2. Orka coordinates the work'
-say 'Orka'"'"'s coordinator starts a data-analysis job on AKS, then hands its findings'
-say 'to Fibey, a specialist agent hosted in Microsoft Foundry.'
+step '2 · Orka runs a data-analysis job on AKS'
 # Wait for the hand-off to Fibey, or stop early if the analysis job failed.
 wait_for 'the Foundry specialist Task' \
   "kubectl -n '$ORKA_NAMESPACE' get tasks -l 'orka.ai/parent-task=$coordinator' -o json |
     jq -e '[.items[] | select(.spec.type == \"agent\" or .status.phase == \"Failed\")] | length > 0'" 600
 kubectl -n "$ORKA_NAMESPACE" get tasks -l "orka.ai/parent-task=$coordinator" -o json >raw/children-dispatched.json
 analysis_task=$(jq -er '[.items[] | select(.spec.type == "container")] | if length == 1 then .[0].metadata.name else error("expected one analysis job") end' raw/children-dispatched.json)
-# Fail before narrating if the job could not run (for example, no free CPU).
+# Fail before showing anything if the job could not run (for example, no free CPU).
 analysis_phase=$(jq -r --arg name "$analysis_task" '.items[] | select(.metadata.name == $name) | .status.phase' raw/children-dispatched.json)
 [[ $analysis_phase == Succeeded ]] || {
   bad "The analysis job is $analysis_phase: $(kubectl -n "$ORKA_NAMESPACE" get task "$analysis_task" -o jsonpath='{.status.message}')"
   exit 1
 }
 fibey_task=$(jq -er '[.items[] | select(.spec.type == "agent")] | if length == 1 then .[0].metadata.name else error("expected one Fibey Task") end' raw/children-dispatched.json)
-pe 'orka task children "$coordinator"'
-ok 'Two child Tasks under one coordinator: the job on AKS and Fibey in Foundry.'
-
-chapter '3. The job analyzes the sensor history'
+# The time window must hold exactly this alert's three Tasks.
+orka task list --since 3m -o json >raw/task-window.json
+jq -e --arg c "$coordinator" --arg a "$analysis_task" --arg f "$fibey_task" \
+  '[.[].name] | sort == ([$c, $a, $f] | sort)' raw/task-window.json >/dev/null || {
+  bad 'Other Tasks started in the last 3 minutes; wait and record again.'
+  exit 1
+}
+pe 'orka task list --since 3m'
+nap 1.5
 pe 'orka task result "$analysis_task"'
 orka task result "$analysis_task" -o json >raw/analysis-result.json
-ok 'Only the replaced transmitter changed. Flow, current, and vibration are normal.'
+ok 'Only the replaced transmitter changed. The pump runs normally.'
+nap 1.5
 
-chapter '4. Fibey proposes a work order'
-pe 'orka task approvals "$fibey_task" --watch --timeout 10m'
+step '3 · A specialist agent in Microsoft Foundry proposes a work order'
+orka task approvals "$fibey_task" --watch --timeout 10m >raw/approval-watch.txt
 snapshot pending
 python3 "$here/check.py" pending
 # The short ID is what `orka task approvals` shows; the CLI resolves it.
 approval=$(jq -er '.approvals[0].id | split(":") | last | .[0:12]' raw/approval-pending.json)
-say 'The work-order service counts what it has received for this alert.'
-pe "$work_orders"
-ok 'Fibey looked up inventory and asked for an inspection. No work order exists yet.'
-
-chapter '5. Mark approves the exact work order'
 pe 'orka task approvals "$fibey_task" "$approval"'
 snapshot before-decision
 python3 "$here/check.py" before-decision
-pe 'orka task approve "$fibey_task" "$approval" --reason "Inspect the transmitter."'
-orka task approvals "$fibey_task" "$approval" -o json >raw/decision.json
-ok 'Mark'"'"'s decision is on record: who approved what, when, and why.'
+ok 'Orka holds this exact action. No work order exists yet.'
+nap 3
 
-chapter '6. The work order runs, and the result returns through the gateway'
-pe 'orka task wait "$coordinator" --timeout 15m'
+step '4 · Mark approves the exact work order'
+# The decision prints the same block again; the record below says it in one line.
+decide='orka task approve "$fibey_task" "$approval" --reason "Inspect the transmitter."'
+p "$decide"
+eval "$decide" >raw/approve.txt
+orka task approvals "$fibey_task" "$approval" -o json >raw/decision.json
+ok "$(jq -er '"Approved by \(.decisionActor | split(":") | last): \"\(.decisionReason)\""' raw/decision.json)"
+nap 2
+
+step '5 · The work order runs   6 · The result goes out through the gateway'
+orka task wait "$coordinator" --timeout 15m >raw/coordinator-wait.txt
 wait_event completed completed
-# Read by a typed command below.
-# shellcheck disable=SC2034
 delivery_id=$(jq -er '.deliveryId' raw/event-completed.json)
+wait_for 'the gateway delivery' \
+  "orka gateway deliveries get '$delivery_id' -o json | tee raw/delivery.json | jq -e '.state == \"Delivered\"'" 60
 snapshot final
 a2a -task-id "$task_ref" >raw/answer.json
 orka task result "$coordinator" -o json >raw/coordinator-result.json
@@ -164,14 +174,11 @@ scenario_collect_events "$fibey_task" raw/fibey-events.json
 fibey_flow_snapshot raw/installation-final.json
 pe "$work_orders"
 pe 'orka task result "$coordinator"'
-pe 'orka gateway deliveries get "$delivery_id"'
-ok 'One work order, created after approval. The gateway delivered the answer.'
+ok 'The gateway delivered this answer back to the monitoring system.'
+nap 2
 
-chapter '7. On the record'
+step 'On the record'
 # Azure publishes per-minute token counts a few minutes late; wait for them off camera.
 python3 "$here/check.py" meter
 python3 "$here/check.py" final
-ok 'Tasks, the approval, elapsed time, tokens, and estimated cost for this one alert.'
-
-note "Full responses and receipts are saved in $run_dir"
-cta
+nap 2
