@@ -96,12 +96,11 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   const completionParams = completionNamespace ? { namespace: completionNamespace } : undefined
   const completionAttempted = useRef(false)
   // A failed consent that was sealed in another namespace is recovered
-  // there: the page switches to it so "start the link again" targets the
-  // affected provider and Connection (the content remounts with the same
-  // callback search, so the error notice is kept).
-  useEffect(() => {
-    if (search.status === 'error' && callbackNamespace && callbackNamespace !== namespace) setNamespace(callbackNamespace)
-  }, [search.status, callbackNamespace, namespace, setNamespace])
+  // there, but only when the person asks: the error redirect is not
+  // authenticated, so its namespace is offered as a switch rather than
+  // written into the persisted selection (the content remounts with the
+  // same callback search, so the error notice is kept).
+  const failedElsewhere = search.status === 'error' && callbackNamespace && callbackNamespace !== namespace ? callbackNamespace : undefined
   const [callbackNotice, setCallbackNotice] = useState<{ tone: 'error' | 'info'; text: string; retry?: boolean } | null>(() => {
     if (search.status === 'error') return { tone: 'error', text: callbackReasonMessage(search.reason) }
     if (returning && !completionToken) return { tone: 'error', text: 'The consent came back without a completion token. Start the link again.' }
@@ -245,6 +244,9 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
           <span>{callbackNotice.text}</span>
           {callbackNotice.retry && completionToken && (
             <Button size="sm" variant="outline" disabled={complete.isPending} onClick={retryCompletion}>Retry</Button>
+          )}
+          {failedElsewhere && (
+            <Button size="sm" variant="outline" onClick={() => setNamespace(failedElsewhere)}>Switch to {failedElsewhere}</Button>
           )}
         </div>
       )}

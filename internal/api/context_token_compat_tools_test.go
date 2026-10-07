@@ -8,6 +8,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -356,6 +357,60 @@ func TestConnectorReadToolAuthorizerRecordsAuditFailures(t *testing.T) {
 		if connectorReadToolAuthorizer(&withScope, authz, true) != nil {
 			t.Fatalf("%s: a token with the connector-read scope needs no check", tc.mode)
 		}
+	}
+}
+
+// fakeLinkedAccounts reports every catalog built-in as bound and counts
+// the resolutions that reached it.
+type fakeLinkedAccounts struct{ calls *int }
+
+func (f fakeLinkedAccounts) BuiltinToolCredential(context.Context, string) (toolspkg.LinkedAccountCredential, bool, error) {
+	*f.calls++
+	return toolspkg.LinkedAccountCredential{AccessToken: "linked"}, true, nil
+}
+
+// TestScopedLinkedAccountsFollowConnectorReadBoundary covers the linked
+// GitHub tools of chat and the compatibility proxies: under enforcement a
+// delegated token without the connector-read scope uses no linked account
+// and never reaches the resolver, audit mode resolves the link and records
+// the missing scope, and a token carrying the scope is not narrowed.
+func TestScopedLinkedAccountsFollowConnectorReadBoundary(t *testing.T) {
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	narrowed := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: requester.Issuer,
+		ContextToken: &ContextToken{Subject: "alice", Issuer: requester.Issuer, Scopes: []string{ContextTokenScopeToolsUse}}}
+	scoped := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: requester.Issuer,
+		ContextToken: &ContextToken{Subject: "alice", Issuer: requester.Issuer, Scopes: []string{ContextTokenScopeConnectorsRead}}}
+	for _, tc := range []struct {
+		mode  string
+		ui    *UserInfo
+		bound bool
+	}{
+		{mode: ContextTokenAuthorizationModeEnforce, ui: narrowed, bound: false},
+		{mode: ContextTokenAuthorizationModeAudit, ui: narrowed, bound: true},
+		{mode: ContextTokenAuthorizationModeEnforce, ui: scoped, bound: true},
+	} {
+		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: tc.mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		factory := func(string, *corev1alpha1.RequestedBy) toolspkg.LinkedAccountCredentials {
+			return fakeLinkedAccounts{calls: &calls}
+		}
+		linked := scopedLinkedAccounts(factory, "default", requester, tc.ui, authz)
+		if linked == nil {
+			t.Fatalf("%s: a resolver is attached for every verified person", tc.mode)
+		}
+		credential, bound, err := linked.BuiltinToolCredential(context.Background(), "list_pull_requests")
+		if err != nil || bound != tc.bound || (bound && credential.AccessToken != "linked") {
+			t.Fatalf("%s %v: credential = %+v bound = %t err = %v, want bound = %t", tc.mode, tc.ui.ContextToken.Scopes, credential, bound, err, tc.bound)
+		}
+		if wantCalls := map[bool]int{true: 1, false: 0}[tc.bound]; calls != wantCalls {
+			t.Fatalf("%s: resolver calls = %d, want %d", tc.mode, calls, wantCalls)
+		}
+	}
+	if scopedLinkedAccounts(nil, "default", requester, narrowed, ContextTokenAuthorizationConfig{}) != nil {
+		t.Fatal("without a factory there is no resolver")
 	}
 }
 

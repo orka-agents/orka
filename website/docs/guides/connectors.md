@@ -291,7 +291,11 @@ by a repository they chose themselves; any other `task_name` is refused,
 because there is no current Task whose repository scope could bound it.
 Without a link those tools keep the Task-Secret path they always had; a
 link that exists but cannot be used (pending, expired, revoked, or being
-deleted) fails the call rather than falling back.
+deleted) fails the call rather than falling back. Under enforced
+context-token authorization, a delegated token without the connector-read
+scope (`orka:connectors:read` by default) uses no linked account on these
+surfaces: its tools keep the Task-Secret path, as for a person with no
+link. Audit mode uses the link and records the missing scope.
 
 ### What runs where
 
