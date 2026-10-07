@@ -871,3 +871,39 @@ func TestExternalRuntimePoolClosesNeverBootstrappedDeletedRequest(t *testing.T) 
 		})
 	}
 }
+
+func TestExternalRuntimePoolQuarantineAuthorizesStopForSuspendCapableClass(t *testing.T) {
+	ctx := context.Background()
+	f := newExternalRuntimePoolFixture(t)
+	workspace := f.currentWorkspace(t)
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = "DataOnly"
+	if err := f.r.Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	workspace, pod := f.serve(t)
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	workspace.Spec.Attachment = nil
+	if err := f.r.Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	// Every external provider acts on quarantine only through a Stop (or Delete)
+	// authorization; a Suspend authorization would leave the instance running.
+	for range 6 {
+		runtimePoolReconcile(t, f.r, f.pool)
+		f.supervisor.probe = runtimePoolValidProbe(f.pool, &pod, "external-boot", true)
+		workspace = f.currentWorkspace(t)
+		if workspace.Spec.Retirement != nil {
+			break
+		}
+	}
+	if workspace.Spec.Retirement == nil || workspace.Spec.Retirement.Action != workspacev1alpha1.WorkloadRetirementStop {
+		t.Fatalf("quarantine did not authorize an exact-instance Stop: %#v", workspace.Spec.Retirement)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined || workspace.Spec.Retirement.Identity != workspace.Status.Allocation.Identity || workspace.Spec.Retirement.Sequence != workspace.Spec.Workload.Sequence {
+		t.Fatalf("quarantine retirement changed intent or lost the exact instance: %#v", workspace.Spec)
+	}
+	if err := workspaceprovider.ValidateWorkloadRetirement(workspace.Spec.Workload, workspace.Status.Allocation, workspace.Spec.Retirement, workspacev1alpha1.WorkloadRetirementStop); err != nil {
+		t.Fatalf("provider Stop validation rejects the quarantine authorization: %v", err)
+	}
+}

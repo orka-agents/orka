@@ -716,10 +716,14 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			}
 		}
 	}
+	// Quarantine is terminal and never reusable, so it never earns the data-preserving
+	// Suspend authorization that a Suspend-capable class otherwise receives. Providers
+	// act on quarantine only through a Stop (or Delete) authorization.
+	quarantined := w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
 	action := workspacev1alpha1.WorkloadRetirementStop
 	if deleting {
 		action = workspacev1alpha1.WorkloadRetirementDelete
-	} else if w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+	} else if !quarantined && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)) {
 		action = workspacev1alpha1.WorkloadRetirementSuspend
 	}
 	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
