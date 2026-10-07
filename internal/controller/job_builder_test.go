@@ -3658,9 +3658,16 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 		PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 1, GrantSequence: 1,
 		Mode: corev1alpha1.ConnectionModeReadOnly, PolicyUID: "policy-uid", PolicyGeneration: 3,
 	}
+	// The freeze's own per-tool classification, as createTaskJob hands it on.
+	freezeInfos, err := classifyConnectorTools(context.Background(), builder.Client, NativeWorkerToolRegistry(task, agent), defaultNS,
+		[]string{"gh_read", "gh_write", "delegate_task"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenDigests := nativeConnectorToolDigests(freezeInfos)
 	build := func(bindings ...corev1alpha1.ConnectionBinding) ([]corev1.EnvVar, error) {
 		return builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil,
-			JobBuildOptions{ConnectionBindings: bindings, ConnectionBindingsFrozen: true})
+			JobBuildOptions{ConnectionBindings: bindings, ConnectionBindingsFrozen: true, ConnectorToolDigests: frozenDigests})
 	}
 
 	envVars, err := build(binding)
@@ -3701,6 +3708,37 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	}
 	if _, err := build(); !errors.Is(err, ErrConnectorToolResolution) {
 		t.Fatalf("missing binding err = %v, want ErrConnectorToolResolution", err)
+	}
+
+	// One of two Tools sharing the frozen policy was retargeted to a plain
+	// policy since the freeze: the policy is still classified through the
+	// other Tool, but the retargeted one would run locally with no
+	// connector route or approval default, so the build fails.
+	plainPolicy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: defaultNS, UID: "plain-uid"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}},
+	}
+	if err := builder.Create(context.Background(), plainPolicy); err != nil {
+		t.Fatal(err)
+	}
+	retargeted := &corev1alpha1.Tool{}
+	if err := builder.Get(context.Background(), types.NamespacedName{Namespace: defaultNS, Name: "gh_write"}, retargeted); err != nil {
+		t.Fatal(err)
+	}
+	original := retargeted.DeepCopy()
+	retargeted.Spec.HTTP.OutboundAccessPolicyRef.Name = "plain"
+	if err := builder.Update(context.Background(), retargeted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("tool retargeted off a shared policy: err = %v, want ErrConnectorToolResolution", err)
+	}
+	retargeted.Spec.HTTP.OutboundAccessPolicyRef.Name = original.Spec.HTTP.OutboundAccessPolicyRef.Name
+	if err := builder.Update(context.Background(), retargeted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build(readWrite); err != nil {
+		t.Fatalf("tool restored: err = %v", err)
 	}
 
 	// The frozen policy left connection mode since the freeze: its tools
