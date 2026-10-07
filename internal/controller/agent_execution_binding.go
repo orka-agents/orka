@@ -405,13 +405,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
-	frozenConnections, err := freezeRequesterConnections(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
+	frozenConnections, frozenClassification, frozenTools, err := freezeRequesterConnectionsClassified(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
 	if err != nil {
 		return nil, fmt.Errorf("freeze requester connections: %w", err)
 	}
 	// Visibility and approvals were decided from the first classification;
-	// the snapshot must not bind a policy that read differently since.
-	if err := frozenConnectionsMatchClassification(frozenConnections, connectorClassification); err != nil {
+	// the snapshot must not bind a tool that read differently since.
+	if err := connectorClassificationUnchanged(connectorClassification, frozenClassification, frozenTools); err != nil {
 		return nil, err
 	}
 

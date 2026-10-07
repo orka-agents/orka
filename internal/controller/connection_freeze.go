@@ -536,23 +536,17 @@ func filterConnectorToolsForRequester(
 	return visible, connectorWrite, infos, nil
 }
 
-// frozenConnectionsMatchClassification reports dispatch drift when a policy
-// the freeze bound was not classified as the same connection-mode policy
-// object (name, UID, generation, provider) when visibility and approvals
-// were decided: a policy that entered connection mode between the two reads
-// would otherwise reach the person's credential with no hiding and no
-// approval default.
-func frozenConnectionsMatchClassification(frozen []agentExecutionSnapshotConnection, infos map[string]connectorToolInfo) error {
-	for _, entry := range frozen {
-		matched := false
-		for _, info := range infos {
-			if info.PolicyName == entry.PolicyName && info.PolicyUID == entry.PolicyUID &&
-				info.PolicyGeneration == entry.PolicyGeneration && info.Provider == entry.Provider {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+// connectorClassificationUnchanged reports dispatch drift when any tool
+// the freeze covered classified differently from the read that decided
+// visibility and approvals. Tools are compared one by one, not by policy:
+// a Tool retargeted onto a connection-mode policy another Tool already
+// uses would otherwise pass on that Tool's entry, although its own
+// visibility and approval default were decided as a plain tool.
+func connectorClassificationUnchanged(planned, frozen map[string]connectorToolInfo, toolNames []string) error {
+	for _, name := range toolNames {
+		before, wasConnector := planned[name]
+		after, isConnector := frozen[name]
+		if wasConnector != isConnector || before != after {
 			return errConnectorDispatchDrift
 		}
 	}
@@ -689,12 +683,25 @@ func freezeRequesterConnectionsForTools(
 	task *corev1alpha1.Task,
 	toolNames []string,
 ) ([]agentExecutionSnapshotConnection, error) {
+	frozen, _, err := freezeClassifiedRequesterConnections(ctx, reader, registry, task, toolNames)
+	return frozen, err
+}
+
+// freezeClassifiedRequesterConnections is freezeRequesterConnectionsForTools
+// that also returns the classification the freeze was made from.
+func freezeClassifiedRequesterConnections(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	toolNames []string,
+) ([]agentExecutionSnapshotConnection, map[string]connectorToolInfo, error) {
 	if reader == nil || task == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var frozen []agentExecutionSnapshotConnection
 	seenPolicies := map[string]struct{}{}
@@ -709,7 +716,7 @@ func freezeRequesterConnectionsForTools(
 		seenPolicies[info.PolicyName] = struct{}{}
 		connection, err := requesterConnection(ctx, reader, task, info.Provider)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// Every connection-mode policy the Task can reach is frozen, with or
 		// without a usable link: an entry without a Connection keeps the
@@ -729,7 +736,7 @@ func freezeRequesterConnectionsForTools(
 		}
 		frozen = append(frozen, entry)
 	}
-	return frozen, nil
+	return frozen, infos, nil
 }
 
 // freezeRequesterConnections is the ACP entry point: it freezes the
@@ -741,6 +748,20 @@ func freezeRequesterConnections(
 	task *corev1alpha1.Task,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
 ) ([]agentExecutionSnapshotConnection, error) {
+	frozen, _, _, err := freezeRequesterConnectionsClassified(ctx, reader, registry, task, mcpConfiguration)
+	return frozen, err
+}
+
+// freezeRequesterConnectionsClassified is freezeRequesterConnections that
+// also returns the classification the freeze was made from and the tools
+// it covered, so the caller can hold it to the planning classification.
+func freezeRequesterConnectionsClassified(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+) ([]agentExecutionSnapshotConnection, map[string]connectorToolInfo, []string, error) {
 	var names []string
 	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
 		if descriptor.Source == harnessv2.MCPToolSourceBrokeredCustom {
@@ -754,13 +775,14 @@ func freezeRequesterConnections(
 		for _, name := range names {
 			if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, &corev1alpha1.Tool{}); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil, fmt.Errorf("tool %q was removed while the task was being bound; binding retries", name)
+					return nil, nil, nil, fmt.Errorf("tool %q was removed while the task was being bound; binding retries", name)
 				}
-				return nil, fmt.Errorf("load tool %q: %w", name, err)
+				return nil, nil, nil, fmt.Errorf("load tool %q: %w", name, err)
 			}
 		}
 	}
-	return freezeRequesterConnectionsForTools(ctx, reader, registry, task, names)
+	frozen, infos, err := freezeClassifiedRequesterConnections(ctx, reader, registry, task, names)
+	return frozen, infos, names, err
 }
 
 // taskConnectionBindings converts frozen links to the Task status form used
