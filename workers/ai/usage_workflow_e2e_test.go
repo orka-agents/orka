@@ -263,7 +263,7 @@ func newUsageWorkflowFixture(t *testing.T) *usageWorkflowFixture {
 	f.monitor.Spec.Targets.PullRequests.Enabled = new(false)
 	f.monitor.Spec.Targets.Issues.Enabled = true
 	f.monitor.Spec.Triggers.GitHub.Labels.Enabled = true
-	f.monitor.Spec.IssueWorkflow.Implementation.RequireApprovedPlan = new(false)
+	f.monitor.Spec.IssueWorkflow.Implementation.RequirePlan = new(false)
 	objects := make([]client.Object, 0, 8)
 	objects = append(objects,
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{

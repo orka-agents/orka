@@ -400,12 +400,17 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedPublishConfig(t *testing.T) {
 }
 
 func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
-	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	forgeSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "forge", Namespace: "demo"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, forgeSecret)
 	body := fmt.Sprintf(`{
 		"name":"repo-monitor",
 		"namespace":"demo",
 		"spec":{
 			"repoURL":%q,
+			"forgeCredentialRef":{"name":"forge"},
 			"review":{"publish":{
 				"enabled":true,
 				"mode":"summary_with_inline_findings",
@@ -429,6 +434,70 @@ func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
 	require.Equal(t, "COMMENT", created.Spec.Review.Publish.Event)
 	require.NotNil(t, created.Spec.Review.Publish.PostPassed)
 	require.True(t, *created.Spec.Review.Publish.PostPassed)
+}
+
+func TestRepositoryMonitorHandlers_ControllerMutationsRequireForgeCredential(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		repair  bool
+		forge   *corev1.LocalObjectReference
+		want    int
+	}{
+		{name: "missing reference", enabled: true, want: http.StatusBadRequest},
+		{name: "blank reference", enabled: true, forge: &corev1.LocalObjectReference{Name: " "}, want: http.StatusBadRequest},
+		{name: "valid reference", enabled: true, forge: &corev1.LocalObjectReference{Name: "forge"}, want: http.StatusOK},
+		{name: "agentless repair missing reference", repair: true, want: http.StatusBadRequest},
+		{name: "agentless repair blank reference", repair: true, forge: &corev1.LocalObjectReference{Name: " "}, want: http.StatusBadRequest},
+		{name: "agentless repair valid reference", repair: true, forge: &corev1.LocalObjectReference{Name: "forge"}, want: http.StatusOK},
+		{name: "read-only publication disabled", want: http.StatusOK},
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		for _, tt := range tests {
+			t.Run(method+"/"+tt.name, func(t *testing.T) {
+				forgeSecret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "forge", Namespace: "demo"},
+					Data:       map[string][]byte{"token": []byte("test-token")},
+				}
+				app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, forgeSecret)
+				path := "/monitors/repositories"
+				want := tt.want
+				if method == http.MethodPut {
+					createRepositoryMonitorForHandlerTest(t, app)
+					path += "/repo-monitor?namespace=demo"
+				} else if want == http.StatusOK {
+					want = http.StatusCreated
+				}
+				spec := corev1alpha1.RepositoryMonitorSpec{
+					RepoURL:            monitorTestRepoURL,
+					ForgeCredentialRef: tt.forge,
+					Agents: corev1alpha1.RepositoryMonitorAgents{
+						Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+					},
+					Review: corev1alpha1.RepositoryMonitorReviewSpec{
+						Publish: corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: tt.enabled},
+					},
+				}
+				spec.Repair.Enabled = tt.repair
+				body, err := json.Marshal(CreateRepositoryMonitorRequest{Name: "repo-monitor", Namespace: "demo", Spec: spec})
+				require.NoError(t, err)
+				req := httptest.NewRequest(method, path, strings.NewReader(string(body)))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				require.Equal(t, want, resp.StatusCode)
+				if want == http.StatusBadRequest {
+					require.Contains(t, readRespBody(t, resp), "spec.forgeCredentialRef is required")
+				} else {
+					var monitor corev1alpha1.RepositoryMonitor
+					require.NoError(t, json.NewDecoder(resp.Body).Decode(&monitor))
+					require.Equal(t, tt.enabled, monitor.Spec.Review.Publish.Enabled)
+					require.Equal(t, tt.repair, monitor.Spec.Repair.Enabled)
+					require.Equal(t, tt.forge, monitor.Spec.ForgeCredentialRef)
+				}
+			})
+		}
+	}
 }
 
 func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {

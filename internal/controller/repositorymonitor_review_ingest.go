@@ -991,6 +991,9 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA &&
 		repositoryMonitorReviewRecordAllowsAutomerge(monitor, record) && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		item.AutomergeState = repositoryMonitorAutomergeStateMergeReady
+		if repositoryMonitorManagedWorkflow(monitor) && monitor.Spec.Review.Publish.Enabled {
+			item.AutomergeState = repositoryMonitorAutomergeStatePending
+		}
 	} else {
 		item.AutomergeState = ""
 	}
