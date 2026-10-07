@@ -387,7 +387,8 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 // closed. Their tokens are left to expire, never revoked: Orka cannot prove
 // whose grant a token nobody committed belongs to.
 // It returns the earliest expiry among the parked completions it kept, so
-// the next reconcile can be scheduled for it.
+// the next reconcile can be scheduled for it; a completion whose deletion
+// failed is due again after connectionRevocationRetry.
 func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, connection *corev1alpha1.Connection) time.Time {
 	var earliest time.Time
 	if r.Consents == nil {
@@ -414,6 +415,9 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 		}
 		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
 			log.FromContext(ctx).Info("expired completion could not be deleted", "connection", connection.Name)
+			if retry := now.Add(connectionRevocationRetry); earliest.IsZero() || retry.Before(earliest) {
+				earliest = retry
+			}
 		}
 	}
 	return earliest
@@ -536,16 +540,21 @@ func (r *ConnectionReconciler) updateStatus(
 // fixed requeue per linked account does not scale.
 func connectionNextPass(connection *corev1alpha1.Connection, now, completionDeadline time.Time) time.Duration {
 	var next time.Duration
-	consider := func(at time.Time) {
-		if until := at.Sub(now) + time.Second; until > time.Second && (next == 0 || until < next) {
+	consider := func(until time.Duration) {
+		if next == 0 || until < next {
 			next = until
 		}
 	}
+	// An expiry already in the past was handled by this pass.
 	if connection.Status.ExpiresAt != nil {
-		consider(connection.Status.ExpiresAt.Time)
+		if until := connection.Status.ExpiresAt.Sub(now) + time.Second; until > time.Second {
+			consider(until)
+		}
 	}
+	// A kept completion is still pending work even if its deadline passed
+	// while this pass ran: it is reaped on a prompt next pass.
 	if !completionDeadline.IsZero() {
-		consider(completionDeadline)
+		consider(max(completionDeadline.Sub(now)+time.Second, time.Second))
 	}
 	return next
 }
