@@ -227,14 +227,18 @@ type GitHubMutationRecord struct {
 
 // GitHubMutationRecordFilter constrains mutation audit list queries.
 type GitHubMutationRecordFilter struct {
-	Namespace    string
-	MonitorName  string
-	Operation    string
-	TargetKind   string
-	TargetNumber int64
-	Status       string
-	Limit        int
-	Cursor       string
+	Namespace string
+	// AllNamespaces explicitly enables controller-wide audit lookup. API lists
+	// remain namespace-scoped and must not accept this from client input.
+	AllNamespaces bool
+	MonitorName   string
+	Operation     string
+	TargetKind    string
+	TargetNumber  int64
+	TargetSHA     string
+	Status        string
+	Limit         int
+	Cursor        string
 }
 
 // ActionRecord stores one generic typed result from an agent or deterministic controller action.

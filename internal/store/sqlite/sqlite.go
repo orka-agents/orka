@@ -791,6 +791,8 @@ func currentSchemaStatements() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_monitor
 			ON github_mutation_records(monitor_namespace, monitor_name, target_kind, target_number, operation, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_operation_sha
+			ON github_mutation_records(operation, target_sha, created_at DESC, id DESC)`,
 		`CREATE TABLE IF NOT EXISTS repair_jobs (
 			id                  TEXT PRIMARY KEY,
 			monitor_namespace   TEXT NOT NULL,

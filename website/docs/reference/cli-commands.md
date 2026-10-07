@@ -1794,7 +1794,6 @@ Usage:
   orka monitor issue [command]
 
 Available Commands:
-  approve-plan   Approve the current issue plan
   decompose      Queue issue decomposition
   implement      Queue issue implementation
   implementation Inspect issue implementation jobs
@@ -1818,27 +1817,6 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka monitor issue [command] --help" for more information about a command.
-```
-
-## `orka monitor issue approve-plan`
-
-```text
-Approve the current issue plan
-
-Usage:
-  orka monitor issue approve-plan <name> <number> [flags]
-
-Flags:
-  -h, --help            help for approve-plan
-  -o, --output string   Output format: table, json, yaml (default "yaml")
-
-Global Flags:
-      --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
-      --txn-token string        Transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor issue decompose`
@@ -2182,7 +2160,7 @@ Usage:
   orka monitor items <name> [flags]
 
 Flags:
-      --automerge-state string   Filter by automerge state
+      --automerge-state string   Filter by merge readiness state
       --continue string          Continue token
       --cursor string            Cursor token
   -h, --help                     help for items
@@ -2311,7 +2289,6 @@ Usage:
   orka monitor pr [command]
 
 Available Commands:
-  automerge     Request head-bound automerge
   fix           Queue PR finding repair
   fix-ci        Queue PR CI repair
   ready         Inspect merge-ready PRs
@@ -2334,28 +2311,6 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka monitor pr [command] --help" for more information about a command.
-```
-
-## `orka monitor pr automerge`
-
-```text
-Request head-bound automerge
-
-Usage:
-  orka monitor pr automerge <name> <number> [flags]
-
-Flags:
-  -h, --help                help for automerge
-  -o, --output string       Output format: table, json, yaml (default "yaml")
-      --target-sha string   Current pull request head SHA for head-bound commands
-
-Global Flags:
-      --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
-      --txn-token string        Transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor pr fix`
