@@ -300,6 +300,11 @@ func (g *approvalGate) targetForCall(
 }
 
 func approvalTargetArguments(args json.RawMessage, customTool *corev1alpha1.Tool) (json.RawMessage, error) {
+	// The controller executes a connector-backed tool with empty arguments
+	// as the empty object and digests that, so the worker's target must too.
+	if customTool != nil && customTool.Annotations[connectorBackedToolAnnotation] == "true" && len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage(`{}`)
+	}
 	return approvals.TargetArguments(args, customTool)
 }
 

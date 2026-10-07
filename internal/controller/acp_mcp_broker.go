@@ -453,6 +453,15 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 			if toolContext != nil {
 				callCtx = tools.WithToolContext(callCtx, toolContext)
 			}
+			// The linked credential is refreshed to stay valid for the
+			// catalog's bound on the call, so the whole call is held to that
+			// bound: a multi-page read that ran longer could outlive the
+			// token partway through.
+			if timeout, bounded := connectors.BuiltinConnectorToolTimeout(descriptor.Name); linkedBuiltin && bounded {
+				var cancel context.CancelFunc
+				callCtx, cancel = context.WithTimeout(callCtx, timeout)
+				defer cancel()
+			}
 			return registry.Execute(callCtx, descriptor.Name, request.Call.Arguments)
 		}
 	case harnessv2.MCPToolSourceBrokeredCustom:

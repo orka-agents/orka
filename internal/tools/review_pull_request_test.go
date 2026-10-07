@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -918,5 +919,47 @@ func TestFetchPRFilesPaginates(t *testing.T) {
 	files, complete, err = fetchPRFiles(context.Background(), large.Client(), large.URL, "token", "o", "r", 42)
 	if err != nil || complete || len(files) != maxPRFilePages*prFilesPerPage {
 		t.Fatalf("files = %d complete = %t err = %v, want the cap reported incomplete", len(files), complete, err)
+	}
+}
+
+// TestFetchPRFilesSplitsOversizedPages covers changed-file pages whose
+// patches exceed the document limit: the page is re-read as smaller pages
+// covering the same files instead of failing the call, and the byte budget
+// over all pages cuts the list, reported as possibly incomplete.
+func TestFetchPRFilesSplitsOversizedPages(t *testing.T) {
+	const totalFiles = prFilesPerPage + 20
+	patch := strings.Repeat("y", 15000)
+	var sizes sync.Map
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		sizes.Store(perPage, true)
+		start := (page - 1) * perPage
+		count := min(perPage, max(0, totalFiles-start))
+		entries := make([]string, count)
+		for i := range entries {
+			entries[i] = fmt.Sprintf(`{"filename":"f%d.go","status":"modified","patch":%q}`, start+i, patch)
+		}
+		_, _ = fmt.Fprint(w, "["+strings.Join(entries, ",")+"]")
+	}))
+	defer server.Close()
+	files, complete, err := fetchPRFiles(context.Background(), server.Client(), server.URL, "token", "o", "r", 42)
+	if err != nil || !complete || len(files) != totalFiles {
+		t.Fatalf("files = %d complete = %t err = %v, want every file through smaller pages", len(files), complete, err)
+	}
+	for i, file := range files {
+		if file.Filename != fmt.Sprintf("f%d.go", i) {
+			t.Fatalf("file %d = %q, want the smaller pages to cover exactly the oversized page's files in order", i, file.Filename)
+		}
+	}
+	if _, split := sizes.Load(prFilesSplitSizes[0]); !split {
+		t.Fatal("the oversized page was never re-read as smaller pages")
+	}
+	previous := maxPRFilesBytes
+	maxPRFilesBytes = githubResponseLimit / 2
+	t.Cleanup(func() { maxPRFilesBytes = previous })
+	files, complete, err = fetchPRFiles(context.Background(), server.Client(), server.URL, "token", "o", "r", 42)
+	if err != nil || complete || len(files) == 0 || len(files) >= totalFiles {
+		t.Fatalf("files = %d complete = %t err = %v, want the byte budget to cut the list and report it incomplete", len(files), complete, err)
 	}
 }

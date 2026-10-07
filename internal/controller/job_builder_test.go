@@ -2963,9 +2963,11 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	}
 	var toolReadFailure atomic.Bool
 	buildWith := func(connection *corev1alpha1.Connection) []corev1.EnvVar {
-		objects := []client.Object{policy, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
+		provider := acceptedBuiltinProvider("github")
+		provider.Namespace = defaultNS
+		objects := []client.Object{policy, provider, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
 		if connection != nil {
-			objects = append(objects, connection)
+			objects = append(objects, consentedConnection(connection, provider))
 		}
 		builder := setupJobBuilder()
 		builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
@@ -3701,5 +3703,17 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	}
 	if _, err := build(); !errors.Is(err, ErrConnectorToolResolution) {
 		t.Fatalf("missing binding err = %v, want ErrConnectorToolResolution", err)
+	}
+
+	// The frozen policy left connection mode since the freeze: its tools
+	// would otherwise run as plain local tools with no connector route or
+	// approval default, so the build fails and the dispatch re-freezes.
+	direct := policy.DeepCopy()
+	direct.Spec.Connection = nil
+	if err := builder.Client.Update(context.Background(), direct); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("policy left connection mode: err = %v, want ErrConnectorToolResolution", err)
 	}
 }

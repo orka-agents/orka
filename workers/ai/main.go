@@ -1906,10 +1906,22 @@ func sealChildTaskViaController(ctx context.Context, _ client.Client, task *core
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	token := workerServiceAccountToken()
-	// A 409 means the child changed between the controller's read and its
-	// fenced seal (a reconcile touched it); the seal is retried briefly.
+	// Nothing repairs a seal later, so a failure that may clear is retried
+	// briefly: a 409 (the child changed between the controller's read and
+	// its fenced seal), a 429 or 5xx, or a transport error. Any other
+	// response is final.
 	backoff := sealConflictBackoff
-	for range 4 {
+	var last string
+	for attempt := range 4 {
+		if attempt > 0 {
+			select {
+			case <-callCtx.Done():
+				fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
+				return nil
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
 		req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, nil)
 		if err != nil {
 			return nil
@@ -1919,37 +1931,29 @@ func sealChildTaskViaController(ctx context.Context, _ client.Client, task *core
 		}
 		resp, err := sealHTTPClient().Do(req)
 		if err != nil {
-			fmt.Printf("Warning: child task %q could not be sealed for connector use: %v\n", task.Name, err)
-			return nil
+			last = err.Error()
+			continue
 		}
 		status := resp.StatusCode
 		_ = resp.Body.Close()
 		if status >= 200 && status < 300 {
 			return nil
 		}
-		if status != http.StatusConflict {
-			fmt.Printf("Warning: child task %q could not be sealed for connector use: controller returned %d\n",
-				task.Name, status)
-			return nil
+		last = fmt.Sprintf("controller returned %d", status)
+		if status != http.StatusConflict && status != http.StatusTooManyRequests && status < http.StatusInternalServerError {
+			break
 		}
-		select {
-		case <-callCtx.Done():
-			return nil
-		case <-time.After(backoff):
-		}
-		backoff *= 2
 	}
-	fmt.Printf("Warning: child task %q could not be sealed for connector use: the controller kept reporting a conflict\n",
-		task.Name)
+	fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
 	return nil
 }
 
-// sealHTTPClient is the client used to reach the controller for sealing;
-// tests replace it with a fixture client.
-// sealConflictBackoff is the first wait after the controller reports a seal
-// conflict; each retry doubles it.
+// sealConflictBackoff is the first wait before a seal is retried; each
+// retry doubles it.
 var sealConflictBackoff = 250 * time.Millisecond
 
+// sealHTTPClient is the client used to reach the controller for sealing;
+// tests replace it with a fixture client.
 // It carries the worker's ServiceAccount token, so it neither honors proxy
 // environment variables nor follows redirects: the token reaches the
 // controller and nothing else.

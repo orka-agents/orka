@@ -81,6 +81,7 @@ type ConnectorOAuthConfig struct {
 
 	// ClientID is the public OAuth client identifier registered with the provider.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	ClientID string `json:"clientID"`
 
 	// ClientSecretRef selects the OAuth client secret from a same-namespace Secret.
