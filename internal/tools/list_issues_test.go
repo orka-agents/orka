@@ -677,3 +677,20 @@ func TestListIssuesTool_BodyTruncationMultiByteUTF8(t *testing.T) {
 		t.Errorf("expected 500 runes (no truncation needed), got %d", len([]rune(body)))
 	}
 }
+
+// TestListIssuesTool_BoundsLargeErrorBodies covers a non-2xx response with
+// a large body: the error carries a bounded note, not the whole response.
+func TestListIssuesTool_BoundsLargeErrorBodies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, strings.Repeat("x", 64<<10))
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	tool := &ListIssuesTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	args, _ := json.Marshal(ListIssuesArgs{RepoURL: testOrgTestRepoURL})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "502") || len(err.Error()) > 2*maxGitHubErrorNoteBytes {
+		t.Fatalf("err length = %d, want a bounded 502 error", len(fmt.Sprint(err)))
+	}
+}

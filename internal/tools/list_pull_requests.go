@@ -122,7 +122,7 @@ func (t *ListPullRequestsTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var pullsResp []struct {

@@ -590,3 +590,17 @@ func TestGetIssueTool_PaginatesNewestComments(t *testing.T) {
 		t.Fatalf("comments = %d truncated = %t note = %q", len(res.Comments), res.Truncated, res.TruncationNote)
 	}
 }
+
+// TestFetchIssueDetailsBoundsLargeErrorBodies covers a non-2xx response with
+// a large body: the error carries a bounded note, not the whole response.
+func TestFetchIssueDetailsBoundsLargeErrorBodies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, strings.Repeat("x", 64<<10))
+	}))
+	defer server.Close()
+	_, err := fetchIssueDetails(context.Background(), server.Client(), server.URL, "token", "o", "r", 1)
+	if err == nil || !strings.Contains(err.Error(), "502") || len(err.Error()) > 2*maxGitHubErrorNoteBytes {
+		t.Fatalf("err length = %d, want a bounded 502 error", len(fmt.Sprint(err)))
+	}
+}

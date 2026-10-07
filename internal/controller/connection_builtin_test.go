@@ -452,6 +452,51 @@ func TestRegistryACPMCPToolExecutorBindsLinkedAccountsForBuiltins(t *testing.T) 
 	requireCatalogBuiltinsNeedToolContext(ctx, t, executor, request, builtin)
 }
 
+// TestRegistryACPMCPToolExecutorScopesLinkedBuiltinsToTheAuthenticatedTask
+// covers a context factory that omits or misnames the Task: the linked
+// token is scoped by the current Task's workspace, so the broker binds the
+// authenticated Task's name and refuses a factory that names another.
+func TestRegistryACPMCPToolExecutorScopesLinkedBuiltinsToTheAuthenticatedTask(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	task := f.task.DeepCopy()
+	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"}}
+	body, err := json.Marshal(agentExecutionSnapshotBody{Connections: []agentExecutionSnapshotConnection{
+		{PolicyName: outboundaccess.BuiltinConnectionKey("list_pull_requests"), Tool: "list_pull_requests", Provider: "github", ConnectionName: "github-x", UID: "conn-uid", Generation: 3, GrantSequence: 1, Mode: "readWrite"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	listTool := &contextCapturingTool{name: "list_pull_requests"}
+	registry.Register(listTool)
+	factoryTaskID := ""
+	executor := RegistryACPMCPToolExecutor{
+		Registry: registry, Reader: f.reader(task), Connections: &fakeLinkedSource{},
+		AgentExecutionSnapshots: fakeSnapshotStore{snapshot: &store.AgentExecutionSnapshot{Body: body}},
+		ContextFactory: func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {
+			return &tools.ToolContext{Brokered: true, TaskID: factoryTaskID}, nil
+		},
+	}
+	request := harnessv2.MCPBrokerCallRequest{Namespace: "tenant"}
+	request.Metadata.TaskUID = "task-uid"
+	ctx := withACPMCPAuthenticatedTask(context.Background(), ACPMCPAuthenticatedTask{Name: "task", Namespace: "tenant", UID: "task-uid"})
+	builtin := harnessv2.MCPToolDescriptor{Name: "list_pull_requests", Source: harnessv2.MCPToolSourceBrokeredBuiltin}
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, builtin); err != nil {
+		t.Fatal(err)
+	}
+	if listTool.captured == nil || listTool.captured.TaskID != "task" {
+		t.Fatalf("captured = %+v, want the authenticated task bound", listTool.captured)
+	}
+	factoryTaskID = "another-task"
+	listTool.captured = nil
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, builtin); err == nil || !strings.Contains(err.Error(), "not the authenticated task") {
+		t.Fatalf("misnamed task err = %v, want refusal", err)
+	}
+	if listTool.captured != nil {
+		t.Fatal("a misnamed task must not run the linked built-in")
+	}
+}
+
 // requireCatalogBuiltinsNeedToolContext checks a broker with no context
 // factory, or one that yields nothing: the catalog built-in is refused
 // rather than run on the tool's own credential path, while a non-catalog

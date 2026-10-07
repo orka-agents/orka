@@ -383,6 +383,15 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 					if err != nil {
 						return nil, err
 					}
+					// The linked token is scoped by the current Task's
+					// workspace, so the Task is the authenticated one, never
+					// whatever name (or none) the factory supplied: without
+					// it no Task scope would be checked at all.
+					authenticated, _ := ACPMCPAuthenticatedTaskFromContext(ctx)
+					if copy.TaskID != "" && copy.TaskID != authenticated.Name {
+						return nil, fmt.Errorf("built-in tool %q: the tool context names task %q, not the authenticated task", descriptor.Name, copy.TaskID)
+					}
+					copy.TaskID = authenticated.Name
 					copy.LinkedAccounts = linkedBuiltinAccounts{
 						source: e.Connections, namespace: request.Namespace, requester: requester, frozen: frozen, required: true,
 					}
