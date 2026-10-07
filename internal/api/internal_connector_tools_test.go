@@ -1085,3 +1085,116 @@ func TestExecuteConnectorToolRefusesARecreatedTool(t *testing.T) {
 		t.Fatalf("recreated tool = %d %s", status, body)
 	}
 }
+
+// withdrawingResolver deletes the approved Tool, and optionally recreates it
+// under the same name, while the call resolves its credential.
+type withdrawingResolver struct {
+	client   client.Client
+	recreate bool
+}
+
+func (r *withdrawingResolver) Resolve(ctx context.Context, _ outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	tool := &corev1alpha1.Tool{}
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: "default", Name: "gh_write"}, tool); err == nil {
+		_ = r.client.Delete(ctx, tool)
+		if r.recreate {
+			replacement := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "gh_write", Namespace: "default", UID: "recreated-uid"}, Spec: tool.Spec}
+			_ = r.client.Create(ctx, replacement)
+		}
+	}
+	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
+}
+
+// TestExecuteConnectorToolRechecksTheToolAtTheSendBoundary covers a Tool
+// withdrawn, or deleted and recreated, while an approved call resolves its
+// credential: the request never leaves with the definition checked earlier,
+// and the approval is handed back.
+func TestExecuteConnectorToolRechecksTheToolAtTheSendBoundary(t *testing.T) {
+	for _, recreate := range []bool{false, true} {
+		resolver := &withdrawingResolver{recreate: recreate}
+		h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+		resolver.client = h.client
+		seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
+		status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`)
+		if status != http.StatusConflict || !strings.Contains(body, "since dispatch") {
+			t.Fatalf("recreate=%t: status = %d %s, want a refusal before any provider request", recreate, status, body)
+		}
+		claims, err := h.events.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+			Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a",
+			EventTypes: []string{events.ExecutionEventTypeApprovalExecutionUpdated}, Limit: 10,
+		})
+		if err != nil || len(claims) != 2 {
+			t.Fatalf("recreate=%t: claim/release events = %d err = %v, want the claim handed back", recreate, len(claims), err)
+		}
+	}
+}
+
+// deadlineResolver records the deadline the call resolves its credential
+// under and refuses, so nothing is sent.
+type deadlineResolver struct{ deadline time.Time }
+
+func (r *deadlineResolver) Resolve(ctx context.Context, _ outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	r.deadline, _ = ctx.Deadline()
+	return outboundaccess.Resolution{}, errors.New("the requester has no connection to this provider")
+}
+
+// TestExecuteConnectorToolBoundsReadCalls covers a read call, which takes
+// no approval claim: it runs under the connector timeout bound like a
+// claimed call does.
+func TestExecuteConnectorToolBoundsReadCalls(t *testing.T) {
+	resolver := &deadlineResolver{}
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readOnly"})
+	started := time.Now()
+	if status, body := postConnectorTool(t, h.app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusFailedDependency {
+		t.Fatalf("read call = %d %s", status, body)
+	}
+	if resolver.deadline.IsZero() || resolver.deadline.After(started.Add(connectorToolDefaultTimeout+time.Second)) {
+		t.Fatalf("deadline = %v, want within the %v connector default", resolver.deadline, connectorToolDefaultTimeout)
+	}
+}
+
+// TestExecuteConnectorToolReportsAnUnreplayableReceipt covers an approved
+// call whose effect already succeeded but whose result was kept only as a
+// receipt: the replay reports that the result cannot be replayed, and the
+// terminal record is neither settled nor its claim handed back.
+func TestExecuteConnectorToolReportsAnUnreplayableReceipt(t *testing.T) {
+	h := newConnectorToolHarness(t, &stubOutboundResolver{}, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
+	history, err := approvals.ListEvents(context.Background(), h.events, "default", "task-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decisionSeq int64
+	for _, approval := range approvals.Derive(history, time.Now()) {
+		if approval.ID == "ap-1" {
+			decisionSeq = approval.DecisionSeq
+		}
+	}
+	seedConnectorEffect(t, h, decisionSeq, 0, store.ExternalEffectInFlight, time.Now().Add(time.Minute))
+	inFlight, err := h.effects.GetExternalEffect(context.Background(), mustEffectID(t, decisionSeq, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(connectorToolOutcomeFor(strings.Repeat("x", connectorToolResultRetention+1)))
+	if _, err := h.effects.TransitionExternalEffect(context.Background(), store.ExternalEffectTransition{
+		ID: inFlight.ID, Fence: h.fence, ExpectedVersion: inFlight.Version, ExpectedState: store.ExternalEffectInFlight,
+		NewState: store.ExternalEffectSucceeded, RequestDigest: inFlight.RequestDigest,
+		ResponseDigest: store.CanonicalBytesDigest(encoded), Response: encoded, ExpectedLeaseOwner: "controller", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`)
+	if status != http.StatusBadGateway || !strings.Contains(body, "cannot be replayed") {
+		t.Fatalf("receipt replay = %d %s, want the unreplayable result reported", status, body)
+	}
+	if effect, err := h.effects.GetExternalEffect(context.Background(), inFlight.ID); err != nil || effect.State != store.ExternalEffectSucceeded {
+		t.Fatalf("effect = %+v err = %v, want it left Succeeded", effect, err)
+	}
+	claims, err := h.events.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a",
+		EventTypes: []string{events.ExecutionEventTypeApprovalExecutionUpdated}, Limit: 10,
+	})
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claim/release events = %d err = %v, want the claim kept spent", len(claims), err)
+	}
+}

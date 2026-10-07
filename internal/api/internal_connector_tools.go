@@ -276,12 +276,16 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 	// is refused rather than executed under a configuration never checked.
 	executor.SetCheckedPolicy(run.policy.Name, outboundaccess.PolicyIdentity{UID: string(run.policy.UID), Generation: run.policy.Generation})
 	// Policy reads and credential resolution (possibly a token refresh) run
-	// inside Execute; the caller's authority is judged once more right
-	// before the request leaves, so a Task cancelled or a Job replaced in
-	// that window never reaches the provider.
-	executor.SetSendGate(func(context.Context) error {
+	// inside Execute; the caller's authority and the Tool are judged once
+	// more right before the request leaves, so a Task cancelled, a Job
+	// replaced, or a Tool edited or withdrawn in that window never reaches
+	// the provider with the definition checked earlier.
+	executor.SetSendGate(func(gateCtx context.Context) error {
 		if _, err := run.authorizer.verifyTaskCaller(c, run.task.Namespace, run.task.Name); err != nil {
-			return connectorCallerRevokedError{err: err}
+			return connectorSendRefusedError{err: err}
+		}
+		if err := connectorToolUnchanged(gateCtx, reader, run.tool); err != nil {
+			return connectorSendRefusedError{err: err}
 		}
 		return nil
 	})
@@ -323,7 +327,11 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 	if run.claim != nil {
 		result, replayed, err = h.runConnectorToolEffect(execCtx, run, call, &attempted)
 	} else {
-		result, err = call(execCtx)
+		// A read call is bounded like a claimed one: the Tool's own timeout
+		// never exceeds the connector maximum.
+		callCtx, cancel := context.WithTimeout(execCtx, connectorToolTimeout(run.tool))
+		result, err = call(callCtx)
+		cancel()
 	}
 	if err != nil {
 		if errors.Is(err, errConnectorEffectLedgerUnavailable) {
@@ -366,7 +374,7 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 // is reported without settling or releasing anything, since that request
 // owns the record.
 func unattemptedConnectorCallRefusal(run connectorToolRun, err error, fail func(int, string) error) (error, bool) {
-	if revoked, ok := errors.AsType[connectorCallerRevokedError](err); ok {
+	if revoked, ok := errors.AsType[connectorSendRefusedError](err); ok {
 		status, message := fiber.StatusForbidden, "task caller is no longer authorized"
 		if fiberErr, ok := errors.AsType[*fiber.Error](revoked.err); ok {
 			status, message = fiberErr.Code, fiberErr.Message
@@ -418,7 +426,11 @@ func (h *InternalHandlers) runConnectorToolEffect(
 		result = liveResult
 	}
 	if err == nil && replayed && outcome.Receipt != nil {
-		err = fmt.Errorf("the approved action succeeded but its %d-byte result exceeded the retained size and cannot be replayed", outcome.Receipt.Bytes)
+		// The action already succeeded and its record is terminal; only the
+		// result is gone. The claim stays spent and nothing is settled or
+		// released again.
+		*attempted = true
+		return "", true, fmt.Errorf("the approved action succeeded but its %d-byte result exceeded the retained size and cannot be replayed", outcome.Receipt.Bytes)
 	}
 	if err != nil && !errors.Is(err, store.ErrConflict) {
 		state := store.ExternalEffectOutcomeUnknown
@@ -471,14 +483,34 @@ func (h *InternalHandlers) settleReservedConnectorEffect(ctx context.Context, ru
 	return controller.SettlePendingExternalEffect(settleCtx, cfg.ExternalEffects, fence, connectorToolEffectIdentity(run.task, run.claim), state)
 }
 
-// connectorCallerRevokedError is the send gate's refusal: the caller lost
-// its authority before the request left, so nothing was attempted.
-type connectorCallerRevokedError struct{ err error }
+// connectorSendRefusedError is the send gate's refusal: the caller lost its
+// authority, or the Tool changed or was withdrawn, before the request left,
+// so nothing was attempted.
+type connectorSendRefusedError struct{ err error }
 
-func (e connectorCallerRevokedError) Error() string {
-	return "task caller is no longer authorized: " + e.err.Error()
+func (e connectorSendRefusedError) Error() string {
+	return "the call was refused before sending: " + e.err.Error()
 }
-func (e connectorCallerRevokedError) Unwrap() error { return e.err }
+func (e connectorSendRefusedError) Unwrap() error { return e.err }
+
+// connectorToolUnchanged re-reads the Tool and refuses one deleted,
+// recreated, edited, or being deleted since its dispatch digest was checked.
+func connectorToolUnchanged(ctx context.Context, reader client.Reader, checked *corev1alpha1.Tool) error {
+	if reader == nil || checked == nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "the tool cannot be re-read before sending")
+	}
+	live := &corev1alpha1.Tool{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(checked), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusConflict, "tool was withdrawn since dispatch; re-dispatch the task")
+		}
+		return fiber.NewError(fiber.StatusServiceUnavailable, "the tool could not be re-read before sending; retry")
+	}
+	if live.UID != checked.UID || live.Generation != checked.Generation || !live.DeletionTimestamp.IsZero() {
+		return fiber.NewError(fiber.StatusConflict, "tool configuration changed since dispatch; re-dispatch the task")
+	}
+	return nil
+}
 
 func connectorToolEffectIdentity(task *corev1alpha1.Task, claim *connectorApprovalClaim) store.ExternalEffectIdentity {
 	return store.ExternalEffectIdentity{

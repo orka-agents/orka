@@ -34,7 +34,6 @@ import (
 )
 
 const (
-	connectionRefreshInterval = 5 * time.Minute
 	connectionRequeueInterval = 100 * time.Millisecond
 
 	// ConnectionCustodyFinalizer holds a Connection until its sealed token
@@ -89,7 +88,7 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: connectionRequeueInterval}, nil
 	}
 
-	r.reapExpiredCompletions(ctx, connection)
+	completionDeadline := r.reapExpiredCompletions(ctx, connection)
 
 	now := metav1.Now()
 	providerResolved := metav1.Condition{
@@ -139,6 +138,7 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// The completion is the durable record that lets a lost status write
 		// be repaired; it goes only once the recovered status is persisted.
 		r.deleteCompletions(ctx, connection, applied)
+		result.RequeueAfter = connectionNextPass(connection, time.Now(), completionDeadline)
 	}
 	return result, err
 }
@@ -386,27 +386,41 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 // reapExpiredCompletions deletes parked completions whose redemption window
 // closed. Their tokens are left to expire, never revoked: Orka cannot prove
 // whose grant a token nobody committed belongs to.
-func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, connection *corev1alpha1.Connection) {
+// It returns the earliest expiry among the parked completions it kept, so
+// the next reconcile can be scheduled for it; a completion whose deletion
+// failed is due again after connectionRevocationRetry.
+func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, connection *corev1alpha1.Connection) time.Time {
+	var earliest time.Time
 	if r.Consents == nil {
-		return
+		return earliest
 	}
 	completions, err := r.Consents.ListConnectorCompletionsForConnection(ctx, string(connection.UID))
 	if err != nil {
 		log.FromContext(ctx).Info("parked completions could not be listed for expiry", "connection", connection.Name)
-		return
+		return earliest
 	}
 	now := time.Now()
 	for _, completion := range completions {
 		// A committed completion is finished by applyCommittedCompletions,
 		// never reaped: its marker is what lets the link be recorded from the
 		// material custody already holds.
-		if completion.ExpiresAt.After(now) || completion.Committed {
+		if completion.Committed {
+			continue
+		}
+		if completion.ExpiresAt.After(now) {
+			if earliest.IsZero() || completion.ExpiresAt.Before(earliest) {
+				earliest = completion.ExpiresAt
+			}
 			continue
 		}
 		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
 			log.FromContext(ctx).Info("expired completion could not be deleted", "connection", connection.Name)
+			if retry := now.Add(connectionRevocationRetry); earliest.IsZero() || retry.Before(earliest) {
+				earliest = retry
+			}
 		}
 	}
+	return earliest
 }
 
 // revokeTokens revokes the refresh then access token of the committed
@@ -506,25 +520,41 @@ func (r *ConnectionReconciler) updateStatus(
 	connection.Status.ObservedGeneration = connection.Generation
 	meta.SetStatusCondition(&connection.Status.Conditions, providerResolved)
 	connection.Status.State = projectConnectionState(connection, providerResolved)
-	requeue := connectionNextPass(connection, time.Now())
+	// Connection and provider changes are watched; nothing here depends on
+	// the passage of time, so there is no periodic requeue to multiply by
+	// the number of linked accounts.
 	if reflect.DeepEqual(before, &connection.Status) {
-		return ctrl.Result{RequeueAfter: requeue}, reconcileErr
+		return ctrl.Result{}, reconcileErr
 	}
 	if err := r.Status().Update(ctx, connection); err != nil {
 		return ctrl.Result{}, errors.Join(reconcileErr, err)
 	}
-	return ctrl.Result{RequeueAfter: requeue}, reconcileErr
+	return ctrl.Result{}, reconcileErr
 }
 
-// connectionNextPass schedules the next reconcile at the credential's known
-// expiry when that is sooner than the refresh interval, so a link whose
-// only material expires stops advertising itself promptly.
-func connectionNextPass(connection *corev1alpha1.Connection, now time.Time) time.Duration {
-	next := connectionRefreshInterval
-	if connection.Status.ExpiresAt != nil {
-		if until := connection.Status.ExpiresAt.Sub(now) + time.Second; until > 0 && until < next {
+// connectionNextPass schedules the next reconcile at the next moment the
+// link's state changes with time alone: just past the credential's known
+// expiry, so a link whose only material expires stops advertising itself
+// promptly, or the earliest parked completion's expiry, so it is reaped.
+// Otherwise the watches (and the manager's resync) drive reconciles: a
+// fixed requeue per linked account does not scale.
+func connectionNextPass(connection *corev1alpha1.Connection, now, completionDeadline time.Time) time.Duration {
+	var next time.Duration
+	consider := func(until time.Duration) {
+		if next == 0 || until < next {
 			next = until
 		}
+	}
+	// An expiry already in the past was handled by this pass.
+	if connection.Status.ExpiresAt != nil {
+		if until := connection.Status.ExpiresAt.Sub(now) + time.Second; until > time.Second {
+			consider(until)
+		}
+	}
+	// A kept completion is still pending work even if its deadline passed
+	// while this pass ran: it is reaped on a prompt next pass.
+	if !completionDeadline.IsZero() {
+		consider(max(completionDeadline.Sub(now)+time.Second, time.Second))
 	}
 	return next
 }

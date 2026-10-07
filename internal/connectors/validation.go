@@ -64,6 +64,11 @@ const (
 	maxScopesEncodedBytes              = 2048
 	// maxClientIDBytes bounds the client_id every authorization URL carries.
 	maxClientIDBytes = 256
+	// maxEndpointURLBytes bounds every endpoint and HTTP tool URL. With the
+	// client ID, scope, and authorize-parameter bounds and the flow's own
+	// parameters, an authorization URL stays under the 8 KiB request
+	// target common servers and proxies accept.
+	maxEndpointURLBytes = 2048
 	// Static tool headers stay well inside common server header limits.
 	maxToolHeaderNameBytes  = 128
 	maxToolHeaderValueBytes = 1024
@@ -296,6 +301,9 @@ func validateURL(field, raw string, required, oauthEndpoint bool) *Issue {
 	}
 	if raw != strings.TrimSpace(raw) {
 		return invalid(fmt.Sprintf("oauth.%s must not contain surrounding whitespace", field))
+	}
+	if len(raw) > maxEndpointURLBytes {
+		return invalid(fmt.Sprintf("oauth.%s must be at most %d bytes", field, maxEndpointURLBytes))
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != schemeHTTPS || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || strings.Contains(raw, "#") || parsed.String() != raw {
