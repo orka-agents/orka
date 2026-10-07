@@ -2694,7 +2694,7 @@ func controllerNamespaceForRuntimePool(namespace string) string {
 	return namespace
 }
 
-func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+func (r *RuntimePoolReconciler) runtimePoolNetworkPolicies(cfg runtimePoolConfig) []networkingv1.NetworkPolicy {
 	selector := metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}
 	controllerNamespace := controllerNamespaceForRuntimePool(r.ControllerNamespace)
 	policies := make([]networkingv1.NetworkPolicy, 0, 6)
@@ -2763,6 +2763,11 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 			},
 		},
 	)
+	return policies
+}
+
+func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	policies := r.runtimePoolNetworkPolicies(cfg)
 	for i := range policies {
 		policy := &networkingv1.NetworkPolicy{ObjectMeta: policies[i].ObjectMeta}
 		desired := policies[i].Spec

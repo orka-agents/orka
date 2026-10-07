@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -283,12 +285,11 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		// runtime egress here; Pod ingress rules do not describe that topology.
 		network.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}
 	}
-	policies := &networkingv1.NetworkPolicyList{}
-	if err := uncachedReader(r.APIReader, r.Client).List(ctx, policies, client.InNamespace(cfg.namespace), client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
-		return ctrl.Result{}, err
-	}
-	slices.SortFunc(policies.Items, func(a, b networkingv1.NetworkPolicy) int { return strings.Compare(a.Name, b.Name) })
-	for _, p := range policies.Items {
+	// Only Core's generated permissions are admission intent. Public labels
+	// on observed policies cannot authorize additional connectivity.
+	policies := r.runtimePoolNetworkPolicies(cfg)
+	slices.SortFunc(policies, func(a, b networkingv1.NetworkPolicy) int { return strings.Compare(a.Name, b.Name) })
+	for _, p := range policies {
 		if !nativeProcess {
 			network.Ingress = append(network.Ingress, p.Spec.Ingress...)
 		}
@@ -434,7 +435,8 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Conte
 	if !runtimePoolWorkspacePodSpecsMatch(request.Runtime.Template.Spec, pod.Spec, claimName) {
 		return nil, fmt.Errorf("runtime Pod spec differs from the frozen admitted workload")
 	}
-	if evidence.Endpoint != fmt.Sprintf("http://%s:%d", pod.Status.PodIP, request.Runtime.BootstrapPort) || pod.Status.PodIP == "" {
+	endpoint := (&url.URL{Scheme: urlSchemeHTTP, Host: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(int(request.Runtime.BootstrapPort)))}).String()
+	if evidence.Endpoint != endpoint || pod.Status.PodIP == "" {
 		return nil, fmt.Errorf("endpoint does not identify the exact observed Pod")
 	}
 	if err := r.verifyExternalRuntimeNetworkPolicies(ctx, request.Runtime, pod); err != nil {
