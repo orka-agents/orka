@@ -127,7 +127,7 @@ func TestPrivateEndpointsAllowedRelaxesOnlyHostRules(t *testing.T) {
 	// The fixed infrastructure hosts stay denied under the allowance: an
 	// OAuth client secret or a person's token must never go to metadata or
 	// the Kubernetes API, fixture mode or not.
-	for _, host := range []string{"metadata.google.internal", "KUBERNETES.DEFAULT.SVC", "kubernetes.default.svc.cluster.local", "kubernetes.default", "169.254.169.254", "169.254.170.23", "[fe80::1]", "[fd00:ec2::254]"} {
+	for _, host := range []string{"metadata.google.internal", "KUBERNETES.DEFAULT.SVC", "kubernetes.default.svc.cluster.local", "kubernetes.default", "169.254.169.254", "169.254.170.23", "100.100.100.200", "[fe80::1]", "[fd00:ec2::254]"} {
 		provider.Spec.OAuth.TokenURL = "https://" + host + "/oauth/token"
 		if issue := ValidateProviderSpec(provider, nil); issue == nil || !strings.Contains(issue.Message, "host is not allowed") {
 			t.Fatalf("token host %s under the allowance: %v", host, issue)

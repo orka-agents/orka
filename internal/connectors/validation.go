@@ -180,6 +180,12 @@ func InfrastructureAddressDenied(ip net.IP) bool {
 	if ip.IsLinkLocalUnicast() || ip.Equal(net.ParseIP("fd00:ec2::254")) {
 		return true
 	}
+	// Alibaba Cloud serves instance metadata from the shared address range
+	// rather than link-local, so the general private allowance would let it
+	// through.
+	if ip.Equal(net.ParseIP("100.100.100.200")) {
+		return true
+	}
 	if apiHost := net.ParseIP(strings.Trim(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")), "[]")); apiHost != nil && ip.Equal(apiHost) {
 		return true
 	}
