@@ -139,8 +139,13 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	}
 	horizon := s.refreshHorizon(req.Tool)
 	if s.expiresWithin(credential, horizon) {
-		credential, err = s.refreshSingleFlight(ctx, connection, ref, horizon)
+		credential, err = s.refreshSingleFlight(ctx, connection, ref, credential.GrantSequence, horizon)
 		if err != nil {
+			return outboundaccess.ConnectionCredential{}, err
+		}
+		// The refresh carries the grant forward; a re-consent that won the
+		// race returns its own grant's material, which this Task never bound.
+		if err := frozenGrantHolds(req, credential); err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
 		// The flight may have been started by a caller with a shorter
@@ -156,11 +161,6 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 			return outboundaccess.ConnectionCredential{}, err
 		}
 		if _, err := s.validateProvider(ctx, connection, credential, &req.Tool); err != nil {
-			return outboundaccess.ConnectionCredential{}, err
-		}
-		// The refresh carries the grant forward; a re-consent that won the
-		// race returns its own grant's material, which this Task never bound.
-		if err := frozenGrantHolds(req, credential); err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
 	} else if connection, err = s.loadLiveConnection(ctx, req); err != nil {
@@ -234,11 +234,14 @@ func (s *Source) refreshHorizon(tool outboundaccess.ToolBinding) time.Duration {
 	return horizon
 }
 
-// refreshSingleFlight refreshes once per Connection at a time. Concurrent
-// callers share the result, and a waiter that arrives after another flight
-// finished re-reads custody instead of refreshing again.
-func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, horizon time.Duration) (store.ConnectorCredential, error) {
-	results := s.flights.DoChan(string(connection.UID), func() (any, error) {
+// refreshSingleFlight refreshes once per Connection grant at a time.
+// Concurrent callers share the result, and a waiter that arrives after
+// another flight finished re-reads custody instead of refreshing again. Only
+// the grant the callers read is refreshed: custody another consent committed
+// meanwhile is returned untouched, since a failed refresh of it (an
+// invalid_grant) would shred a credential no caller of this flight bound.
+func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, grant int64, horizon time.Duration) (store.ConnectorCredential, error) {
+	results := s.flights.DoChan(fmt.Sprintf("%s/%d", connection.UID, grant), func() (any, error) {
 		// Detach from the caller so a canceled waiter cannot abort a refresh
 		// other callers depend on; bound it independently.
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -247,7 +250,7 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 		if err != nil {
 			return nil, err
 		}
-		if !s.expiresWithin(current, horizon) {
+		if current.GrantSequence != grant || !s.expiresWithin(current, horizon) {
 			return current, nil
 		}
 		return s.refresh(flightCtx, connection, ref, current, horizon)
