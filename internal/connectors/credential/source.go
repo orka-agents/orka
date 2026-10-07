@@ -62,6 +62,9 @@ type Source struct {
 	RefreshSkew time.Duration
 
 	flights singleflight.Group
+	// flightEntered, when set, runs once a caller has started or joined the
+	// Connection's refresh flight; tests use it to order callers.
+	flightEntered func()
 }
 
 var _ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
@@ -252,6 +255,9 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 		}
 		return s.refresh(flightCtx, connection, ref, current, horizon)
 	})
+	if s.flightEntered != nil {
+		s.flightEntered()
+	}
 	// The shared flight keeps running for the callers that still need it,
 	// but each caller returns as soon as its own context is done.
 	var flight singleflight.Result
@@ -409,13 +415,19 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 // retireRefreshed keeps a refreshed pair that could not become custody in
 // sealed retirement custody, so disconnect can still revoke it. A transient
 // store failure is retried a few times, and the call's own cancellation
-// does not abandon material the provider already issued.
+// does not abandon material the provider already issued; the attempts are
+// bounded on their own, so a blocked store cannot hold the refresh flight.
 func (s *Source) retireRefreshed(ctx context.Context, ref store.ConnectorCredentialRef, refreshed store.ConnectorCredential) error {
-	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshRetireTimeout)
+	defer cancel()
 	var err error
 	for attempt := range refreshRetireAttempts {
 		if attempt > 0 {
-			time.Sleep(refreshRetireBackoff << (attempt - 1))
+			select {
+			case <-time.After(refreshRetireBackoff << (attempt - 1)):
+			case <-ctx.Done():
+				return fmt.Errorf("retire refreshed connection credential: %w", ctx.Err())
+			}
 		}
 		if err = s.Credentials.RetireConnectorCredential(ctx, ref, refreshed); err == nil || errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			return err
@@ -424,11 +436,15 @@ func (s *Source) retireRefreshed(ctx context.Context, ref store.ConnectorCredent
 	return err
 }
 
-// refreshRetireAttempts bounds the retries of retiring refreshed material;
-// refreshRetireBackoff is the first wait, doubled each time.
+// refreshRetireAttempts bounds the retries of retiring refreshed material,
+// and refreshRetireTimeout all of them together; refreshRetireBackoff is the
+// first wait, doubled each time.
 const refreshRetireAttempts = 3
 
-var refreshRetireBackoff = 100 * time.Millisecond
+var (
+	refreshRetireTimeout = 10 * time.Second
+	refreshRetireBackoff = 100 * time.Millisecond
+)
 
 // revokeUnstorable revokes, best effort, a refreshed credential that custody
 // refused because the Connection was disconnected meanwhile.

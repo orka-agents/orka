@@ -741,6 +741,11 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 	if _, err := full.Resolve(nil); err != nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a resolvable JSON Schema with only local references", name))
 	}
+	// Execution refuses a schema whose numbers a float64 cannot hold
+	// exactly, so such a provider would accept no call at all.
+	if numbersExactlyRepresentable(parameters.Raw) != nil {
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must use only numbers a float64 holds exactly", name))
+	}
 	return nil
 }
 
