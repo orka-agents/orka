@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useAuthStore } from '@/stores/auth'
+import { takeLoginReturn } from '@/lib/login-return'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -42,10 +43,10 @@ function LoginPage() {
     }
   }, [setToken])
 
-  // Already authenticated
+  // Already authenticated: return to the page that sent us here
   useEffect(() => {
     if (token) {
-      navigate({ to: '/' })
+      navigate({ href: takeLoginReturn() })
     }
   }, [token, navigate])
 
