@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -121,6 +123,14 @@ func TestConnectorToolProxyTimeoutFollowsTheTool(t *testing.T) {
 	}}}
 	if got := connectorToolProxyTimeout(slow); got != 8*time.Minute+connectorToolSettlementMargin {
 		t.Fatalf("slow tool = %v, want the tool timeout plus the settlement margin", got)
+	}
+	// A declared duration beyond the controller's maximum is clamped before
+	// the margin is added, so it can neither overflow nor outlast the call.
+	huge := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		Timeout: &metav1.Duration{Duration: time.Duration(math.MaxInt64 - 1)},
+	}}}
+	if got := connectorToolProxyTimeout(huge); got != connectors.MaxHTTPToolTimeout+connectorToolSettlementMargin {
+		t.Fatalf("huge tool timeout = %v, want the controller maximum plus the settlement margin", got)
 	}
 }
 

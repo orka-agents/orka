@@ -14,7 +14,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -153,6 +155,9 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 		if err := decoder.Decode(&req); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return fiber.NewError(fiber.StatusBadRequest, "request body must be a single JSON object")
+		}
 	}
 	if len(req.Arguments) == 0 {
 		req.Arguments = json.RawMessage(`{}`)
@@ -276,15 +281,19 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 	// is refused rather than executed under a configuration never checked.
 	executor.SetCheckedPolicy(run.policy.Name, outboundaccess.PolicyIdentity{UID: string(run.policy.UID), Generation: run.policy.Generation})
 	// Policy reads and credential resolution (possibly a token refresh) run
-	// inside Execute; the caller's authority and the Tool are judged once
-	// more right before the request leaves, so a Task cancelled, a Job
-	// replaced, or a Tool edited or withdrawn in that window never reaches
-	// the provider with the definition checked earlier.
+	// inside Execute; the caller's authority, the Tool, and its policy are
+	// judged once more right before the request leaves, so a Task
+	// cancelled, a Job replaced, or a Tool or policy edited or withdrawn in
+	// that window never reaches the provider with the definition checked
+	// earlier.
 	executor.SetSendGate(func(gateCtx context.Context) error {
 		if _, err := run.authorizer.verifyTaskCaller(c, run.task.Namespace, run.task.Name); err != nil {
 			return connectorSendRefusedError{err: err}
 		}
-		if err := connectorToolUnchanged(gateCtx, reader, run.tool); err != nil {
+		if err := connectorObjectUnchanged(gateCtx, reader, run.tool, "tool"); err != nil {
+			return connectorSendRefusedError{err: err}
+		}
+		if err := connectorObjectUnchanged(gateCtx, reader, run.policy, "outbound access policy"); err != nil {
 			return connectorSendRefusedError{err: err}
 		}
 		return nil
@@ -493,21 +502,25 @@ func (e connectorSendRefusedError) Error() string {
 }
 func (e connectorSendRefusedError) Unwrap() error { return e.err }
 
-// connectorToolUnchanged re-reads the Tool and refuses one deleted,
-// recreated, edited, or being deleted since its dispatch digest was checked.
-func connectorToolUnchanged(ctx context.Context, reader client.Reader, checked *corev1alpha1.Tool) error {
-	if reader == nil || checked == nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "the tool cannot be re-read before sending")
+// connectorObjectUnchanged re-reads checked (the Tool or its policy) and
+// refuses one deleted, recreated, edited, or being deleted since its
+// dispatch digest was checked.
+func connectorObjectUnchanged(ctx context.Context, reader client.Reader, checked client.Object, kind string) error {
+	if reader == nil || checked == nil || reflect.ValueOf(checked).IsNil() {
+		return fiber.NewError(fiber.StatusInternalServerError, "the "+kind+" cannot be re-read before sending")
 	}
-	live := &corev1alpha1.Tool{}
+	live, ok := checked.DeepCopyObject().(client.Object)
+	if !ok {
+		return fiber.NewError(fiber.StatusInternalServerError, "the "+kind+" cannot be re-read before sending")
+	}
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(checked), live); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusConflict, "tool was withdrawn since dispatch; re-dispatch the task")
+			return fiber.NewError(fiber.StatusConflict, kind+" was withdrawn since dispatch; re-dispatch the task")
 		}
-		return fiber.NewError(fiber.StatusServiceUnavailable, "the tool could not be re-read before sending; retry")
+		return fiber.NewError(fiber.StatusServiceUnavailable, "the "+kind+" could not be re-read before sending; retry")
 	}
-	if live.UID != checked.UID || live.Generation != checked.Generation || !live.DeletionTimestamp.IsZero() {
-		return fiber.NewError(fiber.StatusConflict, "tool configuration changed since dispatch; re-dispatch the task")
+	if live.GetUID() != checked.GetUID() || live.GetGeneration() != checked.GetGeneration() || live.GetDeletionTimestamp() != nil {
+		return fiber.NewError(fiber.StatusConflict, kind+" configuration changed since dispatch; re-dispatch the task")
 	}
 	return nil
 }
