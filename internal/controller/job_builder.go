@@ -465,6 +465,10 @@ type JobBuildOptions struct {
 	// freeze: link modes come from them, and a connector tool whose policy
 	// no longer matches its binding fails the build so the dispatch retries.
 	ConnectionBindingsFrozen bool
+	// ConnectorToolDigests are the per-tool dispatch digests of the
+	// classification the freeze was made from; with a frozen dispatch,
+	// every tool must classify the same way again or the build fails.
+	ConnectorToolDigests map[string]string
 }
 
 // connectorReader is the reader connector dispatch data is derived from.
@@ -1196,7 +1200,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// one classification against the registry the native worker resolves
 	// tools with; a dispatch that froze bindings supplies the link modes.
 	visible, connectorWrite, digests, err := nativeConnectorDispatch(ctx, b.connectorReader(opts), NativeWorkerToolRegistry(task, agent),
-		task, cfg.tools, opts.ConnectionBindings, opts.ConnectionBindingsFrozen)
+		task, cfg.tools, opts.ConnectionBindings, opts.ConnectorToolDigests, opts.ConnectionBindingsFrozen)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
 	}

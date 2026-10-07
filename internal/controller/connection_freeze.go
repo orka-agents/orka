@@ -873,6 +873,7 @@ func nativeConnectorDispatch(
 	task *corev1alpha1.Task,
 	toolNames []string,
 	bindings []corev1alpha1.ConnectionBinding,
+	frozenDigests map[string]string,
 	frozen bool,
 ) (visible, connectorWrite []string, digests map[string]string, err error) {
 	if reader == nil || task == nil || len(toolNames) == 0 {
@@ -920,6 +921,19 @@ func nativeConnectorDispatch(
 	}
 	for policyName := range byPolicy {
 		if _, ok := classified[policyName]; !ok {
+			return nil, nil, nil, errConnectorDispatchDrift
+		}
+	}
+	// Tools are also compared one by one against the freeze: a Tool
+	// retargeted off a policy another Tool still uses keeps that policy
+	// classified, yet it would run as a plain local tool with no connector
+	// route and no approval default; one retargeted onto a frozen policy
+	// would reach the person's credential undecided.
+	current := nativeConnectorToolDigests(infos)
+	for _, name := range toolNames {
+		before, wasConnector := frozenDigests[name]
+		after, isConnector := current[name]
+		if wasConnector != isConnector || before != after {
 			return nil, nil, nil, errConnectorDispatchDrift
 		}
 	}

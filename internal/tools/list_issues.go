@@ -143,7 +143,7 @@ func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) 
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	// Parse the response — GitHub issues API returns PRs too, so we filter them out

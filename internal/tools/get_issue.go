@@ -207,7 +207,7 @@ func fetchIssueDetails(ctx context.Context, httpClient *http.Client, baseURL, to
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var issueResp struct {
@@ -308,7 +308,7 @@ func fetchIssueCommentsPage(ctx context.Context, httpClient *http.Client, baseUR
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var commentsResp []struct {
