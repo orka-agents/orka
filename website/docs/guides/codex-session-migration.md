@@ -39,8 +39,9 @@ orka session migrate import migrated-review \
 Import reserves a fresh non-Gateway Session. It allocates no runtime or Task
 lease. An existing Session, including an empty one, cannot be overwritten.
 
-Submit a normal Codex Task with `spec.sessionRef.name: migrated-review` and its
-current workspace and tool policy. During admission, Orka installs the bundle in
+Submit a normal Codex Task with `spec.sessionRef.name: migrated-review` and
+`spec.sessionRef.create: true` for the first continuation. Use the Task's current
+workspace and tool policy. During admission, Orka installs the bundle in
 the child's fresh private `CODEX_HOME` before starting codex-acp. It uses
 `session/load` with the original UUID and current cwd, provider, MCP tools,
 approvals, and sandbox configuration. The runtime must prove loading the exact

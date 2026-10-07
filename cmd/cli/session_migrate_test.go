@@ -144,13 +144,20 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 	var operation, firstHost, retryHost string
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/api/v1/sessions/new/native", r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sessions/new/native" {
+			t.Errorf("request: %s %s", r.Method, r.URL)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
 		var request struct {
 			OperationID string `json:"operationID"`
 			Data        []byte `json:"data"`
 		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
 		calls++
 		if calls == 1 {
 			first, operation, firstHost = bytes.Clone(request.Data), request.OperationID, r.Host
@@ -158,9 +165,14 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 			return
 		}
 		retryHost = r.Host
-		require.Equal(t, first, request.Data)
-		require.Equal(t, operation, request.OperationID)
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"operationID": operation, "namespace": "test", "sessionName": "new", "providerSessionID": thread, "dataDigest": codexstate.DataDigest(first)}))
+		if !bytes.Equal(first, request.Data) || operation != request.OperationID {
+			t.Error("uncertain retry changed native request")
+			http.Error(w, "changed request", http.StatusConflict)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"operationID": operation, "namespace": "test", "sessionName": "new", "providerSessionID": thread, "dataDigest": codexstate.DataDigest(first)}); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 	t.Setenv("ORKA_MIGRATION_TEST_FORWARD", server.URL)
@@ -177,7 +189,9 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"namespace": "test", "name": "orka-api", "uid": serviceUID}}))
+		if err := json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"namespace": "test", "name": "orka-api", "uid": serviceUID}}); err != nil {
+			t.Error(err)
+		}
 	})
 	kube := httptest.NewServer(kubeHandler)
 	defer kube.Close()
