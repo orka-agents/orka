@@ -47,9 +47,9 @@ forward() {
   kubectl -n "$ORKA_NAMESPACE" port-forward --address 127.0.0.1 "svc/$2" "$3:$4" >"raw/$1-forward.log" 2>&1 &
   pids+=("$!")
 }
-forward simulator demo-fibey-tools '' 8099
+simulator_port=${DEMO_FLOW_SIMULATOR_PORT:-8099}
+forward simulator demo-fibey-tools "$simulator_port" 8099
 wait_for 'the work-order receipt service' "grep -q 'Forwarding from 127.0.0.1:' raw/simulator-forward.log" 30
-simulator_port=$(sed -n 's/.*127\.0\.0\.1:\([0-9]*\) ->.*/\1/p' raw/simulator-forward.log | head -n 1)
 a2a_port=${DEMO_FLOW_A2A_PORT:-8443}
 forward adapter fibey-alerts-adapter "$a2a_port" 8443
 a2a_url=https://127.0.0.1:$a2a_port
@@ -87,43 +87,25 @@ snapshot() {
   kubectl -n "$ORKA_NAMESPACE" get tasks -l "orka.ai/parent-task=$coordinator" -o json >"raw/children-$1.json"
   orka task approvals "$fibey_task" -o json >"raw/approval-$1.json"
 }
-
-# --- on-camera helpers ---------------------------------------------------
-# alert — the plant's monitoring system sends alert.txt through the gateway (A2A).
-alert() {
-  a2a -message-id "$alert_id" -context-id "$conversation" -return-immediately -text "$(cat alert.txt)" >raw/admission.json
-  jq -r '"reference: " + (.id | .[:28]) + "…", "state:     " + .status.state' raw/admission.json
-}
-# counts STAGE — the work-order service's own counters for this alert.
-counts() {
-  jq -r '"inventory lookups  \(.inventoryReads // 0)", "work orders        \(.workOrderExecutions)"' "raw/counts-$1.json"
-}
-# answer — what the monitoring system receives back through the gateway.
-answer() {
-  a2a -task-id "$task_ref" >raw/answer.json
-  jq -r '.artifacts[].parts[].text' raw/answer.json
-}
-# record — the closing table, checked against every saved record.
-record() {
-  python3 "$here/check.py" final
-}
+# The work-order service's own counters for this alert, typed with the literal ID.
+work_orders="curl -s 'localhost:$simulator_port/counts?runID=$alert_id' | jq ."
 
 snapshot initial
 python3 "$here/check.py" initial
 
 banner 'Orka — from equipment alert to approved work order' \
   'An alert arrives through the gateway. Orka runs a data-analysis job on AKS and a specialist agent in Microsoft Foundry. Mark approves the work order before it runs.'
-helpers_note alert, counts, answer, record
 
 chapter '1. An alert comes in through the gateway'
-pe 'cat alert.txt'
-say 'The plant'"'"'s monitoring system sends it to Orka'"'"'s gateway over A2A.'
-pe 'alert'
+say 'The plant'"'"'s monitoring system sends a pressure alert to Orka'"'"'s gateway over A2A.'
+# The A2A client plays the monitoring system; its reply is kept for the checks.
+a2a -message-id "$alert_id" -context-id "$conversation" -return-immediately -text "$(cat alert.txt)" >raw/admission.json
 task_ref=$(jq -er '.id' raw/admission.json)
 event_id=$(python3 "$here/check.py" event-id raw/admission.json)
 wait_event dispatched dispatched
 coordinator=$(jq -er '.taskName' raw/event-dispatched.json)
-ok 'Accepted. The gateway turned the alert into an Orka Task.'
+pe 'orka gateway events get "$event_id"'
+ok 'Orka recorded the alert and gave it to the coordinator as a Task.'
 
 chapter '2. Orka coordinates the work'
 say 'Orka'"'"'s coordinator starts a data-analysis job on AKS, then hands its findings'
@@ -155,7 +137,8 @@ snapshot pending
 python3 "$here/check.py" pending
 # The short ID is what `orka task approvals` shows; the CLI resolves it.
 approval=$(jq -er '.approvals[0].id | split(":") | last | .[0:12]' raw/approval-pending.json)
-pe 'counts pending'
+say 'The work-order service counts what it has received for this alert.'
+pe "$work_orders"
 ok 'Fibey looked up inventory and asked for an inspection. No work order exists yet.'
 
 chapter '5. Mark approves the exact work order'
@@ -169,20 +152,25 @@ ok 'Mark'"'"'s decision is on record: who approved what, when, and why.'
 chapter '6. The work order runs, and the result returns through the gateway'
 pe 'orka task wait "$coordinator" --timeout 15m'
 wait_event completed completed
+# Read by a typed command below.
+# shellcheck disable=SC2034
+delivery_id=$(jq -er '.deliveryId' raw/event-completed.json)
 snapshot final
+a2a -task-id "$task_ref" >raw/answer.json
 orka task result "$coordinator" -o json >raw/coordinator-result.json
 orka task result "$fibey_task" -o json >raw/fibey-result.json
 scenario_collect_events "$coordinator" raw/coordinator-events.json
 scenario_collect_events "$fibey_task" raw/fibey-events.json
 fibey_flow_snapshot raw/installation-final.json
-pe 'counts final'
-pe 'answer'
-ok 'One work order, created after approval. The answer went back through the gateway.'
+pe "$work_orders"
+pe 'orka task result "$coordinator"'
+pe 'orka gateway deliveries get "$delivery_id"'
+ok 'One work order, created after approval. The gateway delivered the answer.'
 
 chapter '7. On the record'
 # Azure publishes per-minute token counts a few minutes late; wait for them off camera.
 python3 "$here/check.py" meter
-pe 'record'
+python3 "$here/check.py" final
 ok 'Tasks, the approval, elapsed time, tokens, and estimated cost for this one alert.'
 
 note "Full responses and receipts are saved in $run_dir"
