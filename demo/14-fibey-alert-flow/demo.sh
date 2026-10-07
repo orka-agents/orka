@@ -87,8 +87,6 @@ snapshot() {
   kubectl -n "$ORKA_NAMESPACE" get tasks -l "orka.ai/parent-task=$coordinator" -o json >"raw/children-$1.json"
   orka task approvals "$fibey_task" -o json >"raw/approval-$1.json"
 }
-# The work-order service's own counters for this alert, typed with the literal ID.
-work_orders="curl -s 'localhost:$simulator_port/counts?runID=$alert_id' | jq ."
 
 snapshot initial
 python3 "$here/check.py" initial
@@ -99,7 +97,7 @@ python3 "$here/check.py" initial
 step() { printf '\033[H\033[2J'; chapter "$1"; }
 
 step '1 · Alert in, through the gateway'
-aside 'Recorded live on AKS and Microsoft Foundry. Waiting time is shortened.'
+aside 'Recorded live on AKS and Microsoft Foundry, with sample plant data and a test maintenance system.'
 # The A2A client plays the plant's monitoring system; its reply is kept for the checks.
 a2a -message-id "$alert_id" -context-id "$conversation" -return-immediately -text "$(cat alert.txt)" >raw/admission.json
 task_ref=$(jq -er '.id' raw/admission.json)
@@ -172,7 +170,7 @@ orka task result "$fibey_task" -o json >raw/fibey-result.json
 scenario_collect_events "$coordinator" raw/coordinator-events.json
 scenario_collect_events "$fibey_task" raw/fibey-events.json
 fibey_flow_snapshot raw/installation-final.json
-pe "$work_orders"
+# The service's own count (one work order) is checked off camera from the final snapshot.
 pe 'orka task result "$coordinator"'
 ok 'The gateway delivered this answer back to the monitoring system.'
 nap 2
