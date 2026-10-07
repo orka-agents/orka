@@ -198,6 +198,18 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "http tool access key header", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Access-Key": "abc"}
 		}, want: "looks like a credential"},
+		{name: "http tool concatenated authentication header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"Authentication": "abc"}
+		}, want: "looks like a credential"},
+		{name: "http tool concatenated access key header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Accesskey": "abc"}
+		}, want: "looks like a credential"},
+		{name: "concatenated access key query", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?awsaccesskeyid=abc"
+		}, want: "must not carry credentials"},
+		{name: "http tool concatenated benign header ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Request-Id": "abc", "If-None-Match": "abc"}
+		}},
 		{name: "auth authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"auth": "x"}
 		}, want: "must not carry credentials"},
