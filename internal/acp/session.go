@@ -385,13 +385,10 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, leaseDe
 	s.resuming = nil
 	close(resuming)
 	if err != nil {
-		// The caller went away or its lease ran out mid-restart. The agent
-		// never rejected the provider session, so keep the exited adapter
-		// bound and let the next prompt retry the resume instead of
-		// retiring the session.
-		if ctx.Err() != nil || !leaseDeadline.After(time.Now()) {
-			return fmt.Errorf("resume ACP adapter interrupted: %w", err)
-		}
+		// Even an interrupted restart (caller gone, lease over) is lost: a
+		// failed StartPrompt leaves the supervisor's prompt gates cancelling,
+		// so this generation cannot take another prompt anyway. Retiring it
+		// hands recovery to the controller's transcript recreation.
 		return &AdapterLostError{Attempted: true, Cause: err}
 	}
 	if s.deleted {

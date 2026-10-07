@@ -123,7 +123,7 @@ func TestRuntimeSessionRejectedResumeIsLostAndStopsReplacement(t *testing.T) {
 	}
 }
 
-func TestRuntimeSessionInterruptedResumeStaysRetryable(t *testing.T) {
+func TestRuntimeSessionInterruptedResumeIsLostAndStopsReplacement(t *testing.T) {
 	session, _ := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{
 		helperExitAfterPromptEnv: "1",
 		helperHangFirstResumeEnv: "1",
@@ -133,26 +133,19 @@ func TestRuntimeSessionInterruptedResumeStaysRetryable(t *testing.T) {
 		t.Fatalf("first prompt = %#v", result)
 	}
 	awaitAdapterExit(t, session)
+	exited := session.Process()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")})
-	if err == nil {
-		t.Fatal("prompt whose caller left mid-resume started")
+	if lost, ok := errors.AsType[*AdapterLostError](err); !ok || !lost.Attempted {
+		t.Fatalf("prompt whose caller left mid-resume = %v, want attempted AdapterLostError", err)
 	}
-	if lost, ok := errors.AsType[*AdapterLostError](err); ok {
-		t.Fatalf("caller cancellation retired the provider session: %v", lost)
+	if session.Process() != exited {
+		t.Fatal("interrupted resume bound the replacement adapter")
 	}
 	if session.AdapterRestarts() != 0 {
 		t.Fatalf("adapter restarts = %d, want 0", session.AdapterRestarts())
-	}
-
-	result, _ = runHelperPrompt(t, session, "prompt-3")
-	if result.Outcome != PromptOutcomeCompleted || !result.Accepted {
-		t.Fatalf("prompt retrying the resume = %#v", result)
-	}
-	if session.AdapterRestarts() != 1 {
-		t.Fatalf("adapter restarts = %d, want 1", session.AdapterRestarts())
 	}
 }
 
