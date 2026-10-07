@@ -3704,4 +3704,16 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	if _, err := build(); !errors.Is(err, ErrConnectorToolResolution) {
 		t.Fatalf("missing binding err = %v, want ErrConnectorToolResolution", err)
 	}
+
+	// The frozen policy left connection mode since the freeze: its tools
+	// would otherwise run as plain local tools with no connector route or
+	// approval default, so the build fails and the dispatch re-freezes.
+	direct := policy.DeepCopy()
+	direct.Spec.Connection = nil
+	if err := builder.Client.Update(context.Background(), direct); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("policy left connection mode: err = %v, want ErrConnectorToolResolution", err)
+	}
 }

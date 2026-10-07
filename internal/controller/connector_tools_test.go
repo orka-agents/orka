@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -338,7 +339,7 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 		reader := f.reader(extra...)
 		planAgent := agent.DeepCopy()
 		planAgent.Spec.Runtime.Type = runtimeType
-		adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), reader, nil, task, planAgent)
+		adjustedTask, adjustedAgent, _, err := adjustInputsForConnectorTools(context.Background(), reader, nil, task, planAgent)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -374,7 +375,7 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 
 	// The adjustment leaves unrelated inputs untouched and never mutates the
 	// caller's objects.
-	adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, task, agent)
+	adjustedTask, adjustedAgent, _, err := adjustInputsForConnectorTools(context.Background(), f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, task, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,5 +460,82 @@ func TestRequesterConnectionRevalidatesAgainstCurrentProvider(t *testing.T) {
 	}).Build()
 	if _, err := requesterConnection(ctx, failing, f.task, "github"); err == nil {
 		t.Fatal("a provider read failure must be retried, not treated as unlinked")
+	}
+}
+
+// TestFrozenConnectionsMatchClassification covers an ACP binding whose
+// policy changed between the classification that decided visibility and
+// approvals and the Connection freeze: a policy that entered connection
+// mode, or a connection-mode policy object that changed, is drift, so the
+// snapshot is never committed with a credential the plan did not account for.
+func TestFrozenConnectionsMatchClassification(t *testing.T) {
+	infos := map[string]connectorToolInfo{
+		"gh_read":  {PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"},
+		"gh_write": {PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"},
+	}
+	entry := agentExecutionSnapshotConnection{PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"}
+	if err := frozenConnectionsMatchClassification([]agentExecutionSnapshotConnection{entry}, infos); err != nil {
+		t.Fatalf("matching freeze err = %v", err)
+	}
+	if err := frozenConnectionsMatchClassification(nil, infos); err != nil {
+		t.Fatalf("empty freeze err = %v", err)
+	}
+	changed := entry
+	changed.PolicyGeneration = 4
+	entered := agentExecutionSnapshotConnection{PolicyName: "was-direct", PolicyUID: "direct-uid", PolicyGeneration: 2, Provider: "github"}
+	retargeted := entry
+	retargeted.Provider = "gitlab"
+	for name, frozen := range map[string]agentExecutionSnapshotConnection{"changed generation": changed, "entered connection mode": entered, "retargeted provider": retargeted} {
+		if err := frozenConnectionsMatchClassification([]agentExecutionSnapshotConnection{frozen}, infos); !errors.Is(err, errConnectorDispatchDrift) {
+			t.Fatalf("%s: err = %v, want errConnectorDispatchDrift", name, err)
+		}
+	}
+}
+
+// TestCreateTaskJobBoundsAMissingToolPolicy covers a native Task whose Agent
+// lists a Tool that references an OutboundAccessPolicy that does not exist:
+// dispatch retries shortly while the policy may still be applied, and after
+// the grace period the Task fails naming the policy instead of staying
+// Pending with no reason.
+func TestCreateTaskJobBoundsAMissingToolPolicy(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "ai-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Tools: []corev1alpha1.ToolReference{{Name: "itemsread"}},
+		},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "itemsread", Namespace: "default"},
+		Spec: corev1alpha1.ToolSpec{Description: "read", HTTP: &corev1alpha1.HTTPExecution{
+			URL: "https://api.example.test/items", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "missing-policy"},
+		}},
+	}
+	newTask := func(age time.Duration) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dangling", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890ab",
+				CreationTimestamp: metav1.NewTime(time.Now().Add(-age)),
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "ai-agent"}, AI: &corev1alpha1.AISpec{Prompt: "hello"},
+			},
+		}
+	}
+
+	fresh := newTask(0)
+	r := newUnitReconciler(newTestScheme(), fresh, agent, tool)
+	result, err := r.createTaskJob(context.Background(), fresh, agent, nil)
+	if err != nil || result.RequeueAfter == 0 || fresh.Status.Phase == corev1alpha1.TaskPhaseFailed || fresh.Status.JobName != "" {
+		t.Fatalf("fresh task: result = %+v err = %v phase = %q job = %q, want a short retry", result, err, fresh.Status.Phase, fresh.Status.JobName)
+	}
+
+	stale := newTask(missingToolPolicyGrace + time.Minute)
+	r = newUnitReconciler(newTestScheme(), stale, agent, tool)
+	if _, err := r.createTaskJob(context.Background(), stale, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	if stale.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(stale.Status.Message, "missing-policy") {
+		t.Fatalf("stale task: phase = %q message = %q, want failed naming the policy", stale.Status.Phase, stale.Status.Message)
 	}
 }

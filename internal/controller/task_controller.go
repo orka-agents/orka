@@ -1445,6 +1445,29 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 }
 
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
+// missingToolPolicyGrace bounds how long a native dispatch waits for an
+// OutboundAccessPolicy that one of the Task's Tools references but that does
+// not exist. Tools are classified strictly (a missing policy cannot be judged
+// connector-backed or not), so the wait is retried for a while in case the
+// policy is being applied, and then the Task fails with the reason rather
+// than staying Pending without one.
+const missingToolPolicyGrace = 2 * time.Minute
+
+// boundMissingToolPolicy handles a dispatch error caused by a missing
+// OutboundAccessPolicy: within the grace period dispatch is retried shortly,
+// after it the Task fails naming the policy. Other errors are not handled.
+func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev1alpha1.Task, err error) (ctrl.Result, bool, error) {
+	if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, false, nil
+	}
+	if task.CreationTimestamp.IsZero() || time.Since(task.CreationTimestamp.Time) < missingToolPolicyGrace {
+		logf.FromContext(ctx).Info("A Tool's outbound access policy does not exist yet; retrying dispatch", "error", err.Error())
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
+	}
+	result, failErr := r.failTask(ctx, task, fmt.Sprintf("a Tool references an outbound access policy that does not exist: %v", err))
+	return result, true, failErr
+}
+
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -1560,6 +1583,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Task), so its bindings never belong to another revision.
 	frozenConnections, err := freezeRequesterConnectionsForTools(ctx, reader, NativeWorkerToolRegistry(jobTask, agent), jobTask, aitools.Resolve(jobTask, agent), connectorScope{})
 	if err != nil {
+		if result, handled, failErr := r.boundMissingToolPolicy(ctx, task, err); handled {
+			return result, failErr
+		}
 		log.Error(err, "failed to freeze requester connections; retrying dispatch")
 		return ctrl.Result{}, err
 	}
@@ -1577,6 +1603,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	})
 	if err != nil {
 		if errors.Is(err, ErrConnectorToolResolution) {
+			if result, handled, failErr := r.boundMissingToolPolicy(ctx, task, err); handled {
+				return result, failErr
+			}
 			log.Error(err, "failed to resolve connector-backed tools; retrying dispatch")
 			return ctrl.Result{}, err
 		}

@@ -228,6 +228,13 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "fullwidth digits host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AuthorizeURL = "https://%EF%BC%91%EF%BC%92%EF%BC%97.0.0.1/authorize"
 		}, want: "host must be ASCII"},
+		{name: "single-label host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://kubernetes/token" }, want: "host is not allowed"},
+		{name: "single-label tool host", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://orka-api/x"
+		}, want: "host is not allowed"},
+		{name: "oversized client id", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.ClientID = strings.Repeat("c", 257)
+		}, want: "clientID must be at most 256 bytes"},
 		{name: "unicode tool host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://127%E3%80%820%E3%80%820%E3%80%821/x"
 		}, want: "host must be ASCII"},

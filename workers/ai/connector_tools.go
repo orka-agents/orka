@@ -229,7 +229,24 @@ type connectorToolRequest struct {
 
 type connectorToolResponse struct {
 	Result string `json:"result"`
-	Error  string `json:"error,omitempty"`
+	// Error is the API's shared envelope ({"code", "message"}); a plain
+	// string is accepted too.
+	Error json.RawMessage `json:"error,omitempty"`
+}
+
+// errorMessage returns the controller's error message from either shape.
+func (r connectorToolResponse) errorMessage() string {
+	var envelope struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(r.Error, &envelope) == nil && envelope.Message != "" {
+		return envelope.Message
+	}
+	var message string
+	if json.Unmarshal(r.Error, &message) == nil {
+		return message
+	}
+	return ""
 }
 
 // controllerHTTPClient is the client for the worker's authenticated calls to
@@ -365,7 +382,7 @@ func decodeConnectorToolResponse(toolName string, status int, raw []byte) (strin
 		}
 		return parsed.Result, nil
 	}
-	message := strings.TrimSpace(parsed.Error)
+	message := strings.TrimSpace(parsed.errorMessage())
 	if message == "" {
 		preview := raw
 		if len(preview) > connectorToolErrorBodyLimit {

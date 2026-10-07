@@ -686,7 +686,8 @@ func FilterConnectorToolsForRequester(
 	task *corev1alpha1.Task,
 	toolNames []string,
 ) (visible []string, connectorWrite []string, err error) {
-	return filterConnectorToolsForRequester(ctx, reader, registry, task, toolNames, connectorScope{})
+	visible, connectorWrite, _, err = filterConnectorToolsForRequester(ctx, reader, registry, task, toolNames, connectorScope{})
+	return visible, connectorWrite, err
 }
 
 // FilterBrokeredConnectorToolsForRequester is FilterConnectorToolsForRequester
@@ -701,9 +702,13 @@ func FilterBrokeredConnectorToolsForRequester(
 	task *corev1alpha1.Task,
 	toolNames []string,
 ) (visible []string, connectorWrite []string, err error) {
-	return filterConnectorToolsForRequester(ctx, reader, registry, task, toolNames, connectorScope{builtins: true})
+	visible, connectorWrite, _, err = filterConnectorToolsForRequester(ctx, reader, registry, task, toolNames, connectorScope{builtins: true})
+	return visible, connectorWrite, err
 }
 
+// filterConnectorToolsForRequester also returns the classification the
+// result was derived from, so a caller that freezes Connections later can
+// reject a policy that changed between.
 func filterConnectorToolsForRequester(
 	ctx context.Context,
 	reader client.Reader,
@@ -711,17 +716,17 @@ func filterConnectorToolsForRequester(
 	task *corev1alpha1.Task,
 	toolNames []string,
 	scope connectorScope,
-) (visible []string, connectorWrite []string, err error) {
+) (visible []string, connectorWrite []string, infos map[string]connectorToolInfo, err error) {
 	if reader == nil || task == nil || len(toolNames) == 0 {
-		return toolNames, nil, nil
+		return toolNames, nil, nil, nil
 	}
-	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, scope)
+	infos, err = classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, scope)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if scope.builtins && anyBuiltinInfo(infos) {
 		if err := linkedRepositoryScopeInherited(ctx, reader, task); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	// brokeredBuiltin reports a catalog built-in the broker could execute:
@@ -737,7 +742,7 @@ func filterConnectorToolsForRequester(
 		return linked && registered
 	}
 	modes := map[string]string{}
-	return filterClassifiedConnectorTools(toolNames, infos, brokeredBuiltin, func(info connectorToolInfo) (string, error) {
+	visible, connectorWrite, err = filterClassifiedConnectorTools(toolNames, infos, brokeredBuiltin, func(info connectorToolInfo) (string, error) {
 		mode, cached := modes[info.Provider]
 		if !cached {
 			connection, err := requesterConnection(ctx, reader, task, info.Provider)
@@ -754,6 +759,33 @@ func filterConnectorToolsForRequester(
 		}
 		return mode, nil
 	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return visible, connectorWrite, infos, nil
+}
+
+// frozenConnectionsMatchClassification reports dispatch drift when a policy
+// the freeze bound was not classified as the same connection-mode policy
+// object (name, UID, generation, provider) when visibility and approvals
+// were decided: a policy that entered connection mode between the two reads
+// would otherwise reach the person's credential with no hiding and no
+// approval default.
+func frozenConnectionsMatchClassification(frozen []agentExecutionSnapshotConnection, infos map[string]connectorToolInfo) error {
+	for _, entry := range frozen {
+		matched := false
+		for _, info := range infos {
+			if info.PolicyName == entry.PolicyName && info.PolicyUID == entry.PolicyUID &&
+				info.PolicyGeneration == entry.PolicyGeneration && info.Provider == entry.Provider {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return errConnectorDispatchDrift
+		}
+	}
+	return nil
 }
 
 // filterClassifiedConnectorTools applies the readOnly rule to one
@@ -853,6 +885,19 @@ func nativeConnectorDispatch(
 	byPolicy := make(map[string]corev1alpha1.ConnectionBinding, len(bindings))
 	for _, binding := range bindings {
 		byPolicy[binding.PolicyName] = binding
+	}
+	// A policy frozen as connection-backed must still classify as one: a
+	// policy that left connection mode (or a Tool retargeted off it) since
+	// the freeze would otherwise turn its tools into plain local tools, with
+	// no controller route and no connector approval default.
+	classified := make(map[string]struct{}, len(infos))
+	for _, info := range infos {
+		classified[info.PolicyName] = struct{}{}
+	}
+	for policyName := range byPolicy {
+		if _, ok := classified[policyName]; !ok {
+			return nil, nil, nil, errConnectorDispatchDrift
+		}
 	}
 	visible, connectorWrite, err = filterClassifiedConnectorTools(toolNames, infos, nil, func(info connectorToolInfo) (string, error) {
 		binding, ok := byPolicy[info.PolicyName]
