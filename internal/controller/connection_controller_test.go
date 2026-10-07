@@ -286,8 +286,8 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
-			if result.RequeueAfter != connectionRefreshInterval {
-				t.Fatalf("RequeueAfter = %v", result.RequeueAfter)
+			if result.RequeueAfter != 0 {
+				t.Fatalf("RequeueAfter = %v, want watch-driven reconciles only", result.RequeueAfter)
 			}
 			updated := &corev1alpha1.Connection{}
 			if err := c.Get(context.Background(), key, updated); err != nil {

@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -26,8 +25,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 )
-
-const connectionRefreshInterval = 5 * time.Minute
 
 // ConnectionReconciler resolves a Connection's provider and projects link
 // state. Token custody is handled by the API server's consent flow; this
@@ -167,13 +164,16 @@ func (r *ConnectionReconciler) updateStatus(
 	connection.Status.ObservedGeneration = connection.Generation
 	meta.SetStatusCondition(&connection.Status.Conditions, providerResolved)
 	connection.Status.State = projectConnectionState(connection, providerResolved)
+	// Connection and provider changes are watched; nothing here depends on
+	// the passage of time, so there is no periodic requeue to multiply by
+	// the number of linked accounts.
 	if reflect.DeepEqual(before, &connection.Status) {
-		return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
+		return ctrl.Result{}, reconcileErr
 	}
 	if err := r.Status().Update(ctx, connection); err != nil {
 		return ctrl.Result{}, errors.Join(reconcileErr, err)
 	}
-	return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
+	return ctrl.Result{}, reconcileErr
 }
 
 // projectConnectionState derives the coarse state from the conditions. An
