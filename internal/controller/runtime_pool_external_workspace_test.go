@@ -52,11 +52,11 @@ func newExternalRuntimePoolFixture(t *testing.T) *externalRuntimePoolFixture {
 	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{Provider: "example.workspace.orka.ai", BindingDigest: "sha256:" + strings.Repeat("2", 64),
 		WorkspaceRef: &workspacev1alpha1.ObjectIdentityReference{Name: workspace.Name, UID: workspace.UID}, ParametersRef: &workspacev1alpha1.TypedObjectReference{Group: "example.workspace.orka.ai", Kind: "WorkspaceProfile", Name: "profile"},
 		ParametersBinding: &workspacev1alpha1.ImmutableObjectBinding{Name: "profile", UID: "profile-uid", Generation: 1, ProfileHash: "sha256:" + strings.Repeat("3", 64)},
-		Workload:          &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{ContractVersion: workspacev1alpha1.LifecycleContractV1, ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2}}
+		Workload:          &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{ContractVersion: workspacev1alpha1.LifecycleContractV1, ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, RequiredFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureACPRuntime}}}
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{ObjectMeta: metav1.ObjectMeta{Name: providerBinding.Name, UID: providerBinding.UID, Generation: 1},
 		Spec: workspacev1alpha1.ExecutionWorkspaceProviderSpec{ControllerName: string(pool.Spec.ExecutionWorkspace.Provider), LifecycleState: workspacev1alpha1.ExecutionWorkspaceProviderActive},
 		Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{ObservedGeneration: 1, Adapter: &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: "v1"},
-			SupportedContracts: []string{workspacev1alpha1.LifecycleContractV1}, SupportedFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureACPRuntime},
+			SupportedContracts: []string{workspacev1alpha1.LifecycleContractV1}, SupportedFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureACPRuntime, workspacev1alpha1.WorkspaceFeatureSuspend},
 			Conditions: []metav1.Condition{{Type: string(workspacev1alpha1.ConditionProviderHeartbeat), Status: metav1.ConditionTrue, ObservedGeneration: 1}, {Type: string(workspacev1alpha1.ConditionProviderCompatible), Status: metav1.ConditionTrue, ObservedGeneration: 1}}}}
 	scheme := runtimePoolTestScheme(t)
 	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {

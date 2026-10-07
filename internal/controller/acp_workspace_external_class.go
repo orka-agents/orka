@@ -77,6 +77,9 @@ func externalWorkspaceParametersBinding(object *unstructured.Unstructured) (*wor
 }
 
 func validateExternalACPProvider(ctx context.Context, c client.Client, provider *workspacev1alpha1.ExecutionWorkspaceProvider) error {
+	if provider.Spec.ControllerName == acpWorkspaceControllerLabelValue {
+		return fmt.Errorf("provider controllerName is reserved for the legacy ACP controller")
+	}
 	if len(provider.Spec.ControllerName) > 63 || len(validation.IsDNS1123Subdomain(provider.Spec.ControllerName)) != 0 {
 		return fmt.Errorf("provider controllerName must be a DNS-compatible routing identity")
 	}

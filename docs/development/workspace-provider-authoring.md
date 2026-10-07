@@ -49,7 +49,7 @@ checkpoint UID, digest, class, and provider revision; the provider must acquire
 durable artifact ownership before native creation.
 
 The shared repository contains the [provider installation and retirement
-guide](https://github.com/orka-agents/orka-workspace/blob/feat/workspace-external-providers/docs/external-providers.md),
+guide](https://github.com/orka-agents/orka-workspace/blob/e313ab83c5f4/docs/external-providers.md),
 provider-specific prerequisites, and conformance/live proof scripts. External ACP
 providers use the generic workspace API and ACP dispatch flags. Legacy ACP
 cleanup belongs to the previous release; the removal release retains only pooled
@@ -143,7 +143,7 @@ implementations must also preserve the data-plane protocol described above.
 
 The external provider API and binaries are installed from the same
 `orka-workspace` revision that Orka pins in its Go module. The [shared installation
-and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/feat/workspace-external-providers/docs/external-providers.md)
+and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/e313ab83c5f4/docs/external-providers.md)
 lists the supported Kubernetes and backend versions and the provider-owned schemas.
 
 Before replacing Orka or applying the new RuntimePool CRD, drain every legacy ACP

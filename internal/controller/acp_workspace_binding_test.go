@@ -694,6 +694,10 @@ func TestQueueACPRuntimeTaskKeepsFrozenExternalWorkspaceNamespace(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	fixture := suspendableSubstrateFixture(t)
+	fixture.provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: "v1"}
+	fixture.provider.Status.Conditions = append(fixture.provider.Status.Conditions,
+		metav1.Condition{Type: string(workspacev1alpha1.ConditionProviderHeartbeat), Status: metav1.ConditionTrue, ObservedGeneration: fixture.provider.Generation},
+		metav1.Condition{Type: string(workspacev1alpha1.ConditionProviderCompatible), Status: metav1.ConditionTrue, ObservedGeneration: fixture.provider.Generation})
 	task := suspendableSessionTask()
 	reconciler := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "queue.db"))

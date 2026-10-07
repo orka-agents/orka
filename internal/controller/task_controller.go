@@ -2180,7 +2180,7 @@ func (r *TaskReconciler) handleFinalizing(
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
 		revocationEpoch := workspaceStatus.AttachedEpoch
-		acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+		acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 		if acpWorkspace {
 			revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 			// Attach and the Task epoch annotation are separate API writes.
@@ -2222,7 +2222,7 @@ func (r *TaskReconciler) handleFinalizing(
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
 			revocationEpoch := workspaceStatus.AttachedEpoch
-			acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+			acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 			if acpWorkspace {
 				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {

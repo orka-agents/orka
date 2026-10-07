@@ -1508,10 +1508,11 @@ func main() {
 	var runtimeAvailability api.ACPRuntimeAvailability
 	if acpRuntimeEnabled {
 		runtimePoolReconciler := &controller.RuntimePoolReconciler{
-			Client:           mgr.GetClient(),
-			APIReader:        mgr.GetAPIReader(),
-			Scheme:           mgr.GetScheme(),
-			RuntimeNamespace: acpRuntimeNamespace,
+			Client:               mgr.GetClient(),
+			APIReader:            mgr.GetAPIReader(),
+			Scheme:               mgr.GetScheme(),
+			RuntimeNamespace:     acpRuntimeNamespace,
+			WorkspaceCleanupOnly: !workspaceProviderAPIEnabled,
 		}
 		providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
 		if err != nil {

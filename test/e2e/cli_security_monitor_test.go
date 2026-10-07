@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,15 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 var _ = Describe("Orka CLI security and monitor binary workflows", Ordered, func() {
@@ -164,10 +174,99 @@ spec:
 		}
 
 		By("deleting the monitor and repository scan through the CLI")
+		cleanupConfig, err := config.GetConfig()
+		Expect(err).NotTo(HaveOccurred())
+		cleanupConfig.Timeout = 10 * time.Second
+		cleanupScheme := runtime.NewScheme()
+		Expect(corev1alpha1.AddToScheme(cleanupScheme)).To(Succeed())
+		cleanupReader, err := client.New(cleanupConfig, client.Options{Scheme: cleanupScheme})
+		Expect(err).NotTo(HaveOccurred())
+		cleanupContext, stopCleanup := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer stopCleanup()
+		scanSnapshot, err := captureCLISecurityChildTasks(cleanupContext, cleanupReader, &corev1alpha1.RepositoryScan{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: repositoryScanName}})
+		Expect(err).NotTo(HaveOccurred(), "Failed to capture exact RepositoryScan child identities before deletion")
+		monitorSnapshot, err := captureCLISecurityChildTasks(cleanupContext, cleanupReader, &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: monitorName}})
+		Expect(err).NotTo(HaveOccurred(), "Failed to capture exact RepositoryMonitor child identities before deletion")
 		expectOrkaSuccess(runOrka(home, "monitor", "delete", monitorName), token, fakeAnthropicKey)
 		expectOrkaSuccess(runOrka(home, "security", "repo", "delete", repositoryScanName), token, fakeAnthropicKey)
+		By("waiting for normal deletion of the exact security parents and their child Tasks")
+		Expect(waitCLISecurityChildTasksDeleted(cleanupContext, cleanupReader, scanSnapshot, time.Second)).To(Succeed())
+		Expect(waitCLISecurityChildTasksDeleted(cleanupContext, cleanupReader, monitorSnapshot, time.Second)).To(Succeed())
 	})
 })
+
+type cliSecurityTaskSnapshot struct {
+	parent    client.Object
+	parentUID types.UID
+	children  map[string]types.UID
+}
+
+func captureCLISecurityChildTasks(ctx context.Context, reader client.Reader, parent client.Object) (*cliSecurityTaskSnapshot, error) {
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(parent), parent); err != nil {
+		return nil, errors.New("read security parent identity before CLI deletion")
+	}
+	if parent.GetUID() == "" || !parent.GetDeletionTimestamp().IsZero() {
+		return nil, errors.New("security parent identity is absent or already deleting")
+	}
+	children := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, children, client.InNamespace(parent.GetNamespace())); err != nil {
+		return nil, errors.New("inventory security child Tasks before CLI deletion")
+	}
+	snapshot := &cliSecurityTaskSnapshot{parent: parent.DeepCopyObject().(client.Object), parentUID: parent.GetUID(), children: map[string]types.UID{}}
+	for _, child := range children.Items {
+		for _, owner := range child.OwnerReferences {
+			if owner.UID == snapshot.parentUID {
+				if child.UID == "" {
+					return nil, errors.New("security child Task has no exact identity")
+				}
+				snapshot.children[child.Name] = child.UID
+			}
+		}
+	}
+	return snapshot, nil
+}
+
+// Parent deletion uses normal garbage collection and Task finalization. This
+// observer proves absence without adding a finalizer or claiming a receipt.
+func waitCLISecurityChildTasksDeleted(ctx context.Context, reader client.Reader, snapshot *cliSecurityTaskSnapshot, interval time.Duration) error {
+	if snapshot == nil || snapshot.parentUID == "" {
+		return errors.New("exact security parent deletion identity is required")
+	}
+	return wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
+		parent := snapshot.parent.DeepCopyObject().(client.Object)
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(parent), parent); err == nil {
+			if parent.GetUID() != snapshot.parentUID {
+				return false, errors.New("security parent was replaced during CLI cleanup")
+			}
+			return false, nil
+		} else if !apierrors.IsNotFound(err) {
+			return false, errors.New("observe exact security parent deletion")
+		}
+		for name, uid := range snapshot.children {
+			child := &corev1alpha1.Task{}
+			if err := reader.Get(ctx, client.ObjectKey{Namespace: snapshot.parent.GetNamespace(), Name: name}, child); err == nil {
+				if child.UID != uid {
+					return false, errors.New("security child Task was replaced during CLI cleanup")
+				}
+				return false, nil
+			} else if !apierrors.IsNotFound(err) {
+				return false, errors.New("observe exact security child Task deletion")
+			}
+		}
+		children := &corev1alpha1.TaskList{}
+		if err := reader.List(ctx, children, client.InNamespace(snapshot.parent.GetNamespace())); err != nil {
+			return false, errors.New("verify security parent has no remaining child Tasks")
+		}
+		for _, child := range children.Items {
+			for _, owner := range child.OwnerReferences {
+				if owner.UID == snapshot.parentUID {
+					return false, nil
+				}
+			}
+		}
+		return true, nil
+	})
+}
 
 // repositoryScanManifest returns a minimal REST-compatible RepositoryScan.
 // The API requires spec.repoURL and spec.analysisAgentRef.name; branch and validationMode are fixed for stable e2e reads.

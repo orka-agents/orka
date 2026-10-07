@@ -10,6 +10,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -197,7 +198,20 @@ func TestExternalWorkspaceDispatchGateAllowsPlainPoolsAndRejectsLegacyWorkspaceP
 
 func TestExternalWorkspaceDispatchPinsExactWorkspaceAndOpaqueParameters(t *testing.T) {
 	ctx := context.Background()
-	classResolver, _, _, _ := externalACPFixture(t, true)
+	classResolver, class, provider, config := externalACPFixture(t, true)
+	provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: "v1"}
+	provider.Status.Conditions = append(provider.Status.Conditions,
+		metav1.Condition{Type: string(workspacev1alpha1.ConditionProviderHeartbeat), Status: metav1.ConditionTrue, ObservedGeneration: provider.Generation},
+		metav1.Condition{Type: string(workspacev1alpha1.ConditionProviderCompatible), Status: metav1.ConditionTrue, ObservedGeneration: provider.Generation})
+	if err := classResolver.Status().Update(ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	profile := &unstructured.Unstructured{}
+	profile.SetAPIVersion("example.workspace.orka.ai/v1alpha1")
+	profile.SetKind("WorkspaceProfile")
+	if err := classResolver.Get(ctx, client.ObjectKey{Namespace: class.Namespace, Name: class.Spec.ParametersRef.Name}, profile); err != nil {
+		t.Fatal(err)
+	}
 	task := workspaceBindingTestTask(nil)
 	resolved, err := classResolver.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
@@ -208,6 +222,10 @@ func TestExternalWorkspaceDispatchPinsExactWorkspaceAndOpaqueParameters(t *testi
 		t.Fatal(err)
 	}
 	r, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithRESTMapper(classResolver.RESTMapper()).
+		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}, class, provider).
+		WithObjects(task, bindingTestNamespace(), class, provider, config, profile).Build()
+	r.APIReader = r.Client
 	r.WorkspaceProviderAPIEnabled = true
 	r.ACPWorkspaceDispatchEnabled = true
 	plan, err := PlanACPRuntime(task, bindingTestAgent(), r.ACPRuntimeImages)
@@ -218,21 +236,24 @@ func TestExternalWorkspaceDispatchPinsExactWorkspaceAndOpaqueParameters(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspace := newExternalRuntimePoolFixture(t).workspace.DeepCopy()
-	workspace.ResourceVersion = ""
-	workspace.Namespace = task.Namespace
-	workspace.Labels[workspacev1alpha1.ProviderControllerLabel] = binding.Class.ControllerName
-	workspace.Spec.ClassBinding = workspacev1alpha1.ImmutableObjectBinding{Name: binding.Class.Name, UID: types.UID(binding.Class.UID), Generation: binding.Class.Generation, ProfileHash: binding.Class.ProfileHash}
-	workspace.Spec.ProviderBinding = workspacev1alpha1.ImmutableObjectBinding{Name: binding.Class.ProviderName, UID: types.UID(binding.Class.ProviderUID), Generation: binding.Class.ProviderGeneration}
-	workspace.Spec.CoreAdmission.ClassBinding = workspace.Spec.ClassBinding
-	workspace.Spec.CoreAdmission.ProviderBinding = workspace.Spec.ProviderBinding
-	workspace.Annotations[acpExecutionWorkspacePoolAnnotation] = plan.PoolName
+	workspace, err := r.createACPClassWorkspace(ctx, task, binding, plan.PoolName, "external-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.UID, workspace.Generation = "workspace-uid", 1
+	workspace.CreationTimestamp = metav1.Now()
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{Epoch: 1, ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)), TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: task.Name, UID: task.UID}}
 	workspace.Spec.AttachmentEpoch = 1
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
 	workspace.Status.AttachedEpoch = 1
 	workspace.Status.Conditions = append(workspace.Status.Conditions, metav1.Condition{Type: string(workspacev1alpha1.ConditionWorkspaceAttached), Status: metav1.ConditionTrue, ObservedGeneration: 1})
-	if err := r.Create(ctx, workspace); err != nil {
+	status := workspace.Status.DeepCopy()
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	workspace.Status = *status
+	if err := r.Status().Update(ctx, workspace); err != nil {
 		t.Fatal(err)
 	}
 	pool, existing, err := r.ensureACPRuntimePoolWithPolicy(ctx, task.Namespace, plan, workspace.Name, string(workspace.UID), string(task.UID), true, "")

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -343,6 +344,9 @@ type RuntimePoolReconciler struct {
 	// CleanupOnly keeps deletion finalization active while ACP runtime admission
 	// is disabled without adding finalizers or creating runtime resources.
 	CleanupOnly bool
+	// WorkspaceCleanupOnly disables external workspace admission while keeping
+	// ordinary Deployment-backed pools and exact workspace cleanup active.
+	WorkspaceCleanupOnly bool
 	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
 	// fault marker projected into built-in runtime supervisors.
 	E2EPromptWriteAmbiguityMarker string
@@ -3580,14 +3584,25 @@ func (r *RuntimePoolReconciler) supervisorClientForPool(_ *corev1alpha1.RuntimeP
 	return r.supervisorClient()
 }
 
-// runtimePoolFailingSupervisorClient surfaces a supervisor-transport
-// configuration failure as an authenticated-probe failure so the pool degrades
-// with a sanitized message instead of dialing an unintended endpoint.
-func runtimePoolInstanceEndpoint(_ *corev1alpha1.RuntimePool, pod *corev1.Pod) string {
-	if pod != nil && pod.Annotations[externalRuntimeEndpointAnnotation] != "" {
-		return pod.Annotations[externalRuntimeEndpointAnnotation]
+// Only Core's exact native-process binding can supply a routed endpoint.
+// Real runtime Pods always use their independently observed address.
+func runtimePoolInstanceEndpoint(pool *corev1alpha1.RuntimePool, pod *corev1.Pod) string {
+	if runtimePoolHasExternalWorkspace(pool) {
+		evidence, err := externalRuntimeEvidence(pool)
+		if err != nil {
+			return ""
+		}
+		if evidence != nil && evidence.NativeProcess {
+			if evidence.WorkspaceUID != pool.Spec.ExecutionWorkspace.WorkspaceRef.UID ||
+				pod == nil || string(pod.UID) != evidence.Identity.InstanceID {
+				return ""
+			}
+			return evidence.Endpoint
+		}
+		if slices.Contains(pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+			return ""
+		}
 	}
-
 	return runtimePoolPodEndpoint(pod)
 }
 

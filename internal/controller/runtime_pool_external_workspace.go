@@ -88,7 +88,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if stopping {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
-	if r.CleanupOnly {
+	if r.CleanupOnly || r.WorkspaceCleanupOnly {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace dispatch is disabled")
 	}
 	if r.Epochs != nil {
@@ -235,10 +235,14 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		registration.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(registration) {
 		return ctrl.Result{}, fmt.Errorf("workspace provider no longer matches the admitted identity and capabilities")
 	}
-	nativeProcess := slices.Contains(registration.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)
-	if !nativeProcess && slices.Contains(pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
-		return ctrl.Result{}, fmt.Errorf("workspace provider does not support required native-process materialization")
+	required, err := externalWorkspaceRuntimeRequiredFeatures(pool, w)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
+	if !featureSetContainsAll(registration.Status.SupportedFeatures, required) {
+		return ctrl.Result{}, fmt.Errorf("workspace provider does not support every frozen runtime requirement")
+	}
+	nativeProcess := slices.Contains(required, workspacev1alpha1.WorkspaceFeatureNativeProcess)
 	publicKey, err := harnessv2.CredentialBootstrapPublicKey(auth.Data[runtimePoolBootstrapSigningSeedKey])
 	if err != nil {
 		return ctrl.Result{}, err
@@ -291,16 +295,7 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		network.Egress = append(network.Egress, p.Spec.Egress...)
 	}
 	request.Runtime.NetworkPolicy = network
-	request.Runtime.RequiredFeatures = append([]workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureACPRuntime}, pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures...)
-	if nativeProcess && !slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
-		request.Runtime.RequiredFeatures = append(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)
-	}
-	if request.RestoreFrom != nil {
-		request.Runtime.RequiredFeatures = append(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureRestore, workspacev1alpha1.WorkspaceFeatureCheckpoint)
-	}
-	if slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) && !slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
-		request.Runtime.RequiredFeatures = append(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend)
-	}
+	request.Runtime.RequiredFeatures = required
 	if w.Spec.Workload != nil {
 		request.Sequence = w.Spec.Workload.Sequence + 1
 		request.PreviousInstance = &w.Status.Allocation.Identity
@@ -319,6 +314,38 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		return ctrl.Result{}, err
 	}
 	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "public workload request published; waiting for provider materialization")
+}
+
+func externalWorkspaceRuntimeRequiredFeatures(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) ([]workspacev1alpha1.ExecutionWorkspaceFeature, error) {
+	required := slices.Clone(pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures)
+	if w.Spec.Workload != nil {
+		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil {
+			return nil, fmt.Errorf("published workload cannot establish frozen materialization intent")
+		}
+		if len(required) == 0 {
+			// Older pools did not freeze this field. Their admitted predecessor
+			// proves the materialization kind across restarts and cold resume.
+			required = slices.Clone(w.Spec.Workload.Runtime.RequiredFeatures)
+		} else if slices.Contains(required, workspacev1alpha1.WorkspaceFeatureNativeProcess) != slices.Contains(w.Spec.Workload.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+			return nil, fmt.Errorf("pool requirements conflict with the published materialization kind")
+		}
+	} else if len(required) == 0 {
+		return nil, fmt.Errorf("workspace pool has no frozen materialization intent")
+	}
+	add := func(feature workspacev1alpha1.ExecutionWorkspaceFeature) {
+		if !slices.Contains(required, feature) {
+			required = append(required, feature)
+		}
+	}
+	add(workspacev1alpha1.WorkspaceFeatureACPRuntime)
+	if pool.Spec.ExecutionWorkspace.RestoreFrom != nil {
+		add(workspacev1alpha1.WorkspaceFeatureRestore)
+		add(workspacev1alpha1.WorkspaceFeatureCheckpoint)
+	}
+	if slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
+		add(workspacev1alpha1.WorkspaceFeatureSuspend)
+	}
+	return required, nil
 }
 
 //nolint:gocyclo // Check every accessible Pod and storage identity before credential delivery.
@@ -897,10 +924,6 @@ func runtimePoolWorkspaceStartupPod(ctx context.Context, reader client.Reader, p
 		active.PodAddress != pod.Status.PodIP || active.RuntimeInstanceID != runtimePoolRuntimeInstanceID(pod.UID, harnessv2.SupervisorBootID(active.BootID)) || active.ProfileDigest != pool.Spec.Runtime.Profile.Digest {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[externalRuntimeEndpointAnnotation] = evidence.Endpoint
 	return pod, nil
 }
 
@@ -909,7 +932,11 @@ func runtimePoolWorkspaceStartupEndpoint(ctx context.Context, reader client.Read
 	if err != nil {
 		return "", err
 	}
-	return pod.Annotations[externalRuntimeEndpointAnnotation], nil
+	endpoint := runtimePoolInstanceEndpoint(pool, pod)
+	if endpoint == "" {
+		return "", workspaceprovider.ErrStaleIdentity
+	}
+	return endpoint, nil
 }
 
 // Loss of an independently observed runtime Pod makes authenticated drain

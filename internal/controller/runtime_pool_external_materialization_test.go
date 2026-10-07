@@ -36,6 +36,15 @@ func (f *externalRuntimePoolFixture) advertiseNativeProcess(t *testing.T) {
 	if err := f.r.Update(t.Context(), provider); err != nil {
 		t.Fatal(err)
 	}
+	if f.currentWorkspace(t).Spec.Workload == nil {
+		// This fixture represents the native kind selected at pool creation.
+		f.pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures = append(f.pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)
+		pool := runtimePoolTestGetPool(t, f.r, f.pool)
+		pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures = slices.Clone(f.pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures)
+		if err := f.r.Update(t.Context(), &pool); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestExternalRuntimePoolFreezesMaterializationLayoutBeforeRevision(t *testing.T) {
@@ -266,8 +275,8 @@ func TestExternalRuntimePoolPublicationFencesAuthoritativeProvider(t *testing.T)
 				t.Fatal("publication used cached provider capabilities")
 			}
 			if name == "native capability" {
-				if err != nil || w.Spec.Workload == nil || !slices.Contains(w.Spec.Workload.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
-					t.Fatalf("authoritative capability was not frozen: %v", err)
+				if err != nil || w.Spec.Workload == nil || slices.Contains(w.Spec.Workload.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+					t.Fatalf("late authoritative capability changed the frozen Pod kind: %v", err)
 				}
 			} else if err == nil || w.Spec.Workload != nil {
 				t.Fatalf("unproven provider identity published workload: %v", err)

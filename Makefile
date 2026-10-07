@@ -98,7 +98,9 @@ manifests: controller-gen kustomize workspace-crds ## Generate canonical and sta
 .PHONY: workspace-crds
 workspace-crds: ## Source workspace CRDs from the pinned shared module.
 	go mod download github.com/orka-agents/orka-workspace
-	@workspace_module_dir="$$(go list -m -f '{{.Dir}}' github.com/orka-agents/orka-workspace)"; \
+	@set -euo pipefail; \
+		workspace_module_dir="$$(go list -m -f '{{.Dir}}' github.com/orka-agents/orka-workspace)"; \
+		rm -f config/crd/bases/workspace.orka.ai_*.yaml; \
 		cp "$$workspace_module_dir"/config/crd/bases/workspace.orka.ai_*.yaml config/crd/bases/
 
 .PHONY: release-manifest

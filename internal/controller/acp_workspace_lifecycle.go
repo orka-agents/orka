@@ -929,8 +929,13 @@ func acpClassWorkspaceResumesFromSuspended(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	binding *ACPRuntimeWorkspaceBinding,
 ) bool {
-	resumeProviderSupported := binding.Provider == corev1alpha1.WorkspaceProviderSubstrate ||
-		binding.Provider == corev1alpha1.WorkspaceProviderAgentSandbox
+	resumeProviderSupported := binding.Class.ControllerName != "" &&
+		string(binding.Provider) == binding.Class.ControllerName &&
+		binding.Class.LifecycleContractVersion == workspacev1alpha1.LifecycleContractV1
+	if binding.Class.ControllerName == "" {
+		resumeProviderSupported = binding.Provider == corev1alpha1.WorkspaceProviderSubstrate ||
+			binding.Provider == corev1alpha1.WorkspaceProviderAgentSandbox
+	}
 	return workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
 		workspace.Spec.Attachment == nil &&
 		resumeProviderSupported &&
