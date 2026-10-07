@@ -295,8 +295,8 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
-			if result.RequeueAfter != connectionRefreshInterval {
-				t.Fatalf("RequeueAfter = %v", result.RequeueAfter)
+			if result.RequeueAfter != 0 {
+				t.Fatalf("RequeueAfter = %v, want watch-driven reconciles only", result.RequeueAfter)
 			}
 			updated := &corev1alpha1.Connection{}
 			if err := c.Get(context.Background(), key, updated); err != nil {
@@ -906,23 +906,27 @@ func TestConnectionReconcilerExpiresRefreshlessLink(t *testing.T) {
 func TestConnectionNextPassFollowsExpiry(t *testing.T) {
 	now := time.Now()
 	connection := testConnection("tenant", "github-alice", "github")
-	if got := connectionNextPass(connection, now); got != connectionRefreshInterval {
-		t.Fatalf("no expiry = %v, want the refresh interval", got)
+	if got := connectionNextPass(connection, now, time.Time{}); got != 0 {
+		t.Fatalf("no deadline = %v, want watch-driven reconciles only", got)
 	}
 	soon := metav1.NewTime(now.Add(20 * time.Second))
 	connection.Status.ExpiresAt = &soon
-	if got := connectionNextPass(connection, now); got <= 0 || got > 21*time.Second {
+	if got := connectionNextPass(connection, now, time.Time{}); got <= 0 || got > 21*time.Second {
 		t.Fatalf("near expiry = %v, want just past the expiry", got)
 	}
 	far := metav1.NewTime(now.Add(time.Hour))
 	connection.Status.ExpiresAt = &far
-	if got := connectionNextPass(connection, now); got != connectionRefreshInterval {
-		t.Fatalf("far expiry = %v, want the refresh interval", got)
+	if got := connectionNextPass(connection, now, time.Time{}); got < time.Hour || got > time.Hour+2*time.Second {
+		t.Fatalf("far expiry = %v, want just past the expiry", got)
+	}
+	// A parked completion that expires first is reaped on time.
+	if got := connectionNextPass(connection, now, now.Add(10*time.Minute)); got < 10*time.Minute || got > 10*time.Minute+2*time.Second {
+		t.Fatalf("completion deadline = %v, want just past the completion's expiry", got)
 	}
 	past := metav1.NewTime(now.Add(-time.Minute))
 	connection.Status.ExpiresAt = &past
-	if got := connectionNextPass(connection, now); got != connectionRefreshInterval {
-		t.Fatalf("past expiry = %v, want the refresh interval", got)
+	if got := connectionNextPass(connection, now, time.Time{}); got != 0 {
+		t.Fatalf("past expiry = %v, want no requeue", got)
 	}
 }
 

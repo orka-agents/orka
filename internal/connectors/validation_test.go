@@ -216,6 +216,12 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "single-label tool host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://orka-api/x"
 		}, want: "host is not allowed"},
+		{name: "oversized endpoint url", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://github.com/" + strings.Repeat("a", 2048)
+		}, want: "tokenURL must be at most 2048 bytes"},
+		{name: "oversized tool url", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/" + strings.Repeat("a", 2048)
+		}, want: "must be at most 2048 bytes"},
 		{name: "oversized client id", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.ClientID = strings.Repeat("c", 257)
 		}, want: "clientID must be at most 256 bytes"},
