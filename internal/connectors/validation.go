@@ -450,7 +450,9 @@ func validateEndpointQuery(field, rawQuery string, oauthEndpoint bool) *Issue {
 
 // credentialLikeParameter reports whether a query or authorization parameter
 // name looks like it carries a credential. Names are compared lowercased with
-// underscores folded to hyphens.
+// underscores folded to hyphens, and again with every separator removed, so
+// concatenated aliases (Authentication, X-Accesskey, awsaccesskeyid) are
+// caught too.
 func credentialLikeParameter(name string) bool {
 	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
 	if slices.Contains([]string{"sig", "signature", "assertion", "key", "auth", "x-auth", "pin", "passcode"}, normalized) {
@@ -462,6 +464,20 @@ func credentialLikeParameter(name string) bool {
 		"-key", "key-",
 	} {
 		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	compact := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, normalized)
+	if slices.Contains([]string{"xauth", "authkey", "authcode"}, compact) {
+		return true
+	}
+	for _, fragment := range []string{"authentication", "accesskey", "privatekey", "secretkey", "signingkey", "passphrase"} {
+		if strings.Contains(compact, fragment) {
 			return true
 		}
 	}
