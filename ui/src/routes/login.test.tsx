@@ -25,6 +25,7 @@ describe('login route', () => {
   beforeEach(() => {
     mockNavigate.mockClear()
     useAuthStore.setState({ token: null })
+    sessionStorage.clear()
   })
 
   it('exports Route with component', () => {
@@ -72,7 +73,18 @@ describe('login route', () => {
     useAuthStore.setState({ token: 'existing-token' })
     const LoginPage = Route.component!
     render(<LoginPage />)
-    expect(mockNavigate).toHaveBeenCalledWith({ to: '/' })
+    expect(mockNavigate).toHaveBeenCalledWith({ href: '/' })
+  })
+
+  it('returns to the page that sent the visitor here, fragment included', () => {
+    sessionStorage.setItem('orka-login-return', '/settings/connectors?status=pending&connection=github-1')
+    window.history.replaceState(null, '', '/login#completion=one-time')
+    useAuthStore.setState({ token: 'existing-token' })
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+    expect(mockNavigate).toHaveBeenCalledWith({ href: '/settings/connectors?status=pending&connection=github-1#completion=one-time' })
+    expect(sessionStorage.getItem('orka-login-return')).toBeNull()
+    window.history.replaceState(null, '', '/')
   })
 
   it('handles #token=... hash fragment from CLI login', async () => {
