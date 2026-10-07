@@ -417,7 +417,7 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 	}, fmt.Sprintf("connector-approval-claim:ap-1:%d:1", decisionSeq)); err != nil || !appended {
 		t.Fatalf("seed spent claim: appended = %t err = %v", appended, err)
 	}
-	seedConnectorEffect(t, h, `{"q":"x"}`, decisionSeq, 1, store.ExternalEffectInFlight, time.Now().Add(time.Minute))
+	seedConnectorEffect(t, h, decisionSeq, 1, store.ExternalEffectInFlight, time.Now().Add(time.Minute))
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1","idempotencyKey":"fresh"}`); status != http.StatusConflict || !strings.Contains(body, "still executing") {
 		t.Fatalf("replayed approval = %d %s", status, body)
 	}
@@ -750,12 +750,12 @@ func TestExecuteConnectorToolRefusesPolicyChangedSinceDispatch(t *testing.T) {
 // seedConnectorEffect records an effect for the claim (approval ap-1,
 // decisionSeq, releases) in the given state, the way a run that reached the
 // ledger would have.
-func seedConnectorEffect(t *testing.T, h *connectorToolHarness, args string, decisionSeq int64, releases int, state store.ExternalEffectState, lease time.Time) {
+func seedConnectorEffect(t *testing.T, h *connectorToolHarness, decisionSeq int64, releases int, state store.ExternalEffectState, lease time.Time) {
 	t.Helper()
 	task := connectorToolFixtures()
 	// Every seeded effect belongs to the one approval-required write tool.
 	tool := h.tools["gh_write"]
-	targetArgs, _ := approvals.TargetArguments(json.RawMessage(args), tool)
+	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), tool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
 	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, connectorTestPolicySpec(), "conn-uid", 2, 1)
 	run := connectorToolRun{task: task, tool: tool, binding: task.Status.ConnectionBindings[0], claim: &connectorApprovalClaim{
@@ -830,7 +830,7 @@ func TestExecuteConnectorToolReconcilesSpentClaimsFromTheLedger(t *testing.T) {
 	// The same holds when the stopped request had already reserved its
 	// record (still Pending).
 	claimSpent(2)
-	seedConnectorEffect(t, h, `{"q":"x"}`, decisionSeq, 2, store.ExternalEffectPending, time.Time{})
+	seedConnectorEffect(t, h, decisionSeq, 2, store.ExternalEffectPending, time.Time{})
 	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 		t.Fatalf("pending claim = %d %s", status, body)
 	}
@@ -845,7 +845,7 @@ func TestExecuteConnectorToolReconcilesSpentClaimsFromTheLedger(t *testing.T) {
 	// outcome unknown. The approval is spent and the worker is told so.
 	claimSpent(4)
 	// The lease must be in the future when taken; it lapses before the retry.
-	seedConnectorEffect(t, h, `{"q":"x"}`, decisionSeq, 4, store.ExternalEffectInFlight, time.Now().Add(150*time.Millisecond))
+	seedConnectorEffect(t, h, decisionSeq, 4, store.ExternalEffectInFlight, time.Now().Add(150*time.Millisecond))
 	time.Sleep(200 * time.Millisecond)
 	resolver.request = outboundaccess.ResolveRequest{}
 	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusBadGateway || !strings.Contains(body, "outcome is unknown") {
@@ -1044,7 +1044,7 @@ func TestSettlePendingConnectorEffectLeavesInFlightRecords(t *testing.T) {
 	identity := func(releases int) store.ExternalEffectIdentity {
 		return connectorToolEffectIdentity(task, &connectorApprovalClaim{key: fmt.Sprintf("connector-approval-claim:ap-1:1:%d", releases)})
 	}
-	seedConnectorEffect(t, h, `{"q":"x"}`, 1, 0, store.ExternalEffectInFlight, time.Now().Add(time.Hour))
+	seedConnectorEffect(t, h, 1, 0, store.ExternalEffectInFlight, time.Now().Add(time.Hour))
 	if err := controller.SettlePendingExternalEffect(context.Background(), h.effects, h.fence, identity(0), store.ExternalEffectFailed); !errors.Is(err, controller.ErrExternalEffectNotPending) {
 		t.Fatalf("settling an in-flight record err = %v, want ErrExternalEffectNotPending", err)
 	}
@@ -1052,7 +1052,7 @@ func TestSettlePendingConnectorEffectLeavesInFlightRecords(t *testing.T) {
 	if effect, err := h.effects.GetExternalEffect(context.Background(), id); err != nil || effect.State != store.ExternalEffectInFlight {
 		t.Fatalf("in-flight record = %+v err = %v, want it untouched", effect, err)
 	}
-	seedConnectorEffect(t, h, `{"q":"x"}`, 1, 1, store.ExternalEffectPending, time.Time{})
+	seedConnectorEffect(t, h, 1, 1, store.ExternalEffectPending, time.Time{})
 	if err := controller.SettlePendingExternalEffect(context.Background(), h.effects, h.fence, identity(1), store.ExternalEffectFailed); err != nil {
 		t.Fatalf("settling a pending record: %v", err)
 	}

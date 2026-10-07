@@ -195,6 +195,15 @@ func readConnectorPolicy(
 // approval; policy and transaction identity are the controller's concern.
 const connectorBackedToolAnnotation = "orka.ai/connector-backed"
 
+// isConnectorBackedTool reports whether the worker routes tool to the
+// controller as a connector-backed tool.
+func isConnectorBackedTool(tool *corev1alpha1.Tool) bool {
+	return tool != nil && tool.Annotations[connectorBackedToolAnnotation] == connectorBackedToolValue
+}
+
+// connectorBackedToolValue marks a connector-backed Tool.
+const connectorBackedToolValue = "true"
+
 // markConnectorBackedTools annotates the in-memory Tools the worker routes to
 // the controller so the approval gate digests their plain spec. The marker is
 // derived from the routing classification only: any value that arrived on
@@ -214,7 +223,7 @@ func markConnectorBackedTools(customTools map[string]*corev1alpha1.Tool, names m
 		if tool.Annotations == nil {
 			tool.Annotations = map[string]string{}
 		}
-		tool.Annotations[connectorBackedToolAnnotation] = "true"
+		tool.Annotations[connectorBackedToolAnnotation] = connectorBackedToolValue
 	}
 }
 
