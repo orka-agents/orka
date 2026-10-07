@@ -795,23 +795,17 @@ func filterConnectorToolsForRequester(
 	return visible, connectorWrite, infos, nil
 }
 
-// frozenConnectionsMatchClassification reports dispatch drift when a policy
-// the freeze bound was not classified as the same connection-mode policy
-// object (name, UID, generation, provider) when visibility and approvals
-// were decided: a policy that entered connection mode between the two reads
-// would otherwise reach the person's credential with no hiding and no
-// approval default.
-func frozenConnectionsMatchClassification(frozen []agentExecutionSnapshotConnection, infos map[string]connectorToolInfo) error {
-	for _, entry := range frozen {
-		matched := false
-		for _, info := range infos {
-			if info.PolicyName == entry.PolicyName && info.PolicyUID == entry.PolicyUID &&
-				info.PolicyGeneration == entry.PolicyGeneration && info.Provider == entry.Provider {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+// connectorClassificationUnchanged reports dispatch drift when any tool
+// the freeze covered classified differently from the read that decided
+// visibility and approvals. Tools are compared one by one, not by policy:
+// a Tool retargeted onto a connection-mode policy another Tool already
+// uses would otherwise pass on that Tool's entry, although its own
+// visibility and approval default were decided as a plain tool.
+func connectorClassificationUnchanged(planned, frozen map[string]connectorToolInfo, toolNames []string) error {
+	for _, name := range toolNames {
+		before, wasConnector := planned[name]
+		after, isConnector := frozen[name]
+		if wasConnector != isConnector || before != after {
 			return errConnectorDispatchDrift
 		}
 	}
@@ -961,18 +955,32 @@ func freezeRequesterConnectionsForTools(
 	toolNames []string,
 	scope connectorScope,
 ) ([]agentExecutionSnapshotConnection, error) {
+	frozen, _, err := freezeClassifiedRequesterConnections(ctx, reader, registry, task, toolNames, scope)
+	return frozen, err
+}
+
+// freezeClassifiedRequesterConnections is freezeRequesterConnectionsForTools
+// that also returns the classification the freeze was made from.
+func freezeClassifiedRequesterConnections(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	toolNames []string,
+	scope connectorScope,
+) ([]agentExecutionSnapshotConnection, map[string]connectorToolInfo, error) {
 	if reader == nil || task == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	scope.strictPolicies = true
 	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if scope.builtins && anyBuiltinInfo(infos) {
 		// The link is frozen for a child only within its parents' repositories.
 		if err := linkedRepositoryScopeInherited(ctx, reader, task); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	var frozen []agentExecutionSnapshotConnection
@@ -991,7 +999,7 @@ func freezeRequesterConnectionsForTools(
 		if !cached {
 			connection, err = requesterConnection(ctx, reader, task, info.Provider)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			connections[info.Provider] = connection
 		}
@@ -1006,13 +1014,13 @@ func freezeRequesterConnectionsForTools(
 			// binding retries rather than freeze a policy no call can use.
 			if connection == nil {
 				if scope.builtins {
-					return nil, fmt.Errorf("%w: %s", ErrLinkedBuiltinChanged, name)
+					return nil, nil, fmt.Errorf("%w: %s", ErrLinkedBuiltinChanged, name)
 				}
 				continue
 			}
 			if class, _ := connectors.BuiltinConnectorToolClass(name); scope.builtins && class == corev1alpha1.ConnectorToolClassWrite &&
 				connection.Spec.Mode != corev1alpha1.ConnectionModeReadWrite {
-				return nil, fmt.Errorf("%w: %s", ErrLinkedBuiltinChanged, name)
+				return nil, nil, fmt.Errorf("%w: %s", ErrLinkedBuiltinChanged, name)
 			}
 			frozen = append(frozen, agentExecutionSnapshotConnection{
 				PolicyName: info.PolicyName, Tool: name, Provider: info.Provider, ConnectionName: connection.Name,
@@ -1039,7 +1047,7 @@ func freezeRequesterConnectionsForTools(
 		}
 		frozen = append(frozen, entry)
 	}
-	return frozen, nil
+	return frozen, infos, nil
 }
 
 // freezeRequesterConnections is the ACP entry point: it freezes the
@@ -1051,6 +1059,20 @@ func freezeRequesterConnections(
 	task *corev1alpha1.Task,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
 ) ([]agentExecutionSnapshotConnection, error) {
+	frozen, _, _, err := freezeRequesterConnectionsClassified(ctx, reader, registry, task, mcpConfiguration)
+	return frozen, err
+}
+
+// freezeRequesterConnectionsClassified is freezeRequesterConnections that
+// also returns the classification the freeze was made from and the tools
+// it covered, so the caller can hold it to the planning classification.
+func freezeRequesterConnectionsClassified(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+) ([]agentExecutionSnapshotConnection, map[string]connectorToolInfo, []string, error) {
 	var names, custom []string
 	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
 		if descriptor.Source == harnessv2.MCPToolSourceBrokeredCustom || descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin {
@@ -1067,14 +1089,14 @@ func freezeRequesterConnections(
 		for _, name := range custom {
 			if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, &corev1alpha1.Tool{}); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil, fmt.Errorf("tool %q was removed while the task was being bound; binding retries", name)
+					return nil, nil, nil, fmt.Errorf("tool %q was removed while the task was being bound; binding retries", name)
 				}
-				return nil, fmt.Errorf("load tool %q: %w", name, err)
+				return nil, nil, nil, fmt.Errorf("load tool %q: %w", name, err)
 			}
 		}
 	}
-	frozen, err := freezeRequesterConnectionsForTools(ctx, reader, registry, task, names, connectorScope{builtins: true})
-	return frozen, permanentLinkedBuiltinError(err)
+	frozen, infos, err := freezeClassifiedRequesterConnections(ctx, reader, registry, task, names, connectorScope{builtins: true})
+	return frozen, infos, names, permanentLinkedBuiltinError(err)
 }
 
 // anyBuiltinInfo reports whether any classified tool is a linked built-in.

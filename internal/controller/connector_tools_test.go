@@ -466,30 +466,34 @@ func TestRequesterConnectionRevalidatesAgainstCurrentProvider(t *testing.T) {
 	}
 }
 
-// TestFrozenConnectionsMatchClassification covers an ACP binding whose
-// policy changed between the classification that decided visibility and
-// approvals and the Connection freeze: a policy that entered connection
-// mode, or a connection-mode policy object that changed, is drift, so the
-// snapshot is never committed with a credential the plan did not account for.
-func TestFrozenConnectionsMatchClassification(t *testing.T) {
-	infos := map[string]connectorToolInfo{
-		"gh_read":  {PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"},
-		"gh_write": {PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"},
+// TestConnectorClassificationUnchanged covers an ACP binding whose tools
+// changed between the classification that decided visibility and approvals
+// and the Connection freeze: a policy that entered connection mode, a
+// connection-mode policy object that changed, and a Tool retargeted onto a
+// policy another Tool already uses are all drift, so the snapshot is never
+// committed with a credential the plan did not account for.
+func TestConnectorClassificationUnchanged(t *testing.T) {
+	read := connectorToolInfo{PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	planned := map[string]connectorToolInfo{"gh_read": read}
+	names := []string{"gh_read", "plain"}
+	if err := connectorClassificationUnchanged(planned, map[string]connectorToolInfo{"gh_read": read}, names); err != nil {
+		t.Fatalf("unchanged err = %v", err)
 	}
-	entry := agentExecutionSnapshotConnection{PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"}
-	if err := frozenConnectionsMatchClassification([]agentExecutionSnapshotConnection{entry}, infos); err != nil {
-		t.Fatalf("matching freeze err = %v", err)
+	if err := connectorClassificationUnchanged(nil, nil, nil); err != nil {
+		t.Fatalf("empty err = %v", err)
 	}
-	if err := frozenConnectionsMatchClassification(nil, infos); err != nil {
-		t.Fatalf("empty freeze err = %v", err)
-	}
-	changed := entry
+	changed := read
 	changed.PolicyGeneration = 4
-	entered := agentExecutionSnapshotConnection{PolicyName: "was-direct", PolicyUID: "direct-uid", PolicyGeneration: 2, Provider: "github"}
-	retargeted := entry
+	retargeted := read
 	retargeted.Provider = "gitlab"
-	for name, frozen := range map[string]agentExecutionSnapshotConnection{"changed generation": changed, "entered connection mode": entered, "retargeted provider": retargeted} {
-		if err := frozenConnectionsMatchClassification([]agentExecutionSnapshotConnection{frozen}, infos); !errors.Is(err, errConnectorDispatchDrift) {
+	for name, frozen := range map[string]map[string]connectorToolInfo{
+		"changed generation":   {"gh_read": changed},
+		"retargeted provider":  {"gh_read": retargeted},
+		"left connection mode": {},
+		// plain was decided as a plain tool, then joined gh_read's policy.
+		"joined a shared policy": {"gh_read": read, "plain": read},
+	} {
+		if err := connectorClassificationUnchanged(planned, frozen, names); !errors.Is(err, errConnectorDispatchDrift) {
 			t.Fatalf("%s: err = %v, want errConnectorDispatchDrift", name, err)
 		}
 	}
