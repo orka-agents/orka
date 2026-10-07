@@ -16,7 +16,13 @@ spec:
     # codex runtime cannot do: on it only the read tools are offered. Keep
     # the write tools listed so the same Agent works on an external
     # AgentKit or Foundry runtime that registers them as approval-required.
+    # With Bash off, codex enforces exactly one restricted native surface:
+    # Read, Glob, and Grep on a read workspace. Without them every Task fails
+    # at dispatch.
     defaultAllowedTools:
+      - Read
+      - Glob
+      - Grep
       - list_pull_requests
       - list_issues
       - get_issue
