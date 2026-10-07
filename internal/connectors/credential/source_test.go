@@ -281,7 +281,7 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 	}
 	updated := h.reload()
 	ready := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionReady)
-	if updated.Status.State != corev1alpha1.ConnectionStateRevoked || ready == nil || ready.Status != metav1.ConditionTrue && ready.Reason != corev1alpha1.ConnectionReasonRevoked {
+	if updated.Status.State != corev1alpha1.ConnectionStateRevoked || ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != corev1alpha1.ConnectionReasonRevoked {
 		t.Fatalf("status after revocation = %+v", updated.Status)
 	}
 	// The link is now not Ready, so the next call fails before any refresh.
@@ -927,13 +927,18 @@ func TestSharedRefreshIsJudgedAgainstEachCallersHorizon(t *testing.T) {
 	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_5m", RefreshToken: "ghr_5m", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)}
 	slow := h.curateSlowTool()
 	joined := make(chan error, 1)
+	entered := make(chan struct{}, 2)
+	h.source.flightEntered = func() { entered <- struct{}{} }
 	h.refresher.onRefresh = func() {
-		// The long request joins the flight the short one started.
+		// The long request joins the flight the short one started; the
+		// refresh holds until both callers are in it.
 		go func() {
 			_, err := h.source.ResolveConnectionCredential(context.Background(), slow)
 			joined <- err
 		}()
-		time.Sleep(50 * time.Millisecond)
+		for range 2 {
+			<-entered
+		}
 	}
 	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_5m" {
 		t.Fatalf("short request = %+v err = %v, want the five-minute token", got, err)
@@ -979,6 +984,7 @@ type flakyCustody struct {
 	*sqlite.Store
 	failReplace bool
 	failRetire  int
+	blockRetire bool
 	retires     int
 }
 
@@ -992,6 +998,10 @@ func (f *flakyCustody) ReplaceConnectorCredential(ctx context.Context, ref store
 
 func (f *flakyCustody) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
 	f.retires++
+	if f.blockRetire {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if f.failRetire > 0 {
 		f.failRetire--
 		return errors.New("database is locked")
@@ -1025,6 +1035,35 @@ func TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails(t *testing.T) {
 	}
 	if !kept || flaky.retires != 2 {
 		t.Fatalf("retired = %+v retires = %d, want the issued pair retired after one retry", retired, flaky.retires)
+	}
+}
+
+// TestRefreshRetirementIsBounded covers a custody store that blocks while
+// the issued pair is retired: the retirement gives up within its own bound,
+// so the refresh flight is released instead of holding every caller.
+func TestRefreshRetirementIsBounded(t *testing.T) {
+	previousTimeout, previousBackoff := refreshRetireTimeout, refreshRetireBackoff
+	refreshRetireTimeout, refreshRetireBackoff = 50*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { refreshRetireTimeout, refreshRetireBackoff = previousTimeout, previousBackoff })
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
+	flaky := &flakyCustody{Store: h.store, failReplace: true, blockRetire: true}
+	h.source.Credentials = flaky
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a refresh custody could not store must fail the call")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a blocked retirement held the refresh flight")
+	}
+	if flaky.retires == 0 {
+		t.Fatal("the issued pair was never offered to retirement custody")
 	}
 }
 

@@ -237,6 +237,16 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	if _, err := freezeRequesterConnections(context.Background(), reader, nil, fresh, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
 		t.Fatalf("fresh unsealed task: err = %v, want ErrRequesterStampPending", err)
 	}
+	// A Task that reaches no connection-mode policy is not held for a seal
+	// it has no use for.
+	plain := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "tenant"},
+		Spec:       corev1alpha1.ToolSpec{Description: "plain", HTTP: &corev1alpha1.HTTPExecution{URL: "https://api.example.test/x"}},
+	}
+	plainReader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(plain).Build()
+	if frozen, err := freezeRequesterConnections(context.Background(), plainReader, nil, fresh, brokeredConfiguration("plain")); err != nil || len(frozen) != 0 {
+		t.Fatalf("fresh unsealed task without connection-mode policies: frozen = %+v err = %v, want no wait", frozen, err)
+	}
 	fresh.CreationTimestamp = metav1.NewTime(time.Now().Add(-requesterStampGrace - time.Minute))
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, fresh, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
 		t.Fatalf("stale unsealed task: frozen = %+v err = %v, want unverified", frozen, err)
@@ -385,6 +395,91 @@ func TestACPChildTaskSealerSealsOwnedChildren(t *testing.T) {
 	}
 	if err := SealChildRequesterStamp(ctx, c, nil, parent, child.DeepCopy()); err == nil || errors.Is(err, ErrChildSealRefused) {
 		t.Fatalf("missing key err = %v, want a configuration error", err)
+	}
+}
+
+// TestACPChildTaskSealerSkipsWhatItCannotSeal covers a seal requested
+// while stamps are disabled, or for a child without a requester: there is
+// nothing to seal, so the hook returns at once without reading the parent
+// or retrying.
+func TestACPChildTaskSealerSkipsWhatItCannotSeal(t *testing.T) {
+	var reads atomic.Int32
+	c := ctrlfake.NewClientBuilder().WithScheme(newTestScheme()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+				reads.Add(1)
+				return errors.New("apiserver unavailable")
+			},
+		}).Build()
+	seal := ACPChildTaskSealer(c, "tenant", "parent", "parent-uid")
+	requested := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "tenant", UID: "child-uid"},
+		Spec:       corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}},
+	}
+	SetRequesterStampKey(nil)
+	if err := seal(context.Background(), c, requested); err != nil {
+		t.Fatalf("stamps disabled: err = %v", err)
+	}
+	SetRequesterStampKey(testRequesterStampKey)
+	t.Cleanup(func() { SetRequesterStampKey(nil) })
+	anonymous := requested.DeepCopy()
+	anonymous.Spec.RequestedBy = nil
+	if err := seal(context.Background(), c, anonymous); err != nil {
+		t.Fatalf("no requester: err = %v", err)
+	}
+	if reads.Load() != 0 {
+		t.Fatalf("reads = %d, want none", reads.Load())
+	}
+}
+
+// TestHandleScheduledSealsRunsOfAVerifiedRequester covers a scheduled Task
+// the API sealed for a person: each run acts for the same person, so the
+// controller seals it against the scheduled Task right after creating it,
+// and the run's binding neither waits out the grace window nor loses the
+// person's Connections.
+func TestHandleScheduledSealsRunsOfAVerifiedRequester(t *testing.T) {
+	SetRequesterStampKey(testRequesterStampKey)
+	t.Cleanup(func() { SetRequesterStampKey(nil) })
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	scheduled := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sched-person", Namespace: "default", UID: "sched-person-uid",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+			Annotations: map[string]string{
+				labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+				labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "sched-person-uid", requester.Issuer, requester.Subject),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI, Prompt: "triage", Schedule: "* * * * *",
+			StartingDeadlineSeconds: new(int64(300)), RequestedBy: requester,
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled, LastScheduleTime: &lastSchedule},
+	}
+	ctx := context.Background()
+	r := newUnitReconciler(newTestScheme(), scheduled)
+	// The API server assigns UIDs; the fake client does not.
+	r.Client = interceptor.NewClient(r.Client.(ctrlclient.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, cl ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.CreateOption) error {
+			if obj.GetUID() == "" {
+				obj.SetUID(types.UID(obj.GetName() + "-uid"))
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	})
+	if _, err := r.handleScheduled(ctx, scheduled); err != nil {
+		t.Fatal(err)
+	}
+	var runs corev1alpha1.TaskList
+	if err := r.List(ctx, &runs, ctrlclient.InNamespace("default"), ctrlclient.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(scheduled.Name)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs.Items) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs.Items))
+	}
+	if run := runs.Items[0]; !connectors.RequesterStampValid(testRequesterStampKey, &run) {
+		t.Fatalf("run annotations = %v, want a stamp sealed for the run's own UID", run.Annotations)
 	}
 }
 
