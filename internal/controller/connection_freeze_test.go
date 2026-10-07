@@ -506,7 +506,7 @@ func TestFreezeRequesterConnectionsRequiresOneOwnedLink(t *testing.T) {
 
 	// A Ready canonical link and an adopted duplicate: ambiguous, so the
 	// policy is frozen without a Connection and the call fails closed.
-	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, canonical, adopted).Build()
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, canonical, adopted).Build()
 	frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search"))
 	if err != nil || len(frozen) != 1 || frozen[0].PolicyName != "github-conn" || frozen[0].UID != "" {
 		t.Fatalf("duplicate links: frozen = %+v err = %v, want the policy frozen without a Connection", frozen, err)
@@ -517,7 +517,7 @@ func TestFreezeRequesterConnectionsRequiresOneOwnedLink(t *testing.T) {
 	foreign := canonical.(*corev1alpha1.Connection).DeepCopy()
 	foreign.UID = "foreign-uid"
 	foreign.Spec.Subject.Subject = "mallory"
-	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, foreign, adopted).Build()
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, foreign, adopted).Build()
 	frozen, err = freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search"))
 	if err != nil || len(frozen) != 1 || frozen[0].UID != "adopted-uid" {
 		t.Fatalf("foreign canonical object: frozen = %+v err = %v, want the adopted link", frozen, err)
