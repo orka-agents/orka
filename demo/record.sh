@@ -73,4 +73,6 @@ for name in "${demos[@]}"; do
     --command "bash $script"
 
   python3 demo/lib/markers.py "$cast"
+  # A busy machine stretches the typing sleeps unevenly; even them out.
+  python3 demo/lib/typing.py "$cast"
 done
