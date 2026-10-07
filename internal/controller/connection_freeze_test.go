@@ -88,7 +88,7 @@ func TestFreezeRequesterConnections(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	tool, policy, connection, task := freezeFixtures(true)
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection).Build()
-	frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search", "gh_search"))
+	frozen, err := freezeRequesterConnections(context.Background(), reader, tools.NewRegistry(), task, brokeredConfiguration("gh_search", "gh_search"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3708,7 +3708,7 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	// approval default, so the build fails and the dispatch re-freezes.
 	direct := policy.DeepCopy()
 	direct.Spec.Connection = nil
-	if err := builder.Client.Update(context.Background(), direct); err != nil {
+	if err := builder.Update(context.Background(), direct); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
