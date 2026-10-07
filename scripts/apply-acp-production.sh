@@ -193,6 +193,7 @@ jq -e --arg controller_sa "'orka-controller-manager'" '
   ([.items[] | select(
     .apiVersion == "admissionregistration.k8s.io/v1" and
     .kind == "ValidatingAdmissionPolicyBinding" and
+    .metadata.name == "orka-acp-workspace-lease-protection" and
     .spec.policyName == "orka-acp-workspace-lease-protection" and
     .spec.validationActions == ["Deny"]
   )] | length) == 1
