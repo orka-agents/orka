@@ -284,11 +284,17 @@ describe('ConnectorsPage', () => {
     expect(useUIStore.getState().namespace).toBe('orka-system')
   })
 
-  it('switches to the consent namespace when a callback fails elsewhere', async () => {
+  it('offers, but never makes, a switch to the namespace of a failed callback', async () => {
     useProviders([github])
     render(<ConnectorsPage search={{ status: 'error', reason: 'access_denied', connection: 'github-abc', namespace: 'team-a' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('cancelled'))
+    // The error redirect is unauthenticated: the persisted namespace stays
+    // put until the person chooses to switch.
+    expect(useUIStore.getState().namespace).toBe('orka-system')
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to team-a' }))
     await waitFor(() => expect(useUIStore.getState().namespace).toBe('team-a'))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('cancelled'))
+    expect(screen.queryByRole('button', { name: /Switch to/ })).not.toBeInTheDocument()
   })
 
   it('explains the missing manage scope when completion is refused for it', async () => {

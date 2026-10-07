@@ -420,7 +420,7 @@ Conditions are `ProviderResolved` and `ScopesGranted` (set by the controller; th
 
 ## Connector endpoints
 
-Available when the controller runs with `--connectors-enabled` and `--connector-callback-base-url`. Every route requires a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. Under context-token authorization, reads need `orka:connectors:read` and every mutation needs `orka:connectors:manage`, so a delegated token narrowed to other work cannot inspect or revoke a person's accounts. A person sees and changes only Connections whose `spec.subject` matches their identity; a foreign Connection reads as 404. Responses never carry token material.
+Available when the controller runs with `--connectors-enabled` and `--connector-callback-base-url`. Every route except the OAuth callback requires a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. The callback is the provider's redirect target and carries no user token: the signed single-use consent `state` and the server-side PKCE verifier authenticate it instead. Under context-token authorization, reads need `orka:connectors:read` and every mutation needs `orka:connectors:manage`, so a delegated token narrowed to other work cannot inspect or revoke a person's accounts. A person sees and changes only Connections whose `spec.subject` matches their identity; a foreign Connection reads as 404. Responses never carry token material.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
