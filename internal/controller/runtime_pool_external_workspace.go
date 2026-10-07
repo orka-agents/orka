@@ -402,6 +402,11 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Conte
 	}
 	claimName := ""
 	for _, volume := range evidence.PersistentVolumes {
+		// A Pod resolves claimName in its own namespace, regardless of the
+		// namespace supplied by provider evidence for a same-name claim.
+		if volume.Claim.Namespace != pod.Namespace {
+			return nil, fmt.Errorf("durable storage claim is outside the observed runtime Pod namespace")
+		}
 		claim := &corev1.PersistentVolumeClaim{}
 		pv := &corev1.PersistentVolume{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: volume.Claim.Namespace, Name: volume.Claim.Name}, claim); err != nil {

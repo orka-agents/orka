@@ -289,7 +289,7 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 
 func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) error {
 	if !r.SubstrateMCPToolsEnabled {
-		return fmt.Errorf("MCP substrateActor requires substrate to be enabled")
+		return fmt.Errorf("MCP substrateActor requires Substrate MCP tools to be enabled with --substrate-mcp-tools-enabled")
 	}
 	actor := tool.Spec.MCP.SubstrateActor
 	if strings.TrimSpace(actor.TemplateRef.Name) == "" {
