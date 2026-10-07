@@ -741,7 +741,7 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 	}
 
 	if runtimePoolHasExternalWorkspace(pool) && active != nil {
-		pod, err := runtimePoolWorkspaceStartupPod(ctx, c.APIReader, pool)
+		pod, err := runtimePoolWorkspaceCleanupPod(ctx, c.APIReader, pool)
 		if err != nil {
 			return fmt.Errorf("external RuntimePool admitted endpoint: %w", err)
 		}

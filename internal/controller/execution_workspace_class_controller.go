@@ -37,6 +37,8 @@ const (
 	reasonClassNotReady              = "ClassNotReady"
 	reasonPoolNotReady               = "PoolNotReady"
 	reasonProviderNotReady           = "ProviderNotReady"
+	reasonProviderNameUnsupported    = "ProviderNameUnsupported"
+	messageProviderNameUnsupported   = "provider registration name must be a DNS-compatible label value of at most 63 characters"
 	messageProviderDisabled          = "provider is disabled"
 	messageACPProfileInvalid         = "ACP RuntimeWorkspaceProfile is invalid for the selected provider backend"
 	messageProviderFeaturesMissing   = "provider does not support every explicit or implied class feature"
@@ -251,6 +253,9 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	}
 	if !provider.DeletionTimestamp.IsZero() {
 		return providerName, reasonProviderDeleting, "referenced workspace provider is deleting", nil
+	}
+	if !workspaceProviderNameSupportsRouting(provider.Name) {
+		return providerName, reasonProviderNameUnsupported, messageProviderNameUnsupported, nil
 	}
 	if provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
 		reason := string(workspacev1alpha1.ReasonProviderDraining)

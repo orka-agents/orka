@@ -65,7 +65,16 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 	if err := reader.Get(ctx, types.NamespacedName{Name: source.Spec.ProviderBinding.Name}, provider); err != nil {
 		return ctrl.Result{}, err
 	}
-	if provider.UID != source.Spec.ProviderBinding.UID || provider.Spec.ControllerName == "" || provider.Spec.ControllerName != source.Labels[workspace.ProviderControllerLabel] || provider.Spec.LifecycleState == workspace.ExecutionWorkspaceProviderDisabled || !slices.Contains(provider.Status.SupportedFeatures, workspace.WorkspaceFeatureCheckpoint) {
+	if provider.UID != source.Spec.ProviderBinding.UID || provider.Spec.ControllerName == "" || provider.Spec.ControllerName != source.Labels[workspace.ProviderControllerLabel] {
+		return ctrl.Result{}, fmt.Errorf("checkpoint provider identity or Data export capability is unavailable")
+	}
+	if !workspaceProviderNameSupportsRouting(provider.Name) {
+		if r.APIReader == nil {
+			return ctrl.Result{}, fmt.Errorf("checkpoint provider registration name requires authoritative validation")
+		}
+		return r.failRouting(ctx, checkpoint, reasonProviderNameUnsupported)
+	}
+	if provider.Spec.LifecycleState == workspace.ExecutionWorkspaceProviderDisabled || !slices.Contains(provider.Status.SupportedFeatures, workspace.WorkspaceFeatureCheckpoint) {
 		return ctrl.Result{}, fmt.Errorf("checkpoint provider identity or Data export capability is unavailable")
 	}
 	before := checkpoint.DeepCopy()

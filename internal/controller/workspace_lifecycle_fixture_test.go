@@ -299,6 +299,7 @@ func testAdmittedNativeDispatchWorkspace(t *testing.T, binding *ACPRuntimeWorksp
 			RequiredFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureNativeProcess},
 			Protocol:         harnessv2.ProtocolVersion, ContainerName: "runtime", Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Namespace: pool.Spec.RuntimeNamespace, Annotations: map[string]string{}}, Spec: corev1.PodSpec{AutomountServiceAccountToken: new(false), Containers: []corev1.Container{{Name: "runtime", Image: pool.Spec.Runtime.Image}}}}},
 	}
+	request.Runtime.Template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "ORKA_ACP_POD_UID", Value: string(externalNativeRuntimeUID(request))}}
 	var err error
 	request.Revision, err = workspacev1alpha1.WorkloadRevision(*request)
 	if err != nil {

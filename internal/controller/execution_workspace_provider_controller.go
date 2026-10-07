@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -114,7 +115,7 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	ready := heartbeatFresh && adapterObserved && adapterIdentified && contractsCompatible && parametersValid &&
-		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderActive
+		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderActive && workspaceProviderNameSupportsRouting(provider.Name)
 
 	conditions := make([]metav1.Condition, 0, 3)
 	conditions = append(conditions,
@@ -141,6 +142,9 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 	} else if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled {
 		readyReason = string(workspacev1alpha1.ReasonProviderDisabled)
 		readyMessage = "provider is disabled and permits cleanup only"
+	} else if !workspaceProviderNameSupportsRouting(provider.Name) {
+		readyReason = reasonProviderNameUnsupported
+		readyMessage = messageProviderNameUnsupported
 	} else if !heartbeatFresh {
 		readyReason = string(workspacev1alpha1.ReasonHeartbeatExpired)
 		readyMessage = "provider heartbeat is missing or expired"
@@ -170,6 +174,12 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: defaultProviderHeartbeatCheck}, nil
+}
+
+// The shared checkpoint policy authorizes the exact registration named by its
+// routing label. Core cannot replace that name with a hash or annotation.
+func workspaceProviderNameSupportsRouting(name string) bool {
+	return len(validation.IsDNS1123Subdomain(name)) == 0 && len(validation.IsValidLabelValue(name)) == 0
 }
 
 func (r *ExecutionWorkspaceProviderReconciler) providerParametersClusterScoped(

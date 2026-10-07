@@ -41,6 +41,26 @@ scratch mounts and Ingress/Egress policy. Existing admitted requests keep their
 original layout and cannot switch startup evidence kinds. Native operators must
 confine worker and router ingress while permitting Orka's authenticated routes.
 
+Native endpoint ingress requires worker labels whose literal values bind both
+the attested allocation ID and instance ID. Providers must use label-safe
+identities and birth labels unique to that allocation and incarnation. Before
+granting ingress, Core requires that only the exact attested worker Pod matches
+the full selector, including during deletion, and re-reads its UID and labels
+through the authoritative API. Core freezes its two endpoint policy targets
+before creation, verifies exact ownership and permissions on retries, and
+deletes only its known policies with UID/resourceVersion preconditions. Cold
+resume removes predecessor grants before saving the replacement evidence.
+A later workload cannot change those targets within the same pool; retire the
+exact pool and create a new one to change endpoint namespaces or permissions.
+
+Fresh native requests freeze an opaque Core runtime identity from the exact pool
+UID, workspace UID and workload sequence before admission. Raw provider process
+identity remains in the separate startup evidence and sealed bootstrap challenge;
+Task runtime fences contain only the opaque identity and supervisor boot ID.
+Older native requests that used provider identity cannot admit new Tasks. Their
+immutable workload remains available for exact authenticated drain and retirement;
+retire those instances before continuing with a fresh opaque identity.
+
 Private runtime credentials stay core-owned. Retirement closes admission and
 drains the authenticated instance before the provider receives exact sequence
 and instance authorization. A missing provider response retains both ownership
@@ -48,12 +68,22 @@ fences and finalizers. Independent checkpoint restore additionally binds the
 checkpoint UID, digest, class, and provider revision; the provider must acquire
 durable artifact ownership before native creation.
 
+Core requires provider registration names to be DNS-compatible Kubernetes label
+values of at most 63 characters, including for providers without checkpoint use.
+The shared checkpoint policy authorizes the exact registration named by the
+protected routing label; a hash or annotation cannot replace it. Longer names
+can be stored by Kubernetes but are unsupported for new Core admission.
+
 Core establishes checkpoint routing from the immutable source workspace UID.
 If the authoritative API proves that an unrouted source is absent or replaced,
 Core records `workspace.orka.ai/checkpoint-routing-failure` as `SourceNotFound`
 or `SourceUIDMismatch` and stops routing retries. This is a routing diagnostic;
 it does not set the provider's checkpoint phase or claim artifact cleanup.
-Create a new checkpoint request from a live exact source to retry export.
+An existing unrouted checkpoint bound to an unsupported provider name receives
+`ProviderNameUnsupported` in that same Core-owned annotation. It acquires no
+provider status or retained-artifact ownership. Install a supported registration
+and use a new workspace and checkpoint to retry that case. Create a new checkpoint
+request from a live exact source to retry source loss.
 Deleting sources and API outages remain retryable. Already routed checkpoints
 and retained artifacts keep their provider ownership after source deletion.
 

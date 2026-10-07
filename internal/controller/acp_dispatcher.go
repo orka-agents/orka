@@ -4302,10 +4302,10 @@ func (d *ACPDispatcher) runtimeClient(
 	if target.pool == nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("ACP runtime target is missing")
 	}
-	return d.runtimePoolClient(ctx, target.pool)
+	return d.runtimePoolClient(ctx, target.pool, requireAdmission)
 }
 
-func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha1.RuntimePool) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
+func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha1.RuntimePool, requireAdmission bool) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
 	active := pool.Status.ActiveInstance
 	if active == nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool has no active instance")
@@ -4328,7 +4328,11 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 	}
 	endpoint := exactPodEndpoint(active.PodAddress)
 	if runtimePoolHasExternalWorkspace(pool) {
-		endpoint, err = runtimePoolWorkspaceStartupEndpoint(ctx, uncachedReader(d.APIReader, d.Client), pool)
+		readEndpoint := runtimePoolWorkspaceStartupEndpoint
+		if !requireAdmission {
+			readEndpoint = runtimePoolWorkspaceCleanupEndpoint
+		}
+		endpoint, err = readEndpoint(ctx, uncachedReader(d.APIReader, d.Client), pool)
 		if err != nil {
 			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool admitted endpoint: %w", err)
 		}

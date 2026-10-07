@@ -3599,7 +3599,7 @@ func runtimePoolInstanceEndpoint(pool *corev1alpha1.RuntimePool, pod *corev1.Pod
 		}
 		if evidence != nil && evidence.NativeProcess {
 			if evidence.WorkspaceUID != pool.Spec.ExecutionWorkspace.WorkspaceRef.UID ||
-				pod == nil || string(pod.UID) != evidence.Identity.InstanceID {
+				pod == nil || pod.UID != evidence.RuntimeUID {
 				return ""
 			}
 			return evidence.Endpoint

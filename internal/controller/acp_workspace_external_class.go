@@ -77,6 +77,9 @@ func externalWorkspaceParametersBinding(object *unstructured.Unstructured) (*wor
 }
 
 func validateExternalACPProvider(ctx context.Context, c client.Client, provider *workspacev1alpha1.ExecutionWorkspaceProvider) error {
+	if !workspaceProviderNameSupportsRouting(provider.Name) {
+		return fmt.Errorf("%s", messageProviderNameUnsupported)
+	}
 	if provider.Spec.ControllerName == acpWorkspaceControllerLabelValue {
 		return fmt.Errorf("provider controllerName is reserved for the legacy ACP controller")
 	}

@@ -2819,12 +2819,20 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	profileDigest := plan.Digest
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
 	task.Status.Execution.RuntimePoolName = plan.PoolName
+	runtimeUID := types.UID("pod-uid")
+	if workspaceLifetime {
+		runtimeUID = externalNativeRuntimeUID(&workspacev1alpha1.WorkloadRequest{
+			Sequence: 1, Key: workspacev1alpha1.AllocationKey{WorkspaceUID: "expiring-workspace-uid"},
+			Runtime: &workspacev1alpha1.RuntimeWorkload{PoolBinding: workspacev1alpha1.ImmutableObjectBinding{UID: "pool-uid"}},
+		})
+	}
+	runtimeInstanceID := harnessv2.RuntimeInstanceID(runtimePoolRuntimeInstanceID(runtimeUID, "boot-id"))
 	var deleteCalls atomic.Int32
 	deadlineCancels := make(chan context.CancelCauseFunc, 1)
 	accepted := make(chan struct{})
 	server := newDispatcherTimeoutRuntimeServer(t, profile, profileDigest, &deleteCalls, func() {
 		close(accepted)
-	})
+	}, runtimeInstanceID)
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -2841,7 +2849,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 			Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
 			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
 				PodNamespace: "orka-runtimes", PodName: "runtime-pod", PodAddress: parsed.Host,
-				PodUID: "pod-uid", BootID: "boot-id", RuntimeInstanceID: "pod-uid.boot-id", ControllerEpoch: 1,
+				PodUID: string(runtimeUID), BootID: "boot-id", RuntimeInstanceID: string(runtimeInstanceID), ControllerEpoch: 1,
 				ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, ProfileDigest: string(profileDigest), ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
 			},
 		},
@@ -3496,6 +3504,7 @@ func newDispatcherTimeoutRuntimeServer(
 	digest harnessv2.ProfileDigest,
 	deleteCalls *atomic.Int32,
 	onAccepted func(),
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
 ) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -3507,7 +3516,9 @@ func newDispatcherTimeoutRuntimeServer(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+		response := dispatcherRuntimeStatusResponse(digest, current)
+		response.Fence.RuntimeInstanceID = runtimeInstanceID
+		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{

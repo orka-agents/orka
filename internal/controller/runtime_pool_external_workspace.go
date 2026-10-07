@@ -4,6 +4,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -28,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -36,6 +37,7 @@ import (
 
 const externalRuntimeEndpointAnnotation = "orka.ai/external-runtime-endpoint"
 const externalRuntimeEvidenceAnnotation = "orka.ai/external-runtime-instance-evidence"
+const externalNativeRuntimeUIDEnvName = "ORKA_ACP_POD_UID"
 
 type externalRuntimeInstanceEvidence struct {
 	WorkspaceUID  types.UID                          `json:"workspaceUID"`
@@ -43,6 +45,7 @@ type externalRuntimeInstanceEvidence struct {
 	Identity      workspacev1alpha1.InstanceIdentity `json:"identity"`
 	Pod           workspacev1alpha1.PodReference     `json:"pod"`
 	NativeProcess bool                               `json:"nativeProcess,omitempty"`
+	RuntimeUID    types.UID                          `json:"runtimeUID,omitempty"`
 	Endpoint      string                             `json:"endpoint,omitempty"`
 }
 
@@ -171,6 +174,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if w.Spec.Retirement != nil {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, false)
 	}
+	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) && !externalNativeRuntimeHasOpaqueIdentity(request) {
+		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "native workload requires retirement before opaque runtime identity admission")
+	}
 	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil || w.Status.ObservedGeneration != w.Generation {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
 	}
@@ -178,8 +184,8 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err != nil {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
 	}
-	if process := w.Status.Allocation.Startup.Process; process != nil {
-		if err := r.ensureExternalProcessIngress(ctx, pool, cfg, process); err != nil {
+	if w.Status.Allocation.Startup.Process != nil {
+		if err := r.ensureExternalProcessIngress(ctx, pool, cfg, w); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -302,6 +308,14 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		request.PreviousInstance = &w.Status.Allocation.Identity
 		request.RetainedData = w.Status.Allocation.RetainedData
 	}
+	if nativeProcess {
+		for i := range request.Runtime.Template.Spec.Containers[0].Env {
+			variable := &request.Runtime.Template.Spec.Containers[0].Env[i]
+			if variable.Name == externalNativeRuntimeUIDEnvName {
+				*variable = corev1.EnvVar{Name: variable.Name, Value: string(externalNativeRuntimeUID(&request))}
+			}
+		}
+	}
 	request.Revision, err = workspacev1alpha1.WorkloadRevision(request)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -349,6 +363,57 @@ func externalWorkspaceRuntimeRequiredFeatures(pool *corev1alpha1.RuntimePool, w 
 	return required, nil
 }
 
+// externalNativeRuntimeUID is an opaque Core fence for one immutable workload
+// sequence. Provider identifiers remain in the separate allocation evidence.
+func externalNativeRuntimeUID(request *workspacev1alpha1.WorkloadRequest) types.UID {
+	if request == nil || request.Runtime == nil || request.Runtime.PoolBinding.UID == "" || request.Key.WorkspaceUID == "" || request.Sequence < 1 {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("orka.ai/native-runtime-identity/v1\x00%s\x00%s\x00%d", request.Runtime.PoolBinding.UID, request.Key.WorkspaceUID, request.Sequence)))
+	return types.UID("workspace:" + hex.EncodeToString(digest[:]))
+}
+
+func externalNativeRuntimeIdentity(request *workspacev1alpha1.WorkloadRequest, legacyInstanceID string) (types.UID, bool, error) {
+	opaque := externalNativeRuntimeUID(request)
+	if opaque == "" {
+		return "", false, workspaceprovider.ErrStaleIdentity
+	}
+	var identity *corev1.EnvVar
+	for _, container := range request.Runtime.Template.Spec.Containers {
+		if container.Name != request.Runtime.ContainerName {
+			continue
+		}
+		for i := range container.Env {
+			if container.Env[i].Name == externalNativeRuntimeUIDEnvName {
+				if identity != nil {
+					return "", false, workspaceprovider.ErrStaleIdentity
+				}
+				identity = &container.Env[i]
+			}
+		}
+	}
+	if identity == nil {
+		return "", false, workspaceprovider.ErrStaleIdentity
+	}
+	if identity.ValueFrom == nil && identity.Value == string(opaque) {
+		return opaque, true, nil
+	}
+	// Pre-fix requests are immutable. Their admitted downward identity remains
+	// usable for exact retirement, while startup and Task dispatch deny it.
+	if identity.Value == "" && identity.ValueFrom != nil && identity.ValueFrom.FieldRef != nil && legacyInstanceID != "" {
+		field := identity.ValueFrom.FieldRef
+		if (field.APIVersion == "" || field.APIVersion == "v1") && field.FieldPath == "metadata.uid" && reflect.DeepEqual(identity.ValueFrom, &corev1.EnvVarSource{FieldRef: field}) {
+			return types.UID(legacyInstanceID), false, nil
+		}
+	}
+	return "", false, workspaceprovider.ErrStaleIdentity
+}
+
+func externalNativeRuntimeHasOpaqueIdentity(request *workspacev1alpha1.WorkloadRequest) bool {
+	_, opaque, err := externalNativeRuntimeIdentity(request, "")
+	return err == nil && opaque
+}
+
 //nolint:gocyclo // Check every accessible Pod and storage identity before credential delivery.
 func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Context, request *workspacev1alpha1.WorkloadRequest, evidence *workspacev1alpha1.StartupEvidence) (*corev1.Pod, error) {
 	if request == nil || request.Runtime == nil || evidence == nil {
@@ -368,12 +433,16 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Conte
 		if worker.UID != process.Worker.UID || !worker.DeletionTimestamp.IsZero() {
 			return nil, workspaceprovider.ErrStaleIdentity
 		}
+		runtimeUID, _, err := externalNativeRuntimeIdentity(request, evidence.Identity.InstanceID)
+		if err != nil {
+			return nil, err
+		}
 		endpoint, err := url.Parse(evidence.Endpoint)
 		if err != nil {
 			return nil, err
 		}
 		pod := &corev1.Pod{ObjectMeta: *request.Runtime.Template.ObjectMeta.DeepCopy(), Spec: *request.Runtime.Template.Spec.DeepCopy()}
-		pod.Namespace, pod.Name, pod.UID = request.Runtime.Template.Namespace, process.Name, types.UID(evidence.Identity.InstanceID)
+		pod.Namespace, pod.Name, pod.UID = request.Runtime.Template.Namespace, process.Name, runtimeUID
 		pod.Status.PodIP = endpoint.Hostname()
 		if pod.Annotations == nil {
 			pod.Annotations = map[string]string{}
@@ -483,40 +552,47 @@ func (r *RuntimePoolReconciler) verifyExternalRuntimeNetworkPolicies(ctx context
 	return nil
 }
 
-// Native traffic originates from infrastructure rather than the admitted
-// runtime Pod. Core grants access to its endpoints from the observed worker's
-// namespace and labels only after verifying the worker's immutable UID.
-func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, process *workspacev1alpha1.NativeProcessEvidence) error {
-	worker := &corev1.Pod{}
-	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Namespace: process.Worker.Namespace, Name: process.Worker.Name}, worker); err != nil {
+// Native ingress binds an exact infrastructure worker before any credential
+// delivery. Its endpoint namespaces come from immutable Core network intent.
+func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace) error {
+	process := w.Status.Allocation.Startup.Process
+	worker, err := r.externalUniqueIngressWorker(ctx, process, w.Status.Allocation.Identity)
+	if err != nil {
 		return err
 	}
-	if worker.UID != process.Worker.UID || len(worker.Labels) == 0 || !worker.DeletionTimestamp.IsZero() {
-		return workspaceprovider.ErrStaleIdentity
+	targets, err := r.freezeExternalIngressTargets(ctx, pool, w.Spec.Workload.Runtime)
+	if err != nil {
+		return err
 	}
-	targets := []struct {
-		namespace, suffix string
-		selector          map[string]string
-		port              int32
-	}{
-		{cfg.providerProxy.namespace, "external-provider-ingress", cfg.providerProxy.podLabels, cfg.providerProxy.port},
-		{controllerNamespaceForRuntimePool(r.ControllerNamespace), "external-controller-ingress", map[string]string{runtimePoolNetworkRoleLabel: controllerNameValue}, r.ControllerAPIPort},
+	binding, err := externalRuntimeEvidence(pool)
+	if err != nil {
+		return err
 	}
-	for _, target := range targets {
-		policy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(cfg.baseName, target.suffix), Namespace: target.namespace}}
-		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, policy, func() error {
-			if policy.UID != "" && policy.Labels[runtimePoolUIDLabel] != string(pool.UID) {
-				return workspaceprovider.ErrStaleIdentity
-			}
-			policy.Labels = cloneStringMap(cfg.labels)
-			policy.Spec = networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: cloneStringMap(target.selector)}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, Ingress: []networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: worker.Namespace}}, PodSelector: &metav1.LabelSelector{MatchLabels: cloneStringMap(worker.Labels)}}}, Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(target.port))}}}}}
-			return r.setRuntimePoolControllerReference(pool, policy)
-		})
+	if binding != nil && binding.Sequence != w.Spec.Workload.Sequence {
+		if !binding.NativeProcess || binding.WorkspaceUID != w.UID || binding.Sequence+1 != w.Spec.Workload.Sequence || w.Spec.Workload.PreviousInstance == nil || *w.Spec.Workload.PreviousInstance != binding.Identity {
+			return workspaceprovider.ErrStaleIdentity
+		}
+		pending, err := r.deleteExternalIngressPolicies(ctx, pool, cfg, targets, binding)
 		if err != nil {
 			return err
 		}
+		if pending {
+			return fmt.Errorf("waiting for exact predecessor ingress policies to disappear")
+		}
 	}
-	return nil
+	// Save the independent worker/instance fence before policy creation. A
+	// lost Create response can then be recovered or safely retired even if
+	// the provider later clears startup evidence.
+	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if err := r.ensureExternalIngressPolicy(ctx, pool, cfg, target, worker); err != nil {
+			return err
+		}
+	}
+	_, err = r.externalUniqueIngressWorker(ctx, process, w.Status.Allocation.Identity)
+	return err
 }
 
 func (r *RuntimePoolReconciler) seedExternalNativeCredentials(ctx context.Context, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret) (bool, error) {
@@ -716,12 +792,8 @@ func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx conte
 		return true, err
 	}
 	remaining := false
-	for _, list := range []client.ObjectList{&corev1.SecretList{}, &corev1.ServiceList{}, &networkingv1.NetworkPolicyList{}, &policyv1.PodDisruptionBudgetList{}} {
-		// Native endpoint ingress policies may be in core/proxy namespaces.
-		options := []client.ListOption{client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID), runtimePoolManagedByLabel: runtimePoolManagedByLabelValue}}
-		if _, allNamespaces := list.(*networkingv1.NetworkPolicyList); !allNamespaces {
-			options = append(options, client.InNamespace(cfg.namespace))
-		}
+	for _, list := range []client.ObjectList{&corev1.SecretList{}, &corev1.ServiceList{}, &policyv1.PodDisruptionBudgetList{}} {
+		options := []client.ListOption{client.InNamespace(cfg.namespace), client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID), runtimePoolManagedByLabel: runtimePoolManagedByLabelValue}}
 		if err := reader.List(ctx, list, options...); err != nil {
 			return false, err
 		}
@@ -745,7 +817,8 @@ func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx conte
 			}
 		}
 	}
-	return remaining, nil
+	policiesRemaining, err := r.deleteExternalCoreNetworkPolicies(ctx, pool, cfg, w)
+	return remaining || policiesRemaining, err
 }
 
 func (r *RuntimePoolReconciler) externalObservedInstanceTerminated(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
@@ -839,6 +912,10 @@ func externalRuntimeEvidence(pool *corev1alpha1.RuntimePool) (*externalRuntimeIn
 	if binding.WorkspaceUID == "" || binding.Sequence < 1 || !binding.Identity.Valid() || binding.Pod.Namespace == "" || binding.Pod.Name == "" || binding.Pod.UID == "" {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
+	if binding.NativeProcess && binding.RuntimeUID == "" {
+		// Old evidence can retain its exact already-admitted fence for cleanup.
+		binding.RuntimeUID = types.UID(binding.Identity.InstanceID)
+	}
 	return &binding, nil
 }
 
@@ -846,6 +923,11 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 	a := w.Status.Allocation
 	binding := externalRuntimeInstanceEvidence{WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Endpoint: a.Startup.Endpoint}
 	if a.Startup.Process != nil {
+		var err error
+		binding.RuntimeUID, _, err = externalNativeRuntimeIdentity(w.Spec.Workload, a.Identity.InstanceID)
+		if err != nil {
+			return err
+		}
 		binding.Pod = a.Startup.Process.Worker
 		binding.NativeProcess = true
 	} else {
@@ -890,9 +972,18 @@ func externalProviderUsable(provider *workspacev1alpha1.ExecutionWorkspaceProvid
 
 // runtimePoolWorkspaceStartupPod returns only the exact materialization whose
 // identity and complete endpoint Core observed before releasing credentials.
-//
-//nolint:gocyclo // Keep endpoint, current admission and independently observed identity fences together.
 func runtimePoolWorkspaceStartupPod(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool) (*corev1.Pod, error) {
+	return runtimePoolWorkspaceBoundStartupPod(ctx, reader, pool, true)
+}
+
+// Cleanup retains an already-bound legacy native fence without admitting it
+// to a new Task or replacing its immutable workload identity.
+func runtimePoolWorkspaceCleanupPod(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool) (*corev1.Pod, error) {
+	return runtimePoolWorkspaceBoundStartupPod(ctx, reader, pool, false)
+}
+
+//nolint:gocyclo // Keep endpoint, current admission and independently observed identity fences together.
+func runtimePoolWorkspaceBoundStartupPod(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool, requireOpaqueIdentity bool) (*corev1.Pod, error) {
 	r := &RuntimePoolReconciler{Client: nil, APIReader: reader}
 	w, err := r.externalPoolWorkspace(ctx, pool)
 	if err != nil {
@@ -913,6 +1004,9 @@ func runtimePoolWorkspaceStartupPod(ctx context.Context, reader client.Reader, p
 		return nil, err
 	}
 	if !workspaceCurrentlyAdmittedByCore(w) || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.PoolBinding.UID != pool.UID {
+		return nil, workspaceprovider.ErrStaleIdentity
+	}
+	if requireOpaqueIdentity && evidence.NativeProcess && !externalNativeRuntimeHasOpaqueIdentity(w.Spec.Workload) {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
 	pinned := a.Startup.Pod
@@ -936,6 +1030,18 @@ func runtimePoolWorkspaceStartupPod(ctx context.Context, reader client.Reader, p
 
 func runtimePoolWorkspaceStartupEndpoint(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool) (string, error) {
 	pod, err := runtimePoolWorkspaceStartupPod(ctx, reader, pool)
+	if err != nil {
+		return "", err
+	}
+	endpoint := runtimePoolInstanceEndpoint(pool, pod)
+	if endpoint == "" {
+		return "", workspaceprovider.ErrStaleIdentity
+	}
+	return endpoint, nil
+}
+
+func runtimePoolWorkspaceCleanupEndpoint(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool) (string, error) {
+	pod, err := runtimePoolWorkspaceCleanupPod(ctx, reader, pool)
 	if err != nil {
 		return "", err
 	}
