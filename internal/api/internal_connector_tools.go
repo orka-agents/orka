@@ -350,7 +350,7 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 				}
 			}
 		}
-		return c.Status(status).JSON(fiber.Map{"error": fmt.Sprintf("connector tool %q: %v", toolName, err)})
+		return fiber.NewError(status, fmt.Sprintf("connector tool %q: %v", toolName, err))
 	}
 	response := fiber.Map{connectorToolResultField: result}
 	if replayed {

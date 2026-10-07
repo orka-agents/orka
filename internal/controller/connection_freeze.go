@@ -491,15 +491,29 @@ func FilterConnectorToolsForRequester(
 	task *corev1alpha1.Task,
 	toolNames []string,
 ) (visible []string, connectorWrite []string, err error) {
+	visible, connectorWrite, _, err = filterConnectorToolsForRequester(ctx, reader, registry, task, toolNames)
+	return visible, connectorWrite, err
+}
+
+// filterConnectorToolsForRequester is FilterConnectorToolsForRequester that
+// also returns the classification the result was derived from, so a caller
+// that freezes Connections later can reject a policy that changed between.
+func filterConnectorToolsForRequester(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	toolNames []string,
+) (visible []string, connectorWrite []string, infos map[string]connectorToolInfo, err error) {
 	if reader == nil || task == nil || len(toolNames) == 0 {
-		return toolNames, nil, nil
+		return toolNames, nil, nil, nil
 	}
-	infos, err := connectorToolsFor(ctx, reader, registry, task.Namespace, toolNames)
+	infos, err = connectorToolsFor(ctx, reader, registry, task.Namespace, toolNames)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	modes := map[string]string{}
-	return filterClassifiedConnectorTools(toolNames, infos, func(info connectorToolInfo) (string, error) {
+	visible, connectorWrite, err = filterClassifiedConnectorTools(toolNames, infos, func(info connectorToolInfo) (string, error) {
 		mode, cached := modes[info.Provider]
 		if !cached {
 			connection, err := requesterConnection(ctx, reader, task, info.Provider)
@@ -516,6 +530,33 @@ func FilterConnectorToolsForRequester(
 		}
 		return mode, nil
 	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return visible, connectorWrite, infos, nil
+}
+
+// frozenConnectionsMatchClassification reports dispatch drift when a policy
+// the freeze bound was not classified as the same connection-mode policy
+// object (name, UID, generation, provider) when visibility and approvals
+// were decided: a policy that entered connection mode between the two reads
+// would otherwise reach the person's credential with no hiding and no
+// approval default.
+func frozenConnectionsMatchClassification(frozen []agentExecutionSnapshotConnection, infos map[string]connectorToolInfo) error {
+	for _, entry := range frozen {
+		matched := false
+		for _, info := range infos {
+			if info.PolicyName == entry.PolicyName && info.PolicyUID == entry.PolicyUID &&
+				info.PolicyGeneration == entry.PolicyGeneration && info.Provider == entry.Provider {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return errConnectorDispatchDrift
+		}
+	}
+	return nil
 }
 
 // filterClassifiedConnectorTools applies the readOnly rule to one
@@ -603,6 +644,19 @@ func nativeConnectorDispatch(
 	byPolicy := make(map[string]corev1alpha1.ConnectionBinding, len(bindings))
 	for _, binding := range bindings {
 		byPolicy[binding.PolicyName] = binding
+	}
+	// A policy frozen as connection-backed must still classify as one: a
+	// policy that left connection mode (or a Tool retargeted off it) since
+	// the freeze would otherwise turn its tools into plain local tools, with
+	// no controller route and no connector approval default.
+	classified := make(map[string]struct{}, len(infos))
+	for _, info := range infos {
+		classified[info.PolicyName] = struct{}{}
+	}
+	for policyName := range byPolicy {
+		if _, ok := classified[policyName]; !ok {
+			return nil, nil, nil, errConnectorDispatchDrift
+		}
 	}
 	visible, connectorWrite, err = filterClassifiedConnectorTools(toolNames, infos, func(info connectorToolInfo) (string, error) {
 		binding, ok := byPolicy[info.PolicyName]

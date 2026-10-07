@@ -324,7 +324,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	// Connector-backed tool visibility and approval defaults depend on the
 	// requester's links; apply them to copies so the plan, the MCP policy,
 	// and the frozen snapshot all describe the same effective policy.
-	task, agent, err = adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
+	task, agent, connectorClassification, err := adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -408,6 +408,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	frozenConnections, err := freezeRequesterConnections(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
 	if err != nil {
 		return nil, fmt.Errorf("freeze requester connections: %w", err)
+	}
+	// Visibility and approvals were decided from the first classification;
+	// the snapshot must not bind a policy that read differently since.
+	if err := frozenConnectionsMatchClassification(frozenConnections, connectorClassification); err != nil {
+		return nil, err
 	}
 
 	namespace := &corev1.Namespace{}
