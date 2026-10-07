@@ -62,6 +62,8 @@ const (
 	maxAuthorizeParametersEncodedBytes = 2048
 	maxEndpointQueryBytes              = 1024
 	maxScopesEncodedBytes              = 2048
+	// maxClientIDBytes bounds the client_id every authorization URL carries.
+	maxClientIDBytes = 256
 	// Static tool headers stay well inside common server header limits.
 	maxToolHeaderNameBytes  = 128
 	maxToolHeaderValueBytes = 1024
@@ -104,10 +106,14 @@ var (
 )
 
 // hostDenied reports whether host is a denied name, lies under one, extends
-// one with more labels (kubernetes.default.svc.example), or carries a
-// cluster-local service label. It expects a lowercase host without a
-// trailing dot.
+// one with more labels (kubernetes.default.svc.example), carries a
+// cluster-local service label, or is a single-label name, which a Pod's DNS
+// search domains complete to a cluster Service (kubernetes, orka-api). It
+// expects a lowercase host without a trailing dot.
 func hostDenied(host string) bool {
+	if net.ParseIP(host) == nil && !strings.Contains(host, ".") {
+		return true
+	}
 	for _, denied := range deniedHosts {
 		if host == denied || strings.HasSuffix(host, "."+denied) || strings.HasPrefix(host, denied+".") {
 			return true
@@ -211,6 +217,9 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	if !validClientID(oauth.ClientID) {
 		return invalid("oauth.clientID is required and must be printable ASCII without surrounding whitespace")
 	}
+	if len(oauth.ClientID) > maxClientIDBytes {
+		return invalid(fmt.Sprintf("oauth.clientID must be at most %d bytes", maxClientIDBytes))
+	}
 	if strings.TrimSpace(oauth.ClientSecretRef.Name) == "" || strings.TrimSpace(oauth.ClientSecretRef.Key) == "" {
 		return invalid("oauth.clientSecretRef requires name and key")
 	}
@@ -305,14 +314,14 @@ func validateURL(field, raw string, required, oauthEndpoint bool) *Issue {
 	if net.ParseIP(host) == nil && !validDNSName(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be a valid DNS name", field))
 	}
+	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
+		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
+	}
 	if hostDenied(strings.ToLower(host)) {
 		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
 	if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
 		return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
-	}
-	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
-		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
 	}
 	return validateEndpointQuery(field, parsed.RawQuery, oauthEndpoint)
 }
