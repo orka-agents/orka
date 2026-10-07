@@ -245,15 +245,21 @@ func SealChildRequesterStamp(ctx context.Context, c client.Client, key []byte, p
 const acpChildSealAttempts = 4
 
 // ACPChildTaskSealer returns the seal hook for coordination tools the broker
-// executes on behalf of an authenticated ACP Task. The controller created
-// the child itself, so it seals the child directly against that Task as the
-// parent, re-reading both when a concurrent write fences the patch.
+// executes on behalf of an authenticated ACP Task, also used for the runs a
+// scheduled Task creates. The controller created the child itself, so it
+// seals the child directly against that Task as the parent, re-reading both
+// when a concurrent write fences the patch.
 func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, parentUID string) func(context.Context, client.Client, *corev1alpha1.Task) error {
 	sealOnce := acpChildTaskSealOnce(reader, parentNamespace, parentName, parentUID)
 	// Nothing repairs a seal later, and an unsealed child fails closed for
 	// connector tools, so a transient read or patch failure is retried a
 	// few times; a refusal is final.
 	return func(ctx context.Context, c client.Client, child *corev1alpha1.Task) error {
+		// Without stamps, or without a requester to vouch for, there is
+		// nothing to seal, as the API and worker sealers also conclude.
+		if len(requesterStampKey) < connectors.MinRequesterStampKeyBytes || child == nil || child.Spec.RequestedBy == nil {
+			return nil
+		}
 		var err error
 		backoff := acpChildSealRetryBackoff
 		for attempt := range acpChildSealTransientAttempts {
