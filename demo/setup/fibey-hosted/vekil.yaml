@@ -1,0 +1,129 @@
+# Vekil routes the Orka-hosted Fibey's model calls to the same Foundry model
+# deployment the hosted Fibey uses. It authenticates with workload identity;
+# no API key exists. fibey-hosted.sh fills the ${...} values from env.sh.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vekil
+  namespace: vekil-system
+  labels:
+    app.kubernetes.io/name: vekil
+    demo.orka.ai/name: 13-fibey-hosted-approval
+  annotations:
+    azure.workload.identity/client-id: ${FIBEY_HOSTED_IDENTITY_CLIENT_ID}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vekil-providers
+  namespace: vekil-system
+  labels:
+    app.kubernetes.io/name: vekil
+    demo.orka.ai/name: 13-fibey-hosted-approval
+data:
+  providers.yaml: |
+    schema_version: 2
+    state_bindings:
+      mode: memory
+    providers:
+      - id: foundry
+        type: azure-openai
+        default: true
+        base_url: ${FIBEY_HOSTED_PROJECT_ENDPOINT}/openai/v1
+        auth_mode: azure_identity
+    model_routes:
+      - id: fibey-model-route
+        public_id: ${FIBEY_HOSTED_MODEL}
+        name: ${FIBEY_HOSTED_MODEL}
+        endpoints:
+          - /chat/completions
+          - /responses
+        parallel_tool_calls: true
+        targets:
+          - id: foundry-model
+            provider: foundry
+            upstream_model: ${FIBEY_HOSTED_MODEL}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vekil
+  namespace: vekil-system
+  labels:
+    app.kubernetes.io/name: vekil
+    demo.orka.ai/name: 13-fibey-hosted-approval
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vekil
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vekil
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: vekil
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vekil
+          image: ghcr.io/sozercan/vekil@sha256:4b12fd50bd0f4b2431246c2ea02176a0bc792b5a67be3fdd480067cd6f75b9b6
+          env:
+            - name: PORT
+              value: "1337"
+            - name: HOST
+              value: 0.0.0.0
+            - name: TOKEN_DIR
+              value: /home/nonroot/.config/vekil
+            - name: PROVIDERS_CONFIG
+              value: /etc/vekil/providers.yaml
+          ports:
+            - name: http
+              containerPort: 1337
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: providers, mountPath: /etc/vekil, readOnly: true}
+            - {name: token-cache, mountPath: /home/nonroot/.config/vekil}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: providers
+          configMap: {name: vekil-providers}
+        - name: token-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vekil
+  namespace: vekil-system
+  labels:
+    app.kubernetes.io/name: vekil
+    demo.orka.ai/name: 13-fibey-hosted-approval
+spec:
+  selector:
+    app.kubernetes.io/name: vekil
+  ports:
+    - name: http
+      port: 1337
+      targetPort: http

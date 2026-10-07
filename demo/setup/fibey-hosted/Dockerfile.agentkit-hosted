@@ -1,0 +1,14 @@
+# Hosted Fibey for Microsoft Foundry: AgentKit's brokered Responses server with
+# the baked agent.yaml, kept on loopback behind foundry_ingress.py on port 8088.
+# azure-identity lets the model loop use the hosted agent's managed identity.
+FROM python:3.12-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1
+COPY runtimes/common /src/common
+RUN python -m venv /opt/agentkit && /opt/agentkit/bin/pip install /src/common azure-identity \
+    && useradd --uid 1000 --create-home agentkit
+COPY --chown=0:0 agent-hosted.yaml /agent/agent.yaml
+COPY --chown=0:0 foundry_ingress.py /opt/agentkit/foundry_ingress.py
+RUN chmod 0444 /agent/agent.yaml /opt/agentkit/foundry_ingress.py
+USER 1000
+EXPOSE 8088
+ENTRYPOINT ["/opt/agentkit/bin/python", "/opt/agentkit/foundry_ingress.py"]
