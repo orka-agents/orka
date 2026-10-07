@@ -171,6 +171,15 @@ existing tasks and data depend on them:
 | `controller.acpRuntime.namespace` | Running pools live there. |
 | The release fullname | Every owned resource is named from it. |
 
+The snapshot key also seals linked accounts (connectors). When the controller
+starts, it checks that its key opens every retained execution snapshot and
+every linked account's sealed custody, and it refuses to start if one does
+not: restore the previous key. Orka has no tool yet that re-wraps custody
+under a new key. To change the key on an installation with linked accounts,
+have every person disconnect first, so each Connection's finalizer can still
+revoke its tokens (where the provider supports revocation) while the old key
+opens them, then change the key, then let people reconnect.
+
 ## `--skip-crds`
 
 Use `--skip-crds` only when a platform team or GitOps system already manages

@@ -4,10 +4,12 @@ Date: 2026-09-25
 
 ## Status
 
-Accepted. Landing in stages behind `--connectors-enabled` (default off): the
-`ConnectorProvider` and `Connection` resources and their reconcilers are in;
-consent, custody, injection, controller-only execution, and the user surfaces
-follow in later pull requests and are not active yet. Builds on the outbound-access split in
+Accepted and implemented behind `--connectors-enabled` (default off): the
+`ConnectorProvider` and `Connection` resources and their reconcilers, the
+consent flow and sealed custody, injection through `connection`-mode
+`OutboundAccessPolicy`, controller-only execution, the GitHub built-ins, and
+the dashboard, CLI, and `list_connections` surfaces. The chat decision below
+was narrowed when the surfaces landed. Builds on the outbound-access split in
 [ADR 0011](0011-vendor-neutral-transaction-and-outbound-access.md) and reuses the
 `OutboundAccessPolicy` resolver, the ACP MCP broker, approvals, and the
 external-effect ledger. Proactive (event-driven) connectors and a remote MCP
@@ -84,8 +86,9 @@ live store becomes unrecoverable. That crypto-shredding does not reach copies
 Orka did not make: a volume snapshot, filesystem backup, or database copy taken
 while the row existed still holds the ciphertext together with its wrapped data
 key, and both open with the snapshot key of that time. Operators who need
-deletion to reach backups must bound backup retention, or rotate the snapshot
-key and discard copies sealed under the old one. Raw tokens never appear in
+deletion to reach backups must bound backup retention, or change the snapshot
+key and discard copies sealed under the old one (today that means every
+person disconnects first; see Consequences). Raw tokens never appear in
 Task specs, status, events, logs, or anywhere in the store outside the sealed
 column; the controller records its own audit events for connector use.
 
@@ -119,13 +122,27 @@ broker for ACP runtimes and through an internal controller endpoint for native
 `type: ai` workers. The in-Pod executor refuses them. Worker Pods therefore
 never receive a person's tokens, matching the ACP credential boundary.
 
-### Chat reaches connectors only through Tasks
+### Chat reaches connectors through Tasks, with one read-only exception
 
-The in-process chat loop does not call connector tools directly. It creates a
-Task, stamped with the caller's `requestedBy`, and the Task goes through the
-broker, approval gate, and external-effect ledger. This costs latency on simple
-reads and is accepted so that there is exactly one execution path enforcing the
-rules above.
+The in-process chat loop does not run connector-backed Tools. A custom Tool
+behind a `connection`-mode policy reaches a person's account only from a Task,
+stamped with the caller's `requestedBy`, which goes through the broker,
+approval gate, and external-effect ledger. The dashboard chat offers only
+`list_connections`. This costs latency on simple reads and is accepted so that
+writes have exactly one execution path enforcing the rules above.
+
+One exception was accepted when the user surfaces landed. In coordinator mode
+the compatibility proxies run the GitHub read built-ins (for example
+`check_pull_request_ci`) directly as the signed-in person when that person
+holds a Ready link to a provider that declares the tool. There is no dispatch
+to freeze, so the Connection and its provider are read live on every call, and
+a link that exists but cannot be used fails the call rather than falling back.
+Under enforced context-token authorization, a token without the connector-read
+scope uses no linked account there. These surfaces have no approval gate, so a
+linked write built-in such as `create_pull_request` is refused on them once the
+person has a link; linked writes run only from a Task, where they wait for
+approval. The cost is a second, read-only path whose checks mirror the Task
+path's rather than reusing its frozen snapshot.
 
 ### Read by default, approve to act, disconnect instantly
 
@@ -159,14 +176,21 @@ service it needs.
 - Connectors require an OIDC issuer or a context-token profile; local kind demos
   need an OIDC stub before any account can be linked.
 - The snapshot key becomes load-bearing for connector custody as well as for
-  execution snapshots; rotating it must re-wrap every Connection data key.
+  execution snapshots. There is no re-wrap path yet: a controller given a key
+  that cannot open every retained custody row refuses to start, so changing the
+  key today means every person disconnects first (so each Connection finalizer
+  can still revoke, where the provider supports it, while the old key opens
+  the tokens) and reconnects afterwards.
+  A re-wrap tool is a follow-up.
 - Connector custody requires the persistent controller store; an ephemeral
   store loses every link on restart and people must reconnect.
 - The controller becomes the only process holding third-party user tokens and
   must never log request headers for connector calls; the existing redaction
   helpers apply.
 - Native `type: ai` Tasks gain a controller round trip per connector call.
-- Chat reads through connectors are slower than an in-process call would be.
+- Chat reads through custom connector Tools go through a Task and are slower
+  than an in-process call would be; the proxies' GitHub read built-ins are the
+  exception described above.
 - Existing per-Task GitHub token Secrets remain supported; the connector path is
   additive and does not change publication credentials, which stay outside the
   ACP process tree per the workspace credential rules.
