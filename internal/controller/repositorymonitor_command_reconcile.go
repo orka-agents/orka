@@ -18,9 +18,14 @@ const (
 )
 
 const (
-	repositoryMonitorTriggerLabelCommand = "github_label_command"
-	repositoryMonitorCommandRetryDelay   = 30 * time.Second
-	repositoryMonitorCommandMaxRetries   = 3
+	repositoryMonitorTriggerLabelCommand           = "github_label_command"
+	repositoryMonitorCommandRetryDelay             = 30 * time.Second
+	repositoryMonitorCommandMaxRetries             = 3
+	repositoryMonitorCommandProcessed              = "processed"
+	repositoryMonitorRetiredAutomergeIntent        = "automerge"
+	repositoryMonitorRetiredApprovePlanIntent      = "approve_plan"
+	repositoryMonitorAutomergeCommandRetiredReason = "automerge_command_retired"
+	repositoryMonitorApprovePlanRetiredReason      = "approve_plan_command_retired"
 )
 
 func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
@@ -34,6 +39,12 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 		for i := range commands {
 			command := commands[i]
 			if strings.TrimSpace(command.Kind) == "" || command.Number == 0 {
+				continue
+			}
+			if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
+				if err := r.retireRepositoryMonitorCommand(ctx, monitor, &command, nil, reason); err != nil {
+					return queued, err
+				}
 				continue
 			}
 			runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
@@ -73,6 +84,28 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 	}
 }
 
+func repositoryMonitorRetiredCommandReason(intent string) string {
+	switch intent {
+	case repositoryMonitorRetiredAutomergeIntent:
+		return repositoryMonitorAutomergeCommandRetiredReason
+	case repositoryMonitorRetiredApprovePlanIntent:
+		return repositoryMonitorApprovePlanRetiredReason
+	default:
+		return ""
+	}
+}
+
+func (r *RepositoryMonitorReconciler) retireRepositoryMonitorCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, run *store.MonitorRun, reason string) error {
+	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, run, reason); err != nil {
+		return err
+	}
+	now := time.Now()
+	command.Status = repositoryMonitorCommandProcessed
+	command.ProcessedAt = &now
+	command.Error = reason
+	return r.Store.UpdateCommandEvent(ctx, command)
+}
+
 //nolint:gocyclo // Command recovery must settle existing runs before permitting the next queued run.
 func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, runID string) (bool, bool, error) {
 	terminal, err := r.repositoryMonitorCommandWorkActionTerminal(ctx, monitor, command)
@@ -81,15 +114,17 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 	}
 	run, err := r.repositoryMonitorCommandRun(ctx, monitor, command, runID)
 	if errors.Is(err, store.ErrNotFound) {
-		return false, false, nil
+		return false, false, r.queueRepositoryMonitorCommandWorkAction(ctx, monitor, command, &store.MonitorRun{ID: runID})
 	}
 	if err != nil {
 		return false, false, err
 	}
+	if err := r.queueRepositoryMonitorCommandWorkAction(ctx, monitor, command, run); err != nil {
+		return false, false, err
+	}
 	if run.Phase == repositoryMonitorRunPhaseSucceeded {
 		item, itemErr := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, command.Kind, fmt.Sprintf("%d", command.Number))
-		pending := itemErr == nil && ((command.Intent == repositoryMonitorCommandIntentAutomerge && item.AutomergeState == repositoryMonitorAutomergeStatePending) ||
-			(command.Intent == repositoryMonitorCommandIntentUpdateBranch && item.RepairState == repositoryMonitorRepairPhaseQueued))
+		pending := itemErr == nil && (command.Intent == repositoryMonitorCommandIntentUpdateBranch && item.RepairState == repositoryMonitorRepairPhaseQueued)
 		if pending {
 			now := time.Now()
 			run.Phase = repositoryMonitorRunPhaseQueued
@@ -170,6 +205,12 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 	return true, false, r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, run, run.Error)
 }
 
+func (r *RepositoryMonitorReconciler) queueRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, run *store.MonitorRun) error {
+	// Restore a partial or legacy handoff before inventory can publish readiness,
+	// including when its command run was already queued.
+	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusQueued, "", "", "")
+}
+
 func (r *RepositoryMonitorReconciler) repositoryMonitorCommandRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, runID string) (*store.MonitorRun, error) {
 	run, err := r.Store.GetMonitorRun(ctx, monitor.Namespace, runID)
 	if err == nil {
@@ -227,7 +268,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 	switch action.Status {
 	case repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorWorkActionStatusFailed, repositoryMonitorWorkActionStatusBlocked, repositoryMonitorWorkActionStatusCancelled:
 		now := time.Now()
-		command.Status = "processed"
+		command.Status = repositoryMonitorCommandProcessed
 		command.ProcessedAt = &now
 		command.Error = firstNonEmptyWorkflow(action.Error, action.BlockedReason)
 		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {
@@ -241,15 +282,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 
 func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorFailedCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, run *store.MonitorRun, reason string) error {
 	actionKind := repositoryMonitorCommandActionKind(command.Intent)
-	if command.Intent == repositoryMonitorCommandIntentAutomerge {
-		preserveSuccess, err := r.terminalizeRepositoryMonitorAutomerge(ctx, monitor, command, reason)
-		if err != nil {
-			return err
-		}
-		if preserveSuccess {
-			return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, actionKind, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorAutomergeStateMerged, "", "")
-		}
-	}
 	if command.Intent == repositoryMonitorCommandIntentUpdateBranch {
 		preserveSuccess, err := r.terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, command, reason)
 		if err != nil {
@@ -272,63 +304,15 @@ func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorFailedCommand(
 	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, actionKind, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRunFailurePermanent, "", reason)
 }
 
-func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, reason string) (bool, error) {
-	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
-	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return false, err
-	}
-	item, itemErr := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, fmt.Sprintf("%d", command.Number))
-	if itemErr != nil && !errors.Is(itemErr, store.ErrNotFound) {
-		return false, itemErr
-	}
-	if mutation != nil && mutation.Status == repositoryMonitorRunPhaseSucceeded {
-		if item != nil && strings.TrimSpace(command.HeadSHA) != "" && strings.TrimSpace(item.HeadSHA) == strings.TrimSpace(command.HeadSHA) {
-			item.State = repositoryMonitorAutomergeStateMerged
-			item.AutomergeState = repositoryMonitorAutomergeStateMerged
-			item.SkipReason = ""
-			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-				return false, err
-			}
-		}
-		return true, nil
-	}
-	sameHead := item != nil && strings.TrimSpace(command.HeadSHA) != "" && strings.TrimSpace(item.HeadSHA) == strings.TrimSpace(command.HeadSHA)
-	if sameHead && (item.AutomergeState == repositoryMonitorAutomergeStateMerged || strings.EqualFold(strings.TrimSpace(item.State), repositoryMonitorAutomergeStateMerged)) {
-		if mutation != nil {
-			mutation.Status = repositoryMonitorRunPhaseSucceeded
-			mutation.Error = ""
-			if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
-				return false, err
-			}
-		}
-		return true, nil
-	}
-	if item != nil && strings.TrimSpace(command.HeadSHA) != "" && strings.TrimSpace(item.HeadSHA) == strings.TrimSpace(command.HeadSHA) {
-		item.AutomergeState = repositoryMonitorAutomergeStateFailed
-		item.SkipReason = reason
-		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-			return false, err
-		}
-	}
-	if mutation == nil {
-		return false, nil
-	}
-	mutation.Status = repositoryMonitorRunPhaseFailed
-	mutation.Error = reason
-	return false, r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation)
-}
-
 func repositoryMonitorCommandActionKind(intent string) string {
 	switch strings.TrimSpace(intent) {
 	case repositoryMonitorCommandIntentReview:
 		return "pr_review"
 	case repositoryMonitorCommandIntentFix:
 		return "pr_repair"
-	case repositoryMonitorCommandIntentAutomerge:
-		return repositoryMonitorActionAutomerge
-	case repositoryMonitorCommandIntentApprovePlan:
-		return repositoryMonitorIssueActionApprove
+	case repositoryMonitorRetiredApprovePlanIntent:
+		// Retired plan approval keeps the identity of persisted work actions.
+		return "approve"
 	default:
 		return strings.TrimSpace(intent)
 	}

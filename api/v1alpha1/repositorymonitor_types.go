@@ -104,10 +104,6 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Repair RepositoryMonitorRepairSpec `json:"repair,omitempty"`
 
-	// Automerge controls deterministic merge behavior.
-	// +optional
-	Automerge RepositoryMonitorAutomergeSpec `json:"automerge,omitempty"`
-
 	// Policy contains authorization and safety policy for monitor operations.
 	// +optional
 	Policy RepositoryMonitorPolicySpec `json:"policy,omitempty"`
@@ -221,48 +217,13 @@ type RepositoryMonitorGitHubLabelTriggers struct {
 	// Issues maps issue command intents to label names. Empty fields use the default orka:* labels.
 	// +optional
 	Issues RepositoryMonitorIssueCommandLabels `json:"issues,omitempty"`
-
-	// PullRequests maps pull-request command intents to label names. Empty fields use the default orka:* labels.
-	// +optional
-	PullRequests RepositoryMonitorPullRequestCommandLabels `json:"pullRequests,omitempty"`
 }
 
-// RepositoryMonitorIssueCommandLabels configures issue command label names.
+// RepositoryMonitorIssueCommandLabels configures the issue workflow entrypoint.
 type RepositoryMonitorIssueCommandLabels struct {
-	// +optional
-	Triage string `json:"triage,omitempty"`
-	// +optional
-	Research string `json:"research,omitempty"`
-	// +optional
-	Plan string `json:"plan,omitempty"`
-	// +optional
-	ApprovePlan string `json:"approvePlan,omitempty"`
+	// Implement starts the complete issue workflow. Defaults to orka:implement.
 	// +optional
 	Implement string `json:"implement,omitempty"`
-	// +optional
-	Decompose string `json:"decompose,omitempty"`
-	// +optional
-	Stop string `json:"stop,omitempty"`
-	// +optional
-	Resume string `json:"resume,omitempty"`
-}
-
-// RepositoryMonitorPullRequestCommandLabels configures pull-request command label names.
-type RepositoryMonitorPullRequestCommandLabels struct {
-	// +optional
-	Review string `json:"review,omitempty"`
-	// +optional
-	Fix string `json:"fix,omitempty"`
-	// +optional
-	FixCI string `json:"fixCI,omitempty"`
-	// +optional
-	UpdateBranch string `json:"updateBranch,omitempty"`
-	// +optional
-	Automerge string `json:"automerge,omitempty"`
-	// +optional
-	Stop string `json:"stop,omitempty"`
-	// +optional
-	Resume string `json:"resume,omitempty"`
 }
 
 // RepositoryMonitorAgents configures task agents for monitor workflows.
@@ -323,11 +284,6 @@ type RepositoryMonitorIssuePlanningSpec struct {
 	// Enabled enables planning. Defaults to true when a planner agent is configured and a command requests it.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
-
-	// RequireHumanApprovalFor names risk levels or plan categories that require explicit approval.
-	// +listType=set
-	// +optional
-	RequireHumanApprovalFor []string `json:"requireHumanApprovalFor,omitempty"`
 }
 
 // RepositoryMonitorIssueImplementationSpec configures implementation behavior.
@@ -336,9 +292,9 @@ type RepositoryMonitorIssueImplementationSpec struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// RequireApprovedPlan blocks implementation unless the latest plan was approved.
+	// RequirePlan requires a current ready plan before implementation. Defaults to true.
 	// +optional
-	RequireApprovedPlan *bool `json:"requireApprovedPlan,omitempty"`
+	RequirePlan *bool `json:"requirePlan,omitempty"`
 
 	// BranchPrefix is the branch prefix for implementation push branches. Defaults to orka/issue.
 	// +optional
@@ -466,37 +422,22 @@ type RepositoryMonitorRepairSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 
 	// MaxRepairsPerPR bounds total automated repairs per PR.
+	// +kubebuilder:default=5
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxRepairsPerPR *int32 `json:"maxRepairsPerPR,omitempty"`
 
 	// MaxRepairsPerHead bounds automated repairs per PR head SHA.
+	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxRepairsPerHead *int32 `json:"maxRepairsPerHead,omitempty"`
 
 	// MaxValidationRetries bounds validation retries for one repair job.
+	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxValidationRetries *int32 `json:"maxValidationRetries,omitempty"`
-}
-
-// RepositoryMonitorAutomergeSpec configures automerge behavior.
-type RepositoryMonitorAutomergeSpec struct {
-	// Enabled enables automerge jobs.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// RequireGlobalMergeGate requires the controller-wide merge gate.
-	// +kubebuilder:default=true
-	// +optional
-	RequireGlobalMergeGate *bool `json:"requireGlobalMergeGate,omitempty"`
-
-	// AllowedMergeMethods lists merge methods allowed by policy.
-	// +kubebuilder:validation:items:Enum=merge;squash;rebase
-	// +listType=set
-	// +optional
-	AllowedMergeMethods []string `json:"allowedMergeMethods,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.
@@ -506,7 +447,8 @@ type RepositoryMonitorPolicySpec struct {
 	// +optional
 	ProtectedLabels []string `json:"protectedLabels,omitempty"`
 
-	// PauseLabels block further automation while present.
+	// PauseLabels block further automation while present. Removing them permits fresh reconciliation.
+	// +kubebuilder:default={"orka:pause"}
 	// +listType=set
 	// +optional
 	PauseLabels []string `json:"pauseLabels,omitempty"`
