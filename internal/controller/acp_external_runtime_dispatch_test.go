@@ -2926,6 +2926,7 @@ func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 		{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 2},
 		{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 2},
 	}
+	connection = consentedConnection(connection, github)
 	if err := fixture.client.Create(fixture.ctx, connection); err != nil {
 		t.Fatal(err)
 	}
@@ -2940,6 +2941,15 @@ func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 	if len(body.Connections) != 1 || body.Connections[0].Tool != "list_pull_requests" || body.Connections[0].Provider != "github" ||
 		body.Connections[0].UID != "conn-uid" || body.Connections[0].GrantSequence != 1 {
 		t.Fatalf("snapshot connections = %+v, want the link frozen for the built-in", body.Connections)
+	}
+	// The session's descriptors come from the registered policy, so a Task
+	// that denies a linked built-in that policy exposes is refused for good
+	// instead of being bound with the tool anyway or retried forever.
+	denying := task.DeepCopy()
+	denying.Spec.AgentRuntime.DisallowedTools = []string{"list_pull_requests"}
+	candidate, err = fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denying, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "cannot be narrowed per task") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with a conflicting Task deny = (%#v, %v), want a permanent refusal", candidate, err)
 	}
 	// A write tool the registration did not put behind approval is never
 	// carried, link or no link.

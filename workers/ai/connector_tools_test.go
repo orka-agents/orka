@@ -404,8 +404,42 @@ func TestExecuteConnectorToolDoesNotFollowRedirectsOrProxies(t *testing.T) {
 	if elsewhere.Load() != 0 {
 		t.Fatalf("the redirect target was called %d times; the token must stay with the controller", elsewhere.Load())
 	}
-	client := controllerHTTPClient()
-	if transport, ok := client.Transport.(*http.Transport); !ok || transport.Proxy != nil {
-		t.Fatalf("transport = %#v, want inherited proxies disabled", client.Transport)
+	httpClient := controllerHTTPClient()
+	if transport, ok := httpClient.Transport.(*http.Transport); !ok || transport.Proxy != nil {
+		t.Fatalf("transport = %#v, want inherited proxies disabled", httpClient.Transport)
+	}
+}
+
+// TestConnectorApprovalTargetTreatsEmptyArgumentsAsTheEmptyObject covers an
+// approval-required connector tool called with no arguments: the controller
+// executes and digests the call as `{}`, so the worker's approval target is
+// built from the same bytes and the approval matches.
+func TestConnectorApprovalTargetTreatsEmptyArgumentsAsTheEmptyObject(t *testing.T) {
+	connector := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "gh_write", Annotations: map[string]string{connectorBackedToolAnnotation: "true"}}}
+	for _, empty := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("  ")} {
+		got, err := approvalTargetArguments(empty, connector)
+		if err != nil || string(got) != "{}" {
+			t.Fatalf("connector target args for %q = %q err = %v, want {}", empty, got, err)
+		}
+	}
+	// A tool the worker executes itself keeps its existing target.
+	local := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "local"}}
+	if got, err := approvalTargetArguments(nil, local); err != nil || len(got) != 0 {
+		t.Fatalf("local target args = %q err = %v, want unchanged", got, err)
+	}
+}
+
+// TestDecodeConnectorToolResponseReadsTheErrorEnvelope covers the API's
+// shared error envelope: the worker shows the controller's message rather
+// than the raw JSON body, and a 502 is still reported as attempted.
+func TestDecodeConnectorToolResponseReadsTheErrorEnvelope(t *testing.T) {
+	_, err := decodeConnectorToolResponse("gh_write", http.StatusBadGateway, []byte(`{"error":{"code":502,"message":"connector tool \"gh_write\": upstream refused"}}`))
+	var attemptedErr worker.ToolRequestAttemptedError
+	if err == nil || !errors.As(err, &attemptedErr) || !strings.Contains(err.Error(), "upstream refused") || strings.Contains(err.Error(), `"code"`) {
+		t.Fatalf("envelope 502 err = %v, want the attempted message", err)
+	}
+	_, err = decodeConnectorToolResponse("gh_write", http.StatusFailedDependency, []byte(`{"error":"no connection"}`))
+	if err == nil || errors.As(err, &attemptedErr) || !strings.Contains(err.Error(), "no connection") {
+		t.Fatalf("flat 424 err = %v, want the unattempted message", err)
 	}
 }

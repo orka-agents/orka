@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -106,9 +107,47 @@ func (f connectorToolFixture) connection(mode string, ready bool) *corev1alpha1.
 	return connection
 }
 
+// reader serves the fixture objects plus extra. Without a "github"
+// provider among extra an accepted one is served, and every linked
+// Connection without a consent record carries the consent the flow records
+// against the provider it is read with, so a stale-consent case is built by
+// setting Status.Consent explicitly.
 func (f connectorToolFixture) reader(extra ...ctrlclient.Object) ctrlclient.Client {
-	objects := append([]ctrlclient.Object{f.policy, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool}, extra...)
+	providers := map[string]*corev1alpha1.ConnectorProvider{}
+	for _, object := range extra {
+		if provider, ok := object.(*corev1alpha1.ConnectorProvider); ok {
+			providers[provider.Name] = provider
+		}
+	}
+	objects := []ctrlclient.Object{f.policy, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool}
+	if _, ok := providers["github"]; !ok {
+		providers["github"] = acceptedBuiltinProvider("github")
+		objects = append(objects, providers["github"])
+	}
+	for _, object := range extra {
+		if connection, ok := object.(*corev1alpha1.Connection); ok {
+			object = consentedConnection(connection, providers[connection.Spec.ProviderRef.Name])
+		}
+		objects = append(objects, object)
+	}
 	return ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(objects...).Build()
+}
+
+// consentedConnection returns a copy of a linked Connection carrying the
+// consent and granted scopes the consent flow records against provider,
+// unless it already has a consent record.
+func consentedConnection(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) *corev1alpha1.Connection {
+	if connection == nil || provider == nil || connection.Status.GrantSequence == 0 || connection.Status.Consent != nil {
+		return connection
+	}
+	linked := connection.DeepCopy()
+	mode := linked.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	linked.Status.Consent = connectors.ConsentFor(provider)
+	linked.Status.GrantedScopes = connectors.ScopesForMode(provider, mode)
+	return linked
 }
 
 func TestFilterConnectorToolsForRequester(t *testing.T) {
@@ -303,7 +342,7 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 		reader := f.reader(extra...)
 		planAgent := agent.DeepCopy()
 		planAgent.Spec.Runtime.Type = runtimeType
-		adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), reader, nil, task, planAgent)
+		adjustedTask, adjustedAgent, _, err := adjustInputsForConnectorTools(context.Background(), reader, nil, task, planAgent)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -339,7 +378,7 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 
 	// The adjustment leaves unrelated inputs untouched and never mutates the
 	// caller's objects.
-	adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, task, agent)
+	adjustedTask, adjustedAgent, _, err := adjustInputsForConnectorTools(context.Background(), f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, task, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,5 +420,125 @@ func TestConnectorToolsSkipBuiltinNames(t *testing.T) {
 	visible, write, err = FilterConnectorToolsForRequester(context.Background(), reader, tools.NewRegistry(), f.task, names)
 	if err != nil || len(visible) != 0 || len(write) != 0 {
 		t.Fatalf("visible = %v write = %v err = %v, want the shadowed resource classified by the runtime registry", visible, write, err)
+	}
+}
+
+// TestRequesterConnectionRevalidatesAgainstCurrentProvider covers a Ready
+// Connection the Connection controller has not yet re-judged after a
+// provider change: a consent granted against another authority, granted
+// scopes that no longer cover the mode, or a provider that is no longer
+// accepted make the link unusable at dispatch, instead of freezing a grant
+// the credential source refuses on every call.
+func TestRequesterConnectionRevalidatesAgainstCurrentProvider(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	provider := acceptedBuiltinProvider("github")
+	provider.Spec.OAuth.Scopes.Read = []string{"read:user"}
+	usable := consentedConnection(f.connection(corev1alpha1.ConnectionModeReadOnly, true), provider)
+	if connection, err := requesterConnection(ctx, f.reader(provider, usable), f.task, "github"); err != nil || connection == nil {
+		t.Fatalf("current consent: connection = %v err = %v, want usable", connection, err)
+	}
+	stale := usable.DeepCopy()
+	stale.Status.Consent.AuthorityDigest = "consented-before-the-provider-changed"
+	narrow := usable.DeepCopy()
+	narrow.Status.GrantedScopes = nil
+	unaccepted := provider.DeepCopy()
+	unaccepted.Status.Conditions = nil
+	for name, reader := range map[string]ctrlclient.Client{
+		"stale consent":       f.reader(provider, stale),
+		"scopes do not cover": f.reader(provider, narrow),
+		"provider unaccepted": f.reader(unaccepted, usable),
+	} {
+		if connection, err := requesterConnection(ctx, reader, f.task, "github"); err != nil || connection != nil {
+			t.Fatalf("%s: connection = %v err = %v, want no usable link", name, connection, err)
+		}
+	}
+	failing := ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(provider, usable).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			if _, ok := obj.(*corev1alpha1.ConnectorProvider); ok {
+				return errors.New("apiserver unavailable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+	if _, err := requesterConnection(ctx, failing, f.task, "github"); err == nil {
+		t.Fatal("a provider read failure must be retried, not treated as unlinked")
+	}
+}
+
+// TestFrozenConnectionsMatchClassification covers an ACP binding whose
+// policy changed between the classification that decided visibility and
+// approvals and the Connection freeze: a policy that entered connection
+// mode, or a connection-mode policy object that changed, is drift, so the
+// snapshot is never committed with a credential the plan did not account for.
+func TestFrozenConnectionsMatchClassification(t *testing.T) {
+	infos := map[string]connectorToolInfo{
+		"gh_read":  {PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"},
+		"gh_write": {PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"},
+	}
+	entry := agentExecutionSnapshotConnection{PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github"}
+	if err := frozenConnectionsMatchClassification([]agentExecutionSnapshotConnection{entry}, infos); err != nil {
+		t.Fatalf("matching freeze err = %v", err)
+	}
+	if err := frozenConnectionsMatchClassification(nil, infos); err != nil {
+		t.Fatalf("empty freeze err = %v", err)
+	}
+	changed := entry
+	changed.PolicyGeneration = 4
+	entered := agentExecutionSnapshotConnection{PolicyName: "was-direct", PolicyUID: "direct-uid", PolicyGeneration: 2, Provider: "github"}
+	retargeted := entry
+	retargeted.Provider = "gitlab"
+	for name, frozen := range map[string]agentExecutionSnapshotConnection{"changed generation": changed, "entered connection mode": entered, "retargeted provider": retargeted} {
+		if err := frozenConnectionsMatchClassification([]agentExecutionSnapshotConnection{frozen}, infos); !errors.Is(err, errConnectorDispatchDrift) {
+			t.Fatalf("%s: err = %v, want errConnectorDispatchDrift", name, err)
+		}
+	}
+}
+
+// TestCreateTaskJobBoundsAMissingToolPolicy covers a native Task whose Agent
+// lists a Tool that references an OutboundAccessPolicy that does not exist:
+// dispatch retries shortly while the policy may still be applied, and after
+// the grace period the Task fails naming the policy instead of staying
+// Pending with no reason.
+func TestCreateTaskJobBoundsAMissingToolPolicy(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "ai-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Tools: []corev1alpha1.ToolReference{{Name: "itemsread"}},
+		},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "itemsread", Namespace: "default"},
+		Spec: corev1alpha1.ToolSpec{Description: "read", HTTP: &corev1alpha1.HTTPExecution{
+			URL: "https://api.example.test/items", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "missing-policy"},
+		}},
+	}
+	newTask := func(age time.Duration) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dangling", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890ab",
+				CreationTimestamp: metav1.NewTime(time.Now().Add(-age)),
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "ai-agent"}, AI: &corev1alpha1.AISpec{Prompt: "hello"},
+			},
+		}
+	}
+
+	fresh := newTask(0)
+	r := newUnitReconciler(newTestScheme(), fresh, agent, tool)
+	result, err := r.createTaskJob(context.Background(), fresh, agent, nil)
+	if err != nil || result.RequeueAfter == 0 || fresh.Status.Phase == corev1alpha1.TaskPhaseFailed || fresh.Status.JobName != "" {
+		t.Fatalf("fresh task: result = %+v err = %v phase = %q job = %q, want a short retry", result, err, fresh.Status.Phase, fresh.Status.JobName)
+	}
+
+	stale := newTask(missingToolPolicyGrace + time.Minute)
+	r = newUnitReconciler(newTestScheme(), stale, agent, tool)
+	if _, err := r.createTaskJob(context.Background(), stale, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	if stale.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(stale.Status.Message, "missing-policy") {
+		t.Fatalf("stale task: phase = %q message = %q, want failed naming the policy", stale.Status.Phase, stale.Status.Message)
 	}
 }

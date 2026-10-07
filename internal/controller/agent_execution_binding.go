@@ -329,7 +329,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	// Connector-backed tool visibility and approval defaults depend on the
 	// requester's links; apply them to copies so the plan, the MCP policy,
 	// and the frozen snapshot all describe the same effective policy.
-	task, agent, err = adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
+	task, agent, connectorClassification, err := adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -413,6 +413,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	frozenConnections, err := freezeRequesterConnections(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
 	if err != nil {
 		return nil, fmt.Errorf("freeze requester connections: %w", err)
+	}
+	// Visibility and approvals were decided from the first classification;
+	// the snapshot must not bind a policy that read differently since.
+	if err := frozenConnectionsMatchClassification(frozenConnections, connectorClassification); err != nil {
+		return nil, err
 	}
 
 	namespace := &corev1.Namespace{}
@@ -1583,9 +1588,22 @@ func (r *TaskReconciler) checkExternalConnectorTools(
 	providerKind string,
 	registry *tools.Registry,
 ) (linkedBuiltins []string, err error) {
-	var runtimeDisallowed []string
+	var runtimeAllowed, runtimeDisallowed []string
 	if runtime.Spec.Capabilities.MCPPolicy != nil {
+		runtimeAllowed = runtime.Spec.Capabilities.MCPPolicy.AllowedTools
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
+	}
+	// The session's descriptors come from the registered policy alone, so a
+	// Task-level deny of a linked built-in that policy still exposes would
+	// not remove it: it would be frozen and offered anyway. Such a Task is
+	// refused rather than bound with a tool it denied.
+	if task.Spec.AgentRuntime != nil {
+		for _, denied := range brokeredLinkedBuiltins(r.MCPRegistry, task.Spec.AgentRuntime.DisallowedTools) {
+			if slices.Contains(runtimeAllowed, denied) && !slices.Contains(runtimeDisallowed, denied) {
+				return nil, permanentACPAgentConfiguration(fmt.Errorf(
+					"task disallowedTools names %q, which the registered external AgentRuntime MCP policy exposes; a linked built-in cannot be narrowed per task", denied))
+			}
+		}
 	}
 	candidates := connectorCandidateTools(task, agent, runtimeDisallowed)
 	custom := brokeredCustomCandidates(candidates, providerKind, registry)

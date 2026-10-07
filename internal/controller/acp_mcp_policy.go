@@ -240,9 +240,9 @@ func adjustInputsForConnectorTools(
 	registry *tools.Registry,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
-) (*corev1alpha1.Task, *corev1alpha1.Agent, error) {
+) (*corev1alpha1.Task, *corev1alpha1.Agent, map[string]connectorToolInfo, error) {
 	if reader == nil || task == nil || agent == nil || agent.Spec.Runtime == nil {
-		return task, agent, nil
+		return task, agent, nil, nil
 	}
 	allowed := effectiveACPAllowedTools(task, agent)
 	// Provider-native tools take precedence over a Tool resource of the same
@@ -256,12 +256,12 @@ func adjustInputsForConnectorTools(
 			}
 		}
 	}
-	hidden, connectorWrite, err := FilterBrokeredConnectorToolsForRequester(ctx, reader, registry, task, candidates)
+	hidden, connectorWrite, classified, err := filterConnectorToolsForRequester(ctx, reader, registry, task, candidates, connectorScope{builtins: true})
 	if err != nil {
 		if permanent := permanentLinkedBuiltinError(err); permanent != err {
-			return nil, nil, permanent
+			return nil, nil, nil, permanent
 		}
-		return nil, nil, fmt.Errorf("apply connector tool visibility: %w", err)
+		return nil, nil, nil, fmt.Errorf("apply connector tool visibility: %w", err)
 	}
 	visible := allowed
 	if len(hidden) != len(candidates) {
@@ -287,7 +287,7 @@ func adjustInputsForConnectorTools(
 		}
 		agent.Spec.Coordination.ApprovalRequiredTools = sortedUnique(append(agent.Spec.Coordination.ApprovalRequiredTools, connectorWrite...))
 	}
-	return task, agent, nil
+	return task, agent, classified, nil
 }
 
 // withoutTools returns names with every entry of removed dropped, preserving order.
