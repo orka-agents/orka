@@ -403,6 +403,33 @@ func TestResolveRefreshIsSingleFlight(t *testing.T) {
 	}
 }
 
+// TestRefreshFlightLeavesAnotherGrantAlone covers a re-consent that commits
+// after a call read custody but before its refresh flight re-reads it: the
+// flight must not refresh the new grant on the old call's behalf, where an
+// invalid_grant would shred the credential the person just consented.
+func TestRefreshFlightLeavesAnotherGrantAlone(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	req := h.request()
+	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
+	h.source.Credentials = &disconnectingCustody{Store: h.store, onRead: func() {
+		h.put(store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(-time.Second)})
+	}}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), req); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("err = %v, want the re-linked refusal", err)
+	}
+	if calls := h.refresher.calls.Load(); calls != 0 {
+		t.Fatalf("refresh calls = %d, want the new grant left alone", calls)
+	}
+	ref, _ := connectors.CredentialRef(h.connection)
+	if stored, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || stored.AccessToken != "gho_reconsented" {
+		t.Fatalf("custody = %+v err = %v, want the re-consented credential kept", stored, err)
+	}
+	if live := h.reload(); live.Status.State == corev1alpha1.ConnectionStateRevoked {
+		t.Fatal("the re-consented link must not be marked revoked")
+	}
+}
+
 // TestRefreshLosesToConcurrentReconsent models a tool call refreshing while
 // the owner completes a new consent: the refresh result must not overwrite
 // the newer material, and an invalid_grant for the old token must not shred it.
@@ -449,7 +476,10 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "changed since the task was dispatched") {
+	// Either fence may refuse first: the re-consent changed the grant and
+	// the mode change bumped the generation.
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil ||
+		!strings.Contains(err.Error(), "changed since the task was dispatched") && !strings.Contains(err.Error(), "re-linked") {
 		t.Fatalf("generation change during refresh err = %v", err)
 	}
 	h.refresher.onRefresh = reconsent
