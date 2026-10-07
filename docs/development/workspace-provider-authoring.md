@@ -68,6 +68,16 @@ fences and finalizers. Independent checkpoint restore additionally binds the
 checkpoint UID, digest, class, and provider revision; the provider must acquire
 durable artifact ownership before native creation.
 
+Before creating an external runtime credential Secret, Core saves its exact key,
+role, epoch, and full data digest, then binds its Kubernetes UID before bootstrap.
+Cleanup uses that durable evidence and UID/resourceVersion preconditions, never
+pool labels alone. An issued create whose outcome or UID cannot be established
+keeps admission and cleanup closed until exact evidence is recovered. Earlier
+external auth credentials can recover from saved name/UID bindings or the exact
+bootstrap auth UID. Older provider credentials and unbound auth credentials
+without that evidence stay untouched and require operator verification and
+cleanup; they cannot block a pool finalizer merely by copying its labels.
+
 Core requires provider registration names to be DNS-compatible Kubernetes label
 values of at most 63 characters, including for providers without checkpoint use.
 The shared checkpoint policy authorizes the exact registration named by the
@@ -86,6 +96,9 @@ and use a new workspace and checkpoint to retry that case. Create a new checkpoi
 request from a live exact source to retry source loss.
 Deleting sources and API outages remain retryable. Already routed checkpoints
 and retained artifacts keep their provider ownership after source deletion.
+With `--enable-workspace-provider-api=false`, Core preserves checkpoint requests
+and existing routes without assigning a provider or writing routing diagnostics.
+Runtime retirement and workspace retention cleanup remain active.
 
 The shared repository contains the [provider installation and retirement
 guide](https://github.com/orka-agents/orka-workspace/blob/e313ab83c5f4/docs/external-providers.md),

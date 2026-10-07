@@ -1783,42 +1783,11 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (*corev1.Secret, *corev1.Secret, error) {
-	reader := uncachedReader(r.APIReader, r.Client)
-	epoch := strconv.FormatInt(cfg.controllerEpoch, 10)
-
-	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, epoch)
+	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, strconv.FormatInt(cfg.controllerEpoch, 10))
 	if err != nil {
 		return nil, nil, err
 	}
-
-	var providerSecrets corev1.SecretList
-	if err := reader.List(ctx, &providerSecrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
-		runtimePoolUIDLabel:       string(pool.UID),
-	}); err != nil {
-		return nil, nil, err
-	}
-	providerMatches := runtimePoolProviderSecretsForGeneration(
-		providerSecrets.Items, cfg.controllerEpoch, cfg.providerProxy.tokenGeneration,
-	)
-	if len(providerMatches) > 1 {
-		return nil, nil, fmt.Errorf("workspace RuntimePool requires exactly one private provider Secret for controller epoch %d and token generation %s", cfg.controllerEpoch, cfg.providerProxy.tokenGeneration)
-	}
-	providerName := ""
-	if len(providerMatches) == 1 {
-		providerName = providerMatches[0].Name
-	} else {
-		suffix, err := r.randomHex(12)
-		if err != nil {
-			return nil, nil, fmt.Errorf("generate private RuntimePool provider Secret name: %w", err)
-		}
-		providerName = runtimePoolChildName(cfg.baseName, "provider-e"+epoch+"-g"+cfg.providerProxy.tokenGeneration+"-"+suffix)
-	}
-	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
-		runtimePoolProviderCredentialLabel: booleanTrueValue,
-		runtimePoolCredentialEpochLabel:    epoch,
-		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
-	})
+	provider, err := r.ensureExternalPrivateProviderCredential(ctx, pool, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1831,65 +1800,10 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	cfg runtimePoolConfig,
 	epoch string,
 ) (*corev1.Secret, error) {
-	reader := uncachedReader(r.APIReader, r.Client)
-	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
-	authKeys := map[string]int{
-		runtimePoolControllerTokenKey:      32,
-		runtimePoolCapabilitySecretKey:     32,
-		runtimePoolBootstrapNonceKey:       32,
-		runtimePoolBootstrapSigningSeedKey: 32,
+	if epoch != strconv.FormatInt(cfg.controllerEpoch, 10) {
+		return nil, fmt.Errorf("private credential controller epoch differs from the admitted configuration")
 	}
-	authLabels := map[string]string{
-		runtimePoolAuthLabel:            booleanTrueValue,
-		runtimePoolCredentialEpochLabel: epoch,
-	}
-	binding := strings.TrimSpace(pool.Annotations[bindingKey])
-	if binding != "" {
-		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, cfg.controllerEpoch)
-	}
-
-	var candidates corev1.SecretList
-	if err := reader.List(ctx, &candidates, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: booleanTrueValue,
-		runtimePoolUIDLabel:  string(pool.UID),
-	}); err != nil {
-		return nil, err
-	}
-	authoritativePool := &corev1alpha1.RuntimePool{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), authoritativePool); err != nil {
-		return nil, fmt.Errorf("refresh RuntimePool before private auth Secret cleanup: %w", err)
-	}
-	if authoritativePool.UID != pool.UID {
-		return nil, fmt.Errorf("RuntimePool UID changed before private auth Secret cleanup")
-	}
-	if authoritativeBinding := strings.TrimSpace(authoritativePool.Annotations[bindingKey]); authoritativeBinding != "" {
-		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, authoritativePool, cfg, cfg.controllerEpoch)
-	}
-	matches := runtimePoolAuthSecretsForEpoch(candidates.Items, cfg.controllerEpoch)
-	for i := range matches {
-		if !runtimePoolPrivateAuthSecretMatchesPool(&matches[i], pool, cfg) {
-			return nil, fmt.Errorf("refusing to adopt an unbound private RuntimePool auth Secret for controller epoch %d", cfg.controllerEpoch)
-		}
-	}
-	for i := range matches {
-		if err := r.deleteRuntimePoolManagedSecret(ctx, &matches[i]); err != nil {
-			return nil, fmt.Errorf("discard unbound private RuntimePool auth Secret: %w", err)
-		}
-	}
-
-	suffix, err := r.randomHex(12)
-	if err != nil {
-		return nil, fmt.Errorf("generate private RuntimePool auth Secret name: %w", err)
-	}
-	name := runtimePoolChildName(cfg.baseName, "auth-e"+epoch+"-"+suffix)
-	secret, err := r.createRuntimePoolSecret(ctx, pool, cfg, name, authKeys, authLabels)
-	if err != nil {
-		return nil, err
-	}
-	if err := r.bindPrivateRuntimePoolAuthSecret(ctx, pool, bindingKey, secret); err != nil {
-		return nil, err
-	}
-	return secret, nil
+	return r.ensureExternalPrivateAuthCredential(ctx, pool, cfg)
 }
 
 func (r *RuntimePoolReconciler) boundPrivateWorkspaceRuntimePoolAuthSecret(

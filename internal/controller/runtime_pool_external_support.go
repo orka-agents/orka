@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -445,7 +446,15 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 			return fmt.Errorf("external runtime has no exact retirement identity")
 		}
 		a := workspace.Status.Allocation
-		if a.Sequence != workspace.Spec.Workload.Sequence || a.Key != workspace.Spec.Workload.Key || a.Identity.RequestRevision != workspace.Spec.Workload.Revision || a.Identity.InstanceID != string(pod.UID) {
+		request := workspace.Spec.Workload
+		if a.Sequence != request.Sequence || a.Key != request.Key || a.Identity.RequestRevision != request.Revision {
+			return fmt.Errorf("external runtime retirement refers to a different instance")
+		}
+		if request.Runtime != nil && slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+			if err := r.validateExternalNativeRetirement(ctx, pool, workspace, pod); err != nil {
+				return err
+			}
+		} else if a.Identity.InstanceID != string(pod.UID) {
 			return fmt.Errorf("external runtime retirement refers to a different instance")
 		}
 		// Runtime settlement must finish before authorizing provider termination.
@@ -460,6 +469,25 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		return nil
 	}
 	return fmt.Errorf("legacy workspace RuntimePool must retire under its original provider before upgrade")
+}
+
+func (r *RuntimePoolReconciler) validateExternalNativeRetirement(ctx context.Context, pool *corev1alpha1.RuntimePool, workspace *workspacev1alpha1.ExecutionWorkspace, pod *corev1.Pod) error {
+	a, request := workspace.Status.Allocation, workspace.Spec.Workload
+	binding, err := externalRuntimeEvidence(pool)
+	if err != nil || binding == nil || !binding.NativeProcess || binding.WorkspaceUID != workspace.UID ||
+		binding.Sequence != a.Sequence || binding.Identity != a.Identity || binding.RuntimeUID != pod.UID ||
+		a.Startup == nil || a.Startup.Process == nil || binding.Pod != a.Startup.Process.Worker || binding.Endpoint != a.Startup.Endpoint ||
+		workspace.Status.ObservedGeneration != workspace.Generation {
+		return fmt.Errorf("external native runtime retirement differs from the independently bound instance")
+	}
+	if err := workspacev1alpha1.ValidateStartup(*request, *a); err != nil {
+		return fmt.Errorf("external native runtime retirement has invalid startup evidence: %w", err)
+	}
+	observed, err := r.attestExternalWorkspaceStartup(ctx, request, a.Startup)
+	if err != nil || observed.UID != pod.UID || observed.Namespace != pod.Namespace || observed.Name != pod.Name {
+		return fmt.Errorf("external native runtime retirement failed independent materialization verification")
+	}
+	return nil
 }
 
 // validateRuntimePoolExecutionWorkspace rejects legacy shapes even after the API

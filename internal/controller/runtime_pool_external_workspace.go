@@ -24,9 +24,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -781,7 +779,6 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 }
 
 func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) (bool, error) {
-	reader := uncachedReader(r.APIReader, r.Client)
 	// Core observes termination; it never deletes provider compute to make a
 	// provider's deletion assertion become true.
 	w, err := r.externalPoolWorkspace(ctx, pool)
@@ -791,34 +788,22 @@ func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx conte
 	if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 		return true, err
 	}
-	remaining := false
-	for _, list := range []client.ObjectList{&corev1.SecretList{}, &corev1.ServiceList{}, &policyv1.PodDisruptionBudgetList{}} {
-		options := []client.ListOption{client.InNamespace(cfg.namespace), client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID), runtimePoolManagedByLabel: runtimePoolManagedByLabelValue}}
-		if err := reader.List(ctx, list, options...); err != nil {
-			return false, err
+	if w.Spec.Workload != nil {
+		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.PoolBinding.UID != pool.UID {
+			return false, workspaceprovider.ErrStaleIdentity
 		}
-		items, err := meta.ExtractList(list)
-		if err != nil {
-			return false, err
-		}
-		for _, item := range items {
-			object := item.(client.Object)
-			if object.GetLabels()[runtimePoolKeyLabel] != cfg.labels[runtimePoolKeyLabel] {
-				return false, workspaceprovider.ErrStaleIdentity
-			}
-			if err := r.Delete(ctx, object, deleteCurrentObjectPreconditions(object)...); err != nil && !apierrors.IsNotFound(err) {
-				return false, err
-			}
-			check := object.DeepCopyObject().(client.Object)
-			if err := reader.Get(ctx, client.ObjectKeyFromObject(object), check); err == nil {
-				remaining = true
-			} else if !apierrors.IsNotFound(err) {
-				return false, err
-			}
-		}
+		cfg.namespace = w.Spec.Workload.Runtime.Template.Namespace
+	}
+	remaining, err := r.deleteExternalPrivateCredentials(ctx, pool, cfg)
+	if err != nil {
+		return false, err
+	}
+	discoveryRemaining, err := r.deleteExternalCoreDiscoveryResources(ctx, pool, cfg)
+	if err != nil {
+		return false, err
 	}
 	policiesRemaining, err := r.deleteExternalCoreNetworkPolicies(ctx, pool, cfg, w)
-	return remaining || policiesRemaining, err
+	return remaining || discoveryRemaining || policiesRemaining, err
 }
 
 func (r *RuntimePoolReconciler) externalObservedInstanceTerminated(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {

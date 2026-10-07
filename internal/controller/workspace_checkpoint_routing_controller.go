@@ -22,10 +22,14 @@ const workspaceCheckpointRoutingFailureAnnotation = "workspace.orka.ai/checkpoin
 // selected provider owns artifact export, observed status and reference cleanup.
 type WorkspaceCheckpointRoutingReconciler struct {
 	client.Client
-	APIReader client.Reader
+	APIReader   client.Reader
+	CleanupOnly bool
 }
 
 func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if r.CleanupOnly {
+		return ctrl.Result{}, nil
+	}
 	checkpoint := &workspace.ExecutionWorkspaceCheckpoint{}
 	if err := r.Get(ctx, req.NamespacedName, checkpoint); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)

@@ -1810,7 +1810,9 @@ func main() {
 			os.Exit(1)
 		}
 		if checkpointAPIInstalled {
-			if err := (&controller.WorkspaceCheckpointRoutingReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr); err != nil {
+			if err := (&controller.WorkspaceCheckpointRoutingReconciler{
+				Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), CleanupOnly: !workspaceProviderAPIEnabled,
+			}).SetupWithManager(mgr); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "WorkspaceCheckpointRouting")
 				os.Exit(1)
 			}

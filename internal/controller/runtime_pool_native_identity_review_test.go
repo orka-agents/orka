@@ -147,15 +147,16 @@ func TestExternalNativeRuntimeColdSequenceRotatesOpaqueIdentity(t *testing.T) {
 	if err := f.r.Status().Update(t.Context(), w); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := f.r.runtimePoolConfig(f.pool)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	cfg, err := f.r.runtimePoolConfig(&pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, provider, err := f.r.ensureRuntimePoolSecrets(t.Context(), f.pool, cfg)
+	auth, provider, err := f.r.ensureRuntimePoolSecrets(t.Context(), &pool, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.r.publishExternalWorkspaceWorkload(t.Context(), f.pool, cfg, w, auth, provider); err != nil {
+	if _, err := f.r.publishExternalWorkspaceWorkload(t.Context(), &pool, cfg, w, auth, provider); err != nil {
 		t.Fatal(err)
 	}
 	next := f.currentWorkspace(t).Spec.Workload
