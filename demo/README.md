@@ -18,6 +18,7 @@ terminal: a pull request, an object that survived deletion, a refusal.
 | 11 | [`11-fibey-approval`](11-fibey-approval) | Fibey investigates a pump alert and proposes an inspection. Lee, the shift lead, approves it, and the work-order receipt returns to the same waiting Task. |
 | 12 | [`12-efficiency`](12-efficiency) | Dana's platform team runs twenty customer replies and one fix twice: on a hosted model, then with Vekil choosing between hosted and local CPU models. Compare checked outcomes, elapsed time, and estimated cost. |
 | 13 | [`13-fibey-hosted-approval`](13-fibey-hosted-approval) | Demo 11's pump alert goes to two Fibeys at once: one hosted by Orka on AKS, one a Microsoft Foundry hosted agent behind Orka's Foundry bridge. One policy holds both work orders for Lee, and each receipt returns to its own Task. |
+| 14 | [`14-fibey-alert-flow`](14-fibey-alert-flow) | A pump alert arrives through Orka's gateway. Orka's coordinator runs a sensor-analysis job on AKS and hands its findings to Fibey in Microsoft Foundry; Mark approves the work order, and the answer, tokens, and estimated cost come back on record. |
 
 Projects 6 and 7 are hackathon videos with their own instructions and are
 excluded from the narrated standalone series. See [`narrated/`](narrated/) for
@@ -32,7 +33,7 @@ after a change keeps the two in sync.
 
 The demos share one company. Maya (developer) and Jordan (warehouse) are on
 the inventory team, Priya is on security, Alice is on payments, Sam runs the
-order desk, Lee is a shift lead, and Dana is on the platform team. Every demo
+order desk, Lee is a shift lead, Mark leads maintenance, and Dana is on the platform team. Every demo
 follows the same shape: a two-line situation, chapters named for what happens,
 one green check per chapter stating what was just proven, an evidence table
 built from the objects the demo queried, and the install command.
@@ -42,7 +43,7 @@ built from the objects the demo queried, and the install command.
 These keep the recordings readable for someone who has never seen Orka.
 
 - Five nouns on screen: Provider, Agent, Task, Session, Publisher. Host objects
-  (Sandbox, Actor) are shown but not taught. Tool appears only in 09, 11, and 13.
+  (Sandbox, Actor) are shown but not taught. Tool appears only in 09, 11, 13, and 14.
 - Orka objects are shown with the `orka` CLI, not with helpers: `task list
   --watch` follows the work, `task status` answers "did it finish and where
   did the change go", `task events --type ... --tail 1` shows what an agent

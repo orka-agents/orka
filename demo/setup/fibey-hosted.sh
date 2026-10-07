@@ -37,9 +37,25 @@ sys.stdout.write(re.sub(r"\$\{([A-Z0-9_]+)\}", lambda m: os.environ[m.group(1)],
 PY
 }
 
+# vekil_routes — one model route per distinct deployment: Fibey's model, plus
+# demo 14's coordinator model (FIBEY_FLOW_MODEL) when that is another one.
+vekil_routes() {
+  local model id target
+  for model in $(printf '%s\n' "$FIBEY_HOSTED_MODEL" "${FIBEY_FLOW_MODEL:-}" | awk 'NF && !seen[$0]++'); do
+    id=fibey-model-route target=foundry-model
+    [[ $model == "$FIBEY_HOSTED_MODEL" ]] || id=$model-route target=foundry-$model
+    printf '      - id: %s\n        public_id: %s\n        name: %s\n' "$id" "$model" "$model"
+    printf '        endpoints:\n          - /chat/completions\n          - /responses\n'
+    printf '        parallel_tool_calls: true\n        targets:\n'
+    printf '          - id: %s\n            provider: foundry\n            upstream_model: %s\n' "$target" "$model"
+  done
+}
+
 step_vekil() {
   require_env FIBEY_HOSTED_IDENTITY_CLIENT_ID FIBEY_HOSTED_PROJECT_ENDPOINT FIBEY_HOSTED_MODEL
   kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  FIBEY_VEKIL_MODEL_ROUTES=$(vekil_routes)
+  export FIBEY_VEKIL_MODEL_ROUTES
   render "$here/vekil.yaml" >"$state/vekil.yaml"
   kubectl apply -f "$state/vekil.yaml"
   kubectl -n vekil-system rollout restart deployment/vekil >/dev/null
@@ -48,14 +64,19 @@ step_vekil() {
   kubectl -n "$ORKA_NAMESPACE" rollout status deployment/orka-provider-auth-proxy --timeout=60s
 }
 
-# fetch_build — copy the build outputs the cluster steps need.
+# fetch_build — copy the build outputs the cluster steps need. A build host of
+# `local` means build.sh ran on this machine.
 fetch_build() {
   require_env FIBEY_HOSTED_BUILD_HOST FIBEY_HOSTED_BUILD_DIR
   mkdir -p "$state/setup/context"
   local file
   for file in images.json agentkit-profile.json foundry-profile.json tools.yaml \
     context/foundry.json context/agent-direct.yaml context/agent-hosted.yaml; do
-    scp -q "$FIBEY_HOSTED_BUILD_HOST:$FIBEY_HOSTED_BUILD_DIR/$file" "$state/setup/$file"
+    if [[ $FIBEY_HOSTED_BUILD_HOST == local ]]; then
+      cp "$FIBEY_HOSTED_BUILD_DIR/$file" "$state/setup/$file"
+    else
+      scp -q "$FIBEY_HOSTED_BUILD_HOST:$FIBEY_HOSTED_BUILD_DIR/$file" "$state/setup/$file"
+    fi
   done
 }
 
@@ -79,6 +100,18 @@ step_runtimes() {
   ensure_auth fibey-on-foundry fibey-on-foundry-runtime random
   python3 "$here/runtimes.py" render --setup "$state/setup" --epoch "$epoch" \
     --identity-client-id "$FIBEY_HOSTED_IDENTITY_CLIENT_ID" >"$state/runtimes.json"
+  # Registrations pin the profile digest. Delete a stale one while the runtime
+  # it was conformance-checked against still serves: its cleanup proof is bound
+  # to that exact runtime instance and profile, so rolling the Pod first wedges it.
+  for provider in agentkit foundry; do
+    name=fibey-on-aks
+    [[ $provider == foundry ]] && name=fibey-on-foundry
+    if kubectl -n "$ORKA_NAMESPACE" get agentruntime "$name-runtime" -o json 2>/dev/null |
+      jq -e --slurpfile profile "$state/setup/$provider-profile.json" \
+        '.spec.capabilities.profile.digest != $profile[0].profile.digest' >/dev/null; then
+      kubectl -n "$ORKA_NAMESPACE" delete agentruntime "$name-runtime" --timeout=300s >/dev/null
+    fi
+  done
   kubectl apply -f "$state/runtimes.json"
   for name in fibey-on-aks fibey-on-foundry; do
     kubectl -n "$ORKA_NAMESPACE" rollout status "deployment/$name" --timeout=300s

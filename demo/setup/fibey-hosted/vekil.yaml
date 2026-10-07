@@ -1,6 +1,6 @@
 # Vekil routes the Orka-hosted Fibey's model calls to the same Foundry model
-# deployment the hosted Fibey uses. It authenticates with workload identity;
-# no API key exists. fibey-hosted.sh fills the ${...} values from env.sh.
+# deployment the hosted Fibey uses, and demo 14's coordinator model when it
+# differs. It authenticates with workload identity; no API key exists. fibey-hosted.sh fills the ${...} values from env.sh.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -33,17 +33,7 @@ data:
         base_url: ${FIBEY_HOSTED_PROJECT_ENDPOINT}/openai/v1
         auth_mode: azure_identity
     model_routes:
-      - id: fibey-model-route
-        public_id: ${FIBEY_HOSTED_MODEL}
-        name: ${FIBEY_HOSTED_MODEL}
-        endpoints:
-          - /chat/completions
-          - /responses
-        parallel_tool_calls: true
-        targets:
-          - id: foundry-model
-            provider: foundry
-            upstream_model: ${FIBEY_HOSTED_MODEL}
+${FIBEY_VEKIL_MODEL_ROUTES}
 ---
 apiVersion: apps/v1
 kind: Deployment
