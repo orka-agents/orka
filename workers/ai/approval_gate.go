@@ -302,7 +302,7 @@ func (g *approvalGate) targetForCall(
 func approvalTargetArguments(args json.RawMessage, customTool *corev1alpha1.Tool) (json.RawMessage, error) {
 	// The controller executes a connector-backed tool with empty arguments
 	// as the empty object and digests that, so the worker's target must too.
-	if customTool != nil && customTool.Annotations[connectorBackedToolAnnotation] == "true" && len(bytes.TrimSpace(args)) == 0 {
+	if isConnectorBackedTool(customTool) && len(bytes.TrimSpace(args)) == 0 {
 		args = json.RawMessage(`{}`)
 	}
 	return approvals.TargetArguments(args, customTool)
@@ -371,7 +371,7 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	if err := validateApprovalCustomToolCompatibility(customTool); err != nil {
 		return "", err
 	}
-	if customTool.Annotations[connectorBackedToolAnnotation] == "true" {
+	if isConnectorBackedTool(customTool) {
 		// Executed in the controller, which recomputes this digest from the
 		// live Tool and the Connection frozen with the Job, and refuses a
 		// claim when either changed: a Job re-created after the decision
