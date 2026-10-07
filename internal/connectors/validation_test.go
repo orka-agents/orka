@@ -251,6 +251,9 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "parameters unresolvable ref", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"$ref":"#/$defs/missing"}}}`)}
 		}, want: "resolvable JSON Schema"},
+		{name: "parameters lossy numeric constraint", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"n":{"type":"integer","maximum":9007199254740993}}}`)}
+		}, want: "numbers a float64 holds exactly"},
 		{name: "parameters nested ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"type":"string","minLength":1},"tags":{"type":"array","items":{"type":"string"}}},"required":["q"]}`)}
 		}},
