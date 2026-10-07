@@ -201,7 +201,9 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 			slog.Warn(
 				"ACP adapter lost while idle; retiring runtime session",
 				"sessionID", sessionID, "promptID", request.Metadata.PromptID,
-				"resumeAttempted", lost.Attempted, "error", lost.Error(),
+				"resumeAttempted", lost.Attempted,
+				// The cause can carry adapter-controlled JSON-RPC text.
+				"errorDetail", redactedPromptErrorDetail(lost),
 			)
 			s.poisonSession(state, "adapter lost while idle")
 			writeError(

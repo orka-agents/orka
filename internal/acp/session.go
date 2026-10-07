@@ -58,10 +58,12 @@ type RuntimeSession struct {
 	// it closes when the restart settles either way.
 	resuming        chan struct{}
 	adapterRestarts int
-	active          *activePrompt
-	tombstones      map[string]PromptTombstone
-	deleted         bool
-	deletion        *runtimeSessionDeletion
+	// frozen is set from a workspace freeze attempt until a proven thaw.
+	frozen     bool
+	active     *activePrompt
+	tombstones map[string]PromptTombstone
+	deleted    bool
+	deletion   *runtimeSessionDeletion
 }
 
 // AdapterLostError reports that the adapter process exited while the runtime
@@ -383,6 +385,13 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, leaseDe
 	s.resuming = nil
 	close(resuming)
 	if err != nil {
+		// The caller went away or its lease ran out mid-restart. The agent
+		// never rejected the provider session, so keep the exited adapter
+		// bound and let the next prompt retry the resume instead of
+		// retiring the session.
+		if ctx.Err() != nil || !leaseDeadline.After(time.Now()) {
+			return fmt.Errorf("resume ACP adapter interrupted: %w", err)
+		}
 		return &AdapterLostError{Attempted: true, Cause: err}
 	}
 	if s.deleted {
@@ -403,7 +412,6 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, leaseDe
 		"runtimeSessionID", s.id,
 		"generation", s.generation,
 		"adapterRestarts", s.adapterRestarts,
-		"previousExit", exitErr,
 	)
 	return nil
 }
@@ -491,7 +499,13 @@ func (s *RuntimeSession) closeProviderSession(ctx context.Context, process *Proc
 	select {
 	case err := <-done:
 		if err != nil {
-			slog.Debug("ACP session/close before deletion failed", "runtimeSessionID", s.id, "error", err)
+			// The error text is adapter-controlled; log only its JSON-RPC
+			// code.
+			code := 0
+			if rpcErr, ok := errors.AsType[*RPCError](err); ok {
+				code = rpcErr.Code
+			}
+			slog.Debug("ACP session/close before deletion failed", "runtimeSessionID", s.id, "rpcErrorCode", code)
 		}
 	case <-closeCtx.Done():
 		slog.Debug("ACP session/close before deletion timed out", "runtimeSessionID", s.id)
@@ -751,7 +765,9 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 		cancelPendingPermissions(active)
 	}
 	process := s.process
-	closeSupported := s.capabilities.SessionCapability(SessionCapabilityClose)
+	// A frozen adapter cannot read session/close; sending it would only
+	// stall deletion for the close grace.
+	closeSupported := s.capabilities.SessionCapability(SessionCapabilityClose) && !s.frozen
 	s.mu.Unlock()
 	if firstDeletion && active != nil {
 		// Best-effort courtesy cancel: the notification is a blocking pipe write,
@@ -1056,6 +1072,9 @@ func (s *RuntimeSession) Freeze(ctx context.Context) error {
 		return fmt.Errorf("runtime session must be idle before workspace freeze")
 	}
 	process := s.process
+	// Set before the attempt: a failed freeze may still have stopped part
+	// of the tree, and only a successful Thaw proves it runs again.
+	s.frozen = true
 	s.mu.Unlock()
 	return process.Freeze(ctx)
 }
@@ -1078,5 +1097,11 @@ func (s *RuntimeSession) Thaw() error {
 	}
 	process := s.process
 	s.mu.Unlock()
-	return process.Thaw()
+	if err := process.Thaw(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.frozen = false
+	s.mu.Unlock()
+	return nil
 }

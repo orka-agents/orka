@@ -382,9 +382,13 @@ const (
 	// helperExitAfterPromptEnv makes the helper exit right after answering a
 	// prompt, simulating an adapter crash while the session is idle.
 	helperExitAfterPromptEnv = "ACP_HELPER_EXIT_AFTER_PROMPT"
+	// helperHangFirstResumeEnv makes the first session/resume never answer,
+	// so the caller's context ends mid-restart; later resumes succeed.
+	helperHangFirstResumeEnv = "ACP_HELPER_HANG_FIRST_RESUME"
 	helperStateDirEnv        = "ACP_HELPER_STATE_DIR"
 	helperSessionStateFile   = "provider-session"
 	helperResumedStateFile   = "resumed"
+	helperResumeHungFile     = "resume-hung"
 	helperClosedStateFile    = "closed"
 )
 
@@ -483,6 +487,10 @@ func TestACPHelperProcess(t *testing.T) {
 					"jsonrpc": "2.0", "id": rawIDValue(message.ID),
 					"error": map[string]any{"code": -32602, "message": "cannot resume session"},
 				})
+				continue
+			}
+			if os.Getenv(helperHangFirstResumeEnv) == "1" && readHelperState(helperResumeHungFile) == "" {
+				writeHelperState(helperResumeHungFile, "1")
 				continue
 			}
 			writeHelperState(helperResumedStateFile, "1")

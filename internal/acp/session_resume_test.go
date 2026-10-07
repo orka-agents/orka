@@ -123,6 +123,39 @@ func TestRuntimeSessionRejectedResumeIsLostAndStopsReplacement(t *testing.T) {
 	}
 }
 
+func TestRuntimeSessionInterruptedResumeStaysRetryable(t *testing.T) {
+	session, _ := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{
+		helperExitAfterPromptEnv: "1",
+		helperHangFirstResumeEnv: "1",
+	})
+	result, _ := runHelperPrompt(t, session, "prompt-1")
+	if result.Outcome != PromptOutcomeCompleted {
+		t.Fatalf("first prompt = %#v", result)
+	}
+	awaitAdapterExit(t, session)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")})
+	if err == nil {
+		t.Fatal("prompt whose caller left mid-resume started")
+	}
+	if lost, ok := errors.AsType[*AdapterLostError](err); ok {
+		t.Fatalf("caller cancellation retired the provider session: %v", lost)
+	}
+	if session.AdapterRestarts() != 0 {
+		t.Fatalf("adapter restarts = %d, want 0", session.AdapterRestarts())
+	}
+
+	result, _ = runHelperPrompt(t, session, "prompt-3")
+	if result.Outcome != PromptOutcomeCompleted || !result.Accepted {
+		t.Fatalf("prompt retrying the resume = %#v", result)
+	}
+	if session.AdapterRestarts() != 1 {
+		t.Fatalf("adapter restarts = %d, want 1", session.AdapterRestarts())
+	}
+}
+
 func TestRuntimeSessionDeleteClosesProviderSessionWhenAdvertised(t *testing.T) {
 	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeClose, nil, nil)
 	result, _ := runHelperPrompt(t, session, "prompt-1")
@@ -134,6 +167,26 @@ func TestRuntimeSessionDeleteClosesProviderSessionWhenAdvertised(t *testing.T) {
 	_, _ = session.Delete(ctx)
 	if _, err := os.Stat(filepath.Join(stateDir, helperClosedStateFile)); err != nil {
 		t.Fatalf("helper did not receive session/close before the stop: %v", err)
+	}
+}
+
+func TestRuntimeSessionDeleteSkipsCloseAfterFreeze(t *testing.T) {
+	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeClose, nil, nil)
+	freezeCtx, cancelFreeze := context.WithTimeout(context.Background(), time.Second)
+	// Freeze proof is Linux-only; the attempt alone may leave the tree
+	// stopped, so it must suppress the close either way.
+	_ = session.Freeze(freezeCtx)
+	cancelFreeze()
+	// Continue the tree behind the session's back so a close, if sent, is
+	// answered and recorded: only the frozen marker may suppress it.
+	if err := signalProcessGroup(session.Process().PID(), continueSignal()); err != nil {
+		t.Fatalf("continue adapter: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _ = session.Delete(ctx)
+	if _, err := os.Stat(filepath.Join(stateDir, helperClosedStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session/close was sent to a frozen adapter (stat err=%v)", err)
 	}
 }
 
