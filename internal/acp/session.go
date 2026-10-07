@@ -47,15 +47,46 @@ type RuntimeSession struct {
 	generation        int64
 	profileDigest     string
 	providerSessionID string
-	process           *Process
 	config            RuntimeSessionConfig
 
-	mu         sync.Mutex
-	active     *activePrompt
-	tombstones map[string]PromptTombstone
-	deleted    bool
-	deletion   *runtimeSessionDeletion
+	mu sync.Mutex
+	// process is the live adapter child. It is replaced in place when an
+	// idle adapter exits and the agent supports session/resume.
+	process      *Process
+	capabilities AgentCapabilities
+	// resuming is non-nil while an in-place adapter restart is in flight;
+	// it closes when the restart settles either way.
+	resuming        chan struct{}
+	adapterRestarts int
+	active          *activePrompt
+	tombstones      map[string]PromptTombstone
+	deleted         bool
+	deletion        *runtimeSessionDeletion
 }
+
+// AdapterLostError reports that the adapter process exited while the runtime
+// session was idle and the session could not be resumed in place: either the
+// agent does not advertise session/resume, or the resume attempt failed. The
+// provider session is gone for this generation; the caller must retire the
+// RuntimeSession so the controller continues from Orka's canonical transcript.
+type AdapterLostError struct {
+	// Attempted is true when a session/resume was attempted and failed.
+	Attempted bool
+	Cause     error
+}
+
+func (e *AdapterLostError) Error() string {
+	if e.Attempted {
+		return fmt.Sprintf("ACP adapter exited while idle and session/resume failed: %v", e.Cause)
+	}
+	return fmt.Sprintf("ACP adapter exited while idle and the agent does not support session/resume: %v", e.Cause)
+}
+
+func (e *AdapterLostError) Unwrap() error { return e.Cause }
+
+// closeSessionGraceCap bounds the graceful session/close wait during
+// deletion so a wedged adapter cannot delay the proven process stop.
+const closeSessionGraceCap = 5 * time.Second
 
 type runtimeSessionDeletion struct {
 	done   chan struct{}
@@ -212,45 +243,14 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		config:        cfg,
 		tombstones:    make(map[string]PromptTombstone),
 	}
-	cfg.Process.ClientOptions.RequestHandler = session.handleRequest
-	cfg.Process.ClientOptions.NotificationHandler = session.handleNotification
-	process, err := StartProcess(cfg.Process)
-	if err != nil {
-		return nil, err
-	}
-	session.process = process
+	session.config.Process.ClientOptions.RequestHandler = session.handleRequest
+	session.config.Process.ClientOptions.NotificationHandler = session.handleNotification
 
 	initCtx, cancel := context.WithTimeout(ctx, cfg.InitializeTimeout)
 	defer cancel()
-	clientInfo := cfg.ClientInfo
-	if clientInfo.Name == "" {
-		clientInfo = Implementation{Name: "orka-acp-runtime", Version: "development"}
-	}
-	initialized, err := process.Client().Initialize(initCtx, InitializeRequest{
-		ProtocolVersion: ProtocolVersion,
-		ClientInfo:      &clientInfo,
-		ClientCapabilities: ClientCapabilities{
-			FS:       FileSystemCapabilities{},
-			Terminal: false,
-		},
-	})
+	process, capabilities, err := session.launchAdapter(initCtx)
 	if err != nil {
-		_ = stopProcessBestEffort(process, cfg.CancelGrace)
-		return nil, fmt.Errorf("initialize ACP adapter: %w", err)
-	}
-	if len(cfg.MCPServers) > 0 && !acpMCPCapabilityEnabled(initialized.AgentCapabilities.MCPCapabilities, "http") {
-		_ = stopProcessBestEffort(process, cfg.CancelGrace)
-		return nil, fmt.Errorf("ACP adapter did not advertise HTTP MCP server support")
-	}
-	if cfg.AuthMethodID != "" {
-		if !containsAuthMethod(initialized.AuthMethods, cfg.AuthMethodID) {
-			_ = stopProcessBestEffort(process, cfg.CancelGrace)
-			return nil, fmt.Errorf("ACP adapter did not advertise authentication method %q", cfg.AuthMethodID)
-		}
-		if err := process.Client().Authenticate(initCtx, cfg.AuthMethodID); err != nil {
-			_ = stopProcessBestEffort(process, cfg.CancelGrace)
-			return nil, fmt.Errorf("authenticate ACP adapter: %w", err)
-		}
+		return nil, err
 	}
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
 		CWD:        cfg.Process.Paths.Workspace,
@@ -261,14 +261,243 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		_ = stopProcessBestEffort(process, cfg.CancelGrace)
 		return nil, fmt.Errorf("create ACP provider session: %w", err)
 	}
+	session.process = process
+	session.capabilities = capabilities
 	session.providerSessionID = newSession.SessionID
 	return session, nil
+}
+
+// launchAdapter starts one adapter child and completes the ACP handshake:
+// initialize, the HTTP MCP capability check, and optional authentication. The
+// returned process is stopped on any handshake failure. It is shared by
+// session creation and by the in-place resume after an idle adapter exit, so
+// both paths negotiate exactly the same way.
+func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapabilities, error) {
+	cfg := s.config
+	process, err := StartProcess(cfg.Process)
+	if err != nil {
+		return nil, AgentCapabilities{}, err
+	}
+	clientInfo := cfg.ClientInfo
+	if clientInfo.Name == "" {
+		clientInfo = Implementation{Name: "orka-acp-runtime", Version: "development"}
+	}
+	initialized, err := process.Client().Initialize(ctx, InitializeRequest{
+		ProtocolVersion: ProtocolVersion,
+		ClientInfo:      &clientInfo,
+		ClientCapabilities: ClientCapabilities{
+			FS:       FileSystemCapabilities{},
+			Terminal: false,
+		},
+	})
+	if err != nil {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, fmt.Errorf("initialize ACP adapter: %w", err)
+	}
+	if len(cfg.MCPServers) > 0 && !acpMCPCapabilityEnabled(initialized.AgentCapabilities.MCPCapabilities, "http") {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, fmt.Errorf("ACP adapter did not advertise HTTP MCP server support")
+	}
+	if cfg.AuthMethodID != "" {
+		if !containsAuthMethod(initialized.AuthMethods, cfg.AuthMethodID) {
+			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			return nil, AgentCapabilities{}, fmt.Errorf("ACP adapter did not advertise authentication method %q", cfg.AuthMethodID)
+		}
+		if err := process.Client().Authenticate(ctx, cfg.AuthMethodID); err != nil {
+			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			return nil, AgentCapabilities{}, fmt.Errorf("authenticate ACP adapter: %w", err)
+		}
+	}
+	return process, initialized.AgentCapabilities, nil
 }
 
 func (s *RuntimeSession) ID() string                { return s.id }
 func (s *RuntimeSession) Generation() int64         { return s.generation }
 func (s *RuntimeSession) ProviderSessionID() string { return s.providerSessionID }
-func (s *RuntimeSession) Process() *Process         { return s.process }
+
+// Process returns the current adapter child. After an in-place resume this is
+// the replacement process, not the one that exited.
+func (s *RuntimeSession) Process() *Process {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.process
+}
+
+// AgentCapabilities returns the capabilities the live adapter advertised
+// during its initialize handshake.
+func (s *RuntimeSession) AgentCapabilities() AgentCapabilities {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.capabilities
+}
+
+// AdapterRestarts counts successful in-place adapter resumes for this
+// RuntimeSession generation.
+func (s *RuntimeSession) AdapterRestarts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.adapterRestarts
+}
+
+func processExited(process *Process) bool {
+	if process == nil {
+		return true
+	}
+	select {
+	case <-process.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// recoverExitedAdapterLocked is called with s.mu held, with no active prompt
+// and no deletion. When the adapter child has exited it restarts the adapter
+// and resumes the provider session in place; the lock is released during the
+// restart and re-acquired before returning, so callers must re-validate
+// deletion afterwards. A nil return with the lock held means a live adapter
+// is bound; an *AdapterLostError means the provider session is unrecoverable
+// for this generation.
+func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, leaseDeadline time.Time) error {
+	if s.resuming != nil {
+		return fmt.Errorf("runtime session adapter restart is in flight")
+	}
+	exited := s.process
+	if !processExited(exited) {
+		return nil
+	}
+	exitErr := exited.Client().Err()
+	if exitErr == nil {
+		exitErr = errors.New("adapter process exited")
+	}
+	if !s.capabilities.SessionCapability(SessionCapabilityResume) {
+		return &AdapterLostError{Cause: exitErr}
+	}
+	resuming := make(chan struct{})
+	s.resuming = resuming
+	s.mu.Unlock()
+
+	process, capabilities, err := s.resumeAdapter(ctx, exited, leaseDeadline)
+
+	s.mu.Lock()
+	s.resuming = nil
+	close(resuming)
+	if err != nil {
+		return &AdapterLostError{Attempted: true, Cause: err}
+	}
+	if s.deleted {
+		// Delete joins an in-flight restart before marking deletion, so this
+		// is a guard for any future caller that marks deletion without
+		// joining: a replacement that will never be bound must not outlive
+		// the session.
+		s.mu.Unlock()
+		_ = stopProcessBestEffort(process, s.config.CancelGrace)
+		s.mu.Lock()
+		return fmt.Errorf("runtime session is deleted")
+	}
+	s.process = process
+	s.capabilities = capabilities
+	s.adapterRestarts++
+	slog.Info(
+		"ACP adapter resumed in place after idle exit",
+		"runtimeSessionID", s.id,
+		"generation", s.generation,
+		"adapterRestarts", s.adapterRestarts,
+		"previousExit", exitErr,
+	)
+	return nil
+}
+
+// resumeAdapter proves the exited adapter tree is gone, launches a replacement
+// through the same handshake as session creation, and reconnects it to the
+// existing provider session with session/resume. The provider session ID is
+// pinned: an agent that answers with a different ID is rejected and the
+// replacement is stopped, because Orka's transcript continuity is bound to the
+// original provider session.
+func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, leaseDeadline time.Time) (*Process, AgentCapabilities, error) {
+	cfg := s.config
+	deadline := leaseDeadline
+	if initializeDeadline := time.Now().Add(cfg.InitializeTimeout); initializeDeadline.Before(deadline) {
+		deadline = initializeDeadline
+	}
+	resumeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	// The replacement reuses this session's UID/GID. Under the production
+	// fence (root supervisor, distinct child UID) the exited tree must be
+	// PROVEN gone before another child exists under that identity, or a
+	// straggler could later be mistaken for the new adapter. Without a
+	// distinct identity there is nothing UID-scoped to prove; the observed
+	// leader exit is the only evidence available, exactly as for deletion.
+	if exited.usesUIDProcessScope() {
+		status, err := exited.Stop(resumeCtx, cfg.CancelGrace)
+		if err != nil {
+			return nil, AgentCapabilities{}, fmt.Errorf("prove exited adapter cleanup: %w", err)
+		}
+		if !status.Proven {
+			return nil, AgentCapabilities{}, fmt.Errorf("exited adapter cleanup could not be proven; remaining pids %v", status.RemainingPIDs)
+		}
+	}
+	process, capabilities, err := s.launchAdapter(resumeCtx)
+	if err != nil {
+		return nil, AgentCapabilities{}, err
+	}
+	if !capabilities.SessionCapability(SessionCapabilityResume) {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, fmt.Errorf("replacement adapter no longer advertises session/resume")
+	}
+	meta, err := MergeNewSessionMeta(cfg.NewSessionMeta, Meta{
+		sessionMetaRuntimeSessionID:     s.id,
+		sessionMetaGeneration:           s.generation,
+		sessionMetaRuntimeProfileDigest: s.profileDigest,
+	})
+	if err != nil {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, err
+	}
+	resumed, err := process.Client().ResumeSession(resumeCtx, ResumeSessionRequest{
+		SessionID:  s.providerSessionID,
+		CWD:        cfg.Process.Paths.Workspace,
+		MCPServers: append([]MCPServer{}, cfg.MCPServers...),
+		Meta:       meta,
+	})
+	if err != nil {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, fmt.Errorf("resume ACP provider session: %w", err)
+	}
+	if resumed.SessionID != "" && resumed.SessionID != s.providerSessionID {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, fmt.Errorf("ACP session/resume bound a different provider session")
+	}
+	return process, capabilities, nil
+}
+
+// closeProviderSession sends a bounded, best-effort session/close before the
+// process stop so agents that persist state on close (thread rollouts,
+// session files) get to do so. The request write can block on a wedged
+// adapter, so it runs detached; adapter exit closes stdin and ends it.
+func (s *RuntimeSession) closeProviderSession(ctx context.Context, process *Process) {
+	grace := s.config.CancelGrace
+	if grace <= 0 {
+		grace = DefaultStopGrace
+	}
+	grace = min(grace, closeSessionGraceCap)
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- process.Client().CloseSession(closeCtx, s.providerSessionID)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			slog.Debug("ACP session/close before deletion failed", "runtimeSessionID", s.id, "error", err)
+		}
+	case <-closeCtx.Done():
+		slog.Debug("ACP session/close before deletion timed out", "runtimeSessionID", s.id)
+	case <-ctx.Done():
+	}
+}
 
 // StartPrompt starts a prompt bounded by the configured default lease.
 func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock) (PromptRun, error) {
@@ -316,6 +545,15 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 		s.mu.Unlock()
 		return PromptRun{}, &DuplicatePromptError{PromptID: promptID, Result: &result}
 	}
+	if err := s.recoverExitedAdapterLocked(ctx, leaseDeadline); err != nil {
+		s.mu.Unlock()
+		return PromptRun{}, err
+	}
+	if s.deleted {
+		s.mu.Unlock()
+		return PromptRun{}, fmt.Errorf("runtime session is deleted")
+	}
+	process := s.process
 	active := &activePrompt{
 		id:            promptID,
 		requestDigest: requestDigest,
@@ -330,7 +568,7 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 	s.active = active
 	s.mu.Unlock()
 
-	go s.runPrompt(active)
+	go s.runPrompt(active, process)
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -406,6 +644,7 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	active.cancelRequested = true
 	cancelPendingPermissions(active)
 	done := active.done
+	process := s.process
 	s.mu.Unlock()
 
 	// Best-effort courtesy cancel: the notification write can block when the
@@ -414,7 +653,7 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	// prompt (closing done); a dead or wedged transport is escalated to the
 	// bounded process stop after the grace window.
 	go func() {
-		_ = s.process.Client().Cancel(ctx, s.providerSessionID)
+		_ = process.Client().Cancel(ctx, s.providerSessionID)
 	}()
 	timer := time.NewTimer(s.config.CancelGrace)
 	defer timer.Stop()
@@ -422,7 +661,7 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	case <-done:
 		return s.tombstoneResult(promptID)
 	case <-timer.C:
-		_, _ = s.process.Stop(ctx, s.config.CancelGrace)
+		_, _ = process.Stop(ctx, s.config.CancelGrace)
 		select {
 		case <-done:
 			return s.tombstoneResult(promptID)
@@ -468,6 +707,19 @@ func (s *RuntimeSession) WaitPromptSettlement(ctx context.Context, promptID stri
 
 func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	s.mu.Lock()
+	// An in-flight adapter restart owns a replacement process that is not
+	// yet bound; join it so the stop below covers whichever process ends up
+	// bound and the restart path stops the other.
+	for s.resuming != nil {
+		resuming := s.resuming
+		s.mu.Unlock()
+		select {
+		case <-resuming:
+		case <-ctx.Done():
+			return CleanupStatus{}, ctx.Err()
+		}
+		s.mu.Lock()
+	}
 	deletion := s.deletion
 	if deletion != nil {
 		select {
@@ -498,6 +750,8 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 		active.cancelRequested = true
 		cancelPendingPermissions(active)
 	}
+	process := s.process
+	closeSupported := s.capabilities.SessionCapability(SessionCapabilityClose)
 	s.mu.Unlock()
 	if firstDeletion && active != nil {
 		// Best-effort courtesy cancel: the notification is a blocking pipe write,
@@ -505,10 +759,13 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 		// Delete forever before the bounded process stop. Adapter exit closes
 		// stdin, which unblocks the write and ends the goroutine.
 		go func() {
-			_ = s.process.Client().Cancel(context.Background(), s.providerSessionID)
+			_ = process.Client().Cancel(context.Background(), s.providerSessionID)
 		}()
 	}
-	status, err := s.process.Stop(ctx, s.config.CancelGrace)
+	if firstDeletion && closeSupported && !processExited(process) {
+		s.closeProviderSession(ctx, process)
+	}
+	status, err := process.Stop(ctx, s.config.CancelGrace)
 	s.mu.Lock()
 	deletion.status = status
 	deletion.err = err
@@ -524,9 +781,9 @@ func (s *RuntimeSession) Tombstone(promptID string) (PromptTombstone, bool) {
 	return value, ok
 }
 
-func (s *RuntimeSession) runPrompt(active *activePrompt) {
+func (s *RuntimeSession) runPrompt(active *activePrompt, process *Process) {
 	var written bool
-	response, err := s.process.Client().PromptWithWritten(context.Background(), active.request, func() {
+	response, err := process.Client().PromptWithWritten(context.Background(), active.request, func() {
 		s.mu.Lock()
 		written = true
 		active.accepted = true
@@ -794,7 +1051,7 @@ func stopProcessBestEffort(process *Process, grace time.Duration) error {
 
 func (s *RuntimeSession) Freeze(ctx context.Context) error {
 	s.mu.Lock()
-	if s.deleted || s.active != nil {
+	if s.deleted || s.active != nil || s.resuming != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("runtime session must be idle before workspace freeze")
 	}
@@ -815,7 +1072,7 @@ func (s *RuntimeSession) ChildIdentity() (int, int) {
 
 func (s *RuntimeSession) Thaw() error {
 	s.mu.Lock()
-	if s.deleted || s.active != nil {
+	if s.deleted || s.active != nil || s.resuming != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("runtime session cannot thaw while deleted or prompt-active")
 	}

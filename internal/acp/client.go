@@ -296,6 +296,29 @@ func (c *Client) NewSession(ctx context.Context, request NewSessionRequest) (New
 	return response, nil
 }
 
+// ResumeSession reconnects to an existing provider session. Callers must
+// first check AgentCapabilities.SessionCapability(SessionCapabilityResume).
+func (c *Client) ResumeSession(ctx context.Context, request ResumeSessionRequest) (ResumeSessionResponse, error) {
+	if request.SessionID == "" {
+		return ResumeSessionResponse{}, fmt.Errorf("ACP session ID is required")
+	}
+	var response ResumeSessionResponse
+	if err := c.Call(ctx, MethodSessionResume, request, &response); err != nil {
+		return ResumeSessionResponse{}, err
+	}
+	return response, nil
+}
+
+// CloseSession asks the agent to end a provider session gracefully. Callers
+// must first check AgentCapabilities.SessionCapability(SessionCapabilityClose).
+func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("ACP session ID is required")
+	}
+	var response CloseSessionResponse
+	return c.Call(ctx, MethodSessionClose, CloseSessionRequest{SessionID: sessionID}, &response)
+}
+
 func (c *Client) Prompt(ctx context.Context, request PromptRequest) (PromptResponse, error) {
 	return c.PromptWithWritten(ctx, request, nil)
 }

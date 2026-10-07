@@ -13,11 +13,23 @@ const (
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
 	MethodSessionNew        = "session/new"
+	MethodSessionResume     = "session/resume"
+	MethodSessionClose      = "session/close"
 	MethodSessionPrompt     = "session/prompt"
 	MethodSessionCancel     = "session/cancel"
 	MethodSessionUpdate     = "session/update"
 	MethodRequestPermission = "session/request_permission"
 	MethodCancelRequest     = "$/cancel_request"
+)
+
+const (
+	// SessionCapabilityResume is the ACP sessionCapabilities key for
+	// session/resume: reconnecting to an existing provider session without a
+	// history replay (stable in ACP v1 since 2026-04).
+	SessionCapabilityResume = "resume"
+	// SessionCapabilityClose is the ACP sessionCapabilities key for
+	// session/close: an explicit graceful end of a provider session.
+	SessionCapabilityClose = "close"
 )
 
 type Meta map[string]any
@@ -88,6 +100,25 @@ type AgentCapabilities struct {
 	Meta                Meta               `json:"_meta,omitempty"`
 }
 
+// SessionCapability reports whether the agent advertised the named
+// sessionCapabilities entry. ACP marks a supported capability with an object
+// (usually `{}`); a boolean true is accepted for lenient agents, and null,
+// false, or an absent key mean unsupported.
+func (c AgentCapabilities) SessionCapability(name string) bool {
+	value, ok := c.SessionCapabilities[name]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case map[string]any:
+		return true
+	default:
+		return false
+	}
+}
+
 type AuthMethod struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -154,6 +185,35 @@ type NewSessionResponse struct {
 	Modes         json.RawMessage   `json:"modes,omitempty"`
 	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
 	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+// ResumeSessionRequest reconnects a fresh adapter process to an existing
+// provider session. Unlike session/load, the agent MUST NOT replay history.
+type ResumeSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+// ResumeSessionResponse is nominally empty; agents MAY echo the session ID
+// and initial mode, model, or configuration state.
+type ResumeSessionResponse struct {
+	SessionID     string            `json:"sessionId,omitempty"`
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	Models        json.RawMessage   `json:"models,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+type CloseSessionRequest struct {
+	SessionID string `json:"sessionId"`
+	Meta      Meta   `json:"_meta,omitempty"`
+}
+
+type CloseSessionResponse struct {
+	Meta Meta `json:"_meta,omitempty"`
 }
 
 type ContentBlock struct {

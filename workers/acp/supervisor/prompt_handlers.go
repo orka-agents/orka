@@ -191,6 +191,25 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 			delete(state.operations, request.Metadata.OperationID)
 		}
 		s.mu.Unlock()
+		if lost, ok := errors.AsType[*acp.AdapterLostError](err); ok {
+			// The adapter child exited between prompts and the provider
+			// session could not be resumed in place, so this generation has
+			// no agent to continue. Retire the session: the controller sees a
+			// pre-acceptance failure, records RuntimeLost, drops the binding,
+			// and the next continuation recreates a RuntimeSession from Orka's
+			// canonical transcript.
+			slog.Warn(
+				"ACP adapter lost while idle; retiring runtime session",
+				"sessionID", sessionID, "promptID", request.Metadata.PromptID,
+				"resumeAttempted", lost.Attempted, "error", lost.Error(),
+			)
+			s.poisonSession(state, "adapter lost while idle")
+			writeError(
+				w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned,
+				"ACP adapter exited while the runtime session was idle and could not be resumed in place", nil, false,
+			)
+			return
+		}
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, safeError(err), nil, false)
 		return
 	}
