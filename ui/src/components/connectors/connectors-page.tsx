@@ -144,7 +144,8 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
         setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}. This token lacks the scope your controller requires to manage linked accounts; finish with a token that carries it.`, retry: true })
         return
       }
-      const command = completionCommand(search.connection, search.namespace)
+      // The fallback names the namespace the request actually tried.
+      const command = completionCommand(search.connection, completionNamespace)
       const fallback = command ? `, or run: ${command}` : ''
       // The API answers 404 for another person's Connection rather than
       // revealing it, so a dashboard signed in as someone else sees "not

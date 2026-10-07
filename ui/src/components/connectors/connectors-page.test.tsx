@@ -116,6 +116,14 @@ describe('ConnectorsPage', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 
+  it('names the namespace it tried in the CLI fallback when the callback namespace is invalid', async () => {
+    useProviders([github])
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc&namespace=Not_A_Namespace#completion=one-time')
+    server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('connection not found', { status: 404 })))
+    render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc', namespace: 'Not_A_Namespace' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('orka connection complete github-abc --namespace orka-system'))
+  })
+
   it('keeps the completion token for a retry when finishing fails', async () => {
     useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
     window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
