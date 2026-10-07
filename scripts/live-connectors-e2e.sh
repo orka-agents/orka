@@ -20,7 +20,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 # The shared redactor knows nothing of the fixture's own token format, and
 # the literal OIDC/model credentials this run minted must never reach a
 # log either: every diagnostic below goes through redact_all.
-ORKA_REDACT_SECRET_VARS=(token other_token model_credential client_secret)
+ORKA_REDACT_SECRET_VARS=(token other_token model_credential client_secret client_basic completion)
 redact_all() {
   redact | sed -E 's/fx-(access|refresh)-[A-Za-z0-9._~+\/=-]+/fx-\1-[REDACTED]/g'
 }
@@ -67,6 +67,9 @@ fixture_host="connectors-fixture.${namespace}.svc"
 issuer="http://${fixture_host}:8080/oidc"
 client_id="orka-e2e-client"
 client_secret="$(openssl rand -hex 24)"
+# The provider defaults to HTTP Basic client authentication, so the wire
+# form of the client credential is this value, not the raw secret.
+client_basic="$(printf '%s:%s' "${client_id}" "${client_secret}" | base64 | tr -d '\n')"
 model_credential="fixture-$(openssl rand -hex 12)"
 callback_base="http://localhost:${api_port}"
 workdir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/orka-connectors-e2e.XXXXXX")"
@@ -465,6 +468,10 @@ status="$(request POST "${api}/connections/${connection}/complete" "${workdir}/c
 jq -e '.ready == true and .mode == "readWrite" and .state == "Ready"' "${workdir}/complete.json" >/dev/null || die "connection is not Ready after completion"
 jq -e 'tostring | test("fx-access|fx-refresh") | not' "${workdir}/complete.json" >/dev/null || die "connection response leaked token material"
 wait_for_state '.codeExchanges == 1 and .tokensIssued == 1' "one code exchange" 5
+# A readWrite consent asks for exactly the provider's read and write
+# scopes; the fixture refuses unknown scopes, and this pins the set.
+fixture_state | jq -e '.lastAuthorizedScope == "items:read items:write"' >/dev/null \
+  || { fixture_state | jq -c '{lastAuthorizedScope}' >&2; die "the readWrite consent did not ask for exactly items:read and items:write"; }
 
 for tool in itemsread itemswrite; do
   wait_for_task_condition_on tool "${tool}" '.status.available == true' "Tool ${tool} Available under the private-endpoint allowance" 30
@@ -530,9 +537,14 @@ done
 log "Terminal fixture counters: exactly one read, one approved write, one more read"
 # The earlier waits pass as soon as a counter is reached; only the terminal
 # state proves nothing ran twice (a duplicate write after approval, say).
-fixture_state | jq -e '.reads == 2 and .writes == 1 and .codeExchanges == 1 and .refreshes >= 1 and .revocations >= 1 and .rejected == 0' >/dev/null \
-  || { fixture_state | redact_all >&2; die "terminal fixture counters do not match the single read/write/read the lane expects"; }
-fixture_state | jq '{codeExchanges, refreshes, revocations, reads, writes, distinctBearers, rejected, modelTurns}' >&2
+# The approved write refreshes the expired token once; the read right
+# after it reuses the refreshed token, which has the full TTL (at least
+# 90s) against the 60s refresh horizon, so exactly one refresh and two
+# bearers (the consent-issued and the refreshed token) are expected, and
+# refresh churn fails here.
+fixture_state | jq -e '.reads == 2 and .writes == 1 and .codeExchanges == 1 and .refreshes == 1 and .distinctBearers == 2 and .revocations >= 1 and .rejected == 0' >/dev/null \
+  || { fixture_state | redact_all >&2; die "terminal fixture counters do not match the single read/write/read and single refresh the lane expects"; }
+fixture_state | jq '{codeExchanges, refreshes, revocations, reads, writes, distinctBearers, rejected, modelTurns, lastAuthorizedScope}' >&2
 
 log "No token material in controller logs"
 # The logs are captured first, so an unreadable log can never pass as "no match".
@@ -567,8 +579,17 @@ if grep -Fq -e "${token}" -e "${other_token}" "${workdir}/controller.log"; then
   die "an OIDC token appeared in controller logs"
 fi
 # The controller reads the provider's OAuth client secret for every code
-# exchange, refresh, and revocation; it must never reach a log either.
-if grep -Fq -e "${client_secret}" "${workdir}/controller.log"; then
-  die "the OAuth client secret appeared in controller logs"
+# exchange, refresh, and revocation; it must never reach a log either, raw
+# or in the Basic form it is sent in.
+if grep -Fq -e "${client_secret}" -e "${client_basic}" "${workdir}/controller.log"; then
+  die "the OAuth client credential appeared in controller logs"
+fi
+# The one-time completion token and the model credential the worker uses
+# are credential material too.
+if grep -Fq -e "${completion}" "${workdir}/controller.log"; then
+  die "the consent completion token appeared in controller logs"
+fi
+if grep -Fq -e "${model_credential}" "${workdir}/controller.log"; then
+  die "the model credential appeared in controller logs"
 fi
 log "Live connectors E2E passed"

@@ -143,6 +143,9 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		t.Fatal("a revoked pair must be rejected")
 	}
 	counters := f.Snapshot()
+	if counters.LastAuthorizedScope != "items:read items:write" {
+		t.Fatalf("last authorized scope = %q", counters.LastAuthorizedScope)
+	}
 	if counters.Authorizations != 2 || counters.CodeExchanges != 1 || counters.Refreshes != 1 || counters.Revocations != 1 ||
 		counters.Reads != 2 || counters.Writes != 1 || counters.LastWriteTitle != "hello" || counters.DistinctBearers != 2 || counters.Rejected < 3 {
 		t.Fatalf("counters = %+v", counters)
@@ -152,6 +155,30 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	raw, _ := json.Marshal(counters)
 	if resp.StatusCode != http.StatusOK || strings.Contains(string(raw), "fx-access") {
 		t.Fatalf("state = %d %s", resp.StatusCode, raw)
+	}
+}
+
+// TestFixtureRefusesUnknownScopes covers a consent that asks for more
+// than the fixture provider offers: no code is issued, so a lane whose
+// consent over-asks fails instead of passing with the extra privilege.
+func TestFixtureRefusesUnknownScopes(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	f, _, secure := newTestFixture(t, &now)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	authorize := secure.URL + "/oauth/authorize?" + url.Values{
+		"client_id": {"client"}, "response_type": {"code"}, "redirect_uri": {"http://localhost:1/cb"}, "state": {"s1"},
+		"scope": {"items:read items:write items:admin"}, "code_challenge": {"challenge"}, "code_challenge_method": {"S256"},
+	}.Encode()
+	resp, err := client.Get(authorize)
+	if err != nil || resp.StatusCode != http.StatusFound {
+		t.Fatalf("authorize status = %d err = %v", statusOf(resp), err)
+	}
+	location, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil || location.Query().Get("error") != "invalid_scope" || location.Query().Get("code") != "" {
+		t.Fatalf("redirect error = %q code issued = %t, want invalid_scope and no code", location.Query().Get("error"), location.Query().Get("code") != "")
+	}
+	if snapshot := f.Snapshot(); snapshot.LastAuthorizedScope != "" {
+		t.Fatalf("last authorized scope = %q, want none", snapshot.LastAuthorizedScope)
 	}
 }
 

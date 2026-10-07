@@ -90,6 +90,28 @@ type Counters struct {
 	BearerDigests    []string `json:"-"`
 	TokensIssued     int      `json:"tokensIssued"`
 	RevokedRefreshes int      `json:"revokedRefreshes"`
+	// LastAuthorizedScope is the scope set of the last authorization a
+	// code was issued for, sorted and space-separated, so the lane can
+	// assert that Orka asked for exactly what the mode needs.
+	LastAuthorizedScope string `json:"lastAuthorizedScope"`
+}
+
+// knownScopes are the only scopes the fixture provider offers; an
+// authorization asking for anything else is refused rather than granted.
+var knownScopes = map[string]struct{}{"items:read": {}, "items:write": {}}
+
+// normalizedScopes returns a space-separated scope sorted and without
+// duplicates, and whether every entry is a scope the fixture offers.
+func normalizedScopes(scope string) (string, bool) {
+	fields := strings.Fields(scope)
+	slices.Sort(fields)
+	fields = slices.Compact(fields)
+	for _, field := range fields {
+		if _, known := knownScopes[field]; !known {
+			return "", false
+		}
+	}
+	return strings.Join(fields, " "), true
 }
 
 // New builds a fixture with a fresh signing key.
@@ -219,13 +241,20 @@ func (f *Fixture) authorize(w http.ResponseWriter, r *http.Request) {
 	target.Set("state", q.Get("state"))
 	f.mu.Lock()
 	f.counters.Authorizations++
-	if q.Get("fixture_decision") == "deny" {
+	scope, known := normalizedScopes(q.Get("scope"))
+	switch {
+	case q.Get("fixture_decision") == "deny":
 		target.Set("error", "access_denied")
-	} else {
+	case !known:
+		// RFC 6749 §4.1.2.1: a consent that asks for a privilege the
+		// provider does not offer fails instead of being granted.
+		target.Set("error", "invalid_scope")
+	default:
 		code := randomToken(24)
 		f.codes[code] = authorizationCode{
-			challenge: q.Get("code_challenge"), redirectURI: q.Get("redirect_uri"), scope: q.Get("scope"), expires: f.cfg.Now().Add(5 * time.Minute),
+			challenge: q.Get("code_challenge"), redirectURI: q.Get("redirect_uri"), scope: scope, expires: f.cfg.Now().Add(5 * time.Minute),
 		}
+		f.counters.LastAuthorizedScope = scope
 		target.Set("code", code)
 	}
 	f.mu.Unlock()
