@@ -3588,6 +3588,15 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	} else {
 		log.Info("Created scheduled child task", "child", childName)
 		r.Recorder.Eventf(task, "Normal", "ScheduledRun", "Created child task %s", childName)
+		// A run acts for the scheduled Task's requester, so it is sealed
+		// against its verified parent; an unsealed run's connector tools
+		// fail closed.
+		seal := ACPChildTaskSealer(r.taskMetadataReader(), task.Namespace, task.Name, string(task.UID))
+		if err := seal(ctx, r.Client, child); errors.Is(err, ErrChildSealRefused) {
+			log.V(1).Info("Scheduled child task requester was not sealed", "child", childName, "reason", err.Error())
+		} else if err != nil {
+			log.Info("Scheduled child task requester could not be sealed; its connector tools fail closed", "child", childName, "error", err.Error())
+		}
 	}
 
 	// Update status

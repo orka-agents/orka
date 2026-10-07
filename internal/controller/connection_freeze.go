@@ -47,15 +47,11 @@ func freezeRequesterConnections(
 	// failing closed even if the policy is later retargeted to a service
 	// credential, because the resolver refuses a frozen policy whose adapter
 	// changed. Only a verified requester's Ready Connection fills the entry.
+	// Provenance is judged once a connection-mode policy is reached, so a
+	// Task whose seal is still on its way is not held when it has none.
 	requester := task.Spec.RequestedBy
 	linkable := requester != nil && strings.TrimSpace(requester.Issuer) != "" && strings.TrimSpace(requester.Subject) != ""
-	if linkable {
-		verified, err := requesterProvenanceVerified(ctx, reader, task)
-		if err != nil {
-			return nil, err
-		}
-		linkable = verified
-	}
+	provenanceJudged := false
 	var frozen []agentExecutionSnapshotConnection
 	seenPolicies := map[string]struct{}{}
 	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
@@ -90,6 +86,13 @@ func freezeRequesterConnections(
 		}
 		if policy.Spec.Connection == nil {
 			continue
+		}
+		if linkable && !provenanceJudged {
+			verified, err := requesterProvenanceVerified(ctx, reader, task)
+			if err != nil {
+				return nil, err
+			}
+			linkable, provenanceJudged = verified, true
 		}
 		provider := policy.Spec.Connection.ProviderRef.Name
 		entry := agentExecutionSnapshotConnection{
@@ -354,15 +357,21 @@ func SealChildRequesterStamp(ctx context.Context, c client.Client, key []byte, p
 const acpChildSealAttempts = 4
 
 // ACPChildTaskSealer returns the seal hook for coordination tools the broker
-// executes on behalf of an authenticated ACP Task. The controller created
-// the child itself, so it seals the child directly against that Task as the
-// parent, re-reading both when a concurrent write fences the patch.
+// executes on behalf of an authenticated ACP Task, also used for the runs a
+// scheduled Task creates. The controller created the child itself, so it
+// seals the child directly against that Task as the parent, re-reading both
+// when a concurrent write fences the patch.
 func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, parentUID string) func(context.Context, client.Client, *corev1alpha1.Task) error {
 	sealOnce := acpChildTaskSealOnce(reader, parentNamespace, parentName, parentUID)
 	// Nothing repairs a seal later, and an unsealed child fails closed for
 	// connector tools, so a transient read or patch failure is retried a
 	// few times; a refusal is final.
 	return func(ctx context.Context, c client.Client, child *corev1alpha1.Task) error {
+		// Without stamps, or without a requester to vouch for, there is
+		// nothing to seal, as the API and worker sealers also conclude.
+		if len(requesterStampKey) < connectors.MinRequesterStampKeyBytes || child == nil || child.Spec.RequestedBy == nil {
+			return nil
+		}
 		var err error
 		backoff := acpChildSealRetryBackoff
 		for attempt := range acpChildSealTransientAttempts {
