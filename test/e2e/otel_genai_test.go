@@ -60,6 +60,9 @@ var _ = Describe("OpenTelemetry GenAI export", Ordered, Serial, func() {
 
 		By("enabling controller telemetry against the local collector")
 		enableControllerTelemetryForE2E(controllerSnapshot)
+
+		By("waiting for the controller API Service to be reachable from inside the cluster")
+		waitForOTelControllerAPIReachable(2 * time.Minute)
 	})
 
 	AfterAll(func() {
@@ -308,6 +311,22 @@ func enableControllerTelemetryForE2E(snapshot otelControllerSnapshot) {
 	})
 
 	patchOTelControllerManager(snapshot.DeploymentName, snapshot.ContainerIndex, args, env, "failed to patch controller-manager telemetry settings")
+}
+
+// waitForOTelControllerAPIReachable dials the controller API Service from the
+// fake OpenAI pod, over the same ClusterIP path AI workers use. The controller
+// Deployment uses the Recreate strategy, so the Service can still have no ready
+// endpoints after rollout status reports the new pod Ready; a worker started in
+// that window fails its first API call with connection refused.
+func waitForOTelControllerAPIReachable(timeout time.Duration) {
+	healthURL := fmt.Sprintf("http://%s.%s.svc:8080/healthz", controllerAPIService, namespace)
+	probe := fmt.Sprintf("import urllib.request; urllib.request.urlopen(%q, timeout=5).read()", healthURL)
+	EventuallyWithOffset(1, func(g Gomega) {
+		cmd := exec.Command("kubectl", "exec", "deployment/"+otelFakeOpenAIName, "-n", namespace,
+			"-c", "fake-openai", "--", "python", "-c", probe)
+		_, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+	}, timeout, time.Second).Should(Succeed(), "controller API Service did not become reachable after rollout")
 }
 
 type otelControllerSnapshot struct {
