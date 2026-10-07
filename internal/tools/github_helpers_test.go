@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -812,6 +814,49 @@ func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T)
 	// before, because the transaction scope carries no Secret reference.)
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(txSecret, k8sClient, "list_pull_requests", "", "https://github.com/txorg/txrepo", ""); err == nil || strings.Contains(err.Error(), "repository scope") {
 		t.Fatalf("transaction scope under Task credentials must be unchanged: err=%v", err)
+	}
+}
+
+// TestResolveRepoAndToken_LinkedAccountChildReadOnceUncached covers a child
+// Task deleted and recreated under the same name: a linked call judges the
+// child through the uncached reader rather than a stale cache, and scopes
+// the token with the very object whose ownership it validated, never a
+// second read of the name that may by then be the replacement.
+func TestResolveRepoAndToken_LinkedAccountChildReadOnceUncached(t *testing.T) {
+	k8sClient, task := linkedAccountFixture(t)
+	linked := &fakeLinkedAccounts{credential: LinkedAccountCredential{AccessToken: "linked-token", Provider: "github"}, bound: true}
+	child := task.DeepCopy()
+	child.Name, child.ResourceVersion, child.UID = "child-task", "", "child-uid"
+	child.OwnerReferences = []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: testMyTaskName, UID: "task-uid", Controller: new(true)}}
+	if err := k8sClient.Create(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	// The uncached reader sees the replacement: the same name, owned by
+	// someone else. The stale client still holds the original child.
+	replacement := child.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.OwnerReferences[0].UID = "someone-else"
+	replacement.Spec.Workspace.GitRepo = "https://github.com/elsewhere/repo"
+	uncached := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(task.DeepCopy(), replacement).Build()
+	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "task-uid", LinkedAccounts: linked, PolicyReader: uncached})
+	if _, _, _, _, err := resolveForgeRepoAndToken(ctx, k8sClient, "create_pull_request", "child-task", "", ""); err == nil || !strings.Contains(err.Error(), "child tasks") {
+		t.Fatalf("replaced child through the uncached reader: err = %v, want refusal", err)
+	}
+	// A child that changes between reads is read only once: the validated
+	// object's workspace scopes the call.
+	var childReads atomic.Int32
+	swapping := interceptor.NewClient(fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(task.DeepCopy(), child.DeepCopy()).Build(), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if key.Name == "child-task" && childReads.Add(1) > 1 {
+				replacement.DeepCopyInto(obj.(*corev1alpha1.Task))
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	ctx = WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "task-uid", LinkedAccounts: linked, PolicyReader: swapping})
+	if owner, repo, _, _, err := resolveForgeRepoAndToken(ctx, k8sClient, "create_pull_request", "child-task", "", ""); err != nil || owner != "taskorg" || repo != "taskrepo" || childReads.Load() != 1 {
+		t.Fatalf("validated child: %s/%s err = %v reads = %d, want its own workspace from one read", owner, repo, err, childReads.Load())
 	}
 }
 

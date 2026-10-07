@@ -1583,9 +1583,22 @@ func (r *TaskReconciler) checkExternalConnectorTools(
 	providerKind string,
 	registry *tools.Registry,
 ) (linkedBuiltins []string, err error) {
-	var runtimeDisallowed []string
+	var runtimeAllowed, runtimeDisallowed []string
 	if runtime.Spec.Capabilities.MCPPolicy != nil {
+		runtimeAllowed = runtime.Spec.Capabilities.MCPPolicy.AllowedTools
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
+	}
+	// The session's descriptors come from the registered policy alone, so a
+	// Task-level deny of a linked built-in that policy still exposes would
+	// not remove it: it would be frozen and offered anyway. Such a Task is
+	// refused rather than bound with a tool it denied.
+	if task.Spec.AgentRuntime != nil {
+		for _, denied := range brokeredLinkedBuiltins(r.MCPRegistry, task.Spec.AgentRuntime.DisallowedTools) {
+			if slices.Contains(runtimeAllowed, denied) && !slices.Contains(runtimeDisallowed, denied) {
+				return nil, permanentACPAgentConfiguration(fmt.Errorf(
+					"task disallowedTools names %q, which the registered external AgentRuntime MCP policy exposes; a linked built-in cannot be narrowed per task", denied))
+			}
+		}
 	}
 	candidates := connectorCandidateTools(task, agent, runtimeDisallowed)
 	custom := brokeredCustomCandidates(candidates, providerKind, registry)

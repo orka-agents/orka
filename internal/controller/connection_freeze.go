@@ -651,6 +651,26 @@ func requesterConnection(ctx context.Context, reader client.Reader, task *corev1
 	if !connectionReadyFor(connection, requester, provider) {
 		return nil, nil
 	}
+	// Ready is the Connection controller's last projection. A provider
+	// update it has not reconciled yet (new authority, wider scopes) would
+	// make every call fail at the credential source while the snapshot,
+	// which re-consent cannot repair, keeps the stale grant; the link is
+	// judged against the provider as it stands now.
+	current := &corev1alpha1.ConnectorProvider{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: provider}, current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load connector provider %q: %w", provider, err)
+	}
+	mode := connection.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	if !connectors.ProviderAccepted(current) || !connectors.ConsentMatchesProvider(connection, current) ||
+		!connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(current, mode)) {
+		return nil, nil
+	}
 	return connection, nil
 }
 

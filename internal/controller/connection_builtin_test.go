@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -349,6 +350,7 @@ func TestLinkedBuiltinAccountsFailClosed(t *testing.T) {
 type contextCapturingTool struct {
 	name     string
 	captured *tools.ToolContext
+	deadline time.Time
 }
 
 func (t *contextCapturingTool) Name() string        { return t.name }
@@ -358,6 +360,7 @@ func (t *contextCapturingTool) Parameters() json.RawMessage {
 }
 func (t *contextCapturingTool) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	t.captured = tools.GetToolContext(ctx)
+	t.deadline, _ = ctx.Deadline()
 	return `{"ok":true}`, nil
 }
 
@@ -392,6 +395,10 @@ func TestRegistryACPMCPToolExecutorBindsLinkedAccountsForBuiltins(t *testing.T) 
 	builtin := harnessv2.MCPToolDescriptor{Name: "list_pull_requests", Source: harnessv2.MCPToolSourceBrokeredBuiltin}
 	if _, err := executor.ExecuteACPMCPTool(ctx, request, builtin); err != nil {
 		t.Fatal(err)
+	}
+	// The call is held to the catalog bound the credential was refreshed for.
+	if listTool.deadline.IsZero() || time.Until(listTool.deadline) > connectors.BuiltinToolTimeout {
+		t.Fatalf("linked built-in deadline = %v, want within the catalog bound", listTool.deadline)
 	}
 	if listTool.captured == nil || listTool.captured.LinkedAccounts == nil {
 		t.Fatal("a catalog built-in must execute with the linked-account binding")

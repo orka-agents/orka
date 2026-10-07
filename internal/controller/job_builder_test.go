@@ -2963,9 +2963,11 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	}
 	var toolReadFailure atomic.Bool
 	buildWith := func(connection *corev1alpha1.Connection) []corev1.EnvVar {
-		objects := []client.Object{policy, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
+		provider := acceptedBuiltinProvider("github")
+		provider.Namespace = defaultNS
+		objects := []client.Object{policy, provider, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
 		if connection != nil {
-			objects = append(objects, connection)
+			objects = append(objects, consentedConnection(connection, provider))
 		}
 		builder := setupJobBuilder()
 		builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).

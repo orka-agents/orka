@@ -58,6 +58,7 @@ func freezeFixtures(ready bool) (runtime.Object, runtime.Object, runtime.Object,
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 4},
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 4},
 		}
+		connection = consentedConnection(connection, freezeProvider())
 	}
 	SetRequesterStampKey(testRequesterStampKey)
 	task := &corev1alpha1.Task{
@@ -71,6 +72,11 @@ func freezeFixtures(ready bool) (runtime.Object, runtime.Object, runtime.Object,
 		Spec: corev1alpha1.TaskSpec{RequestedBy: requester},
 	}
 	return tool, policy, connection, task
+}
+
+// freezeProvider is the accepted provider the freeze fixtures link through.
+func freezeProvider() *corev1alpha1.ConnectorProvider {
+	return acceptedBuiltinProvider("github")
 }
 
 // testRequesterStampKey is the stamp key the freeze fixtures verify under.
@@ -87,7 +93,7 @@ func brokeredConfiguration(names ...string) harnessv2.MCPPolicyConfiguration {
 func TestFreezeRequesterConnections(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	tool, policy, connection, task := freezeFixtures(true)
-	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection).Build()
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, connection).Build()
 	frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search", "gh_search"))
 	if err != nil {
 		t.Fatal(err)
@@ -100,12 +106,12 @@ func TestFreezeRequesterConnections(t *testing.T) {
 	// (so a later retargeting to a service credential is refused) but no
 	// Connection fills the entry, and the call fails closed.
 	_, _, unready, _ := freezeFixtures(false)
-	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, unready).Build()
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, unready).Build()
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil ||
 		len(frozen) != 1 || frozen[0].PolicyName != "github-conn" || frozen[0].UID != "" || frozen[0].GrantSequence != 0 {
 		t.Fatalf("unready: frozen = %+v err = %v, want the policy frozen without a Connection", frozen, err)
 	}
-	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection).Build()
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, connection).Build()
 	anonymous := task.DeepCopy()
 	anonymous.Spec.RequestedBy = nil
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, anonymous, brokeredConfiguration("gh_search")); err != nil ||
@@ -117,7 +123,7 @@ func TestFreezeRequesterConnections(t *testing.T) {
 	// recreated under a policy in another mode must never run unfrozen.
 	direct := policy.(*corev1alpha1.OutboundAccessPolicy).DeepCopy()
 	direct.Spec = corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}}
-	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, direct, connection).Build()
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, direct, connection).Build()
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("direct: frozen = %+v err = %v", frozen, err)
 	}
@@ -126,7 +132,7 @@ func TestFreezeRequesterConnections(t *testing.T) {
 	}
 
 	// Read failures propagate so binding retries.
-	failing := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection).WithInterceptorFuncs(interceptor.Funcs{
+	failing := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, connection).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
 			if _, isConnection := obj.(*corev1alpha1.Connection); isConnection {
 				return errors.New("apiserver unavailable")
@@ -207,7 +213,7 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	tool, policy, connection, stamped := freezeFixtures(true)
 	forged := stamped.DeepCopy()
 	forged.Name, forged.UID, forged.Annotations = "forged", "forged-uid", nil
-	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, forged).Build()
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, connection, stamped, forged).Build()
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, forged, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
 		t.Fatalf("forged parentless task: frozen = %+v err = %v, want the policy frozen without a Connection", frozen, err)
 	}
@@ -223,7 +229,7 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	copied := planted.DeepCopy()
 	copied.Name, copied.UID = "copied", "copied-uid"
 	copied.Annotations[labels.AnnotationRequestedByStamp] = stamped.Annotations[labels.AnnotationRequestedByStamp]
-	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, planted, copied).Build()
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, connection, stamped, planted, copied).Build()
 	for _, task := range []*corev1alpha1.Task{planted, copied} {
 		if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
 			t.Fatalf("%s task: frozen = %+v err = %v, want no Connection without a stamp sealed for this UID", task.Name, frozen, err)
@@ -283,7 +289,7 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	impostor := sealed.DeepCopy()
 	impostor.Name, impostor.UID = "impostor", "impostor-uid"
 	impostor.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: stamped.Spec.RequestedBy.Issuer, Subject: "victim"}
-	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, child, sealed, impostor).Build()
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, connection, stamped, child, sealed, impostor).Build()
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, child, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
 		t.Fatalf("owner reference alone: frozen = %+v err = %v, want nothing without the child's own seal", frozen, err)
 	}

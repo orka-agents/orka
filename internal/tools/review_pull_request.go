@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -268,37 +269,81 @@ func fetchPRDiff(ctx context.Context, httpClient *http.Client, baseURL, token, o
 // prDiffResponseLimit bounds the unified diff read for a pull request.
 const prDiffResponseLimit int64 = 10 << 20
 
-// fetchPRFiles fetches the list of changed files in a PR.
 // prFilesPerPage and maxPRFilePages bound the changed-file pages one
-// review_pull_request call reads.
+// review_pull_request call reads; maxPRFilesBytes bounds what those pages
+// may hold together.
 const (
 	prFilesPerPage = 100
 	maxPRFilePages = 10
 )
 
+var maxPRFilesBytes = maxPRFilePages * githubResponseLimit
+
+// prFilesSplitSizes are the smaller page sizes a changed-file page past the
+// document limit is re-read with, each dividing the one before it, so the
+// smaller pages cover exactly the files of the page they replace.
+var prFilesSplitSizes = []int{25, 5, 1}
+
 // fetchPRFiles reads the pull request's changed files page by page, up to
-// maxPRFilePages; complete is false when the last page read was full at
-// that cap, so more files may exist.
+// maxPRFilePages pages and maxPRFilesBytes in all; complete is false when
+// either cap cut the list, so more files may exist. A page whose patches
+// exceed the document limit is re-read as smaller pages rather than
+// failing the call, and the result budget then trims those patches.
 func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) (files []FileChange, complete bool, err error) {
+	budget := maxPRFilesBytes
 	for page := 1; page <= maxPRFilePages; page++ {
-		pageFiles, err := fetchPRFilesPage(ctx, httpClient, baseURL, token, owner, repo, prNumber, page)
+		pageFiles, more, err := fetchPRFilesSpan(ctx, httpClient, baseURL, token, owner, repo, prNumber, prFilesPerPage, page, prFilesSplitSizes, &budget)
 		if err != nil {
 			return nil, false, err
 		}
 		files = append(files, pageFiles...)
-		if len(pageFiles) < prFilesPerPage {
+		if !more {
 			return files, true, nil
+		}
+		if budget <= 0 {
+			return files, false, nil
 		}
 	}
 	return files, false, nil
 }
 
-func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber, page int) ([]FileChange, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d", baseURL, owner, repo, prNumber, prFilesPerPage, page)
+// fetchPRFilesSpan reads the changed files that page covers at perPage files
+// per page, splitting it into smaller pages when it is past the document
+// limit. more reports that the list may continue past what was read: the
+// span was full, or the byte budget cut it short.
+func fetchPRFilesSpan(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber, perPage, page int, smaller []int, budget *int64) (files []FileChange, more bool, err error) {
+	files, read, err := fetchPRFilesPage(ctx, httpClient, baseURL, token, owner, repo, prNumber, perPage, page)
+	if err == nil {
+		*budget -= read
+		return files, len(files) == perPage, nil
+	}
+	if !errors.Is(err, errGitHubResponseTooLarge) || len(smaller) == 0 {
+		return nil, false, err
+	}
+	size := smaller[0]
+	parts := perPage / size
+	for part := range parts {
+		partFiles, partMore, err := fetchPRFilesSpan(ctx, httpClient, baseURL, token, owner, repo, prNumber, size, (page-1)*parts+part+1, smaller[1:], budget)
+		if err != nil {
+			return nil, false, err
+		}
+		files = append(files, partFiles...)
+		if !partMore {
+			return files, false, nil
+		}
+		if *budget <= 0 {
+			return files, true, nil
+		}
+	}
+	return files, true, nil
+}
+
+func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber, perPage, page int) ([]FileChange, int64, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d", baseURL, owner, repo, prNumber, perPage, page)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -306,7 +351,7 @@ func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, tok
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, 0, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -314,11 +359,11 @@ func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, tok
 	// refused before decoding, never parsed from a cut prefix.
 	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
+		return nil, 0, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var filesResp []struct {
@@ -329,7 +374,7 @@ func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, tok
 		Patch     string `json:"patch"`
 	}
 	if err := json.Unmarshal(respBody, &filesResp); err != nil {
-		return nil, fmt.Errorf("failed to parse GitHub response: %w", err)
+		return nil, 0, fmt.Errorf("failed to parse GitHub response: %w", err)
 	}
 
 	files := make([]FileChange, len(filesResp))
@@ -343,5 +388,5 @@ func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, tok
 		}
 	}
 
-	return files, nil
+	return files, int64(len(respBody)), nil
 }

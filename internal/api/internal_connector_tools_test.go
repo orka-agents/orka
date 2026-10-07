@@ -225,8 +225,18 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 	// The requester's Connection name must match the deterministic form the
 	// controller derives; override the fixture name accordingly.
 	connection.Name = connectors.ConnectionName("github", "https://issuer.example.test", "alice")
+	// The link was consented against the provider as it stands, which
+	// dispatch revalidates before treating the Connection as usable.
+	provider := acceptedTestProvider()
+	provider.Namespace = "default"
+	mode := opts.mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	connection.Status.Consent = connectors.ConsentFor(provider)
+	connection.Status.GrantedScopes = connectors.ScopesForMode(provider, mode)
 	builder := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).
-		WithObjects(task, job, pod, agent, policy, connection,
+		WithObjects(task, job, pod, agent, policy, provider, connection,
 			fixtureTools["gh_search"].DeepCopy(), fixtureTools["gh_write"].DeepCopy(), fixtureTools["plain"].DeepCopy())
 	c := builder.Build()
 	cfg := ConnectorToolExecutionConfig{
