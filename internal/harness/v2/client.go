@@ -939,6 +939,7 @@ func validateHTTPErrorMapping(status int, response ErrorResponse) error {
 		ErrorCodeRateLimited:              {http.StatusTooManyRequests: {}},
 		ErrorCodeSessionPoisoned:          {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
 		ErrorCodeNativeCaptureUnsupported: {http.StatusUnprocessableEntity: {}},
+		ErrorCodeNativeCaptureNotStarted:  {http.StatusConflict: {}},
 		ErrorCodeWorkspaceResumeLost:      {http.StatusConflict: {}},
 		ErrorCodeOutcomeUnknown:           {http.StatusInternalServerError: {}},
 		ErrorCodeCleanupUnproven:          {http.StatusConflict: {}},

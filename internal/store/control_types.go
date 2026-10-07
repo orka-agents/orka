@@ -625,6 +625,9 @@ type FinalizeSessionTurnRequest struct {
 	Projection             OutboxProjection        `json:"projection"`
 	FinalizedAt            time.Time               `json:"finalizedAt"`
 	NativeSession          *NativeSessionRecord    `json:"-"`
+	// NativeSessionCarried marks NativeSession as the Session's existing checkpoint
+	// carried across a non-success outcome marker, not a fresh capture.
+	NativeSessionCarried bool `json:"-"`
 }
 
 // ResumeSessionTurnFinalizationRequest resumes only the Kubernetes and outbox

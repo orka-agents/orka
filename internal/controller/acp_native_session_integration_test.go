@@ -388,9 +388,6 @@ func TestACPDispatcherNativeContinuityRetainsUnsupportedTerminalState(t *testing
 		validationError bool
 		wantExecution   store.PromptExecutionState
 	}{
-		{name: "failed", terminal: harnessv2.EventFailed, wantExecution: store.PromptExecutionFailed},
-		{name: "cancelled", terminal: harnessv2.EventCancelled, wantExecution: store.PromptExecutionCancelled},
-		{name: "unknown", terminal: harnessv2.EventOutcomeUnknown, wantExecution: store.PromptExecutionOutcomeUnknown},
 		{name: "read-only-modified", workspaceState: harnessv2.WorkspaceDeltaReadOnlyModified, wantExecution: store.PromptExecutionSucceeded},
 		{name: "validation-error", validationError: true, wantExecution: store.PromptExecutionSucceeded},
 	} {
@@ -780,4 +777,185 @@ func TestACPDispatcherRejectsIncompatibleNativeRuntimeBeforeSessionMutation(t *t
 			require.Zero(t, prompts)
 		})
 	}
+}
+
+// A failed, cancelled, or lost prompt yields no new native state and the
+// supervisor retires that runtime, so the Session settles its terminal marker
+// with the existing checkpoint carried forward instead of holding the lease.
+func TestACPDispatcherNativeContinuityCarriesCheckpointAcrossNonSuccess(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		terminal      harnessv2.EventType
+		wantExecution store.PromptExecutionState
+	}{
+		{name: "failed", terminal: harnessv2.EventFailed, wantExecution: store.PromptExecutionFailed},
+		{name: "cancelled", terminal: harnessv2.EventCancelled, wantExecution: store.PromptExecutionCancelled},
+		{name: "unknown", terminal: harnessv2.EventOutcomeUnknown, wantExecution: store.PromptExecutionOutcomeUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			snapshot := storetest.NativeSessionSnapshot(t, "native continuity preceding a non-success prompt")
+			captures, prompts := 0, 0
+			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-carried-"+test.name, "78787878-7878-7878-7878-787878787878",
+				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+					options := dispatcherRuntimeServerOptions{
+						nativeSnapshot: &snapshot,
+						terminalEvents: map[harnessv2.PromptID]harnessv2.EventType{"prompt-78787878-7878-7878-7878-787878787878-1": test.terminal},
+						onPrompt: func(request harnessv2.StartPromptRequest) {
+							prompts++
+							require.Len(t, request.Input.Content, 1, "restored prompts must omit canonical bootstrap")
+						},
+						onNativeCapture: func(harnessv2.CaptureNativeSessionRequest) error {
+							captures++
+							return &harnessv2.ClientError{Code: harnessv2.ErrorCodeSessionPoisoned, StatusCode: http.StatusConflict}
+						},
+					}
+					return newDispatcherRuntimeServerWithOptions(t, profile, digest, options, func(request harnessv2.CreateRuntimeSessionRequest) {
+						require.NotNil(t, request.NativeRestore)
+					})
+				}, func(task *corev1alpha1.Task) {
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-carried", Create: true, Append: true}
+				})
+			defer fixture.stop()
+			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			fixture.dispatcher.EventStore = persistence
+			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
+				NewSessionUID: func() (string, error) { return "native-carried-owner", nil },
+			})
+			require.NoError(t, err)
+			fixture.dispatcher.Sessions = continuity
+			staged := snapshot
+			staged.RuntimeSessionUID, staged.RuntimeProfileDigest, staged.WorkingDirectory = "", "", ""
+			_, err = persistence.StageNativeSessionImport(ctx, store.NativeSessionImport{
+				Namespace: "default", SessionName: "native-carried", OperationID: "import-native-carried",
+				RequestDigest: store.NativeSessionImportDigest("default", "native-carried", snapshot.DataDigest), Snapshot: staged,
+			})
+			require.NoError(t, err)
+			require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, "default", "native-carried", "native-carried-owner"))
+			before, err := persistence.GetNativeSession(ctx, "default", "native-carried", "native-carried-owner")
+			require.NoError(t, err)
+			transcript, err := persistence.LoadTranscript(ctx, "default", "native-carried", 100)
+			require.NoError(t, err)
+			reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+			require.NoError(t, err)
+			require.NotNil(t, reserved)
+			require.NoError(t, fixture.dispatcher.executeReservedTask(ctx, reserved, target))
+			attempt, err := persistence.GetPromptAttempt(ctx, fixture.attemptID)
+			require.NoError(t, err)
+			require.Equal(t, test.wantExecution, attempt.ExecutionState)
+			control, err := persistence.GetSessionControl(ctx, "default", "native-carried")
+			require.NoError(t, err)
+			require.Nil(t, control.Lease, "a settled non-success prompt must release the Session lease")
+			key := store.SessionTurnKey{SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration,
+				TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID}
+			turnID, err := key.CanonicalID()
+			require.NoError(t, err)
+			turn, err := persistence.GetSessionTurn(ctx, turnID)
+			require.NoError(t, err)
+			require.Equal(t, store.SessionTurnFinalized, turn.State)
+			require.Equal(t, store.SessionTurnOutcomeMarker, turn.TerminalKind)
+			require.Equal(t, store.NativeSessionCaptureDigest(before), turn.NativeSessionDigest)
+			history, err := persistence.LoadTranscript(ctx, control.Namespace, control.SessionName, 100)
+			require.NoError(t, err)
+			require.Greater(t, len(history), len(transcript), "the terminal marker advances canonical history")
+			after, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			require.NoError(t, err, "the carried checkpoint must remain loadable for the next Task")
+			require.Equal(t, before.Snapshot, after.Snapshot, "a non-success prompt must not change native bytes")
+			require.Equal(t, before.SourceOperationID, after.SourceOperationID)
+			require.Greater(t, after.MessageCount, before.MessageCount)
+			require.Zero(t, captures, "failed or lost runtime state cannot start a native capture")
+			require.Equal(t, 1, prompts, "accepted prompts must never replay")
+		})
+	}
+}
+
+// A capture intent that expires before the runtime ever records it must not
+// reconcile forever: the same runtime incarnation reports that no capture
+// started, and the controller begins one fresh capture under a superseding
+// intent.
+func TestACPDispatcherExpiredCaptureIntentStartsFreshCaptureWhenNeverStarted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	snapshot := storetest.NativeSessionSnapshot(t, "first native checkpoint captured after an expired intent")
+	var persistence *sqlite.Store
+	var requests []harnessv2.CaptureNativeSessionRequest
+	failFresh := true
+	fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-expired-intent", "79797979-7979-7979-7979-797979797979",
+		func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+			return newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
+				nativeSnapshot: &snapshot,
+				onNativeCapture: func(request harnessv2.CaptureNativeSessionRequest) error {
+					requests = append(requests, request)
+					if request.OriginalOperationID != "" {
+						return &harnessv2.ClientError{Code: harnessv2.ErrorCodeNativeCaptureNotStarted, StatusCode: http.StatusConflict}
+					}
+					if failFresh {
+						return &harnessv2.ClientError{Code: harnessv2.ErrorCodeAlreadyAccepted, StatusCode: http.StatusConflict, Retryable: true}
+					}
+					return nil
+				},
+			}, func(request harnessv2.CreateRuntimeSessionRequest) {
+				require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, "default", "native-expired-intent", string(request.Metadata.Fence.RuntimeSessionUID)))
+			})
+		}, func(task *corev1alpha1.Task) {
+			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-expired-intent", Create: true, Append: true}
+		})
+	defer fixture.stop()
+	persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+	failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
+	fixture.dispatcher.Store = failure
+	fixture.dispatcher.EventStore = persistence
+	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+		SessionControls: failure, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
+	})
+	require.NoError(t, err)
+	fixture.dispatcher.Sessions = continuity
+	reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+	require.NoError(t, err)
+	require.NotNil(t, reserved)
+	require.ErrorContains(t, fixture.dispatcher.executeReservedTask(ctx, reserved, target), "injected terminal delivery transition failure")
+	failure.fail = false
+	fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+	require.NoError(t, err)
+	require.NoError(t, fixture.dispatcher.transitionDelivery(ctx, fixture.attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryNoChange, "recover-terminal-delivery", ""))
+	restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: failure,
+		ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs}
+
+	// The first recovery persists the intent, but the runtime never records it.
+	require.Error(t, restarted.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
+	require.Len(t, requests, 1)
+	original := requests[0]
+	require.Empty(t, original.OriginalOperationID)
+	current := fixture.currentTask(t, ctx)
+	var intent nativeCaptureIntent
+	require.NoError(t, json.Unmarshal([]byte(current.Annotations[nativeCaptureIntentAnnotation]), &intent))
+	require.Equal(t, original.Metadata.RequestDigest, intent.Request.Metadata.RequestDigest)
+	intent.Request.Metadata.ExpiresAt = time.Now().UTC().Add(-time.Minute)
+	expired, err := json.Marshal(intent)
+	require.NoError(t, err)
+	current.Annotations[nativeCaptureIntentAnnotation] = string(expired)
+	require.NoError(t, fixture.kubeClient.Update(ctx, current))
+
+	failFresh = false
+	require.NoError(t, restarted.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
+	require.Len(t, requests, 3, "one reconciliation attempt, then exactly one fresh capture")
+	require.Equal(t, original.Metadata.OperationID, requests[1].OriginalOperationID)
+	require.Equal(t, original.Metadata.RequestDigest, requests[1].OriginalRequestDigest)
+	fresh := requests[2]
+	require.Empty(t, fresh.OriginalOperationID)
+	require.NotEqual(t, original.Metadata.OperationID, fresh.Metadata.OperationID)
+	var superseding nativeCaptureIntent
+	require.NoError(t, json.Unmarshal([]byte(fixture.currentTask(t, ctx).Annotations[nativeCaptureIntentAnnotation]), &superseding))
+	require.Equal(t, fresh.Metadata.RequestDigest, superseding.Request.Metadata.RequestDigest)
+	require.Equal(t, original.Metadata.RequestDigest, superseding.Supersedes)
+	require.Nil(t, superseding.Reconciliation)
+	control, err := persistence.GetSessionControl(ctx, "default", "native-expired-intent")
+	require.NoError(t, err)
+	require.Nil(t, control.Lease, "the fresh capture settles the Session")
+	record, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+	require.NoError(t, err)
+	require.Equal(t, snapshot.DataDigest, record.Snapshot.DataDigest)
+	require.Equal(t, string(fresh.Metadata.OperationID), record.SourceOperationID)
 }

@@ -80,7 +80,16 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 	}
 	if request.OriginalOperationID != "" {
 		capture := state.nativeCapture
-		if capture == nil || !capture.finished {
+		if capture == nil {
+			// The fence already proved this is the same supervisor boot. Captures are
+			// recorded under the lock before they start, so no record means the
+			// original never arrived and the writer is untouched. Reconciliation
+			// still never starts a capture itself.
+			s.mu.Unlock()
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeNativeCaptureNotStarted, "original native capture was never started by this runtime", nil, false)
+			return
+		}
+		if !capture.finished {
 			s.mu.Unlock()
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, "original native capture has not completed", nil, true)
 			return

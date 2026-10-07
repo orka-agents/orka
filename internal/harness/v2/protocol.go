@@ -537,9 +537,13 @@ const (
 	ErrorCodeRateLimited              ErrorCode = "rate_limited"
 	ErrorCodeSessionPoisoned          ErrorCode = "session_poisoned"
 	ErrorCodeNativeCaptureUnsupported ErrorCode = "native_capture_unsupported"
-	ErrorCodeWorkspaceResumeLost      ErrorCode = "workspace_resume_lost"
-	ErrorCodeOutcomeUnknown           ErrorCode = "outcome_unknown"
-	ErrorCodeCleanupUnproven          ErrorCode = "cleanup_unproven"
+	// ErrorCodeNativeCaptureNotStarted answers a capture reconciliation whose
+	// original operation this runtime incarnation never recorded, so no capture
+	// has started and the controller may begin a fresh one.
+	ErrorCodeNativeCaptureNotStarted ErrorCode = "native_capture_not_started"
+	ErrorCodeWorkspaceResumeLost     ErrorCode = "workspace_resume_lost"
+	ErrorCodeOutcomeUnknown          ErrorCode = "outcome_unknown"
+	ErrorCodeCleanupUnproven         ErrorCode = "cleanup_unproven"
 )
 
 type ErrorResponse struct {
@@ -557,7 +561,8 @@ func (r ErrorResponse) Validate() error {
 	switch r.Code {
 	case ErrorCodeInvalidRequest, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodeExpired,
 		ErrorCodeStaleFence, ErrorCodeDigestConflict, ErrorCodeAlreadyAccepted, ErrorCodeSettled,
-		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeNativeCaptureUnsupported, ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
+		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeNativeCaptureUnsupported, ErrorCodeNativeCaptureNotStarted,
+		ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
 	default:
 		return fmt.Errorf("unsupported error code %q", r.Code)
 	}

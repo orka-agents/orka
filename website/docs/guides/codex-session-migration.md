@@ -88,15 +88,24 @@ pool admission. Exact create retries report that retained outcome without
 allocating another home or starting a child. Automatic reconciliation of that
 supervisor creation state is not part of this delivery.
 
-Failed or cancelled provider prompts do not publish a new native checkpoint.
+Failed, cancelled, or lost provider prompts do not publish a new native
+checkpoint. The runtime that ran them is poisoned and retired, so a Task that
+appends to a Session with a native checkpoint settles its terminal marker with
+the existing checkpoint carried forward: the checkpoint's transcript boundary
+advances past the marker, the lease is released, and the next Task loads the
+same native state. That state omits only the prompt that produced no result.
 A successful prompt can retain its native state after delivery failure once
 workspace finalization and canonical settlement complete. Poisoned workspace
-validation failures cannot produce a native checkpoint. For Tasks that append
-to a Session with a native checkpoint, failed prompts and poisoned workspace
-outcomes retain the exact runtime evidence and hold the Session lease until
-reconciliation. Accepted turns with `sessionRef.append: false` leave the
-checkpoint unchanged and retire their runtime before a later Task loads the
-saved state.
+validation failures cannot produce a native checkpoint; for appending Tasks on
+a Session with a native checkpoint they retain the exact runtime evidence and
+hold the Session lease until reconciliation. Accepted turns with
+`sessionRef.append: false` leave the checkpoint unchanged and retire their
+runtime before a later Task loads the saved state.
+A capture intent that reaches the runtime only after it expired is reconciled
+against the runtime's own record. When the same runtime incarnation never
+recorded that capture, it reports `native_capture_not_started` and the
+controller begins one fresh capture under a superseding intent instead of
+reconciling indefinitely.
 A changed canonical boundary makes an older checkpoint unavailable for restore
 or export.
 If a native-continuity Session cannot produce a supported checkpoint, Orka

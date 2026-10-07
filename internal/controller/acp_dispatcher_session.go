@@ -915,7 +915,11 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
 	}
-	if err := d.guardNativeSessionSettlement(ctx, task, session, nil); err != nil {
+	carried, err := d.carriedNativeCheckpoint(ctx, task, session)
+	if err != nil {
+		return err
+	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, carried); err != nil {
 		return err
 	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
@@ -934,7 +938,7 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 		return err
 	}
 	_, err = d.Sessions.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
-		SessionTurn: *session.Turn, Fence: fence, Reason: reason,
+		SessionTurn: *session.Turn, Fence: fence, Reason: reason, NativeSession: carried,
 		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
@@ -957,10 +961,13 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
 	}
-	if err := d.guardNativeSessionSettlement(ctx, task, session, nil); err != nil {
+	carried, err := d.carriedNativeCheckpoint(ctx, task, session)
+	if err != nil {
 		return err
 	}
-	var err error
+	if err := d.guardNativeSessionSettlement(ctx, task, session, carried); err != nil {
+		return err
+	}
 	execution, err = taskSessionProjectionExecution(task, execution)
 	if err != nil {
 		return err
@@ -973,7 +980,7 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 		return err
 	}
 	_, err = d.Sessions.FinalizeOutcomeMarker(ctx, ACPFinalizeOutcomeMarkerRequest{
-		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason,
+		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason, NativeSession: carried,
 		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})

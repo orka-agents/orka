@@ -23,8 +23,10 @@ var errNativeSessionInstallUnresolved = fmt.Errorf("%w: native Session installat
 var errNativeSessionRuntimeUnsupported = fmt.Errorf("%w: staged native Session requires a Codex runtime advertising native sessions", store.ErrConflict)
 var errNativeSessionCheckpointRequired = fmt.Errorf("%w: native Session continuity requires a checkpoint before canonical settlement; exact lease and runtime evidence retained", store.ErrNotReady)
 
-// Appending a terminal marker or result without the corresponding native state
-// would make the previous checkpoint diverge from canonical history.
+// Appending a terminal result without the corresponding native state would make
+// the previous checkpoint diverge from canonical history. A non-success marker
+// settles with the existing checkpoint carried forward instead; see
+// carriedNativeCheckpoint.
 func (d *ACPDispatcher) guardNativeSessionSettlement(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession, checkpoint *store.NativeSessionRecord) error {
 	if session == nil || session.Turn == nil || session.finalized || session.Turn.Turn.State == store.SessionTurnFinalized || checkpoint != nil {
 		return nil
@@ -86,6 +88,27 @@ type nativeCaptureIntent struct {
 	Request        harnessv2.CaptureNativeSessionRequest  `json:"request"`
 	Reconciliation *harnessv2.CaptureNativeSessionRequest `json:"reconciliation,omitempty"`
 	Unsupported    bool                                   `json:"unsupported,omitempty"`
+	// Supersedes records the request digest of an intent whose original capture
+	// the same runtime incarnation proved it never started.
+	Supersedes harnessv2.RequestDigest `json:"supersedes,omitempty"`
+}
+
+// carriedNativeCheckpoint returns the Session's existing checkpoint when a
+// non-success outcome may settle with it. A failed, cancelled, or lost prompt
+// produces no new native state: the supervisor poisons and retires that
+// runtime rather than retaining capture evidence, so holding the lease for a
+// capture that can never happen would wedge the Session. The prior checkpoint
+// omits only the prompt that produced no result, and its boundary advances
+// with the marker. A pending capture intent from a successful prompt remains
+// strict because its exact receipt must be reconciled.
+func (d *ACPDispatcher) carriedNativeCheckpoint(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) (*store.NativeSessionRecord, error) {
+	if session == nil || session.Turn == nil || session.Turn.SkipTranscriptAppend || task.Annotations[nativeCaptureIntentAnnotation] != "" {
+		return nil, nil
+	}
+	if session.NativeSession != nil {
+		return session.NativeSession, nil
+	}
+	return d.loadTaskNativeSession(ctx, task, &session.Turn.Lease.Session)
 }
 
 func (d *ACPDispatcher) nativeSessionStore() store.NativeSessionStore {
@@ -177,6 +200,36 @@ func nativeCaptureEligible(session *acpTaskSession, supported bool) bool {
 	return supported && session != nil && session.Turn != nil && !session.Turn.SkipTranscriptAppend
 }
 
+// freshNativeCaptureRequest seals a new capture operation for the Task's exact
+// runtime generation. suffix distinguishes a superseding capture from the
+// original operation identifier.
+func freshNativeCaptureRequest(runtimeFence harnessv2.Fence, task *corev1alpha1.Task, suffix string) (harnessv2.CaptureNativeSessionRequest, error) {
+	request := harnessv2.CaptureNativeSessionRequest{
+		Protocol: harnessv2.ProtocolVersion,
+		Metadata: mutationMetadataForTaskUID(runtimeFence, task, acpTaskControlUID(task), "capture-native-g"+strconv.FormatUint(runtimeFence.RuntimeSessionGeneration, 10)+suffix, false, time.Now().UTC().Add(2*time.Minute)),
+	}
+	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
+		return harnessv2.CaptureNativeSessionRequest{}, err
+	}
+	return request, nil
+}
+
+// supersedeUnstartedNativeCapture replaces an intent whose original capture the
+// same supervisor boot proved it never started. No capture has begun and the
+// writer is untouched, so reconciling forever would hold the lease for a receipt
+// that cannot exist; one fresh capture begins under a superseding intent.
+func (d *ACPDispatcher) supersedeUnstartedNativeCapture(ctx context.Context, runtimeClient *harnessv2.Client, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, intent *nativeCaptureIntent) (*harnessv2.CaptureNativeSessionResponse, error) {
+	replacement, err := freshNativeCaptureRequest(runtimeFence, task, "-"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10))
+	if err != nil {
+		return nil, err
+	}
+	*intent = nativeCaptureIntent{Request: replacement, Supersedes: intent.Request.Metadata.RequestDigest}
+	if err := d.persistNativeCaptureIntent(ctx, task, *intent); err != nil {
+		return nil, err
+	}
+	return runtimeClient.CaptureNativeSession(ctx, harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)), intent.Request)
+}
+
 func (d *ACPDispatcher) persistNativeCaptureIntent(ctx context.Context, task *corev1alpha1.Task, intent nativeCaptureIntent) error {
 	body, err := json.Marshal(intent)
 	if err != nil {
@@ -194,7 +247,8 @@ func (d *ACPDispatcher) persistNativeCaptureIntent(ctx context.Context, task *co
 		}
 		if previous := latest.Annotations[nativeCaptureIntentAnnotation]; previous != "" {
 			var old nativeCaptureIntent
-			if err := json.Unmarshal([]byte(previous), &old); err != nil || old.Request.Metadata.RequestDigest != intent.Request.Metadata.RequestDigest {
+			if err := json.Unmarshal([]byte(previous), &old); err != nil ||
+				(old.Request.Metadata.RequestDigest != intent.Request.Metadata.RequestDigest && old.Request.Metadata.RequestDigest != intent.Supersedes) {
 				return fmt.Errorf("%w: Task native capture intent changed", store.ErrConflict)
 			}
 		}
@@ -228,13 +282,11 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 			return fmt.Errorf("%w: durable native capture intent belongs to another runtime", store.ErrConflict)
 		}
 	} else {
-		intent.Request = harnessv2.CaptureNativeSessionRequest{
-			Protocol: harnessv2.ProtocolVersion,
-			Metadata: mutationMetadataForTaskUID(runtimeFence, task, acpTaskControlUID(task), "capture-native-g"+strconv.FormatUint(runtimeFence.RuntimeSessionGeneration, 10), false, time.Now().UTC().Add(2*time.Minute)),
-		}
-		if err := sealMutation(&intent.Request.Metadata.RequestDigest, intent.Request); err != nil {
+		request, err := freshNativeCaptureRequest(runtimeFence, task, "")
+		if err != nil {
 			return err
 		}
+		intent.Request = request
 		if err := d.persistNativeCaptureIntent(ctx, task, intent); err != nil {
 			return err
 		}
@@ -267,6 +319,9 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 		request = *intent.Reconciliation
 	}
 	response, err := runtimeClient.CaptureNativeSession(ctx, harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)), request)
+	if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && clientErr.Code == harnessv2.ErrorCodeNativeCaptureNotStarted && request.OriginalOperationID != "" {
+		response, err = d.supersedeUnstartedNativeCapture(ctx, runtimeClient, task, runtimeFence, &intent)
+	}
 	if err != nil {
 		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && clientErr.Code == harnessv2.ErrorCodeNativeCaptureUnsupported && session.NativeSession == nil {
 			intent.Unsupported = true

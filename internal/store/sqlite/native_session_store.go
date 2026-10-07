@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -10,18 +11,23 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/codexstate"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 )
 
 var _ store.NativeSessionImportStore = (*Store)(nil)
 
-const maxNativeSessionBytes = 512 << 10
+// maxNativeSessionBytes is the single transport cap shared with the API and runtime.
+const maxNativeSessionBytes = harnessv2.MaxNativeSessionBytes
 
 func nativeSessionAAD(namespace, name, uid, digest string) []byte {
 	return fmt.Appendf(nil, "orka.native-session.v1\x00%s\x00%s\x00%s\x00%s", namespace, name, uid, digest)
 }
 
-func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord, staged bool) error {
+// validateNativeRecord checks a record's shape. inspect additionally parses the
+// bundle, which writes require; authenticated reads already proved the bytes
+// are the ones inspected when they were written.
+func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord, staged, inspect bool) error {
 	for field, value := range map[string]string{sessionControlFieldNamespace: record.Namespace, sessionControlFieldName: record.SessionName, "native operation ID": record.SourceOperationID} {
 		if err := store.ValidateControlIdentifier(field, value); err != nil {
 			return err
@@ -37,8 +43,10 @@ func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord,
 		if err := record.Snapshot.Validate(); err != nil {
 			return store.ValidationErrorf("invalid captured native snapshot")
 		}
-	} else if record.SessionUID != "" || record.RuntimeSessionGeneration != 0 || record.MessageCount != 0 || record.ThroughMessageID != "" {
-		return store.ValidationErrorf("staged native import must not carry runtime or transcript ownership")
+	} else if record.SessionUID != "" || record.RuntimeSessionGeneration != 0 {
+		// A staged import never owns a runtime. Its transcript boundary may
+		// advance when a non-success prompt carries it across a terminal marker.
+		return store.ValidationErrorf("staged native import must not carry runtime ownership")
 	}
 	if staged && (record.Snapshot.RuntimeSessionUID != "" || record.Snapshot.RuntimeProfileDigest != "" || record.Snapshot.WorkingDirectory != "") {
 		return store.ValidationErrorf("staged import must not carry runtime configuration")
@@ -48,6 +56,9 @@ func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord,
 	}
 	if len(record.Snapshot.Data) == 0 || len(record.Snapshot.Data) > maxNativeSessionBytes {
 		return store.ValidationErrorf("native session bundle must contain 1 through %d bytes", maxNativeSessionBytes)
+	}
+	if !inspect {
+		return nil
 	}
 	summary, err := codexstate.Inspect(ctx, record.Snapshot.Data)
 	if err != nil {
@@ -112,7 +123,7 @@ func (s *Store) readNativeRecordTx(ctx context.Context, tx *sql.Tx, namespace, n
 	if record.Namespace != namespace || record.SessionName != name || record.SessionUID != uid || record.Snapshot.DataDigest != dataDigest || record.SourceOperationID != operationID || record.RuntimeSessionGeneration != generation || record.MessageCount != count || record.ThroughMessageID != throughID {
 		return nil, fmt.Errorf("native session metadata integrity failed")
 	}
-	if err = validateNativeRecord(ctx, record, uid == ""); err != nil {
+	if err = validateNativeRecord(ctx, record, uid == "", false); err != nil {
 		return nil, err
 	}
 	return &record, nil
@@ -206,7 +217,7 @@ func (s *Store) saveNativeSessionTx(ctx context.Context, tx *sql.Tx, record stor
 	if s.snapshotCipher == nil {
 		return errSnapshotCipherRequired
 	}
-	if err := validateNativeRecord(ctx, record, false); err != nil {
+	if err := validateNativeRecord(ctx, record, false, true); err != nil {
 		return err
 	}
 	canonical := record
@@ -260,10 +271,32 @@ func (s *Store) saveNativeSessionTx(ctx context.Context, tx *sql.Tx, record stor
 	return nil
 }
 
+// validateNativeFinalization admits native state on exactly two terminal
+// shapes: a fresh capture committed with a canonical assistant result, or the
+// Session's existing checkpoint carried across a non-success outcome marker.
+func validateNativeFinalization(native *store.NativeSessionRecord, carried bool, kind store.SessionTurnTerminalKind, skipTranscriptAppend bool) error {
+	if native == nil {
+		if carried {
+			return store.ValidationErrorf("carried native checkpoint requires the existing record")
+		}
+		return nil
+	}
+	if skipTranscriptAppend {
+		return store.ValidationErrorf("native state cannot bind to a finalization that leaves the transcript unchanged")
+	}
+	if carried && kind != store.SessionTurnOutcomeMarker {
+		return store.ValidationErrorf("carried native checkpoint requires an outcome-marker finalization")
+	}
+	if !carried && kind != store.SessionTurnAssistantResult {
+		return store.ValidationErrorf("native capture requires canonical assistant-result finalization")
+	}
+	return nil
+}
+
 // commitNativeSessionFinalizationTx binds the verified capture to the exact
 // canonical messages just appended in this transaction. Caller boundaries are
 // ignored because message IDs are generated by canonical finalization.
-func (s *Store) commitNativeSessionFinalizationTx(ctx context.Context, tx *sql.Tx, turnID, namespace, name, uid string, native *store.NativeSessionRecord) error {
+func (s *Store) commitNativeSessionFinalizationTx(ctx context.Context, tx *sql.Tx, turnID, namespace, name, uid string, native *store.NativeSessionRecord, carried bool) error {
 	if native == nil {
 		return nil
 	}
@@ -280,11 +313,42 @@ func (s *Store) commitNativeSessionFinalizationTx(ctx context.Context, tx *sql.T
 	}
 	record.MessageCount = count
 	record.ThroughMessageID = lastID
-	if err := s.saveNativeSessionTx(ctx, tx, record); err != nil {
+	if carried {
+		err = s.carryNativeSessionTx(ctx, tx, record)
+	} else {
+		err = s.saveNativeSessionTx(ctx, tx, record)
+	}
+	if err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO native_session_finalizations(turn_id,namespace,session_name,capture_digest) VALUES(?,?,?,?)`, turnID, namespace, name, store.NativeSessionCaptureDigest(native))
 	return err
+}
+
+// carryNativeSessionTx advances only the transcript boundary of the stored
+// checkpoint. A failed, cancelled, or lost prompt produced no new native state,
+// so the exact stored bytes, source operation, and runtime generation must
+// match and no new capture operation is recorded.
+func (s *Store) carryNativeSessionTx(ctx context.Context, tx *sql.Tx, record store.NativeSessionRecord) error {
+	if s.snapshotCipher == nil {
+		return errSnapshotCipherRequired
+	}
+	prior, err := s.readNativeRecordTx(ctx, tx, record.Namespace, record.SessionName)
+	if err != nil {
+		return err
+	}
+	if (prior.SessionUID != "" && prior.SessionUID != record.SessionUID) || prior.Snapshot.DataDigest != record.Snapshot.DataDigest ||
+		!bytes.Equal(prior.Snapshot.Data, record.Snapshot.Data) || prior.SourceOperationID != record.SourceOperationID ||
+		prior.RuntimeSessionGeneration != record.RuntimeSessionGeneration {
+		return store.ConflictErrorf("carried native checkpoint does not match the stored checkpoint")
+	}
+	if record.MessageCount < prior.MessageCount {
+		return store.ErrConflict
+	}
+	carried := *prior
+	carried.MessageCount = record.MessageCount
+	carried.ThroughMessageID = record.ThroughMessageID
+	return s.writeNativeRecordTx(ctx, tx, carried)
 }
 
 // StageNativeSessionImport atomically reserves a new Session and stages the
@@ -294,7 +358,7 @@ func (s *Store) StageNativeSessionImport(ctx context.Context, request store.Nati
 		return nil, errSnapshotCipherRequired
 	}
 	record := store.NativeSessionRecord{Namespace: request.Namespace, SessionName: request.SessionName, Snapshot: request.Snapshot, SourceOperationID: request.OperationID}
-	if err := validateNativeRecord(ctx, record, true); err != nil {
+	if err := validateNativeRecord(ctx, record, true, true); err != nil {
 		return nil, err
 	}
 	if err := store.ValidateCanonicalDigest("native import request digest", request.RequestDigest); err != nil {

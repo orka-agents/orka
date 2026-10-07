@@ -152,8 +152,8 @@ func TestSupervisorNativeReconciliationNeverStartsAnotherCapture(t *testing.T) {
 	request.OriginalRequestDigest = harnessv2.RequestDigest(testDigest("missing-original"))
 	sealRequest(t, &request.Metadata.RequestDigest, request)
 	response := performMutation(t, server.Handler(), http.MethodPost, "/v2/runtime-sessions/session-1/native-session", request, cfg)
-	if response.Code != http.StatusConflict || !bytes.Contains(response.Body.Bytes(), []byte(`"retryable":true`)) {
-		t.Fatalf("missing capture reconciliation: %d %s", response.Code, response.Body.String())
+	if response.Code != http.StatusConflict || !bytes.Contains(response.Body.Bytes(), []byte(string(harnessv2.ErrorCodeNativeCaptureNotStarted))) || bytes.Contains(response.Body.Bytes(), []byte(`"retryable":true`)) {
+		t.Fatalf("missing capture reconciliation must report that no capture started: %d %s", response.Code, response.Body.String())
 	}
 	select {
 	case <-state.runtime.Process().Done():

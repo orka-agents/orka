@@ -650,6 +650,8 @@ type ACPFinalizeOutcomeUnknownRequest struct {
 	PublicationID string
 	Projection    ACPFinalizationProjection
 	FinalizedAt   time.Time
+	// NativeSession carries the Session's existing checkpoint across this marker.
+	NativeSession *store.NativeSessionRecord
 }
 
 // ACPFinalizeOutcomeMarkerRequest records a proven non-success terminal marker
@@ -661,6 +663,8 @@ type ACPFinalizeOutcomeMarkerRequest struct {
 	Reason      string
 	Projection  ACPFinalizationProjection
 	FinalizedAt time.Time
+	// NativeSession carries the Session's existing checkpoint across this marker.
+	NativeSession *store.NativeSessionRecord
 }
 
 // ACPSessionFinalization is the committed turn plus its latest Session state.
@@ -731,7 +735,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeUnknown(ctx context.Context, reque
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		marker, request.PublicationID, request.Projection, request.FinalizedAt, nil)
+		marker, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, request ACPFinalizeOutcomeMarkerRequest) (*ACPSessionFinalization, error) {
@@ -750,7 +754,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, reques
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		string(markerBytes), "", request.Projection, request.FinalizedAt, nil)
+		string(markerBytes), "", request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 func (c *ACPSessionContinuity) finalizeTurn(
@@ -783,8 +787,12 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		"turnID": sessionTurn.Turn.ID, "terminalKind": terminalKind, "terminalContent": terminalContent,
 		publicationIDField: publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
 	}
+	carried := native != nil && terminalKind == store.SessionTurnOutcomeMarker
 	if native != nil {
 		finalizationIdentity["nativeSessionDigest"] = store.NativeSessionCaptureDigest(native)
+	}
+	if carried {
+		finalizationIdentity["nativeSessionCarried"] = true
 	}
 	if blockReason != "" {
 		finalizationIdentity["blockReason"] = blockReason
@@ -808,6 +816,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		ExpectedSessionVersion: sessionTurn.Lease.Session.Version, ExpectedTurnVersion: sessionTurn.Turn.Version,
 		FinalizationDigest: finalizationDigest, TerminalKind: terminalKind, TerminalContent: terminalContent,
 		NativeSession:        native,
+		NativeSessionCarried: carried,
 		SkipTranscriptAppend: sessionTurn.SkipTranscriptAppend,
 		SkipUserPromptAppend: sessionTurn.SkipUserPromptAppend,
 		PublicationID:        publicationID,

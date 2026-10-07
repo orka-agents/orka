@@ -13,15 +13,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/orka-agents/sessionkit"
 	"golang.org/x/sys/unix"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 // MaxBundleBytes is an Orka transport limit, not SessionKit's storage limit.
-const MaxBundleBytes = 512 << 10
+const MaxBundleBytes = harnessv2.MaxNativeSessionBytes
 
 // ErrUnsupported identifies an otherwise stopped conversation outside this
 // consumer's supported format or transport bounds. I/O and uncertain outcomes
@@ -320,12 +323,17 @@ func atomicJSON(dir, name string, value any) error {
 	return syncDir(dir)
 }
 
+// within reports whether name is root or lies under it. Existing paths compare
+// by identity so aliases such as symlinked parents cannot hide an overlap; a
+// root that does not exist yet falls back to the cleaned lexical ancestry.
 func within(root, name string) bool {
+	root, name = filepath.Clean(root), filepath.Clean(name)
 	rootInfo, err := os.Stat(root)
 	if err != nil {
-		return false
+		rel, relErr := filepath.Rel(root, name)
+		return relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 	}
-	for name = filepath.Clean(name); ; name = filepath.Dir(name) {
+	for ; ; name = filepath.Dir(name) {
 		info, err := os.Stat(name)
 		if err == nil && os.SameFile(rootInfo, info) {
 			return true

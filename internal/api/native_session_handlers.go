@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-const maxNativeSessionBundleBytes = 512 << 10
+const maxNativeSessionBundleBytes = harnessv2.MaxNativeSessionBytes
 
 type nativeSessionImportRequest struct {
 	OperationID string `json:"operationID"`

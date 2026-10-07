@@ -340,3 +340,67 @@ func TestNativeSessionAtomicCanonicalFinalization(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeSessionCarriedAcrossOutcomeMarker(t *testing.T) {
+	s := nativeTestStore(t, ":memory:")
+	ctx := t.Context()
+	request := sessionTurnFinalizationOwnershipFixture(t, s, false, "carried-task-uid")
+	uid := request.Key.SessionUID
+	require.NoError(t, s.BindSessionCleanupIdentity(ctx, "ns", "session", uid))
+	prior := store.NativeSessionRecord{Namespace: "ns", SessionName: "session", SessionUID: uid, Snapshot: storetest.NativeSessionSnapshot(t, "checkpoint before a failed prompt"), RuntimeSessionGeneration: 1, SourceOperationID: "prior-capture"}
+	require.NoError(t, s.SaveNativeSession(ctx, prior))
+	stored, err := s.GetNativeSession(ctx, "ns", "session", uid)
+	require.NoError(t, err)
+
+	marker := request
+	marker.TerminalKind = store.SessionTurnOutcomeMarker
+	marker.TerminalContent = `{"kind":"Failed","reason":"prompt failed","assistantResultRecorded":false}`
+	marker.NativeSession = stored
+	marker.NativeSessionCarried = true
+
+	fresh := marker
+	fresh.NativeSessionCarried = false
+	_, err = s.FinalizeSessionTurn(ctx, fresh)
+	require.Error(t, err, "a marker must not accept a fresh capture")
+	carriedResult := request
+	carriedResult.NativeSession = stored
+	carriedResult.NativeSessionCarried = true
+	_, err = s.FinalizeSessionTurn(ctx, carriedResult)
+	require.Error(t, err, "an assistant result must not carry a stale checkpoint")
+	changed := marker
+	other := *stored
+	other.Snapshot = storetest.NativeSessionSnapshot(t, "different native state")
+	changed.NativeSession = &other
+	_, err = s.FinalizeSessionTurn(ctx, changed)
+	require.ErrorIs(t, err, store.ErrConflict, "carried bytes must match the stored checkpoint")
+	turn, err := s.GetSessionTurn(ctx, mustTurnID(t, request.Key))
+	require.NoError(t, err)
+	require.Equal(t, store.SessionTurnOpen, turn.State, "rejected finalizations must not settle the turn")
+	unchanged, err := s.GetNativeSession(ctx, "ns", "session", uid)
+	require.NoError(t, err)
+	require.Equal(t, stored, unchanged)
+
+	turn, err = s.FinalizeSessionTurn(ctx, marker)
+	require.NoError(t, err)
+	require.Equal(t, store.NativeSessionCaptureDigest(stored), turn.NativeSessionDigest)
+	session, err := s.GetSession(ctx, "ns", "session")
+	require.NoError(t, err)
+	require.Equal(t, 2, session.MessageCount, "the user prompt and failure marker advance canonical history")
+	after, err := s.GetNativeSession(ctx, "ns", "session", uid)
+	require.NoError(t, err, "the carried checkpoint must cover the advanced transcript")
+	require.Equal(t, stored.Snapshot, after.Snapshot)
+	require.Equal(t, stored.SourceOperationID, after.SourceOperationID)
+	require.Equal(t, stored.RuntimeSessionGeneration, after.RuntimeSessionGeneration)
+	require.Equal(t, 2, after.MessageCount)
+	require.Equal(t, session.Messages[len(session.Messages)-1].ID, after.ThroughMessageID)
+	retry, err := s.FinalizeSessionTurn(ctx, marker)
+	require.NoError(t, err)
+	require.Equal(t, turn.NativeSessionDigest, retry.NativeSessionDigest)
+}
+
+func mustTurnID(t *testing.T, key store.SessionTurnKey) string {
+	t.Helper()
+	id, err := key.CanonicalID()
+	require.NoError(t, err)
+	return id
+}

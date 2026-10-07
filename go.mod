@@ -19,7 +19,7 @@ require (
 	github.com/onsi/gomega v1.43.0
 	github.com/open-policy-agent/cert-controller v0.16.0
 	github.com/openai/openai-go/v3 v3.50.0
-	github.com/orka-agents/sessionkit v0.0.0-20261006054510-a3cef22a9511
+	github.com/orka-agents/sessionkit v0.0.0-20261007015529-b32f6420237d
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/robfig/cron/v3 v3.0.1
