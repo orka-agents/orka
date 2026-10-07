@@ -123,14 +123,12 @@ Validate workflow/script edits locally before pushing:
 bash -n scripts/live-copilot-proxy-e2e.sh
 bash -n scripts/agent-runtime-e2e.sh scripts/agent-runtime-kind-e2e.sh scripts/lib/agent-runtime-kind-bootstrap.sh
 bash -n scripts/live-agent-sandbox-e2e.sh
-bash -n scripts/live-github-label-trigger-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
 bash -n scripts/agent-substrate-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-runtime-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/release-qualification.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-agent-sandbox-e2e.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-label-trigger-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/gateway-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repository-monitor-smoke.yml

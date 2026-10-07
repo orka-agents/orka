@@ -15,24 +15,7 @@ const repositoryMonitorIssueTargetSchema = z.object({
 })
 
 const repositoryMonitorIssueCommandLabelsSchema = z.object({
-  triage: z.string().optional(),
-  research: z.string().optional(),
-  plan: z.string().optional(),
-  approvePlan: z.string().optional(),
   implement: z.string().optional(),
-  decompose: z.string().optional(),
-  stop: z.string().optional(),
-  resume: z.string().optional(),
-})
-
-const repositoryMonitorPullRequestCommandLabelsSchema = z.object({
-  review: z.string().optional(),
-  fix: z.string().optional(),
-  fixCI: z.string().optional(),
-  updateBranch: z.string().optional(),
-  automerge: z.string().optional(),
-  stop: z.string().optional(),
-  resume: z.string().optional(),
 })
 
 const repositoryMonitorTriggersSchema = z.object({
@@ -42,7 +25,6 @@ const repositoryMonitorTriggersSchema = z.object({
       consumeCommandLabels: z.boolean().optional(),
       requireActorPermission: z.enum(['write', 'maintain', 'admin']).optional(),
       issues: repositoryMonitorIssueCommandLabelsSchema.optional(),
-      pullRequests: repositoryMonitorPullRequestCommandLabelsSchema.optional(),
     }).optional(),
   }).optional(),
 })
@@ -54,6 +36,10 @@ export const repositoryMonitorSpecSchema = z.object({
   repository: z.string().optional(),
   branch: z.string().optional(),
   gitSecretRef: z.object({ name: z.string() }).optional(),
+  readCredentialRef: z.object({ name: z.string() }).optional(),
+  publicationReadCredentialRef: z.object({ name: z.string() }).optional(),
+  publicationCredentialRef: z.object({ name: z.string() }).optional(),
+  forgeCredentialRef: z.object({ name: z.string() }).optional(),
   schedule: z.string().optional(),
   timeZone: z.string().optional(),
   suspend: z.boolean().optional(),
@@ -77,11 +63,10 @@ export const repositoryMonitorSpecSchema = z.object({
     research: z.object({ enabled: z.boolean().optional() }).optional(),
     planning: z.object({
       enabled: z.boolean().optional(),
-      requireHumanApprovalFor: z.array(z.string()).optional(),
     }).optional(),
     implementation: z.object({
       enabled: z.boolean().optional(),
-      requireApprovedPlan: z.boolean().optional(),
+      requirePlan: z.boolean().optional(),
       branchPrefix: z.string().optional(),
       maxActive: z.number().optional(),
       maxAttemptsPerIssue: z.number().optional(),
@@ -112,11 +97,9 @@ export const repositoryMonitorSpecSchema = z.object({
   }).optional(),
   repair: z.object({
     enabled: z.boolean().optional(),
-  }).optional(),
-  automerge: z.object({
-    enabled: z.boolean().optional(),
-    requireGlobalMergeGate: z.boolean().optional(),
-    allowedMergeMethods: z.array(z.string()).optional(),
+    maxRepairsPerPR: z.number().int().min(0).optional(),
+    maxRepairsPerHead: z.number().int().min(0).optional(),
+    maxValidationRetries: z.number().int().min(0).optional(),
   }).optional(),
   policy: z.object({
     protectedLabels: z.array(z.string()).optional(),

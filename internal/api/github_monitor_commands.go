@@ -36,7 +36,6 @@ const (
 	githubAPIBaseURLEnv           = "ORKA_GITHUB_API_BASE_URL"
 	commandIntentStop             = finishReasonStop
 	commandIntentResume           = "resume"
-	commandIntentApprovePlan      = "approve_plan"
 	commandIntentDecompose        = "decompose"
 	commandIntentPlan             = "plan"
 	commandIntentFixCI            = "fix_ci"
@@ -159,64 +158,17 @@ func repositoryMonitorWebhookMatchingLabel(policyLabels, itemLabels []string) st
 }
 
 func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMonitor, target githubLabelTarget, label string) (string, bool) {
-	label = strings.ToLower(strings.TrimSpace(label))
-	if label == "" {
+	if monitor == nil || target.IsPR {
 		return "", false
 	}
-	labels := monitor.Spec.Triggers.GitHub.Labels
-	type commandLabel struct{ intent, label string }
-	var configured []commandLabel
-	if target.IsPR {
-		configured = []commandLabel{
-			{intent: githubActionReview, label: labels.PullRequests.Review},
-			{intent: githubActionFix, label: labels.PullRequests.Fix},
-			{intent: commandIntentFixCI, label: labels.PullRequests.FixCI},
-			{intent: commandIntentUpdateBranch, label: labels.PullRequests.UpdateBranch},
-			{intent: "automerge", label: labels.PullRequests.Automerge},
-			{intent: commandIntentStop, label: labels.PullRequests.Stop},
-			{intent: commandIntentResume, label: labels.PullRequests.Resume},
-		}
-	} else {
-		configured = []commandLabel{
-			{intent: githubActionTriage, label: labels.Issues.Triage},
-			{intent: githubActionResearch, label: labels.Issues.Research},
-			{intent: commandIntentPlan, label: labels.Issues.Plan},
-			{intent: commandIntentApprovePlan, label: labels.Issues.ApprovePlan},
-			{intent: githubActionImplement, label: labels.Issues.Implement},
-			{intent: "decompose", label: labels.Issues.Decompose},
-			{intent: commandIntentStop, label: labels.Issues.Stop},
-			{intent: commandIntentResume, label: labels.Issues.Resume},
-		}
+	want := strings.TrimSpace(monitor.Spec.Triggers.GitHub.Labels.Issues.Implement)
+	if want == "" {
+		want = "orka:implement"
 	}
-	matchedIntent := ""
-	for _, entry := range configured {
-		configuredLabel := strings.TrimSpace(entry.label)
-		if configuredLabel == "" {
-			configuredLabel = repositoryMonitorDefaultCommandLabel(entry.intent)
-		}
-		if strings.EqualFold(configuredLabel, label) {
-			if matchedIntent != "" {
-				return "", false
-			}
-			matchedIntent = entry.intent
-		}
+	if strings.EqualFold(strings.TrimSpace(label), want) {
+		return githubActionImplement, true
 	}
-	return matchedIntent, matchedIntent != ""
-}
-
-func repositoryMonitorDefaultCommandLabel(intent string) string {
-	switch intent {
-	case commandIntentApprovePlan:
-		return "orka:approve-plan"
-	case commandIntentFixCI:
-		return "orka:fix-ci"
-	case commandIntentUpdateBranch:
-		return "orka:update-branch"
-	case commandIntentDecompose:
-		return "orka:to-issues"
-	default:
-		return "orka:" + strings.ReplaceAll(intent, "_", "-")
-	}
+	return "", false
 }
 
 func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, intent, delivery string) (*store.CommandEvent, bool, error) {
@@ -433,7 +385,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 
 func repositoryMonitorCommandGuardLabel(monitor *corev1alpha1.RepositoryMonitor, labels []string) string {
 	guards := append([]string{}, monitor.Spec.Policy.ProtectedLabels...)
-	guards = append(guards, monitor.Spec.Policy.PauseLabels...)
+	guards = append(guards, repositoryMonitorAPIPauseLabels(monitor)...)
 	for _, label := range labels {
 		for _, guard := range guards {
 			if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(guard)) && strings.TrimSpace(guard) != "" {
@@ -621,7 +573,7 @@ func githubIssueSnapshotDigest(monitor *corev1alpha1.RepositoryMonitor, target g
 	ignored := map[string]struct{}{}
 	if monitor != nil {
 		configured := monitor.Spec.Triggers.GitHub.Labels.Issues
-		for _, label := range []string{configured.Triage, configured.Research, configured.Plan, configured.ApprovePlan, configured.Implement, configured.Decompose, configured.Stop, configured.Resume} {
+		for _, label := range []string{configured.Implement} {
 			if label = strings.ToLower(strings.TrimSpace(label)); label != "" {
 				ignored[label] = struct{}{}
 			}

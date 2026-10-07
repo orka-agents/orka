@@ -14,10 +14,9 @@ credentials, repository settings, and controller configuration in its README.
 | [`github-cicd/`](github-cicd) | Publishing one implementation, opening a PR, and reporting its CI status; includes an optional direct CI-repair workflow | [Agent runtimes](../website/docs/concepts/agent-runtimes.md) |
 | [`self-bootstrapping/`](self-bootstrapping) | A coordinator that creates the specialist agents it needs, then delegates to them | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
 | [`autonomous-task/`](autonomous-task) | A native AI coordinator that saves a plan and delegates review across multiple iterations | [Autonomous Task execution](../website/docs/guides/autonomous-tasks.md) |
-| [`github-label-trigger/`](github-label-trigger) | Turning a GitHub label into an agent Task via a signed webhook | [GitHub label triggers](../website/docs/guides/github-label-triggers.md) |
-| [`github-label-triggered-issue-loop/`](github-label-triggered-issue-loop) | The `orka:*` label workflow from issue through implementation, PR creation, and review; automerge is disabled by default | [Issue-to-PR automation](../website/docs/guides/issue-to-pr-automation.md) |
+| [`github-label-triggered-issue-loop/`](github-label-triggered-issue-loop) | The `orka:implement` workflow from issue through implementation, PR creation, and readiness for GitHub-native auto-merge | [Issue-to-PR automation](../website/docs/guides/issue-to-pr-automation.md) |
 | [`repository-monitor-issue-plan-only/`](repository-monitor-issue-plan-only) | Durable triage and planning records, with no code written | [Repository monitors](../website/docs/guides/repository-monitors.md) |
-| [`repository-monitor-pr-review-repair/`](repository-monitor-pr-review-repair) | Reviewing PRs, pushing repairs, and optional automerge command labels | [Repository monitors](../website/docs/guides/repository-monitors.md) |
+| [`repository-monitor-pr-review-repair/`](repository-monitor-pr-review-repair) | Reviewing PRs, pushing repairs, and publishing readiness for GitHub-native auto-merge | [Repository monitors](../website/docs/guides/repository-monitors.md) |
 
 Each subdirectory has its own README with the exact apply commands and the Secrets it
 needs.

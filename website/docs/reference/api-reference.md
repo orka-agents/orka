@@ -48,7 +48,7 @@ GitHub webhooks use HMAC verification instead of bearer-token authentication.
 |----------|--------|-------------|
 | `/webhooks/github` | POST | Accept GitHub `issues` / `pull_request` label triggers and pull request events for exact-head repository monitor runs |
 
-The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. Label trigger events can create agent Tasks for labels such as `agent:implement`. Pull request events can also queue exact-head `RepositoryMonitor` runs when a matching monitor has `spec.review.exactEventEnabled: true`. See [GitHub Label Triggers](../guides/github-label-triggers.md) for configuration and webhook behavior.
+The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. The `orka:implement` issue label queues the managed repository workflow; configured pause-label changes queue fresh reconciliation. Pull request events can also queue exact-head `RepositoryMonitor` runs when a matching monitor has `spec.review.exactEventEnabled: true`. See [GitHub Label Triggers](../guides/github-label-triggers.md) for configuration and webhook behavior.
 
 ## Tasks
 
@@ -560,7 +560,7 @@ The request body can be omitted to run a full inventory pass. `targetKind` may b
 }
 ```
 
-Supported issue intents are `triage`, `research`, `plan`, `approve_plan`, `implement`, `decompose`, `stop`, and `resume`. Supported pull request intents are `review`, `fix`, `fix_ci`, `update_branch`, `automerge`, `stop`, and `resume`. Head-bound pull request commands (`review`, `fix`, `fix_ci`, `update_branch`, and `automerge`) must include `targetSHA`; `stop` and `resume` can omit it. The command creation endpoint always requires `orka:monitors:operate`. Mutating intents (including approve, implement, repair, update-branch, automerge, stop, and resume) additionally require `orka:monitors:write`; `review` also requires monitor-write when review publishing is enabled. The endpoint validates that the target kind is enabled, records a durable command event, and queues a targeted monitor run.
+Supported issue intents are `triage`, `research`, `plan`, `implement`, `decompose`, `stop`, and `resume`. Supported pull request intents are `review`, `fix`, `fix_ci`, `update_branch`, `stop`, and `resume`. Head-bound pull request commands (`review`, `fix`, `fix_ci`, `update_branch`) must include `targetSHA`; `stop` and `resume` can omit it. The command creation endpoint always requires `orka:monitors:operate`. Mutating intents (including `implement`, `decompose`, `fix`, `fix_ci`, `update_branch`, `stop`, and `resume`) additionally require `orka:monitors:write`; `review` also requires monitor-write when review publishing is enabled. The endpoint validates that the target kind is enabled, records a durable command event, and queues a targeted monitor run.
 
 ### List monitor commands, actions, implementations, and mutations
 
@@ -578,7 +578,7 @@ Supported issue intents are `triage`, `research`, `plan`, `approve_plan`, `imple
 - `GET /api/v1/monitors/mutations?namespace=&name=&kind=&number=&operation=&status=`
 - `GET /api/v1/monitors/mutations/{id}`
 
-Command events record label/API intake, actor/source authorization, target SHA/snapshot bindings, status, and errors. Work actions are the durable queue/lease view for prerequisites and follow-up work. Action records store typed triage/research/plan/implementation/review/repair/automerge outcomes. Implementation jobs track issue coding attempts, patch artifacts, validation state, branches, and linked PRs. Mutation records audit every controller-owned GitHub write such as label consumption, review submission, branch pushes, PR creation, and automerge attempts.
+Command events record label/API intake, actor/source authorization, target SHA/snapshot bindings, status, and errors. Work actions are the durable queue/lease view for prerequisites and follow-up work. Action records store typed triage/research/plan/implementation/review/repair/readiness outcomes. Implementation jobs track issue coding attempts, patch artifacts, validation state, branches, and linked PRs. Mutation records audit every controller-owned GitHub write such as label consumption, review submission, branch pushes, PR creation, and readiness statuses.
 
 See [Repository Monitors](../guides/repository-monitors.md) for the full workflow and CRD example.
 
