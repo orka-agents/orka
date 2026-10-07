@@ -149,8 +149,9 @@ path's rather than reusing its frozen snapshot.
 Connector tools carry a `read` or `write` class (`spec.tools[].class`). A
 `readOnly` Connection removes write tools from the effective tool list. Write
 tools default into the Agent's `approvalRequiredTools`, so the existing broker gate and approval UI ask before
-an email is sent or a document is changed. Every call is recorded as an
-`ExternalEffect` with a Connection digest for audit. Deleting a Connection
+an email is sent or a document is changed. Every write call is recorded as
+an `ExternalEffect` with a Connection digest for audit; read calls leave no
+effect record. Deleting a Connection
 deletes its sealed row and wrapped key, best-effort revokes the upstream token,
 and causes in-flight calls to fail closed.
 
