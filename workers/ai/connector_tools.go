@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -69,11 +70,13 @@ func parseConnectionBindings(raw string) map[string]corev1alpha1.ConnectionBindi
 	return result
 }
 
-// connectorToolProxyTimeout is the Tool's declared request timeout plus a
-// settlement margin, or the default proxy deadline when it declares none.
+// connectorToolProxyTimeout is the Tool's declared request timeout, clamped
+// to the controller's connector maximum, plus a settlement margin, or the
+// default proxy deadline when it declares none. Clamping first also keeps a
+// huge declared duration from overflowing when the margin is added.
 func connectorToolProxyTimeout(tool *corev1alpha1.Tool) time.Duration {
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
-		return tool.Spec.HTTP.Timeout.Duration + connectorToolSettlementMargin
+		return min(tool.Spec.HTTP.Timeout.Duration, connectors.MaxHTTPToolTimeout) + connectorToolSettlementMargin
 	}
 	return connectorToolCallTimeout
 }

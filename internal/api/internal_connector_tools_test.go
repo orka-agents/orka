@@ -1119,6 +1119,45 @@ func TestExecuteConnectorToolRechecksTheToolAtTheSendBoundary(t *testing.T) {
 	}
 }
 
+// policyWithdrawingResolver deletes the Tool's outbound access policy while
+// the credential resolves, as an administrator withdrawing it during a slow
+// token refresh would.
+type policyWithdrawingResolver struct{ client client.Client }
+
+func (r *policyWithdrawingResolver) Resolve(ctx context.Context, req outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: "default", Name: req.PolicyName}, policy); err == nil {
+		_ = r.client.Delete(ctx, policy)
+	}
+	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
+}
+
+// TestExecuteConnectorToolRechecksThePolicyAtTheSendBoundary covers the
+// policy withdrawn while an approved call resolves its credential: the
+// request never leaves under the policy checked earlier, and the approval
+// is handed back.
+func TestExecuteConnectorToolRechecksThePolicyAtTheSendBoundary(t *testing.T) {
+	resolver := &policyWithdrawingResolver{}
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	resolver.client = h.client
+	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
+	status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`)
+	if status != http.StatusConflict || !strings.Contains(body, "outbound access policy was withdrawn since dispatch") {
+		t.Fatalf("status = %d %s, want a refusal before any provider request", status, body)
+	}
+}
+
+// TestExecuteConnectorToolRefusesTrailingRequestData covers a request body
+// with data after its JSON object: it is not a valid request and is refused
+// before anything is loaded or executed.
+func TestExecuteConnectorToolRefusesTrailingRequestData(t *testing.T) {
+	h := newConnectorToolHarness(t, &stubOutboundResolver{}, true, connectorToolAppOptions{mode: "readOnly"})
+	status, body := postConnectorTool(t, h.app, "gh_search", `{"arguments":{"q":"x"}} trailing`)
+	if status != http.StatusBadRequest || !strings.Contains(body, "single JSON object") {
+		t.Fatalf("status = %d %s, want the trailing data refused", status, body)
+	}
+}
+
 // deadlineResolver records the deadline the call resolves its credential
 // under and refuses, so nothing is sent.
 type deadlineResolver struct{ deadline time.Time }
