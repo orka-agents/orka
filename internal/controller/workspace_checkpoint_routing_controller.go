@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	workspace "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -15,6 +16,7 @@ import (
 )
 
 const workspaceCheckpointProviderNameLabel = "workspace.orka.ai/provider-name"
+const workspaceCheckpointRoutingFailureAnnotation = "workspace.orka.ai/checkpoint-routing-failure"
 
 // Core establishes checkpoint routing from the exact source workspace. The
 // selected provider owns artifact export, observed status and reference cleanup.
@@ -31,12 +33,29 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 	if !checkpoint.DeletionTimestamp.IsZero() || checkpoint.Labels[workspaceCheckpointProviderNameLabel] != "" {
 		return ctrl.Result{}, nil
 	}
+	// Published exports and in-progress legacy references keep their prior
+	// owner even when the source is gone and no new routing is established.
+	if checkpoint.Status.Digest != "" || slices.Contains(checkpoint.Finalizers, "orka.ai/substrate-checkpoint-reference") {
+		return ctrl.Result{}, nil
+	}
+	if checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation] != "" {
+		return ctrl.Result{}, nil
+	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	source := &workspace.ExecutionWorkspace{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: checkpoint.Namespace, Name: checkpoint.Spec.WorkspaceRef.Name}, source); err != nil {
+		if r.APIReader != nil && apierrors.IsNotFound(err) {
+			return r.failRouting(ctx, checkpoint, "SourceNotFound")
+		}
 		return ctrl.Result{}, err
 	}
-	if source.UID != checkpoint.Spec.WorkspaceRef.UID || !source.DeletionTimestamp.IsZero() {
+	if source.UID != checkpoint.Spec.WorkspaceRef.UID {
+		if r.APIReader != nil {
+			return r.failRouting(ctx, checkpoint, "SourceUIDMismatch")
+		}
+		return ctrl.Result{}, fmt.Errorf("checkpoint source workspace identity is unavailable from the authoritative API")
+	}
+	if !source.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, fmt.Errorf("checkpoint source workspace has changed or is deleting")
 	}
 	if source.Labels[workspace.ProviderControllerLabel] == acpWorkspaceControllerLabelValue {
@@ -59,6 +78,17 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// A routing failure is Core-owned metadata, not a provider export or cleanup
+// result. The immutable source UID cannot become available again after loss.
+func (r *WorkspaceCheckpointRoutingReconciler) failRouting(ctx context.Context, checkpoint *workspace.ExecutionWorkspaceCheckpoint, reason string) (ctrl.Result, error) {
+	before := checkpoint.DeepCopy()
+	if checkpoint.Annotations == nil {
+		checkpoint.Annotations = map[string]string{}
+	}
+	checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation] = reason
+	return ctrl.Result{}, r.Patch(ctx, checkpoint, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
 func (r *WorkspaceCheckpointRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {

@@ -48,6 +48,15 @@ fences and finalizers. Independent checkpoint restore additionally binds the
 checkpoint UID, digest, class, and provider revision; the provider must acquire
 durable artifact ownership before native creation.
 
+Core establishes checkpoint routing from the immutable source workspace UID.
+If the authoritative API proves that an unrouted source is absent or replaced,
+Core records `workspace.orka.ai/checkpoint-routing-failure` as `SourceNotFound`
+or `SourceUIDMismatch` and stops routing retries. This is a routing diagnostic;
+it does not set the provider's checkpoint phase or claim artifact cleanup.
+Create a new checkpoint request from a live exact source to retry export.
+Deleting sources and API outages remain retryable. Already routed checkpoints
+and retained artifacts keep their provider ownership after source deletion.
+
 The shared repository contains the [provider installation and retirement
 guide](https://github.com/orka-agents/orka-workspace/blob/e313ab83c5f4/docs/external-providers.md),
 provider-specific prerequisites, and conformance/live proof scripts. External ACP

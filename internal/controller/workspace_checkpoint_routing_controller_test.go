@@ -36,7 +36,7 @@ func TestWorkspaceCheckpointRoutingRequiresExactSourceAndProvider(t *testing.T) 
 			}
 			r := &WorkspaceCheckpointRoutingReconciler{Client: f.r.Client, APIReader: f.r.Client}
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(checkpoint)})
-			if (err == nil) != (name == "valid") {
+			if (err == nil) != (name == "valid" || name == "replaced source") {
 				t.Fatalf("routing error = %v", err)
 			}
 			if err := f.r.Get(ctx, client.ObjectKeyFromObject(checkpoint), checkpoint); err != nil {
@@ -48,6 +48,9 @@ func TestWorkspaceCheckpointRoutingRequiresExactSourceAndProvider(t *testing.T) 
 				}
 			} else if len(checkpoint.Labels) != 0 {
 				t.Fatal("invalid source acquired provider authority")
+			}
+			if name == "replaced source" && checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation] != "SourceUIDMismatch" {
+				t.Fatal("replaced source did not publish its terminal routing diagnostic")
 			}
 		})
 	}

@@ -1578,7 +1578,17 @@ func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, r
 	if err := reader.Get(ctx, types.NamespacedName{Name: bound.ProviderName}, provider); err != nil {
 		return nil, err
 	}
-	if !provider.DeletionTimestamp.IsZero() || string(provider.UID) != bound.ProviderUID || provider.Generation != bound.ProviderGeneration ||
+	providerGenerationMatches := provider.Generation == bound.ProviderGeneration
+	if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining {
+		// Draining advances the registration generation without replacing an
+		// admitted Session workspace's frozen installation. Reuse only that
+		// exact logical workspace; new identities still require Active.
+		providerGenerationMatches = bound.ProviderGeneration > 0 && bound.ProviderGeneration <= provider.Generation &&
+			plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && plan.Workspace.SessionUID != "" &&
+			workspace.Spec.SessionRef != nil && string(workspace.Spec.SessionRef.UID) == plan.Workspace.SessionUID &&
+			workspace.Spec.Slot == plan.Workspace.WorkspaceSlot && workspaceCurrentlyAdmittedByCore(workspace)
+	}
+	if !provider.DeletionTimestamp.IsZero() || string(provider.UID) != bound.ProviderUID || !providerGenerationMatches ||
 		provider.Spec.ControllerName != bound.ControllerName || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
 		return nil, fmt.Errorf("workspace provider no longer matches the frozen identity and capabilities")
 	}
