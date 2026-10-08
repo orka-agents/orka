@@ -697,6 +697,13 @@ func RegisterProxyPRTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewCheckPullRequestCITool(k8sClient))
 }
 
+// ProxyPRToolNames are the tools RegisterProxyPRTools adds. Only the
+// controller registers them in its default registry; a native worker has
+// them only as coordination tools.
+func ProxyPRToolNames() []string {
+	return []string{createPullRequestToolName, checkPullRequestCIToolName}
+}
+
 // KnownBuiltInToolNames returns every built-in tool name known to Orka, including
 // tools registered in the default proxy registry and coordination tools that are
 // registered in worker processes. Controller-side validation uses this to reject

@@ -66,7 +66,7 @@ func connectorToolFixtures() *corev1alpha1.Task {
 	// the requester only through it.
 	controller.SetRequesterStampKey(testConnectorStampKey)
 	task.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testConnectorStampKey, task.UID, task.Spec.RequestedBy.Issuer, task.Spec.RequestedBy.Subject)
-	task.Status.ConnectionBindings = []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
+	task.Status.ConnectionBindings = []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: connectors.ConnectionName("github", "https://issuer.example.test", "alice"), UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
 	return task
 }
 
@@ -1143,6 +1143,31 @@ func TestExecuteConnectorToolRechecksThePolicyAtTheSendBoundary(t *testing.T) {
 	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
 	status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`)
 	if status != http.StatusConflict || !strings.Contains(body, "outbound access policy was withdrawn since dispatch") {
+		t.Fatalf("status = %d %s, want a refusal before any provider request", status, body)
+	}
+}
+
+type connectionDisconnectingResolver struct{ client client.Client }
+
+func (r *connectionDisconnectingResolver) Resolve(ctx context.Context, req outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	connection := &corev1alpha1.Connection{}
+	key := client.ObjectKey{Namespace: "default", Name: connectors.ConnectionName("github", "https://issuer.example.test", "alice")}
+	if err := r.client.Get(ctx, key, connection); err == nil {
+		_ = r.client.Delete(ctx, connection)
+	}
+	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
+}
+
+// TestExecuteConnectorToolRechecksTheConnectionAtTheSendBoundary covers a
+// disconnect while an approved call resolves its credential: the released
+// token never reaches the provider, and the approval is handed back.
+func TestExecuteConnectorToolRechecksTheConnectionAtTheSendBoundary(t *testing.T) {
+	resolver := &connectionDisconnectingResolver{}
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	resolver.client = h.client
+	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
+	status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`)
+	if status != http.StatusConflict || !strings.Contains(body, "connection was disconnected since dispatch") {
 		t.Fatalf("status = %d %s, want a refusal before any provider request", status, body)
 	}
 }
