@@ -174,11 +174,10 @@ existing tasks and data depend on them:
 The snapshot key also seals linked accounts (connectors). When the controller
 starts, it checks that its key opens every retained execution snapshot and
 every linked account's sealed custody, and it refuses to start if one does
-not: restore the previous key. Orka has no tool yet that re-wraps custody
-under a new key. To change the key on an installation with linked accounts,
-have every person disconnect first, so each Connection's finalizer can still
-revoke its tokens (where the provider supports revocation) while the old key
-opens them, then change the key, then let people reconnect.
+not: restore the previous key. Orka has no tool yet that re-wraps snapshots
+or custody under a new key, so treat the key as fixed for the life of the
+release. Disconnecting every linked account does not make a key change safe:
+retained execution snapshots still need the old key.
 
 ## `--skip-crds`
 

@@ -612,6 +612,25 @@ func TestLinkedRepositoryScopeInherited(t *testing.T) {
 	if err := linkedRepositoryScopeInherited(ctx, f.reader(within), within); err == nil || errors.Is(err, ErrLinkedRepositoryScope) {
 		t.Fatalf("missing parent err = %v", err)
 	}
+	// A delegated child whose owner reference is gone (orphaned) is not its
+	// own root: its workspace can no longer be checked against the parent.
+	orphan := beyond.DeepCopy()
+	orphan.OwnerReferences = nil
+	orphan.Annotations = map[string]string{labels.AnnotationParentTaskUID: string(root.UID)}
+	if err := linkedRepositoryScopeInherited(ctx, f.reader(root, orphan), orphan); !errors.Is(err, ErrLinkedRepositoryScope) {
+		t.Fatalf("orphaned child err = %v, want the scope refused", err)
+	}
+	// Nor is a child controlled by a Task other than the parent it records.
+	mismatched := within.DeepCopy()
+	mismatched.Annotations = map[string]string{labels.AnnotationParentTaskUID: "other-parent-uid"}
+	if err := linkedRepositoryScopeInherited(ctx, f.reader(root, mismatched), mismatched); !errors.Is(err, ErrLinkedRepositoryScope) {
+		t.Fatalf("mismatched parent annotation err = %v, want the scope refused", err)
+	}
+	recorded := within.DeepCopy()
+	recorded.Annotations = map[string]string{labels.AnnotationParentTaskUID: string(root.UID)}
+	if err := linkedRepositoryScopeInherited(ctx, f.reader(root, recorded), recorded); err != nil {
+		t.Fatalf("child recording its controlling parent: %v", err)
+	}
 
 	// The brokered filter and freeze refuse such a child permanently, and
 	// leave a child within scope alone.

@@ -178,11 +178,11 @@ service it needs.
   need an OIDC stub before any account can be linked.
 - The snapshot key becomes load-bearing for connector custody as well as for
   execution snapshots. There is no re-wrap path yet: a controller given a key
-  that cannot open every retained custody row refuses to start, so changing the
-  key today means every person disconnects first (so each Connection finalizer
-  can still revoke, where the provider supports it, while the old key opens
-  the tokens) and reconnects afterwards.
-  A re-wrap tool is a follow-up.
+  that cannot open every retained custody row and execution snapshot refuses
+  to start, so the key cannot change while either remains. Disconnecting
+  every person does not make a change safe; it only lets each Connection
+  finalizer revoke, where the provider supports it, while the old key still
+  opens the tokens. A re-wrap tool is a follow-up.
 - Connector custody requires the persistent controller store; an ephemeral
   store loses every link on restart and people must reconnect.
 - The controller becomes the only process holding third-party user tokens and
