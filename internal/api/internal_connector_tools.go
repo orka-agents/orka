@@ -281,23 +281,11 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 	// is refused rather than executed under a configuration never checked.
 	executor.SetCheckedPolicy(run.policy.Name, outboundaccess.PolicyIdentity{UID: string(run.policy.UID), Generation: run.policy.Generation})
 	// Policy reads and credential resolution (possibly a token refresh) run
-	// inside Execute; the caller's authority, the Tool, and its policy are
-	// judged once more right before the request leaves, so a Task
-	// cancelled, a Job replaced, or a Tool or policy edited or withdrawn in
-	// that window never reaches the provider with the definition checked
-	// earlier.
-	executor.SetSendGate(func(gateCtx context.Context) error {
-		if _, err := run.authorizer.verifyTaskCaller(c, run.task.Namespace, run.task.Name); err != nil {
-			return connectorSendRefusedError{err: err}
-		}
-		if err := connectorObjectUnchanged(gateCtx, reader, run.tool, "tool"); err != nil {
-			return connectorSendRefusedError{err: err}
-		}
-		if err := connectorObjectUnchanged(gateCtx, reader, run.policy, "outbound access policy"); err != nil {
-			return connectorSendRefusedError{err: err}
-		}
-		return nil
-	})
+	// inside Execute; the caller's authority, the Tool, its policy, and the
+	// Connection are judged once more right before the request leaves, so a
+	// Task cancelled, a Job replaced, a Tool or policy edited or withdrawn,
+	// or the link disconnected in that window never reaches the provider.
+	executor.SetSendGate(connectorSendGate(c, reader, run))
 	execCtx := ctx
 	if strings.TrimSpace(run.req.CallID) != "" {
 		execCtx = workerexecutor.WithToolCallID(execCtx, run.req.CallID)
@@ -521,6 +509,54 @@ func connectorObjectUnchanged(ctx context.Context, reader client.Reader, checked
 	}
 	if live.GetUID() != checked.GetUID() || live.GetGeneration() != checked.GetGeneration() || live.GetDeletionTimestamp() != nil {
 		return fiber.NewError(fiber.StatusConflict, kind+" configuration changed since dispatch; re-dispatch the task")
+	}
+	return nil
+}
+
+// connectorSendGate judges the call once more right before the request
+// leaves: the caller's authority, the Tool, its policy, and the frozen
+// Connection must all still be the ones checked.
+func connectorSendGate(c fiber.Ctx, reader client.Reader, run connectorToolRun) func(context.Context) error {
+	return func(gateCtx context.Context) error {
+		if _, err := run.authorizer.verifyTaskCaller(c, run.task.Namespace, run.task.Name); err != nil {
+			return connectorSendRefusedError{err: err}
+		}
+		if err := connectorObjectUnchanged(gateCtx, reader, run.tool, "tool"); err != nil {
+			return connectorSendRefusedError{err: err}
+		}
+		if err := connectorObjectUnchanged(gateCtx, reader, run.policy, "outbound access policy"); err != nil {
+			return connectorSendRefusedError{err: err}
+		}
+		if err := connectorConnectionUnchanged(gateCtx, reader, run.task, run.binding); err != nil {
+			return connectorSendRefusedError{err: err}
+		}
+		return nil
+	}
+}
+
+// connectorConnectionUnchanged re-reads the Connection frozen for the call
+// right before it is sent: a disconnect or re-link after the credential was
+// resolved must not still reach the provider with the released token.
+func connectorConnectionUnchanged(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, binding corev1alpha1.ConnectionBinding) error {
+	name := binding.ConnectionName
+	if name == "" && task.Spec.RequestedBy != nil {
+		name = connectors.ConnectionName(binding.Provider, task.Spec.RequestedBy.Issuer, task.Spec.RequestedBy.Subject)
+	}
+	if reader == nil || name == "" {
+		return fiber.NewError(fiber.StatusInternalServerError, "the connection cannot be re-read before sending")
+	}
+	live := &corev1alpha1.Connection{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusConflict, "connection was disconnected since dispatch")
+		}
+		return fiber.NewError(fiber.StatusServiceUnavailable, "the connection could not be re-read before sending; retry")
+	}
+	if string(live.UID) != binding.UID || live.Generation != binding.Generation || !live.DeletionTimestamp.IsZero() {
+		return fiber.NewError(fiber.StatusConflict, "connection was disconnected or changed since dispatch; re-dispatch the task")
+	}
+	if !connectors.ConnectionLinked(live) || live.Status.GrantSequence != binding.GrantSequence {
+		return fiber.NewError(fiber.StatusConflict, "connection is no longer linked with the grant frozen at dispatch; re-dispatch the task")
 	}
 	return nil
 }
