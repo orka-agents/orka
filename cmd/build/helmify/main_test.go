@@ -174,6 +174,20 @@ func TestStaticChartConnectorsFlags(t *testing.T) {
 	if err == nil || !strings.Contains(output, "store.persistence.enabled must be true") {
 		t.Fatalf("enabling connectors on an ephemeral store must fail: %v\n%s", err, output)
 	}
+	output, err = helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
+		"--set-string", "controller.mode=harness-v1",
+		"--set-string", "harnessV1.image.digest=sha256:"+strings.Repeat("1", 64),
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
+		"--set-string", "harnessV1.tls.rolloutNonce=certificate-1",
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+		"--set", "controller.connectors.enabled=true",
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=false")
+	if err == nil || !strings.Contains(output, "store.persistence.enabled must be true when controller.mode=harness-v1") {
+		t.Fatalf("enabling connectors on an ephemeral harness-v1 store must fail: %v\n%s", err, output)
+	}
 	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
 		"--set", "controller.connectors.enabled=true",
 		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
@@ -316,6 +330,24 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStaticChartGrantsConnectorProvidersLeastPrivilege(t *testing.T) {
+	output := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
+	start := strings.Index(output, "# Controller tenant Role.")
+	if start < 0 {
+		t.Fatal("rendered RBAC is missing the controller tenant Role")
+	}
+	controllerRole := output[start:]
+	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
+		controllerRole = controllerRole[:end]
+	}
+	// The controller reads providers and manages their finalizer; it never
+	// creates or deletes one.
+	const want = "resources: [\"connectorproviders\"]\n    verbs: [\"get\", \"list\", \"watch\", \"update\", \"patch\"]"
+	if !strings.Contains(controllerRole, want) || strings.Count(controllerRole, `"connectorproviders"`) != 1 {
+		t.Fatalf("controller tenant Role must grant connectorproviders only %q:\n%s", want, controllerRole)
 	}
 }
 
