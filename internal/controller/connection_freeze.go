@@ -182,9 +182,23 @@ func (n nativeBuiltinName) Execute(context.Context, json.RawMessage) (string, er
 // Task, the coordination tools. A Tool resource shadowed by one of these is
 // never what the worker runs, so it is never classified as connector-backed.
 func NativeWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *tools.Registry {
+	return nativeWorkerToolRegistry(tools.DefaultRegistry, task, agent)
+}
+
+func nativeWorkerToolRegistry(defaults *tools.Registry, task *corev1alpha1.Task, agent *corev1alpha1.Agent) *tools.Registry {
+	// The controller's default registry also holds the pull request tools
+	// it serves the compatibility proxies with; a worker has those only as
+	// coordination tools, added below when coordination applies.
+	proxyOnly := map[string]bool{}
+	for _, name := range tools.ProxyPRToolNames() {
+		proxyOnly[name] = true
+	}
 	registry := tools.NewRegistry()
-	for _, name := range tools.DefaultRegistry.Names() {
-		if tool, ok := tools.DefaultRegistry.Get(name); ok {
+	for _, name := range defaults.Names() {
+		if proxyOnly[name] {
+			continue
+		}
+		if tool, ok := defaults.Get(name); ok {
 			registry.Register(tool)
 		}
 	}
@@ -1182,7 +1196,9 @@ func BindNativeTaskConnectorAuthority(
 // Connection identity behind policyName, for external-effect audit records.
 func frozenConnectionDigest(frozen map[string]outboundaccess.FrozenConnection, policyName string) string {
 	binding, ok := frozen[policyName]
-	if !ok {
+	// A policy frozen with no Connection held for it is unbound: there is
+	// no link for a digest to name.
+	if !ok || binding.UID == "" || binding.GrantSequence <= 0 {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(policyName + "\x00" + binding.UID + "\x00" + strconv.FormatInt(binding.Generation, 10) +

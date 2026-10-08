@@ -232,6 +232,13 @@ func TestFreezeAndBindNativeConnections(t *testing.T) {
 	if frozenConnectionDigest(nil, "github-conn") != "" || frozenConnectionDigest(executor.FrozenConnections(), "other") != "" {
 		t.Fatal("missing bindings must yield an empty digest")
 	}
+	// A policy frozen with no Connection held for it names no link, so an
+	// approval or effect record never claims one.
+	for _, unbound := range []outboundaccess.FrozenConnection{{}, {UID: "conn-uid", Generation: 3}} {
+		if frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": unbound}, "github-conn") != "" {
+			t.Fatalf("unbound entry %+v must yield an empty digest", unbound)
+		}
+	}
 }
 
 func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
@@ -544,5 +551,28 @@ func TestCreateTaskJobBoundsAMissingToolPolicy(t *testing.T) {
 	}
 	if stale.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(stale.Status.Message, "missing-policy") {
 		t.Fatalf("stale task: phase = %q message = %q, want failed naming the policy", stale.Status.Phase, stale.Status.Message)
+	}
+}
+
+// TestNativeWorkerToolRegistryLeavesProxyPRToolsToCoordination covers the
+// pull request tools the controller registers for its compatibility
+// proxies: a native worker has them only as coordination tools, so without
+// coordination a Tool resource of the same name is what the worker runs.
+func TestNativeWorkerToolRegistryLeavesProxyPRToolsToCoordination(t *testing.T) {
+	defaults := tools.NewRegistry()
+	defaults.Register(tools.NewCreatePullRequestTool(nil))
+	defaults.Register(tools.NewCheckPullRequestCITool(nil))
+	task := &corev1alpha1.Task{}
+	plain := nativeWorkerToolRegistry(defaults, task, &corev1alpha1.Agent{})
+	coordinating := nativeWorkerToolRegistry(defaults, task, &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+	}})
+	for _, name := range tools.ProxyPRToolNames() {
+		if _, ok := plain.Get(name); ok {
+			t.Errorf("%s is a built-in for a native worker without coordination", name)
+		}
+		if _, ok := coordinating.Get(name); !ok {
+			t.Errorf("%s is not a built-in for a coordinating native worker", name)
+		}
 	}
 }
