@@ -10,8 +10,13 @@ metadata:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks", "tools", "agents", "agentruntimes", "runtimepools", "promptattempts", "runtimesessioncontrols", "publications", "controllerepochs", "externaleffects", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies", "connectorproviders", "connections"]
+    resources: ["tasks", "tools", "agents", "agentruntimes", "runtimepools", "promptattempts", "runtimesessioncontrols", "publications", "controllerepochs", "externaleffects", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies", "connections"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Providers are operator-authored: the controller reads them and manages
+  # their finalizer, never creates or deletes one.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["connectorproviders"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
     verbs: ["get", "list", "delete"]
