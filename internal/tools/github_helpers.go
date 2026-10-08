@@ -133,6 +133,12 @@ func resolveRepoAndTokenWithPolicy(
 	if tc := GetToolContext(ctx); tc != nil {
 		requireTaskCredentials = tc.RequireGitHubTaskCredentials
 	}
+	if linked != "" && scopeTaskName == "" {
+		// Outside a Task only a Task this turn created may scope the
+		// person's token; naming none would let repo_url reach any
+		// repository the person can.
+		return "", "", "", "", fmt.Errorf("task_name must name a task created in this conversation when acting through a linked account outside a task")
+	}
 	if requireTaskCredentials && scopeTaskName == "" && token == "" {
 		return "", "", "", "", fmt.Errorf("task_name or current Task context is required for external GitHub access")
 	}
