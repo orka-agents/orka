@@ -775,6 +775,11 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("task_name outside a task err = %v", err)
 	}
+	// Naming no Task outside one is refused too: the readers that take an
+	// unscoped repo_url would otherwise point the link at any repository.
+	if _, _, _, _, err := resolveReadRepoAndToken(outside, k8sClient, "get_issue", "", "https://github.com/other/repo", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("unscoped repo_url outside a task err = %v", err)
+	}
 	// A Task this turn created in another namespace is resolved from the
 	// record (name alone is what the tool receives) and read from there.
 	elsewhere := task.DeepCopy()
