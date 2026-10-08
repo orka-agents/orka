@@ -113,14 +113,23 @@ func taskRepositories(task *corev1alpha1.Task) map[string]struct{} {
 // its parent's verified requester, and delegate_task lets a coordinator
 // name any repository, so without this the person's linked account could
 // be pointed anywhere by delegating instead of calling directly. A Task
-// with no controlling Task is its own root and passes. Read failures are
-// returned as they are, so the caller retries.
+// with no controlling Task is its own root and passes, unless the
+// controller-managed parent annotation shows it was delegated: a child
+// orphaned from its parent can no longer be checked and is refused. Read
+// failures are returned as they are, so the caller retries.
 func linkedRepositoryScopeInherited(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) error {
 	current := task
 	for range linkedInheritanceDepth {
 		owner := metav1.GetControllerOf(current)
+		recordedParent := strings.TrimSpace(current.Annotations[labels.AnnotationParentTaskUID])
 		if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() {
+			if recordedParent != "" {
+				return fmt.Errorf("%w: task %q was delegated by task %s, which no longer controls it", ErrLinkedRepositoryScope, current.Name, recordedParent)
+			}
 			return nil
+		}
+		if recordedParent != "" && recordedParent != string(owner.UID) {
+			return fmt.Errorf("%w: task %q records parent %s but is controlled by task %q", ErrLinkedRepositoryScope, current.Name, recordedParent, owner.Name)
 		}
 		parent := &corev1alpha1.Task{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: current.Namespace, Name: owner.Name}, parent); err != nil {
