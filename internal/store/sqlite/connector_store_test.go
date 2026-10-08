@@ -1102,6 +1102,53 @@ func TestConnectorRetireConnectorCredential(t *testing.T) {
 	}
 }
 
+// TestConnectorCompletionDropsLeaveNoLogCopy covers the paths that delete
+// a parked completion outside a disconnect: an expired one met at commit
+// and one consumed. Its sealed payload must leave the write-ahead log too.
+func TestConnectorCompletionDropsLeaveNoLogCopy(t *testing.T) {
+	ctx := context.Background()
+	for name, drop := range map[string]func(*Store, store.ConnectorCompletion) error{
+		"expired at commit": func(s *Store, completion store.ConnectorCompletion) error {
+			ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+			if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("expired commit err = %v, want ErrNotFound", err)
+			}
+			return nil
+		},
+		"consumed": func(s *Store, completion store.ConnectorCompletion) error {
+			_, err := s.ConsumeConnectorCompletion(ctx, completion.Nonce)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newConnectorTestStore(t)
+			completion := testConnectorCompletion()
+			if name == "expired at commit" {
+				completion.ExpiresAt = time.Now().Add(-time.Second)
+			}
+			if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+				t.Fatal(err)
+			}
+			var payload []byte
+			if err := s.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if err := drop(s, completion); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{s.dbPath, s.dbPath + "-wal"} {
+				data, err := os.ReadFile(path)
+				if err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if bytes.Contains(data, payload) {
+					t.Fatalf("%s still holds the dropped completion payload", path)
+				}
+			}
+		})
+	}
+}
+
 // TestConnectorCommitDropsSupersededCompletions covers two parked
 // completions for one Connection (an older consent was approved, then a
 // newer one): once the newer one commits, the older one can never be
