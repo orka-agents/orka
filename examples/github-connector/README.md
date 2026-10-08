@@ -65,3 +65,8 @@ token. `create_pull_request` and the other write tools appear only for a
 that can ask: register the same allowlist and `approvalRequiredTools` on an
 external AgentKit or Foundry `AgentRuntime` (see the guide) to use them; the
 built-in `codex` runtime in this example gets the read tools.
+
+`orka connection delete <name>` (or `DELETE /api/v1/connections/<name>`)
+disconnects and deletes the tokens Orka holds. GitHub has no standard
+revocation endpoint, so revoke the authorization itself in GitHub under
+Settings → Applications.

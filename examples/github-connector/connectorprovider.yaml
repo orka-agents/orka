@@ -7,6 +7,9 @@ spec:
   oauth:
     authorizeURL: https://github.com/login/oauth/authorize
     tokenURL: https://github.com/login/oauth/access_token
+    # GitHub has no RFC 7009 revocation endpoint, so revocationURL is unset:
+    # a disconnect deletes the tokens Orka holds, and the person revokes the
+    # authorization itself in GitHub under Settings > Applications.
     # The public client ID of your GitHub OAuth App. The client secret lives
     # only in the Secret below.
     clientID: Iv1.replace-with-your-client-id
