@@ -619,7 +619,7 @@ Usage:
 
 Available Commands:
   complete    Finish a consent with the completion value the provider callback returned
-  delete      Disconnect a linked account and revoke its tokens
+  delete      Disconnect a linked account and delete its tokens
   get         Show one of your linked accounts
   list        List your linked accounts
   providers   List the connector providers you can link
@@ -662,7 +662,7 @@ Global Flags:
 ## `orka connection delete`
 
 ```text
-Disconnect a linked account and revoke its tokens
+Disconnect a linked account and delete its tokens
 
 Usage:
   orka connection delete <name> [flags]

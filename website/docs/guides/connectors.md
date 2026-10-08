@@ -184,7 +184,7 @@ consent, and disconnect.
 orka connect github --mode readWrite       # opens the consent page, waits until Ready
 orka connection list                       # your linked accounts
 orka connection get github-<digest>
-orka connection delete github-<digest>     # disconnect and revoke
+orka connection delete github-<digest>     # disconnect and delete the tokens
 orka connection providers                  # what an operator has made available
 ```
 
@@ -218,8 +218,12 @@ Connection as `Ready` with its granted scopes and no token material.
 `mode` is `readOnly` (only read scopes; write tools hidden) or `readWrite`.
 Widening the mode later (`PUT /api/v1/connections/<name>`) asks for consent
 again with the extra scopes; narrowing takes effect immediately. Disconnect
-with `DELETE`: the controller revokes the committed tokens against the
-client they were issued to and then deletes the sealed material.
+with `DELETE`: the controller deletes the sealed material, first revoking
+the committed tokens, against the client they were issued to, at the
+provider's `revocationURL` when it names one. GitHub offers no standard
+revocation endpoint, so the GitHub example sets none: a GitHub disconnect
+deletes the tokens Orka holds, and the person revokes the authorization
+itself in GitHub under Settings → Applications.
 
 The [API reference](../reference/api-reference.md#connector-endpoints) lists
 every route and the scopes a context token needs for them.
