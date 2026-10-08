@@ -87,8 +87,9 @@ Orka did not make: a volume snapshot, filesystem backup, or database copy taken
 while the row existed still holds the ciphertext together with its wrapped data
 key, and both open with the snapshot key of that time. Operators who need
 deletion to reach backups must bound backup retention, or change the snapshot
-key and discard copies sealed under the old one (today that means every
-person disconnects first; see Consequences). Raw tokens never appear in
+key and discard copies sealed under the old one, which is not possible today
+while retained execution snapshots or custody remain (see Consequences). Raw
+tokens never appear in
 Task specs, status, events, logs, or anywhere in the store outside the sealed
 column; the controller records its own audit events for connector use.
 
