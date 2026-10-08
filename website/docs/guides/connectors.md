@@ -178,7 +178,7 @@ consent, and disconnect.
 orka connect github --mode readWrite       # opens the consent page, waits until Ready
 orka connection list                       # your linked accounts
 orka connection get github-<digest>
-orka connection delete github-<digest>     # disconnect and revoke
+orka connection delete github-<digest>     # disconnect and delete the tokens
 orka connection providers                  # what an operator has made available
 ```
 

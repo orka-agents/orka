@@ -238,7 +238,7 @@ func joinProviderReadiness(item connectionView, providersReady map[string]bool, 
 	if item.Deleting {
 		item.Ready = false
 		item.State = "Disconnecting"
-		item.Message = "this link is being disconnected; its tokens are being revoked and it will disappear"
+		item.Message = "this link is being disconnected; it will disappear once its tokens are revoked where the provider supports it and deleted"
 		return item
 	}
 	if duplicated[item.Provider] {
@@ -272,7 +272,7 @@ func joinProviderReadinessInto(item map[string]any, providersReady map[string]bo
 	if deleting, _ := item["deleting"].(bool); deleting {
 		item["ready"] = false
 		item["state"] = "Disconnecting"
-		item["message"] = "this link is being disconnected; its tokens are being revoked and it will disappear"
+		item["message"] = "this link is being disconnected; it will disappear once its tokens are revoked where the provider supports it and deleted"
 		return
 	}
 	if provider, _ := item["provider"].(string); duplicated[provider] {
@@ -455,7 +455,7 @@ func newConnectionCompleteCmd() *cobra.Command {
 func newConnectionDeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <name>",
-		Short: "Disconnect a linked account and revoke its tokens",
+		Short: "Disconnect a linked account and delete its tokens",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
@@ -464,7 +464,7 @@ func newConnectionDeleteCmd() *cobra.Command {
 			}
 			// DELETE only starts the removal: the finalizer revokes the
 			// tokens first and may retry, so nothing is claimed finished.
-			fmt.Fprintf(cmd.OutOrStdout(), "Disconnect requested for %s: its tokens are being revoked and the link removed. Check with 'orka connection get %s'.\n", args[0], args[0]) //nolint:errcheck
+			fmt.Fprintf(cmd.OutOrStdout(), "Disconnect requested for %s: its tokens are being revoked where the provider supports it and deleted, and the link removed. Check with 'orka connection get %s'.\n", args[0], args[0]) //nolint:errcheck
 			return nil
 		},
 	}
