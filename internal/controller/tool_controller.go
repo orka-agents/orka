@@ -76,8 +76,8 @@ type ToolReconciler struct {
 	SkipSSRFValidation bool
 
 	// AllowPrivateConnectorEndpoints mirrors --connectors-allow-private-endpoints:
-	// a Tool behind an outbound access policy may target a private or
-	// cluster-local endpoint. Local fixtures only.
+	// a Tool behind a connection-mode outbound access policy may target a
+	// private or cluster-local endpoint. Local fixtures only.
 	AllowPrivateConnectorEndpoints bool
 
 	// SubstrateEnabled enables durable MCP tool actors.

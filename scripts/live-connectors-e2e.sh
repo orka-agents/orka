@@ -111,9 +111,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# local_curl reaches the port-forwards on loopback directly: a proxy from
+# the environment must never see the bearer tokens, OAuth code and state,
+# or completion token these calls carry.
+local_curl() { curl --noproxy '*' "$@"; }
+
 request() {
   local method="$1" url="$2" output="$3"; shift 3
-  curl -sS -o "${output}" -w '%{http_code}' -X "${method}" "${url}" "$@"
+  local_curl -sS -o "${output}" -w '%{http_code}' -X "${method}" "${url}" "$@"
 }
 
 # url_shape prints a URL without its query values and fragment: the
@@ -139,13 +144,13 @@ start_port_forwards() {
 wait_for_http() {
   local url="$1" label="$2" attempts=90
   while (( attempts > 0 )); do
-    if curl -fsS --connect-timeout 5 --max-time 10 "${url}" >/dev/null 2>&1; then return 0; fi
+    if local_curl -fsS --connect-timeout 5 --max-time 10 "${url}" >/dev/null 2>&1; then return 0; fi
     attempts=$((attempts - 1)); sleep 2
   done
   die "${label} did not become ready"
 }
 
-fixture_state() { curl -fsS "http://127.0.0.1:${fixture_port}/fixture/state"; }
+fixture_state() { local_curl -fsS "http://127.0.0.1:${fixture_port}/fixture/state"; }
 
 wait_for_state() {
   local expression="$1" label="$2" attempts="${3:-120}"
@@ -433,7 +438,7 @@ kubectl -n "${namespace}" get connectorprovider fixture -o json | jq -e "${provi
   || { kubectl -n "${namespace}" get connectorprovider fixture -o yaml | redact_all >&2; die "ConnectorProvider was not accepted"; }
 
 log "Signing in as ${subject} through the OIDC fixture"
-token="$(curl -fsS -X POST "http://127.0.0.1:${fixture_port}/oidc/mint" -H 'Content-Type: application/json' \
+token="$(local_curl -fsS -X POST "http://127.0.0.1:${fixture_port}/oidc/mint" -H 'Content-Type: application/json' \
   -d "{\"subject\":\"${subject}\",\"email\":\"${subject}@example.test\"}" | jq -er '.token')"
 auth=(-H "Authorization: Bearer ${token}")
 api="http://127.0.0.1:${api_port}/api/v1"
@@ -452,9 +457,9 @@ authorize_url="$(jq -er '.authorizeURL' "${workdir}/start.json")"
 # controller callback; the callback redirects to the settings page with the
 # completion token in the fragment.
 local_authorize="https://127.0.0.1:${fixture_tls_port}${authorize_url#https://${fixture_host}:8443}"
-callback_location="$(curl -sS --cacert "${tls_dir}/ca.crt" --resolve "${fixture_host}:${fixture_tls_port}:127.0.0.1" -o /dev/null -w '%{redirect_url}' "${local_authorize}")"
+callback_location="$(local_curl -sS --cacert "${tls_dir}/ca.crt" --resolve "${fixture_host}:${fixture_tls_port}:127.0.0.1" -o /dev/null -w '%{redirect_url}' "${local_authorize}")"
 [[ "${callback_location}" == "${callback_base}/api/v1/connections/callback?"* ]] || die "provider redirected elsewhere: $(url_shape "${callback_location}")"
-settings_location="$(curl -sS -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:${api_port}${callback_location#${callback_base}}")"
+settings_location="$(local_curl -sS -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:${api_port}${callback_location#${callback_base}}")"
 settings_query="${settings_location#*\?}"; settings_query="${settings_query%%#*}"
 [[ "${settings_location}" == "${callback_base}/settings/connectors?"*"#completion="* ]] \
   && [[ "&${settings_query}&" == *"&status=pending&"* ]] \
@@ -515,7 +520,7 @@ jq -e '(.result // "" | tostring) | test("CONNECTORS_E2E_DONE")' "${workdir}/res
   || { jq -c '{keys: keys}' "${workdir}/result.json" >&2; die "the scripted model never reached its final answer"; }
 
 log "Isolation: another signed-in person sees none of ${subject}'s links"
-other_token="$(curl -fsS -X POST "http://127.0.0.1:${fixture_port}/oidc/mint" -H 'Content-Type: application/json' \
+other_token="$(local_curl -fsS -X POST "http://127.0.0.1:${fixture_port}/oidc/mint" -H 'Content-Type: application/json' \
   -d "{\"subject\":\"${other_subject}\"}" | jq -er '.token')"
 status="$(request GET "${api}/connections?namespace=${namespace}" "${workdir}/other.json" -H "Authorization: Bearer ${other_token}")"
 [[ "${status}" == 200 ]] || die "${other_subject}'s connection list returned HTTP ${status}"
