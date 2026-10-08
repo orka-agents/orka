@@ -463,6 +463,8 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		if err := tx.Commit(); err != nil {
 			return store.ConnectorCredential{}, err
 		}
+		// The dropped row held sealed tokens: its log copy goes too.
+		_ = s.truncateWAL(ctx)
 		return store.ConnectorCredential{}, store.ErrNotFound
 	}
 	current, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion))
@@ -1021,6 +1023,8 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 	if err := tx.Commit(); err != nil {
 		return store.ConnectorCompletion{}, fmt.Errorf("commit connector completion: %w", err)
 	}
+	// The consumed row held sealed tokens: its log copy goes too.
+	_ = s.truncateWAL(ctx)
 	completion.ExpiresAt = completion.ExpiresAt.UTC()
 	if !completion.ExpiresAt.After(time.Now()) {
 		return store.ConnectorCompletion{}, store.ErrNotFound
