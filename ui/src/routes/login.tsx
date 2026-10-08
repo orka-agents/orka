@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, useLocation, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useAuthStore } from '@/stores/auth'
 import { takeLoginReturn } from '@/lib/login-return'
@@ -17,6 +17,7 @@ function LoginPage() {
   const [isValidating, setIsValidating] = useState(false)
   const { setToken, token } = useAuthStore()
   const navigate = useNavigate()
+  const location = useLocation()
 
   // Handle #token=... hash fragment from CLI login
   useEffect(() => {
@@ -43,12 +44,15 @@ function LoginPage() {
     }
   }, [setToken])
 
-  // Already authenticated: return to the page that sent us here
+  // Already authenticated: return to the page that sent us here. Only while
+  // the address is still /login: the token swaps the root layout before the
+  // route match changes, so this page mounts again for a moment at the
+  // destination, where the return has already been taken.
   useEffect(() => {
-    if (token) {
+    if (token && location.pathname === '/login') {
       navigate({ href: takeLoginReturn() })
     }
-  }, [token, navigate])
+  }, [token, location.pathname, navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
