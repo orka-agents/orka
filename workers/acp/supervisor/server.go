@@ -1163,7 +1163,9 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
-	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
+	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{
+		PATH: harnessv2.RuntimeToolboxChildPath(acp.DefaultChildPath, s.cfg.Toolboxes), Values: envValues,
+	})
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
 	}

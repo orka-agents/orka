@@ -1836,7 +1836,7 @@ func TestBuildPromptRequestHonorsExternalLeaseBounds(t *testing.T) {
 			limits.MinPromptLeaseMillis = test.minimum
 			limits.MaxPromptLeaseMillis = test.maximum
 			request, err := fixture.dispatcher.buildPromptRequest(
-				bound.frozenTask, fence, bound.plan.Profile, bound.mcpConfiguration, "", "bounded", limits, 0,
+				bound.frozenTask, fence, bound.plan.Profile, bound.mcpConfiguration, "", "", "bounded", limits, 0,
 			)
 			if err != nil {
 				t.Fatal(err)

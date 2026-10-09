@@ -139,11 +139,16 @@ func PlanACPRuntimeWithConfiguration(
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}
+	toolboxes := RuntimeToolboxesFromAgent(agent.Spec.Runtime.Toolboxes)
+	if err := harnessv2.ValidateRuntimeToolboxes(toolboxes); err != nil {
+		return ACPRuntimePlan{}, fmt.Errorf("ACP runtime toolboxes: %w", err)
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile: harnessv2.ACPProfileV1, AdapterDigests: adapterDigests, ProviderKind: provider, Model: model,
 		ModelLimits: modelLimits, AgentConfigurationDigest: agentDigest, ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest,
 		MCPConfigurationDigest: mcpDigest, WorkspaceIntent: harnessv2.WorkspaceIntent(intent),
 		ProxyCredentialRole: "provider-inference", ProxyCredentialScope: "model:" + model, ResourceClass: "standard",
+		Toolboxes: toolboxes,
 	}
 	digest, err := harnessv2.CanonicalProfileDigest(profile)
 	if err != nil {
@@ -256,6 +261,7 @@ func RuntimePoolProfileFromPlan(plan ACPRuntimePlan) corev1alpha1.RuntimePoolPro
 		WorkspaceIntent:     corev1alpha1.WorkspaceIntent(plan.Profile.WorkspaceIntent),
 		ProxyCredentialRole: plan.Profile.ProxyCredentialRole, ProxyCredentialScope: plan.Profile.ProxyCredentialScope,
 		ResourceClass: plan.Profile.ResourceClass,
+		Toolboxes:     runtimePoolToolboxesFromProfile(plan.Profile.Toolboxes),
 	}
 }
 

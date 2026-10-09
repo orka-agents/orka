@@ -88,6 +88,8 @@ func (in AgentSpec) MarshalJSON() ([]byte, error) {
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
+// +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)",message="runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
+// +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || !has(self.contractVersion) || self.contractVersion == 'orka.harness.v2'",message="runtime.toolboxes require the orka.harness.v2 contract; harness v1 runtimes cannot mount toolboxes"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
@@ -126,6 +128,46 @@ type AgentCLIRuntime struct {
 	// +kubebuilder:validation:Enum=low;medium;high;xhigh;max
 	// +optional
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
+
+	// Toolboxes lists extra command-line tool images for built-in runtimes.
+	// Each toolbox folder is bound read-only into the runtime Pod at the same
+	// path and its pathEntries are appended, in order, to the agent's PATH.
+	// Nothing from a toolbox runs with elevated permissions. The feature is
+	// off by default and the controller restricts images to allowed registries.
+	// +kubebuilder:validation:MaxItems=4
+	// +optional
+	Toolboxes []AgentToolbox `json:"toolboxes,omitempty"`
+}
+
+// AgentToolbox is a container image whose files are added, read-only, to the
+// runtime Pod so the agent can run the tools inside it.
+type AgentToolbox struct {
+	// Image must be a fully qualified reference pinned by digest:
+	// <registry>/<repository>@sha256:<64 hex>.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// MountPath is the absolute folder inside the toolbox image that holds the
+	// tools. Orka makes it appear at the same path in the runtime container.
+	// It must be exactly /home/linuxbrew/.linuxbrew or /opt/<name>, where
+	// <name> is not one the runtime images already use.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=5
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^(/opt/[A-Za-z0-9][A-Za-z0-9._-]{0,127}|/home/linuxbrew/\.linuxbrew)$`
+	MountPath string `json:"mountPath"`
+
+	// PathEntries are folders relative to MountPath that are appended, in
+	// order, to the agent's PATH. Example: ["bin"].
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:Pattern=`^[^/:\s][^:\s]*$`
+	// +optional
+	PathEntries []string `json:"pathEntries,omitempty"`
 }
 
 // MarshalJSON preserves the distinction between an omitted tool allowlist and
@@ -140,6 +182,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools    *[]string                    `json:"defaultAllowedTools,omitempty"`
 		DefaultAllowBash       *bool                        `json:"defaultAllowBash,omitempty"`
 		DefaultReasoningEffort string                       `json:"defaultReasoningEffort,omitempty"`
+		Toolboxes              []AgentToolbox               `json:"toolboxes,omitempty"`
 	}
 	var defaultAllowedTools *[]string
 	if in.DefaultAllowedTools != nil {
@@ -154,6 +197,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools:    defaultAllowedTools,
 		DefaultAllowBash:       in.DefaultAllowBash,
 		DefaultReasoningEffort: in.DefaultReasoningEffort,
+		Toolboxes:              in.Toolboxes,
 	})
 }
 

@@ -175,6 +175,38 @@ live_acp_kind_build_and_publish_images() {
   live_acp_kind_report_images
 }
 
+# Toolbox fixtures are tiny tool images published through the run's registry
+# so the validator can prove toolbox mounting and every documented failure
+# reason without any external registry.
+live_acp_kind_build_and_publish_toolbox_fixtures() {
+  local fixtures="${LIVE_ACP_REPO_ROOT}/test/e2e/fixtures/toolboxes"
+  local name
+  for name in yq wrong-arch fifo missing; do
+    live_acp_kind_run docker build -t "orka-e2e-toolbox-${name}:e2e" "${fixtures}/${name}"
+  done
+  ACP_E2E_TOOLBOX_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-yq:e2e orka/e2e-toolbox-yq)"
+  ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-wrong-arch:e2e orka/e2e-toolbox-wrong-arch)"
+  ACP_E2E_TOOLBOX_FIFO_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-fifo:e2e orka/e2e-toolbox-fifo)"
+  ACP_E2E_TOOLBOX_MISSING_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-missing:e2e orka/e2e-toolbox-missing)"
+  ACP_E2E_TOOLBOX_REGISTRY="${ORKA_KIND_REGISTRY_ADDR}"
+  export ACP_E2E_TOOLBOX_IMAGE ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE ACP_E2E_TOOLBOX_FIFO_IMAGE
+  export ACP_E2E_TOOLBOX_MISSING_IMAGE ACP_E2E_TOOLBOX_REGISTRY
+  acp_report_update '.builtImages.toolboxFixture = $toolbox' --arg toolbox "${ACP_E2E_TOOLBOX_IMAGE}"
+}
+
+# Toolboxes are off by default. The deployed controller reads the enablement
+# flags from its environment, so the lane turns them on for its own registry
+# only, after the regular rollout, without changing the shipped manifests.
+live_acp_kind_enable_toolboxes() {
+  [[ -n "${ACP_E2E_TOOLBOX_REGISTRY:-}" ]] || return 0
+  live_acp_kind_log "Enabling toolboxes for the run registry ${ACP_E2E_TOOLBOX_REGISTRY}"
+  live_acp_kind_run kubectl -n orka-system set env deployment/orka-controller-manager \
+    ORKA_ACP_TOOLBOXES_ENABLED=true \
+    "ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES=${ACP_E2E_TOOLBOX_REGISTRY}" \
+    "ORKA_ACP_TOOLBOX_MOUNT_METHOD=${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}"
+  live_acp_kind_run kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout="${LIVE_ACP_ROLLOUT_TIMEOUT}"
+}
+
 # Release candidates use the already built GHCR digests. Rebuilding here would
 # qualify different bytes from the images awaiting release approval.
 live_acp_kind_use_release_images() {
@@ -575,6 +607,8 @@ live_acp_kind_bootstrap() {
     live_acp_kind_build_and_publish_images
     live_acp_kind_deploy_orka
   fi
+  live_acp_kind_build_and_publish_toolbox_fixtures
+  live_acp_kind_enable_toolboxes
   live_acp_kind_create_release_credentials
 }
 

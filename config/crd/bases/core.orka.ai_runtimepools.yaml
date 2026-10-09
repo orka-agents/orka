@@ -378,6 +378,45 @@ spec:
                           policy.
                         pattern: ^sha256:[a-f0-9]{64}$
                         type: string
+                      toolboxes:
+                        description: |-
+                          Toolboxes lists the read-only tool images bound into the runtime Pod, in
+                          declared order. It is part of Digest. Absent means no toolboxes and
+                          leaves the digest of pre-existing pools unchanged.
+                        items:
+                          description: RuntimePoolToolbox is the frozen projection
+                            of one Agent toolbox.
+                          properties:
+                            image:
+                              description: Image is the digest-pinned toolbox image.
+                              maxLength: 512
+                              minLength: 1
+                              pattern: ^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$
+                              type: string
+                            mountPath:
+                              description: MountPath is the toolbox folder, bound
+                                read-only at the same path.
+                              maxLength: 256
+                              minLength: 5
+                              pattern: ^(/opt/[A-Za-z0-9][A-Za-z0-9._-]{0,127}|/home/linuxbrew/\.linuxbrew)$
+                              type: string
+                            pathEntries:
+                              description: |-
+                                PathEntries are folders relative to MountPath appended, in order, to the
+                                agent PATH.
+                              items:
+                                maxLength: 256
+                                minLength: 1
+                                pattern: ^[^/:\s][^:\s]*$
+                                type: string
+                              maxItems: 8
+                              type: array
+                          required:
+                          - image
+                          - mountPath
+                          type: object
+                        maxItems: 4
+                        type: array
                       workspaceIntent:
                         description: WorkspaceIntent is part of the immutable runtime
                           profile.

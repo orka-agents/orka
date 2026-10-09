@@ -86,6 +86,12 @@ const (
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
 	EnvE2EPromptWriteAmbiguity   = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
+	// EnvToolboxes carries the frozen toolbox list as JSON. It is part of the
+	// runtime profile digest, so the controller and supervisor must agree.
+	EnvToolboxes = "ORKA_ACP_TOOLBOXES"
+	// EnvToolboxMountMethod names how the controller bound the toolboxes
+	// (copy or imageVolume). It is not part of the profile.
+	EnvToolboxMountMethod = "ORKA_ACP_TOOLBOX_MOUNT_METHOD"
 
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
@@ -140,6 +146,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	toolboxes, err := toolboxesFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:               harnessv2.ACPProfileV1,
 		ProviderKind:             providerKind,
@@ -153,6 +163,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProxyCredentialRole:      requiredEnv(EnvProxyCredentialRole),
 		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
 		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
+		Toolboxes:                toolboxes,
 	}
 	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
@@ -335,6 +346,8 @@ func LoadConfigFromEnv() (Config, error) {
 		ArtifactUploader:              artifactUploader,
 		E2EPromptWriteFaultRecorder:   e2ePromptWriteFaultRecorder,
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
+		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
+		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -1092,6 +1105,26 @@ func workspaceArtifactDownloadLimitFromEnv() (int64, error) {
 }
 
 func requiredEnv(name string) string { return strings.TrimSpace(os.Getenv(name)) }
+
+// toolboxesFromEnv parses the frozen toolbox list. An absent or empty value
+// means no toolboxes and leaves the profile digest unchanged.
+func toolboxesFromEnv() ([]harnessv2.RuntimeToolbox, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvToolboxes))
+	if raw == "" {
+		return nil, nil
+	}
+	var toolboxes []harnessv2.RuntimeToolbox
+	if err := json.Unmarshal([]byte(raw), &toolboxes); err != nil {
+		return nil, fmt.Errorf("%s: %w", EnvToolboxes, err)
+	}
+	if len(toolboxes) == 0 {
+		return nil, nil
+	}
+	if err := harnessv2.ValidateRuntimeToolboxes(toolboxes); err != nil {
+		return nil, fmt.Errorf("%s: %w", EnvToolboxes, err)
+	}
+	return toolboxes, nil
+}
 
 func modelTokenLimitsFromEnv() (*harnessv2.ModelTokenLimits, error) {
 	contextValue := strings.TrimSpace(os.Getenv(EnvModelContextLimit))

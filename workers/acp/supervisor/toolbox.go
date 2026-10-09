@@ -1,0 +1,85 @@
+package supervisor
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/orka-agents/orka/internal/acp/toolbox"
+)
+
+const (
+	// toolboxCheckUID is the fixed unprivileged identity for the image-volume
+	// architecture check. It differs from the session identity range and from
+	// the init-container identities.
+	toolboxCheckUID               = 64022
+	toolboxCheckTimeout           = 2 * time.Minute
+	toolboxMountMethodImageVolume = "imageVolume"
+)
+
+// toolboxCheckCommand is replaced in tests so the unprivileged child can run
+// without a real runtime image.
+var toolboxCheckCommand = toolbox.SupervisorBinaryPath
+
+// VerifyToolboxes runs the supervisor's startup toolbox checks before it
+// serves: every mount path and path entry must exist as a real folder (lstat
+// only, nothing is opened or run by root), and with image volumes an
+// unprivileged child verifies the ELF architecture of the tool folders.
+func VerifyToolboxes(cfg Config) error {
+	if len(cfg.Toolboxes) == 0 {
+		return nil
+	}
+	for i := range cfg.Toolboxes {
+		if err := toolbox.VerifyMounted(cfg.Toolboxes[i].MountPath, cfg.Toolboxes[i].PathEntries); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(cfg.ToolboxMountMethod) != toolboxMountMethodImageVolume {
+		return nil
+	}
+	return runUnprivilegedToolboxCheck(cfg)
+}
+
+func runUnprivilegedToolboxCheck(cfg Config) error {
+	args := make([]string, 0, 1+2*len(cfg.Toolboxes))
+	args = append(args, toolbox.CheckSubcommand)
+	for i := range cfg.Toolboxes {
+		args = append(args, "--mount", toolbox.MountFlagValue(cfg.Toolboxes[i].MountPath, cfg.Toolboxes[i].PathEntries))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), toolboxCheckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, toolboxCheckCommand, args...)
+	cmd.Dir = "/"
+	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
+	cmd.SysProcAttr = toolboxCheckSysProcAttr()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if failure, ok := toolbox.ParseFailureLine(stderr.String()); ok {
+			return &toolbox.Failure{Reason: failure.Reason, Message: failure.Message}
+		}
+		return &toolbox.Failure{Reason: toolbox.ReasonCopyFailed, Message: fmt.Sprintf("toolbox check did not complete: %v: %s", err, strings.TrimSpace(stderr.String()))}
+	}
+	return nil
+}
+
+// ReportToolboxFailure writes the stable FAIL line to the termination log and
+// stderr so the controller can classify the failed start.
+func ReportToolboxFailure(err error) {
+	var failure *toolbox.Failure
+	if !errors.As(err, &failure) {
+		failure = &toolbox.Failure{Reason: toolbox.ReasonMissingMount, Message: err.Error()}
+	}
+	line := toolbox.FormatFailureLine(failure)
+	fmt.Fprintln(os.Stderr, line)
+	if file, openErr := os.OpenFile(toolbox.TerminationLogPath, os.O_WRONLY|os.O_APPEND, 0); openErr == nil {
+		_, _ = file.WriteString(line + "\n")
+		_ = file.Close()
+	}
+}

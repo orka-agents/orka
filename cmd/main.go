@@ -37,8 +37,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/version"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -332,6 +335,11 @@ func main() {
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
 	var acpE2EPromptWriteAmbiguityMarker string
+	var acpToolboxesEnabled bool
+	var acpToolboxAllowedRegistries string
+	var acpToolboxImagePullSecrets string
+	var acpToolboxNodeSelector string
+	var acpToolboxMountMethod string
 	var agentSandboxEnabled bool
 	var acpWorkspaceDispatchEnabled bool
 	var agentSandboxCleanupPolicy string
@@ -595,6 +603,16 @@ func main() {
 		"Mounted file containing the authenticated provider proxy bearer token.")
 	flag.StringVar(&acpE2EPromptWriteAmbiguityMarker, "acp-e2e-prompt-write-ambiguity-marker", os.Getenv("ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"),
 		"Test-only exact prompt marker that aborts a fully validated ACP prompt request before acceptance is recorded.")
+	flag.BoolVar(&acpToolboxesEnabled, "acp-toolboxes-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_TOOLBOXES_ENABLED"), "true"),
+		"Allow built-in Agents to declare runtime.toolboxes (read-only tool images bound into runtime Pods). Off by default.")
+	flag.StringVar(&acpToolboxAllowedRegistries, "acp-toolbox-allowed-registries", os.Getenv("ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES"),
+		"Comma-separated registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing.")
+	flag.StringVar(&acpToolboxImagePullSecrets, "acp-toolbox-image-pull-secrets", os.Getenv("ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS"),
+		"Comma-separated Secret names in the runtime namespace added to runtime Pod imagePullSecrets when toolboxes are bound.")
+	flag.StringVar(&acpToolboxNodeSelector, "acp-toolbox-node-selector", os.Getenv("ORKA_ACP_TOOLBOX_NODE_SELECTOR"),
+		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
+	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
+		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
 	flag.StringVar(&executionWorkspaceDefaultProviderFlag, "execution-workspace-default-provider",
 		executionWorkspaceDefaultProviderFlag,
 		"Default execution workspace provider when Task execution.workspace.provider is omitted (agent-sandbox, substrate).")
@@ -1157,6 +1175,12 @@ func main() {
 		acpOpencodeRuntimeImage = images.Opencode
 	}
 	restConfig := ctrl.GetConfigOrDie()
+	acpToolboxPolicy, err := resolveACPToolboxPolicy(restConfig, acpToolboxesEnabled, acpToolboxAllowedRegistries,
+		acpToolboxImagePullSecrets, acpToolboxNodeSelector, acpToolboxMountMethod)
+	if err != nil {
+		setupLog.Error(err, "invalid ACP toolbox configuration")
+		os.Exit(1)
+	}
 	mgrOptions := ctrl.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsServerOptions,
@@ -1737,6 +1761,7 @@ func main() {
 		runtimePoolReconciler.EnablePDB = true
 		runtimePoolReconciler.EnableTelemetry = enableTracing
 		runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
+		runtimePoolReconciler.ToolboxPolicy = acpToolboxPolicy
 		runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
 		runtimePoolReconciler.SubstrateEnabled = substrateEnabled
 		// Keep the provider connection and trust configuration available after
@@ -1812,6 +1837,7 @@ func main() {
 			Opencode: acpOpencodeRuntimeImage,
 		},
 		ACPRuntimeNamespace:         acpRuntimeNamespace,
+		ACPToolboxPolicy:            acpToolboxPolicy,
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
@@ -2140,9 +2166,10 @@ func main() {
 	}
 
 	if err := (&controller.AgentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Mode:   mode,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Mode:          mode,
+		ToolboxPolicy: acpToolboxPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -2521,6 +2548,57 @@ func envDurationDefault(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+// resolveACPToolboxPolicy builds the controller-wide toolbox policy. With the
+// imageVolume mount method it reads the API server version through discovery
+// (readable by every authenticated client) and, below 1.36, marks toolbox
+// mounting unavailable instead of silently falling back to copying.
+func resolveACPToolboxPolicy(
+	restConfig *rest.Config,
+	enabled bool,
+	allowedRegistries, imagePullSecrets, nodeSelector, mountMethod string,
+) (controller.ACPToolboxPolicy, error) {
+	method, err := controller.ParseACPToolboxMountMethod(mountMethod)
+	if err != nil {
+		return controller.ACPToolboxPolicy{}, err
+	}
+	policy := controller.ACPToolboxPolicy{
+		Enabled:           enabled,
+		AllowedRegistries: splitCommaList(allowedRegistries),
+		ImagePullSecrets:  splitCommaList(imagePullSecrets),
+		MountMethod:       method,
+	}
+	if strings.TrimSpace(nodeSelector) != "" {
+		selector, err := parseExactLabels(nodeSelector)
+		if err != nil {
+			return controller.ACPToolboxPolicy{}, fmt.Errorf("--acp-toolbox-node-selector: %w", err)
+		}
+		policy.NodeSelector = selector
+	}
+	if !enabled || method != controller.ACPToolboxMountImageVolume {
+		return policy, nil
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		return controller.ACPToolboxPolicy{}, fmt.Errorf("create discovery client for toolbox image-volume support: %w", err)
+	}
+	serverVersion, err := discoveryClient.ServerVersion()
+	if err != nil {
+		return controller.ACPToolboxPolicy{}, fmt.Errorf("read API server version for toolbox image-volume support: %w", err)
+	}
+	parsed, err := version.ParseGeneric(serverVersion.GitVersion)
+	if err != nil {
+		return controller.ACPToolboxPolicy{}, fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err)
+	}
+	if parsed.LessThan(version.MustParseGeneric(controller.ACPToolboxImageVolumeMinimumServerVersion)) {
+		policy.UnavailableReason = fmt.Sprintf(
+			"image volumes need Kubernetes %s or newer; this API server is %s. Use --acp-toolbox-mount-method=copy or upgrade the cluster",
+			controller.ACPToolboxImageVolumeMinimumServerVersion, serverVersion.GitVersion,
+		)
+		setupLog.Error(errors.New(policy.UnavailableReason), "toolbox image volumes are unavailable; Agents with toolboxes are rejected")
+	}
+	return policy, nil
 }
 
 func parseExactLabels(raw string) (map[string]string, error) {
