@@ -387,6 +387,7 @@ const (
 	helperHangFirstResumeEnv = "ACP_HELPER_HANG_FIRST_RESUME"
 	// helperBlockFirstResumeEnv parks the first resume until the test releases it.
 	helperBlockFirstResumeEnv   = "ACP_HELPER_BLOCK_FIRST_RESUME"
+	helperSkipResumeUpdateEnv   = "ACP_HELPER_SKIP_RESUME_UPDATE"
 	helperStateDirEnv           = "ACP_HELPER_STATE_DIR"
 	helperSessionStateFile      = "provider-session"
 	helperResumedStateFile      = "resumed"
@@ -508,10 +509,12 @@ func TestACPHelperProcess(t *testing.T) {
 			// Real agents (Codex, Claude, OpenCode) send an
 			// available_commands_update after a resume; it must not reach any
 			// prompt stream.
-			writeACPHelper(writer, map[string]any{
-				"jsonrpc": "2.0", "method": MethodSessionUpdate,
-				"params": map[string]any{"sessionId": providerSession, "update": map[string]any{"sessionUpdate": "available_commands_update", "availableCommands": []any{}}},
-			})
+			if os.Getenv(helperSkipResumeUpdateEnv) != "1" {
+				writeACPHelper(writer, map[string]any{
+					"jsonrpc": "2.0", "method": MethodSessionUpdate,
+					"params": map[string]any{"sessionId": providerSession, "update": map[string]any{"sessionUpdate": "available_commands_update", "availableCommands": []any{}}},
+				})
+			}
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
 		case MethodSessionClose:
 			writeHelperState(helperClosedStateFile, "1")

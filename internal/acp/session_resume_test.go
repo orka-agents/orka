@@ -452,3 +452,62 @@ func TestAgentCapabilitiesSessionCapability(t *testing.T) {
 		t.Error("nil capabilities reported resume support")
 	}
 }
+
+func TestRuntimeSessionRejectsLeaseExpiredWhileResumeWaitsForAdmissionLock(t *testing.T) {
+	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{
+		helperExitAfterPromptEnv: "1", helperBlockFirstResumeEnv: "1", helperSkipResumeUpdateEnv: "1",
+	})
+	if result, _ := runHelperPrompt(t, session, "prompt-1"); result.Outcome != PromptOutcomeCompleted {
+		t.Fatalf("first prompt = %#v", result)
+	}
+	awaitAdapterExit(t, session)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	started := make(chan error, 1)
+	go func() {
+		run, err := session.StartPromptWithLeaseDeadline(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run after lease expiry")}, deadline)
+		if err == nil {
+			for event := range run.Events {
+				run.Release(event)
+			}
+			<-run.Result
+		}
+		started <- err
+	}()
+	awaitResumeStateFile(t, ctx, filepath.Join(stateDir, helperResumeBlockedFile))
+	// Let the adapter answer on time, but hold the admission mutex until
+	// after the lease. The reply reader does not need this session mutex.
+	func() {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		if err := os.WriteFile(filepath.Join(stateDir, helperResumeReleaseFile), []byte("1"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		awaitResumeStateFile(t, ctx, filepath.Join(stateDir, helperResumedStateFile))
+		time.Sleep(time.Until(deadline) + 20*time.Millisecond)
+	}()
+	select {
+	case err := <-started:
+		lost, ok := errors.AsType[*AdapterLostError](err)
+		if !ok || !lost.Attempted || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expired resumed prompt = %v, want attempted adapter loss with deadline expiry", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("expired resumed prompt did not settle")
+	}
+	if session.AdapterRestarts() != 1 {
+		t.Fatal("test did not complete the resume RPC before lease expiry")
+	}
+	if _, err := session.StartPrompt(ctx, "prompt-3", "sha256:prompt-3", []ContentBlock{Text("must not reuse retired replacement")}); err == nil {
+		t.Fatal("lease-expired replacement remained open to prompt admission")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, helperPromptAfterResumeFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired prompt reached the replacement adapter: %v", err)
+	}
+	select {
+	case <-session.Process().Done():
+	case <-ctx.Done():
+		t.Fatal("expired replacement adapter was not stopped")
+	}
+}

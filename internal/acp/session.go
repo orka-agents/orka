@@ -603,6 +603,7 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 		s.mu.Unlock()
 		return PromptRun{}, &DuplicatePromptError{PromptID: promptID, Active: true}
 	}
+	restartsBeforeAdmission := s.adapterRestarts
 	if err := s.recoverExitedAdapterLocked(ctx, promptID, requestDigest, leaseDeadline); err != nil {
 		s.mu.Unlock()
 		return PromptRun{}, err
@@ -610,6 +611,20 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 	if s.deleted {
 		s.mu.Unlock()
 		return PromptRun{}, fmt.Errorf("runtime session is deleted")
+	}
+	if !leaseDeadline.After(time.Now()) {
+		leaseErr := fmt.Errorf("prompt lease expired before admission: %w", context.DeadlineExceeded)
+		if s.adapterRestarts == restartsBeforeAdmission {
+			s.mu.Unlock()
+			return PromptRun{}, leaseErr
+		}
+		// Recovery may finish its RPC on time but wait for this mutex past
+		// the lease. Retire the replacement before any ACP prompt write.
+		s.deleted = true
+		process := s.process
+		s.mu.Unlock()
+		_ = stopProcessBestEffort(process, s.config.CancelGrace)
+		return PromptRun{}, &AdapterLostError{Attempted: true, Cause: leaseErr}
 	}
 	process := s.process
 	active := &activePrompt{
