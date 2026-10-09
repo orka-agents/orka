@@ -42,6 +42,9 @@ jobs:
           go-version: '1.27'
           check-latest: true
 
+      - name: Configure the Docker Hub cache
+        uses: ./.github/actions/docker-hub-mirror
+
       - name: Install kind
         uses: ./.github/actions/setup-kind
 

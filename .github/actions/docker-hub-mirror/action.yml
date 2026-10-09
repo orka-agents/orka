@@ -1,0 +1,12 @@
+name: Configure Docker Hub cache
+description: >-
+  Configure the official mirror.gcr.io cache on a GitHub-hosted Linux runner
+  before starting kind or other containers, without Docker Hub credentials.
+runs:
+  using: composite
+  steps:
+    - name: Configure the runner Docker daemon
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${ACTION_PATH}/configure.sh"

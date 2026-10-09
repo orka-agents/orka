@@ -12,6 +12,10 @@ kubectl() {
       if [[ "${wrong_context:-false}" == true ]]; then printf '%s\n' production;
       else printf '%s\n' "kind-${kind_cluster}"; fi
       ;;
+    '--request-timeout=10s exec -n')
+      [[ "$*" == *'deployment/aikit -- sh -c'* ]]
+      printf '%s\n' '/sys/fs/cgroup/cpu.stat' 'usage_usec 1234' '/sys/fs/cgroup/memory.current' '3000000000'
+      ;;
     'get deployment orka-provider-auth-proxy')
       if [[ "${missing_flag:-false}" == true ]]; then
         printf '%s\n' '{"spec":{"template":{"spec":{"containers":[{"name":"proxy","args":["--token-file=/token"]}]}}}}'
@@ -19,6 +23,11 @@ kubectl() {
         printf '%s\n' '{"spec":{"template":{"spec":{"containers":[{"name":"proxy","args":["--listen-address=:8080","--upstream-base-url=http://vekil.vekil-system.svc:1337","--token-file=/token","--token-reload-interval=5s"]}]}}}}'
       fi
       ;;
+    'get deployment orka-controller-manager')
+      printf '%s\n' '{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":["--enable-acp","--chat-max-duration=30m","--chat-max-concurrent=10"]}]}}}}'
+      ;;
+    'patch deployment orka-controller-manager') printf '%s\n' "${@: -1}" >"${work}/controller-patch.json" ;;
+    'rollout status deployment/orka-controller-manager') printf '%s\n' controller-rollout >>"${work}/calls" ;;
     'get networkpolicy orka-provider-auth-proxy')
       printf '%s\n' '{"spec":{"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}},"podSelector":{"matchLabels":{"k8s-app":"kube-dns"}}}],"ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]},{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"vekil-system"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"vekil"}}}],"ports":[{"protocol":"TCP","port":1337}]}]}}'
       ;;
@@ -66,7 +75,16 @@ jq -e '.spec.egress | length == 2 and
   .[0].ports == [{protocol:"UDP",port:53},{protocol:"TCP",port:53}] and
   .[1].to == [{namespaceSelector:{matchLabels:{"kubernetes.io/metadata.name":"aikit-system"}},podSelector:{matchLabels:{"app.kubernetes.io/name":"aikit"}}}] and
   .[1].ports == [{protocol:"TCP",port:8080}]' "${work}/network-patch.json" >/dev/null
+jq -e '.spec.template.spec.containers[0] | .name == "manager" and
+  .args == ["--enable-acp","--chat-max-concurrent=10","--chat-max-duration=170s"]' "${work}/controller-patch.json" >/dev/null
 printf '%s\n' 'ok - local upstream keeps auth flags and restricted DNS/model egress'
+printf '%s\n' 'ok - CI server work ends before the unchanged 180s client deadline'
+sample_model_resources >"${work}/model-resources.log"
+grep -q '^usage_usec 1234$' "${work}/model-resources.log"
+if (wrong_context=true sample_model_resources) >/dev/null 2>&1; then
+  echo 'resource sampling accepted a non-E2E context' >&2; exit 1
+fi
+printf '%s\n' 'ok - model diagnostics capture only counters on the verified E2E context'
 
 if (E2E_LOCAL_MODEL=wrong configure_provider_proxy) >/dev/null 2>&1; then
   echo 'mismatched local model was accepted' >&2; exit 1

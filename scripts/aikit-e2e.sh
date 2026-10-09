@@ -20,6 +20,7 @@ aikit_image="${AIKIT_IMAGE:-ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:525dfb
 aikit_model="${AIKIT_MODEL:-qwen-3.5-4b}"
 aikit_base_url="http://${aikit_service}.${aikit_namespace}.svc:${aikit_port}"
 proxy_pf_pid=""
+monitor_pid=""
 work_dir=""
 cleanup_report_dir=""
 e2e_started=false
@@ -42,6 +43,32 @@ cleanup_port_forward() {
   fi
 }
 
+# Capture only resource counters, never prompts, responses, headers, or process
+# arguments. CPU deltas distinguish slow prompt evaluation from idle/stuck work.
+sample_model_resources() {
+  require_kind_context
+  # The counter variable expands inside the model container, not on the runner.
+  # shellcheck disable=SC2016
+  kubectl --request-timeout=10s exec -n "${aikit_namespace}" deployment/"${aikit_service}" -- sh -c '
+    for counter in /sys/fs/cgroup/cpu.stat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events /proc/pressure/cpu /proc/pressure/memory; do
+      if [ -r "$counter" ]; then
+        printf "%s\n" "$counter"
+        cat "$counter"
+      fi
+    done'
+}
+
+start_model_monitor() {
+  (
+    while is_expected_kind_context; do
+      date -u '+%Y-%m-%dT%H:%M:%SZ'
+      sample_model_resources 2>&1 | redact || true
+      sleep 15
+    done
+  ) >"${cleanup_report_dir}/model-resources.log" &
+  monitor_pid=$!
+}
+
 dump_diagnostics() {
   {
     kubectl get pods,svc,deploy -n "${aikit_namespace}" -o wide || true
@@ -55,6 +82,7 @@ dump_diagnostics() {
 on_exit() {
   local status="$1"
   trap - EXIT
+  cleanup_port_forward "${monitor_pid}"
   cleanup_port_forward "${proxy_pf_pid}"
   if ! is_expected_kind_context; then
     log "Refusing diagnostics or teardown against an unverified cluster context"
@@ -109,6 +137,16 @@ configure_provider_proxy() {
   patch="$(jq -cn --argjson egress "${egress}" '{spec:{egress:$egress}}')"
   kubectl patch networkpolicy orka-provider-auth-proxy -n "${orka_namespace}" --type=merge -p "${patch}" || die "could not configure provider proxy model egress"
   kubectl rollout status deployment/orka-provider-auth-proxy -n "${orka_namespace}" --timeout=2m
+
+  # Clients retain their 180s assertion budget. Bound CI-only server work just
+  # below it, instead of letting abandoned requests occupy the model for 30m.
+  # Production defaults and native-runtime Task deadlines are unchanged.
+  args="$(kubectl get deployment orka-controller-manager -n "${orka_namespace}" -o json |
+    jq -ce '.spec.template.spec.containers[] | select(.name == "manager") | .args
+      | map(select(startswith("--chat-max-duration=") | not)) + ["--chat-max-duration=170s"]')" || die "could not resolve controller arguments"
+  patch="$(jq -cn --argjson args "${args}" '{spec:{template:{spec:{containers:[{name:"manager",args:$args}]}}}}')"
+  kubectl patch deployment orka-controller-manager -n "${orka_namespace}" --type=strategic -p "${patch}" || die "could not bound CI chat requests"
+  kubectl rollout status deployment/orka-controller-manager -n "${orka_namespace}" --timeout=2m
   # The base installation creates this namespace for its default upstream.
   # No Vekil workload is installed in this lane.
   kubectl delete namespace vekil-system --ignore-not-found --wait=true --timeout=1m
@@ -322,6 +360,7 @@ main() {
   log "Deploying digest-pinned AIKit Qwen CPU model"
   deploy_aikit
   warm_model
+  start_model_monitor
 
   log "Running real model and runtime E2E specs without Vekil"
   e2e_started=true

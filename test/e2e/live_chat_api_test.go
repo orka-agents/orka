@@ -7,9 +7,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"time"
@@ -188,6 +190,10 @@ type liveChatUsage struct {
 }
 
 func postLiveChatSSE(apiBaseURL, token, providerName, model, expectedText string) (string, string, liveChatUsage, []string, error) {
+	return postLiveChatSSEWithTimeout(apiBaseURL, token, providerName, model, expectedText, 3*time.Minute)
+}
+
+func postLiveChatSSEWithTimeout(apiBaseURL, token, providerName, model, expectedText string, timeout time.Duration) (string, string, liveChatUsage, []string, error) {
 	body := fmt.Sprintf(`{
 		"message": "Reply with exactly %s and nothing else.",
 		"provider": "%s",
@@ -204,7 +210,7 @@ func postLiveChatSSE(apiBaseURL, token, providerName, model, expectedText string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
-	client := &http.Client{Timeout: 3 * time.Minute}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", liveChatUsage{}, nil, err
@@ -223,7 +229,34 @@ func postLiveChatSSE(apiBaseURL, token, providerName, model, expectedText string
 	}
 
 	sessionID, content, usage, events, err := parseLiveChatSSE(resp.Body)
+	if err != nil && sessionID != "" {
+		// A client timeout does not cancel the server's durable chat turn. Close
+		// the transport, then use the public cancellation endpoint before the
+		// next spec can contend for the local model's inference slot.
+		_ = resp.Body.Close()
+		err = errors.Join(err, cancelLiveChatSession(apiBaseURL, token, sessionID))
+	}
 	return sessionID, strings.TrimSpace(content), usage, events, err
+}
+
+func cancelLiveChatSession(apiBaseURL, token, sessionID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		strings.TrimRight(apiBaseURL, "/")+"/api/v1/chat/"+url.PathEscape(sessionID), nil)
+	if err != nil {
+		return fmt.Errorf("creating failed-chat cancellation request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("canceling failed chat: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("failed-chat cancellation returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func postLiveChatJSON(apiBaseURL, token, providerName, model, expectedText string) (liveChatJSONResponse, error) {
@@ -335,7 +368,7 @@ func parseLiveChatSSE(body io.Reader) (string, string, liveChatUsage, []string, 
 		switch {
 		case line == "":
 			if err := flush(); err != nil {
-				return "", "", liveChatUsage{}, events, err
+				return sessionID, messageText.String(), usage, events, err
 			}
 		case strings.HasPrefix(line, "event:"):
 			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
@@ -350,16 +383,16 @@ func parseLiveChatSSE(body io.Reader) (string, string, liveChatUsage, []string, 
 	}
 
 	if err := scanner.Err(); err != nil {
-		return "", "", liveChatUsage{}, events, err
+		return sessionID, messageText.String(), usage, events, err
 	}
 	if err := flush(); err != nil {
-		return "", "", liveChatUsage{}, events, err
+		return sessionID, messageText.String(), usage, events, err
 	}
 	if !hasDone {
-		return "", "", liveChatUsage{}, events, fmt.Errorf("SSE stream did not emit a done event")
+		return sessionID, messageText.String(), usage, events, fmt.Errorf("SSE stream did not emit a done event")
 	}
 	if sessionID == "" {
-		return "", "", liveChatUsage{}, events, fmt.Errorf("SSE stream did not include a sessionId")
+		return sessionID, messageText.String(), usage, events, fmt.Errorf("SSE stream did not include a sessionId")
 	}
 
 	return sessionID, messageText.String(), usage, events, nil

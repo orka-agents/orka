@@ -199,6 +199,12 @@ missing or mismatched artifacts staying not ready.
   directly to AIKit, without Vekil. Its Qwen template merges system/developer
   instructions into a leading system block so multi-turn Responses requests
   remain compatible without dropping instructions or changing tool permissions.
+  CI-only API work is bounded to 170 seconds, below the unchanged 180-second
+  client deadline; failed Chat streams explicitly cancel their observed Session.
+  Model CPU, memory, throttling, and pressure counters are saved with the cleanup
+  evidence. The AIKit and ordinary E2E workflows use the public Docker Hub cache
+  at `mirror.gcr.io` without registry credentials; uncached images can still fall
+  back to Docker Hub.
   `Agent Runtime E2E` retains real-provider
   execution coverage for the built-in RuntimePool profiles.
 - Structural e2e tests for native worker Jobs run without external model keys.
