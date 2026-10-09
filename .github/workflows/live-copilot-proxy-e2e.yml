@@ -1,8 +1,9 @@
-name: Live Copilot Proxy E2E
+name: AIKit Qwen E2E
 
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths-ignore:
       - ".agents/**"
       - ".claude/**"
@@ -15,96 +16,45 @@ permissions:
   contents: read
 
 concurrency:
-  group: live-copilot-proxy-e2e-${{ github.event.pull_request.number || github.ref }}
+  group: aikit-e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  live-copilot-proxy-e2e:
-    name: Live Copilot Proxy E2E
+  aikit-e2e:
+    name: AIKit Qwen E2E
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
-      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-      KIND_CLUSTER: orka-live-copilot-proxy-e2e
-      E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/copilot
-      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:v0.14.10@sha256:656eb73f6eeea2ca0c1277cdd7bb8eede72efc5cac2450cdc30a3b94bda44d4b
+      KIND_CLUSTER: orka-aikit-e2e
+      E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/aikit
+      AIKIT_IMAGE: ghcr.io/kaito-project/aikit/qwen3.5:2b@sha256:d838c5eebf533b5b73f67cc7f4984921f87d64d28e4a52d482740b667f46b8b4
+      AIKIT_MODEL: qwen-3.5-2b
     steps:
-      - name: Decide whether live e2e can run
-        id: gate
-        env:
-          IS_FORK: ${{ github.event.pull_request.head.repo.fork || false }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${IS_FORK}" = "true" ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Skipping live copilot-proxy e2e for fork pull requests because repository secrets are not exposed." >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "${ACTOR}" = "dependabot[bot]" ] && [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Skipping live copilot-proxy e2e for Dependabot pull requests because repository secrets are not exposed." >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
-            echo "COPILOT_GITHUB_TOKEN repository secret is required for live copilot-proxy e2e." >&2
-            exit 1
-          fi
-
-          echo "run=true" >> "$GITHUB_OUTPUT"
-
-      - name: Explain skipped live e2e
-        if: steps.gate.outputs.run != 'true'
-        run: echo "${{ steps.gate.outputs.reason }}"
-
       - name: Clone Orka
-        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Free disk space for Docker-heavy live E2E
-        if: steps.gate.outputs.run == 'true'
+      - name: Free disk space for Docker-heavy E2E
         uses: ./.github/actions/free-disk-space
 
       - name: Setup Go
-        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27'
           check-latest: true
 
       - name: Install kind
-        if: steps.gate.outputs.run == 'true'
         uses: ./.github/actions/setup-kind
 
-      - name: Verify kind installation
-        if: steps.gate.outputs.run == 'true'
-        run: kind version
+      - name: Run AIKit Qwen E2E
+        run: bash scripts/aikit-e2e.sh
 
-      - name: Run live copilot proxy e2e
-        if: steps.gate.outputs.run == 'true'
-        # This lane depends on an external upstream proxy, so a transient
-        # upstream failure gets one retry only after both normal resource
-        # cleanup and Kind teardown have been verified for the first attempt.
-        run: |
-          set -Eeuo pipefail
-          if bash scripts/live-copilot-proxy-e2e.sh; then
-            exit 0
-          else
-            status=$?
-          fi
-          if [ "${status}" -eq 90 ]; then
-            echo "::error::cleanup was not proved; refusing to hide it with an upstream retry"
-            exit "${status}"
-          fi
-          echo "::warning::live copilot proxy e2e failed once; retrying in case the external proxy flaked"
-          bash scripts/live-copilot-proxy-e2e.sh
-
-      - name: Upload exact cleanup evidence for every attempt
-        if: always() && steps.gate.outputs.run == 'true'
+      - name: Upload exact cleanup evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: live-copilot-cleanup-evidence
+          name: aikit-cleanup-evidence
           path: ${{ env.E2E_CLEANUP_REPORT_DIR }}/
           if-no-files-found: error
           retention-days: 7

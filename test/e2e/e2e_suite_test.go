@@ -74,7 +74,9 @@ func TestE2E(t *testing.T) {
 var _ = BeforeSuite(func() {
 	By("loading e2e environment file")
 	earlyEnvProjectDir, _ := utils.GetProjectDir()
-	loadEnvFile(filepath.Join(earlyEnvProjectDir, "test", "e2e", ".env"))
+	if os.Getenv("E2E_LOCAL_MODEL") == "" {
+		loadEnvFile(filepath.Join(earlyEnvProjectDir, "test", "e2e", ".env"))
+	}
 
 	By("building all Docker images")
 	cmd := exec.Command("make", "docker-build-all",
@@ -144,7 +146,9 @@ var _ = BeforeSuite(func() {
 
 	By("loading e2e environment configuration")
 	projectDir, _ := utils.GetProjectDir()
-	loadEnvFile(filepath.Join(projectDir, "test", "e2e", ".env"))
+	if os.Getenv("E2E_LOCAL_MODEL") == "" {
+		loadEnvFile(filepath.Join(projectDir, "test", "e2e", ".env"))
+	}
 	e2eOpenAIAPIKey = os.Getenv("E2E_OPENAI_API_KEY")
 	e2eOpenAIBaseURL = os.Getenv("E2E_OPENAI_BASE_URL")
 	e2eOpenAIModel = os.Getenv("E2E_OPENAI_MODEL")
@@ -251,6 +255,13 @@ var _ = BeforeSuite(func() {
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+	if os.Getenv("E2E_LOCAL_MODEL") != "" {
+		By("routing the authenticated provider proxy directly to the local AIKit model")
+		cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "aikit-e2e.sh"), "configure-provider-proxy")
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to configure the local model upstream")
+	}
 
 	By("granting the E2E caller access to the external API")
 	cmd = exec.Command("kubectl", "create", "rolebinding", "e2e-api-editor",

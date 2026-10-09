@@ -41,9 +41,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		if strings.TrimSpace(e2eLiveCopilotProxyBaseURL) == "" {
-			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set")
-		}
+		requireLiveCopilotProxyConfigured()
 
 		var err error
 
@@ -99,9 +97,10 @@ var _ = Describe("Live Chat API", Ordered, func() {
 			"claude-",
 		)
 		Expect(err).NotTo(HaveOccurred())
-		if liveChatModel == "" {
+		if liveChatModel == "" && localE2EModel() == "" {
 			Skip("Skipping: " + skipReason)
 		}
+		Expect(liveChatModel).NotTo(BeEmpty())
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveChatSecretName, namespace, map[string]string{
@@ -128,7 +127,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 
 	It("should stream chat SSE and create a live session", func() {
 		sessionID, content, usage, events, err := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveChatModel, liveChatExpectedText)
-		if isLiveCopilotProxyForbiddenError(err) {
+		if localE2EModel() == "" && isLiveCopilotProxyForbiddenError(err) {
 			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + liveChatModel)
 		}
 		Expect(err).NotTo(HaveOccurred())
@@ -150,7 +149,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 
 	It("should return JSON chat metadata and expose the created session", func() {
 		resp, err := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveChatModel, liveChatExpectedText)
-		if isLiveCopilotProxyForbiddenError(err) {
+		if localE2EModel() == "" && isLiveCopilotProxyForbiddenError(err) {
 			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + liveChatModel)
 		}
 		Expect(err).NotTo(HaveOccurred())

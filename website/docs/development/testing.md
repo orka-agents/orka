@@ -193,10 +193,11 @@ missing or mismatched artifacts staying not ready.
   mode also exercises Task forks.
 - `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
-- `COPILOT_GITHUB_TOKEN` also remains the credential for
-  `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
-  Provider test infrastructure. `Agent Runtime E2E` provides the
-  provider-execution evidence for the built-in RuntimePool profiles.
+- `AIKit Qwen E2E` uses a digest-pinned Qwen 3.5 2B image as local CPU model
+  infrastructure for native Provider, compatibility API, and runtime checks.
+  It requires no cloud credentials and routes through Orka's auth/session proxies
+  directly to AIKit, without Vekil. `Agent Runtime E2E` retains real-provider
+  execution coverage for the built-in RuntimePool profiles.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:

@@ -72,10 +72,11 @@ printf '%s\n' 'ok - Kind deletion failure, failed readback and retained exact cl
 
 # Exercise the real EXIT handler without creating a cluster or starting a
 # provider. Exit 90 is the workflow contract: cleanup failures cannot be
-# hidden by its external-upstream retry.
-body="$(awk '/^on_exit\(\) \{/,/^\}$/' "${root}/scripts/live-copilot-proxy-e2e.sh")"
+# hidden by a successful cluster teardown.
+body="$(awk '/^on_exit\(\) \{/,/^\}$/' "${root}/scripts/aikit-e2e.sh")"
 [[ -n "${body}" ]]
 eval "${body}"
+is_expected_kind_context() { [[ "${wrong_context:-false}" == false ]]; }
 cleanup_port_forward() { :; }
 dump_diagnostics() { :; }
 log() { :; }
@@ -83,7 +84,8 @@ proxy_pf_pid=""
 kind_cluster=owned-e2e
 cleanup_report_dir="${evidence}"
 e2e_started=true
-for scenario in success upstream_error missing_receipt failed_kind; do
+for scenario in success upstream_error missing_receipt failed_kind wrong_context; do
+  wrong_context=false
   fake_delete_status=0
   fake_list_status=0
   fake_clusters=another-cluster
@@ -99,6 +101,7 @@ for scenario in success upstream_error missing_receipt failed_kind; do
       expected_status=90
       ;;
     failed_kind) fake_delete_status=7; expected_status=90 ;;
+    wrong_context) wrong_context=true; expected_status=90 ;;
   esac
   actual_status=0
   if (on_exit "${initial_status}"); then
@@ -111,4 +114,4 @@ for scenario in success upstream_error missing_receipt failed_kind; do
     exit 1
   }
 done
-printf '%s\n' 'ok - upstream failure remains retryable only after normal cleanup and Kind absence'
+printf '%s\n' 'ok - model failure is preserved and cleanup requires receipts plus Kind absence'
