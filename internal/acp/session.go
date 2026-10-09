@@ -55,8 +55,8 @@ type RuntimeSession struct {
 	process      *Process
 	capabilities AgentCapabilities
 	// resuming is non-nil while an in-place adapter restart is in flight;
-	// it closes when the restart settles either way.
-	resuming        chan struct{}
+	// its done channel closes when the restart settles either way.
+	resuming        *runtimeSessionRestart
 	adapterRestarts int
 	// frozen is set from a workspace freeze attempt until a proven thaw.
 	frozen     bool
@@ -89,6 +89,16 @@ func (e *AdapterLostError) Unwrap() error { return e.Cause }
 // closeSessionGraceCap bounds the graceful session/close wait during
 // deletion so a wedged adapter cannot delay the proven process stop.
 const closeSessionGraceCap = 5 * time.Second
+
+// runtimeSessionRestart reserves the prompt identity before adapter recovery
+// releases s.mu. Cancellation stays recorded even if its caller stops waiting.
+type runtimeSessionRestart struct {
+	promptID        string
+	requestDigest   string
+	done            chan struct{}
+	cancel          context.CancelFunc
+	cancelRequested bool
+}
 
 type runtimeSessionDeletion struct {
 	done   chan struct{}
@@ -360,7 +370,7 @@ func processExited(process *Process) bool {
 // deletion afterwards. A nil return with the lock held means a live adapter
 // is bound; an *AdapterLostError means the provider session is unrecoverable
 // for this generation.
-func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, leaseDeadline time.Time) error {
+func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, promptID, requestDigest string, leaseDeadline time.Time) error {
 	if s.resuming != nil {
 		return fmt.Errorf("runtime session adapter restart is in flight")
 	}
@@ -375,15 +385,42 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, leaseDe
 	if !s.capabilities.SessionCapability(SessionCapabilityResume) {
 		return &AdapterLostError{Cause: exitErr}
 	}
-	resuming := make(chan struct{})
+	resumeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resuming := &runtimeSessionRestart{
+		promptID: promptID, requestDigest: requestDigest,
+		done: make(chan struct{}), cancel: cancel,
+	}
 	s.resuming = resuming
+	defer func() {
+		s.resuming = nil
+		close(resuming.done)
+	}()
 	s.mu.Unlock()
 
-	process, capabilities, err := s.resumeAdapter(ctx, exited, leaseDeadline)
+	process, capabilities, err := s.resumeAdapter(resumeCtx, exited, leaseDeadline)
 
 	s.mu.Lock()
-	s.resuming = nil
-	close(resuming)
+	if resuming.cancelRequested {
+		// Resume may have answered just before cancellation acquired s.mu.
+		// Stop even a successful replacement before releasing the reservation;
+		// the cancelled prompt must never be submitted or replayed.
+		if process != nil {
+			s.mu.Unlock()
+			_ = stopProcessBestEffort(process, s.config.CancelGrace)
+			s.mu.Lock()
+		}
+		s.tombstones[promptID] = PromptTombstone{
+			PromptID: promptID, RequestDigest: requestDigest,
+			Result: PromptResult{
+				Outcome: PromptOutcomeCancelled, StopReason: StopReasonCancelled,
+				SettledAt: time.Now().UTC(),
+			},
+		}
+		if err == nil {
+			err = context.Canceled
+		}
+	}
 	if err != nil {
 		// Even an interrupted restart (caller gone, lease over) is lost: a
 		// failed StartPrompt leaves the supervisor's prompt gates cancelling,
@@ -392,10 +429,8 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, leaseDe
 		return &AdapterLostError{Attempted: true, Cause: err}
 	}
 	if s.deleted {
-		// Delete joins an in-flight restart before marking deletion, so this
-		// is a guard for any future caller that marks deletion without
-		// joining: a replacement that will never be bound must not outlive
-		// the session.
+		// Delete cancels before joining a restart. Keep this guard as well:
+		// a replacement that cannot be bound must not outlive the session.
 		s.mu.Unlock()
 		_ = stopProcessBestEffort(process, s.config.CancelGrace)
 		s.mu.Lock()
@@ -556,7 +591,19 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 		s.mu.Unlock()
 		return PromptRun{}, &DuplicatePromptError{PromptID: promptID, Result: &result}
 	}
-	if err := s.recoverExitedAdapterLocked(ctx, leaseDeadline); err != nil {
+	if resuming := s.resuming; resuming != nil {
+		if resuming.promptID != promptID {
+			s.mu.Unlock()
+			return PromptRun{}, fmt.Errorf("runtime session already has active prompt %s", resuming.promptID)
+		}
+		if resuming.requestDigest != requestDigest {
+			s.mu.Unlock()
+			return PromptRun{}, &DigestConflictError{PromptID: promptID}
+		}
+		s.mu.Unlock()
+		return PromptRun{}, &DuplicatePromptError{PromptID: promptID, Active: true}
+	}
+	if err := s.recoverExitedAdapterLocked(ctx, promptID, requestDigest, leaseDeadline); err != nil {
 		s.mu.Unlock()
 		return PromptRun{}, err
 	}
@@ -643,6 +690,17 @@ func (s *RuntimeSession) ResolvePermission(promptID, requestID string, outcome R
 
 func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (PromptResult, error) {
 	s.mu.Lock()
+	if resuming := s.resuming; resuming != nil && resuming.promptID == promptID {
+		resuming.cancelRequested = true
+		resuming.cancel()
+		s.mu.Unlock()
+		select {
+		case <-resuming.done:
+			return s.tombstoneResult(promptID)
+		case <-ctx.Done():
+			return PromptResult{}, ctx.Err()
+		}
+	}
 	active := s.active
 	if active == nil || active.id != promptID || active.settled {
 		tombstone, settled := s.tombstones[promptID]
@@ -718,11 +776,15 @@ func (s *RuntimeSession) WaitPromptSettlement(ctx context.Context, promptID stri
 
 func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	s.mu.Lock()
-	// An in-flight adapter restart owns a replacement process that is not
-	// yet bound; join it so the stop below covers whichever process ends up
-	// bound and the restart path stops the other.
+	firstDeletion := !s.deleted
+	s.deleted = true
+	// Close admission and cancel before joining an in-flight restart. The
+	// restart owns an unbound replacement and must stop it without submitting
+	// its reserved prompt, even if this deletion caller stops waiting.
 	for s.resuming != nil {
-		resuming := s.resuming
+		s.resuming.cancelRequested = true
+		s.resuming.cancel()
+		resuming := s.resuming.done
 		s.mu.Unlock()
 		select {
 		case <-resuming:
@@ -752,8 +814,6 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	// A failed observation is not a cleanup proof. A later caller may observe
 	// the same stopped process again, while callers already joining an attempt
 	// retain that attempt's result even if another retry starts first.
-	firstDeletion := !s.deleted
-	s.deleted = true
 	deletion = &runtimeSessionDeletion{done: make(chan struct{})}
 	s.deletion = deletion
 	active := s.active

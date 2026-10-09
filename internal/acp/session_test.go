@@ -385,11 +385,16 @@ const (
 	// helperHangFirstResumeEnv makes the first session/resume never answer,
 	// so the caller's context ends mid-restart; later resumes succeed.
 	helperHangFirstResumeEnv = "ACP_HELPER_HANG_FIRST_RESUME"
-	helperStateDirEnv        = "ACP_HELPER_STATE_DIR"
-	helperSessionStateFile   = "provider-session"
-	helperResumedStateFile   = "resumed"
-	helperResumeHungFile     = "resume-hung"
-	helperClosedStateFile    = "closed"
+	// helperBlockFirstResumeEnv parks the first resume until the test releases it.
+	helperBlockFirstResumeEnv   = "ACP_HELPER_BLOCK_FIRST_RESUME"
+	helperStateDirEnv           = "ACP_HELPER_STATE_DIR"
+	helperSessionStateFile      = "provider-session"
+	helperResumedStateFile      = "resumed"
+	helperResumeHungFile        = "resume-hung"
+	helperResumeBlockedFile     = "resume-blocked"
+	helperResumeReleaseFile     = "resume-release"
+	helperPromptAfterResumeFile = "prompt-after-resume"
+	helperClosedStateFile       = "closed"
 )
 
 func helperSessionCapabilities(mode string) map[string]any {
@@ -493,6 +498,12 @@ func TestACPHelperProcess(t *testing.T) {
 				writeHelperState(helperResumeHungFile, "1")
 				continue
 			}
+			if os.Getenv(helperBlockFirstResumeEnv) == "1" && readHelperState(helperResumeBlockedFile) == "" {
+				writeHelperState(helperResumeBlockedFile, strconv.Itoa(os.Getpid()))
+				for readHelperState(helperResumeReleaseFile) == "" {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
 			writeHelperState(helperResumedStateFile, "1")
 			// Real agents (Codex, Claude, OpenCode) send an
 			// available_commands_update after a resume; it must not reach any
@@ -506,6 +517,9 @@ func TestACPHelperProcess(t *testing.T) {
 			writeHelperState(helperClosedStateFile, "1")
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
 		case MethodSessionPrompt:
+			if readHelperState(helperResumedStateFile) != "" {
+				writeHelperState(helperPromptAfterResumeFile, "1")
+			}
 			promptID = append(promptID[:0], message.ID...)
 			writeACPHelper(writer, map[string]any{
 				"jsonrpc": "2.0", "method": MethodSessionUpdate,

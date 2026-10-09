@@ -5,6 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -146,6 +149,249 @@ func TestRuntimeSessionInterruptedResumeIsLostAndStopsReplacement(t *testing.T) 
 	}
 	if session.AdapterRestarts() != 0 {
 		t.Fatalf("adapter restarts = %d, want 0", session.AdapterRestarts())
+	}
+}
+
+// The resume marker is written before the helper waits on a release file, so
+// cancellation always races a known, blocked pre-admission restart, not a sleep.
+func TestRuntimeSessionCancelPromptDuringBlockedResume(t *testing.T) {
+	for _, expiredCancel := range []bool{false, true} {
+		name := "live cancellation context"
+		if expiredCancel {
+			name = "expired cancellation context"
+		}
+		t.Run(name, func(t *testing.T) {
+			session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{
+				helperExitAfterPromptEnv:  "1",
+				helperBlockFirstResumeEnv: "1",
+			})
+			session.config.CancelGrace = 50 * time.Millisecond
+			result, _ := runHelperPrompt(t, session, "prompt-1")
+			if result.Outcome != PromptOutcomeCompleted {
+				t.Fatalf("first prompt = %#v", result)
+			}
+			awaitAdapterExit(t, session)
+			exited := session.Process()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			releaseResume := func() {
+				if err := os.WriteFile(filepath.Join(stateDir, helperResumeReleaseFile), []byte("1"), 0o644); err != nil {
+					t.Errorf("release resume: %v", err)
+				}
+			}
+			t.Cleanup(releaseResume)
+			started := make(chan error, 1)
+			go func() {
+				run, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run")})
+				if err == nil {
+					for event := range run.Events {
+						run.Release(event)
+					}
+					<-run.Result
+				}
+				started <- err
+			}()
+			pidText := awaitResumeStateFile(t, ctx, filepath.Join(stateDir, helperResumeBlockedFile))
+			replacementPID, err := strconv.Atoi(pidText)
+			if err != nil || replacementPID <= 0 {
+				t.Fatalf("replacement PID = %q, error = %v", pidText, err)
+			}
+			assertRestartPromptIdentityReserved(t, session, ctx)
+
+			cancelCtx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stop()
+			if expiredCancel {
+				stop()
+			}
+			cancelled, cancelErr := session.CancelPrompt(cancelCtx, "prompt-2")
+			releaseResume()
+			var startErr error
+			select {
+			case startErr = <-started:
+			case <-ctx.Done():
+				t.Fatal("prompt restart did not settle after cancellation")
+			}
+			if cancelErr != nil {
+				if !expiredCancel || !errors.Is(cancelErr, context.Canceled) {
+					t.Fatalf("cancel blocked restart = %v; original StartPrompt = %v", cancelErr, startErr)
+				}
+			}
+			if cancelErr == nil && (cancelled.Accepted || cancelled.Outcome != PromptOutcomeCancelled) {
+				t.Fatalf("pre-admission cancellation = %#v", cancelled)
+			}
+			lost, ok := errors.AsType[*AdapterLostError](startErr)
+			if !ok || !lost.Attempted {
+				t.Fatalf("cancelled restart = %v, want attempted AdapterLostError", startErr)
+			}
+			assertRestartCancelledBeforeAdmission(t, session, exited, replacementPID, stateDir)
+			assertCancelledPromptIdentityNotReplayed(t, session, ctx)
+			cleanup, err := session.Delete(ctx)
+			if runtime.GOOS == "linux" {
+				if err != nil || !cleanup.Proven {
+					t.Fatalf("delete after cancelled restart = %#v, %v", cleanup, err)
+				}
+			} else if err == nil || cleanup.Proven {
+				t.Fatal("unsupported descendant inspection produced a cleanup proof")
+			}
+			if _, err := session.StartPrompt(ctx, "after-delete", "sha256:after-delete", []ContentBlock{Text("must not run")}); err == nil {
+				t.Fatal("cleanup reopened the runtime session")
+			}
+		})
+	}
+}
+
+func TestRuntimeSessionDeleteDuringBlockedResume(t *testing.T) {
+	for _, expiredDelete := range []bool{false, true} {
+		name := "live deletion context"
+		if expiredDelete {
+			name = "expired deletion context"
+		}
+		t.Run(name, func(t *testing.T) {
+			session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{
+				helperExitAfterPromptEnv:  "1",
+				helperBlockFirstResumeEnv: "1",
+			})
+			session.config.CancelGrace = 50 * time.Millisecond
+			result, _ := runHelperPrompt(t, session, "prompt-1")
+			if result.Outcome != PromptOutcomeCompleted {
+				t.Fatalf("first prompt = %#v", result)
+			}
+			awaitAdapterExit(t, session)
+			exited := session.Process()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			releaseResume := func() {
+				if err := os.WriteFile(filepath.Join(stateDir, helperResumeReleaseFile), []byte("1"), 0o644); err != nil {
+					t.Errorf("release resume: %v", err)
+				}
+			}
+			t.Cleanup(releaseResume)
+			started := make(chan error, 1)
+			go func() {
+				run, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run")})
+				if err == nil {
+					for event := range run.Events {
+						run.Release(event)
+					}
+					<-run.Result
+				}
+				started <- err
+			}()
+			pidText := awaitResumeStateFile(t, ctx, filepath.Join(stateDir, helperResumeBlockedFile))
+			replacementPID, err := strconv.Atoi(pidText)
+			if err != nil || replacementPID <= 0 {
+				t.Fatalf("replacement PID = %q, error = %v", pidText, err)
+			}
+			deleteCtx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stop()
+			if expiredDelete {
+				stop()
+			}
+			observation := &deleteObservationContext{Context: deleteCtx, entered: make(chan struct{})}
+			deleted := startObservedDeletion(session, observation)
+			awaitDeleteObservation(t, observation.entered)
+			releaseResume()
+			select {
+			case err := <-started:
+				if lost, ok := errors.AsType[*AdapterLostError](err); !ok || !lost.Attempted {
+					t.Fatalf("deletion left the original prompt free to start: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("prompt restart did not settle after deletion")
+			}
+			deletion := awaitObservedDeletion(t, deleted)
+			if expiredDelete {
+				if deletion.status.Proven || !errors.Is(deletion.err, context.Canceled) {
+					t.Fatalf("expired deletion = %#v, %v", deletion.status, deletion.err)
+				}
+			} else if runtime.GOOS == "linux" {
+				if deletion.err != nil || !deletion.status.Proven {
+					t.Fatalf("deletion = %#v, %v", deletion.status, deletion.err)
+				}
+			} else if deletion.err == nil || deletion.status.Proven {
+				t.Fatal("unsupported descendant inspection produced a cleanup proof")
+			}
+			assertRestartCancelledBeforeAdmission(t, session, exited, replacementPID, stateDir)
+			if _, err := session.StartPrompt(ctx, "after-delete", "sha256:after-delete", []ContentBlock{Text("must not run")}); err == nil {
+				t.Fatal("deletion reopened admission")
+			}
+		})
+	}
+}
+
+func assertRestartPromptIdentityReserved(t *testing.T, session *RuntimeSession, ctx context.Context) {
+	t.Helper()
+	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("duplicate")})
+	if duplicate, ok := errors.AsType[*DuplicatePromptError](err); !ok || !duplicate.Active {
+		t.Errorf("pending identity duplicate = %v, want active duplicate", err)
+	}
+	_, err = session.StartPrompt(ctx, "prompt-2", "sha256:changed", []ContentBlock{Text("changed")})
+	if _, ok := errors.AsType[*DigestConflictError](err); !ok {
+		t.Errorf("pending identity digest conflict = %v", err)
+	}
+	if _, err := session.StartPrompt(ctx, "prompt-other", "sha256:other", []ContentBlock{Text("other")}); err == nil {
+		t.Error("another prompt was admitted during restart")
+	}
+	if _, err := session.CancelPrompt(ctx, "prompt-other"); err == nil {
+		t.Error("unrelated identity cancelled the pending restart")
+	} else if _, ok := errors.AsType[*StalePromptError](err); !ok {
+		t.Errorf("unrelated identity cancellation = %v", err)
+	}
+}
+
+func assertRestartCancelledBeforeAdmission(t *testing.T, session *RuntimeSession, exited *Process, replacementPID int, stateDir string) {
+	t.Helper()
+	if session.Process() != exited || session.AdapterRestarts() != 0 {
+		t.Fatal("cancelled restart bound the replacement adapter")
+	}
+	if runtime.GOOS != "windows" {
+		if err := signalProcessGroup(replacementPID, syscall.Signal(0)); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("cancelled replacement process group still exists: %v", err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, helperPromptAfterResumeFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("original prompt reached the resumed adapter: stat = %v", err)
+	}
+	tombstone, ok := session.Tombstone("prompt-2")
+	if !ok || tombstone.RequestDigest != "sha256:prompt-2" || tombstone.Result.Accepted || tombstone.Result.Outcome != PromptOutcomeCancelled {
+		t.Fatalf("cancelled restart tombstone = %#v, found = %v", tombstone, ok)
+	}
+}
+
+func assertCancelledPromptIdentityNotReplayed(t *testing.T, session *RuntimeSession, ctx context.Context) {
+	t.Helper()
+	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not replay")})
+	duplicate, ok := errors.AsType[*DuplicatePromptError](err)
+	if !ok || duplicate.Active || duplicate.Result == nil || duplicate.Result.Accepted || duplicate.Result.Outcome != PromptOutcomeCancelled {
+		t.Fatalf("cancelled identity replay = %v, want settled not-accepted duplicate", err)
+	}
+	if _, err := session.StartPrompt(ctx, "prompt-2", "sha256:changed", []ContentBlock{Text("changed")}); err == nil {
+		t.Fatal("cancelled prompt identity accepted a conflicting digest")
+	} else if _, ok := errors.AsType[*DigestConflictError](err); !ok {
+		t.Fatalf("cancelled identity digest conflict = %v", err)
+	}
+	if replayed, err := session.CancelPrompt(ctx, "prompt-2"); err != nil || replayed.Accepted || replayed.Outcome != PromptOutcomeCancelled {
+		t.Fatalf("settled cancellation replay = %#v, %v", replayed, err)
+	}
+}
+
+func awaitResumeStateFile(t *testing.T, ctx context.Context, path string) string {
+	t.Helper()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if data, err := os.ReadFile(path); err == nil {
+			if len(data) > 0 {
+				return string(data)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("observe resume marker: %v", err)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal("adapter did not reach the blocked resume")
+		}
 	}
 }
 

@@ -2,14 +2,22 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/store"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestPromptNotAcceptedFailsOnlyProvenIdleResumeRejection(t *testing.T) {
@@ -87,5 +95,95 @@ func TestPromptNotAcceptedFailsOnlyProvenIdleResumeRejection(t *testing.T) {
 				t.Fatalf("durable attempt classification differs from Task: %#v", attempt)
 			}
 		})
+	}
+}
+
+func TestPromptNotAcceptedDeferredSessionFinalizationAllowsContinuation(t *testing.T) {
+	ctx := t.Context()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "idle-resume-session.db"))
+	defer closeStore()
+	continuity := newACPSessionTestContinuity(t, controlStore, ACPBootstrapLimits{})
+	control := ensureACPSessionForTest(t, continuity, fence, "idle-resume-session")
+	const taskUID = "task-idle-resume-session"
+	const promptID = "prompt-idle-resume-session"
+	turn, attempt := openACPSessionTurnForTest(t, continuity, controlStore, fence, control, taskUID, promptID, "continue the session")
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned, store.PromptExecutionSubmitting,
+	} {
+		operation := "idle-resume-" + string(next)
+		var err error
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: operation, OperationDigest: acpSessionTestDigest(operation), UpdatedAt: attempt.UpdatedAt.Add(time.Second),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: control.Namespace, Name: "idle-resume-task", UID: types.UID(taskUID)},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, Prompt: "continue the session", SessionRef: &corev1alpha1.SessionReference{Name: control.SessionName},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1,
+			Execution: &corev1alpha1.TaskExecutionStatus{
+				State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: promptID,
+				RuntimeSessionUID: control.SessionUID, RuntimeSessionGeneration: turn.Lease.Key.LeaseGeneration, RequestDigest: attempt.RequestDigest,
+			},
+		},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Sessions: continuity}
+	binding := ACPRuntimeSessionBinding{SessionUID: control.SessionUID, Generation: uint64(turn.Lease.Key.LeaseGeneration)}
+	dispatcher.setRuntimeSessionBinding(binding)
+	session := &acpTaskSession{Turn: turn, Binding: binding}
+	// Match executeReservedTask's existing deferred terminal reconciliation.
+	// The stream error branch need not duplicate Session finalization.
+	run := func() (retErr error) {
+		defer func() {
+			if err := dispatcher.reconcileUnfinalizedTaskSession(ctx, task, fence, session, retErr); retErr == nil {
+				retErr = err
+			}
+		}()
+		return dispatcher.handlePromptStreamError(ctx, nil, nil, "runtime-session", task, attempt.ID, fence, harnessv2.Fence{}, nil,
+			false, harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteComplete}, nil,
+			&harnessv2.ClientError{Operation: "start_prompt", Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusConflict, Code: harnessv2.ErrorCodePromptNotAccepted},
+		)
+	}
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	finalized, err := controlStore.GetSessionTurn(ctx, turn.Turn.ID)
+	if err != nil || finalized.State != store.SessionTurnFinalized {
+		t.Fatalf("Session turn = %#v, error = %v", finalized, err)
+	}
+	projection, err := controlStore.GetOutboxProjection(ctx, finalized.ProjectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload taskTerminalProjection
+	if err := json.Unmarshal(projection.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Execution.State != corev1alpha1.TaskExecutionStateFailed || payload.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeFailed || payload.Execution.Reason != "RuntimeLost" {
+		t.Fatalf("Session finalization lost the definitive failure: %#v", payload.Execution)
+	}
+	if dispatcher.currentRuntimeSessionBinding(control.SessionUID) != nil {
+		t.Fatal("retired runtime binding survived deferred Session finalization")
+	}
+	current, err := controlStore.GetSessionControl(ctx, control.Namespace, control.SessionName)
+	if err != nil || current.Lease != nil {
+		t.Fatalf("Session lease was not released: control=%#v error=%v", current, err)
+	}
+	if _, err := continuity.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
+		Session: *current, Fence: fence, TaskUID: "next-task", Attempt: 1, PromptID: "next-prompt",
+		PromptRequestDigest: acpSessionTestDigest("next-prompt"), AcquiredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("next continuation blocked after resume rejection: %v", err)
 	}
 }
