@@ -101,7 +101,7 @@ and existing routes without assigning a provider or writing routing diagnostics.
 Runtime retirement and workspace retention cleanup remain active.
 
 The shared repository contains the [provider installation and retirement
-guide](https://github.com/orka-agents/orka-workspace/blob/e55b58d/docs/external-providers.md),
+guide](https://github.com/orka-agents/orka-workspace/blob/92e3c00/docs/external-providers.md),
 provider-specific prerequisites, and conformance/live proof scripts. External ACP
 providers use the generic workspace API and ACP dispatch flags. Legacy ACP
 cleanup belongs to the previous release; the removal release retains only pooled
@@ -195,7 +195,7 @@ implementations must also preserve the data-plane protocol described above.
 
 The external provider API and binaries are installed from the same
 `orka-workspace` revision that Orka pins in its Go module. The [shared installation
-and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/e55b58d/docs/external-providers.md)
+and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/92e3c00/docs/external-providers.md)
 lists the supported Kubernetes and backend versions and the provider-owned schemas.
 
 Before replacing Orka or applying the new RuntimePool CRD, drain every legacy ACP
