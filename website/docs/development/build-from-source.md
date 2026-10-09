@@ -85,9 +85,11 @@ helm install orka ./manifest_staging/charts/orka \
 The controller issues its own webhook certificate. To bring your own, see
 [Webhook certificate](../reference/configuration.md#webhook-certificate).
 
-To disable an unused runtime, set its image to an empty string, for example
-`--set-string controller.acpRuntime.codexImage=`. Otherwise, the chart uses its
-release image tag for any runtime you do not override.
+Development charts have no default image tags. Supply controller, publisher,
+and worker images from the same checkout, and an explicit image reference for
+every runtime provider you want to enable. Omitted runtime images remain disabled.
+To disable a runtime configured in a values file or prior installation, set its
+image to an empty string, for example `--set-string controller.acpRuntime.codexImage=`.
 
 If Helm refuses to render, that is deliberate — the chart checks its inputs up front
 rather than installing something broken. [Troubleshooting](../operations/troubleshooting.md)
@@ -106,6 +108,11 @@ image variables must use the pushed `repository@sha256:...` references.
 
 Orka currently supports new installations only. Read
 [Upgrading](../operations/upgrading.md) for support details and CRD requirements.
+
+When testing a source upgrade, replace all image references with images from the
+target checkout. `--reuse-values` preserves previously supplied images; it does
+not select images for the new source. Explicitly clear unused runtime image
+fields so older image references are not retained.
 
 ## Next
 

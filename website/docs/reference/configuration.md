@@ -695,7 +695,9 @@ spec:
 
 ## Helm chart
 
-Key configuration values for the Helm chart:
+Key configuration values for the Helm chart. Image defaults shown as release
+versions apply to published charts, not the development chart. See
+[Image overrides](#image-overrides) for source image requirements.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -765,6 +767,13 @@ Released charts include matching version tags for the controller, workers,
 Publisher, and coding-agent runtimes. For controller, worker, and Publisher
 images, set `image.tag` to choose another version or `image.digest` to pin a
 SHA256 digest. A digest takes precedence over the tag.
+
+The development chart uses version `0.0.0-dev` and leaves image defaults unset.
+Supply controller, worker, and Publisher tags or digests from the matching source
+checkout before rendering. Coding-agent runtimes are disabled unless each enabled
+provider has an explicit image reference from that checkout. An omitted runtime
+never falls back to a release image. When testing source upgrades, `--reuse-values`
+retains prior image references, so replace them explicitly and clear unused runtimes.
 
 Runtime fields such as `controller.acpRuntime.codexImage` accept a full image
 reference with a tag or digest. The controller resolves tags to digests once at
