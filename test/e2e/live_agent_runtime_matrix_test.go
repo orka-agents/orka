@@ -124,8 +124,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			"Use a tool to read README in the repository root. "+
-				"Wait for the read to succeed, then reply with the exact file contents and nothing else.",
+			liveCodexReadPrompt(),
 			4,
 			nil,
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -370,6 +369,16 @@ func openCodeModelSupportsEndpoint(catalog proxyModelCatalog, model, endpoint st
 type runtimeWorkspaceConfig struct {
 	GitRepo string
 	Ref     string
+}
+
+func liveCodexReadPrompt() string {
+	if localE2EModel() != "" {
+		// Small local models need an unambiguous filename and tool shape. This
+		// still requires a real read; the result and frozen turn budget are unchanged.
+		return `Read the file named README, NOT README.md. Use exec_command with exactly these arguments: {"cmd":"cat README","yield_time_ms":1000,"max_output_tokens":2048}. Do not add other argument keys. Wait for the command to succeed, then return only its stdout text, with no prose, quotes or Markdown fences.`
+	}
+	return "Use a tool to read README in the repository root. " +
+		"Wait for the read to succeed, then reply with the exact file contents and nothing else."
 }
 
 func runtimeAgentManifest(name, runtimeType, modelName string, defaultMaxTurns int, defaultAllowBash *bool) map[string]any {
