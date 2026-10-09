@@ -159,6 +159,15 @@ spec:
             - --gateway-claim-lease={{ .Values.controller.gateway.claimLease }}
             - --gateway-poll-interval={{ .Values.controller.gateway.pollInterval }}
             - --gateway-batch-size={{ .Values.controller.gateway.batchSize }}
+            {{- with .Values.controller.connectors }}
+            {{- if .enabled }}
+            - --connectors-enabled=true
+            {{- if not .callbackBaseUrl }}
+            {{- fail "controller.connectors.callbackBaseUrl is required when controller.connectors.enabled=true" }}
+            {{- end }}
+            - {{ printf "--connector-callback-base-url=%s" .callbackBaseUrl | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
             - {{ printf "--oidc-issuer=%s" .issuer | quote }}
@@ -258,6 +267,12 @@ spec:
             {{- end }}
             {{- if .monitorOperate }}
             - {{ printf "--context-token-monitor-operate-scopes=%s" .monitorOperate | quote }}
+            {{- end }}
+            {{- if .connectorRead }}
+            - {{ printf "--context-token-connector-read-scopes=%s" .connectorRead | quote }}
+            {{- end }}
+            {{- if .connectorManage }}
+            - {{ printf "--context-token-connector-manage-scopes=%s" .connectorManage | quote }}
             {{- end }}
             {{- if .skillRead }}
             - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}

@@ -621,3 +621,35 @@ func containsAnyString(values []any, want string) bool {
 	}
 	return false
 }
+
+// TestCreatePRMonitorTool_ExecuteSealsCreatedTask covers the requester seal:
+// a scheduled monitor Task created from chat is handed to the sealer like
+// every other Task-creating tool, so it can use the person's linked accounts.
+func TestCreatePRMonitorTool_ExecuteSealsCreatedTask(t *testing.T) {
+	_, gitSecret := githubRepoTaskWithSecret("https://github.com/orka-agents/orka")
+	fc := newFakeClient(
+		&corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+			Spec:       corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}},
+		},
+		gitSecret,
+	)
+	ctx := newCreatePRMonitorToolContext(fc)
+	var sealed []string
+	GetToolContext(ctx).SealTaskCreate = func(_ context.Context, _ client.Client, task *corev1alpha1.Task) error {
+		sealed = append(sealed, task.Name)
+		return nil
+	}
+	if _, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
+		nameField:           "sealed-pr-monitor",
+		repoURLField:        "https://github.com/orka-agents/orka",
+		scheduleField:       "*/15 * * * *",
+		agentRefField:       "reviewer",
+		"readCredentialRef": gitSecret.Name,
+	})); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(sealed) != 1 || sealed[0] != "pr-monitor-task" {
+		t.Fatalf("sealed = %v, want the created monitor Task", sealed)
+	}
+}

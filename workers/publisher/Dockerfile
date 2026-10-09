@@ -26,7 +26,7 @@ RUN set -eux; \
     test "$(/usr/local/bin/git version)" = "git version 2.55.0"; \
     rm -rf /usr/local/share/man /usr/local/share/doc /usr/local/share/git-gui /usr/local/share/gitk
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS service-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS service-builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

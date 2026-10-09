@@ -135,7 +135,7 @@ func (f *mcpApprovalRecoveryFixture) seed(t *testing.T, state store.ExternalEffe
 	credentials, err := f.broker.Credentials.ResolveACPMCPBrokerCredentials(f.ctx, f.request)
 	require.NoError(t, err)
 	credentials.Task.SessionName, credentials.Task.AgentName = "approval-session", "approval-agent"
-	call, _, err := f.broker.persistApprovalCall(f.ctx, f.request, descriptor, credentials.Task)
+	call, _, err := f.broker.persistApprovalCall(f.ctx, f.request, descriptor, credentials.Task, "")
 	require.NoError(t, err)
 	effect, err := f.control.ReserveExternalEffect(f.ctx, store.ReserveExternalEffectRequest{
 		Identity: store.ExternalEffectIdentity{

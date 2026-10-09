@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -97,6 +98,34 @@ type agentExecutionSnapshotBody struct {
 	// ExecutionWorkspace freezes the resolved execution-workspace binding for
 	// workspace-provider-backed RuntimePools. It is absent for plain pools.
 	ExecutionWorkspace *agentExecutionSnapshotWorkspaceBinding `json:"executionWorkspace,omitempty"`
+	// Connections freezes, per connection-mode OutboundAccessPolicy reachable
+	// from the frozen tool policy, the identity of the requester's Connection
+	// at dispatch. Call-time resolution fails closed unless the live
+	// Connection still matches. No token material is ever recorded.
+	Connections []agentExecutionSnapshotConnection `json:"connections,omitempty"`
+}
+
+// agentExecutionSnapshotConnection is one frozen person-to-provider link.
+type agentExecutionSnapshotConnection struct {
+	// PolicyName is the connection-mode policy, or the BuiltinConnectionKey
+	// of a built-in tool the controller runs under the link.
+	PolicyName string `json:"policyName"`
+	// Tool is set for a built-in binding: the tool the link was frozen for.
+	Tool           string `json:"tool,omitempty"`
+	Provider       string `json:"provider"`
+	ConnectionName string `json:"connectionName"`
+	UID            string `json:"uid"`
+	Generation     int64  `json:"generation"`
+	// GrantSequence is the consent count the Connection carried when
+	// frozen; a later re-link of the same object raises it and invalidates
+	// this snapshot's authority to use the account.
+	GrantSequence int64  `json:"grantSequence"`
+	Mode          string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the connection-mode policy the
+	// Connection was frozen under: its credential output semantics are part
+	// of what the Task was dispatched with.
+	PolicyUID        string `json:"policyUID,omitempty"`
+	PolicyGeneration int64  `json:"policyGeneration,omitempty"`
 }
 
 // agentExecutionSnapshotExternalRuntime freezes the non-secret registration
@@ -305,6 +334,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
+	// Connector-backed tool visibility and approval defaults depend on the
+	// requester's links; apply them to copies so the plan, the MCP policy,
+	// and the frozen snapshot all describe the same effective policy.
+	task, agent, connectorClassification, err := adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
+	if err != nil {
+		return nil, err
+	}
 	plan, err := PlanACPRuntimeWithConfiguration(task, withEffectiveBuiltInContract(agent, r.Mode), r.ACPRuntimeImages, configuration)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
@@ -382,6 +418,15 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
+	frozenConnections, frozenClassification, frozenTools, err := freezeRequesterConnectionsClassified(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
+	if err != nil {
+		return nil, fmt.Errorf("freeze requester connections: %w", err)
+	}
+	// Visibility and approvals were decided from the first classification;
+	// the snapshot must not bind a tool that read differently since.
+	if err := connectorClassificationUnchanged(connectorClassification, frozenClassification, frozenTools); err != nil {
+		return nil, err
+	}
 
 	namespace := &corev1.Namespace{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Namespace}, namespace); err != nil {
@@ -418,6 +463,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		SessionRef:       task.Spec.SessionRef.DeepCopy(),
 		Workspace:        task.Spec.Workspace.DeepCopy(),
 		RuntimeOverride:  task.Spec.AgentRuntime.DeepCopy(),
+		Connections:      frozenConnections,
 	}
 	if task.Spec.Timeout != nil {
 		body.Timeout = task.Spec.Timeout.Duration.String()
@@ -528,6 +574,10 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if registry == nil {
 		registry = tools.DefaultRegistry
 	}
+	linkedBuiltins, err := r.checkExternalConnectorTools(ctx, reader, task, agent, runtime, profile.ProviderKind, registry)
+	if err != nil {
+		return nil, err
+	}
 	mcpConfiguration, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
 		ctx, reader, task, agent, runtime, profile, registry,
 	)
@@ -537,11 +587,25 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
 		return nil, errors.New("external AgentRuntime MCP tool descriptors have not passed current conformance")
 	}
+	var frozenConnections []agentExecutionSnapshotConnection
+	if len(linkedBuiltins) > 0 {
+		frozenConnections, err = freezeRequesterConnections(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
+		if err != nil {
+			return nil, fmt.Errorf("freeze requester connections: %w", err)
+		}
+		// The visibility check above saw a Ready link for every linked
+		// built-in; a link gone since then is a transient state, and the
+		// snapshot is not written without it.
+		if len(frozenConnections) != len(linkedBuiltins) {
+			return nil, fmt.Errorf("the requester's linked account changed while the task was being bound; retrying")
+		}
+	}
 
 	body := agentExecutionSnapshotBody{
 		SchemaVersion:   store.AgentExecutionSnapshotSchemaVersion,
 		ContractVersion: string(corev1alpha1.AgentRuntimeContractHarnessV2),
 		Backend:         string(corev1alpha1.AgentExecutionBackendExternalEndpoint),
+		Connections:     frozenConnections,
 		Agent: agentExecutionSnapshotAgent{
 			Namespace: agent.Namespace, Name: agent.Name, UID: string(agent.UID), Generation: agent.Generation,
 		},
@@ -1483,4 +1547,117 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		return result, handleErr, true
 	}
 	return ctrl.Result{}, nil, false
+}
+
+// checkExternalLinkedBuiltins admits GitHub built-ins under a linked account
+// on an external v2 runtime only when the requester's link changes nothing
+// about the registered policy: every such tool must stay visible (a Ready
+// link, readWrite for write tools) and every write tool must already be in
+// the registered approval-required set. Anything else is a permanent
+// configuration refusal, never a per-person narrowing of the profile.
+func checkExternalLinkedBuiltins(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	runtime *corev1alpha1.AgentRuntime,
+	candidates []string,
+) error {
+	visible, connectorWrite, err := FilterBrokeredConnectorToolsForRequester(ctx, reader, registry, task, candidates)
+	if err != nil {
+		if permanent := permanentLinkedBuiltinError(err); permanent != err {
+			return permanent
+		}
+		return fmt.Errorf("apply connector tool visibility: %w", err)
+	}
+	if hidden := withoutTools(candidates, visible); len(hidden) > 0 {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"built-in tools %s run only under the requester's linked account, and the registered external AgentRuntime policy cannot be narrowed per person; link the account (readWrite for write tools) before creating the task",
+			strings.Join(hidden, ", "),
+		))
+	}
+	var registeredApprovals []string
+	if runtime != nil && runtime.Spec.Capabilities != nil && runtime.Spec.Capabilities.MCPPolicy != nil {
+		registeredApprovals = runtime.Spec.Capabilities.MCPPolicy.ApprovalRequiredTools
+	}
+	for _, name := range connectorWrite {
+		if !slices.Contains(registeredApprovals, name) {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"write tool %q runs under the requester's linked account and must be in the external AgentRuntime's registered approvalRequiredTools", name,
+			))
+		}
+	}
+	return nil
+}
+
+// checkExternalConnectorTools applies the connector rules to an external v2
+// runtime. Its MCP policy is fixed by its registered profile, so
+// per-requester links cannot narrow it. Tools behind connection-mode
+// policies therefore fail closed here, with a definitive reason, rather than
+// being advertised as tools whose every call would fail for want of a frozen
+// Connection; only names that resolve to brokered custom Tools count. GitHub
+// built-ins under a linked account are carried only when the requester's
+// link leaves the registered policy exactly as registered; see
+// checkExternalLinkedBuiltins.
+func (r *TaskReconciler) checkExternalConnectorTools(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	runtime *corev1alpha1.AgentRuntime,
+	providerKind string,
+	registry *tools.Registry,
+) (linkedBuiltins []string, err error) {
+	var runtimeAllowed, runtimeDisallowed []string
+	if runtime.Spec.Capabilities.MCPPolicy != nil {
+		runtimeAllowed = runtime.Spec.Capabilities.MCPPolicy.AllowedTools
+		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
+	}
+	// The session's descriptors come from the registered policy alone, so a
+	// Task-level deny of a linked built-in that policy still exposes would
+	// not remove it: it would be frozen and offered anyway. Such a Task is
+	// refused rather than bound with a tool it denied.
+	if task.Spec.AgentRuntime != nil {
+		for _, denied := range brokeredLinkedBuiltins(r.MCPRegistry, task.Spec.AgentRuntime.DisallowedTools) {
+			if slices.Contains(runtimeAllowed, denied) && !slices.Contains(runtimeDisallowed, denied) {
+				return nil, permanentACPAgentConfiguration(fmt.Errorf(
+					"task disallowedTools names %q, which the registered external AgentRuntime MCP policy exposes; a linked built-in cannot be narrowed per task", denied))
+			}
+		}
+	}
+	candidates := connectorCandidateTools(task, agent, runtimeDisallowed)
+	custom := brokeredCustomCandidates(candidates, providerKind, registry)
+	if connectorTools, err := classifyConnectorTools(ctx, reader, r.MCPRegistry, task.Namespace, custom, connectorScope{strictPolicies: true}); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
+	}
+	linkedBuiltins = brokeredLinkedBuiltins(r.MCPRegistry, candidates)
+	if len(linkedBuiltins) > 0 {
+		if err := checkExternalLinkedBuiltins(ctx, reader, r.MCPRegistry, task, runtime, candidates); err != nil {
+			return nil, err
+		}
+	}
+	return linkedBuiltins, nil
+}
+
+// brokeredCustomCandidates keeps the names that would resolve to brokered
+// custom Tools, mirroring buildCanonicalMCPToolDescriptors: a registered
+// built-in or a provider-native tool takes precedence over a same-named Tool
+// CR, which is then never exposed and cannot make a Task connector-backed.
+func brokeredCustomCandidates(names []string, providerKind string, registry *tools.Registry) []string {
+	native := providerNativeTools[strings.ToLower(providerKind)]
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if registry != nil {
+			if _, builtin := registry.Get(name); builtin {
+				continue
+			}
+		}
+		if _, isNative := native[strings.ToLower(name)]; isNative {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept
 }

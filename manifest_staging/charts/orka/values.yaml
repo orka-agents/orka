@@ -155,6 +155,13 @@ controller:
     commandTimeout: 30m
     cleanupPolicy: delete
 
+  # Per-user connectors (ConnectorProvider and Connection). When enabled, the
+  # OAuth provider must register exactly callbackBaseUrl + /api/v1/connections/callback.
+  connectors:
+    enabled: false
+    # Absolute https origin people reach the dashboard on, for example https://orka.example.com.
+    callbackBaseUrl: ""
+
   # OIDC/JWT authentication for external API requests
   oidc:
     # Issuer URL expected in bearer tokens. Requires audience when set.
@@ -205,6 +212,8 @@ controller:
       monitorRead: ""
       monitorWrite: ""
       monitorOperate: ""
+      connectorRead: ""
+      connectorManage: ""
       skillRead: ""
       skillWrite: ""
       gatewayRead: ""

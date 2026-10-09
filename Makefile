@@ -471,6 +471,8 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 		agentruntimes.core.orka.ai \
 		agents.core.orka.ai \
 		branchclaims.core.orka.ai \
+		connections.core.orka.ai \
+		connectorproviders.core.orka.ai \
 		controllerepochs.core.orka.ai \
 		executionworkspaceclasses.workspace.orka.ai \
 		executionworkspacepools.workspace.orka.ai \
@@ -579,7 +581,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.14.0
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)

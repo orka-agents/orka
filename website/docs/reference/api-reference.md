@@ -38,7 +38,7 @@ Authentication modes:
 Txn-Token: <txntoken+jwt>
 ```
 
-When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Transaction Token integration](../concepts/transaction-tokens.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
+When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. Right after creating such a Task the API seals `orka.ai/requested-by-stamp`, an HMAC over the server-assigned Task UID and the requester, next to the controller-only `orka.ai/requested-by-source=api` annotation; connector use trusts a requester only when that stamp verifies for the Task's own UID, so a Task planted with the source annotation while admission was disabled is never trusted. A coordination child created by a worker is sealed only through `POST /internal/v1/tasks/:namespace/:taskName/children/:child/requester-stamp`, which authenticates the caller as the parent's current worker and checks that the child is controller-owned by that parent and names the same requester; an owner reference alone never lets a child inherit authority. Because the seal is a second write after the create (or, for a coordination child, a request from the parent's worker), an API-stamped Task or controller-owned child less than two minutes old whose seal has not landed is retried at dispatch rather than dispatched without Connections; an older unsealed Task is treated as unverified. See [Transaction Token integration](../concepts/transaction-tokens.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
 ## Webhooks
 
@@ -310,7 +310,7 @@ MCP actor-backed tools require Substrate support to be enabled on the controller
 
 ## OutboundAccessPolicy
 
-`OutboundAccessPolicy` is namespaced and selects exactly one adapter. Direct mode performs RFC 8693/RFC 7523 exchange and injects a validated Bearer resource credential. Gateway mode dials a trusted Kubernetes Service while preserving the original Tool authority, path, query, method, body, and protocol headers.
+`OutboundAccessPolicy` is namespaced and selects exactly one adapter. Direct mode performs RFC 8693/RFC 7523 exchange and injects a validated Bearer resource credential. Gateway mode dials a trusted Kubernetes Service while preserving the original Tool authority, path, query, method, body, and protocol headers. Connection mode injects the requesting person's linked-account credential for a `ConnectorProvider`.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -330,7 +330,112 @@ spec:
     expectedIssuedTokenType: urn:ietf:params:oauth:token-type:access_token
 ```
 
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: github-as-me
+  namespace: default
+spec:
+  connection:
+    providerRef:
+      name: github
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.connection.providerRef.name` | string | required | Same-namespace `ConnectorProvider`. `ResolvedRefs` is True only while the provider is Accepted. |
+| `spec.connection.output` | object | `Authorization: Bearer` | Header and prefix for the injected credential. `Txn-Token` is forbidden. |
+
+Connection mode resolves at call time, in the controller only. A `readOnly` Connection hides the provider's write-class tools from the agent, and connector write tools are always approval-required. For native `type: ai` Tasks the worker Pod never runs such a tool itself: it calls `POST /internal/v1/tasks/:namespace/:taskName/connector-tools/:tool` with its ServiceAccount token, and the controller verifies the caller is the Task's current worker, that the arguments satisfy the Tool's declared JSON Schema, that the tool is connector-backed and enabled for the Task, and that the policy frozen into the Job at dispatch is honored: the Job carries the tool list, the approval-required set, the spec digest of every dispatched connector tool, and the Connection bindings (`ORKA_CONNECTOR_TOOL_DIGESTS`, `ORKA_CONNECTION_BINDINGS`). A tool whose definition changed since dispatch, a write-class tool the frozen policy does not cover, or a Task whose `status.connectionBindings` no longer match the Job's is refused, and a tool the policy covers executes only with an approved approval (`approvalId`) that binds this tool's configuration, the connection-mode policy's injection configuration, and the Connection frozen for its policy (so a Job re-created after the decision against a re-linked account or a changed policy needs a fresh approval), these exact arguments, and is claimed atomically for a single execution. Every failure before a provider request hands the claim back; a claimed call is recorded in the durable external-effect ledger under its claim with the frozen Connection digest, using the Tool's own request timeout as its lease, and a worker that lost the response receives the committed result again (`replayed: true`) without a second request. Results larger than 256 KiB are retained as a digest-and-size receipt and cannot be replayed. The effect record is reserved before the claim is recorded, and a spent claim is reconciled from it: a record still Pending is moved to Failed (which fences out any request that has not started its call) and the claim is handed back; an in-flight record whose lease lapsed settles as outcome unknown (`502`) and the approval stays spent; a live in-flight record is `409 still executing`. It then executes the call against the Connection frozen into `status.connectionBindings` at Job creation, which a recovered Job always reads back from its own environment. The Task's verified `spec.requestedBy` selects the person, the Connection identity frozen into the Task's execution snapshot at dispatch must still match the live Connection (UID, generation, and grant sequence, so a re-link of the same Connection object needs a re-dispatch), the policy object checked against the dispatched configuration must be the one that resolves, the Connection must be Ready for its current generation, and the Tool URL must be HTTPS without `authSecretRef`. A token that expires within 60 seconds is refreshed once per Connection at a time and the rotated material written back to custody. A provider that rejects the refresh marks the Connection `Revoked` and shreds its custody; an expired token with no refresh token marks it `Expired`. Any other condition fails the call with no fallback to Task Secrets, environment credentials, or other people's Connections. Worker Pods have no credential source and refuse connection-mode policies.
+
 Policy status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. Secret references are key-specific and same-namespace. Cross-namespace Service refs require exact controller allowlist entries. See [Outbound Access Policies](../concepts/outbound-access.md).
+
+## ConnectorProvider
+
+`ConnectorProvider` is the operator-owned catalog entry for one third-party service people may link through OAuth. It is namespaced, reconciled only when the controller runs with `--connectors-enabled`, and carries public OAuth client settings plus the tools the service offers. Only the client secret lives in a Secret.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: ConnectorProvider
+metadata:
+  name: github
+  namespace: default
+spec:
+  displayName: GitHub
+  oauth:
+    authorizeURL: https://github.com/login/oauth/authorize
+    tokenURL: https://github.com/login/oauth/access_token
+    clientID: Iv1.example-client-id
+    clientSecretRef:
+      name: github-connector-oauth
+      key: clientSecret
+    scopes:
+      read: [read:user]
+      write: [repo]
+  tools:
+    - name: list_pull_requests
+      class: read
+      source: Builtin
+    - name: create_pull_request
+      class: write
+      source: Builtin
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.displayName` | string | object name | Shown to people in the dashboard and CLI. |
+| `spec.oauth.authorizeURL` | string | required | Absolute HTTPS authorization endpoint. Private, loopback, link-local, and cluster-internal hosts are rejected, and so are single-label names (which Pod DNS search domains complete to cluster Services) and non-canonical numeric hosts. Hosts must be ASCII: write an internationalized name in its punycode (`xn--`) form. The same host rules, and a 2048-byte length bound, apply to every endpoint and HTTP tool URL. |
+| `spec.oauth.tokenURL` | string | required | Absolute HTTPS token endpoint used for the code exchange and refresh. |
+| `spec.oauth.revocationURL` | string | empty | Optional RFC 7009 endpoint called best-effort on disconnect for the committed credential. It must be on the token endpoint's host and port, so tokens are only sent back to their issuer; GitHub has no such endpoint, so a GitHub provider leaves it empty. Orka never revokes material it did not commit: a token from a consent nobody completed is deleted and left to expire, because it may belong to a different person's grant. |
+| `spec.oauth.clientID` | string | required | Public OAuth client identifier, printable ASCII, at most 256 bytes. |
+| `spec.oauth.clientSecretRef` | Secret key selector | required | Same-namespace Secret holding the client secret. |
+| `spec.oauth.clientAuthentication` | `ClientSecretBasic` \| `ClientSecretPost` | `ClientSecretBasic` | How the client secret is presented to the token endpoint. |
+| `spec.oauth.pkce` | bool | `true` | Enable RFC 7636 code verification. |
+| `spec.oauth.scopes.read` / `.write` | []string | empty | Scopes requested for `readOnly` Connections, and additionally for `readWrite`. Entries must be RFC 6749 scope tokens (printable ASCII without spaces, quotes, or backslashes) of at most 256 bytes; the read and write sets together must encode to at most 2048 bytes. |
+| `spec.oauth.additionalAuthorizeParameters` | map | empty | Static authorize query parameters, each value at most 512 bytes and 2048 bytes encoded in total. Reserved OAuth fields and credential-like names (`token`, `secret`, `api_key`, `assertion`, and similar) are rejected; the spec is public configuration. Endpoint URLs may carry a query of at most 1024 bytes, but not credential-like parameters or reserved OAuth fields (including `code_verifier`). An HTTP tool URL may use any query name that is not credential-like, such as `state=open`. |
+| `spec.tools[].name` | string | required | Tool name exposed to agents. Unique within the provider. |
+| `spec.tools[].class` | `read` \| `write` | required | Write tools are hidden from `readOnly` Connections and require approval. |
+| `spec.tools[].source` | `Builtin` \| `HTTP` | required | `Builtin` names an existing Orka tool. `HTTP` carries a curated definition in `http`. |
+| `spec.tools[].description`, `.parameters`, `.http` | | | HTTP tools only. `parameters` must be a JSON Schema whose root declares `type: object` and that resolves in full, including nested property schemas. `http.url` must be HTTPS and is the exact destination, without template placeholders; static headers are limited to 128-byte names, 1024-byte values, and 4096 bytes in total; `Authorization`, `Cookie`, `Host`, `Txn-Token`, and hop-by-hop headers (`Connection`, `Keep-Alive`, `Te`, `Trailer`, `Upgrade`, and similar) are reserved, and credential-like header names (`X-Api-Key`, `X-Auth-Token`, and similar) are rejected: the linked account is the only credential. |
+
+Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. `Builtin` declarations are checked against the controller's built-in tool registry and the connector built-in catalog (the GitHub tools listed in the [Connectors guide](../guides/connectors.md#built-in-github-tools)): a misspelled name, a built-in that would ignore the linked credential, or a class other than the one the catalog fixes for the tool is rejected.
+
+## Connection
+
+`Connection` is one person's linked account with one `ConnectorProvider`. The API server creates it from the caller's verified OIDC or context-token identity; `spec.subject` and `spec.providerRef` are immutable. Deleting the Connection is the disconnect. Status never carries token material.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.subject.issuer` | string | required | Identity issuer that verified the subject. Immutable. |
+| `spec.subject.subject` | string | required | Issuer-scoped stable subject. Immutable. |
+| `spec.providerRef.name` | string | required | Same-namespace `ConnectorProvider`. Immutable. |
+| `spec.mode` | `readOnly` \| `readWrite` | `readOnly` | `readOnly` hides the provider's write tools and requests only read scopes. |
+| `status.state` | string | | `Pending`, `Ready`, `Expired`, `Revoked`, or `Error`. |
+| `status.grantedScopes` | []string | | Scopes the provider reported at consent time. |
+| `status.linkedAt`, `.expiresAt`, `.lastRefreshTime` | time | | Link, access-token expiry, and refresh timestamps. |
+| `status.grantSequence` | integer | | The grant custody assigned to the linked material; it rises with every committed consent and never repeats. Authority frozen or approved under one grant does not survive a re-link. |
+| `status.consent.providerUID`, `.authorityDigest` | string | | The `ConnectorProvider` UID and a non-secret digest of everything the last consent authorized a token to reach: the provider's OAuth client identity (client ID, secret reference, authentication method, endpoints, static authorize parameters) and the curated HTTP tool destinations (name, class, URL, method, static headers). Built-in declarations (name, class, and their fixed `https://api.github.com` audience) are part of it too. Changing any of these asks for consent again. |
+
+Conditions are `ProviderResolved` and `ScopesGranted` (set by the controller; the latter compares `status.grantedScopes` with the scopes the current mode and provider require, so widening the mode or a provider requiring more scopes projects `Pending` with reason `ConsentRequired` without erasing the consent, and narrowing restores readiness; it also requires `status.consent` to match the current provider, so a replaced provider or a changed OAuth client asks for consent again instead of refreshing or revoking the held token against a different authority) and `Ready` (set by the consent and refresh paths). A Connection is usable only when `Ready` is True and both controller conditions are True for the current generation. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
+
+## Connector endpoints
+
+Available when the controller runs with `--connectors-enabled` and `--connector-callback-base-url`. Every route except the OAuth callback requires a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. The callback is the provider's redirect target and carries no user token: the signed single-use consent `state` authenticates it against the pending consent instead, and the server-side PKCE verifier binds the code exchange to that consent. Under context-token authorization, reads need `orka:connectors:read` and every mutation needs `orka:connectors:manage`, so a delegated token narrowed to other work cannot inspect or revoke a person's accounts. A person sees and changes only Connections whose `spec.subject` matches their identity; a foreign Connection reads as 404. Responses never carry token material.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/connectors` | GET | List the provider catalog: name, display name, readiness, scopes, and tools with their `read`/`write` class. |
+| `/api/v1/connections` | GET | List the caller's Connections. |
+| `/api/v1/connections` | POST | Body `{"provider": "github", "mode": "readOnly"}`. Creates or reuses the caller's Connection for that provider and returns `{"connection": ..., "authorizeURL": ...}`. The browser opens `authorizeURL`; unknown body fields, including any subject, are rejected. |
+| `/api/v1/connections/:name` | GET | One Connection. |
+| `/api/v1/connections/:name` | PUT | Body `{"mode": "readWrite"}` (`mode` is required). Whenever the granted scopes do not cover the requested mode the response carries a new `authorizeURL`, so widening to `readWrite`, and retrying it, asks for the write scopes; narrowing takes effect immediately. |
+| `/api/v1/connections/:name` | DELETE | Disconnect. When the provider names a `revocationURL`, the controller's finalizer revokes the committed tokens (against the client and revocation endpoint sealed with them, so a moved token endpoint does not skip revocation); it then deletes the sealed material. GitHub has no revocation endpoint, so a GitHub disconnect only deletes the tokens Orka holds. A provider that refuses a revocation is best effort; a missing client Secret or key is not: custody and the finalizer are kept, and the disconnect retries until the Secret is restored, unless the provider itself is being deleted (namespace teardown), in which case the tokens are left to expire and the disconnect finishes. |
+| `/api/v1/connections/:name/authorize` | POST | Restart consent for an existing Connection, for example after the provider revoked it. |
+| `/api/v1/connections/callback` | GET | OAuth redirect target. Unauthenticated: the signed single-use `state` authenticates it against the pending consent, and the server-side PKCE verifier binds the code exchange to that consent. It exchanges the code, parks the tokens sealed as a pending completion, and redirects to `<callback base>/settings/connectors?status=pending&connection=<name>&namespace=<namespace>#completion=<token>` (the namespace the consent was sealed in, which the completion must target), or `?status=error&reason=<code>`. A provider that grants fewer scopes than the mode requires is refused (`reason=scopes_denied`); the issued token is discarded and left to expire, never revoked, because Orka cannot prove whose grant a token nobody committed belongs to. The requested set is the one sealed when consent started, never the provider's current configuration. A provider that omits the `scope` field granted the requested set; an explicitly empty `scope` is a grant of nothing and is refused. Granted scope lists are split on spaces and, as GitHub reports them, commas; a configured scope name may not contain a comma, so splitting never fabricates a required scope. A provider whose OAuth client changed since consent started is refused before any exchange (`reason=provider_changed`). So is a Connection whose mode changed while the person was at the provider (`reason=mode_changed`). Consents are numbered when they start; a callback from a consent older than one already parked or committed for the Connection is refused (`reason=consent_superseded`), and a newer callback replaces an older uncommitted completion, so callbacks that finish out of order never let an older grant replace a newer one. |
+| `/api/v1/connections/:name/complete` | POST | Body `{"completion": "<token from the fragment>"}`. Commits the parked tokens. Only the Connection's owner can call it and only with the one-time token the completing browser received, so a consent link forwarded to someone else can never bind their account to the sender's Connection. Requires the controller's custody finalizer to be present; after a disconnect the UID is tombstoned and completion is refused. A short-lived token without a refresh token that expired while the browser held the completion is refused (`409`) and the completion discarded, never committed as Ready. If a `PUT` changed the mode between the completion fence and the status write, the link is judged again from the committed material against the new mode. A Connection keeps at most 16 superseded grants for revocation at disconnect; a completion past that bound is refused (`409`) and the person disconnects and links again. |
+
+The consent `state` and the completion token are HMACs over random single-use nonces, keyed by a value derived from the controller's snapshot key. The pending consent row, sealed with the controller key, binds the nonce to the Connection UID, owner digest, provider, and a 10 minute expiry. Token material is sealed under a per-Connection data key that is itself wrapped by the controller key. Disconnect deletes both halves and tombstones the Connection, so the live store and later backups hold nothing; a backup taken before the disconnect still contains the sealed material and must be protected like the store itself. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md). A Connection holds one pending consent at a time: a new authorize replaces the earlier one. A `ConnectorProvider` name is at most 63 characters, since it labels every Connection.
 
 ## Security
 

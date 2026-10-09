@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -62,14 +63,21 @@ type compatProxyToolContextConfig struct {
 	AuthContext               *ContextToken
 	AuthorizationConfig       ContextTokenAuthorizationConfig
 	UserInfo                  *UserInfo
+	LinkedAccounts            LinkedAccountsFactory
+	ConnectorsEnabled         bool
 }
 
 func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolContext {
 	tasksCreated := 0
 	authorizationReader := uncachedReaderOr(cfg.AuthorizationReader, cfg.Client)
+	requester := requesterFromUserInfo(cfg.UserInfo)
 	toolCtx := &tools.ToolContext{
 		Client:                    cfg.Client,
 		PolicyReader:              authorizationReader,
+		Requester:                 requester,
+		LinkedAccounts:            scopedLinkedAccounts(cfg.LinkedAccounts, cfg.Namespace, requester, cfg.UserInfo, cfg.AuthorizationConfig),
+		AuthorizeConnectorRead:    connectorReadToolAuthorizer(cfg.UserInfo, cfg.AuthorizationConfig, cfg.ConnectorsEnabled),
+		CreatedTasks:              tools.NewCreatedTasks(),
 		KubeClient:                cfg.KubeClient,
 		Namespace:                 cfg.Namespace,
 		Tenant:                    cfg.Namespace,
@@ -95,6 +103,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 			}
 			return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
 		}
+		toolCtx.SealTaskCreate = requesterStampSealer
 	}
 	if cfg.Profile.TaskDeleteAction != "" {
 		toolCtx.AuthorizeTaskDelete = func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
@@ -143,4 +152,40 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 	}
 	authorizeExternalToolContext(toolCtx, cfg.UserInfo, cfg.GatewayEventStore)
 	return toolCtx
+}
+
+// scopedLinkedAccounts builds the person's linked-account resolver under
+// the connector-read boundary the connector routes and list_connections
+// apply: under enforcement, a delegated token without that scope uses no
+// linked account (a catalog built-in keeps its own credential path, as it
+// does for a person with no link), and audit mode records the missing
+// scope when a linked built-in is actually resolved.
+func scopedLinkedAccounts(factory LinkedAccountsFactory, namespace string, requester *corev1alpha1.RequestedBy, ui *UserInfo, cfg ContextTokenAuthorizationConfig) tools.LinkedAccountCredentials {
+	if factory == nil || requester == nil {
+		return nil
+	}
+	inner := factory(namespace, requester)
+	if inner == nil {
+		return nil
+	}
+	authorize := connectorReadToolAuthorizer(ui, cfg, true)
+	if authorize == nil {
+		return inner
+	}
+	return scopeGatedLinkedAccounts{inner: inner, authorize: authorize}
+}
+
+// scopeGatedLinkedAccounts consults the connector-read boundary before it
+// resolves a linked account, so a refused token never reaches custody.
+type scopeGatedLinkedAccounts struct {
+	inner     tools.LinkedAccountCredentials
+	authorize func() *tools.ChatToolError
+}
+
+// BuiltinToolCredential implements tools.LinkedAccountCredentials.
+func (s scopeGatedLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName string) (tools.LinkedAccountCredential, bool, error) {
+	if _, linked := connectors.BuiltinConnectorToolClass(toolName); linked && s.authorize() != nil {
+		return tools.LinkedAccountCredential{}, false, nil
+	}
+	return s.inner.BuiltinToolCredential(ctx, toolName)
 }

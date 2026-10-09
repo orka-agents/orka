@@ -500,6 +500,14 @@ type TaskStatus struct {
 	// +optional
 	AgentExecutionBinding *AgentExecutionBinding `json:"agentExecutionBinding,omitempty"`
 
+	// ConnectionBindings freezes, for native type: ai Tasks, the identity of
+	// the requester's Connection behind each connection-mode
+	// OutboundAccessPolicy at Job creation. Connector-backed tool calls from
+	// the worker are honored only while the live Connection still matches.
+	// No token material is ever recorded.
+	// +optional
+	ConnectionBindings []ConnectionBinding `json:"connectionBindings,omitempty"`
+
 	// ExecutionOutcome records the immutable outcome of a non-ACP workload before
 	// provider-neutral execution-workspace finalization completes.
 	// +optional
@@ -708,6 +716,31 @@ type ChildTaskStatus struct {
 	// Result is the result from the child task (if completed)
 	// +optional
 	Result string `json:"result,omitempty"`
+}
+
+// ConnectionBinding is one frozen person-to-provider link for a policy.
+type ConnectionBinding struct {
+	// PolicyName is the connection-mode OutboundAccessPolicy.
+	PolicyName string `json:"policyName"`
+	// Provider is the ConnectorProvider the policy selects.
+	Provider string `json:"provider"`
+	// ConnectionName is the requester's Connection for that provider.
+	ConnectionName string `json:"connectionName"`
+	// UID and Generation pin the Connection as it was when frozen.
+	UID        string `json:"uid"`
+	Generation int64  `json:"generation"`
+	// GrantSequence is the Connection's consent count when frozen; a
+	// re-link of the same object raises it and invalidates this binding.
+	GrantSequence int64 `json:"grantSequence"`
+	// Mode is the Connection mode at freeze time.
+	Mode string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the policy object the binding was
+	// frozen under, so a policy deleted and recreated, or edited, after
+	// dispatch is refused rather than executed under the old binding.
+	// +optional
+	PolicyUID string `json:"policyUID,omitempty"`
+	// +optional
+	PolicyGeneration int64 `json:"policyGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

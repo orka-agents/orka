@@ -122,6 +122,7 @@ rules:
   - agentruntimes
   - agents
   - branchclaims
+  - connections
   - controllerepochs
   - externaleffects
   - promptattempts
@@ -149,6 +150,8 @@ rules:
   - agentruntimes/finalizers
   - agents/finalizers
   - branchclaims/finalizers
+  - connections/finalizers
+  - connectorproviders/finalizers
   - controllerepochs/finalizers
   - externaleffects/finalizers
   - outboundaccesspolicies/finalizers
@@ -171,6 +174,8 @@ rules:
   - agentruntimes/status
   - agents/status
   - branchclaims/status
+  - connections/status
+  - connectorproviders/status
   - controllerepochs/status
   - externaleffects/status
   - outboundaccesspolicies/status
@@ -189,6 +194,16 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - connectorproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - core.orka.ai
   resources:

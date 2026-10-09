@@ -291,6 +291,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		Namespace:           namespace,
 		ToolUseAction:       "openAITools",
 		AuthorizationConfig: h.contextTokenAuthorization,
+		ConnectorsEnabled:   h.config.ConnectorsEnabled,
 	})
 	if err != nil {
 		return openAIContextTokenAuthorizationError(c, err)
@@ -314,6 +315,8 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			AuthContext:               contextToken,
 			AuthorizationConfig:       h.contextTokenAuthorization,
 			UserInfo:                  userInfo,
+			LinkedAccounts:            h.config.LinkedAccounts,
+			ConnectorsEnabled:         h.config.ConnectorsEnabled,
 		})
 
 	}

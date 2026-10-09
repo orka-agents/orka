@@ -118,6 +118,8 @@ type Handlers struct {
 	gatewayIngressLimiter     *gatewayIngressLimiter
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
+	connectors                ConnectorConfig
+	completionLocks           *completionLocks
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -143,6 +145,7 @@ type HandlersConfig struct {
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
+	Connectors                ConnectorConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -172,6 +175,8 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		gatewayIngressLimiter:     newGatewayIngressLimiter(),
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
+		connectors:                cfg.Connectors,
+		completionLocks:           newCompletionLocks(),
 	}
 }
 
@@ -567,7 +572,11 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		return err
 	}
 
-	if err := h.client.Create(ctx, task); err != nil {
+	createErr := h.client.Create(ctx, task)
+	if createErr == nil {
+		sealRequesterStamp(ctx, h.client, task)
+	}
+	if err := createErr; err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "task already exists")
 		}

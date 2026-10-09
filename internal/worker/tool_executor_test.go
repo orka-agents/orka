@@ -28,6 +28,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -38,8 +41,6 @@ import (
 	"github.com/orka-agents/orka/internal/transactiontoken"
 	txtest "github.com/orka-agents/orka/internal/transactiontoken/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
-	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const (
@@ -2780,7 +2781,7 @@ func TestToolHTTPClientStripsSensitiveHeadersOnRedirect(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	client, err := toolHTTPClient(server.Client(), nil, tokenexchange.TLSConfig{}, false)
+	client, err := toolHTTPClient(server.Client(), nil, tokenexchange.TLSConfig{}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2825,7 +2826,7 @@ func TestToolHTTPClientGatewayBypassesConfiguredProxy(t *testing.T) {
 	transport := base.Transport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxyURL)
 	base.Transport = transport
-	client, err := toolHTTPClient(base, nil, tokenexchange.TLSConfig{}, true)
+	client, err := toolHTTPClient(base, nil, tokenexchange.TLSConfig{}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2854,7 +2855,7 @@ func TestToolHTTPClientDoesNotFollowGatewayRedirect(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}))
 	defer gateway.Close()
-	client, err := toolHTTPClient(gateway.Client(), nil, tokenexchange.TLSConfig{}, true)
+	client, err := toolHTTPClient(gateway.Client(), nil, tokenexchange.TLSConfig{}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2961,7 +2962,7 @@ func TestToolHTTPClientRejectsCrossOriginRedirectWithoutCredentials(t *testing.T
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}))
 	defer source.Close()
-	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false)
+	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3232,5 +3233,35 @@ func TestGatewayMCPErrorHidesMessageAndPreservesClassification(t *testing.T) {
 	}
 	if !ToolRequestWasAttempted(err) {
 		t.Fatal("gateway error lost attempted-request classification")
+	}
+}
+
+// A request carrying a person's linked-account credential never follows a
+// redirect: Go forwards custom headers across redirects, and the credential
+// is bound to the origin the provider declared.
+func TestToolHTTPClientDoesNotFollowRedirectsForConnectionCredentials(t *testing.T) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(source.Close)
+	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, source.URL+"/search", nil)
+	req.Header.Set("X-Linked-Token", "secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || hits.Load() != 0 {
+		t.Fatalf("status = %d target hits = %d, want the redirect returned unfollowed", resp.StatusCode, hits.Load())
 	}
 }

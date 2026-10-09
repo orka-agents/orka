@@ -8,8 +8,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
@@ -120,7 +124,11 @@ func setupJobBuilder() *JobBuilder {
 
 // buildEnvVars builds the environment variables for the container
 func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
-	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+	envVars, err := b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+	if err != nil {
+		panic(err)
+	}
+	return envVars
 }
 
 func assertServiceAccountName(t *testing.T, got, want string) {
@@ -1376,7 +1384,10 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 		},
 	}
 
-	container := builder.buildContainerWithOptions(context.Background(), task, nil, nil, JobBuildOptions{})
+	container, err := builder.buildContainerWithOptions(context.Background(), task, nil, nil, JobBuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if container.Image != DefaultGeneralWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultGeneralWorkerImage)
 	}
@@ -2356,7 +2367,7 @@ func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2430,7 +2441,7 @@ func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2460,7 +2471,7 @@ func TestAddAIEnvVars_ChildTaskMessagingDisabled(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2502,7 +2513,7 @@ func TestAddAIEnvVars_ChildTaskExplicitCoordinationWithInjectionDisabled(t *test
 		},
 	}
 
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, envVar := range envVars {
 		envMap[envVar.Name] = envVar.Value
@@ -2554,7 +2565,7 @@ func TestJobBuilderEffectiveAIToolsMatchAuthorizationResolver(t *testing.T) {
 				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{Tools: tt.tools}},
 			}
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: tt.coordination}}
-			envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+			envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 			env, found := findEnvVar(envVars, workerenv.AITools)
 			if !found {
 				t.Fatalf("missing %s", workerenv.AITools)
@@ -2586,7 +2597,7 @@ func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 			},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2625,7 +2636,7 @@ func TestAddAIEnvVars_CoordinationEnabledWithExplicitToolsOnly(t *testing.T) {
 			},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2919,6 +2930,176 @@ func TestJobBuilder_buildEnvVars_WithApprovalRequiredTools(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnReadOnly(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: defaultNS},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
+	connectorTool := func(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass) *corev1alpha1.Tool {
+		return &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS},
+			Spec: corev1alpha1.ToolSpec{Description: name, BrokeredToolClass: class, HTTP: &corev1alpha1.HTTPExecution{
+				URL: "https://api.github.example.test/" + name, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+			}},
+		}
+	}
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	connection := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("github", requester.Issuer, requester.Subject), Namespace: defaultNS, UID: "conn-uid", Generation: 1},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite,
+		},
+		Status: corev1alpha1.ConnectionStatus{GrantSequence: 1, Conditions: []metav1.Condition{
+			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: "Linked", ObservedGeneration: 1},
+			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: "ScopesGranted", ObservedGeneration: 1},
+			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: "ProviderResolved", ObservedGeneration: 1},
+		}},
+	}
+	var toolReadFailure atomic.Bool
+	buildWith := func(connection *corev1alpha1.Connection) []corev1.EnvVar {
+		provider := acceptedBuiltinProvider("github")
+		provider.Namespace = defaultNS
+		objects := []client.Object{policy, provider, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
+		if connection != nil {
+			objects = append(objects, consentedConnection(connection, provider))
+		}
+		builder := setupJobBuilder()
+		builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, isTool := obj.(*corev1alpha1.Tool); isTool && toolReadFailure.Load() {
+						return errors.New("transient tool read failure")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}).Build()
+		SetRequesterStampKey(testRequesterStampKey)
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: testTask, Namespace: defaultNS, UID: "task-uid",
+				Annotations: map[string]string{
+					labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+					labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "task-uid", requester.Issuer, requester.Subject),
+				},
+			},
+			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review", RequestedBy: requester},
+		}
+		agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+			Tools:        []corev1alpha1.ToolReference{{Name: "gh_read"}, {Name: "gh_write"}},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true, ApprovalRequiredTools: []string{"dispatch_work_order"}},
+		}}
+		return builder.buildEnvVars(context.Background(), task, agent, nil)
+	}
+	// A read failure while resolving connector tools must fail the build
+	// (the Task controller requeues) rather than start a worker with a write
+	// tool advertised but absent from the approval set.
+	toolReadFailure.Store(true)
+	func() {
+		defer func() {
+			recovered := recover()
+			err, _ := recovered.(error)
+			if err == nil || !errors.Is(err, ErrConnectorToolResolution) {
+				t.Fatalf("build with unreadable tools = %v, want ErrConnectorToolResolution", recovered)
+			}
+		}()
+		buildWith(connection)
+	}()
+	toolReadFailure.Store(false)
+
+	envVars := buildWith(connection)
+	tools, _ := findEnvVar(envVars, workerenv.AITools)
+	if !strings.Contains(tools.Value, "gh_write") || !strings.Contains(tools.Value, "gh_read") {
+		t.Fatalf("readWrite link must expose both tools, got %q", tools.Value)
+	}
+	approval, _ := findEnvVar(envVars, workerenv.ApprovalRequiredTools)
+	if approval.Value != "dispatch_work_order,gh_write" {
+		t.Fatalf("%s = %q, want the connector write tool added", workerenv.ApprovalRequiredTools, approval.Value)
+	}
+	// The controller executes each connector tool only as defined at
+	// dispatch: the Job carries the spec digest of every dispatched one.
+	digests := map[string]string{}
+	digestsEnv, _ := findEnvVar(envVars, workerenv.ConnectorToolDigests)
+	if err := json.Unmarshal([]byte(digestsEnv.Value), &digests); err != nil {
+		t.Fatalf("%s = %q: %v", workerenv.ConnectorToolDigests, digestsEnv.Value, err)
+	}
+	readSpec, _ := ConnectorToolDispatchDigest(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).Spec, policy.Spec)
+	writeSpec, _ := ConnectorToolDispatchDigest(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).Spec, policy.Spec)
+	wantRead := NativeConnectorToolDispatchDigest(string(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).UID), string(policy.UID), readSpec)
+	wantWrite := NativeConnectorToolDispatchDigest(string(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).UID), string(policy.UID), writeSpec)
+	if len(digests) != 2 || digests["gh_read"] != wantRead || digests["gh_write"] != wantWrite {
+		t.Fatalf("%s = %v, want both connector tools digested", workerenv.ConnectorToolDigests, digests)
+	}
+
+	readOnly := connection.DeepCopy()
+	readOnly.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	envVars = buildWith(readOnly)
+	tools, _ = findEnvVar(envVars, workerenv.AITools)
+	if strings.Contains(tools.Value, "gh_write") || !strings.Contains(tools.Value, "gh_read") {
+		t.Fatalf("readOnly link must hide the write tool, got %q", tools.Value)
+	}
+	digestsEnv, _ = findEnvVar(envVars, workerenv.ConnectorToolDigests)
+	if !strings.Contains(digestsEnv.Value, "gh_read") || strings.Contains(digestsEnv.Value, "gh_write") {
+		t.Fatalf("%s = %q, want only the dispatched tool digested", workerenv.ConnectorToolDigests, digestsEnv.Value)
+	}
+	approval, _ = findEnvVar(envVars, workerenv.ApprovalRequiredTools)
+	if approval.Value != "dispatch_work_order" {
+		t.Fatalf("%s = %q, want only the agent's own list", workerenv.ApprovalRequiredTools, approval.Value)
+	}
+
+	envVars = buildWith(nil)
+	tools, _ = findEnvVar(envVars, workerenv.AITools)
+	if !strings.Contains(tools.Value, "gh_write") {
+		t.Fatalf("without a link the tool stays visible and fails closed at call time, got %q", tools.Value)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_FreezesConnectionBindingsOnTheJob(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"}}}
+	bindings := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
+	envVars, err := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ConnectionBindings: bindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, found := findEnvVar(envVars, workerenv.ConnectionBindings)
+	if !found {
+		t.Fatalf("missing %s", workerenv.ConnectionBindings)
+	}
+	job := &batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: workerContainerName, Env: envVars}}}}}}
+	decoded, present, err := FrozenConnectionBindingsFromJob(job)
+	if err != nil || !present || !ConnectionBindingsEqual(decoded, bindings) {
+		t.Fatalf("bindings from job = %+v present = %v err = %v (env %q)", decoded, present, err, env.Value)
+	}
+	if strings.Contains(env.Value, "token") {
+		t.Fatalf("frozen bindings must carry no token material: %q", env.Value)
+	}
+	// A Task-supplied value never survives: the controller owns the name.
+	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.ConnectionBindings, Value: `[{"policyName":"github-conn","uid":"forged"}]`}}
+	envVars, err = builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ = findEnvVar(envVars, workerenv.ConnectionBindings)
+	if env.Value != "" {
+		t.Fatalf("%s = %q, want the Task's value replaced by the controller's empty freeze", workerenv.ConnectionBindings, env.Value)
+	}
+	if _, present, err := FrozenConnectionBindingsFromJob(&batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: workerContainerName, Env: []corev1.EnvVar{{Name: workerenv.ConnectionBindings, Value: "{bad"}}}}}}}}); err == nil || !present {
+		t.Fatalf("unreadable bindings must fail closed, got present = %v err = %v", present, err)
+	}
+	if ConnectionBindingsEqual(bindings, []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", UID: "conn-uid", Generation: 3}}) ||
+		!ConnectionBindingsEqual(nil, []corev1alpha1.ConnectionBinding{}) {
+		t.Fatal("binding equality must compare every field and treat empty sets alike")
+	}
+}
+
 func TestJobBuilder_buildEnvVars_WithResolvedApprovalsOption(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2926,7 +3107,10 @@ func TestJobBuilder_buildEnvVars_WithResolvedApprovalsOption(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Coordinate incident"},
 	}
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"}}}
-	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ResolvedApprovalsJSON: `[{"id":"k","status":"approved"}]`})
+	envVars, err := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ResolvedApprovalsJSON: `[{"id":"k","status":"approved"}]`})
+	if err != nil {
+		t.Fatal(err)
+	}
 	env, found := findEnvVar(envVars, workerenv.ResolvedApprovals)
 	if !found {
 		t.Fatalf("missing %s", workerenv.ResolvedApprovals)
@@ -2953,7 +3137,7 @@ func TestJobBuilder_buildEnvVars_KeepsEmptyResolvedApprovalsEnvOverride(t *testi
 			ApprovalRequiredTools: []string{"dispatch_work_order"},
 		},
 	}}
-	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	envVars, _ := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
 	env, ok := findEnvVar(envVars, workerenv.ResolvedApprovals)
 	if !ok {
 		t.Fatalf("missing %s", workerenv.ResolvedApprovals)
@@ -3029,7 +3213,7 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "real-agent", Namespace: defaultNS},
 		Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"}},
 	}
-	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	envVars, _ := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
 	if env, ok := findEnvVar(envVars, workerenv.TaskUID); !ok || env.Value != "real-uid" {
 		t.Fatalf("%s = %#v, found=%t; want real-uid", workerenv.TaskUID, env, ok)
 	}
@@ -3428,5 +3612,143 @@ func TestValidateContainerDeliveredPromptSize(t *testing.T) {
 	containerTask := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "alpine", Prompt: oversized}}
 	if err := builder().validateContainerDeliveredPromptSize(ctx, containerTask, nil); err != nil {
 		t.Fatalf("container task rejected on unused prompt field: %v", err)
+	}
+}
+
+// TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
+// covers one native dispatch: link modes come from the bindings the dispatch
+// froze (not a second Connection read), a policy that changed since the
+// freeze fails the build so the dispatch retries, and a Tool resource
+// shadowed by a coordination built-in the worker registers is never
+// classified as connector-backed.
+func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: defaultNS, UID: "policy-uid", Generation: 3},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
+	connectorTool := func(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass) *corev1alpha1.Tool {
+		return &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS, UID: types.UID(name + "-uid")},
+			Spec: corev1alpha1.ToolSpec{Description: name, BrokeredToolClass: class, HTTP: &corev1alpha1.HTTPExecution{
+				URL: "https://api.github.example.test/" + name, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+			}},
+		}
+	}
+	builder := setupJobBuilder()
+	builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy,
+		connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead),
+		connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite),
+		// Same name as a coordination built-in the worker registers.
+		connectorTool("delegate_task", corev1alpha1.AgentRuntimeBrokeredToolClassWrite),
+	).Build()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "task-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Model:        &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+		Tools:        []corev1alpha1.ToolReference{{Name: "gh_read"}, {Name: "gh_write"}, {Name: "delegate_task"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	binding := corev1alpha1.ConnectionBinding{
+		PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 1, GrantSequence: 1,
+		Mode: corev1alpha1.ConnectionModeReadOnly, PolicyUID: "policy-uid", PolicyGeneration: 3,
+	}
+	// The freeze's own per-tool classification, as createTaskJob hands it on.
+	freezeInfos, err := classifyConnectorTools(context.Background(), builder.Client, NativeWorkerToolRegistry(task, agent), defaultNS,
+		[]string{"gh_read", "gh_write", "delegate_task"}, connectorScope{strictPolicies: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenDigests := nativeConnectorToolDigests(freezeInfos)
+	build := func(bindings ...corev1alpha1.ConnectionBinding) ([]corev1.EnvVar, error) {
+		return builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil,
+			JobBuildOptions{ConnectionBindings: bindings, ConnectionBindingsFrozen: true, ConnectorToolDigests: frozenDigests})
+	}
+
+	envVars, err := build(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsEnv, _ := findEnvVar(envVars, workerenv.AITools)
+	if strings.Contains(toolsEnv.Value, "gh_write") || !strings.Contains(toolsEnv.Value, "gh_read") || !strings.Contains(toolsEnv.Value, "delegate_task") {
+		t.Fatalf("tools = %q, want the frozen readOnly link to hide gh_write and the built-in kept", toolsEnv.Value)
+	}
+	digestsEnv, _ := findEnvVar(envVars, workerenv.ConnectorToolDigests)
+	if !strings.Contains(digestsEnv.Value, "gh_read") || strings.Contains(digestsEnv.Value, "gh_write") || strings.Contains(digestsEnv.Value, "delegate_task") {
+		t.Fatalf("digests = %q, want only the dispatched connector tool", digestsEnv.Value)
+	}
+	approval, _ := findEnvVar(envVars, workerenv.ApprovalRequiredTools)
+	if strings.Contains(approval.Value, "delegate_task") {
+		t.Fatalf("approval set = %q, a shadowed Tool resource must not gate the built-in", approval.Value)
+	}
+
+	// A readWrite binding exposes and gates the write tool.
+	readWrite := binding
+	readWrite.Mode = corev1alpha1.ConnectionModeReadWrite
+	envVars, err = build(readWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsEnv, _ = findEnvVar(envVars, workerenv.AITools)
+	if !strings.Contains(toolsEnv.Value, "gh_write") {
+		t.Fatalf("tools = %q, want the readWrite link to expose gh_write", toolsEnv.Value)
+	}
+
+	// The policy object changed since the freeze: the build fails so the
+	// dispatch retries rather than mixing revisions.
+	stale := binding
+	stale.PolicyGeneration = 2
+	if _, err := build(stale); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("stale binding err = %v, want ErrConnectorToolResolution", err)
+	}
+	if _, err := build(); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("missing binding err = %v, want ErrConnectorToolResolution", err)
+	}
+
+	// One of two Tools sharing the frozen policy was retargeted to a plain
+	// policy since the freeze: the policy is still classified through the
+	// other Tool, but the retargeted one would run locally with no
+	// connector route or approval default, so the build fails.
+	plainPolicy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: defaultNS, UID: "plain-uid"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}},
+	}
+	if err := builder.Create(context.Background(), plainPolicy); err != nil {
+		t.Fatal(err)
+	}
+	retargeted := &corev1alpha1.Tool{}
+	if err := builder.Get(context.Background(), types.NamespacedName{Namespace: defaultNS, Name: "gh_write"}, retargeted); err != nil {
+		t.Fatal(err)
+	}
+	original := retargeted.DeepCopy()
+	retargeted.Spec.HTTP.OutboundAccessPolicyRef.Name = "plain"
+	if err := builder.Update(context.Background(), retargeted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("tool retargeted off a shared policy: err = %v, want ErrConnectorToolResolution", err)
+	}
+	retargeted.Spec.HTTP.OutboundAccessPolicyRef.Name = original.Spec.HTTP.OutboundAccessPolicyRef.Name
+	if err := builder.Update(context.Background(), retargeted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build(readWrite); err != nil {
+		t.Fatalf("tool restored: err = %v", err)
+	}
+
+	// The frozen policy left connection mode since the freeze: its tools
+	// would otherwise run as plain local tools with no connector route or
+	// approval default, so the build fails and the dispatch re-freezes.
+	direct := policy.DeepCopy()
+	direct.Spec.Connection = nil
+	if err := builder.Update(context.Background(), direct); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("policy left connection mode: err = %v, want ErrConnectorToolResolution", err)
 	}
 }

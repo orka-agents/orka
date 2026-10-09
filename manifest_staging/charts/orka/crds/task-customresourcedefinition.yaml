@@ -2346,6 +2346,62 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              connectionBindings:
+                description: |-
+                  ConnectionBindings freezes, for native type: ai Tasks, the identity of
+                  the requester's Connection behind each connection-mode
+                  OutboundAccessPolicy at Job creation. Connector-backed tool calls from
+                  the worker are honored only while the live Connection still matches.
+                  No token material is ever recorded.
+                items:
+                  description: ConnectionBinding is one frozen person-to-provider
+                    link for a policy.
+                  properties:
+                    connectionName:
+                      description: ConnectionName is the requester's Connection for
+                        that provider.
+                      type: string
+                    generation:
+                      format: int64
+                      type: integer
+                    grantSequence:
+                      description: |-
+                        GrantSequence is the Connection's consent count when frozen; a
+                        re-link of the same object raises it and invalidates this binding.
+                      format: int64
+                      type: integer
+                    mode:
+                      description: Mode is the Connection mode at freeze time.
+                      type: string
+                    policyGeneration:
+                      format: int64
+                      type: integer
+                    policyName:
+                      description: PolicyName is the connection-mode OutboundAccessPolicy.
+                      type: string
+                    policyUID:
+                      description: |-
+                        PolicyUID and PolicyGeneration pin the policy object the binding was
+                        frozen under, so a policy deleted and recreated, or edited, after
+                        dispatch is refused rather than executed under the old binding.
+                      type: string
+                    provider:
+                      description: Provider is the ConnectorProvider the policy selects.
+                      type: string
+                    uid:
+                      description: UID and Generation pin the Connection as it was
+                        when frozen.
+                      type: string
+                  required:
+                  - connectionName
+                  - generation
+                  - grantSequence
+                  - mode
+                  - policyName
+                  - provider
+                  - uid
+                  type: object
+                type: array
               delivery:
                 description: Delivery reports trusted workspace validation and publication
                   reconciliation.

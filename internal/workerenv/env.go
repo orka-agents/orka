@@ -92,7 +92,13 @@ const (
 	AutonomousMaxIterations   = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
 	TaskUID                   = "ORKA_TASK_UID"
 	ApprovalRequiredTools     = "ORKA_APPROVAL_REQUIRED_TOOLS"
-	ResolvedApprovals         = "ORKA_RESOLVED_APPROVALS"
+	// ConnectorToolDigests is a JSON object mapping each connector-backed
+	// tool dispatched with the Job to the digest of its Tool spec at dispatch.
+	ConnectorToolDigests = "ORKA_CONNECTOR_TOOL_DIGESTS"
+	// ConnectionBindings is the JSON list of Connection identities frozen
+	// for the Task at dispatch (no token material).
+	ConnectionBindings = "ORKA_CONNECTION_BINDINGS"
+	ResolvedApprovals  = "ORKA_RESOLVED_APPROVALS"
 
 	// Agent runtime env vars.
 	Prompt                      = "ORKA_PROMPT"

@@ -9,7 +9,7 @@ description: "Building, running, and regenerating Orka locally."
 
 | Tool | Version | Notes |
 | --- | --- | --- |
-| Go | 1.26.2 or newer | `go.mod` sets `go 1.26.2` and pins `toolchain go1.27.0`, so Go downloads 1.27.0 for you. CI builds on 1.27. |
+| Go | 1.26.2 or newer | `go.mod` keeps `go 1.26.2` and prefers `toolchain go1.27.2`. With automatic toolchain selection, Go downloads 1.27.2 when needed. CI builds on 1.27. |
 | Bun | current | Builds the React dashboard, which is embedded into the controller binary. Bun 1.4.2 has a [known Windows/WSL setup issue](#windows-bsod-during-ui-dependency-installation); use 1.3.13 there. |
 | Docker | with BuildKit | The Dockerfiles use BuildKit syntax. Docker Desktop and any modern Docker Engine have it on by default. |
 | kubectl | matching your cluster | |
@@ -119,6 +119,7 @@ The repository has additional GitHub Actions workflows in addition to the normal
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Gateway Live E2E` — runs on relevant pushes and pull requests or by manual dispatch. It creates a fresh Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid authentication, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. It is model-free and secret-free and does not use repository or provider credentials.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
+- `Live Connectors E2E` — builds the PR controller, the native AI worker, and the connectors fixture (an OIDC issuer, a fake OAuth provider with short-lived tokens, a resource API, and a scripted model) into Kind, then proves the linked-account lifecycle end to end: a person signs in through the OIDC fixture, links the fake provider (`POST /api/v1/connections`, the consent redirect, and the fragment-carried completion), a native `type: ai` Task created by that person reads through the linked token, its write parks for approval and runs once approved, the second read is served by a refreshed token because the first one expired meanwhile, another person sees no link, and disconnecting revokes the tokens and removes the Connection. It runs the controller with the fixture-only `--connectors-allow-private-endpoints` allowance (a literal acknowledgement value that the controller accepts only together with a plain-http localhost callback base) so the provider may live in the cluster. It is model-free and secret-free.
 
 Validate workflow/script edits locally before pushing:
 
@@ -126,12 +127,14 @@ Validate workflow/script edits locally before pushing:
 bash -n scripts/live-copilot-proxy-e2e.sh
 bash -n scripts/agent-runtime-e2e.sh scripts/agent-runtime-kind-e2e.sh scripts/lib/agent-runtime-kind-bootstrap.sh
 bash -n scripts/live-github-oidc-e2e.sh
+bash -n scripts/live-connectors-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-runtime-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/release-qualification.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/gateway-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repository-monitor-smoke.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-connectors-e2e.yml
 ```
 
 ### External workspace local proof

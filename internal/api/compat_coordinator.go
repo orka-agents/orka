@@ -8,6 +8,7 @@ package api
 
 import (
 	"github.com/gofiber/fiber/v3"
+	toolspkg "github.com/orka-agents/orka/internal/tools"
 
 	"github.com/orka-agents/orka/internal/llm"
 )
@@ -16,6 +17,9 @@ type compatCoordinatorSetup struct {
 	Namespace           string
 	ToolUseAction       string
 	AuthorizationConfig ContextTokenAuthorizationConfig
+	// ConnectorsEnabled mirrors --connectors-enabled; without it the
+	// coordinator never offers list_connections.
+	ConnectorsEnabled bool
 }
 
 // prepareCompatCoordinatorTools mutates req for Orka coordinator mode and
@@ -32,6 +36,9 @@ func prepareCompatCoordinatorTools(
 	}
 	req.Tools = nil
 	injectOrkaTools(req)
+	if !setup.ConnectorsEnabled {
+		req.Tools = filterCompletionToolsExcluding(req.Tools, toolspkg.ListConnectionsToolName)
+	}
 	req.Tools = filterCompletionToolsForContextToken(c, setup.AuthorizationConfig, req.Tools)
 	if err := authorizeContextTokenToolUse(c, setup.AuthorizationConfig, setup.ToolUseAction, completionToolNames(req.Tools)); err != nil {
 		return false, err

@@ -26,6 +26,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -96,6 +97,8 @@ type ServerConfig struct {
 	TaskProvenanceProtected   bool
 	ControllerEpochs          ControllerEpochFenceSource
 	E2EPromptFaultEnabled     bool
+	Connectors                ConnectorConfig
+	ConnectorTools            ConnectorToolExecutionConfig
 }
 
 // Server is the REST API server
@@ -168,6 +171,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
+		Connectors:                config.Connectors,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
@@ -308,6 +312,11 @@ func (s *Server) setupRoutes() {
 
 	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
 	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
+
+	// The connector OAuth callback arrives from the provider through the
+	// person's browser without an Orka bearer token. The signed single-use
+	// state and the sealed PKCE verifier authenticate it instead.
+	s.app.Get(connectors.CallbackPath, s.handlers.ConnectionCallback)
 
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
@@ -466,6 +475,17 @@ func (s *Server) setupRoutes() {
 	api.Get("/auth/validate", s.handleAuthValidate)
 	api.Get("/auth/whoami", s.handleAuthWhoAmI)
 
+	// Connector catalog and per-person Connections. Every handler re-checks
+	// that the caller is a verified human identity and owns the Connection.
+	api.Get("/connectors", s.handlers.ListConnectors)
+	api.Get("/connections", s.handlers.ListConnections)
+	api.Post("/connections", s.handlers.CreateConnection)
+	api.Get("/connections/:name", s.handlers.GetConnection)
+	api.Put("/connections/:name", s.handlers.UpdateConnection)
+	api.Delete("/connections/:name", s.handlers.DeleteConnection)
+	api.Post("/connections/:name/authorize", s.handlers.AuthorizeConnection)
+	api.Post("/connections/:name/complete", s.handlers.CompleteConnection)
+
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
 
@@ -506,6 +526,7 @@ func (s *Server) setupRoutes() {
 				GatewayEventStore:       s.GatewayEventStore,
 				GatewayService:          s.config.GatewayService,
 				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
+				ConnectorTools:          s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -517,7 +538,11 @@ func (s *Server) setupRoutes() {
 			s.internalHandlers.GetGatewayReplyOrigin)
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		// Native workers run connector-backed tools here; the person's token
+		// never leaves the controller.
+		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
+		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
 		internal.Get("/tasks/:namespace/:taskName/gateway-messages/budget", s.internalHandlers.GetGatewayMessageBudget)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)

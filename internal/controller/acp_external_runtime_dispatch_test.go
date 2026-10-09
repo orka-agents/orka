@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 	"github.com/orka-agents/orka/internal/labels"
@@ -62,6 +63,9 @@ type externalACPDispatchFixtureOptions struct {
 	promptObserver                  func(harnessv2.StartPromptRequest)
 	workspaceDeltaObserver          func(harnessv2.CreateWorkspaceDeltaRequest)
 	supportsPublicationFinalization bool
+	// registry is the broker registry the runtime's descriptors and the
+	// reconciler classify against; nil means the default registry.
+	registry *tools.Registry
 }
 
 type failAgentRuntimeReadWhileTaskSubmitting struct {
@@ -346,8 +350,12 @@ func newExternalACPDispatchFixtureWithOptions(
 			&corev1alpha1.BranchClaim{}, &corev1alpha1.Publication{}, &corev1alpha1.ExternalEffect{},
 		).
 		WithObjects(objects...).Build()
+	registry := options.registry
+	if registry == nil {
+		registry = tools.DefaultRegistry
+	}
 	mcpConfiguration, err := buildAgentRuntimeMCPConfigurationWithRegistry(
-		ctx, kubeClient, externalRuntime, profile, tools.DefaultRegistry,
+		ctx, kubeClient, externalRuntime, profile, registry,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -413,7 +421,7 @@ func newExternalACPDispatchFixtureWithOptions(
 		Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(32),
 		DurableControlStore: controlStore, ControllerEpochManager: epochs, AgentExecutionSnapshots: persistence,
 		ResultStore: persistence, MessageStore: persistence, PlanStore: persistence, ExecutionEventStore: persistence,
-		SessionManager: sessionManager, ACPRuntimeEnabled: true,
+		SessionManager: sessionManager, ACPRuntimeEnabled: true, MCPRegistry: options.registry,
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
@@ -2824,5 +2832,142 @@ func TestExternalRuntimeFrozenCapabilityEnvelopeRejectsEveryLiveDriftClass(t *te
 				t.Fatal("drifted capability envelope was accepted")
 			}
 		})
+	}
+}
+
+// An external runtime's snapshot freezes no Connections, so a connector-
+// backed tool on it is refused with a definitive reason at candidate
+// resolution instead of failing every call for want of a frozen Connection.
+func TestExternalRuntimeCandidateRefusesConnectorBackedTools(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "github-conn"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "gh_search"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL: "https://api.github.com/search/issues", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+		}},
+	}
+	for _, object := range []client.Object{policy, tool} {
+		if err := fixture.client.Create(fixture.ctx, object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "external-connector", UID: types.UID("external-connector-uid"), Generation: 1},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+			Prompt: "search issues", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"gh_search"}},
+		},
+	}
+	candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() = (%#v, %v), want a permanent connector refusal", candidate, err)
+	}
+	// A connector tool the policy denies is never exposed, so it is no
+	// reason to refuse the runtime.
+	denied := task.DeepCopy()
+	denied.Name, denied.UID = "external-connector-denied", types.UID("external-connector-denied-uid")
+	denied.Spec.AgentRuntime.DisallowedTools = []string{"gh_search"}
+	// (The fixture's registered policy then rejects the changed tool list on
+	// its own; what matters is that the refusal is no longer the connector.)
+	if _, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denied, fixture.agent); err != nil && strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with the connector tool denied = %v, want no connector refusal", err)
+	}
+}
+
+// GitHub built-ins under a linked account ride an external runtime only
+// when the requester's link leaves the registered policy exactly as
+// registered: a Ready link for every such tool, and write tools already in
+// the registered approval set. The candidate then freezes the link.
+func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
+	registry := brokeredGitHubRegistry(t)
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{"list_pull_requests"}
+	github := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
+	github.Namespace = defaultNS
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-linked", policy, externalACPDispatchFixtureOptions{registry: registry}, github)
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	SetRequesterStampKey(testRequesterStampKey)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: defaultNS, Name: "external-linked", UID: types.UID("external-linked-uid"), Generation: 1,
+			Annotations: map[string]string{
+				labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+				labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "external-linked-uid", requester.Issuer, requester.Subject),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+			Prompt: "list pull requests", RequestedBy: requester,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"list_pull_requests"}},
+		},
+	}
+	// No link: the registered policy would have to be narrowed, so the
+	// Task is refused for good rather than dispatched with a tool that
+	// could never run.
+	candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "cannot be narrowed per person") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() without a link = (%#v, %v), want a permanent refusal", candidate, err)
+	}
+	connection := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("github", requester.Issuer, requester.Subject), Namespace: defaultNS, UID: "conn-uid", Generation: 2},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite,
+		},
+	}
+	// Connection has no status subresource in this fake client, so the
+	// Ready status is created with the object.
+	connection.Status.GrantSequence = 1
+	connection.Status.Conditions = []metav1.Condition{
+		{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 2},
+		{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 2},
+		{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 2},
+	}
+	connection = consentedConnection(connection, github)
+	if err := fixture.client.Create(fixture.ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err = fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err != nil || candidate == nil {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with a Ready link = (%#v, %v)", candidate, err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Connections) != 1 || body.Connections[0].Tool != "list_pull_requests" || body.Connections[0].Provider != "github" ||
+		body.Connections[0].UID != "conn-uid" || body.Connections[0].GrantSequence != 1 {
+		t.Fatalf("snapshot connections = %+v, want the link frozen for the built-in", body.Connections)
+	}
+	// The session's descriptors come from the registered policy, so a Task
+	// that denies a linked built-in that policy exposes is refused for good
+	// instead of being bound with the tool anyway or retried forever.
+	denying := task.DeepCopy()
+	denying.Spec.AgentRuntime.DisallowedTools = []string{"list_pull_requests"}
+	candidate, err = fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denying, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "cannot be narrowed per task") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with a conflicting Task deny = (%#v, %v), want a permanent refusal", candidate, err)
+	}
+	// A write tool the registration did not put behind approval is never
+	// carried, link or no link.
+	writePolicy := testAgentRuntimeMCPPolicy()
+	writePolicy.AllowedTools = []string{"create_pull_request", "list_pull_requests"}
+	writeFixture := newExternalACPDispatchFixtureWithOptions(t, "external-linked-write", writePolicy, externalACPDispatchFixtureOptions{registry: registry}, github.DeepCopy())
+	writeTask := task.DeepCopy()
+	writeTask.Name, writeTask.UID, writeTask.ResourceVersion = "external-linked-write", types.UID("external-linked-write-uid"), ""
+	writeTask.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testRequesterStampKey, "external-linked-write-uid", requester.Issuer, requester.Subject)
+	writeTask.Spec.AgentRef.Name = writeFixture.agent.Name
+	writeTask.Spec.AgentRuntime.AllowedTools = []string{"create_pull_request", "list_pull_requests"}
+	writeConnection := connection.DeepCopy()
+	writeConnection.ResourceVersion = ""
+	if err := writeFixture.client.Create(writeFixture.ctx, writeConnection); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err = writeFixture.reconciler.resolveExternalAgentExecutionCandidate(writeFixture.ctx, writeTask, writeFixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "registered approvalRequiredTools") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with an unregistered write approval = (%#v, %v), want a permanent refusal", candidate, err)
 	}
 }
