@@ -193,7 +193,7 @@ missing or mismatched artifacts staying not ready.
   mode also exercises Task forks.
 - `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
-- `AIKit Qwen E2E` uses a digest-pinned Qwen 3.5 2B image as local CPU model
+- `AIKit Qwen E2E` uses a digest-pinned Qwen 3.5 4B image as local CPU model
   infrastructure for native Provider, compatibility API, and runtime checks.
   It requires no cloud credentials and routes through Orka's auth/session proxies
   directly to AIKit, without Vekil. Its Qwen template merges system/developer

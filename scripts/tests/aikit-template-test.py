@@ -28,6 +28,21 @@ class QwenTemplateTest(unittest.TestCase):
             enable_thinking=False,
         )
 
+    def test_generation_prompt_matches_4b_thinking_defaults(self):
+        messages = [{"role": "user", "content": "USER_QUERY"}]
+        prefix = "<|im_start|>user\nUSER_QUERY<|im_end|>\n<|im_start|>assistant\n"
+        cases = [
+            ({}, "<think>\n"),
+            ({"enable_thinking": True}, "<think>\n"),
+            ({"enable_thinking": False}, "<think>\n\n</think>\n\n"),
+        ]
+        for kwargs, suffix in cases:
+            with self.subTest(kwargs=kwargs):
+                output = self.template.render(
+                    messages=messages, tools=[], add_generation_prompt=True, **kwargs,
+                )
+                self.assertEqual(output, prefix + suffix)
+
     def test_control_instructions_keep_priority_and_order(self):
         output = self.render([
             {"role": "system", "content": "CONTROL_FIRST"},

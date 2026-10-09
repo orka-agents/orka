@@ -82,12 +82,12 @@ deploy_aikit
 python3 - "${work}/aikit.yaml" <<'PY'
 import sys,re
 manifest=open(sys.argv[1]).read()
-assert 'image: ghcr.io/kaito-project/aikit/qwen3.5:2b@sha256:d838c5eebf533b5b73f67cc7f4984921f87d64d28e4a52d482740b667f46b8b4' in manifest
+assert 'image: ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:525dfb8b5ccc1c180f0eab633bcf459d2a574c14bfab01c03535191c810d121d' in manifest
 assert 'automountServiceAccountToken: false' in manifest
 assert 'args: ["--config-file=/etc/orka-aikit/config.yaml"]' in manifest
 assert 'mountPath: /etc/orka-aikit' in manifest
 assert 'readOnly: true' in manifest
-for name,value in [('LOCALAI_THREADS','"4"'),('LOCALAI_CONTEXT_SIZE','"32768"'),('LOCALAI_LOAD_TO_MEMORY','qwen-3.5-2b')]:
+for name,value in [('LOCALAI_THREADS','"4"'),('LOCALAI_CONTEXT_SIZE','"32768"'),('LOCALAI_LOAD_TO_MEMORY','qwen-3.5-4b')]:
     assert re.search(r'name: '+name+r'\s+value: '+re.escape(value),manifest)
 assert 'limits:\n              cpu: "4"\n              memory: 6Gi' in manifest
 assert 'policyTypes: [Ingress]' in manifest
@@ -96,6 +96,21 @@ assert 'namespace: vekil' not in manifest
 assert len(re.findall(r'^kind: ',manifest,re.M)) == 4
 PY
 printf '%s\n' 'ok - pinned Qwen deploy is CPU bounded and restricts model ingress'
+python3 - "${root}/scripts/fixtures/aikit/config.yaml" "${root}/.github/workflows/live-copilot-proxy-e2e.yml" <<'PYCONFIG'
+import sys,re
+configuration=open(sys.argv[1]).read()
+workflow=open(sys.argv[2]).read()
+assert re.search(r'^- name: qwen-3\.5-4b$',configuration,re.M)
+assert 'model: Qwen3.5-4B-Q4_K_M.gguf' in configuration
+for key,value in [('temperature','0.7'),('top_p','0.8'),('top_k','20'),('min_p','0.0'),('presence_penalty','1.5'),('repeat_penalty','1.0')]:
+    assert re.search(r'^    '+key+r': '+re.escape(value)+r'$',configuration,re.M)
+assert 'enable_thinking: false' in configuration
+assert re.search(r'^  reasoning:\n    disable: true$',configuration,re.M)
+assert re.search(r'^    runs-on: ubuntu-latest$',workflow,re.M)
+assert 'AIKIT_MODEL: qwen-3.5-4b' in workflow
+assert 'AIKIT_IMAGE: ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:525dfb8b5ccc1c180f0eab633bcf459d2a574c14bfab01c03535191c810d121d' in workflow
+PYCONFIG
+printf '%s\n' 'ok - 4B image, model config, sampling, and free Actions runner agree'
 require_cmd() { :; }
 if (aikit_image=mutable-tag main) >/dev/null 2>&1; then
   echo 'mutable AIKit image was accepted' >&2; exit 1

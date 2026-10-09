@@ -1,5 +1,5 @@
-{# Qwen3.5-2B tokenizer template, Apache-2.0.
-   Source: Qwen/Qwen3.5-2B, commit 15852e8c16360a2fea060d615a32b45270f8a8fc.
+{# Qwen3.5-4B tokenizer template, Apache-2.0.
+   Source: Qwen/Qwen3.5-4B, commit 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a.
    CI adaptation: merge system/developer instructions into one leading block.
    User, assistant, and tool messages retain their original order and roles. #}
 {%- set image_count = namespace(value=0) %}
@@ -164,9 +164,9 @@
 {%- endfor %}
 {%- if add_generation_prompt %}
     {{- '<|im_start|>assistant\n' }}
-    {%- if enable_thinking is defined and enable_thinking is true %}
-        {{- '<think>\n' }}
-    {%- else %}
+    {%- if enable_thinking is defined and enable_thinking is false %}
         {{- '<think>\n\n</think>\n\n' }}
+    {%- else %}
+        {{- '<think>\n' }}
     {%- endif %}
 {%- endif %}
