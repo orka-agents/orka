@@ -290,9 +290,11 @@ func TestRuntimePoolToolboxAdmissionFailsClosed(t *testing.T) {
 		pool   *corev1alpha1.RuntimePool
 		want   string
 	}{
-		"disabled":    {policy: ACPToolboxPolicy{}, pool: pool, want: "disabled"},
-		"unavailable": {policy: ACPToolboxPolicy{Enabled: true, UnavailableReason: "image volumes need Kubernetes 1.36 or newer"}, pool: pool, want: "1.36"},
-		"bad method":  {policy: ACPToolboxPolicy{Enabled: true, MountMethod: "hostPath"}, pool: pool, want: "mount method"},
+		"disabled":         {policy: ACPToolboxPolicy{}, pool: pool, want: "disabled"},
+		"unavailable":      {policy: ACPToolboxPolicy{Enabled: true, UnavailableReason: "image volumes need Kubernetes 1.36 or newer"}, pool: pool, want: "1.36"},
+		"bad method":       {policy: ACPToolboxPolicy{Enabled: true, MountMethod: "hostPath"}, pool: pool, want: "mount method"},
+		"registry removed": {policy: ACPToolboxPolicy{Enabled: true, AllowedRegistries: []string{"ghcr.io/other"}, MountMethod: ACPToolboxMountCopy}, pool: pool, want: "no longer from an allowed toolbox registry"},
+		"empty allowlist":  {policy: ACPToolboxPolicy{Enabled: true, MountMethod: ACPToolboxMountCopy}, pool: pool, want: "no longer from an allowed toolbox registry"},
 		"workspace pool": {policy: acpTestToolboxPolicy(), pool: func() *corev1alpha1.RuntimePool {
 			workspacePool := pool.DeepCopy()
 			workspacePool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{Provider: corev1alpha1.WorkspaceProviderAgentSandbox}
@@ -415,6 +417,25 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 				}}
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_IMAGE_PULL:", ok: true,
+		},
+		"copy init container OOM killed without stable line": {
+			pods: pod(func(p *corev1.Pod) {
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name:                 runtimePoolToolboxCopyContainerName(0),
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+					State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+				}}
+			}),
+			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_COPY_FAILED: toolbox-copy-0: exited 137 (OOMKilled)", ok: true,
+		},
+		"copy init container cannot be created": {
+			pods: pod(func(p *corev1.Pod) {
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name:  runtimePoolToolboxCopyContainerName(0),
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerError", Message: "mount /handoff: not a directory"}},
+				}}
+			}),
+			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_MOUNT_FAILED: toolbox-copy-0: CreateContainerError mount /handoff", ok: true,
 		},
 		"runtime image pull is not a toolbox failure": {
 			pods: pod(func(p *corev1.Pod) {

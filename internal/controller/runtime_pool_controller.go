@@ -2729,6 +2729,14 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxAdmission(pool *corev1alpha1.R
 	if pool != nil && pool.Spec.ExecutionWorkspace != nil {
 		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "execution-workspace RuntimePools cannot mount toolboxes")
 	}
+	// The frozen profile was admitted under the allowlist of its day. Recheck
+	// it against the current allowlist so removing a registry also stops
+	// existing pools from recreating Pods with its images.
+	for i := range cfg.profile.Toolboxes {
+		if !ToolboxImageAllowed(cfg.profile.Toolboxes[i].Image, r.ToolboxPolicy.AllowedRegistries) {
+			return fmt.Errorf("%stoolbox image %q is no longer from an allowed toolbox registry", acpToolboxUnavailablePrefix, cfg.profile.Toolboxes[i].Image)
+		}
+	}
 	return nil
 }
 

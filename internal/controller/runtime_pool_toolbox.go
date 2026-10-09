@@ -35,10 +35,12 @@ const (
 
 	runtimePoolDropAllCapabilities corev1.Capability = "ALL"
 
-	podWaitingReasonErrImagePull     = "ErrImagePull"
-	podWaitingReasonImagePullBackOff = "ImagePullBackOff"
-	podWaitingReasonInvalidImageName = "InvalidImageName"
-	podWaitingReasonCreateContainer  = "CreateContainerError"
+	podWaitingReasonErrImagePull          = "ErrImagePull"
+	podWaitingReasonImagePullBackOff      = "ImagePullBackOff"
+	podWaitingReasonInvalidImageName      = "InvalidImageName"
+	podWaitingReasonCreateContainer       = "CreateContainerError"
+	podWaitingReasonCreateContainerConfig = "CreateContainerConfigError"
+	podWaitingReasonRunContainer          = "RunContainerError"
 )
 
 var (
@@ -247,11 +249,22 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 			if message, ok := runtimePoolToolboxTerminationFailure(status); ok {
 				return corev1alpha1.RuntimePoolReasonToolboxUnavailable, message, true
 			}
+			// A toolbox init container exists only to bind a toolbox, so any
+			// unsuccessful end without the stable line (OOM kill, a crash
+			// before the copier starts) is still a toolbox failure.
+			if message, ok := runtimePoolToolboxUnexplainedTermination(status); ok {
+				return corev1alpha1.RuntimePoolReasonToolboxUnavailable, message, true
+			}
 			if waiting := status.State.Waiting; waiting != nil {
 				switch waiting.Reason {
 				case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonInvalidImageName:
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonImagePull, status.Name+": "+waiting.Reason+" "+waiting.Message), true
+				case podWaitingReasonCreateContainer, podWaitingReasonCreateContainerConfig, podWaitingReasonRunContainer:
+					// The container never ran: typically a toolbox image that
+					// blocks the /handoff or /out mount points with a file.
+					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
+						acpToolboxUnavailableMessage(toolbox.ReasonMountFailed, status.Name+": "+waiting.Reason+" "+waiting.Message), true
 				}
 			}
 		}
@@ -293,6 +306,25 @@ func runtimePoolToolboxTerminationFailure(status corev1.ContainerStatus) (string
 			continue
 		}
 		return acpToolboxUnavailableMessage(failure.Reason, status.Name+": "+failure.Message), true
+	}
+	return "", false
+}
+
+// runtimePoolToolboxUnexplainedTermination classifies a toolbox init container
+// that ended unsuccessfully without a stable FAIL line.
+func runtimePoolToolboxUnexplainedTermination(status corev1.ContainerStatus) (string, bool) {
+	for _, terminated := range []*corev1.ContainerStateTerminated{status.State.Terminated, status.LastTerminationState.Terminated} {
+		if terminated == nil || terminated.ExitCode == 0 {
+			continue
+		}
+		detail := fmt.Sprintf("%s: exited %d", status.Name, terminated.ExitCode)
+		if reason := strings.TrimSpace(terminated.Reason); reason != "" && reason != "Error" {
+			detail += " (" + reason + ")"
+		}
+		if message := strings.TrimSpace(terminated.Message); message != "" {
+			detail += ": " + message
+		}
+		return acpToolboxUnavailableMessage(toolbox.ReasonCopyFailed, detail), true
 	}
 	return "", false
 }
