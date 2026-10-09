@@ -261,6 +261,8 @@ jobs:
             --set-string webhooks.tls.existingSecret=controller-webhook-tls
             --set-string webhooks.caBundle=Y2E=
             --set-string "publisher.image.digest=${controller_digest}"
+            --set-string "workers.ai.image.digest=${controller_digest}"
+            --set-string "workers.general.image.digest=${controller_digest}"
             --set providerProxy.enabled=true
           )
           helm lint cmd/build/helmify/static --namespace "${NAMESPACE}" "${snapshot_args[@]}"
@@ -361,9 +363,8 @@ jobs:
           wrapper_service_name=$(awk '$1 == "name:" { print $2; exit }' "${long_v1_wrapper_service}")
           grep -Fq -- "--harness-v1-endpoint=https://${wrapper_service_name}.${NAMESPACE}.svc:8080" "${long_harness_v1_render}"
 
-          chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
-          grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"
-          grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${harness_v1_render}"
+          grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker@${controller_digest}" "${secondary_render}"
+          grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker@${controller_digest}" "${harness_v1_render}"
           assert_controller_rbac_resources "${secondary_rbac}" agentruntimes branchclaims controllerepochs externaleffects promptattempts publications runtimepools runtimesessioncontrols substrateactorpools
           # branchclaims RBAC is granted through the v2-only ClusterRole; every
           # other coexistence resource stays readable/writable in v1 too.
@@ -497,6 +498,8 @@ jobs:
             --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
             --set-string workers.ai.image.tag="${pause_tag}" \
             --set-string workers.ai.image.digest="${pause_digest}" \
+            --set-string workers.general.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
+            --set-string workers.general.image.digest="${pause_digest}" \
             --set-string publisher.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
             --set-string publisher.image.digest="${pause_digest}" \
             --set publisher.enabled=true \
@@ -523,6 +526,10 @@ jobs:
             --set-string controller.image.tag="${pause_tag}"
             --set-string controller.image.digest="${pause_digest}"
             --set controller.image.pullPolicy=IfNotPresent
+            --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}"
+            --set-string workers.ai.image.digest="${pause_digest}"
+            --set-string workers.general.image.repository="${PAUSE_IMAGE_REPOSITORY}"
+            --set-string workers.general.image.digest="${pause_digest}"
             --set-string webhooks.tls.existingSecret=controller-webhook-tls
             --set-string webhooks.caBundle=Y2E=
             --set-string harnessV1.image.repository="${PAUSE_IMAGE_REPOSITORY}"

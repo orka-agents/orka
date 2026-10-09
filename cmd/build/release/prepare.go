@@ -82,25 +82,31 @@ type replacement struct {
 
 func versionFields() map[string][]replacement {
 	bare := strings.TrimPrefix(versionPattern, "v")
+	// The exact development sentinel is an input default, not a release version.
+	versionOrDev := `(?:` + versionPattern + `|v0\.0\.0-dev)`
+	bareOrDev := `(?:` + bare + `|0\.0\.0-dev)`
 	fields := map[string][]replacement{
-		makefilePath: {{pattern: `^VERSION := ` + versionPattern + `$`, value: "VERSION := RELEASE_VERSION"}},
+		makefilePath: {{pattern: `^VERSION := ` + versionOrDev + `$`, value: "VERSION := RELEASE_VERSION"}},
 		chartInputPath: {
-			{pattern: `^version: ` + bare + `$`, value: "version: RELEASE_VERSION"},
-			{pattern: `^appVersion: "` + versionPattern + `"$`, value: `appVersion: "RELEASE_VERSION"`},
+			{pattern: `^version: ` + bareOrDev + `$`, value: "version: RELEASE_VERSION"},
+			{pattern: `^appVersion: "` + versionOrDev + `"$`, value: `appVersion: "RELEASE_VERSION"`},
 		},
 	}
 	for _, name := range versionedImages {
 		fields[valuesInputPath] = append(fields[valuesInputPath], replacement{
 			pattern: `^([ \t]+repository:[ \t]*` + regexp.QuoteMeta(imageRepository(name)) + `[ \t]*\n` +
-				`(?:[ \t]*(?:#.*)?\n)*[ \t]+tag: )"` + bare + `"$`,
+				`(?:[ \t]*(?:#.*)?\n)*[ \t]+tag: )"(?:` + bare + `)?"$`,
 			value: `${1}"RELEASE_VERSION"`,
 		})
 	}
 	for _, provider := range versionedRuntimeProviders {
+		repository := imageRepository("acp-" + provider + "-runtime")
+		// An empty runtime image inherits this repository. A concrete image must
+		// match it exactly; preserve the field prefix, including its whitespace.
 		fields[valuesInputPath] = append(fields[valuesInputPath], replacement{
-			pattern: `^([ \t]+` + provider + `Image:[ \t]*` +
-				regexp.QuoteMeta(imageRepository("acp-"+provider+"-runtime")) + `:)` + bare + `$`,
-			value: `${1}RELEASE_VERSION`,
+			pattern: `^([ \t]+` + provider + `Image:[ \t]*)(?:` +
+				regexp.QuoteMeta(repository) + `:` + bare + `|"")$`,
+			value: `${1}` + repository + `:RELEASE_VERSION`,
 		})
 	}
 	return fields

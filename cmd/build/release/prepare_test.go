@@ -283,6 +283,96 @@ func TestPreviousReleaseVersionDoesNotChangeToolingIdentity(t *testing.T) {
 	}
 }
 
+func newDevelopmentPreparationFixture(t *testing.T) *preparationFixture {
+	t.Helper()
+	p := newPreparationFixture(t)
+	for path, content := range repositoryDevelopmentInputs(t) {
+		writeTestFile(t, filepath.Join(p.checkout, path), content)
+	}
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "trusted repository development inputs")
+	p.main = p.git(t, "rev-parse", "HEAD")
+	p.env["GITHUB_SHA"] = p.main
+	p.git(t, "push", "origin", "main")
+	return p
+}
+
+func TestRepositoryDevelopmentInputsMatchGeneratedReleaseInputs(t *testing.T) {
+	p := newDevelopmentPreparationFixture(t)
+	for _, version := range []string{testVersion, "v0.2.0-beta.1", "v0.2.0-rc.2"} {
+		t.Run(version, func(t *testing.T) {
+			p.git(t, "checkout", "-B", testBranch, "main")
+			must(t, updateVersion(p.checkout, version))
+			p.git(t, "add", ".")
+			p.git(t, "commit", "-m", "generated release inputs")
+			candidate := p.git(t, "rev-parse", "HEAD")
+			p.git(t, "checkout", "main")
+			must(t, p.w.checkPreparationAutomation(p.main, candidate))
+			if p.git(t, "rev-parse", "HEAD") != p.main {
+				t.Fatal("identity check changed checkout")
+			}
+		})
+	}
+}
+
+func TestDevelopmentInputNormalizationRejectsUntrustedChanges(t *testing.T) {
+	p := newDevelopmentPreparationFixture(t)
+	p.git(t, "checkout", "-b", testBranch)
+	must(t, updateVersion(p.checkout, testVersion))
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "generated release inputs")
+	generated := p.git(t, "rev-parse", "HEAD")
+	type change struct{ path, old, new string }
+	changes := map[string]change{
+		"makefile command":    {makefilePath, "VERSION := " + testVersion, "VERSION := $(shell touch untrusted-command-ran)"},
+		"makefile whitespace": {makefilePath, "VERSION := ", "VERSION :=  "},
+		"other dev version":   {makefilePath, testVersion, "v0.2.0-dev"},
+		"chart content":       {chartInputPath, "name: orka", "name: changed"},
+		"chart comment":       {chartInputPath, "version: 0.2.0", "version: 0.2.0 # changed"},
+		"chart whitespace":    {chartInputPath, "version: ", "version:  "},
+		"unrelated value":     {valuesInputPath, "replicas: 1", "replicas: 2"},
+		"values comment":      {valuesInputPath, "# Orka Helm Chart Values", "# Changed Helm Chart Values"},
+		"tag comment":         {valuesInputPath, `tag: "0.2.0"`, `tag: "0.2.0" # changed`},
+		"tag whitespace":      {valuesInputPath, `tag: "0.2.0"`, `tag:  "0.2.0"`},
+		"non-release tag":     {valuesInputPath, `tag: "0.2.0"`, `tag: "latest"`},
+		"tag preceding comment": {valuesInputPath, "repository: " + imageRepository(controllerImage) + "\n",
+			"repository: " + imageRepository(controllerImage) + "\n    # changed\n"},
+		"repository whitespace": {valuesInputPath, "repository: " + imageRepository(controllerImage) + "\n",
+			"repository:  " + imageRepository(controllerImage) + "\n"},
+		"runtime whitespace": {valuesInputPath, "codexImage: ", "codexImage:  "},
+		"runtime comment": {valuesInputPath, "codexImage: " + imageRepository("acp-codex-runtime") + ":0.2.0",
+			"codexImage: " + imageRepository("acp-codex-runtime") + ":0.2.0 # changed"},
+	}
+	for _, name := range versionedImages {
+		changes["repository/"+name] = change{valuesInputPath,
+			"repository: " + imageRepository(name) + "\n", "repository: registry.example/changed\n"}
+	}
+	for _, provider := range versionedRuntimeProviders {
+		changes["runtime/"+provider] = change{valuesInputPath,
+			provider + "Image: " + imageRepository("acp-"+provider+"-runtime") + ":0.2.0",
+			provider + "Image: registry.example/changed-runtime:0.2.0"}
+	}
+	for name, edit := range changes {
+		t.Run(name, func(t *testing.T) {
+			p.git(t, "checkout", "-B", testBranch, generated)
+			path := filepath.Join(p.checkout, edit.path)
+			content := readTestFile(t, path)
+			if !strings.Contains(content, edit.old) {
+				t.Fatalf("missing fixture field %q in %s", edit.old, edit.path)
+			}
+			writeTestFile(t, path, strings.Replace(content, edit.old, edit.new, 1))
+			p.git(t, "add", edit.path)
+			p.git(t, "commit", "-m", "untrusted release input change")
+			candidate := p.git(t, "rev-parse", "HEAD")
+			p.git(t, "checkout", "main")
+			wantError(t, p.w.checkPreparationAutomation(p.main, candidate), "release automation differs")
+			if p.git(t, "rev-parse", "HEAD") != p.main {
+				t.Fatal("identity check changed checkout")
+			}
+		})
+	}
+}
+
 func TestRuntimeRepositoryChangesStopBeforeCheckoutOrGeneration(t *testing.T) {
 	p := newPreparationFixture(t)
 	values := readTestFile(t, filepath.Join(p.checkout, valuesInputPath))

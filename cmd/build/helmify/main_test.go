@@ -127,6 +127,8 @@ func staticChartDefaultArgs() []string {
 		"--set-string", "webhooks.tls.existingSecret=controller-webhook-tls",
 		"--set-string", "webhooks.caBundle=Y2E=",
 		"--set-string", "publisher.image.digest=" + digest,
+		"--set-string", "workers.ai.image.digest=" + digest,
+		"--set-string", "workers.general.image.digest=" + digest,
 		"--set", "providerProxy.enabled=true",
 	}
 }
@@ -749,6 +751,8 @@ func TestStaticChartProviderProxyUsesOperatorGateway(t *testing.T) {
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "controller.image.digest=" + digest,
 		"--set-string", "publisher.image.digest=" + digest,
+		"--set-string", "workers.ai.image.digest=" + digest,
+		"--set-string", "workers.general.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -33,6 +34,44 @@ func versionFixture(t *testing.T) (string, map[string]string) {
 		writeTestFile(t, filepath.Join(root, name), content)
 	}
 	return root, files
+}
+
+// Use the real source files, but overlay the upcoming defaults so this fixture
+// works both before and after the development chart inputs land.
+func repositoryDevelopmentInputs(t *testing.T) map[string]string {
+	t.Helper()
+	edits := map[string][]replacement{
+		makefilePath: {{pattern: `^VERSION := .*$`, value: "VERSION := v0.0.0-dev", count: 1}},
+		chartInputPath: {
+			{pattern: `^version: .*$`, value: "version: 0.0.0-dev", count: 1},
+			{pattern: `^appVersion: .*$`, value: `appVersion: "v0.0.0-dev"`, count: 1},
+		},
+	}
+	for _, name := range versionedImages {
+		edits[valuesInputPath] = append(edits[valuesInputPath], replacement{
+			pattern: `^([ \t]+repository: ` + regexp.QuoteMeta(imageRepository(name)) + `\n` +
+				`(?:[ \t]*(?:#.*)?\n)*[ \t]+tag: ).*$`, value: `${1}""`, count: 1,
+		})
+	}
+	for _, provider := range versionedRuntimeProviders {
+		edits[valuesInputPath] = append(edits[valuesInputPath], replacement{
+			pattern: `^([ \t]+` + provider + `Image: ).*$`, value: `${1}""`, count: 1,
+		})
+	}
+	files := make(map[string]string)
+	for _, path := range []string{makefilePath, chartInputPath, valuesInputPath,
+		"config/manager/manager.yaml", "config/manager/kustomization.yaml"} {
+		content := readTestFile(t, filepath.Join("..", "..", "..", path))
+		for _, edit := range edits[path] {
+			pattern := regexp.MustCompile("(?m)" + edit.pattern)
+			if count := len(pattern.FindAllStringIndex(content, -1)); count != edit.count {
+				t.Fatalf("expected %d development fixture fields in %s, found %d", edit.count, path, count)
+			}
+			content = pattern.ReplaceAllString(content, edit.value)
+		}
+		files[path] = content
+	}
+	return files
 }
 
 func TestUpdateVersionPreservesFormattingAndUpdatesEveryReleaseImage(t *testing.T) {
@@ -66,6 +105,48 @@ func TestUpdateVersionAcceptsCurrentRepositoryInputs(t *testing.T) {
 	must(t, newWorkflow(root).execute([]string{"update-version", "v9.8.7-rc.3"}))
 }
 
+func TestUpdateVersionStampsRepositoryDevelopmentInputs(t *testing.T) {
+	root := t.TempDir()
+	before := repositoryDevelopmentInputs(t)
+	for path, content := range before {
+		writeTestFile(t, filepath.Join(root, path), content)
+	}
+	const tag = "v9.8.7-rc.3"
+	const version = "9.8.7-rc.3"
+	must(t, newWorkflow(root).execute([]string{"update-version", tag}))
+	for path, content := range before {
+		expected := content
+		switch path {
+		case makefilePath, chartInputPath:
+			expected = strings.ReplaceAll(content, "0.0.0-dev", version)
+		case valuesInputPath:
+			if count := strings.Count(content, `tag: ""`); count != len(versionedImages) {
+				t.Fatalf("expected %d empty image tags, found %d", len(versionedImages), count)
+			}
+			expected = strings.ReplaceAll(content, `tag: ""`, `tag: "`+version+`"`)
+			for _, provider := range versionedRuntimeProviders {
+				field := provider + `Image: ""`
+				if strings.Count(content, field) != 1 {
+					t.Fatalf("expected one empty %s runtime image", provider)
+				}
+				expected = strings.ReplaceAll(expected, field,
+					provider+"Image: "+imageRepository("acp-"+provider+"-runtime")+":"+version)
+			}
+		case "config/manager/manager.yaml":
+			for _, name := range []string{"ai-worker", "general-worker"} {
+				pattern := regexp.MustCompile(`(` + regexp.QuoteMeta(imageRepository(name)) + `:)[^\s]+`)
+				expected = pattern.ReplaceAllString(expected, `${1}`+version)
+			}
+		case "config/manager/kustomization.yaml":
+			expected = regexp.MustCompile(`(?m)^(\s*newTag:)\s*.*$`).ReplaceAllString(content, `${1} `+version)
+		}
+		if actual := readTestFile(t, filepath.Join(root, path)); actual != expected {
+			t.Fatalf("unexpected release edit to %s", path)
+		}
+	}
+	must(t, updateVersion(root, tag))
+}
+
 func TestUpdateVersionRejectsMissingOrDuplicateFieldsBeforeWriting(t *testing.T) {
 	for _, change := range []string{"missing", "duplicate"} {
 		root, before := versionFixture(t)
@@ -87,7 +168,9 @@ func TestUpdateVersionRejectsMissingOrDuplicateFieldsBeforeWriting(t *testing.T)
 
 func TestUpdateVersionRejectsInvalidTagsWithoutWriting(t *testing.T) {
 	root, before := versionFixture(t)
-	for _, tag := range []string{"0.2.0", "v0.2", "v0.2.0\n", "v0.2.0-dev"} {
+	for _, tag := range []string{
+		"0.2.0", "v0.2", "v0.2.0\n", "v0.2.0-dev", "v0.0.0-dev", "v0.2.0-alpha.1", "v0.2.0+build",
+	} {
 		wantError(t, updateVersion(root, tag), "usage:")
 	}
 	for name, expected := range before {

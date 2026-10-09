@@ -10,10 +10,11 @@ controller:
   # Number of controller replicas
   replicas: 1
 
-  # Release image tag. Set digest to override the tag with a SHA256 digest.
+  # Source charts require images built from the same checkout. Set a tag or
+  # SHA256 digest; release preparation supplies the published release tag.
   image:
     repository: ghcr.io/orka-agents/orka
-    tag: "0.1.1"
+    tag: ""
     digest: ""
     pullPolicy: IfNotPresent
 
@@ -84,13 +85,14 @@ controller:
     # The chart-managed provider proxy always runs in the Helm release namespace.
     # Leave empty or set exactly to .Release.Namespace; other values are rejected.
     providerProxyNamespace: ""
-    # Release image tags. The controller resolves tags to digests at startup.
-    # Override with repository@sha256:<digest> to skip registry resolution.
+    # Source charts leave providers disabled until source-matched images are set.
+    # Use a full tagged reference or repository@sha256:<digest>. Release
+    # preparation supplies release tags, resolved to digests at startup.
     # An empty image disables that provider.
-    codexImage: ghcr.io/orka-agents/orka/acp-codex-runtime:0.1.1
-    claudeImage: ghcr.io/orka-agents/orka/acp-claude-runtime:0.1.1
-    copilotImage: ghcr.io/orka-agents/orka/acp-copilot-runtime:0.1.1
-    opencodeImage: ghcr.io/orka-agents/orka/acp-opencode-runtime:0.1.1
+    codexImage: ""
+    claudeImage: ""
+    copilotImage: ""
+    opencodeImage: ""
     # Planned controller upgrades use a same-binary preStop child to call a
     # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
     # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.
@@ -294,7 +296,7 @@ publisher:
   enabled: true
   image:
     repository: ghcr.io/orka-agents/orka/workspace-publisher
-    tag: "0.1.1"
+    tag: ""
     digest: ""
     pullPolicy: IfNotPresent
   allowedSCMHosts: github.com
@@ -441,7 +443,7 @@ harnessV1:
         ephemeral-storage: 64Mi
   image:
     repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-    tag: "0.1.1"
+    tag: ""
     # Required when controller.mode is harness-v1. Tags are never accepted for
     # a running wrapper.
     digest: ""
@@ -486,14 +488,14 @@ workers:
   ai:
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
-      tag: "0.1.1"
+      tag: ""
       digest: ""
       pullPolicy: IfNotPresent
 
   general:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
-      tag: "0.1.1"
+      tag: ""
       digest: ""
 
 # GitHub webhook and label-trigger configuration.
