@@ -56,7 +56,7 @@ RUN npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npm
 RUN npm run build && rm -rf /src/dist/tests
 RUN artifact-tool compare /src/dist /published/package/dist
 
-FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS claude-layout
+FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e AS claude-layout
 ARG TARGETARCH
 ENV NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
@@ -106,7 +106,7 @@ RUN set -eu; \
       go build -buildvcs=false -trimpath -ldflags='-s -w' \
       -o /out/orka-acp-exec-helper ./cmd/orka-acp-exec-helper
 
-FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
+FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e
 LABEL org.opencontainers.image.title="Orka ACP Claude runtime" \
       org.opencontainers.image.description="Orka harness v2 ACP supervisor with Claude Agent ACP 0.61.0 and Claude Agent SDK 0.3.217 / Claude Code 2.1.217" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \

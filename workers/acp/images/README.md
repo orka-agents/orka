@@ -68,8 +68,26 @@ Base images are immutable multi-platform manifest-list references:
 | --- | --- |
 | Dockerfile frontend | `docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e` |
 | Go builder | `golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61` |
-| Node builder/runtime | `node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94` |
+| Node adapter builder (build platform only) | `node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94` |
+| Node runtime (Codex, Claude, Copilot final stages and the Claude layout stage) | `node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e` |
 | Debian OpenCode runtime | `debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd` |
+
+## Runtime base
+
+Every stage that runs on the target platform (`--platform=$TARGETPLATFORM`)
+uses Debian 13 ("trixie"). Build-only stages keep the bookworm builders so the
+adapter artifact digests pinned in `internal/acp/pins.go` are unchanged.
+[Toolbox](../../../website/docs/guides/toolboxes.md) authors build against this
+baseline: a toolbox binary must run with the runtime's glibc.
+
+| Runtime | Final base | Debian | glibc |
+| --- | --- | --- | --- |
+| Codex | `node:22.22.0-trixie-slim` | 13 (trixie) | 2.41 |
+| Claude | `node:22.22.0-trixie-slim` | 13 (trixie) | 2.41 |
+| Copilot | `node:22.22.0-trixie-slim` | 13 (trixie) | 2.41 |
+| OpenCode | `debian:trixie-slim` | 13 (trixie) | 2.41 |
+
+Verify after a rebuild with `docker run --rm --entrypoint ldd <image> --version`.
 
 Codex inputs:
 
