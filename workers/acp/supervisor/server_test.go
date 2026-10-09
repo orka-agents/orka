@@ -40,6 +40,9 @@ const toolBurstRPCErrorMode = "tool-burst-rpc-error"
 // honoring a resume of the persisted provider session from a fresh process.
 const adapterResumeMode = "resume-after-exit"
 
+// adapterResumeFailureMode advertises resume but rejects the handshake.
+const adapterResumeFailureMode = "resume-fails-after-exit"
+
 // adapterExitAfterPromptMode exits after every prompt without advertising
 // session/resume, so an idle session loses its agent for good.
 const adapterExitAfterPromptMode = "exit-after-prompt"
@@ -1377,7 +1380,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 		switch message.Method {
 		case acp.MethodInitialize:
 			agentCapabilities := map[string]any{"mcpCapabilities": map[string]any{"http": true}}
-			if mode == adapterResumeMode {
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode {
 				agentCapabilities["sessionCapabilities"] = map[string]any{acp.SessionCapabilityResume: map[string]any{}}
 			}
 			writeHelperMessage(writer, map[string]any{
@@ -1400,7 +1403,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{}})
 		case acp.MethodSessionNew:
-			if mode == adapterResumeMode || mode == adapterExitAfterPromptMode {
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterExitAfterPromptMode {
 				// The child's HOME is the session home, which real agents use
 				// for the state a fresh adapter process resumes from.
 				_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile), []byte(sessionID), 0o600)
@@ -1474,7 +1477,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{"stopReason": acp.StopReasonEndTurn}})
 				promptID = nil
 			}
-			if mode == adapterResumeMode || mode == adapterExitAfterPromptMode {
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterExitAfterPromptMode {
 				// Simulate an adapter crash while the session is idle.
 				os.Exit(0)
 			}

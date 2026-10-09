@@ -2,8 +2,9 @@ package supervisor
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -88,18 +89,42 @@ func TestSupervisorResumesIdleAdapterInPlace(t *testing.T) {
 }
 
 func TestSupervisorRetiresSessionWhenIdleAdapterCannotResume(t *testing.T) {
-	server, cfg, create, state := runFirstPromptThenAwaitAdapterExit(t, adapterExitAfterPromptMode)
+	for _, mode := range []string{adapterExitAfterPromptMode, adapterResumeFailureMode} {
+		t.Run(mode, func(t *testing.T) {
+			assertSupervisorRetiresUnresumableAdapter(t, mode)
+		})
+	}
+}
+
+func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
+	t.Helper()
+	server, cfg, create, state := runFirstPromptThenAwaitAdapterExit(t, mode)
 	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
-	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
-	if response.Code != http.StatusConflict {
-		t.Fatalf("prompt after unresumable adapter exit status = %d body=%s", response.Code, response.Body.String())
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	client, err := harnessv2.NewClient(httpServer.URL,
+		harnessv2.WithControllerBearerToken(cfg.ControllerBearerToken),
+		harnessv2.WithOperationCapabilitySecret(cfg.CapabilitySecret),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var failure harnessv2.ErrorResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
-		t.Fatalf("decode error response: %v body=%s", err, response.Body.String())
+	emitted := false
+	summary, err := client.StreamPrompt(t.Context(), create.RuntimeSessionID, next, func(harnessv2.Event) error {
+		emitted = true
+		return nil
+	})
+	var failure *harnessv2.ClientError
+	if !errors.As(err, &failure) || failure.Kind != harnessv2.ClientErrorHTTP ||
+		failure.Code != harnessv2.ErrorCodePromptNotAccepted || failure.StatusCode != http.StatusConflict || failure.Retryable {
+		t.Fatalf("error = %v, want non-retryable prompt-not-accepted HTTP rejection", err)
 	}
-	if failure.Code != harnessv2.ErrorCodeSessionPoisoned || failure.Retryable {
-		t.Fatalf("error response = %#v, want non-retryable %s", failure, harnessv2.ErrorCodeSessionPoisoned)
+	if emitted || summary.Accepted || summary.WriteEvidence.State != harnessv2.RequestWriteComplete ||
+		failure.WriteEvidence.SafeToResendSameIdentity() || failure.WriteEvidence.RequestBodyBytesRead == 0 {
+		t.Fatalf("idle resume failure altered acceptance or write evidence: summary=%#v error=%#v", summary, failure)
+	}
+	if _, exists := state.runtime.Tombstone(string(next.Metadata.PromptID)); exists {
+		t.Fatal("failed idle resume submitted the next ACP prompt")
 	}
 	if state.runtime.AdapterRestarts() != 0 {
 		t.Fatalf("adapter restarts = %d, want 0", state.runtime.AdapterRestarts())

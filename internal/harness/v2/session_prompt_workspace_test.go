@@ -545,7 +545,7 @@ func TestCapabilitiesStatusAndDrainContracts(t *testing.T) {
 }
 
 func TestTerminalErrorsAreNeverRetryable(t *testing.T) {
-	for _, code := range []ErrorCode{ErrorCodeOutcomeUnknown, ErrorCodeWorkspaceResumeLost} {
+	for _, code := range []ErrorCode{ErrorCodeOutcomeUnknown, ErrorCodeWorkspaceResumeLost, ErrorCodePromptNotAccepted} {
 		t.Run(string(code), func(t *testing.T) {
 			response := ErrorResponse{
 				Protocol:  ProtocolVersion,

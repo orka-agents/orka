@@ -916,6 +916,7 @@ func validateHTTPErrorMapping(status int, response ErrorResponse) error {
 		ErrorCodeSettled:             {http.StatusGone: {}},
 		ErrorCodeRateLimited:         {http.StatusTooManyRequests: {}},
 		ErrorCodeSessionPoisoned:     {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
+		ErrorCodePromptNotAccepted:   {http.StatusConflict: {}},
 		ErrorCodeWorkspaceResumeLost: {http.StatusConflict: {}},
 		ErrorCodeOutcomeUnknown:      {http.StatusInternalServerError: {}},
 		ErrorCodeCleanupUnproven:     {http.StatusConflict: {}},

@@ -6290,6 +6290,22 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, journalState, accepted, persistenceErr,
 		)
 	}
+	if rejection, ok := errors.AsType[*harnessv2.ClientError](err); !accepted && ok &&
+		rejection.Kind == harnessv2.ClientErrorHTTP && rejection.Operation == "start_prompt" &&
+		rejection.StatusCode == http.StatusConflict && rejection.Code == harnessv2.ErrorCodePromptNotAccepted &&
+		!rejection.Retryable && rejection.Classification == nil {
+		// The HTTP body was written, but the supervisor proved idle recovery
+		// failed before submitting an ACP prompt. Record a terminal failure;
+		// this does not turn transport evidence into permission to replay.
+		const message = "ACP adapter could not resume while idle; prompt was not accepted"
+		if transitionErr := d.transitionAttemptToFailed(ctx, attemptID, fence, "prompt-not-accepted", "RuntimeLost", message); transitionErr != nil {
+			return transitionErr
+		}
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeLost", message),
+		)
+	}
 	if runtimeContextErr != nil {
 		if !accepted && writeEvidence.SafeToResendSameIdentity() {
 			operation, terminalReason, message := "cancelled-before-acceptance", corev1alpha1.TaskExecutionReason("Cancelled"), "prompt cancelled before acceptance"

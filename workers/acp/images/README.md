@@ -150,14 +150,20 @@ prompt; updates emitted during the resume handshake never reach a prompt
 stream. Resume is same-Pod only: the agent's state lives in the ephemeral
 session home, so a cold resume after suspension or a pool replacement still
 recreates the RuntimeSession from Orka's canonical transcript, and an idle
-exit the agent cannot resume retires the session the same way. Orka does not
-use `session/load` (removed in the ACP v2 draft in favor of `session/resume`
-with `replayFrom`), `session/list`, or the still-unstable `session/fork`;
+exit the agent cannot resume retires the session the same way. Before any
+ACP prompt write, the supervisor returns non-retryable `prompt_not_accepted`
+for that idle-exit retirement; the controller records `Failed`/`RuntimeLost`
+without automatic replay, and the next continuation rebuilds from the
+canonical transcript. Orka does not use `session/load` (removed in the ACP
+v2 draft in favor of `session/resume` with `replayFrom`), `session/list`, or
+the still-unstable `session/fork`;
 installing an imported SessionKit bundle and handling restore errors beyond
-that remain consumer work. A native restore consumer must also set the
-adapter's `MODEL_PROVIDER` to the destination provider ID.
-`CODEX_CONFIG.model_provider` alone does not select the provider passed to
-`thread/resume` in this adapter release.
+that remain consumer work. The supervisor supplies `MODEL_PROVIDER=orka`
+alongside `CODEX_CONFIG` for every Codex session so `thread/resume` retains
+the session's provider proxy. This adapter release selects the resume provider
+from `MODEL_PROVIDER` or Codex's persisted config, not
+`CODEX_CONFIG.model_provider`. Imported native restore consumers must likewise
+set `MODEL_PROVIDER` to the destination provider ID.
 
 Session-lifecycle capabilities advertised by the pinned runtimes, verified by
 driving each adapter over stdio (`initialize`, `session/new`, `session/prompt`,

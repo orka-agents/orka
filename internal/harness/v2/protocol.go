@@ -528,6 +528,10 @@ const (
 	ErrorCodeWorkspaceResumeLost ErrorCode = "workspace_resume_lost"
 	ErrorCodeOutcomeUnknown      ErrorCode = "outcome_unknown"
 	ErrorCodeCleanupUnproven     ErrorCode = "cleanup_unproven"
+
+	// ErrorCodePromptNotAccepted proves idle adapter recovery failed before
+	// submitting the prompt. The runtime session is retired, not retryable.
+	ErrorCodePromptNotAccepted ErrorCode = "prompt_not_accepted"
 )
 
 type ErrorResponse struct {
@@ -545,7 +549,7 @@ func (r ErrorResponse) Validate() error {
 	switch r.Code {
 	case ErrorCodeInvalidRequest, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodeExpired,
 		ErrorCodeStaleFence, ErrorCodeDigestConflict, ErrorCodeAlreadyAccepted, ErrorCodeSettled,
-		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
+		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodePromptNotAccepted, ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
 	default:
 		return fmt.Errorf("unsupported error code %q", r.Code)
 	}
@@ -557,7 +561,7 @@ func (r ErrorResponse) Validate() error {
 			return fmt.Errorf("classification: %w", err)
 		}
 	}
-	if (r.Code == ErrorCodeOutcomeUnknown || r.Code == ErrorCodeWorkspaceResumeLost) && r.Retryable {
+	if (r.Code == ErrorCodeOutcomeUnknown || r.Code == ErrorCodeWorkspaceResumeLost || r.Code == ErrorCodePromptNotAccepted) && r.Retryable {
 		return fmt.Errorf("%s must never be retryable", r.Code)
 	}
 	return nil
