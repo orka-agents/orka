@@ -146,8 +146,10 @@ bounded process stop on deletion. When an adapter child exits while its
 RuntimeSession is idle and the agent advertises `sessionCapabilities.resume`,
 the supervisor restarts the adapter under the same session identity and
 reconnects it with `session/resume` (no history replay) before the next
-prompt; updates emitted during the resume handshake never reach a prompt
-stream. Resume is same-Pod only: the agent's state lives in the ephemeral
+prompt. Notifications received while the resume handshake is in flight are
+discarded. Session-control updates such as `available_commands_update` are
+excluded from harness prompt streams regardless of arrival order. Resume is
+same-Pod only: the agent's state lives in the ephemeral
 session home, so a cold resume after suspension or a pool replacement still
 recreates the RuntimeSession from Orka's canonical transcript, and an idle
 exit the agent cannot resume retires the session the same way. Before any
