@@ -241,7 +241,7 @@ warm_model() {
   jq -e '.choices[0].message.content | type == "string" and length > 0' "${work_dir}/warmup-response.json" >/dev/null
   # Qualify the multi-turn Responses shape used by both Orka and Codex before
   # building the full stack. The baked Qwen template rejects late control roles.
-  jq -n --arg model "${aikit_model}" '{model:$model,max_output_tokens:32,input:[
+  jq -n --arg model "${aikit_model}" '{model:$model,max_output_tokens:128,input:[
     {role:"system",content:"This is an Orka connectivity check."},
     {role:"user",content:"Please perform the check."},
     {role:"assistant",content:"I will perform it."},
