@@ -18,10 +18,13 @@ existing non-CRD Helm templates remain static inputs under `static/templates`;
 full manifest-to-template conversion would require Orka-specific Helm
 substitutions and is intentionally outside this change.
 
-Source chart inputs identify development builds as `0.0.0-dev`. They leave image
-references unset so current templates cannot silently select an older release
-binary. Supply controller, publisher, and worker images from the same checkout;
-configure runtime image references only for providers that should be enabled.
+Source chart inputs identify development builds as `0.0.0-dev` and select the
+latest validated `main` images under that rolling tag. The Development Images
+workflow builds the complete release image inventory by digest, then publishes
+commit-specific tags and advances development aliases only after validating the
+whole set. Its digest-pinned `values.json` artifact selects one exact build.
+Override images for feature branches or older checkouts; the rolling tag need
+not match those sources. Retagging images does not roll out existing Pods.
 
 `make release-manifest NEWVERSION=vX.Y.Z` stamps the application version, chart
 metadata, and all nine release images before generation. Release preparation

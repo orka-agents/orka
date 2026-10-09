@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-var versionedImages = []string{controllerImage, publisherImage, "agent-harness-wrapper", "ai-worker", "general-worker"}
+var versionedImages = []string{controllerImage, publisherImage, harnessWrapperImage, aiWorkerImage, generalWorkerImage}
 
 var versionedRuntimeProviders = []string{"codex", "claude", "copilot", "opencode"}
 

@@ -1030,7 +1030,7 @@ Create release-scoped static worker RoleBinding names.
 {{- end -}}
 {{ printf "%s@%s" $repository .digest }}
 {{- else -}}
-{{- $tag := required "image.tag is required when image.digest is unset; development charts require images built from the same checkout" .tag | toString -}}
+{{- $tag := required "image.tag is required when image.digest is unset" .tag | toString -}}
 {{- if not (regexMatch "^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$" $tag) -}}
 {{- fail "image.tag must be a valid container image tag" -}}
 {{- end -}}

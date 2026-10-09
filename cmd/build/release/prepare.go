@@ -83,8 +83,8 @@ type replacement struct {
 func versionFields() map[string][]replacement {
 	bare := strings.TrimPrefix(versionPattern, "v")
 	// The exact development sentinel is an input default, not a release version.
-	versionOrDev := `(?:` + versionPattern + `|v0\.0\.0-dev)`
-	bareOrDev := `(?:` + bare + `|0\.0\.0-dev)`
+	versionOrDev := `(?:` + versionPattern + `|v` + regexp.QuoteMeta(developmentVersion) + `)`
+	bareOrDev := `(?:` + bare + `|` + regexp.QuoteMeta(developmentVersion) + `)`
 	fields := map[string][]replacement{
 		makefilePath: {{pattern: `^VERSION := ` + versionOrDev + `$`, value: "VERSION := RELEASE_VERSION"}},
 		chartInputPath: {
@@ -95,7 +95,7 @@ func versionFields() map[string][]replacement {
 	for _, name := range versionedImages {
 		fields[valuesInputPath] = append(fields[valuesInputPath], replacement{
 			pattern: `^([ \t]+repository:[ \t]*` + regexp.QuoteMeta(imageRepository(name)) + `[ \t]*\n` +
-				`(?:[ \t]*(?:#.*)?\n)*[ \t]+tag: )"(?:` + bare + `)?"$`,
+				`(?:[ \t]*(?:#.*)?\n)*[ \t]+tag: )"(?:` + bareOrDev + `)?"$`,
 			value: `${1}"RELEASE_VERSION"`,
 		})
 	}
@@ -105,7 +105,7 @@ func versionFields() map[string][]replacement {
 		// match it exactly; preserve the field prefix, including its whitespace.
 		fields[valuesInputPath] = append(fields[valuesInputPath], replacement{
 			pattern: `^([ \t]+` + provider + `Image:[ \t]*)(?:` +
-				regexp.QuoteMeta(repository) + `:` + bare + `|"")$`,
+				regexp.QuoteMeta(repository) + `:` + bareOrDev + `|"")$`,
 			value: `${1}` + repository + `:RELEASE_VERSION`,
 		})
 	}

@@ -23,13 +23,14 @@ func (w *workflow) execute(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: release " +
 			"<prepare|update-version|candidate|package-cli|cli-checksums|bundle|download|" +
-			"check-bundle|check-environment|qualify|publish> [args]")
+			"check-bundle|check-environment|qualify|publish|development-matrix|development-publish> [args]")
 	}
 	name, values := args[0], args[1:]
 	counts := map[string]int{
 		"prepare": 1, "update-version": 1, "candidate": 2, "package-cli": 4, "cli-checksums": 2,
 		"bundle": 4, "download": 5,
 		"check-bundle": 1, "check-environment": 2, "qualify": 1, "publish": 1,
+		"development-matrix": 0, "development-publish": 2,
 	}
 	count, found := counts[name]
 	if !found || len(values) != count {
@@ -66,6 +67,10 @@ func (w *workflow) execute(args []string) error {
 		return w.qualify(path(values[0]))
 	case "publish":
 		return w.publish(path(values[0]))
+	case "development-matrix":
+		return w.developmentMatrix()
+	case "development-publish":
+		return w.publishDevelopment(path(values[0]), values[1])
 	default:
 		return fmt.Errorf("unknown release command %q", name)
 	}

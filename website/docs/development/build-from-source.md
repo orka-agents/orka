@@ -85,10 +85,15 @@ helm install orka ./manifest_staging/charts/orka \
 The controller issues its own webhook certificate. To bring your own, see
 [Webhook certificate](../reference/configuration.md#webhook-certificate).
 
-Development charts have no default image tags. Supply controller, publisher,
-and worker images from the same checkout, and an explicit image reference for
-every runtime provider you want to enable. Omitted runtime images remain disabled.
-To disable a runtime configured in a values file or prior installation, set its
+The chart defaults to `0.0.0-dev`, the latest validated `main` build, not
+necessarily your checkout. Keep the overrides above for a feature branch or older
+commit. The Development Images workflow publishes `sha-<full-commit>` image tags
+and a `development-images-<full-commit>` artifact with `images.json` and
+`values.json`; using that values file pins all nine images to the matching build.
+
+Tagged controller, publisher, and native worker images use `Always` pull policy.
+Changing a registry tag does not restart existing Pods. Coding-runtime tags are
+resolved to digests at controller startup. To disable an unused runtime, set its
 image to an empty string, for example `--set-string controller.acpRuntime.codexImage=`.
 
 If Helm refuses to render, that is deliberate — the chart checks its inputs up front

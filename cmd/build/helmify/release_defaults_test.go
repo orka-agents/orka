@@ -11,8 +11,8 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// Do not inject image defaults here: source charts must reject missing images
-// rather than silently selecting an older published release.
+// Render actual chart image defaults instead of the shared digest-overriding
+// fixture, so development and release image selection remains observable.
 func renderInstallationDefaults(t *testing.T, overrides ...string) (string, error) {
 	t.Helper()
 	helm, err := exec.LookPath("helm")
@@ -38,7 +38,7 @@ func developmentImageArgs() []string {
 	return args
 }
 
-func TestStaticChartDevelopmentDefaultsRequireImages(t *testing.T) {
+func TestStaticChartDevelopmentDefaultsUseRollingImages(t *testing.T) {
 	chart, err := os.ReadFile("static/Chart.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -60,39 +60,29 @@ func TestStaticChartDevelopmentDefaultsRequireImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(regexp.MustCompile(`(?m)^\s+tag: ""$`).FindAll(values, -1)); got != 5 {
-		t.Fatalf("source chart has %d unset image tags, want all five", got)
+	if got := len(regexp.MustCompile(`(?m)^\s+tag: "0.0.0-dev"$`).FindAll(values, -1)); got != 5 {
+		t.Fatalf("source chart has %d development image tags, want all five", got)
 	}
 	for _, provider := range []string{"codex", "claude", "copilot", "opencode"} {
-		if !strings.Contains(string(values), provider+`Image: ""`) {
-			t.Errorf("source chart supplied an image default for %s", provider)
+		ref := provider + "Image: ghcr.io/orka-agents/orka/acp-" + provider + "-runtime:0.0.0-dev"
+		if !strings.Contains(string(values), ref) {
+			t.Errorf("source chart did not select the development image for %s", provider)
 		}
 	}
-	const missingImageMessage = "development charts require images built from the same checkout"
-	if rendered, err := renderInstallationDefaults(t); err == nil || !strings.Contains(rendered, missingImageMessage) {
-		t.Fatalf("source chart did not reject missing images: %v\n%s", err, rendered)
+	rendered, err := renderInstallationDefaults(t)
+	if err != nil {
+		t.Fatalf("development image defaults do not render: %v\n%s", err, rendered)
+	}
+	if !strings.Contains(rendered, "imagePullPolicy: Always") {
+		t.Error("rolling development images do not pull on each pod start")
 	}
 	for _, setting := range []string{"controller.image", "publisher.image", "workers.ai.image", "workers.general.image"} {
 		t.Run(setting, func(t *testing.T) {
 			args := append(developmentImageArgs(), "--set-string", setting+".tag=")
 			if _, err := renderInstallationDefaults(t, args...); err == nil {
-				t.Error("source chart accepted a missing image tag and digest")
+				t.Error("source chart accepted an explicitly missing image tag and digest")
 			}
 		})
-	}
-	rendered, err := renderInstallationDefaults(t, developmentImageArgs()...)
-	if err != nil {
-		t.Fatalf("source-matched image overrides do not render: %v\n%s", err, rendered)
-	}
-	for _, image := range []string{"orka", "orka/workspace-publisher", "orka/ai-worker", "orka/general-worker"} {
-		if !strings.Contains(rendered, "ghcr.io/orka-agents/"+image+":source-test") {
-			t.Errorf("source chart did not use the supplied image for %s", image)
-		}
-	}
-	for _, provider := range []string{"codex", "claude", "copilot", "opencode"} {
-		if strings.Contains(rendered, "--acp-"+provider+"-runtime-image=") {
-			t.Errorf("source chart enabled %s without a supplied image", provider)
-		}
 	}
 	for _, want := range []string{
 		"--watch-namespace=orka-install-test",
@@ -111,7 +101,7 @@ func TestStaticChartDevelopmentDefaultsRequireImages(t *testing.T) {
 	}
 }
 
-func TestStaticChartUsesReleaseTagsByDefault(t *testing.T) {
+func TestStaticChartUsesVersionedImagesByDefault(t *testing.T) {
 	chart, err := os.ReadFile("static/Chart.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -123,9 +113,6 @@ func TestStaticChartUsesReleaseTagsByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	version := strings.TrimPrefix(metadata.AppVersion, "v")
-	if version == "0.0.0-dev" {
-		t.Skip("development charts require explicit source-matched images")
-	}
 	rendered, err := renderInstallationDefaults(t)
 	if err != nil {
 		t.Fatalf("installation defaults do not render: %v\n%s", err, rendered)

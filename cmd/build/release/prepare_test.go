@@ -513,3 +513,24 @@ func TestExactChartPublicationPreservesSiteRepairsIndexAndRetries(t *testing.T) 
 		t.Fatal("publication changed the tested chart bytes")
 	}
 }
+
+func TestRollingDevelopmentInputsMatchGeneratedReleaseInputs(t *testing.T) {
+	p := newDevelopmentPreparationFixture(t)
+	valuesPath := filepath.Join(p.checkout, valuesInputPath)
+	values := readTestFile(t, valuesPath)
+	values = strings.ReplaceAll(values, `tag: ""`, `tag: "`+developmentVersion+`"`)
+	for _, provider := range versionedRuntimeProviders {
+		values = strings.ReplaceAll(values, provider+`Image: ""`,
+			provider+"Image: "+imageRepository("acp-"+provider+"-runtime")+":"+developmentVersion)
+	}
+	writeTestFile(t, valuesPath, values)
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "trusted rolling development inputs")
+	trusted := p.git(t, "rev-parse", "HEAD")
+	p.git(t, "checkout", "-b", testBranch)
+	must(t, updateVersion(p.checkout, testVersion))
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "generated release inputs")
+	candidate := p.git(t, "rev-parse", "HEAD")
+	must(t, p.w.checkPreparationAutomation(trusted, candidate))
+}
