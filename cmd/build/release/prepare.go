@@ -86,7 +86,7 @@ func versionFields() map[string][]replacement {
 	versionOrDev := `(?:` + versionPattern + `|v` + regexp.QuoteMeta(developmentVersion) + `)`
 	bareOrDev := `(?:` + bare + `|` + regexp.QuoteMeta(developmentVersion) + `)`
 	fields := map[string][]replacement{
-		makefilePath: {{pattern: `^VERSION := ` + versionOrDev + `$`, value: "VERSION := RELEASE_VERSION"}},
+		makefilePath: {{pattern: `^VERSION ([?:]=) ` + versionOrDev + `$`, value: "VERSION ${1} RELEASE_VERSION"}},
 		chartInputPath: {
 			{pattern: `^version: ` + bareOrDev + `$`, value: "version: RELEASE_VERSION"},
 			{pattern: `^appVersion: "` + versionOrDev + `"$`, value: `appVersion: "RELEASE_VERSION"`},

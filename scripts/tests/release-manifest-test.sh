@@ -48,7 +48,7 @@ mkdir -p \
 go -C "${root}" build -o "${test_root}/release" ./cmd/build/release
 
 cat >"${test_root}/Makefile" <<'EOF_MAKEFILE'
-VERSION := v0.0.1
+VERSION ?= v0.0.1
 EOF_MAKEFILE
 
 cat >"${test_root}/cmd/build/helmify/static/Chart.yaml" <<'EOF_CHART'
@@ -104,7 +104,7 @@ EOF_KUSTOMIZATION
 
 (cd "${test_root}" && ./release update-version v9.8.7-rc.3) >/dev/null
 
-grep -Fx 'VERSION := v9.8.7-rc.3' "${test_root}/Makefile" >/dev/null
+grep -Fx 'VERSION ?= v9.8.7-rc.3' "${test_root}/Makefile" >/dev/null
 grep -Fx 'version: 9.8.7-rc.3' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
 grep -Fx 'appVersion: "v9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
 test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 5

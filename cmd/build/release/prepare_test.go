@@ -324,8 +324,9 @@ func TestDevelopmentInputNormalizationRejectsUntrustedChanges(t *testing.T) {
 	generated := p.git(t, "rev-parse", "HEAD")
 	type change struct{ path, old, new string }
 	changes := map[string]change{
-		"makefile command":    {makefilePath, "VERSION := " + testVersion, "VERSION := $(shell touch untrusted-command-ran)"},
-		"makefile whitespace": {makefilePath, "VERSION := ", "VERSION :=  "},
+		"makefile operator":   {makefilePath, "VERSION ?= ", "VERSION := "},
+		"makefile command":    {makefilePath, "VERSION ?= " + testVersion, "VERSION ?= $(shell touch untrusted-command-ran)"},
+		"makefile whitespace": {makefilePath, "VERSION ?= ", "VERSION ?=  "},
 		"other dev version":   {makefilePath, testVersion, "v0.2.0-dev"},
 		"chart content":       {chartInputPath, "name: orka", "name: changed"},
 		"chart comment":       {chartInputPath, "version: 0.2.0", "version: 0.2.0 # changed"},

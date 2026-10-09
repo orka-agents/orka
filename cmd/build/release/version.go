@@ -20,7 +20,7 @@ func updateVersion(root, tag string) error {
 	}
 	version := strings.TrimPrefix(tag, "v")
 	edits := map[string][]replacement{
-		makefilePath: {{pattern: `^VERSION := .*$`, value: "VERSION := " + tag, count: 1}},
+		makefilePath: {{pattern: `^VERSION ([?:]=) .*$`, value: "VERSION ${1} " + tag, count: 1}},
 		chartInputPath: {
 			{pattern: `^version: .*$`, value: "version: " + version, count: 1},
 			{pattern: `^appVersion: .*$`, value: `appVersion: "` + tag + `"`, count: 1},

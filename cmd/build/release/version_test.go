@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,7 +42,7 @@ func versionFixture(t *testing.T) (string, map[string]string) {
 func repositoryDevelopmentInputs(t *testing.T) map[string]string {
 	t.Helper()
 	edits := map[string][]replacement{
-		makefilePath: {{pattern: `^VERSION := .*$`, value: "VERSION := v0.0.0-dev", count: 1}},
+		makefilePath: {{pattern: `^VERSION [?:]= .*$`, value: "VERSION ?= v0.0.0-dev", count: 1}},
 		chartInputPath: {
 			{pattern: `^version: .*$`, value: "version: 0.0.0-dev", count: 1},
 			{pattern: `^appVersion: .*$`, value: `appVersion: "v0.0.0-dev"`, count: 1},
@@ -75,21 +76,66 @@ func repositoryDevelopmentInputs(t *testing.T) map[string]string {
 }
 
 func TestUpdateVersionPreservesFormattingAndUpdatesEveryReleaseImage(t *testing.T) {
-	root, before := versionFixture(t)
-	must(t, updateVersion(root, "v9.8.7-rc.3"))
-	for name, content := range before {
-		expected := strings.ReplaceAll(content, "0.1.1", "9.8.7-rc.3")
-		if actual := readTestFile(t, filepath.Join(root, name)); actual != expected {
-			t.Fatalf("unexpected edit to %s:\n%s", name, actual)
-		}
-		info, err := os.Stat(filepath.Join(root, name))
-		must(t, err)
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("changed file permissions for %s", name)
-		}
+	for _, assignment := range []string{":=", "?="} {
+		t.Run(assignment, func(t *testing.T) {
+			root, before := versionFixture(t)
+			before[makefilePath] = strings.Replace(before[makefilePath], "VERSION :=", "VERSION "+assignment, 1)
+			writeTestFile(t, filepath.Join(root, makefilePath), before[makefilePath])
+			must(t, updateVersion(root, "v9.8.7-rc.3"))
+			for name, content := range before {
+				expected := strings.ReplaceAll(content, "0.1.1", "9.8.7-rc.3")
+				if actual := readTestFile(t, filepath.Join(root, name)); actual != expected {
+					t.Fatalf("unexpected edit to %s:\n%s", name, actual)
+				}
+				info, err := os.Stat(filepath.Join(root, name))
+				must(t, err)
+				if info.Mode().Perm() != 0o600 {
+					t.Fatalf("changed file permissions for %s", name)
+				}
+			}
+			// Repeating the same update preserves the complete file contents.
+			must(t, updateVersion(root, "v9.8.7-rc.3"))
+		})
 	}
-	// Repeating the same update is safe and preserves the complete file contents.
-	must(t, updateVersion(root, "v9.8.7-rc.3"))
+}
+
+func TestRepositoryVersionDefaultHonorsMakeOverrides(t *testing.T) {
+	content := readTestFile(t, filepath.Join("..", "..", "..", makefilePath))
+	assignments := regexp.MustCompile(`(?m)^VERSION [?:]= .*$`).FindAllString(content, -1)
+	if len(assignments) != 1 {
+		t.Fatalf("repository Makefile has %d VERSION defaults, want one", len(assignments))
+	}
+	path := filepath.Join(t.TempDir(), makefilePath)
+	writeTestFile(t, path, assignments[0]+"\nprint-version:\n\t@printf '%s' '$(VERSION)'\n")
+	for _, test := range []struct {
+		name, environment, commandLine, want string
+	}{
+		{name: "default", want: "v0.0.0-dev"},
+		{name: "environment", environment: "v9.8.7", want: "v9.8.7"},
+		{name: "command line", commandLine: "v9.8.7-rc.3", want: "v9.8.7-rc.3"},
+		{name: "command line takes precedence", environment: "v9.8.7", commandLine: "v9.8.7-rc.3", want: "v9.8.7-rc.3"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), "make", "--no-print-directory", "-s", "-f", path, "print-version")
+			for _, item := range os.Environ() {
+				key, _, _ := strings.Cut(item, "=")
+				if key != "VERSION" && key != "MAKEFLAGS" && key != "MFLAGS" && key != "GNUMAKEFLAGS" {
+					cmd.Env = append(cmd.Env, item)
+				}
+			}
+			if test.environment != "" {
+				cmd.Env = append(cmd.Env, "VERSION="+test.environment)
+			}
+			if test.commandLine != "" {
+				cmd.Args = append(cmd.Args, "VERSION="+test.commandLine)
+			}
+			output, err := cmd.CombinedOutput()
+			must(t, err)
+			if string(output) != test.want {
+				t.Fatalf("Makefile VERSION = %q, want %q", output, test.want)
+			}
+		})
+	}
 }
 
 func TestUpdateVersionAcceptsCurrentRepositoryInputs(t *testing.T) {

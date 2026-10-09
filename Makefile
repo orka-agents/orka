@@ -1,6 +1,6 @@
 # Source checkouts are development builds. Release preparation stamps the
 # requested application and chart versions on the release branch.
-VERSION := v0.0.0-dev
+VERSION ?= v0.0.0-dev
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
