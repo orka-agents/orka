@@ -62,6 +62,7 @@ jobs:
 
       - name: Test AIKit E2E setup and cleanup contracts
         run: |
+          make kustomize
           bash scripts/tests/aikit-e2e-test.sh
           bash scripts/tests/e2e-cleanup-test.sh
 

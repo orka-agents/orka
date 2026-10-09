@@ -93,7 +93,7 @@ configure_provider_proxy() {
   patch="$(jq -cn --argjson args "${args}" '{spec:{template:{spec:{containers:[{name:"proxy",args:$args}]}}}}')"
   kubectl patch deployment orka-provider-auth-proxy -n "${orka_namespace}" --type=strategic -p "${patch}" || die "could not configure provider proxy upstream"
 
-  egress="$(kubectl get networkpolicy provider-auth-proxy -n "${orka_namespace}" -o json |
+  egress="$(kubectl get networkpolicy orka-provider-auth-proxy -n "${orka_namespace}" -o json |
     jq -ce --arg namespace "${aikit_namespace}" --arg service "${aikit_service}" --argjson port "${aikit_port}" '
       .spec.egress
       | if any(.[]; any(.to[]?; .namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "vekil-system" or
@@ -107,7 +107,7 @@ configure_provider_proxy() {
           | .ports = [{protocol:"TCP",port:$port}]
         else . end)')" || die "could not resolve provider proxy model egress"
   patch="$(jq -cn --argjson egress "${egress}" '{spec:{egress:$egress}}')"
-  kubectl patch networkpolicy provider-auth-proxy -n "${orka_namespace}" --type=merge -p "${patch}" || die "could not configure provider proxy model egress"
+  kubectl patch networkpolicy orka-provider-auth-proxy -n "${orka_namespace}" --type=merge -p "${patch}" || die "could not configure provider proxy model egress"
   kubectl rollout status deployment/orka-provider-auth-proxy -n "${orka_namespace}" --timeout=2m
   # The base installation creates this namespace for its default upstream.
   # No Vekil workload is installed in this lane.

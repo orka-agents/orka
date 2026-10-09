@@ -19,11 +19,11 @@ kubectl() {
         printf '%s\n' '{"spec":{"template":{"spec":{"containers":[{"name":"proxy","args":["--listen-address=:8080","--upstream-base-url=http://vekil.vekil-system.svc:1337","--token-file=/token","--token-reload-interval=5s"]}]}}}}'
       fi
       ;;
-    'get networkpolicy provider-auth-proxy')
+    'get networkpolicy orka-provider-auth-proxy')
       printf '%s\n' '{"spec":{"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}},"podSelector":{"matchLabels":{"k8s-app":"kube-dns"}}}],"ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]},{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"vekil-system"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"vekil"}}}],"ports":[{"protocol":"TCP","port":1337}]}]}}'
       ;;
     'patch deployment orka-provider-auth-proxy') printf '%s\n' "${@: -1}" >"${work}/deployment-patch.json" ;;
-    'patch networkpolicy provider-auth-proxy') printf '%s\n' "${@: -1}" >"${work}/network-patch.json" ;;
+    'patch networkpolicy orka-provider-auth-proxy') printf '%s\n' "${@: -1}" >"${work}/network-patch.json" ;;
     'rollout status deployment/orka-provider-auth-proxy') printf '%s\n' rollout >>"${work}/calls" ;;
     'delete namespace vekil-system') printf '%s\n' delete-namespace >>"${work}/calls" ;;
     'apply -f -') cat >"${work}/aikit.yaml" ;;
@@ -31,6 +31,18 @@ kubectl() {
     *) echo "unexpected kubectl invocation: $*" >&2; return 1 ;;
   esac
 }
+
+# Verify the fixture lookup against the actual name-prefixed installation,
+# rather than trusting the unrendered base resource name.
+[[ -x "${root}/bin/kustomize" ]] || { echo 'run make kustomize before this test' >&2; exit 1; }
+"${root}/bin/kustomize" build "${root}/config/acp-production" >"${work}/production.yaml"
+  python3 - "${work}/production.yaml" <<'PYNAME'
+import sys,re
+objects=open(sys.argv[1]).read().split('\n---\n')
+assert any(re.search(r'^kind: NetworkPolicy$',obj,re.M) and
+           re.search(r'^  name: orka-provider-auth-proxy$',obj,re.M) and
+           re.search(r'^  namespace: orka-system$',obj,re.M) for obj in objects)
+PYNAME
 
 export E2E_LOCAL_MODEL="${aikit_model}"
 if (wrong_context=true configure_provider_proxy) >/dev/null 2>&1; then
