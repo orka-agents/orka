@@ -218,6 +218,42 @@ YAML
   kubectl rollout status deployment/"${aikit_service}" -n "${aikit_namespace}" --timeout=10m
 }
 
+# Exercise the streamed tool-call shape used by Codex before building Orka.
+# A successful text-only response does not qualify this backend path.
+qualify_responses_tools() {
+  local url="$1"
+  jq -n --arg model "${aikit_model}" '{model:$model,stream:true,max_output_tokens:128,
+    input:[{role:"user",content:"Call ci_echo with text ORKA_TOOL_READY. Do not answer directly."}],
+    tools:[{type:"function",name:"ci_echo",description:"Echo the supplied text.",
+      parameters:{type:"object",properties:{text:{type:"string"}},required:["text"],additionalProperties:false}}],
+    tool_choice:{type:"function",name:"ci_echo"}}' >"${work_dir}/tools-warmup.json"
+  if ! curl -fsS -N --max-time 180 -H 'Content-Type: application/json' \
+    --data-binary @"${work_dir}/tools-warmup.json" "${url}/v1/responses" >"${work_dir}/tools-warmup.sse"; then
+    die "Qwen streamed Responses tool preflight failed or timed out"
+  fi
+  sed -n 's/^data: //p' "${work_dir}/tools-warmup.sse" | sed '/^\[DONE\]\r*$/d' |
+    jq -se 'map(select(.type == "response.completed")) |
+      if length == 1 then .[0].response else error("missing unique response.completed event") end' \
+      >"${work_dir}/tools-warmup-response.json"
+  jq -e '.status == "completed" and any(.output[]?;
+    .type == "function_call" and .name == "ci_echo" and (.call_id | length > 0) and
+    (.arguments | fromjson | .text == "ORKA_TOOL_READY"))' \
+    "${work_dir}/tools-warmup-response.json" >/dev/null || die "Qwen preflight did not emit the requested tool call"
+  jq -n --arg model "${aikit_model}" --slurpfile response "${work_dir}/tools-warmup-response.json" \
+    '{model:$model,max_output_tokens:128,input:(
+      [{role:"user",content:"Call ci_echo with text ORKA_TOOL_READY. Do not answer directly."}] +
+      $response[0].output +
+      [$response[0].output[] | select(.type == "function_call") |
+        {type:"function_call_output",call_id:.call_id,output:"ORKA_TOOL_READY"}] +
+      [{role:"developer",content:"The tool succeeded. Reply with exactly ORKA_TOOL_READY."}])}' \
+      >"${work_dir}/tool-result-warmup.json"
+  curl -fsS --max-time 180 -H 'Content-Type: application/json' \
+    --data-binary @"${work_dir}/tool-result-warmup.json" "${url}/v1/responses" >"${work_dir}/tool-result-warmup-response.json"
+  jq -e '[.output[]?.content[]?.text // empty] | join("") | contains("ORKA_TOOL_READY")' \
+    "${work_dir}/tool-result-warmup-response.json" >/dev/null || die "Qwen preflight did not consume its tool result"
+  log "Qwen streamed Responses tool call and tool-result preflight passed"
+}
+
 warm_model() {
   local port=18190 url="http://127.0.0.1:18190" ready=false
   kubectl port-forward -n "${aikit_namespace}" service/"${aikit_service}" "${port}:${aikit_port}" \
@@ -258,6 +294,7 @@ warm_model() {
     die "Qwen multi-turn Responses preflight did not return its connectivity marker"
   fi
   log "Qwen chat and multi-turn Responses preflight passed"
+  qualify_responses_tools "${url}"
   cleanup_port_forward "${proxy_pf_pid}"
   proxy_pf_pid=""
 }

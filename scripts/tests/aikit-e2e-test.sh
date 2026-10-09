@@ -104,3 +104,41 @@ if grep -Eq 'secrets\.|COPILOT_GITHUB_TOKEN|retrying' "${root}/.github/workflows
   echo 'AIKit CI still depends on cloud credentials or whole-suite retries' >&2; exit 1
 fi
 printf '%s\n' 'ok - CI requires immutable images and no cloud credentials or retries'
+
+work_dir="${work}"
+curl() {
+  local payload="" arg
+  for arg in "$@"; do [[ "${arg}" != @* ]] || payload="${arg#@}"; done
+  [[ -f "${payload}" ]] || { echo 'missing synthetic preflight payload' >&2; return 1; }
+  if [[ "${payload}" == */tools-warmup.json ]]; then
+    jq -e '.stream == true and .max_output_tokens == 128 and
+      .tool_choice == {type:"function",name:"ci_echo"} and .tools[0].name == "ci_echo"' "${payload}" >/dev/null
+    [[ "${stream_failure:-false}" != true ]] || return 28
+    printf '%s\n\n' 'event: response.created' 'data: {"type":"response.created"}'
+    if [[ "${missing_terminal:-false}" != true ]]; then
+      printf 'data: %s\n\n' "$(jq -nc --arg name "${tool_name:-ci_echo}" --arg arguments "${tool_arguments:-{\"text\":\"ORKA_TOOL_READY\"}}" \
+        '{type:"response.completed",response:{status:"completed",output:[{type:"function_call",name:$name,call_id:"call_echo",arguments:$arguments}]}}')"
+    fi
+    printf '%s\n\n' 'data: [DONE]'
+  else
+    [[ "${payload}" == */tool-result-warmup.json ]]
+    jq -e '.input[1].type == "function_call" and
+      .input[2] == {type:"function_call_output",call_id:"call_echo",output:"ORKA_TOOL_READY"} and
+      .input[3].role == "developer"' "${payload}" >/dev/null
+    jq -nc --arg text "${tool_result:-ORKA_TOOL_READY}" \
+      '{output:[{type:"message",content:[{type:"output_text",text:$text}]}]}'
+  fi
+}
+qualify_responses_tools http://synthetic.invalid
+for failure in stream_failure missing_terminal tool_name tool_arguments tool_result; do
+  case "${failure}" in
+    stream_failure|missing_terminal) value=true ;;
+    tool_name) value=wrong_tool ;;
+    tool_arguments) value='{"text":"wrong"}' ;;
+    tool_result) value=wrong_marker ;;
+  esac
+  if (export "${failure}=${value}"; qualify_responses_tools http://synthetic.invalid) >/dev/null 2>&1; then
+    echo "streamed tool preflight accepted ${failure}" >&2; exit 1
+  fi
+done
+printf '%s\n' 'ok - streamed Responses requires completion, the exact tool call and its consumed result'
