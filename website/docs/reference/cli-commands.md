@@ -3986,6 +3986,7 @@ the filters, so "what did the agent say last?" is:
   ModelContextUpdated
   ModelMessage
   ContextTruncated
+  NativeSessionCaptureSkipped
   ToolCallStarted
   ToolCallCompleted
   ToolCallFailed
@@ -4873,6 +4874,7 @@ the filters, so "what did the agent say last?" is:
   ModelContextUpdated
   ModelMessage
   ContextTruncated
+  NativeSessionCaptureSkipped
   ToolCallStarted
   ToolCallCompleted
   ToolCallFailed

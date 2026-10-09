@@ -264,6 +264,12 @@ func (d *ACPDispatcher) persistNativeCaptureIntent(ctx context.Context, task *co
 	})
 }
 
+func hasNativeCaptureRetryProof(err error, request harnessv2.CaptureNativeSessionRequest) bool {
+	clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
+	return ok && (clientErr.Code == harnessv2.ErrorCodeNativeCaptureNotStarted && request.OriginalOperationID != "" ||
+		clientErr.Code == harnessv2.ErrorCodeNativeCaptureRetryReady)
+}
+
 func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeClient *harnessv2.Client, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, session *acpTaskSession) error {
 	if session.NativeCapture != nil {
 		return nil
@@ -318,7 +324,7 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 		request = *intent.Reconciliation
 	}
 	response, err := runtimeClient.CaptureNativeSession(ctx, harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)), request)
-	if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && (clientErr.Code == harnessv2.ErrorCodeNativeCaptureNotStarted && request.OriginalOperationID != "" || clientErr.Code == harnessv2.ErrorCodeNativeCaptureRetryReady) {
+	if hasNativeCaptureRetryProof(err, request) {
 		response, err = d.supersedeRetryableNativeCapture(ctx, runtimeClient, task, runtimeFence, &intent)
 	}
 	if err != nil {

@@ -96,41 +96,10 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if request.OriginalOperationID != "" {
-		capture := nativeCaptureReceiptLocked(state, request.OriginalOperationID)
-		if capture == nil {
-			// The fence already proved this is the same supervisor boot. Captures are
-			// recorded under the lock before they start, so no record means the
-			// original never arrived and the writer is untouched. Reconciliation
-			// still never starts a capture itself.
-			s.mu.Unlock()
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeNativeCaptureNotStarted, "original native capture was never started by this runtime", nil, false)
-			return
-		}
-		if !capture.finished {
-			s.mu.Unlock()
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, "original native capture has not completed", nil, true)
-			return
-		}
-		if capture.request.Metadata.OperationID != request.OriginalOperationID || capture.request.Metadata.RequestDigest != request.OriginalRequestDigest {
-			s.mu.Unlock()
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "native capture reconciliation does not match the original operation", nil, false)
-			return
-		}
-		if classification.Class == harnessv2.RequestClassificationFresh {
-			if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
-				s.mu.Unlock()
-				writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
-				return
-			}
-			recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
-		}
-		s.mu.Unlock()
-		s.writeNativeCapture(w, capture, classification)
+		s.reconcileNativeCaptureLocked(w, state, request, classification, now)
 		return
 	}
-	retryReady := state.nativeCapture != nil && state.nativeCapture.finished && state.nativeCapture.retryable &&
-		classification.Class == harnessv2.RequestClassificationFresh && !state.drainCleanupScheduled &&
-		state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned
+	retryReady := canRetryNativeCapture(state, classification)
 	if capture := nativeCaptureReceiptLocked(state, request.Metadata.OperationID); capture != nil {
 		if capture.request.Metadata.OperationID != request.Metadata.OperationID ||
 			capture.request.Metadata.RequestDigest != request.Metadata.RequestDigest {
@@ -203,6 +172,46 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 	close(capture.done)
 	s.mu.Unlock()
 	s.writeNativeCapture(w, capture, harnessv2.Classification{Class: harnessv2.RequestClassificationFresh})
+}
+
+// The caller transfers the held mutex; every reply path releases it first.
+func (s *Server) reconcileNativeCaptureLocked(w http.ResponseWriter, state *sessionState, request harnessv2.CaptureNativeSessionRequest, classification harnessv2.Classification, now time.Time) {
+	capture := nativeCaptureReceiptLocked(state, request.OriginalOperationID)
+	if capture == nil {
+		// The fence already proved this is the same supervisor boot. Captures are
+		// recorded under the lock before they start, so no record means the
+		// original never arrived and the writer is untouched. Reconciliation
+		// still never starts a capture itself.
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeNativeCaptureNotStarted, "original native capture was never started by this runtime", nil, false)
+		return
+	}
+	if !capture.finished {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, "original native capture has not completed", nil, true)
+		return
+	}
+	if capture.request.Metadata.OperationID != request.OriginalOperationID || capture.request.Metadata.RequestDigest != request.OriginalRequestDigest {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "native capture reconciliation does not match the original operation", nil, false)
+		return
+	}
+	if classification.Class == harnessv2.RequestClassificationFresh {
+		if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
+			s.mu.Unlock()
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
+			return
+		}
+		recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	}
+	s.mu.Unlock()
+	s.writeNativeCapture(w, capture, classification)
+}
+
+func canRetryNativeCapture(state *sessionState, classification harnessv2.Classification) bool {
+	return state.nativeCapture != nil && state.nativeCapture.finished && state.nativeCapture.retryable &&
+		classification.Class == harnessv2.RequestClassificationFresh && !state.drainCleanupScheduled &&
+		state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned
 }
 
 func canStartNativeCapture(state *sessionState, classification harnessv2.Classification) bool {
