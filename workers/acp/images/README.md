@@ -139,13 +139,48 @@ The adapter returns JSON-RPC `invalid_request` (`-32600`) with
 `data.reason: "thread_active_writer"` when another Codex client owns a thread.
 A caller must release that writer before retrying. For an unmaterialized
 thread, the adapter falls back to `thread/read` in the same live app-server;
-a missing persisted thread still fails. Orka currently creates provider
-sessions with `session/new` and continues them with `session/prompt`. It does
-not expose native `session/load` or `session/resume`; installing an imported
-SessionKit bundle and handling these restore errors remain consumer work.
-A native restore consumer must also set the adapter's `MODEL_PROVIDER` to the
-destination provider ID. `CODEX_CONFIG.model_provider` alone does not select
-the provider passed to `thread/resume` in this adapter release.
+a missing persisted thread still fails. Orka creates provider sessions with
+`session/new`, continues them with `session/prompt`, and, when the agent
+advertises `sessionCapabilities.close`, sends `session/close` before the
+bounded process stop on deletion. When an adapter child exits while its
+RuntimeSession is idle and the agent advertises `sessionCapabilities.resume`,
+the supervisor restarts the adapter under the same session identity and
+reconnects it with `session/resume` (no history replay) before the next
+prompt. Notifications received while the resume handshake is in flight are
+discarded. Session-control updates such as `available_commands_update` are
+excluded from harness prompt streams regardless of arrival order. Resume is
+same-Pod only: the agent's state lives in the ephemeral
+session home, so a cold resume after suspension or a pool replacement still
+recreates the RuntimeSession from Orka's canonical transcript, and an idle
+exit the agent cannot resume retires the session the same way. Before any
+ACP prompt write, the supervisor returns non-retryable `prompt_not_accepted`
+for that idle-exit retirement; the controller records `Failed`/`RuntimeLost`
+without automatic replay, and the next continuation rebuilds from the
+canonical transcript. Orka does not use `session/load` (removed in the ACP
+v2 draft in favor of `session/resume` with `replayFrom`), `session/list`, or
+the still-unstable `session/fork`;
+installing an imported SessionKit bundle and handling restore errors beyond
+that remain consumer work. The supervisor supplies `MODEL_PROVIDER=orka`
+alongside `CODEX_CONFIG` for every Codex session so `thread/resume` retains
+the session's provider proxy. This adapter release selects the resume provider
+from `MODEL_PROVIDER` or Codex's persisted config, not
+`CODEX_CONFIG.model_provider`. Imported native restore consumers must likewise
+set `MODEL_PROVIDER` to the destination provider ID.
+
+Session-lifecycle capabilities advertised by the pinned runtimes, verified by
+driving each adapter over stdio (`initialize`, `session/new`, `session/prompt`,
+process kill, fresh process, `session/resume` or `session/load`, `session/close`)
+on 2026-10-06:
+
+| Runtime | `loadSession` | `resume` | `close` | `list` | `fork` | Resume across adapter restart |
+| --- | --- | --- | --- | --- | --- | --- |
+| Codex ACP 2.1.1 (Codex CLI 0.160.0) | yes | yes | yes | yes | yes (unstable) | works; only `available_commands_update` follows |
+| Claude Agent ACP 0.61.0 | yes | yes | yes | yes | yes (unstable) | works; only `available_commands_update` follows |
+| Copilot CLI 1.0.77 | yes | no (`Method not found`) | no (`Method not found`) | yes | no | `session/load` only, replays full history |
+| OpenCode 1.18.9 | yes | yes | yes | yes | yes (unstable) | works; only `available_commands_update` follows |
+
+Re-run the probe when any of these pins change; Copilot is the only built-in
+runtime whose idle adapter exit cannot be resumed in place.
 
 The Copilot image instead installs the unmodified official per-architecture
 release executable. Its tar asset is checksum-verified, must contain exactly one

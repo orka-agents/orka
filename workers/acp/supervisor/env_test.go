@@ -3,12 +3,14 @@ package supervisor
 import (
 	"encoding/json"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -105,6 +107,7 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	maps.Copy(environment, projection.Environment)
+	assertCodexResumeModelProvider(t, environment)
 	if environment["NO_BROWSER"] != "1" || environment["CODEX_HOME"] != "/sessions/private/home/.codex" ||
 		!strings.Contains(environment["CODEX_CONFIG"], proxy.BaseURL) || environment["CODEX_API_KEY"] != proxy.Credential {
 		t.Fatalf("unexpected Codex environment: %#v", environment)
@@ -140,6 +143,7 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	maps.Copy(environment, projection.Environment)
+	assertCodexResumeModelProvider(t, environment)
 	// Read-only sessions keep the orka-external agent mode: Codex's own
 	// sandbox needs unprivileged user namespaces the runtime Pod forbids, so
 	// the RuntimeSession boundary enforces the read-only surface instead.
@@ -525,11 +529,83 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			assertCodexResumeModelProvider(t, environment)
 			if got := environment["INITIAL_AGENT_MODE"]; got != codexAgentModeOrkaExternal {
 				t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", got)
 			}
 		})
 	}
+}
+
+// Both adapter processes must receive the actual Codex provider environment,
+// including after the runtime reconnects the persisted session with session/resume.
+func TestCodexProviderResumeEnvironmentSurvivesIdleRestart(t *testing.T) {
+	server, cfg, profile := newTestServer(t, adapterResumeMode)
+	codex, err := providerProfile(providerKindCodex, profile.Model, profile.WorkspaceIntent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.cfg.Provider.EnvironmentForSession = codex.EnvironmentForSession
+	server.cfg.Provider.PrepareSession = codex.PrepareSession
+	server.cfg.Provider.Args = []string{"-test.run=^TestCodexProviderResumeHelper$"}
+	create := testCreateSessionRequest(t, cfg, profile)
+	created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d", created.Code)
+	}
+	first := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+	completed := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", first, cfg)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("first prompt status = %d", completed.Code)
+	}
+	server.mu.Lock()
+	state := server.sessions[create.RuntimeSessionID]
+	server.mu.Unlock()
+	if state == nil || state.runtime == nil {
+		t.Fatal("session state missing after first prompt")
+	}
+	select {
+	case <-state.runtime.Process().Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("helper adapter did not exit after the first prompt")
+	}
+	server.mu.Lock()
+	state.descriptor.State = harnessv2.RuntimeSessionStateIdle
+	server.mu.Unlock()
+	deactivatePromptCapabilities(state, first.Metadata.PromptID, harnessv2.RuntimeSessionStateIdle)
+	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
+	resumed := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
+	if resumed.Code != http.StatusOK {
+		t.Fatalf("resumed prompt status = %d", resumed.Code)
+	}
+	if got := state.runtime.AdapterRestarts(); got != 1 {
+		t.Fatalf("adapter restarts = %d, want 1", got)
+	}
+}
+
+func TestCodexProviderResumeHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_SUPERVISOR_ACP_HELPER") != "1" {
+		return
+	}
+	assertCodexResumeModelProvider(t, map[string]string{
+		"MODEL_PROVIDER": os.Getenv("MODEL_PROVIDER"),
+		"CODEX_CONFIG":   os.Getenv("CODEX_CONFIG"),
+	})
+	TestSupervisorACPHelper(t)
+}
+
+func assertCodexResumeModelProvider(t *testing.T, environment map[string]string) {
+	t.Helper()
+	var config map[string]any
+	if err := json.Unmarshal([]byte(environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	// The pinned adapter does not consult CODEX_CONFIG for thread/resume's
+	// modelProvider. Its explicit MODEL_PROVIDER must match the session config.
+	if got := environment["MODEL_PROVIDER"]; got != codexProviderID || got != config["model_provider"] {
+		t.Fatalf("MODEL_PROVIDER = %q, CODEX_CONFIG.model_provider = %v, want %q", got, config["model_provider"], codexProviderID)
+	}
+	assertCodexWebSocketTransportsDisabled(t, config)
 }
 
 //nolint:gocyclo // The environment fixture checks one complete derived supervisor configuration.

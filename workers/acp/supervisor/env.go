@@ -710,7 +710,10 @@ func providerProfile(
 				}
 				return map[string]string{
 					noBrowserEnv: "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
-					"CODEX_CONFIG": string(config), "INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
+					// The pinned adapter's thread/resume provider selector reads
+					// MODEL_PROVIDER, not the model_provider in CODEX_CONFIG.
+					"MODEL_PROVIDER": codexProviderID,
+					"CODEX_CONFIG":   string(config), "INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
 				}, nil
 			},
 			PrepareSession: prepareCodexHome,

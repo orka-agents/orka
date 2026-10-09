@@ -35,6 +35,18 @@ const providerProjectionCanaryMode = "provider-projection-canary"
 const providerProjectionCanaryValue = "projected"
 const assistantBurstMode = "assistant-burst"
 const toolBurstRPCErrorMode = "tool-burst-rpc-error"
+
+// adapterResumeMode exits after every prompt and advertises session/resume,
+// honoring a resume of the persisted provider session from a fresh process.
+const adapterResumeMode = "resume-after-exit"
+
+// adapterResumeFailureMode advertises resume but rejects the handshake.
+const adapterResumeFailureMode = "resume-fails-after-exit"
+
+// adapterExitAfterPromptMode exits after every prompt without advertising
+// session/resume, so an idle session loses its agent for good.
+const adapterExitAfterPromptMode = "exit-after-prompt"
+const helperProviderSessionFile = "acp-helper-provider-session"
 const testPromptOneID = "prompt-1"
 const testPromptTwoID = "prompt-2"
 const testPromptOperationTwo = "prompt-operation-2"
@@ -1367,14 +1379,35 @@ func TestSupervisorACPHelper(t *testing.T) {
 		}
 		switch message.Method {
 		case acp.MethodInitialize:
+			agentCapabilities := map[string]any{"mcpCapabilities": map[string]any{"http": true}}
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode {
+				agentCapabilities["sessionCapabilities"] = map[string]any{acp.SessionCapabilityResume: map[string]any{}}
+			}
 			writeHelperMessage(writer, map[string]any{
 				testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
 				"result": map[string]any{
 					"protocolVersion":   acp.ProtocolVersion,
-					"agentCapabilities": map[string]any{"mcpCapabilities": map[string]any{"http": true}},
+					"agentCapabilities": agentCapabilities,
 				},
 			})
+		case acp.MethodSessionResume:
+			var request acp.ResumeSessionRequest
+			persisted, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile))
+			if err := json.Unmarshal(message.Params, &request); err != nil || mode != adapterResumeMode ||
+				request.SessionID == "" || request.SessionID != string(persisted) || request.Meta["orka.runtimeSessionID"] != "session-1" {
+				writeHelperMessage(writer, map[string]any{
+					testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
+					"error": map[string]any{"code": -32602, "message": "cannot resume session"},
+				})
+				continue
+			}
+			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{}})
 		case acp.MethodSessionNew:
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterExitAfterPromptMode {
+				// The child's HOME is the session home, which real agents use
+				// for the state a fresh adapter process resumes from.
+				_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile), []byte(sessionID), 0o600)
+			}
 			if mode == providerProjectionCanaryMode {
 				var request acp.NewSessionRequest
 				if err := json.Unmarshal(message.Params, &request); err != nil || request.Meta["provider.canary"] != providerProjectionCanaryValue ||
@@ -1443,6 +1476,10 @@ func TestSupervisorACPHelper(t *testing.T) {
 			if mode != "wait" {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{"stopReason": acp.StopReasonEndTurn}})
 				promptID = nil
+			}
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterExitAfterPromptMode {
+				// Simulate an adapter crash while the session is idle.
+				os.Exit(0)
 			}
 		case acp.MethodSessionCancel:
 			if len(promptID) > 0 {
