@@ -1,0 +1,20 @@
+- name: qwen-3.5-2b
+  backend: llama-cpp
+  parameters:
+    model: Qwen3.5-2B-Q4_K_M.gguf
+    temperature: 0
+    repeat_penalty: 1.0
+  f16: true
+  mmap: true
+  reasoning_effort: none
+  chat_template_kwargs:
+    enable_thinking: false
+  template:
+    use_tokenizer_template: true
+    system_messages_after_first: merge
+  options:
+    - "use_jinja:true"
+    - "--chat-template-file:/etc/orka-aikit/chat-template.jinja"
+  function:
+    grammar:
+      disable: true

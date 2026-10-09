@@ -196,7 +196,10 @@ missing or mismatched artifacts staying not ready.
 - `AIKit Qwen E2E` uses a digest-pinned Qwen 3.5 2B image as local CPU model
   infrastructure for native Provider, compatibility API, and runtime checks.
   It requires no cloud credentials and routes through Orka's auth/session proxies
-  directly to AIKit, without Vekil. `Agent Runtime E2E` retains real-provider
+  directly to AIKit, without Vekil. Its Qwen template merges system/developer
+  instructions into a leading system block so multi-turn Responses requests
+  remain compatible without dropping instructions or changing tool permissions.
+  `Agent Runtime E2E` retains real-provider
   execution coverage for the built-in RuntimePool profiles.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks

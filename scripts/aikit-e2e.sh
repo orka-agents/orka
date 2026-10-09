@@ -138,10 +138,19 @@ spec:
         app.kubernetes.io/name: ${aikit_service}
     spec:
       automountServiceAccountToken: false
+      volumes:
+        - name: configuration
+          configMap:
+            name: aikit-configuration
       containers:
         - name: model
           image: ${aikit_image}
           imagePullPolicy: IfNotPresent
+          args: ["--config-file=/etc/orka-aikit/config.yaml"]
+          volumeMounts:
+            - name: configuration
+              mountPath: /etc/orka-aikit
+              readOnly: true
           ports:
             - name: http
               containerPort: ${aikit_port}
@@ -202,6 +211,10 @@ spec:
         - protocol: TCP
           port: ${aikit_port}
 YAML
+  kubectl create configmap aikit-configuration -n "${aikit_namespace}" \
+    --from-file=config.yaml="${script_dir}/fixtures/aikit/config.yaml" \
+    --from-file=chat-template.jinja="${script_dir}/fixtures/aikit/qwen3.5-chat-template.jinja" \
+    --dry-run=client -o yaml | kubectl apply -f -
   kubectl rollout status deployment/"${aikit_service}" -n "${aikit_namespace}" --timeout=10m
 }
 
@@ -226,6 +239,19 @@ warm_model() {
   curl -fsS --max-time 300 -H 'Content-Type: application/json' \
     --data-binary @"${work_dir}/warmup.json" "${url}/v1/chat/completions" >"${work_dir}/warmup-response.json"
   jq -e '.choices[0].message.content | type == "string" and length > 0' "${work_dir}/warmup-response.json" >/dev/null
+  # Qualify the multi-turn Responses shape used by both Orka and Codex before
+  # building the full stack. The baked Qwen template rejects late control roles.
+  jq -n --arg model "${aikit_model}" '{model:$model,max_output_tokens:32,input:[
+    {role:"system",content:"This is an Orka connectivity check."},
+    {role:"user",content:"Please perform the check."},
+    {role:"assistant",content:"I will perform it."},
+    {role:"developer",content:"Reply with exactly ORKA_RESPONSES_READY."},
+    {role:"user",content:"Proceed."}]}' >"${work_dir}/responses-warmup.json"
+  curl -fsS --max-time 180 -H 'Content-Type: application/json' \
+    --data-binary @"${work_dir}/responses-warmup.json" "${url}/v1/responses" >"${work_dir}/responses-warmup-response.json"
+  jq -e '[.output[]?.content[]?.text // empty] | join("") | contains("ORKA_RESPONSES_READY")' \
+    "${work_dir}/responses-warmup-response.json" >/dev/null
+  log "Qwen chat and multi-turn Responses preflight passed"
   cleanup_port_forward "${proxy_pf_pid}"
   proxy_pf_pid=""
 }

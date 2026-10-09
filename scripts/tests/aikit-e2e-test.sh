@@ -26,7 +26,15 @@ kubectl() {
     'patch networkpolicy orka-provider-auth-proxy') printf '%s\n' "${@: -1}" >"${work}/network-patch.json" ;;
     'rollout status deployment/orka-provider-auth-proxy') printf '%s\n' rollout >>"${work}/calls" ;;
     'delete namespace vekil-system') printf '%s\n' delete-namespace >>"${work}/calls" ;;
-    'apply -f -') cat >"${work}/aikit.yaml" ;;
+    'create configmap aikit-configuration')
+      [[ "$*" == *"--from-file=config.yaml="* && "$*" == *"--from-file=chat-template.jinja="* ]]
+      printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: aikit-configuration'
+      ;;
+    'apply -f -')
+      input="$(cat)"
+      if [[ "${input}" == *'kind: ConfigMap'* ]]; then printf '%s\n' "${input}" >"${work}/configuration.yaml";
+      else printf '%s\n' "${input}" >"${work}/aikit.yaml"; fi
+      ;;
     'rollout status deployment/aikit') printf '%s\n' model-rollout >>"${work}/calls" ;;
     *) echo "unexpected kubectl invocation: $*" >&2; return 1 ;;
   esac
@@ -76,6 +84,9 @@ import sys,re
 manifest=open(sys.argv[1]).read()
 assert 'image: ghcr.io/kaito-project/aikit/qwen3.5:2b@sha256:d838c5eebf533b5b73f67cc7f4984921f87d64d28e4a52d482740b667f46b8b4' in manifest
 assert 'automountServiceAccountToken: false' in manifest
+assert 'args: ["--config-file=/etc/orka-aikit/config.yaml"]' in manifest
+assert 'mountPath: /etc/orka-aikit' in manifest
+assert 'readOnly: true' in manifest
 for name,value in [('LOCALAI_THREADS','"4"'),('LOCALAI_CONTEXT_SIZE','"32768"'),('LOCALAI_LOAD_TO_MEMORY','qwen-3.5-2b')]:
     assert re.search(r'name: '+name+r'\s+value: '+re.escape(value),manifest)
 assert 'limits:\n              cpu: "4"\n              memory: 6Gi' in manifest
