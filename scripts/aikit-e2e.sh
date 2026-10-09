@@ -239,17 +239,21 @@ qualify_responses_tools() {
     .type == "function_call" and .name == "ci_echo" and (.call_id | length > 0) and
     (.arguments | fromjson | .text == "ORKA_TOOL_READY"))' \
     "${work_dir}/tools-warmup-response.json" >/dev/null || die "Qwen preflight did not emit the requested tool call"
-  jq -n --arg model "${aikit_model}" --slurpfile response "${work_dir}/tools-warmup-response.json" \
+  # Only the tool output exposes this fresh value; echoing the prompt cannot pass.
+  local tool_output
+  tool_output="ORKA_TOOL_OUTPUT_$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
+  jq -n --arg model "${aikit_model}" --arg tool_output "${tool_output}" \
+    --slurpfile response "${work_dir}/tools-warmup-response.json" \
     '{model:$model,max_output_tokens:128,input:(
       [{role:"user",content:"Call ci_echo with text ORKA_TOOL_READY. Do not answer directly."}] +
       $response[0].output +
       [$response[0].output[] | select(.type == "function_call") |
-        {type:"function_call_output",call_id:.call_id,output:"ORKA_TOOL_READY"}] +
-      [{role:"developer",content:"The tool succeeded. Reply with exactly ORKA_TOOL_READY."}])}' \
+        {type:"function_call_output",call_id:.call_id,output:$tool_output}] +
+      [{role:"developer",content:"Reply with exactly the tool output text and nothing else."}])}' \
       >"${work_dir}/tool-result-warmup.json"
   curl -fsS --max-time 180 -H 'Content-Type: application/json' \
     --data-binary @"${work_dir}/tool-result-warmup.json" "${url}/v1/responses" >"${work_dir}/tool-result-warmup-response.json"
-  jq -e '[.output[]?.content[]?.text // empty] | join("") | contains("ORKA_TOOL_READY")' \
+  jq -e --arg tool_output "${tool_output}" '[.output[]?.content[]?.text // empty] | join("") == $tool_output' \
     "${work_dir}/tool-result-warmup-response.json" >/dev/null || die "Qwen preflight did not consume its tool result"
   log "Qwen streamed Responses tool call and tool-result preflight passed"
 }

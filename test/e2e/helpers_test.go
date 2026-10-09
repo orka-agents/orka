@@ -1348,12 +1348,22 @@ func isProxyOpenAIProviderCandidate(modelID string) bool {
 		!strings.HasPrefix(modelID, "gpt-5.4")
 }
 
+func liveProxyOpenAIProbeTimeout() time.Duration {
+	if localE2EModel() != "" {
+		// Match the AIKit Responses preflight budget for CPU inference.
+		return 3 * time.Minute
+	}
+	return 30 * time.Second
+}
+
 func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
+	timeout := liveProxyOpenAIProbeTimeout()
 	if _, err := probeProxyOpenAIProviderCompletion(
 		baseURL,
 		modelID,
 		"Reply with exactly OK and nothing else.",
 		nil,
+		timeout,
 	); err != nil {
 		return fmt.Errorf("completion probe failed: %w", err)
 	}
@@ -1370,6 +1380,7 @@ func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
 		modelID,
 		"Call noop_tool exactly once before answering.",
 		tools,
+		timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("tool completion probe failed: %w", err)
@@ -1384,7 +1395,7 @@ func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
 	return nil
 }
 
-func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools []llm.Tool) (*llm.CompletionResponse, error) {
+func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools []llm.Tool, timeout time.Duration) (*llm.CompletionResponse, error) {
 	provider, err := openaiprovider.NewProvider(llm.ProviderConfig{
 		ProviderType: "openai",
 		APIKey:       liveProxyProbeAPIKey,
@@ -1394,7 +1405,7 @@ func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools [
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return provider.Complete(ctx, &llm.CompletionRequest{

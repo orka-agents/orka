@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLiveProxyModelCandidates(t *testing.T) {
@@ -258,6 +259,65 @@ func TestLiveProxyLocalOpenAIModelRequiresTools(t *testing.T) {
 			}
 			if completionCalls != 1 || toolCalls != 1 {
 				t.Fatalf("completion probes = %d, tool probes = %d; want one of each", completionCalls, toolCalls)
+			}
+		})
+	}
+}
+
+func TestLiveProxyOpenAIProbeTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		local string
+		want  time.Duration
+	}{
+		{"cloud budget unchanged", "", 30 * time.Second},
+		{"CPU inference budget", "qwen-3.5-2b", 3 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("E2E_LOCAL_MODEL", tc.local)
+			if got := liveProxyOpenAIProbeTimeout(); got != tc.want {
+				t.Fatalf("probe timeout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProbeProxyOpenAIProviderCompletionTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		wantErr bool
+	}{
+		{"deadline expires", 25 * time.Millisecond, true},
+		{"completion within budget", time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/v1/responses" {
+					http.NotFound(w, req)
+					return
+				}
+				if req.URL.Path != "/v1/chat/completions" {
+					t.Errorf("unexpected path %q", req.URL.Path)
+				}
+				select {
+				case <-req.Context().Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"completion_probe","model":"qwen-3.5-2b","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"OK"}}]}`))
+			}))
+			defer server.Close()
+			resp, err := probeProxyOpenAIProviderCompletion(server.URL, "qwen-3.5-2b", "Reply with exactly OK.", nil, tc.timeout)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+					t.Fatalf("completion error = %v, want deadline exceeded", err)
+				}
+				return
+			}
+			if err != nil || resp == nil || resp.Content != "OK" {
+				t.Fatalf("completion = %+v, error = %v; want OK", resp, err)
 			}
 		})
 	}

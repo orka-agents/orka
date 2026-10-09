@@ -107,12 +107,12 @@ printf '%s\n' 'ok - CI requires immutable images and no cloud credentials or ret
 
 work_dir="${work}"
 curl() {
-  local payload="" arg
+  local payload="" arg result_value text
   for arg in "$@"; do [[ "${arg}" != @* ]] || payload="${arg#@}"; done
   [[ -f "${payload}" ]] || { echo 'missing synthetic preflight payload' >&2; return 1; }
   if [[ "${payload}" == */tools-warmup.json ]]; then
     jq -e '.stream == true and .max_output_tokens == 128 and
-      .tool_choice == {type:"function",name:"ci_echo"} and .tools[0].name == "ci_echo"' "${payload}" >/dev/null
+      .tool_choice == {type:"function",name:"ci_echo"} and .tools[0].name == "ci_echo"' "${payload}" >/dev/null || return 1
     [[ "${stream_failure:-false}" != true ]] || return 28
     printf '%s\n\n' 'event: response.created' 'data: {"type":"response.created"}'
     if [[ "${missing_terminal:-false}" != true ]]; then
@@ -121,24 +121,51 @@ curl() {
     fi
     printf '%s\n\n' 'data: [DONE]'
   else
-    [[ "${payload}" == */tool-result-warmup.json ]]
-    jq -e '.input[1].type == "function_call" and
-      .input[2] == {type:"function_call_output",call_id:"call_echo",output:"ORKA_TOOL_READY"} and
-      .input[3].role == "developer"' "${payload}" >/dev/null
-    jq -nc --arg text "${tool_result:-ORKA_TOOL_READY}" \
+    [[ "${payload}" == */tool-result-warmup.json ]] || return 1
+    result_value="$(jq -er '.input[2].output | select(type == "string")' "${payload}")" || return 1
+    jq -e --arg result_value "${result_value}" '.input[1].type == "function_call" and
+      .input[2] == {type:"function_call_output",call_id:"call_echo",output:$result_value} and
+      ($result_value | test("^ORKA_TOOL_OUTPUT_[0-9a-f]{32}$")) and
+      .input[3] == {role:"developer",content:"Reply with exactly the tool output text and nothing else."} and
+      (del(.input[2].output) | all(.. | strings; contains($result_value) | not))' "${payload}" >/dev/null || return 1
+    case "${tool_result_mode:-exact}" in
+      exact) text="${result_value}" ;;
+      wrong) text=wrong_marker ;;
+      prompt) text="$(jq -r '.input[0].content' "${payload}")" ;;
+      arguments) text="$(jq -r '.input[1].arguments | fromjson | .text' "${payload}")" ;;
+      arguments_json) text="$(jq -r '.input[1].arguments' "${payload}")" ;;
+      developer) text="$(jq -r '.input[3].content' "${payload}")" ;;
+      prefix) text="Tool result: ${result_value}" ;;
+      suffix) text="${result_value} done" ;;
+      whitespace) text=" ${result_value} " ;;
+      newline) text="$(printf '%s\nextra line' "${result_value}")" ;;
+      *) echo "unexpected synthetic tool result mode: ${tool_result_mode}" >&2; return 1 ;;
+    esac
+    jq -nc --arg text "${text}" \
       '{output:[{type:"message",content:[{type:"output_text",text:$text}]}]}'
   fi
 }
 qualify_responses_tools http://synthetic.invalid
-for failure in stream_failure missing_terminal tool_name tool_arguments tool_result; do
+first_tool_result="$(jq -r '.input[2].output' "${work}/tool-result-warmup.json")"
+qualify_responses_tools http://synthetic.invalid
+[[ "$(jq -r '.input[2].output' "${work}/tool-result-warmup.json")" != "${first_tool_result}" ]] || {
+  echo 'tool-result preflight reused its previous value' >&2; exit 1;
+}
+printf '%s\n' 'ok - tool-result preflight exposes a fresh value only in function_call_output'
+for failure in stream_failure missing_terminal tool_name tool_arguments; do
   case "${failure}" in
     stream_failure|missing_terminal) value=true ;;
     tool_name) value=wrong_tool ;;
     tool_arguments) value='{"text":"wrong"}' ;;
-    tool_result) value=wrong_marker ;;
   esac
   if (export "${failure}=${value}"; qualify_responses_tools http://synthetic.invalid) >/dev/null 2>&1; then
     echo "streamed tool preflight accepted ${failure}" >&2; exit 1
   fi
 done
-printf '%s\n' 'ok - streamed Responses requires completion, the exact tool call and its consumed result'
+printf '%s\n' 'ok - streamed Responses requires completion and the exact tool call arguments'
+for mode in wrong prompt arguments arguments_json developer prefix suffix whitespace newline; do
+  if (tool_result_mode="${mode}"; qualify_responses_tools http://synthetic.invalid) >/dev/null 2>&1; then
+    echo "tool-result preflight accepted ${mode}" >&2; exit 1
+  fi
+done
+printf '%s\n' 'ok - tool-result preflight rejects prompt/argument echoes and surrounding text'
