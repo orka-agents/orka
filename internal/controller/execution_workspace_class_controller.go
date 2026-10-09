@@ -25,23 +25,25 @@ import (
 )
 
 const (
-	executionWorkspaceClassFinalizer = "workspace.orka.ai/class-protection"
-	classReadinessRequeue            = 30 * time.Second
-	reasonParametersScopeInvalid     = "ParametersScopeInvalid"
-	reasonProfileDrift               = "ProfileDrift"
-	reasonProviderDeleting           = "ProviderDeleting"
-	reasonProviderNotFound           = "ProviderNotFound"
-	reasonRequiredFeatures           = "RequiredFeaturesUnavailable"
-	reasonProviderBindingMismatch    = "ProviderBindingMismatch"
-	reasonNamespacePolicyInvalid     = "NamespacePolicyInvalid"
-	reasonClassNotReady              = "ClassNotReady"
-	reasonPoolNotReady               = "PoolNotReady"
-	reasonProviderNotReady           = "ProviderNotReady"
-	reasonProviderNameUnsupported    = "ProviderNameUnsupported"
-	messageProviderNameUnsupported   = "provider registration name must be a DNS-compatible label value of at most 63 characters"
-	messageProviderDisabled          = "provider is disabled"
-	messageACPProfileInvalid         = "ACP RuntimeWorkspaceProfile is invalid for the selected provider backend"
-	messageProviderFeaturesMissing   = "provider does not support every explicit or implied class feature"
+	executionWorkspaceClassFinalizer  = "workspace.orka.ai/class-protection"
+	classReadinessRequeue             = 30 * time.Second
+	reasonParametersScopeInvalid      = "ParametersScopeInvalid"
+	reasonProfileDrift                = "ProfileDrift"
+	reasonProviderDeleting            = "ProviderDeleting"
+	reasonProviderNotFound            = "ProviderNotFound"
+	reasonRequiredFeatures            = "RequiredFeaturesUnavailable"
+	reasonProviderBindingMismatch     = "ProviderBindingMismatch"
+	reasonNamespacePolicyInvalid      = "NamespacePolicyInvalid"
+	reasonClassNotReady               = "ClassNotReady"
+	reasonPoolNotReady                = "PoolNotReady"
+	reasonProviderNotReady            = "ProviderNotReady"
+	reasonProviderNameUnsupported     = "ProviderNameUnsupported"
+	messageProviderNameUnsupported    = "provider registration name must be a DNS-compatible label value of at most 63 characters"
+	reasonProviderControllerReserved  = "ProviderControllerReserved"
+	messageProviderControllerReserved = "provider controllerName is reserved for the legacy ACP controller"
+	messageProviderDisabled           = "provider is disabled"
+	messageACPProfileInvalid          = "ACP RuntimeWorkspaceProfile is invalid for the selected provider backend"
+	messageProviderFeaturesMissing    = "provider does not support every explicit or implied class feature"
 )
 
 var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace selector")
@@ -256,6 +258,9 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	}
 	if !workspaceProviderNameSupportsRouting(provider.Name) {
 		return providerName, reasonProviderNameUnsupported, messageProviderNameUnsupported, nil
+	}
+	if workspaceProviderControllerReserved(provider.Spec.ControllerName) {
+		return providerName, reasonProviderControllerReserved, messageProviderControllerReserved, nil
 	}
 	if provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
 		reason := string(workspacev1alpha1.ReasonProviderDraining)

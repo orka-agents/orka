@@ -115,7 +115,8 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	ready := heartbeatFresh && adapterObserved && adapterIdentified && contractsCompatible && parametersValid &&
-		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderActive && workspaceProviderNameSupportsRouting(provider.Name)
+		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderActive && workspaceProviderNameSupportsRouting(provider.Name) &&
+		!workspaceProviderControllerReserved(provider.Spec.ControllerName)
 
 	conditions := make([]metav1.Condition, 0, 3)
 	conditions = append(conditions,
@@ -145,6 +146,9 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 	} else if !workspaceProviderNameSupportsRouting(provider.Name) {
 		readyReason = reasonProviderNameUnsupported
 		readyMessage = messageProviderNameUnsupported
+	} else if workspaceProviderControllerReserved(provider.Spec.ControllerName) {
+		readyReason = reasonProviderControllerReserved
+		readyMessage = messageProviderControllerReserved
 	} else if !heartbeatFresh {
 		readyReason = string(workspacev1alpha1.ReasonHeartbeatExpired)
 		readyMessage = "provider heartbeat is missing or expired"
@@ -178,6 +182,12 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 
 // The shared checkpoint policy authorizes the exact registration named by its
 // routing label. Core cannot replace that name with a hash or annotation.
+// Core treats workspaces and checkpoints labeled with the legacy ACP routing
+// identity as legacy-owned, so no registration may claim it as controllerName.
+func workspaceProviderControllerReserved(controllerName string) bool {
+	return controllerName == acpWorkspaceControllerLabelValue
+}
+
 func workspaceProviderNameSupportsRouting(name string) bool {
 	return len(validation.IsDNS1123Subdomain(name)) == 0 && len(validation.IsValidLabelValue(name)) == 0
 }
