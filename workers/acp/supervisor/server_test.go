@@ -1375,11 +1375,11 @@ func TestSupervisorACPHelper(t *testing.T) {
 				testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
 				"result": map[string]any{
 					"protocolVersion":   acp.ProtocolVersion,
-					"agentCapabilities": map[string]any{"loadSession": true, "mcpCapabilities": map[string]any{"http": true}},
+					"agentCapabilities": map[string]any{"loadSession": true, "sessionCapabilities": map[string]any{"resume": map[string]any{}}, "mcpCapabilities": map[string]any{"http": true}},
 				},
 			})
 		case acp.MethodSessionNew:
-			if mode == "native-load" {
+			if strings.HasPrefix(mode, "native-resume") {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "error": map[string]any{"code": -32602, "message": "unexpected session/new during native restore"}})
 				continue
 			}
@@ -1391,8 +1391,8 @@ func TestSupervisorACPHelper(t *testing.T) {
 				continue
 			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{"sessionId": sessionID}})
-		case acp.MethodSessionLoad:
-			handleSupervisorNativeLoad(writer, message.ID, message.Params, sessionID)
+		case acp.MethodSessionResume:
+			handleSupervisorNativeResume(writer, message.ID, message.Params)
 		case acp.MethodSessionPrompt:
 			promptID = append(promptID[:0], message.ID...)
 			if mode == providerProxyCanaryMode {

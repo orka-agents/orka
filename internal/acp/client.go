@@ -296,6 +296,21 @@ func (c *Client) NewSession(ctx context.Context, request NewSessionRequest) (New
 	return response, nil
 }
 
+// ResumeSession requires the caller to check the advertised resume capability.
+func (c *Client) ResumeSession(ctx context.Context, request ResumeSessionRequest) (ResumeSessionResponse, error) {
+	if request.SessionID == "" {
+		return ResumeSessionResponse{}, fmt.Errorf("ACP session/resume requires sessionId")
+	}
+	var response ResumeSessionResponse
+	if err := c.Call(ctx, MethodSessionResume, request, &response); err != nil {
+		return ResumeSessionResponse{}, err
+	}
+	if response.SessionID != "" && response.SessionID != request.SessionID {
+		return ResumeSessionResponse{}, fmt.Errorf("ACP session/resume bound a different provider session")
+	}
+	return response, nil
+}
+
 func (c *Client) LoadSession(ctx context.Context, request LoadSessionRequest) (LoadSessionResponse, error) {
 	if request.SessionID == "" {
 		return LoadSessionResponse{}, fmt.Errorf("ACP session/load requires sessionId")

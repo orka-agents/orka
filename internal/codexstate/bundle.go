@@ -86,7 +86,7 @@ func Capture(ctx context.Context, home, threadID string) ([]byte, error) {
 		if errors.As(err, &exhausted) && exhausted.Limit != "timeout" {
 			return nil, fmt.Errorf("%w: capture budget %s", ErrUnsupported, exhausted.Limit)
 		}
-		return nil, err
+		return nil, classifyNativeFormatError(err)
 	}
 	if err := supported(bundle.Manifest); err != nil {
 		return nil, err
@@ -107,6 +107,21 @@ func Capture(ctx context.Context, home, threadID string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: native bundle exceeds Orka's %d-byte transport limit", ErrUnsupported, MaxBundleBytes)
 	}
 	return data, nil
+}
+
+// SessionKit rejects encrypted content before producing an inspection manifest.
+// Only this known format rejection is eligible for optional transcript fallback.
+func classifyNativeFormatError(err error) error {
+	rejected, ok := errors.AsType[*sessionkit.RejectionError](err)
+	if !ok || len(rejected.Rejections) == 0 {
+		return err
+	}
+	for _, rejection := range rejected.Rejections {
+		if rejection.Code != "encrypted_content" {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: encrypted native context has no supported reload contract", ErrUnsupported)
 }
 
 func supported(manifest sessionkit.Manifest) error {
@@ -285,7 +300,7 @@ func Inspect(ctx context.Context, data []byte) (Summary, error) {
 	}
 	bundle, err := sessionkit.OpenBundle(ctx, dir, limits())
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, classifyNativeFormatError(err)
 	}
 	if err := supported(bundle.Manifest); err != nil {
 		return Summary{}, err

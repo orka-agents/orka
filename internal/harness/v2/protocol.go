@@ -541,6 +541,8 @@ const (
 	// original operation this runtime incarnation never recorded, so no capture
 	// has started and the controller may begin a fresh one.
 	ErrorCodeNativeCaptureNotStarted ErrorCode = "native_capture_not_started"
+	// RetryReady proves capture failed after writer exit; a fresh operation may retry the retained private tree.
+	ErrorCodeNativeCaptureRetryReady ErrorCode = "native_capture_retry_ready"
 	ErrorCodeWorkspaceResumeLost     ErrorCode = "workspace_resume_lost"
 	ErrorCodeOutcomeUnknown          ErrorCode = "outcome_unknown"
 	ErrorCodeCleanupUnproven         ErrorCode = "cleanup_unproven"
@@ -561,7 +563,7 @@ func (r ErrorResponse) Validate() error {
 	switch r.Code {
 	case ErrorCodeInvalidRequest, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodeExpired,
 		ErrorCodeStaleFence, ErrorCodeDigestConflict, ErrorCodeAlreadyAccepted, ErrorCodeSettled,
-		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeNativeCaptureUnsupported, ErrorCodeNativeCaptureNotStarted,
+		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeNativeCaptureUnsupported, ErrorCodeNativeCaptureNotStarted, ErrorCodeNativeCaptureRetryReady,
 		ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
 	default:
 		return fmt.Errorf("unsupported error code %q", r.Code)

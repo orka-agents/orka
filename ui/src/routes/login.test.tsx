@@ -7,6 +7,7 @@ vi.mock('zustand/middleware', async () => {
 })
 
 const mockNavigate = vi.fn()
+let mockPathname = '/login'
 
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
@@ -14,7 +15,7 @@ vi.mock('@tanstack/react-router', async () => {
     ...actual,
     createFileRoute: (_path: string) => (opts: any) => ({ ...opts, path: _path }),
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: '/login' }),
+    useLocation: () => ({ pathname: mockPathname }),
   }
 })
 
@@ -24,7 +25,9 @@ import { Route } from './login'
 describe('login route', () => {
   beforeEach(() => {
     mockNavigate.mockClear()
+    mockPathname = '/login'
     useAuthStore.setState({ token: null })
+    sessionStorage.clear()
   })
 
   it('exports Route with component', () => {
@@ -72,7 +75,33 @@ describe('login route', () => {
     useAuthStore.setState({ token: 'existing-token' })
     const LoginPage = Route.component!
     render(<LoginPage />)
-    expect(mockNavigate).toHaveBeenCalledWith({ to: '/' })
+    expect(mockNavigate).toHaveBeenCalledWith({ href: '/' })
+  })
+
+  it('returns to the page that sent the visitor here, fragment included', () => {
+    sessionStorage.setItem('orka-login-return', '/settings/connectors?status=pending&connection=github-1')
+    window.history.replaceState(null, '', '/login#completion=one-time')
+    useAuthStore.setState({ token: 'existing-token' })
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+    expect(mockNavigate).toHaveBeenCalledWith({ href: '/settings/connectors?status=pending&connection=github-1#completion=one-time' })
+    expect(sessionStorage.getItem('orka-login-return')).toBeNull()
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('sends the visitor on once when signing in remounts it under the destination address', () => {
+    sessionStorage.setItem('orka-login-return', '/settings/connectors?status=pending&connection=github-1')
+    window.history.replaceState(null, '', '/login#completion=one-time')
+    useAuthStore.setState({ token: 'existing-token' })
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+    // The token swaps the root layout before the route match changes, so
+    // the login page mounts again for a moment at the new address.
+    mockPathname = '/settings/connectors'
+    render(<LoginPage />)
+    expect(mockNavigate).toHaveBeenCalledTimes(1)
+    expect(mockNavigate).toHaveBeenCalledWith({ href: '/settings/connectors?status=pending&connection=github-1#completion=one-time' })
+    window.history.replaceState(null, '', '/')
   })
 
   it('handles #token=... hash fragment from CLI login', async () => {

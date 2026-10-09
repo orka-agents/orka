@@ -8,12 +8,16 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
@@ -28,7 +32,6 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // MemoryReader is the least-privilege store dependency required by recall_memory.
@@ -53,6 +56,24 @@ type TranscriptSearcher interface {
 type TaskMessageStore interface {
 	SendMessage(context.Context, *store.Message) error
 	GetMessages(context.Context, string, string, string, bool) ([]store.Message, error)
+}
+
+// LinkedAccountCredential is a person's linked-account credential resolved
+// for one built-in tool call, with the non-secret identity of the Connection
+// that supplied it.
+type LinkedAccountCredential struct {
+	AccessToken   string
+	Provider      string
+	ConnectionUID string
+}
+
+// LinkedAccountCredentials resolves a linked-account credential for a
+// built-in tool. BuiltinToolCredential reports false when the Task has no
+// Connection bound for the tool, in which case the tool keeps its own
+// credential path; an error means a Connection is bound but cannot be used
+// now, and the tool fails closed rather than falling back.
+type LinkedAccountCredentials interface {
+	BuiltinToolCredential(ctx context.Context, toolName string) (LinkedAccountCredential, bool, error)
 }
 
 // ToolContext provides dependencies for tools that need K8s client access or other services.
@@ -108,10 +129,14 @@ type ToolContext struct {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName     func() string
-	TaskLabels           func() map[string]string
-	CheckTaskLimit       func() *ChatToolError
-	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	GenerateTaskName    func() string
+	TaskLabels          func() map[string]string
+	CheckTaskLimit      func() *ChatToolError
+	AuthorizeTaskCreate func(context.Context, *corev1alpha1.Task) *ChatToolError
+	// SealTaskCreate runs right after a Task this tool created exists, so
+	// the API can bind server-assigned identity (the UID) to the requester
+	// it stamped. A failure is logged by the sealer; the Task stays.
+	SealTaskCreate       func(context.Context, client.Client, *corev1alpha1.Task) error
 	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
 	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
 	// AuthorizeAgentInitialTask preflights the combined Agent/Task operation
@@ -128,11 +153,125 @@ type ToolContext struct {
 	// RequireGitHubTaskCredentials disables controller-global repository and
 	// credential fallback for external GitHub tool calls.
 	RequireGitHubTaskCredentials bool
-	IncrementTasks               func()
-	ApprovalEmitter              func(context.Context, approvals.ApprovalTarget) error
-	ApprovalTargetSpecDigest     func(context.Context, string) (string, error)
-	ApprovalTargetArguments      func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	ApprovalTargetRefresh        func(context.Context, string, *corev1alpha1.Tool) error
+	// LinkedAccounts resolves the requester's linked-account credential for
+	// built-in tools the controller executes on their behalf. Only the
+	// controller sets it; worker Pods never hold one and keep their own
+	// credential path.
+	LinkedAccounts LinkedAccountCredentials
+	// Requester is the verified person this call acts for: the signed-in
+	// caller for chat, the Task's verified requester for the broker. Tools
+	// that show or use linked accounts read it; nothing else does.
+	Requester *corev1alpha1.RequestedBy
+	// AuthorizeConnectorRead gates list_connections for callers whose
+	// delegated token may not read the person's linked accounts.
+	AuthorizeConnectorRead func() *ChatToolError
+	IncrementTasks         func()
+	// CreatedTasks records the Tasks this turn's tools created: the only
+	// Tasks a linked account may be scoped by outside a Task. The API
+	// owns one per turn and shares it across the turn's tool calls; a
+	// context without one never accepts a task_name outside a Task.
+	CreatedTasks             *CreatedTasks
+	ApprovalEmitter          func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest func(context.Context, string) (string, error)
+	ApprovalTargetArguments  func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	ApprovalTargetRefresh    func(context.Context, string, *corev1alpha1.Tool) error
+}
+
+// CreatedTasks is the set of Tasks one turn's tools created, by namespace
+// and name with the UID the API server assigned. It is held by pointer so
+// the per-call copies of a ToolContext share it.
+type CreatedTasks struct {
+	mu   sync.Mutex
+	uids map[string]string
+	// workspaces digests each created Task's spec.workspace as created, so
+	// a later linked call can refuse a Task whose repository scope was
+	// changed after this turn chose it.
+	workspaces map[string]string
+}
+
+// NewCreatedTasks returns an empty set for one turn.
+func NewCreatedTasks() *CreatedTasks {
+	return &CreatedTasks{uids: map[string]string{}, workspaces: map[string]string{}}
+}
+
+// WorkspaceDigest is a stable digest of a Task's workspace as the turn
+// created it; "" when the Task has no workspace.
+func WorkspaceDigest(task *corev1alpha1.Task) string {
+	if task == nil || task.Spec.Workspace == nil {
+		return ""
+	}
+	raw, err := json.Marshal(task.Spec.Workspace)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func createdTaskKey(namespace, name string) string {
+	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(name)
+}
+
+// RecordCreatedTask notes a Task this turn's tools created, so a later
+// call may name it as the repository scope for the requester's linked
+// account (see CreatedTaskUID). Without a set the record is dropped.
+func (tc *ToolContext) RecordCreatedTask(task *corev1alpha1.Task) {
+	if tc == nil || tc.CreatedTasks == nil || task == nil || strings.TrimSpace(task.Name) == "" {
+		return
+	}
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	key := createdTaskKey(task.Namespace, task.Name)
+	tc.CreatedTasks.uids[key] = string(task.UID)
+	tc.CreatedTasks.workspaces[key] = WorkspaceDigest(task)
+}
+
+// CreatedTaskWorkspaceDigest returns the workspace digest recorded for a
+// Task this turn created, or "" when none was recorded.
+func (tc *ToolContext) CreatedTaskWorkspaceDigest(namespace, name string) string {
+	if tc == nil || tc.CreatedTasks == nil {
+		return ""
+	}
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	return tc.CreatedTasks.workspaces[createdTaskKey(namespace, name)]
+}
+
+// CreatedTaskUID returns the UID of the Task this turn's tools created
+// under namespace and name, or "" when this turn created no such Task.
+func (tc *ToolContext) CreatedTaskUID(namespace, name string) string {
+	if tc == nil || tc.CreatedTasks == nil {
+		return ""
+	}
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	return tc.CreatedTasks.uids[createdTaskKey(namespace, name)]
+}
+
+// CreatedTaskByName resolves a Task this turn created by name alone, as
+// the GitHub tools receive it: the one recorded entry with that name, in
+// whichever namespace the creation tool was told. Two entries with the
+// same name in different namespaces are ambiguous and resolve to nothing.
+func (tc *ToolContext) CreatedTaskByName(name string) (namespace, uid string, ok bool) {
+	if tc == nil || tc.CreatedTasks == nil {
+		return "", "", false
+	}
+	name = strings.TrimSpace(name)
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	matches := 0
+	for key, recorded := range tc.CreatedTasks.uids {
+		ns, recordedName, found := strings.Cut(key, "/")
+		if !found || recordedName != name {
+			continue
+		}
+		matches++
+		namespace, uid = ns, recorded
+	}
+	if matches != 1 {
+		return "", "", false
+	}
+	return namespace, uid, true
 }
 
 type toolContextKey struct{}
@@ -638,6 +777,16 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	return nil
 }
 
+// RegisterBrokeredConnectionTools registers the linked-account tools the
+// ACP broker offers only when connectors are enabled on the controller.
+func RegisterBrokeredConnectionTools(r *Registry) error {
+	if r == nil {
+		return fmt.Errorf("registry is required")
+	}
+	r.Register(&ListConnectionsTool{})
+	return nil
+}
+
 // RegisterBrokeredWebTools registers public web reads whose implementations
 // are safe to execute inside the controller MCP broker. Registration is
 // idempotent because Registry.Register replaces the implementation for a
@@ -664,6 +813,7 @@ func RegisterChatTools(r *Registry) {
 	r.Register(&ListAgentsTool{})
 	r.Register(&ListToolsTool{})
 	r.Register(&ListTasksTool{})
+	r.Register(&ListConnectionsTool{})
 	r.Register(&ChatCreateAgentTool{})
 	r.Register(&UpdateAgentTool{})
 	r.Register(&ChatDeleteAgentTool{})
@@ -690,6 +840,13 @@ func RegisterChatToolsDefault() {
 func RegisterProxyPRTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewCreatePullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewCheckPullRequestCITool(k8sClient))
+}
+
+// ProxyPRToolNames are the tools RegisterProxyPRTools adds. Only the
+// controller registers them in its default registry; a native worker has
+// them only as coordination tools.
+func ProxyPRToolNames() []string {
+	return []string{createPullRequestToolName, checkPullRequestCIToolName}
 }
 
 // KnownBuiltInToolNames returns every built-in tool name known to Orka, including
@@ -721,7 +878,7 @@ func ChatToolNames() []string {
 		createPRMonitorToolName,
 		createContainerTaskToolName,
 		createAgentTaskToolName,
-		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, createAgentToolName, updateAgentToolName, "delete_agent",
+		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, ListConnectionsToolName, createAgentToolName, updateAgentToolName, "delete_agent",
 		createToolCRDToolName,
 		deleteToolToolName,
 		deleteSessionToolName,

@@ -6,11 +6,9 @@ spec:
   provider: github
   repoURL: https://github.com/example-org/example-repo
   branch: main
-  # Read-only monitor: no branch is pushed, so only these two roles are needed.
-  readCredentialRef:  # clone/read the source repository
+  readCredentialRef:
     name: orka-monitor-source-read
-  forgeCredentialRef: # GitHub API calls the controller makes itself, including
-                      # the label sender's permission check
+  forgeCredentialRef:
     name: orka-monitor-forge
   targets:
     pullRequests:
@@ -19,18 +17,15 @@ spec:
       enabled: true
       maxPerRun: 5
       excludeLabels:
-        - blocked
-        - security-sensitive
+      - blocked
+      - security-sensitive
   triggers:
     github:
       labels:
-        enabled: true
+        enabled: false
         consumeCommandLabels: true
         issues:
-          plan: orka:plan
-          approvePlan: orka:approve-plan
-          stop: orka:stop
-          resume: orka:resume
+          implement: orka:implement
   agents:
     triager:
       name: issue-researcher
@@ -41,13 +36,8 @@ spec:
   issueWorkflow:
     implementation:
       enabled: false
-    planning:
-      requireHumanApprovalFor:
-        - high
-        - security
+    planning: {}
   policy:
-    protectedLabels:
-      - security-sensitive
+    protectedLabels: []
     pauseLabels:
-      - blocked
-      - orka:pause
+    - orka:pause

@@ -165,3 +165,25 @@ func TestInstallRejectsOccupiedHomeAndCancelledLock(t *testing.T) {
 		t.Fatal("cancelled install accepted")
 	}
 }
+
+func TestNativeFormatRejectionClassificationStaysNarrow(t *testing.T) {
+	for _, tc := range []struct {
+		codes []string
+		want  bool
+	}{
+		{[]string{"encrypted_content"}, true}, {[]string{"unsupported_profile"}, false},
+		{[]string{"encrypted_content", "invalid_ordinal"}, false}, {nil, false},
+	} {
+		var rejected sessionkit.RejectionError
+		for _, code := range tc.codes {
+			rejected.Rejections = append(rejected.Rejections, sessionkit.Rejection{Code: code})
+		}
+		if got := errors.Is(classifyNativeFormatError(&rejected), ErrUnsupported); got != tc.want {
+			t.Fatalf("classification %v = %v, want %v", tc.codes, got, tc.want)
+		}
+	}
+	ioFailure := &os.PathError{Op: "read", Path: "private", Err: os.ErrPermission}
+	if got := classifyNativeFormatError(ioFailure); got != ioFailure {
+		t.Fatal("I/O failures must remain distinct")
+	}
+}

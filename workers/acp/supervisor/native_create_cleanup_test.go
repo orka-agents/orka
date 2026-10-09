@@ -65,7 +65,7 @@ func TestSupervisorNativeCreateKnownFailureRemovesPrivateJournal(t *testing.T) {
 			if stage == "load" && runtime.GOOS != "linux" {
 				t.Skip("proven child exit requires Linux")
 			}
-			fixture := newNativeCreateFixture(t, "native-load-reject")
+			fixture := newNativeCreateFixture(t, "native-resume-reject")
 			switch stage {
 			case "install":
 				fixture.server.cfg.Provider.PrepareSession = func(paths acp.SessionPaths) error {
@@ -111,7 +111,7 @@ func assertNativeCreatePathsAbsent(t *testing.T, fixture *nativeCreateFixture) {
 }
 
 func TestSupervisorNativeCreateRejectPreservesPreexistingFrozenJournal(t *testing.T) {
-	fixture := newNativeCreateFixture(t, "native-load")
+	fixture := newNativeCreateFixture(t, "native-resume")
 	oldHome, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestSupervisorNativeCreateRejectPreservesPreexistingFrozenJournal(t *testin
 }
 
 func TestSupervisorNativeCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
-	fixture := newNativeCreateFixture(t, "native-load-reject-held")
+	fixture := newNativeCreateFixture(t, "native-resume-reject-held")
 	fixture.server.cfg.CancelGrace = time.Nanosecond
 	response := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
 	var failure harnessv2.ErrorResponse

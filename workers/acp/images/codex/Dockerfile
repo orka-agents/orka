@@ -2,7 +2,7 @@
 
 # The tag documents the human-readable version; the manifest-list digest makes
 # every supported platform immutable.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS upstream-artifacts
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS upstream-artifacts
 ARG TARGETARCH
 COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
 COPY NOTICE.md /artifacts/orka-NOTICE.md
@@ -81,7 +81,7 @@ RUN set -eu; \
     cp /tmp/native/package/package.json /opt/codex/package.json; \
     ln -s "../vendor/$target_triple/bin/codex" /opt/codex/bin/codex
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS supervisor-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

@@ -1,13 +1,22 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/orka-agents/orka/internal/events"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -19,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func TestNativeRestoreRequiresExactLoadAndRebindsCurrentPolicy(t *testing.T) {
+func TestNativeRestoreRequiresExactResumeAndRebindsCurrentPolicy(t *testing.T) {
 	snapshot := storetest.NativeSessionSnapshot(t, "existing private context")
 	session := &acpTaskSession{NativeSession: &store.NativeSessionRecord{Snapshot: snapshot}, Bootstrap: &ACPBootstrapTranscript{}}
 	request := harnessv2.CreateRuntimeSessionRequest{Profile: harnessv2.RuntimeProfile{ProviderKind: "codex"}, Metadata: harnessv2.MutationMetadata{Fence: harnessv2.Fence{
@@ -211,12 +220,13 @@ func TestACPDispatcherCapturesNativeSessionBeforeDeletion(t *testing.T) {
 }
 
 func TestACPDispatcherUnsupportedNativeCapturePreservesContinuityPolicy(t *testing.T) {
-	for _, imported := range []bool{false, true} {
+	for _, tc := range []struct{ imported, failWarning bool }{{}, {failWarning: true}, {imported: true}} {
+		imported := tc.imported
 		name := "canonical-session"
 		if imported {
 			name = "native-session"
 		}
-		t.Run(name, func(t *testing.T) {
+		t.Run(name+fmt.Sprint(tc.failWarning), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			snapshot := storetest.NativeSessionSnapshot(t, "native imported context")
@@ -236,7 +246,8 @@ func TestACPDispatcherUnsupportedNativeCapturePreservesContinuityPolicy(t *testi
 				})
 			defer fixture.stop()
 			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
-			fixture.dispatcher.EventStore = persistence
+			warningStore := &nativeWarningFailureStore{Store: persistence, fail: tc.failWarning}
+			fixture.dispatcher.EventStore = warningStore
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
 				NewSessionUID: func() (string, error) { return "fixed-native-owner", nil },
@@ -257,6 +268,19 @@ func TestACPDispatcherUnsupportedNativeCapturePreservesContinuityPolicy(t *testi
 			require.NoError(t, err)
 			require.NotNil(t, reserved)
 			err = fixture.dispatcher.executeReservedTask(ctx, reserved, target)
+			if tc.failWarning {
+				require.ErrorContains(t, err, "injected warning persistence failure")
+				current := fixture.currentTask(t, ctx)
+				var intent nativeCaptureIntent
+				require.NoError(t, json.Unmarshal([]byte(current.Annotations[nativeCaptureIntentAnnotation]), &intent))
+				require.True(t, intent.Unsupported, "annotation may commit before warning")
+				fence, fenceErr := fixture.dispatcher.Epochs.CurrentFence(ctx)
+				require.NoError(t, fenceErr)
+				restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient,
+					Store: fixture.dispatcher.Store, ResultStore: persistence, EventStore: warningStore,
+					Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs}
+				err = restarted.recoverStaleTask(ctx, current, fence)
+			}
 			control, controlErr := persistence.GetSessionControl(ctx, "default", name)
 			require.NoError(t, controlErr)
 			if imported {
@@ -274,6 +298,24 @@ func TestACPDispatcherUnsupportedNativeCapturePreservesContinuityPolicy(t *testi
 				require.Equal(t, 1, captures, "the durable unsupported fallback must not retry capture")
 				require.Equal(t, 1, deletes)
 			}
+			listed, eventErr := persistence.ListExecutionEvents(ctx, store.ExecutionEventFilter{Namespace: "default", StreamType: events.ExecutionEventStreamTypeTask, StreamID: fixture.task.Name, Limit: 1000})
+			require.NoError(t, eventErr)
+			warnings := 0
+			for _, event := range listed {
+				if event.Type == events.ExecutionEventTypeNativeSessionCaptureSkipped {
+					warnings++
+					require.Equal(t, events.ExecutionEventSeverityWarning, event.Severity)
+					require.JSONEq(t, `{"reason":"native_capture_unsupported","fallback":"transcript"}`, string(event.Content))
+					require.Contains(t, event.Summary, "canonical transcript")
+					require.NotContains(t, event.Summary, snapshot.ProviderSessionID)
+				}
+			}
+			if imported {
+				require.Zero(t, warnings)
+			} else {
+				require.Equal(t, 1, warnings)
+			}
+
 		})
 	}
 }
@@ -351,4 +393,59 @@ func TestACPDispatcherUnknownNativeInstallRetainsExactGenerationAndLease(t *test
 	retained, err := persistence.GetSessionControl(ctx, "default", "unknown-import")
 	require.NoError(t, err)
 	require.Equal(t, control.Lease, retained.Lease)
+}
+
+type nativeWarningFailureStore struct {
+	*sqlite.Store
+	fail bool
+}
+
+func (s *nativeWarningFailureStore) AppendExecutionEventIfAbsent(ctx context.Context, event *store.ExecutionEvent, key string) (*store.ExecutionEvent, bool, error) {
+	if s.fail && event.Type == events.ExecutionEventTypeNativeSessionCaptureSkipped {
+		s.fail = false
+		return nil, false, errors.New("injected warning persistence failure")
+	}
+	return s.Store.AppendExecutionEventIfAbsent(ctx, event, key)
+}
+
+func TestLegacyTaskRejectsNativeSessionBeforeLockAndAppend(t *testing.T) {
+	ctx := t.Context()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "native-legacy.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	persistence := sqlite.NewStore(db, "")
+	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
+	require.NoError(t, err)
+	require.NoError(t, persistence.SetAgentExecutionSnapshotCipher(cipher))
+	snapshot := storetest.NativeSessionSnapshot(t, "staged private history")
+	snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""
+	_, err = persistence.StageNativeSessionImport(ctx, store.NativeSessionImport{
+		Namespace: "default", SessionName: "native-import", OperationID: "stage-native",
+		RequestDigest: store.NativeSessionImportDigest("default", "native-import", snapshot.DataDigest), Snapshot: snapshot,
+	})
+	require.NoError(t, err)
+	before, err := persistence.GetNativeSession(ctx, "default", "native-import", "")
+	require.NoError(t, err)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "legacy-task", UID: "legacy-uid"},
+		Spec: corev1alpha1.TaskSpec{Prompt: "unrelated legacy work", SessionRef: &corev1alpha1.SessionReference{Name: "native-import", Append: true}}}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	manager := NewSessionManager(persistence)
+	reconciler := &TaskReconciler{Client: kube, SessionManager: manager, ExecutionEventStore: persistence}
+	_, err, rejected := reconciler.acquireSessionLock(ctx, task)
+	require.NoError(t, err)
+	require.True(t, rejected)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+	require.Contains(t, current.Status.Message, "native continuity")
+	require.NoError(t, manager.AppendMessages(ctx, current, persistence), "a rejected Task has no transcript ownership")
+	session, err := persistence.GetSession(ctx, "default", "native-import")
+	require.NoError(t, err)
+	require.Empty(t, session.ActiveTask)
+	require.Zero(t, session.MessageCount)
+	after, err := persistence.GetNativeSession(ctx, "default", "native-import", "")
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }

@@ -593,7 +593,7 @@ build_fake_runtime() {
   local dockerfile="${work_dir}/security-scan-fake-runtime.Dockerfile"
   cat >"${dockerfile}" <<'DOCKERFILE'
 # syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

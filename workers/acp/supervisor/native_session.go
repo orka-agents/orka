@@ -25,12 +25,29 @@ type nativeSessionCapture struct {
 	snapshot    harnessv2.NativeSessionSnapshot
 	failure     string
 	failureCode harnessv2.ErrorCode
+	retryable   bool
 }
 
 type nativeCaptureUnsupportedError struct{}
 
 func (*nativeCaptureUnsupportedError) Error() string {
 	return "native Codex context is unsupported or exceeds the transport budget; stopped private home retained"
+}
+
+// A retry is safe only after the writer and all descendants are proven gone.
+type nativeCaptureRetryableError struct{ message string }
+
+func (e *nativeCaptureRetryableError) Error() string { return e.message }
+
+// Receipts remain immutable until runtime deletion, even after a safe retry.
+func nativeCaptureReceiptLocked(state *sessionState, operationID harnessv2.OperationID) *nativeSessionCapture {
+	if receipt := state.nativeCaptureReceipts[operationID]; receipt != nil {
+		return receipt
+	}
+	if state.nativeCapture != nil && state.nativeCapture.request.Metadata.OperationID == operationID {
+		return state.nativeCapture
+	}
+	return nil
 }
 
 func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +96,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if request.OriginalOperationID != "" {
-		capture := state.nativeCapture
+		capture := nativeCaptureReceiptLocked(state, request.OriginalOperationID)
 		if capture == nil {
 			// The fence already proved this is the same supervisor boot. Captures are
 			// recorded under the lock before they start, so no record means the
@@ -111,8 +128,10 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		s.writeNativeCapture(w, capture, classification)
 		return
 	}
-	if state.nativeCapture != nil {
-		capture := state.nativeCapture
+	retryReady := state.nativeCapture != nil && state.nativeCapture.finished && state.nativeCapture.retryable &&
+		classification.Class == harnessv2.RequestClassificationFresh && !state.drainCleanupScheduled &&
+		state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned
+	if capture := nativeCaptureReceiptLocked(state, request.Metadata.OperationID); capture != nil {
 		if capture.request.Metadata.OperationID != request.Metadata.OperationID ||
 			capture.request.Metadata.RequestDigest != request.Metadata.RequestDigest {
 			s.mu.Unlock()
@@ -129,7 +148,12 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		}
 		return
 	}
-	if !canStartNativeCapture(state, classification) {
+	if state.nativeCapture != nil && !retryReady {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "native session capture already belongs to another operation", nil, false)
+		return
+	}
+	if !retryReady && !canStartNativeCapture(state, classification) {
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session cannot enter native capture", nil, false)
 		return
@@ -139,8 +163,17 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
 		return
 	}
+	if len(state.nativeCaptureReceipts) >= harnessv2.MaxRuntimeSessionTombstoneOperations-sessionDeletionOperationReserve {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "native capture receipt journal is full; private evidence retained", nil, false)
+		return
+	}
 	capture := &nativeSessionCapture{request: request, done: make(chan struct{})}
 	state.nativeCapture = capture
+	if state.nativeCaptureReceipts == nil {
+		state.nativeCaptureReceipts = make(map[harnessv2.OperationID]*nativeSessionCapture)
+	}
+	state.nativeCaptureReceipts[request.Metadata.OperationID] = capture
 	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
 	state.descriptor.LastTransitionAt = now
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
@@ -157,6 +190,10 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 	if captureErr != nil {
 		capture.failure = captureErr.Error()
 		capture.failureCode = harnessv2.ErrorCodeSessionPoisoned
+		if _, ok := errors.AsType[*nativeCaptureRetryableError](captureErr); ok {
+			capture.failureCode = harnessv2.ErrorCodeNativeCaptureRetryReady
+			capture.retryable = true
+		}
 		if _, ok := errors.AsType[*nativeCaptureUnsupportedError](captureErr); ok {
 			capture.failureCode = harnessv2.ErrorCodeNativeCaptureUnsupported
 		}
@@ -281,21 +318,21 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState) 
 		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native capture could not prove descendant exit")
 	}
 	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
-		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native capture could not reclaim stopped session ownership")
+		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native capture could not reclaim stopped session ownership"}
 	}
 	data, err := codexstate.Capture(ctx, filepath.Join(state.paths.Home, ".codex"), state.descriptor.ProviderSessionID)
 	if err != nil {
 		if errors.Is(err, codexstate.ErrUnsupported) {
 			return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
 		}
-		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native Codex session capture failed; private home retained")
+		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native Codex session capture failed; private home retained"}
 	}
 	summary, err := codexstate.Inspect(ctx, data)
 	if err != nil || summary.ThreadID != state.descriptor.ProviderSessionID {
 		if errors.Is(err, codexstate.ErrUnsupported) {
 			return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
 		}
-		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native captured bundle validation failed; private home retained")
+		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native captured bundle validation failed; private home retained"}
 	}
 	snapshot := harnessv2.NativeSessionSnapshot{
 		Data: data, DataDigest: summary.DataDigest, ProviderSessionID: summary.ThreadID,
@@ -313,7 +350,7 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState) 
 		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native captured snapshot encoding failed; private home retained")
 	}
 	if err := persistNativeSnapshot(state.paths.Root, body); err != nil {
-		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native captured snapshot persistence failed; private home retained")
+		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native captured snapshot persistence failed; private home retained"}
 	}
 	return snapshot, nil
 }
@@ -348,14 +385,14 @@ func persistNativeSnapshot(root string, body []byte) error {
 
 func (s *Server) writeNativeCapture(w http.ResponseWriter, capture *nativeSessionCapture, classification harnessv2.Classification) {
 	s.mu.Lock()
-	failure, code, snapshot, descriptor := capture.failure, capture.failureCode, capture.snapshot, capture.descriptor
+	failure, code, snapshot, descriptor, retryable := capture.failure, capture.failureCode, capture.snapshot, capture.descriptor, capture.retryable
 	s.mu.Unlock()
 	if failure != "" {
 		status := http.StatusInternalServerError
 		if code == harnessv2.ErrorCodeNativeCaptureUnsupported {
 			status = http.StatusUnprocessableEntity
 		}
-		writeError(w, status, code, failure, nil, false)
+		writeError(w, status, code, failure, nil, retryable)
 		return
 	}
 	writeJSON(w, http.StatusOK, harnessv2.CaptureNativeSessionResponse{

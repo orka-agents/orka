@@ -875,87 +875,95 @@ func TestACPDispatcherNativeContinuityCarriesCheckpointAcrossNonSuccess(t *testi
 // reconcile forever: the same runtime incarnation reports that no capture
 // started, and the controller begins one fresh capture under a superseding
 // intent.
-func TestACPDispatcherExpiredCaptureIntentStartsFreshCaptureWhenNeverStarted(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	snapshot := storetest.NativeSessionSnapshot(t, "first native checkpoint captured after an expired intent")
-	var persistence *sqlite.Store
-	var requests []harnessv2.CaptureNativeSessionRequest
-	failFresh := true
-	fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-expired-intent", "79797979-7979-7979-7979-797979797979",
-		func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
-			return newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
-				nativeSnapshot: &snapshot,
-				onNativeCapture: func(request harnessv2.CaptureNativeSessionRequest) error {
-					requests = append(requests, request)
-					if request.OriginalOperationID != "" {
-						return &harnessv2.ClientError{Code: harnessv2.ErrorCodeNativeCaptureNotStarted, StatusCode: http.StatusConflict}
-					}
-					if failFresh {
-						return &harnessv2.ClientError{Code: harnessv2.ErrorCodeAlreadyAccepted, StatusCode: http.StatusConflict, Retryable: true}
-					}
-					return nil
-				},
-			}, func(request harnessv2.CreateRuntimeSessionRequest) {
-				require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, "default", "native-expired-intent", string(request.Metadata.Fence.RuntimeSessionUID)))
+func TestACPDispatcherExpiredNativeCaptureIntentStartsFreshSafeCapture(t *testing.T) {
+	for _, proof := range []harnessv2.ErrorCode{harnessv2.ErrorCodeNativeCaptureNotStarted, harnessv2.ErrorCodeNativeCaptureRetryReady} {
+		t.Run(string(proof), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			snapshot := storetest.NativeSessionSnapshot(t, "first native checkpoint captured after an expired intent")
+			var persistence *sqlite.Store
+			var requests []harnessv2.CaptureNativeSessionRequest
+			failFresh := true
+			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-expired-intent", "79797979-7979-7979-7979-797979797979",
+				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+					return newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
+						nativeSnapshot: &snapshot,
+						onNativeCapture: func(request harnessv2.CaptureNativeSessionRequest) error {
+							requests = append(requests, request)
+							if request.OriginalOperationID != "" {
+								status := http.StatusConflict
+								if proof == harnessv2.ErrorCodeNativeCaptureRetryReady {
+									status = http.StatusInternalServerError
+								}
+								return &harnessv2.ClientError{Code: proof, StatusCode: status, Retryable: proof == harnessv2.ErrorCodeNativeCaptureRetryReady}
+							}
+							if failFresh {
+								return &harnessv2.ClientError{Code: harnessv2.ErrorCodeAlreadyAccepted, StatusCode: http.StatusConflict, Retryable: true}
+							}
+							return nil
+						},
+					}, func(request harnessv2.CreateRuntimeSessionRequest) {
+						require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, "default", "native-expired-intent", string(request.Metadata.Fence.RuntimeSessionUID)))
+					})
+				}, func(task *corev1alpha1.Task) {
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-expired-intent", Create: true, Append: true}
+				})
+			defer fixture.stop()
+			persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+			failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
+			fixture.dispatcher.Store = failure
+			fixture.dispatcher.EventStore = persistence
+			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+				SessionControls: failure, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
 			})
-		}, func(task *corev1alpha1.Task) {
-			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-expired-intent", Create: true, Append: true}
+			require.NoError(t, err)
+			fixture.dispatcher.Sessions = continuity
+			reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+			require.NoError(t, err)
+			require.NotNil(t, reserved)
+			require.ErrorContains(t, fixture.dispatcher.executeReservedTask(ctx, reserved, target), "injected terminal delivery transition failure")
+			failure.fail = false
+			fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+			require.NoError(t, err)
+			require.NoError(t, fixture.dispatcher.transitionDelivery(ctx, fixture.attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryNoChange, "recover-terminal-delivery", ""))
+			restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: failure,
+				ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs}
+
+			// The first recovery retains the intent without a usable capture receipt.
+			require.Error(t, restarted.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
+			require.Len(t, requests, 1)
+			original := requests[0]
+			require.Empty(t, original.OriginalOperationID)
+			current := fixture.currentTask(t, ctx)
+			var intent nativeCaptureIntent
+			require.NoError(t, json.Unmarshal([]byte(current.Annotations[nativeCaptureIntentAnnotation]), &intent))
+			require.Equal(t, original.Metadata.RequestDigest, intent.Request.Metadata.RequestDigest)
+			intent.Request.Metadata.ExpiresAt = time.Now().UTC().Add(-time.Minute)
+			expired, err := json.Marshal(intent)
+			require.NoError(t, err)
+			current.Annotations[nativeCaptureIntentAnnotation] = string(expired)
+			require.NoError(t, fixture.kubeClient.Update(ctx, current))
+
+			failFresh = false
+			require.NoError(t, restarted.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
+			require.Len(t, requests, 3, "one reconciliation attempt, then exactly one fresh capture")
+			require.Equal(t, original.Metadata.OperationID, requests[1].OriginalOperationID)
+			require.Equal(t, original.Metadata.RequestDigest, requests[1].OriginalRequestDigest)
+			fresh := requests[2]
+			require.Empty(t, fresh.OriginalOperationID)
+			require.NotEqual(t, original.Metadata.OperationID, fresh.Metadata.OperationID)
+			var superseding nativeCaptureIntent
+			require.NoError(t, json.Unmarshal([]byte(fixture.currentTask(t, ctx).Annotations[nativeCaptureIntentAnnotation]), &superseding))
+			require.Equal(t, fresh.Metadata.RequestDigest, superseding.Request.Metadata.RequestDigest)
+			require.Equal(t, original.Metadata.RequestDigest, superseding.Supersedes)
+			require.Nil(t, superseding.Reconciliation)
+			control, err := persistence.GetSessionControl(ctx, "default", "native-expired-intent")
+			require.NoError(t, err)
+			require.Nil(t, control.Lease, "the fresh capture settles the Session")
+			record, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			require.NoError(t, err)
+			require.Equal(t, snapshot.DataDigest, record.Snapshot.DataDigest)
+			require.Equal(t, string(fresh.Metadata.OperationID), record.SourceOperationID)
 		})
-	defer fixture.stop()
-	persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
-	failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
-	fixture.dispatcher.Store = failure
-	fixture.dispatcher.EventStore = persistence
-	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: failure, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
-	})
-	require.NoError(t, err)
-	fixture.dispatcher.Sessions = continuity
-	reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
-	require.NoError(t, err)
-	require.NotNil(t, reserved)
-	require.ErrorContains(t, fixture.dispatcher.executeReservedTask(ctx, reserved, target), "injected terminal delivery transition failure")
-	failure.fail = false
-	fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
-	require.NoError(t, err)
-	require.NoError(t, fixture.dispatcher.transitionDelivery(ctx, fixture.attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryNoChange, "recover-terminal-delivery", ""))
-	restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: failure,
-		ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs}
-
-	// The first recovery persists the intent, but the runtime never records it.
-	require.Error(t, restarted.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
-	require.Len(t, requests, 1)
-	original := requests[0]
-	require.Empty(t, original.OriginalOperationID)
-	current := fixture.currentTask(t, ctx)
-	var intent nativeCaptureIntent
-	require.NoError(t, json.Unmarshal([]byte(current.Annotations[nativeCaptureIntentAnnotation]), &intent))
-	require.Equal(t, original.Metadata.RequestDigest, intent.Request.Metadata.RequestDigest)
-	intent.Request.Metadata.ExpiresAt = time.Now().UTC().Add(-time.Minute)
-	expired, err := json.Marshal(intent)
-	require.NoError(t, err)
-	current.Annotations[nativeCaptureIntentAnnotation] = string(expired)
-	require.NoError(t, fixture.kubeClient.Update(ctx, current))
-
-	failFresh = false
-	require.NoError(t, restarted.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
-	require.Len(t, requests, 3, "one reconciliation attempt, then exactly one fresh capture")
-	require.Equal(t, original.Metadata.OperationID, requests[1].OriginalOperationID)
-	require.Equal(t, original.Metadata.RequestDigest, requests[1].OriginalRequestDigest)
-	fresh := requests[2]
-	require.Empty(t, fresh.OriginalOperationID)
-	require.NotEqual(t, original.Metadata.OperationID, fresh.Metadata.OperationID)
-	var superseding nativeCaptureIntent
-	require.NoError(t, json.Unmarshal([]byte(fixture.currentTask(t, ctx).Annotations[nativeCaptureIntentAnnotation]), &superseding))
-	require.Equal(t, fresh.Metadata.RequestDigest, superseding.Request.Metadata.RequestDigest)
-	require.Equal(t, original.Metadata.RequestDigest, superseding.Supersedes)
-	require.Nil(t, superseding.Reconciliation)
-	control, err := persistence.GetSessionControl(ctx, "default", "native-expired-intent")
-	require.NoError(t, err)
-	require.Nil(t, control.Lease, "the fresh capture settles the Session")
-	record, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
-	require.NoError(t, err)
-	require.Equal(t, snapshot.DataDigest, record.Snapshot.DataDigest)
-	require.Equal(t, string(fresh.Metadata.OperationID), record.SourceOperationID)
+	}
 }

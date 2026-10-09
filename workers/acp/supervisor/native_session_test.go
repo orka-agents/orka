@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -297,7 +298,7 @@ func TestSupervisorNativeUnsupportedCaptureProvesExitAndRetainsHome(t *testing.T
 	}
 }
 
-func TestSupervisorInstallsNativeBundleBeforeACPLoadAndReportsRestoration(t *testing.T) {
+func TestSupervisorInstallsNativeBundleBeforeACPResumeAndReportsRestoration(t *testing.T) {
 	source, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +308,7 @@ func TestSupervisorInstallsNativeBundleBeforeACPLoadAndReportsRestoration(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, cfg, profile := newTestServer(t, "native-load")
+	server, cfg, profile := newTestServer(t, "native-resume")
 	server.cfg.Provider.PrepareSession = prepareCodexHome
 	parent, err := filepath.EvalSymlinks(filepath.Dir(cfg.SessionBaseDir))
 	if err != nil {
@@ -352,7 +353,7 @@ func TestSupervisorUnknownNativeInstallRetainsFrozenPublicationAndStopsAdmission
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, cfg, profile := newTestServer(t, "native-load")
+	server, cfg, profile := newTestServer(t, "native-resume")
 	parent, err := filepath.EvalSymlinks(filepath.Dir(cfg.SessionBaseDir))
 	if err != nil {
 		t.Fatal(err)
@@ -439,8 +440,8 @@ func validSupervisorProjection(params json.RawMessage) bool {
 		request.Meta["orka.runtimeSessionID"] == "session-1" && request.Meta["orka.profileDigest"] != ""
 }
 
-func handleSupervisorNativeLoad(writer *bufio.Writer, id, params json.RawMessage, sessionID string) {
-	var request acp.LoadSessionRequest
+func handleSupervisorNativeResume(writer *bufio.Writer, id, params json.RawMessage) {
+	var request acp.ResumeSessionRequest
 	cwd, _ := os.Getwd()
 	installed := false
 	_ = filepath.WalkDir(filepath.Join(os.Getenv("HOME"), ".codex", "sessions"), func(path string, entry os.DirEntry, err error) error {
@@ -451,18 +452,17 @@ func handleSupervisorNativeLoad(writer *bufio.Writer, id, params json.RawMessage
 		return nil
 	})
 	if json.Unmarshal(params, &request) != nil || request.SessionID != testNativeThreadID || request.CWD != cwd || len(request.MCPServers) != 1 || !installed {
-		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native load did not find installed current-cwd rollout and MCP"}})
+		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native resume did not find installed current-cwd rollout and MCP"}})
 		return
 	}
 	mode := os.Getenv("SUPERVISOR_ACP_HELPER_MODE")
 	if strings.HasSuffix(mode, "-held") {
 		signal.Ignore(syscall.SIGTERM)
 	}
-	if strings.HasPrefix(mode, "native-load-reject") {
-		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native load rejected"}})
+	if strings.HasPrefix(mode, "native-resume-reject") {
+		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native resume rejected"}})
 		return
 	}
-	writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{"sessionId": sessionID, "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "imported history"}}}})
 	writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "result": map[string]any{}})
 }
 
@@ -485,4 +485,121 @@ func forceNativeReceiptPersistenceFailure(ctx context.Context, paths acp.Session
 		return "", nil, err
 	}
 	return target, published, os.Mkdir(filepath.Join(journal, "receipt.json"), 0o700)
+}
+
+func TestSupervisorTransientNativeCaptureCanRetryRetainedHome(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("descendant exit proof requires Linux")
+	}
+	for _, failPersistence := range []bool{false, true} {
+		t.Run(fmt.Sprint(failPersistence), func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "native-capture")
+			create := testCreateSessionRequest(t, cfg, profile)
+			performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+			prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+			performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", prompt, cfg)
+			server.mu.Lock()
+			state := server.sessions[create.RuntimeSessionID]
+			state.descriptor.State = harnessv2.RuntimeSessionStateIdle
+			server.mu.Unlock()
+			home := filepath.Join(state.paths.Home, ".codex")
+			blocked := filepath.Join(state.paths.Root, ".native-session-snapshot.json")
+			if failPersistence {
+				writeTestNativeRollout(t, home)
+				if err := os.Mkdir(blocked, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			request := nativeCaptureRequest(t, create.Metadata.Fence)
+			path := "/v2/runtime-sessions/session-1/native-session"
+			first := performMutation(t, server.Handler(), http.MethodPost, path, request, cfg)
+			var failure harnessv2.ErrorResponse
+			if err := json.Unmarshal(first.Body.Bytes(), &failure); err != nil || failure.Code != harnessv2.ErrorCodeNativeCaptureRetryReady || !failure.Retryable {
+				t.Fatalf("retry proof: %d %s", first.Code, first.Body.String())
+			}
+			old := state.nativeCapture
+			if failPersistence {
+				if err := os.Remove(blocked); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeTestNativeRollout(t, home)
+			}
+			duplicate := performMutation(t, server.Handler(), http.MethodPost, path, request, cfg)
+			if !bytes.Equal(first.Body.Bytes(), duplicate.Body.Bytes()) || state.nativeCapture != old {
+				t.Fatal("original capture receipt changed on replay")
+			}
+			reconcile := request
+			reconcile.Metadata = testMetadata(create.Metadata.Fence, "reconcile-native-transient", false)
+			reconcile.OriginalOperationID, reconcile.OriginalRequestDigest = request.Metadata.OperationID, request.Metadata.RequestDigest
+			sealRequest(t, &reconcile.Metadata.RequestDigest, reconcile)
+			proof := performMutation(t, server.Handler(), http.MethodPost, path, reconcile, cfg)
+			if !bytes.Equal(first.Body.Bytes(), proof.Body.Bytes()) || state.nativeCapture != old {
+				t.Fatal("reconciliation began another capture")
+			}
+			retry := request
+			retry.Metadata = testMetadata(create.Metadata.Fence, "retry-native-transient", false)
+			sealRequest(t, &retry.Metadata.RequestDigest, retry)
+			response := performMutation(t, server.Handler(), http.MethodPost, path, retry, cfg)
+			if response.Code != http.StatusOK {
+				t.Fatalf("retry capture: %d %s", response.Code, response.Body.String())
+			}
+			var captured harnessv2.CaptureNativeSessionResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &captured); err != nil || captured.Snapshot.ProviderSessionID != testNativeThreadID || state.nativeCapture == old {
+				t.Fatal("retry did not preserve the native thread")
+			}
+			current := state.nativeCapture
+			lateReplay := performMutation(t, server.Handler(), http.MethodPost, path, request, cfg)
+			if !bytes.Equal(first.Body.Bytes(), lateReplay.Body.Bytes()) || state.nativeCapture != current {
+				t.Fatal("successful retry discarded the original failed receipt")
+			}
+			lateReconciliation := performMutation(t, server.Handler(), http.MethodPost, path, reconcile, cfg)
+			if !bytes.Equal(first.Body.Bytes(), lateReconciliation.Body.Bytes()) || state.nativeCapture != current {
+				t.Fatal("late reconciliation lost the original immutable receipt")
+			}
+			changed := request
+			changed.Metadata.RequestDigest = harnessv2.RequestDigest(testDigest("different capture"))
+			conflict := performMutation(t, server.Handler(), http.MethodPost, path, changed, cfg)
+			if conflict.Code == http.StatusOK {
+				t.Fatal("old operation accepted a changed digest")
+			}
+
+		})
+	}
+}
+
+func TestSupervisorNativeCaptureRetryRejectsDeletionReservation(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "native-capture")
+	create := testCreateSessionRequest(t, cfg, profile)
+	performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+	performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", prompt, cfg)
+	original := nativeCaptureRequest(t, create.Metadata.Fence)
+	done := make(chan struct{})
+	close(done)
+	capture := &nativeSessionCapture{request: original, done: done, finished: true, retryable: true,
+		failure: "transient capture failure", failureCode: harnessv2.ErrorCodeNativeCaptureRetryReady}
+	server.mu.Lock()
+	state := server.sessions[create.RuntimeSessionID]
+	state.nativeCapture = capture
+	state.nativeCaptureReceipts = map[harnessv2.OperationID]*nativeSessionCapture{original.Metadata.OperationID: capture}
+	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	// DELETE reserves Deleting under the same mutex before touching the home.
+	ready, err := prepareSessionDeletionLocked(state, false, time.Now().UTC())
+	server.mu.Unlock()
+	if err != nil || !ready {
+		t.Fatalf("deletion reservation: %v %v", ready, err)
+	}
+	retry := original
+	retry.Metadata = testMetadata(create.Metadata.Fence, "retry-after-delete-reservation", false)
+	sealRequest(t, &retry.Metadata.RequestDigest, retry)
+	response := performMutation(t, server.Handler(), http.MethodPost, "/v2/runtime-sessions/session-1/native-session", retry, cfg)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("retry after deletion: %d %s", response.Code, response.Body.String())
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if state.nativeCapture != capture || len(state.nativeCaptureReceipts) != 1 || state.descriptor.State != harnessv2.RuntimeSessionStateDeleting {
+		t.Fatal("retry replaced capture evidence or escaped deletion reservation")
+	}
 }

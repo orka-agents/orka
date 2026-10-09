@@ -180,6 +180,13 @@ controller:
     commandTimeout: 30m
     cleanupPolicy: delete
 
+  # Per-user connectors (ConnectorProvider and Connection). When enabled, the
+  # OAuth provider must register exactly callbackBaseUrl + /api/v1/connections/callback.
+  connectors:
+    enabled: false
+    # Absolute https origin people reach the dashboard on, for example https://orka.example.com.
+    callbackBaseUrl: ""
+
   # OIDC/JWT authentication for external API requests
   oidc:
     # Issuer URL expected in bearer tokens. Requires audience when set.
@@ -230,6 +237,8 @@ controller:
       monitorRead: ""
       monitorWrite: ""
       monitorOperate: ""
+      connectorRead: ""
+      connectorManage: ""
       skillRead: ""
       skillWrite: ""
       gatewayRead: ""
@@ -494,19 +503,6 @@ github:
     # Kubernetes Secret containing the GitHub webhook shared secret.
     secretName: ""
     secretKey: secret
-  labelTrigger:
-    # Default runtime Agent CR used for labels such as agent:implement.
-    agent: ""
-    # Optional namespace for created Tasks; defaults to controller.watchNamespace or default.
-    namespace: ""
-    # Optional Secret name mounted into agent workspaces for git/GitHub auth.
-    gitSecret: ""
-    # Label prefix that marks an Orka trigger.
-    prefix: "agent:"
-    timeout: "30m"
-    maxTurns: 100
-    # Optional action-specific Agent overrides, e.g. implement: codex-agent.
-    agents: {}
 
 # Service configuration
 service:

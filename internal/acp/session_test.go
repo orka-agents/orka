@@ -371,10 +371,10 @@ func TestACPHelperProcess(t *testing.T) {
 			writeACPHelper(writer, map[string]any{
 				"jsonrpc": "2.0", "id": rawIDValue(message.ID),
 				"result": map[string]any{"protocolVersion": ProtocolVersion, "agentInfo": map[string]any{"name": "fake", "version": "1"},
-					"agentCapabilities": map[string]any{"loadSession": mode != "load-unsupported", "mcpCapabilities": map[string]bool{"http": true}}},
+					"agentCapabilities": map[string]any{"loadSession": true, "sessionCapabilities": map[string]any{"resume": mode != "resume-unsupported"}, "mcpCapabilities": map[string]bool{"http": true}}},
 			})
 		case MethodSessionNew:
-			if strings.HasPrefix(mode, "load-") {
+			if strings.HasPrefix(mode, "resume-") {
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "session/new fallback forbidden"}})
 				continue
 			}
@@ -389,20 +389,20 @@ func TestACPHelperProcess(t *testing.T) {
 				}
 			}
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{"sessionId": providerSession}})
-		case MethodSessionLoad:
-			var request LoadSessionRequest
+		case MethodSessionResume:
+			var request ResumeSessionRequest
 			cwd, _ := os.Getwd()
-			if mode == "load-error" || json.Unmarshal(message.Params, &request) != nil ||
+			if mode == "resume-error" || json.Unmarshal(message.Params, &request) != nil ||
 				request.CWD != cwd || len(request.MCPServers) != 1 || request.MCPServers[0].Name != "current-mcp" {
-				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "load rejected"}})
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "resume rejected"}})
 				continue
 			}
 			providerSession = request.SessionID
-			writeACPHelper(writer, map[string]any{
-				"jsonrpc": "2.0", "method": MethodSessionUpdate,
-				"params": map[string]any{"sessionId": providerSession, "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "imported history"}}},
-			})
-			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
+			response := map[string]any{}
+			if mode == "resume-wrong-id" {
+				response["sessionId"] = "another-thread"
+			}
+			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": response})
 		case MethodSessionPrompt:
 			promptID = append(promptID[:0], message.ID...)
 			writeACPHelper(writer, map[string]any{
@@ -415,7 +415,7 @@ func TestACPHelperProcess(t *testing.T) {
 					"jsonrpc": "2.0", "id": 50, "method": MethodRequestPermission,
 					"params": map[string]any{"sessionId": providerSession, "toolCall": map[string]any{"toolCallId": "tool-1", "title": "test"}, "options": []map[string]any{{"optionId": "allow", "name": "Allow", "kind": "allow_once"}}},
 				})
-			case "immediate", "load-success":
+			case "immediate", "resume-success":
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonEndTurn}})
 			case "rpc-error":
 				writeACPHelper(writer, map[string]any{

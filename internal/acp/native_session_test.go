@@ -11,14 +11,14 @@ import (
 	"time"
 )
 
-func TestRuntimeSessionLoadRequiresSupportAndNeverCreatesFallback(t *testing.T) {
-	for _, mode := range []string{"load-success", "load-error", "load-unsupported"} {
+func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T) {
+	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id"} {
 		t.Run(mode, func(t *testing.T) {
 			uid, gid := os.Getuid(), os.Getgid()
 			if uid == 0 {
 				uid, gid = 65534, 65534
 			}
-			root, err := os.MkdirTemp("", "orka-acp-load-test-")
+			root, err := os.MkdirTemp("", "orka-acp-resume-test-")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -26,7 +26,7 @@ func TestRuntimeSessionLoadRequiresSupportAndNeverCreatesFallback(t *testing.T) 
 			if err := os.Chmod(root, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			paths, err := PrepareSessionPaths(filepath.Join(root, "sessions"), "load-session")
+			paths, err := PrepareSessionPaths(filepath.Join(root, "sessions"), "resume-session")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -42,30 +42,31 @@ func TestRuntimeSessionLoadRequiresSupportAndNeverCreatesFallback(t *testing.T) 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			session, err := NewRuntimeSession(ctx, RuntimeSessionConfig{
-				ID: "load-session", Generation: 1, ProfileDigest: "sha256:profile", LoadSessionID: nativeID,
+				ID: "resume-session", Generation: 1, ProfileDigest: "sha256:profile", ResumeSessionID: nativeID,
 				MCPServers:  []MCPServer{{Name: "current-mcp", Type: "http", URL: "http://current.example/mcp"}},
 				Process:     ProcessConfig{Command: command, Args: []string{"-test.run=TestACPHelperProcess"}, Environment: env, Paths: paths, UID: uid, GID: gid, ExecHelperCommand: helperCommand},
 				CancelGrace: 100 * time.Millisecond,
 			})
-			if mode != "load-success" {
+			if mode != "resume-success" {
 				if err == nil {
 					_, _ = session.Delete(ctx)
-					t.Fatal("unsupported or failed native load succeeded")
+					t.Fatal("unsupported or failed native resume succeeded")
 				}
-				want := "load ACP provider session"
-				if mode == "load-unsupported" {
-					want = "did not advertise session/load"
-				}
+				want := map[string]string{
+					"resume-error":       "resume ACP provider session",
+					"resume-unsupported": "did not advertise session/resume",
+					"resume-wrong-id":    "bound a different provider session",
+				}[mode]
 				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("native load error = %v, want %s", err, want)
+					t.Fatalf("native resume error = %v, want %s", err, want)
 				}
 				initialization, ok := errors.AsType[*InitializationError](err)
 				if !ok || initialization.RuntimeSession() == nil || session != nil {
-					t.Fatalf("failed load lost its runtime cleanup handle: %v", err)
+					t.Fatalf("failed resume lost its runtime cleanup handle: %v", err)
 				}
-				if mode == "load-error" {
+				if mode == "resume-error" {
 					if rpc, ok := errors.AsType[*RPCError](err); !ok || rpc.Code != -32602 {
-						t.Fatalf("failed load lost its RPC cause: %v", err)
+						t.Fatalf("failed resume lost its RPC cause: %v", err)
 					}
 				}
 				failedSession := initialization.RuntimeSession()
@@ -86,7 +87,7 @@ func TestRuntimeSessionLoadRequiresSupportAndNeverCreatesFallback(t *testing.T) 
 			}
 			defer func() { _, _ = session.Delete(ctx) }()
 			if session.ProviderSessionID() != nativeID {
-				t.Fatalf("loaded provider ID = %q", session.ProviderSessionID())
+				t.Fatalf("resumed provider ID = %q", session.ProviderSessionID())
 			}
 			run, err := session.StartPrompt(ctx, "continue", "digest", []ContentBlock{Text("continue")})
 			if err != nil {
@@ -94,12 +95,28 @@ func TestRuntimeSessionLoadRequiresSupportAndNeverCreatesFallback(t *testing.T) 
 			}
 			for event := range run.Events {
 				if event.Update != nil && strings.Contains(string(event.Update.Update), "imported history") {
-					t.Fatal("session/load history entered the fresh prompt")
+					t.Fatal("session/resume history entered the fresh prompt")
 				}
 			}
 			if result := <-run.Result; result.Outcome != PromptOutcomeCompleted {
-				t.Fatalf("continued load outcome = %#v", result)
+				t.Fatalf("continued resume outcome = %#v", result)
 			}
 		})
+	}
+}
+
+func TestResumeCapabilityRequiresAnAdvertisedSupportedValue(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  bool
+	}{
+		{nil, false}, {false, false}, {true, true}, {map[string]any{}, true}, {map[string]any(nil), false}, {"yes", false}, {1, false},
+	} {
+		if got := (AgentCapabilities{SessionCapabilities: map[string]any{SessionCapabilityResume: tc.value}}).SessionCapability(SessionCapabilityResume); got != tc.want {
+			t.Fatalf("capability %T = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+	if (AgentCapabilities{LoadSession: true}).SessionCapability(SessionCapabilityResume) {
+		t.Fatal("load support must not imply resume support")
 	}
 }

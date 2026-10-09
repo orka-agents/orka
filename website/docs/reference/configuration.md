@@ -320,7 +320,7 @@ When `validation.image` is set, the reviewer must call `run_validation` once and
 
 Before upgrading a monitor that uses the former `validation.mode` and `validation.commands` fields, replace them with `validation.image`. The CRD retains the old fields so the controller can detect existing policies, but it does not execute them. A non-empty legacy command list puts the monitor in `Error` with reason `LegacyValidationCommandsUnsupported`; Orka does not silently disable validation. Apply the updated CRD before upgrading the controller, then update each affected monitor with a digest-pinned image and remove the legacy fields.
 
-`targets.issues`, durable `orka:*` label commands, issue triage/research/planning/implementation, PR review/repair, `review.requireGreenCI`, and optional head-bound automerge are active RepositoryMonitor workflows. `targets.commits` remain rejected until commit inventory is implemented. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, branch pushes, PR creation, label consumption, and automerge attempts are controller-owned and audited through mutation records; read-only agents never receive the GitHub mutation token.
+`targets.issues`, the `orka:implement` label command, issue triage/research/planning/implementation, PR review/repair, `review.requireGreenCI`, and exact-head readiness are active RepositoryMonitor workflows. `targets.commits` remain rejected until commit inventory is implemented. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, branch pushes, PR creation, label consumption, and readiness publication are controller-owned and audited through mutation records; read-only agents never receive the GitHub mutation token. GitHub's per-PR auto-merge setting owns merging. Orka never enables auto-merge or calls the merge endpoint; when it is disabled, the PR stays open and ready.
 
 **Status fields:**
 
@@ -980,6 +980,8 @@ controller:
       monitorRead: orka:monitors:read
       monitorWrite: orka:monitors:write
       monitorOperate: orka:monitors:operate
+      connectorRead: orka:connectors:read
+      connectorManage: orka:connectors:manage
       gatewayRead: orka:gateways:read
       gatewayOperate: orka:gateways:operate
     tts:
@@ -1019,6 +1021,9 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 |------|---------|-------------|
 | `--api-port` | `8080` | REST API server port |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
+| `--connectors-enabled` | `false` | Enable per-user connector reconciliation (`ConnectorProvider` and `Connection`). Requires Task provenance admission (`--task-provenance-admission-enabled` or `--task-provenance-admission-external`); the controller refuses to start otherwise, because connector use trusts `spec.requestedBy` only when the API server provably stamped it. Env: `ORKA_CONNECTORS_ENABLED` |
+| `--connectors-allow-private-endpoints` | empty | **Local fixtures only.** Accept private, loopback, and cluster-local connector provider endpoints and, for Tools behind a connection-mode outbound access policy, private tool endpoints (HTTPS is still required), and let linked-account requests reach them over the same hardened transport (no proxy, verified TLS). A person's token would be sent to such an address, so the flag takes only the literal `i-understand-tokens-may-leave-the-cluster`, and the controller refuses to start with it unless `--connector-callback-base-url` is a plain-http `localhost` origin, which no production deployment has. The Live Connectors E2E uses it for its in-cluster fake provider. Env: `ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS` |
+| `--connector-callback-base-url` | `ORKA_CONNECTOR_CALLBACK_BASE_URL` env or `""` | Required with `--connectors-enabled`. Absolute https origin (scheme and host only, no path) the OAuth provider redirects back to; the provider must register exactly this origin plus `/api/v1/connections/callback`. Plain http is accepted only for `localhost`. Helm: `controller.connectors.callbackBaseUrl`. Sealed linked-account credentials live in the controller store, which the chart already requires to be persistent in every mode. |
 | `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
 | `--gateway-interim-messages-per-task` | `10` | Lifetime cap for distinct accepted interim messages per Task; failed/expired messages count, retries do not. Helm: `controller.gateway.interimMessagesPerTask` |
 | `--gateway-max-records-per-gateway` | `1000` | Maximum retained accepted/dead-letter event records per Gateway before ingress is throttled |
@@ -1076,6 +1081,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--context-token-monitor-read-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_READ_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor reads. Defaults to `orka:monitors:read` |
 | `--context-token-monitor-write-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor create, update, and delete operations. Defaults to `orka:monitors:write` |
 | `--context-token-monitor-operate-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor manual runs. Defaults to `orka:monitors:operate` |
+| `--context-token-connector-read-scopes` | `ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES` env or `""` | Comma-separated scopes authorizing a person to read their own connector Connections. Defaults to `orka:connectors:read` |
+| `--context-token-connector-manage-scopes` | `ORKA_CONTEXT_TOKEN_CONNECTOR_MANAGE_SCOPES` env or `""` | Comma-separated scopes authorizing a person to link, update, and disconnect their own connector Connections. Defaults to `orka:connectors:manage` |
 | `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
 | `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
 | `--context-token-gateway-read-scopes` | `ORKA_CONTEXT_TOKEN_GATEWAY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing gateway resource and ledger reads. Defaults to `orka:gateways:read` |

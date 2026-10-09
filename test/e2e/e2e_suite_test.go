@@ -330,6 +330,8 @@ var _ = AfterSuite(func() {
 	for _, resource := range []string{
 		"substrateactorpools.core.orka.ai",
 		"outboundaccesspolicies.core.orka.ai",
+		"connections.core.orka.ai",
+		"connectorproviders.core.orka.ai",
 		"executionworkspacepools.workspace.orka.ai",
 		"executionworkspaceclasses.workspace.orka.ai",
 	} {

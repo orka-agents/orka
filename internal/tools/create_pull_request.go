@@ -82,7 +82,7 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("task_name, head_branch, base_branch, and title are required")
 	}
 
-	owner, repo, token, baseURL, err := resolveForgeRepoAndToken(ctx, t.k8sClient, args.TaskName, "", t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveForgeRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, "", t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}
@@ -104,6 +104,12 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 
 // parseGitHubRepo extracts owner and repo name from a GitHub URL.
 // Supports https://github.com/owner/repo.git and similar formats.
+// ParseGitHubRepository returns the owner and repository named by a GitHub
+// repository URL in any of the spellings the built-in tools accept.
+func ParseGitHubRepository(repoURL string) (owner, repo string, err error) {
+	return parseGitHubRepo(repoURL)
+}
+
 func parseGitHubRepo(repoURL string) (string, string, error) {
 	// Normalize
 	repoURL = strings.TrimSuffix(repoURL, ".git")

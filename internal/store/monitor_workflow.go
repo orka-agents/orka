@@ -21,8 +21,6 @@ const (
 func RepositoryMonitorDesiredActionForIntent(intent string) string {
 	intent = strings.TrimSpace(intent)
 	switch intent {
-	case "approve_plan":
-		return "approve"
 	case "fix":
 		return repositoryMonitorDesiredActionRepair
 	default:
@@ -39,8 +37,6 @@ func RepositoryMonitorDesiredActionForActionKind(actionKind string) string {
 		return "research"
 	case "issue_plan":
 		return "plan"
-	case "issue_approve_plan":
-		return "approve"
 	case "issue_implementation":
 		return "implement"
 	case "issue_decompose":

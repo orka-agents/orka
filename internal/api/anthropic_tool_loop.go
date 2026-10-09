@@ -627,6 +627,7 @@ var coordinatorProxyTools = []string{
 	"cancel_task",
 	"list_agents",
 	"list_tasks",
+	"list_connections",
 }
 
 // injectOrkaTools appends the built-in and coordinator tools that the registry can execute.

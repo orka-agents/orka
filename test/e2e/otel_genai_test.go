@@ -375,6 +375,15 @@ func patchOTelControllerManager(deploymentName string, containerIndex int, args 
 	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+deploymentName, "-n", namespace, "--timeout=5m")
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed waiting for controller-manager rollout")
+
+	// The rollout reports done once the new Pod is Ready, which can precede
+	// both the API listener and the Service endpoints; a worker started in
+	// that window fails its first API call. Wait until the API answers
+	// through its Service.
+	EventuallyWithOffset(1, func() error {
+		_, err := fetchServiceProxyBody(namespace, controllerAPIService, 8080, "/healthz")
+		return err
+	}, 2*time.Minute, time.Second).Should(Succeed(), "controller API did not answer through its Service after the rollout")
 }
 
 type otelEnvVar struct {

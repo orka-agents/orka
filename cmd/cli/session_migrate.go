@@ -48,13 +48,13 @@ func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), err
 	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
 	restConfig, err := buildRESTConfig(kubeconfigPath)
 	if err != nil {
-		return newClientFromCmdWithServer(cmd, defaultServer), defaultServer, func() {}, nil
+		return nil, "", nil, errors.New("resolve native migration target: invalid or unavailable kubeconfig; use --server for an explicit endpoint")
 	}
 	// Resolve the same namespace defaults without selecting a transport yet.
 	c := newClientFromCmdWithServer(cmd, defaultServer)
 	serviceNamespace, serviceName := discoverService(kubeconfigPath, c.Namespace)
 	if serviceName == "" {
-		return c, defaultServer, func() {}, nil
+		return nil, "", nil, errors.New("resolve native migration target: Orka service not found; use --server for an explicit endpoint")
 	}
 	kube, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {

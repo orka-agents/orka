@@ -28,6 +28,8 @@ Available Commands:
   auth          Inspect authentication
   completion    Generate the autocompletion script for the specified shell
   config        Manage CLI configuration
+  connect       Link one of your accounts to a connector provider
+  connection    Manage your linked accounts
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
   login         Authenticate with the Orka dashboard
@@ -573,6 +575,163 @@ Usage:
 
 Flags:
   -h, --help   help for view
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connect`
+
+```text
+Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link to become ready. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
+
+Usage:
+  orka connect <provider> [flags]
+
+Flags:
+  -h, --help               help for connect
+      --mode string        Link mode: readOnly or readWrite (write tools ask for approval) (default "readOnly")
+      --no-open            Print the consent URL without opening a browser
+      --no-wait            Return as soon as consent has started
+      --timeout duration   How long to wait for the link to become ready (default 5m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection`
+
+```text
+Manage your linked accounts
+
+Usage:
+  orka connection [command]
+
+Available Commands:
+  complete    Finish a consent with the completion value the provider callback returned
+  delete      Disconnect a linked account and delete its tokens
+  get         Show one of your linked accounts
+  list        List your linked accounts
+  providers   List the connector providers you can link
+
+Flags:
+  -h, --help   help for connection
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka connection [command] --help" for more information about a command.
+```
+
+## `orka connection complete`
+
+```text
+After consent, the controller sends the browser to the dashboard with a one-time completion value in the URL fragment (#completion=...). When the dashboard is not signed in as you, pass that value here to finish the link as yourself; it is accepted exactly once.
+
+Usage:
+  orka connection complete <name> [flags]
+
+Flags:
+      --completion string   The value after '#completion=' in the dashboard URL the provider callback opened
+  -h, --help                help for complete
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection delete`
+
+```text
+Disconnect a linked account and delete its tokens
+
+Usage:
+  orka connection delete <name> [flags]
+
+Flags:
+  -h, --help   help for delete
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection get`
+
+```text
+Show one of your linked accounts
+
+Usage:
+  orka connection get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection list`
+
+```text
+List your linked accounts
+
+Usage:
+  orka connection list [flags]
+
+Flags:
+  -h, --help            help for list
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection providers`
+
+```text
+List the connector providers you can link
+
+Usage:
+  orka connection providers [flags]
+
+Flags:
+  -h, --help            help for providers
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1794,7 +1953,6 @@ Usage:
   orka monitor issue [command]
 
 Available Commands:
-  approve-plan   Approve the current issue plan
   decompose      Queue issue decomposition
   implement      Queue issue implementation
   implementation Inspect issue implementation jobs
@@ -1818,27 +1976,6 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka monitor issue [command] --help" for more information about a command.
-```
-
-## `orka monitor issue approve-plan`
-
-```text
-Approve the current issue plan
-
-Usage:
-  orka monitor issue approve-plan <name> <number> [flags]
-
-Flags:
-  -h, --help            help for approve-plan
-  -o, --output string   Output format: table, json, yaml (default "yaml")
-
-Global Flags:
-      --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
-      --txn-token string        Transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor issue decompose`
@@ -2182,7 +2319,7 @@ Usage:
   orka monitor items <name> [flags]
 
 Flags:
-      --automerge-state string   Filter by automerge state
+      --automerge-state string   Filter by merge readiness state
       --continue string          Continue token
       --cursor string            Cursor token
   -h, --help                     help for items
@@ -2311,7 +2448,6 @@ Usage:
   orka monitor pr [command]
 
 Available Commands:
-  automerge     Request head-bound automerge
   fix           Queue PR finding repair
   fix-ci        Queue PR CI repair
   ready         Inspect merge-ready PRs
@@ -2334,28 +2470,6 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka monitor pr [command] --help" for more information about a command.
-```
-
-## `orka monitor pr automerge`
-
-```text
-Request head-bound automerge
-
-Usage:
-  orka monitor pr automerge <name> <number> [flags]
-
-Flags:
-  -h, --help                help for automerge
-  -o, --output string       Output format: table, json, yaml (default "yaml")
-      --target-sha string   Current pull request head SHA for head-bound commands
-
-Global Flags:
-      --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
-      --txn-token string        Transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor pr fix`

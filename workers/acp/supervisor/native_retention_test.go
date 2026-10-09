@@ -23,7 +23,7 @@ func TestSupervisorRestoredNativeFailureRetainsEvidenceUntilProvenDelete(t *test
 	}
 	for _, failure := range []string{"provider-prompt", "workspace-validation"} {
 		t.Run(failure, func(t *testing.T) {
-			mode := "native-load-held"
+			mode := "native-resume-held"
 			if failure == "provider-prompt" {
 				mode = "native-prompt-error-held"
 			}

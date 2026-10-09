@@ -10,6 +10,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -451,6 +453,30 @@ type JobBuildOptions struct {
 	GatewayReplyEligible        bool
 	ResolvedApprovalsJSON       string
 	RepositoryMonitorValidation bool
+	// ConnectionBindings are the requester's Connections frozen for this
+	// dispatch; they are carried on the Job so recovery and the controller's
+	// connector endpoint judge the Job's own bindings, never a later freeze.
+	ConnectionBindings []corev1alpha1.ConnectionBinding
+	// Reader, when set, is the uncached reader the dispatch froze its
+	// bindings through; connector visibility and dispatch digests are read
+	// through the same reader so one Job never mixes revisions.
+	Reader client.Reader
+	// ConnectionBindingsFrozen marks ConnectionBindings as this dispatch's
+	// freeze: link modes come from them, and a connector tool whose policy
+	// no longer matches its binding fails the build so the dispatch retries.
+	ConnectionBindingsFrozen bool
+	// ConnectorToolDigests are the per-tool dispatch digests of the
+	// classification the freeze was made from; with a frozen dispatch,
+	// every tool must classify the same way again or the build fails.
+	ConnectorToolDigests map[string]string
+}
+
+// connectorReader is the reader connector dispatch data is derived from.
+func (b *JobBuilder) connectorReader(opts JobBuildOptions) client.Reader {
+	if opts.Reader != nil {
+		return opts.Reader
+	}
+	return b.Client
 }
 
 // Build creates a Job for the given Task.
@@ -471,6 +497,10 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
+	container, err := b.buildContainerWithOptions(ctx, task, agent, provider, opts)
+	if err != nil {
+		return nil, err
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -495,7 +525,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
-						b.buildContainerWithOptions(ctx, task, agent, provider, opts),
+						container,
 					},
 				},
 			},
@@ -593,13 +623,17 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 }
 
 // buildContainerWithOptions builds the main container for the Job.
-func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) corev1.Container {
+func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (corev1.Container, error) {
+	workerEnv, err := b.buildEnvVarsWithOptions(ctx, task, agent, provider, opts)
+	if err != nil {
+		return corev1.Container{}, err
+	}
 	container := corev1.Container{
-		Name:            "worker",
+		Name:            workerContainerName,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
-		Env:             b.buildEnvVarsWithOptions(ctx, task, agent, provider, opts),
+		Env:             workerEnv,
 		VolumeMounts:    []corev1.VolumeMount{},
 	}
 
@@ -655,7 +689,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 		MountPath: workerTempPath,
 	})
 
-	return container
+	return container, nil
 }
 
 func resolveExecution(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *corev1alpha1.ExecutionSpec {
@@ -750,7 +784,7 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 }
 
 // buildEnvVarsWithOptions builds the environment variables for the container using additional options.
-func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) []corev1.EnvVar {
+func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) ([]corev1.EnvVar, error) {
 	baseEnv := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
@@ -821,24 +855,32 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
-		envVars = b.addAIEnvVars(ctx, envVars, task, agent, provider)
-		names := aitools.ResolveWithGatewayReply(task, agent, opts.GatewayReplyEligible)
-		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(names, ","))
-		if slices.Contains(names, aitools.GatewayReplyToolName) {
-			envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
+		aiEnvVars, err := b.addAIEnvVars(ctx, envVars, task, agent, provider, opts)
+		if err != nil {
+			return nil, err
 		}
+		envVars = aiEnvVars
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
+	frozenBindings := ""
+	if len(opts.ConnectionBindings) > 0 {
+		encoded, err := json.Marshal(opts.ConnectionBindings)
+		if err != nil {
+			return nil, fmt.Errorf("encode frozen connection bindings: %w", err)
+		}
+		frozenBindings = string(encoded)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.ConnectionBindings, frozenBindings)
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
 
-	return envVars
+	return envVars, nil
 }
 
 func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
@@ -1077,7 +1119,7 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 }
 
 // addCoordinationEnvVars appends coordination-related environment variables.
-func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
+func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, connectorWrite []string) []corev1.EnvVar {
 	agentNames := make([]string, 0, len(agent.Spec.Coordination.AllowedAgents))
 	for _, a := range agent.Spec.Coordination.AllowedAgents {
 		agentNames = append(agentNames, a.Name)
@@ -1101,12 +1143,23 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 	}).EnvVars() {
 		envVars = setControllerEnvValue(envVars, envVar.Name, envVar.Value)
 	}
-	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(agent.Spec.Coordination.ApprovalRequiredTools))
+	required := append([]string(nil), agent.Spec.Coordination.ApprovalRequiredTools...)
+	required = append(required, connectorWrite...)
+	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(sortedUnique(required)))
 }
+
+// workerContainerName is the Job container the worker runs in; the
+// controller reads the frozen dispatch policy from its environment.
+const workerContainerName = "worker"
+
+// ErrConnectorToolResolution marks a Job build that could not determine which
+// tools are connector-backed. It is transient: the Task controller requeues
+// rather than failing the Task.
+var ErrConnectorToolResolution = errors.New("connector tool resolution failed")
 
 // addAIEnvVars adds AI-specific environment variables
 func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
-	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
+	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider, opts JobBuildOptions) ([]corev1.EnvVar, error) {
 	cfg := resolveAIConfig(task, agent, providerCRD)
 
 	// Resolve system prompt from ConfigMapRef if not already set inline
@@ -1135,15 +1188,60 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		}
 	}
 
-	cfg.tools = aitools.Resolve(task, agent)
+	cfg.tools = aitools.ResolveWithGatewayReply(task, agent, opts.GatewayReplyEligible)
 	coordinationConfigured := agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
 
-	if len(cfg.tools) > 0 {
-		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	// Connector-backed write tools are hidden from readOnly links and
+	// otherwise always require approval. A read failure here fails the Job
+	// build so dispatch retries: starting the worker with a connector write
+	// tool advertised but missing from the approval set would let it run
+	// without the promised approval.
+	// Visibility, the approval set, and the dispatch digests all come from
+	// one classification against the registry the native worker resolves
+	// tools with; a dispatch that froze bindings supplies the link modes.
+	visible, connectorWrite, digests, err := nativeConnectorDispatch(ctx, b.connectorReader(opts), NativeWorkerToolRegistry(task, agent),
+		task, cfg.tools, opts.ConnectionBindings, opts.ConnectorToolDigests, opts.ConnectionBindingsFrozen)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
+	}
+	cfg.tools = visible
+	// Only an autonomous coordination Task can park on an approval and
+	// resume to execute the approved call; any other native Task would
+	// request approval and then finish without it. Such Tasks never see
+	// connector write tools at all: no write without a resumable approval.
+	if (!coordinationConfigured || !agent.Spec.Coordination.Autonomous) && len(connectorWrite) > 0 {
+		cfg.tools = withoutTools(cfg.tools, connectorWrite)
+		connectorWrite = nil
 	}
 
+	// The tool list is always controller-owned, even when empty, so Task env
+	// and Agent Secret EnvFrom cannot supply it.
+	envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	if slices.Contains(cfg.tools, aitools.GatewayReplyToolName) {
+		envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
+	}
+	// The controller executes a connector-backed tool only as it was defined
+	// when the worker was dispatched with it. A write tool withdrawn above
+	// keeps no digest, so it can never be executed for this Job.
+	for name := range digests {
+		if !slices.Contains(cfg.tools, name) {
+			delete(digests, name)
+		}
+	}
+	frozenDigests := ""
+	if len(digests) > 0 {
+		encoded, err := json.Marshal(digests)
+		if err != nil {
+			return nil, fmt.Errorf("encode connector tool digests: %w", err)
+		}
+		frozenDigests = string(encoded)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.ConnectorToolDigests, frozenDigests)
+
 	if coordinationConfigured {
-		envVars = b.addCoordinationEnvVars(envVars, task, agent)
+		envVars = b.addCoordinationEnvVars(envVars, task, agent, connectorWrite)
+	} else if len(connectorWrite) > 0 {
+		envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(connectorWrite))
 	}
 
 	// Child identity enables the coordination registry even when implicit tool
@@ -1195,7 +1293,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		})
 	}
 
-	return envVars
+	return envVars, nil
 }
 
 func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -137,8 +138,8 @@ func TestNativeSessionRejectsChatTurnWithoutChangingCheckpoint(t *testing.T) {
 			require.NoError(t, err)
 			require.Zero(t, session.MessageCount)
 			require.Empty(t, session.Messages)
-			// A rejected chat must leave no lease blocking the first real Task.
-			require.NoError(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"))
+			// Native Tasks use the ACP mutation lease, never a legacy Task lock.
+			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"), store.ErrValidation)
 			require.NoError(t, s.ReleaseLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"))
 		})
 	}
@@ -403,4 +404,33 @@ func mustTurnID(t *testing.T, key store.SessionTurnKey) string {
 	id, err := key.CanonicalID()
 	require.NoError(t, err)
 	return id
+}
+
+func TestNativeSessionRejectsLegacyTaskMutation(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprint(bound), func(t *testing.T) {
+			s := nativeTestStore(t, ":memory:")
+			request := nativeImportFixture(t, "legacy-rejected", "private original")
+			_, err := s.StageNativeSessionImport(t.Context(), request)
+			require.NoError(t, err)
+			uid := ""
+			if bound {
+				uid = "canonical-owner"
+				require.NoError(t, s.BindSessionCleanupIdentity(t.Context(), request.Namespace, request.SessionName, uid))
+			}
+			before, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
+			require.NoError(t, err)
+			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "legacy-task", "legacy-uid"), store.ErrValidation)
+			// A previously acquired or corrupt legacy lock must not authorize append.
+			_, err = s.db.ExecContext(t.Context(), `UPDATE sessions SET active_task='legacy-task',active_task_uid='legacy-uid' WHERE namespace=? AND name=?`, request.Namespace, request.SessionName)
+			require.NoError(t, err)
+			require.ErrorIs(t, s.AppendMessagesWithLock(t.Context(), request.Namespace, request.SessionName, "legacy-task", "legacy-uid", []store.SessionMessage{{Role: "assistant", Content: "legacy result"}}), store.ErrValidation)
+			after, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			transcript, err := s.LoadTranscript(t.Context(), request.Namespace, request.SessionName, 100)
+			require.NoError(t, err)
+			require.Empty(t, transcript)
+		})
+	}
 }

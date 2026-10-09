@@ -43,10 +43,13 @@ Submit a normal Codex Task with `spec.sessionRef.name: migrated-review` and
 `spec.sessionRef.create: true` for the first continuation. Use the Task's current
 workspace and tool policy. During admission, Orka installs the bundle in
 the child's fresh private `CODEX_HOME` before starting codex-acp. It uses
-`session/load` with the original UUID and current cwd, provider, MCP tools,
-approvals, and sandbox configuration. The runtime must prove loading the exact
-bundle before Orka sends the new user prompt. Canonical history is not injected
-again. The imported history stays native; the Orka transcript records new Tasks.
+capability-gated `session/resume` with the original UUID and current cwd,
+provider, MCP tools, approvals, and sandbox configuration. The runtime must
+advertise resume support and prove restoring the exact bundle before Orka sends
+the new user prompt. Canonical history is not injected again. Missing resume
+support or a failed resume rejects creation without falling back to
+`session/new`. The imported history stays native; the Orka transcript records
+new Tasks.
 
 ## Export a checkpoint
 
@@ -81,18 +84,29 @@ CLI reuses its saved bundle and operation ID. Export also reuses the same frozen
 SessionKit install plan and receipt. Changing the target, bundle, or cwd with
 that journal is rejected. Automatic port-forward retries use the Kubernetes
 cluster and Service identity rather than the local port. Recreating the Service
-requires a new journal; an explicit server URL must stay unchanged.
+requires a new journal; an explicit server URL must stay unchanged. Invalid or
+unavailable Kubernetes configuration and missing service discovery fail closed.
+Use `--server` to select an explicit endpoint, including a development server.
 
 An uncertain runtime install retains its target and frozen journal and closes
 pool admission. Exact create retries report that retained outcome without
 allocating another home or starting a child. Automatic reconciliation of that
 supervisor creation state is not part of this delivery.
 
+A capture failure after proven writer exit can retry from the retained private
+home under a new fenced operation. Receipt reconciliation never starts a capture.
+If native capture is unsupported and there is no prior native checkpoint, Orka
+records one warning execution event with reason `native_capture_unsupported`.
+The next turn uses the canonical transcript instead of native continuity.
+The warning survives controller retries and restarts without duplicates. If a
+prior native checkpoint exists, unsupported capture still blocks settlement;
+Orka never silently replaces required native continuity with transcript replay.
+
 Failed, cancelled, or lost provider prompts do not publish a new native
 checkpoint. The runtime that ran them is poisoned and retired, so a Task that
 appends to a Session with a native checkpoint settles its terminal marker with
 the existing checkpoint carried forward: the checkpoint's transcript boundary
-advances past the marker, the lease is released, and the next Task loads the
+advances past the marker, the lease is released, and the next Task resumes the
 same native state. That state omits only the prompt that produced no result.
 A successful prompt can retain its native state after delivery failure once
 workspace finalization and canonical settlement complete. Poisoned workspace

@@ -370,3 +370,34 @@ func TestMigrateRejectsWrongDestinationVersion(t *testing.T) {
 		t.Fatal("unsupported destination accepted")
 	}
 }
+
+func TestMigrationTargetFailsClosedWithoutExplicitServer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, mode := range []string{"missing", "malformed", "no-context"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config")
+			if mode == "malformed" {
+				require.NoError(t, os.WriteFile(path, []byte("not: [valid"), 0o600))
+			}
+			if mode == "no-context" {
+				require.NoError(t, os.WriteFile(path, []byte("apiVersion: v1\nkind: Config\n"), 0o600))
+			}
+			home, journal := t.TempDir(), t.TempDir()
+			require.NoError(t, os.Chmod(journal, 0o700))
+			cmd := newRootCmd()
+			cmd.SetOut(new(bytes.Buffer))
+			cmd.SetErr(new(bytes.Buffer))
+			cmd.SetArgs([]string{"--kubeconfig", path, "session", "migrate", "import", "private", "--codex-home", home, "--thread", "thread", "--journal-dir", journal, "--source-stopped"})
+			require.ErrorContains(t, cmd.Execute(), "invalid or unavailable kubeconfig")
+		})
+	}
+	cmd := newRootCmd()
+	require.NoError(t, cmd.PersistentFlags().Set("server", "http://explicit.example"))
+	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
+	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
+	c, target, cleanup, err := newMigrationClient(cmd)
+	require.NoError(t, err)
+	defer cleanup()
+	require.Equal(t, "http://explicit.example", target)
+	require.Equal(t, target, c.BaseURL)
+}

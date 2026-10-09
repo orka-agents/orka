@@ -263,6 +263,7 @@ type sessionState struct {
 	drainCleanupScheduled   bool
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 	nativeCapture           *nativeSessionCapture
+	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
 }
 
 type promptState struct {
@@ -1190,7 +1191,7 @@ func (s *Server) createSession(
 		maps.Copy(envValues, values)
 	}
 	maps.Copy(envValues, projection.Environment)
-	loadSessionID := ""
+	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
 		if !s.cfg.Capabilities.SupportsNativeSessions || s.cfg.Provider.Kind != providerKindCodex || snapshot.ProviderVersion != acp.CodexCLIVersion {
@@ -1213,7 +1214,7 @@ func (s *Server) createSession(
 			}
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
 		}
-		loadSessionID = snapshot.ProviderSessionID
+		resumeSessionID = snapshot.ProviderSessionID
 	}
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
@@ -1260,7 +1261,7 @@ func (s *Server) createSession(
 		},
 		MCPServers:            []acp.MCPServer{mcpServer},
 		NewSessionMeta:        projection.NewSessionMeta,
-		LoadSessionID:         loadSessionID,
+		ResumeSessionID:       resumeSessionID,
 		AuthMethodID:          s.cfg.Provider.AuthMethodID,
 		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
 		PromptLease:           time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
@@ -1326,7 +1327,7 @@ func (s *Server) createSession(
 		LastTransitionAt:     now,
 	}
 	if request.NativeRestore != nil {
-		descriptor.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: loadSessionID, Loaded: true}
+		descriptor.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: resumeSessionID, Loaded: true}
 	}
 	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, projection.AgentDiagnosticFilter, nil
 }

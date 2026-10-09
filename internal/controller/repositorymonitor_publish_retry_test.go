@@ -25,6 +25,8 @@ import (
 // Exercise ingestion, durable publication records, Secret reload and real HTTP
 // requests through Reconcile. Only the Kubernetes client and GitHub service are
 // substituted; no LLM execution is needed to republish a completed review.
+//
+//nolint:gocyclo // Keep credential rotation, cooldown, restart, and terminal outcomes in one publication lifecycle fixture.
 func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -87,6 +89,13 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 					t.Fatalf("Reconcile: %v", err)
 				}
 				return result
+			}
+			if !tt.suspended {
+				// A recent inventory run keeps automatic polling out of this
+				// publication retry fixture without disabling review ingestion.
+				if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "recent-inventory", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRunPhaseSucceeded, StartedAt: time.Now()}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, monitorName, task.Name,
 				repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictNeedsChanges))

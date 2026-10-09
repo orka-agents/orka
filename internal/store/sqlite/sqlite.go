@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,6 +51,10 @@ func NewDB(path string) (*sql.DB, error) {
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA synchronous=NORMAL",
 		"PRAGMA foreign_keys=ON",
+		// Deleted content is overwritten with zeros rather than left in free
+		// pages: connector custody rows are crypto-shredded on disconnect,
+		// and a later file snapshot must not be able to recover them.
+		"PRAGMA secure_delete=ON",
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
@@ -791,6 +796,8 @@ func currentSchemaStatements() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_monitor
 			ON github_mutation_records(monitor_namespace, monitor_name, target_kind, target_number, operation, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_operation_sha
+			ON github_mutation_records(operation, target_sha, created_at DESC, id DESC)`,
 		`CREATE TABLE IF NOT EXISTS repair_jobs (
 			id                  TEXT PRIMARY KEY,
 			monitor_namespace   TEXT NOT NULL,
@@ -958,7 +965,8 @@ func currentSchemaStatements() []string {
 	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
 	statements = append(statements, usageSchema()...)
 	statements = append(statements, agentExecutionSchemaStatements()...)
-	return append(statements, nativeSessionSchemaStatements()...)
+	statements = append(statements, nativeSessionSchemaStatements()...)
+	return append(statements, connectorSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.
@@ -968,6 +976,11 @@ type Store struct {
 	dbPath           string
 	processLock      io.Closer
 	executionEventMu sync.Mutex
+	// pendingWALTruncate remembers a connector custody deletion whose log
+	// truncation found the log busy; the next custody operation finishes it.
+	// It starts set, so a truncation a previous process could not finish is
+	// completed by this process's first custody operation.
+	pendingWALTruncate atomic.Bool
 
 	// snapshotCipher encrypts immutable agent execution snapshot bodies at
 	// rest. Snapshot persistence fails closed while it is nil.
@@ -985,7 +998,9 @@ type Store struct {
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	return &Store{db: db, dbPath: dbPath}
+	s := &Store{db: db, dbPath: dbPath}
+	s.pendingWALTruncate.Store(true)
+	return s
 }
 
 // OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
@@ -1002,7 +1017,9 @@ func OpenLockedStore(path string) (*Store, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	return &Store{db: db, dbPath: path, processLock: lock}, nil
+	store := &Store{db: db, dbPath: path, processLock: lock}
+	store.pendingWALTruncate.Store(true)
+	return store, nil
 }
 
 // Start runs background maintenance and blocks until ctx is cancelled,

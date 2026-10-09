@@ -2548,3 +2548,69 @@ func TestBindApprovalOutboundAccessPolicyVersionFailsClosedOnMissingCredentialSe
 		t.Fatal("partial outbound policy identity was retained after failed binding")
 	}
 }
+
+func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing.T) {
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "gh_write", Annotations: map[string]string{
+			approvalOutboundPolicyUIDAnnotation: "policy-uid", approvalOutboundPolicyGenerationAnnotation: "3",
+		}},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: "https://api.github.example.test/gh_write",
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"}}},
+	}
+	plain, err := approvals.TargetSpecDigest(tool.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got == plain {
+		t.Fatalf("a worker-executed tool folds policy identity into its digest: got %q err = %v", got, err)
+	}
+	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": tool}, map[string]bool{"gh_write": true})
+	// Without a frozen binding the digest carries an empty Connection
+	// identity, which the controller never matches; with one it binds the
+	// exact link the Job was dispatched under.
+	previous := connectorBindings
+	t.Cleanup(func() { connectorBindings = previous })
+	connectorBindings = map[string]corev1alpha1.ConnectionBinding{}
+	previousPolicies := connectorToolPolicies
+	t.Cleanup(func() { connectorToolPolicies = previousPolicies })
+	connectorToolPolicies = map[string]corev1alpha1.OutboundAccessPolicySpec{}
+	unbound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got != unbound || got == plain {
+		t.Fatalf("a connector-backed tool digests its plain spec plus the frozen Connection: got %q want %q err = %v",
+			got, unbound, err)
+	}
+	connectorBindings = parseConnectionBindings(
+		`[{"policyName":"github-conn","provider":"github","connectionName":"github-abc",` +
+			`"uid":"conn-uid","generation":2,"grantSequence":1,"mode":"readWrite"}]`)
+	bound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "conn-uid", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got != bound || got == unbound {
+		t.Fatalf("a connector-backed tool must bind the frozen Connection: got %q want %q err = %v", got, bound, err)
+	}
+	// The policy that injects the credential is part of the target too.
+	policy := corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{
+		ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+		Output:      &corev1alpha1.OutboundCredentialOutput{Header: "X-Token"},
+	}}
+	connectorToolPolicies["gh_write"] = policy
+	withPolicy, err := approvals.ConnectorTargetSpecDigest(tool.Spec, policy, "conn-uid", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got != withPolicy || got == bound {
+		t.Fatalf("a connector-backed tool must bind its policy configuration: got %q want %q err = %v", got, withPolicy, err)
+	}
+	// A marker that arrived on the Tool object is not a classification: it
+	// is cleared unless routing derived it.
+	local := tool.DeepCopy()
+	local.Annotations[connectorBackedToolAnnotation] = "true"
+	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": local}, map[string]bool{})
+	if got, err := approvalTargetSpecDigest(local); err != nil || got == plain {
+		t.Fatalf("a locally executed tool must keep the full digest: got %q err = %v", got, err)
+	}
+}

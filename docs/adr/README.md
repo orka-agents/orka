@@ -108,6 +108,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0010](0010-genai-metrics-export.md) | Export GenAI metrics through OTLP push | Accepted |
 | [0011](0011-vendor-neutral-transaction-and-outbound-access.md) | Separate transaction governance from outbound resource access | Accepted |
 | [0019](0019-genai-semconv-constants-strategy.md) | Hand-roll GenAI semantic-convention constants | Accepted |
+| [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
 
 ## Writing a new one
 

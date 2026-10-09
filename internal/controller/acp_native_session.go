@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -89,7 +90,7 @@ type nativeCaptureIntent struct {
 	Reconciliation *harnessv2.CaptureNativeSessionRequest `json:"reconciliation,omitempty"`
 	Unsupported    bool                                   `json:"unsupported,omitempty"`
 	// Supersedes records the request digest of an intent whose original capture
-	// the same runtime incarnation proved it never started.
+	// the same runtime incarnation proved it never started or can safely retry.
 	Supersedes harnessv2.RequestDigest `json:"supersedes,omitempty"`
 }
 
@@ -214,11 +215,9 @@ func freshNativeCaptureRequest(runtimeFence harnessv2.Fence, task *corev1alpha1.
 	return request, nil
 }
 
-// supersedeUnstartedNativeCapture replaces an intent whose original capture the
-// same supervisor boot proved it never started. No capture has begun and the
-// writer is untouched, so reconciling forever would hold the lease for a receipt
-// that cannot exist; one fresh capture begins under a superseding intent.
-func (d *ACPDispatcher) supersedeUnstartedNativeCapture(ctx context.Context, runtimeClient *harnessv2.Client, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, intent *nativeCaptureIntent) (*harnessv2.CaptureNativeSessionResponse, error) {
+// supersedeRetryableNativeCapture starts one fresh capture only after the exact
+// runtime proves the original never started or failed with no surviving writer.
+func (d *ACPDispatcher) supersedeRetryableNativeCapture(ctx context.Context, runtimeClient *harnessv2.Client, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, intent *nativeCaptureIntent) (*harnessv2.CaptureNativeSessionResponse, error) {
 	replacement, err := freshNativeCaptureRequest(runtimeFence, task, "-"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10))
 	if err != nil {
 		return nil, err
@@ -295,7 +294,7 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 		if session.NativeSession != nil {
 			return fmt.Errorf("%w: native continuity cannot omit a checkpoint", store.ErrConflict)
 		}
-		return nil
+		return d.recordNativeCaptureSkipped(ctx, task)
 	}
 	request := intent.Request
 	if harnessv2.CompareFence(runtimeFence, request.Metadata.Fence, true) != harnessv2.FenceMatch || !request.Metadata.ExpiresAt.After(time.Now().UTC()) {
@@ -319,8 +318,8 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 		request = *intent.Reconciliation
 	}
 	response, err := runtimeClient.CaptureNativeSession(ctx, harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)), request)
-	if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && clientErr.Code == harnessv2.ErrorCodeNativeCaptureNotStarted && request.OriginalOperationID != "" {
-		response, err = d.supersedeUnstartedNativeCapture(ctx, runtimeClient, task, runtimeFence, &intent)
+	if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && (clientErr.Code == harnessv2.ErrorCodeNativeCaptureNotStarted && request.OriginalOperationID != "" || clientErr.Code == harnessv2.ErrorCodeNativeCaptureRetryReady) {
+		response, err = d.supersedeRetryableNativeCapture(ctx, runtimeClient, task, runtimeFence, &intent)
 	}
 	if err != nil {
 		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && clientErr.Code == harnessv2.ErrorCodeNativeCaptureUnsupported && session.NativeSession == nil {
@@ -328,7 +327,7 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 			if persistErr := d.persistNativeCaptureIntent(ctx, task, intent); persistErr != nil {
 				return persistErr
 			}
-			return nil
+			return d.recordNativeCaptureSkipped(ctx, task)
 		}
 		return fmt.Errorf("capture private native Session; exact runtime evidence retained: %w", err)
 	}
@@ -342,6 +341,30 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	return d.patchExecution(ctx, task, func(execution *corev1alpha1.TaskExecutionStatus) {
 		execution.RuntimeSessionRecreationPending = true
 	})
+}
+
+// A durable deduplication key survives annotation/event write ordering and restart.
+func (d *ACPDispatcher) recordNativeCaptureSkipped(ctx context.Context, task *corev1alpha1.Task) error {
+	eventStore, ok := d.EventStore.(store.DeduplicatingExecutionEventStore)
+	if !ok {
+		return fmt.Errorf("%w: native capture warning requires durable event storage", store.ErrNotReady)
+	}
+	sessionName := ""
+	if task.Spec.SessionRef != nil {
+		sessionName = task.Spec.SessionRef.Name
+	}
+	content, err := json.Marshal(map[string]string{"reason": string(harnessv2.ErrorCodeNativeCaptureUnsupported), "fallback": "transcript"})
+	if err != nil {
+		return err
+	}
+	_, _, err = eventStore.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+		Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name,
+		TaskName: task.Name, SessionName: sessionName,
+		Type: events.ExecutionEventTypeNativeSessionCaptureSkipped, Severity: events.ExecutionEventSeverityWarning,
+		Summary: "Native checkpoint unsupported; the next turn will use the canonical transcript instead of native continuity.",
+		Content: content,
+	}, "native-capture-skipped:"+string(task.UID)+":"+strconv.Itoa(int(task.Status.Execution.Attempt)))
+	return err
 }
 
 // Recovery captures the exact surviving built-in RuntimePool incarnation.

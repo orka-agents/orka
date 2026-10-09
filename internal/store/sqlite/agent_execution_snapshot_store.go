@@ -115,6 +115,11 @@ func (s *Store) SetAgentExecutionSnapshotCipher(snapshotCipher *AgentExecutionSn
 	if err := s.verifyNativeSessionCipher(snapshotCipher); err != nil {
 		return err
 	}
+	// Connector custody is sealed under the same key. Verify every retained
+	// row before replacing it so linked accounts remain usable and revocable.
+	if err := s.verifyConnectorRowsWithCipher(snapshotCipher); err != nil {
+		return err
+	}
 	s.snapshotCipher = snapshotCipher
 	return nil
 }

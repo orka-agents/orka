@@ -26,11 +26,11 @@ type RuntimeSessionConfig struct {
 	Process        ProcessConfig
 	MCPServers     []MCPServer
 	NewSessionMeta Meta
-	// LoadSessionID requests an installed native provider session. Failure to
-	// advertise or complete load must fail creation without session/new.
-	LoadSessionID string
-	AuthMethodID  string
-	ClientInfo    Implementation
+	// ResumeSessionID requests an installed native provider session. Failure to
+	// advertise or complete resume must fail creation without session/new.
+	ResumeSessionID string
+	AuthMethodID    string
+	ClientInfo      Implementation
 
 	InitializeTimeout time.Duration
 	PromptLease       time.Duration
@@ -263,18 +263,18 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 			return nil, initializationFailed(session, fmt.Errorf("authenticate ACP adapter: %w", err))
 		}
 	}
-	if cfg.LoadSessionID != "" {
-		if !initialized.AgentCapabilities.LoadSession {
-			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/load support"))
+	if cfg.ResumeSessionID != "" {
+		if !initialized.AgentCapabilities.SessionCapability(SessionCapabilityResume) {
+			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume support"))
 		}
-		_, err := process.Client().LoadSession(initCtx, LoadSessionRequest{
-			SessionID: cfg.LoadSessionID, CWD: cfg.Process.Paths.Workspace,
+		_, err := process.Client().ResumeSession(initCtx, ResumeSessionRequest{
+			SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 			MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 		})
 		if err != nil {
-			return nil, initializationFailed(session, fmt.Errorf("load ACP provider session: %w", err))
+			return nil, initializationFailed(session, fmt.Errorf("resume ACP provider session: %w", err))
 		}
-		session.providerSessionID = cfg.LoadSessionID
+		session.providerSessionID = cfg.ResumeSessionID
 		return session, nil
 	}
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{

@@ -20,6 +20,7 @@ const (
 	ExecutionEventTypeModelContextUpdated           = "ModelContextUpdated"
 	ExecutionEventTypeModelMessage                  = "ModelMessage"
 	ExecutionEventTypeContextTruncated              = "ContextTruncated"
+	ExecutionEventTypeNativeSessionCaptureSkipped   = "NativeSessionCaptureSkipped"
 	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
 	ExecutionEventTypeToolCallCompleted             = "ToolCallCompleted"
 	ExecutionEventTypeToolCallFailed                = "ToolCallFailed"
@@ -78,6 +79,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeModelContextUpdated,
 	ExecutionEventTypeModelMessage,
 	ExecutionEventTypeContextTruncated,
+	ExecutionEventTypeNativeSessionCaptureSkipped,
 	ExecutionEventTypeToolCallStarted,
 	ExecutionEventTypeToolCallCompleted,
 	ExecutionEventTypeToolCallFailed,

@@ -940,6 +940,7 @@ func validateHTTPErrorMapping(status int, response ErrorResponse) error {
 		ErrorCodeSessionPoisoned:          {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
 		ErrorCodeNativeCaptureUnsupported: {http.StatusUnprocessableEntity: {}},
 		ErrorCodeNativeCaptureNotStarted:  {http.StatusConflict: {}},
+		ErrorCodeNativeCaptureRetryReady:  {http.StatusInternalServerError: {}},
 		ErrorCodeWorkspaceResumeLost:      {http.StatusConflict: {}},
 		ErrorCodeOutcomeUnknown:           {http.StatusInternalServerError: {}},
 		ErrorCodeCleanupUnproven:          {http.StatusConflict: {}},
