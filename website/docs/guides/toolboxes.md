@@ -110,6 +110,9 @@ and again inside the runtime Pod:
 Order matters: toolboxes and their `pathEntries` are appended to `PATH` in the
 order you declare them, **after** the system folders
 (`/usr/local/bin:/usr/bin:/bin`), so a toolbox never replaces a system command.
+The supervisor also writes a `~/.profile` into each session home that re-adds
+the toolbox folders, because agents such as Codex run commands through a login
+shell and Debian's `/etc/profile` resets `PATH` for non-root users.
 Changing any toolbox field creates a new RuntimePool; Tasks that are already
 running keep the toolboxes frozen in their execution snapshot.
 

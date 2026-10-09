@@ -1152,6 +1152,9 @@ func (s *Server) createSession(
 		maps.Copy(envValues, values)
 	}
 	maps.Copy(envValues, projection.Environment)
+	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
+	}
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -243,4 +244,54 @@ func TestToolboxCheckHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(toolbox.Run(args[0], args[1:], os.Stdout, os.Stderr))
+}
+
+func TestWriteToolboxLoginProfileRestoresPathForLoginShells(t *testing.T) {
+	home := t.TempDir()
+	if err := writeToolboxLoginProfile(home, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".profile")); !os.IsNotExist(err) {
+		t.Fatal("no toolboxes must not write a login profile")
+	}
+	if err := writeToolboxLoginProfile(home, supervisorTestToolboxes()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".profile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := string(data)
+	for _, dir := range []string{"/opt/yq-jq/bin", "/home/linuxbrew/.linuxbrew/bin", "/home/linuxbrew/.linuxbrew/sbin"} {
+		if !strings.Contains(profile, "PATH=\"$PATH:"+dir+"\"") {
+			t.Fatalf("profile is missing %s:\n%s", dir, profile)
+		}
+	}
+	if !strings.HasSuffix(profile, "export PATH\n") {
+		t.Fatalf("profile must export PATH:\n%s", profile)
+	}
+	if sh, lookErr := exec.LookPath("sh"); lookErr == nil {
+		// Simulate /etc/profile resetting PATH, then source the generated file.
+		cmd := exec.Command(sh, "-c", "PATH=/usr/bin:/bin; . "+filepath.Join(home, ".profile")+"; printf %s \"$PATH\"")
+		out, runErr := cmd.Output()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if got := string(out); got != "/usr/bin:/bin:/opt/yq-jq/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin" {
+			t.Fatalf("sourced PATH = %q", got)
+		}
+		cmd = exec.Command(sh, "-c", ". "+filepath.Join(home, ".profile")+"; . "+filepath.Join(home, ".profile")+"; printf %s \"$PATH\"")
+		cmd.Env = []string{"PATH=/usr/bin:/bin"}
+		out, runErr = cmd.Output()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if strings.Count(string(out), "/opt/yq-jq/bin") != 1 {
+			t.Fatalf("sourcing twice must not duplicate folders: %q", string(out))
+		}
+	}
+	unsafe := []harnessv2.RuntimeToolbox{{Image: supervisorTestToolboxes()[0].Image, MountPath: "/opt/x", PathEntries: []string{"bin$(id)"}}}
+	if err := writeToolboxLoginProfile(t.TempDir(), unsafe); err == nil {
+		t.Fatal("shell metacharacters must be rejected")
+	}
 }
