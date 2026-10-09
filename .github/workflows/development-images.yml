@@ -102,6 +102,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: development-digest-${{ matrix.name }}-${{ github.sha }}
+          # Preserve successful matrix artifacts when only failed jobs rerun.
+          overwrite: true
           path: ${{ runner.temp }}/development-digests
           if-no-files-found: error
           retention-days: 14
@@ -146,6 +148,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: development-images-${{ github.sha }}
+          overwrite: true
           path: |
             ${{ runner.temp }}/development-digests/images.json
             ${{ runner.temp }}/development-digests/values.json

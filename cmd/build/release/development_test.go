@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 type developmentFixture struct {
@@ -262,6 +264,37 @@ func TestDevelopmentWorkflowKeepsPublicationOnTrustedMain(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("development workflow enables an unintended publication path: %q", forbidden)
 		}
+	}
+}
+
+func TestDevelopmentWorkflowUploadsAreRetrySafe(t *testing.T) {
+	body := readTestFile(t, filepath.Join("..", "..", "..", ".github", "workflows", "development-images.yml"))
+	var document struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string `yaml:"uses"`
+				With struct {
+					Name      string `yaml:"name"`
+					Overwrite bool   `yaml:"overwrite"`
+				} `yaml:"with"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	must(t, yaml.Unmarshal([]byte(body), &document))
+	uploads := 0
+	for job, configuration := range document.Jobs {
+		for _, step := range configuration.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+				continue
+			}
+			uploads++
+			if !step.With.Overwrite {
+				t.Errorf("%s artifact %q cannot be replaced on rerun", job, step.With.Name)
+			}
+		}
+	}
+	if uploads != 2 {
+		t.Fatalf("checked %d artifact uploads, want 2", uploads)
 	}
 }
 
