@@ -25,6 +25,20 @@ func nativeTestStore(t *testing.T, path string) *Store {
 	return s
 }
 
+// appendCanonicalNativeTestMessages sets up a canonical transcript boundary
+// directly inside a test transaction, without authorizing a legacy append.
+func appendCanonicalNativeTestMessages(t *testing.T, s *Store, namespace, name string, messages []store.SessionMessage) {
+	t.Helper()
+	tx, err := s.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer tx.Rollback() //nolint:errcheck
+	inserted, err := insertSessionMessagesTx(t.Context(), tx, namespace, name, messages)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), `UPDATE sessions SET message_count=message_count+?, updated_at=CURRENT_TIMESTAMP WHERE namespace=? AND name=?`, inserted, namespace, name)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+}
+
 func nativeImportFixture(t *testing.T, name, text string) store.NativeSessionImport {
 	t.Helper()
 	snapshot := storetest.NativeSessionSnapshot(t, text)
@@ -84,9 +98,9 @@ func TestNativeSessionImportAndCaptureOperationIDsAreIndependent(t *testing.T) {
 	receipt, err := s.StageNativeSessionImport(ctx, request)
 	require.NoError(t, err)
 	require.NoError(t, s.BindSessionCleanupIdentity(ctx, request.Namespace, request.SessionName, "canonical-uid"))
-	require.NoError(t, s.AppendMessages(ctx, request.Namespace, request.SessionName, []store.SessionMessage{
+	appendCanonicalNativeTestMessages(t, s, request.Namespace, request.SessionName, []store.SessionMessage{
 		{ID: "new-result", Role: "assistant", Content: "continued result"},
-	}))
+	})
 	capture := store.NativeSessionRecord{
 		Namespace: request.Namespace, SessionName: request.SessionName, SessionUID: "canonical-uid",
 		Snapshot:     storetest.NativeSessionSnapshot(t, "continued native history"),
@@ -161,7 +175,7 @@ func TestNativeSessionCaptureMonotonicBoundary(t *testing.T) {
 	wrongUID := first
 	wrongUID.SessionUID = "wrong-owner"
 	require.ErrorIs(t, s.SaveNativeSession(ctx, wrongUID), store.ErrConflict)
-	require.NoError(t, s.AppendMessages(ctx, "tenant", "captured", []store.SessionMessage{{ID: "message-two", Role: "assistant", Content: "next"}}))
+	appendCanonicalNativeTestMessages(t, s, "tenant", "captured", []store.SessionMessage{{ID: "message-two", Role: "assistant", Content: "next"}})
 	_, err := s.GetNativeSession(ctx, "tenant", "captured", "canonical-uid")
 	require.ErrorIs(t, err, store.ErrConflict)
 	second := first
@@ -420,6 +434,7 @@ func TestNativeSessionRejectsLegacyTaskMutation(t *testing.T) {
 			}
 			before, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
 			require.NoError(t, err)
+			require.ErrorIs(t, s.AppendMessages(t.Context(), request.Namespace, request.SessionName, []store.SessionMessage{{Role: "assistant", Content: "unowned legacy result"}}), store.ErrValidation)
 			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "legacy-task", "legacy-uid"), store.ErrValidation)
 			// A previously acquired or corrupt legacy lock must not authorize append.
 			_, err = s.db.ExecContext(t.Context(), `UPDATE sessions SET active_task='legacy-task',active_task_uid='legacy-uid' WHERE namespace=? AND name=?`, request.Namespace, request.SessionName)

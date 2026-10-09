@@ -850,10 +850,8 @@ func (s *Store) appendMessages(
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if ownerName != "" || ownerUID != "" {
-		if err := rejectLegacyNativeSession(ctx, tx, namespace, name); err != nil {
-			return err
-		}
+	if err := rejectLegacyNativeSession(ctx, tx, namespace, name); err != nil {
+		return err
 	}
 
 	var ownerType string
