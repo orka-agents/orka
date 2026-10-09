@@ -169,7 +169,8 @@ func (p *usageProvider) begin(ctx context.Context, req *CompletionRequest) (cont
 }
 
 func finishUsage(ctx context.Context, record UsageRecorder, observation store.UsageObservation) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	// Final accounting may need the worker event transport's bounded retry window.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if err := record(writeCtx, observation); err != nil {
 		return &usagePersistenceError{cause: err}

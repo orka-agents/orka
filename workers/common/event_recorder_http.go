@@ -1,11 +1,9 @@
 package common
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,8 +29,10 @@ type HTTPEventRecorderConfig struct {
 	SessionName   string
 	BearerPath    string
 	Client        *http.Client
-	Timeout       time.Duration
-	Now           func() time.Time
+	// Timeout may shorten the per-request deadline. Non-positive values use 2s;
+	// values above 2s are capped at 2s, independently of the 30s retry budget.
+	Timeout time.Duration
+	Now     func() time.Time
 }
 
 // HTTPEventRecorder posts worker execution events to the controller internal API.
@@ -106,7 +106,7 @@ func NewHTTPEventRecorder(cfg HTTPEventRecorderConfig) EventRecorder {
 
 // Record implements EventRecorder. Failures are warning-only and never returned to callers.
 func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...EventOption) {
-	if err := r.RecordStrict(ctx, typ, opts...); err != nil {
+	if err := r.record(ctx, typ, false, opts...); err != nil {
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -117,6 +117,10 @@ func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...Even
 // RecordStrict implements StrictEventRecorder by posting the event and returning
 // transport or non-2xx response errors.
 func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts ...EventOption) error {
+	return r.record(ctx, typ, true, opts...)
+}
+
+func (r *HTTPEventRecorder) record(ctx context.Context, typ string, retry bool, opts ...EventOption) error {
 	if r == nil {
 		return fmt.Errorf("http execution event recorder is nil")
 	}
@@ -169,32 +173,11 @@ func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts .
 		return fmt.Errorf("marshal execution event: %w", err)
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create execution event request: %w", err)
+	if !retry {
+		_, err := r.postEventAttempt(ctx, body)
+		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if token := readServiceAccountToken(r.bearerPath); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("record execution event: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	_, _ = io.CopyN(io.Discard, resp.Body, 64<<10)
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf(
-			"controller rejected execution event: HTTP %d: %s",
-			resp.StatusCode,
-			strings.TrimSpace(string(bodyPreview)),
-		)
-	}
-	return nil
+	return r.postEvent(ctx, body)
 }
 
 type submitRecordedEventRequest struct {
