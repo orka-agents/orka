@@ -249,8 +249,14 @@ warm_model() {
     {role:"user",content:"Proceed."}]}' >"${work_dir}/responses-warmup.json"
   curl -fsS --max-time 180 -H 'Content-Type: application/json' \
     --data-binary @"${work_dir}/responses-warmup.json" "${url}/v1/responses" >"${work_dir}/responses-warmup-response.json"
-  jq -e '[.output[]?.content[]?.text // empty] | join("") | contains("ORKA_RESPONSES_READY")' \
-    "${work_dir}/responses-warmup-response.json" >/dev/null
+  if ! jq -e '[.output[]?.content[]?.text // empty] | join("") | contains("ORKA_RESPONSES_READY")' \
+    "${work_dir}/responses-warmup-response.json" >/dev/null; then
+    # Only this synthetic connectivity response is projected; never dump caller
+    # requests, headers, environment, or credentials into diagnostics.
+    jq '{status,usage,output:[.output[]? | {type,content}]}' \
+      "${work_dir}/responses-warmup-response.json" | head -c 4096 | redact >&2
+    die "Qwen multi-turn Responses preflight did not return its connectivity marker"
+  fi
   log "Qwen chat and multi-turn Responses preflight passed"
   cleanup_port_forward "${proxy_pf_pid}"
   proxy_pf_pid=""
