@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +9,6 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,13 +22,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
-	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
-const testSubstrateTemplateName = "substrate-template"
+const FakeWorkspaceControllerName = "fixture.workspace.orka.ai"
 
 func TestExecutionWorkspaceProviderReconcilerEvaluatesLifecycleAndHeartbeat(t *testing.T) {
 	t.Parallel()
@@ -224,6 +221,23 @@ func TestExecutionWorkspaceProviderDeletionBlockedByReferences(t *testing.T) {
 	}
 	if len(got.Finalizers) == 0 {
 		t.Fatal("provider finalizer removed while pool reference remains")
+	}
+}
+
+func TestExecutionWorkspaceProviderDeletionWaitsForIndependentCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	provider := testGenericProvider("retained-provider")
+	checkpoint := &workspacev1alpha1.ExecutionWorkspaceCheckpoint{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "retained-data", Labels: map[string]string{workspaceCheckpointProviderNameLabel: provider.Name}}}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).WithObjects(provider, checkpoint).Build()
+	r := &ExecutionWorkspaceProviderReconciler{Client: c, APIReader: c}
+	if blocked, err := r.providerHasReferences(ctx, provider); err != nil || !blocked {
+		t.Fatalf("retained checkpoint did not protect its provider: blocked %v, error %v", blocked, err)
+	}
+	if err := c.Delete(ctx, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, err := r.providerHasReferences(ctx, provider); err != nil || blocked {
+		t.Fatalf("provider remained protected after checkpoint deletion: blocked %v, error %v", blocked, err)
 	}
 }
 
@@ -647,63 +661,6 @@ func TestWorkspaceClassAuthorizerUsesUseVerb(t *testing.T) {
 	}
 }
 
-func TestFakeWorkspaceProviderReconcilesProviderPoolAndWorkspace(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	scheme := testWorkspaceScheme(t)
-	provider := testGenericProvider("fake-provider")
-	class := testGenericClass("default", "class", provider.Name)
-	pool := testGenericPool("default", "pool", provider.Name)
-	class.Spec.ProviderRef = nil
-	class.Spec.ParametersRef = nil
-	class.Spec.PoolRef = &corev1.LocalObjectReference{Name: pool.Name}
-	workspace := testBoundWorkspace(t, "default", "workspace", class.Name, provider.Name)
-	workspace.Spec.Attachment = workspaceAttachmentForTest(
-		"attachment", 3, metav1.NewTime(time.Now().Add(time.Minute)),
-	)
-	suspended := testBoundWorkspace(t, "default", "suspended-workspace", class.Name, provider.Name)
-	suspended.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
-	mapper, parameters := preparePooledClassProfileForTest(t, provider, pool, class, workspace, suspended)
-	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
-	workspace.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
-		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
-	}
-	markWorkspaceAdmittedForPolicyReview(suspended, suspended.Generation)
-	suspended.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
-		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(provider, pool, workspace, suspended).
-		WithObjects(provider, class, pool, workspace, suspended, parameters).
-		Build()
-	providerReconciler := &FakeExecutionWorkspaceProviderReconciler{Client: c}
-	if _, err := providerReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
-		t.Fatalf("reconcile fake provider: %v", err)
-	}
-	workspaceReconciler := &FakeExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
-	if _, err := workspaceReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}); err != nil {
-		t.Fatalf("reconcile fake workspace: %v", err)
-	}
-	poolReconciler := &FakeExecutionWorkspacePoolReconciler{Client: c}
-	if _, err := poolReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}}); err != nil {
-		t.Fatalf("reconcile fake pool: %v", err)
-	}
-	gotWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, gotWorkspace); err != nil {
-		t.Fatalf("get fake workspace: %v", err)
-	}
-	if gotWorkspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateAttached || gotWorkspace.Status.AttachedEpoch != 3 {
-		t.Fatalf("fake workspace status = %#v", gotWorkspace.Status)
-	}
-	gotPool := &workspacev1alpha1.ExecutionWorkspacePool{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, gotPool); err != nil {
-		t.Fatalf("get fake pool: %v", err)
-	}
-	if gotPool.Status.Allocated != 1 || gotPool.Status.Suspended != 1 || gotPool.Status.Total < 2 {
-		t.Fatalf("fake pool status = %#v", gotPool.Status)
-	}
-}
-
 type subjectAccessReviewClient struct {
 	client.Client
 	allowed bool
@@ -913,440 +870,17 @@ func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
 // A substrate-backend Suspend class must not advertise readiness when its
 // profile also carries agent-sandbox inputs: resolution rejects that profile,
 // so every Task selecting the class would fail after admission.
-func TestExecutionWorkspaceClassReconcilerRejectsCrossBackendSubstrateProfile(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	const profileName = "acp-cross-profile"
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "acp-cross-backend"}}
-	provider := testGenericProvider("acp-provider-cross")
-	provider.Spec.ControllerName = acpWorkspaceProviderControllerName
-	provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
-		workspacev1alpha1.WorkspaceFeatureExec,
-		workspacev1alpha1.WorkspaceFeatureReset,
-		workspacev1alpha1.WorkspaceFeatureSuspend,
-		workspacev1alpha1.WorkspaceFeatureTLS,
-	}
-	provider.Status.Conditions = []metav1.Condition{{
-		Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
-	}}
-	provider.Spec.ParametersRef = workspacev1alpha1.TypedObjectReference{
-		Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderConfigKind, Name: "acp-config-cross",
-	}
-	providerConfig := &acpworkspacev1alpha1.RuntimeProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "acp-config-cross"},
-		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
-	}
-	class := testGenericClass(ns.Name, "class", provider.Name)
-	class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
-		Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: profileName,
-	}
-	class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
-		workspacev1alpha1.WorkspaceOnDetachSuspend)
-	mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
-	profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: profileName, UID: profileName + "-uid", Generation: 1},
-		Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
-			Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
-				TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: testSubstrateTemplateName},
-				Suspend:     &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
-			},
-			AgentSandbox: &acpworkspacev1alpha1.AgentSandboxProfileSpec{},
-		},
-	}
-	scheme := testWorkspaceScheme(t)
-	if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add acp scheme: %v", err)
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(class).
-		WithObjects(ns, provider, providerConfig, class, parameters, profile).
-		Build()
-	reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
-	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
-	if _, err := reconciler.Reconcile(ctx, request); err != nil {
-		t.Fatalf("reconcile class: %v", err)
-	}
-	got := &workspacev1alpha1.ExecutionWorkspaceClass{}
-	if err := c.Get(ctx, request.NamespacedName, got); err != nil {
-		t.Fatalf("get class: %v", err)
-	}
-	condition := workspaceprovider.FindCondition(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
-	if condition == nil || condition.Status == metav1.ConditionTrue {
-		t.Fatalf("a substrate profile with agent-sandbox inputs must not be Ready, got %+v", condition)
-	}
-}
 
 // A StorageClass change re-enqueues every class so a created or corrected
 // storage class lifts a stale NotReady without an unrelated class edit.
-func TestExecutionWorkspaceClassReconcilerWatchesStorageClasses(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	scheme := testWorkspaceScheme(t)
-	classA := testGenericClass("ns-a", "class-a", "provider")
-	classB := testGenericClass("ns-b", "class-b", "provider")
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(classA, classB).Build()
-	reconciler := &ExecutionWorkspaceClassReconciler{Client: c}
-	requests := reconciler.classesForStorageChange(ctx, &storagev1.StorageClass{})
-	if len(requests) != 2 {
-		t.Fatalf("storage-class change enqueued %d classes, want every class (2)", len(requests))
-	}
-}
 
 // The reserved ACP adapter advertises suspend per provider, but a class that
 // permits Suspend goes Ready only when it allows Session reuse and its
 // RuntimeWorkspaceProfile opts into a backend DataOnly suspend policy;
 // otherwise every Task relying on the advertised lifecycle would fail later
 // at binding or detach-action resolution.
-func TestExecutionWorkspaceClassReconcilerRequiresACPSuspendPolicy(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	const acpProfileName = "acp-profile"
-	shape := func(
-		nsName string,
-		withPolicy, withSessionReuse, withIdleTimeout, withMaxLifetime, zeroCapSuspendDefault bool,
-	) (bool, string) {
-		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
-		provider := testGenericProvider("acp-provider-" + nsName)
-		provider.Spec.ControllerName = acpWorkspaceProviderControllerName
-		provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
-			workspacev1alpha1.WorkspaceFeatureExec,
-			workspacev1alpha1.WorkspaceFeatureReset,
-			workspacev1alpha1.WorkspaceFeatureSuspend,
-			workspacev1alpha1.WorkspaceFeatureTLS,
-		}
-		provider.Status.Conditions = []metav1.Condition{{
-			Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
-		}}
-		provider.Spec.ParametersRef = workspacev1alpha1.TypedObjectReference{
-			Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderConfigKind, Name: "acp-config-" + nsName,
-		}
-		providerConfig := &acpworkspacev1alpha1.RuntimeProviderConfig{
-			ObjectMeta: metav1.ObjectMeta{Name: "acp-config-" + nsName},
-			Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
-		}
-		class := testGenericClass(ns.Name, "class", provider.Name)
-		class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
-			Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: acpProfileName,
-		}
-		class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
-			workspacev1alpha1.WorkspaceOnDetachSuspend)
-		if zeroCapSuspendDefault {
-			class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
-		}
-		if withIdleTimeout {
-			class.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: time.Hour}
-		}
-		if withMaxLifetime {
-			class.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 24 * time.Hour}
-		}
-		if !withSessionReuse {
-			class.Spec.AllowedReuseScopes = []workspacev1alpha1.WorkspaceReuseScope{
-				workspacev1alpha1.WorkspaceReuseScopeNone,
-			}
-		}
-		mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
-		profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: acpProfileName, UID: acpProfileName + "-uid", Generation: 1},
-			Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
-				Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
-					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: testSubstrateTemplateName},
-				},
-			},
-		}
-		if withPolicy {
-			profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly}
-		}
-		limit := int32(1)
-		if zeroCapSuspendDefault {
-			limit = 0
-		}
-		profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
-		scheme := testWorkspaceScheme(t)
-		if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
-			t.Fatalf("add acp scheme: %v", err)
-		}
-		c := fake.NewClientBuilder().WithScheme(scheme).
-			WithStatusSubresource(class).
-			WithObjects(ns, provider, providerConfig, class, parameters, profile).
-			Build()
-		reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
-		request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
-		if _, err := reconciler.Reconcile(ctx, request); err != nil {
-			t.Fatalf("reconcile class: %v", err)
-		}
-		got := &workspacev1alpha1.ExecutionWorkspaceClass{}
-		if err := c.Get(ctx, request.NamespacedName, got); err != nil {
-			t.Fatalf("get class: %v", err)
-		}
-		condition := workspaceprovider.FindCondition(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
-		if condition == nil {
-			t.Fatal("class readiness condition missing")
-		}
-		return condition.Status == metav1.ConditionTrue, condition.Message
-	}
-
-	ready, message := shape("acp-suspend-nopolicy", false, true, false, true, false)
-	if ready || !strings.Contains(message, "DataOnly suspend policy") {
-		t.Fatalf("a Suspend class without a profile policy must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	ready, message = shape("acp-suspend-no-session-reuse", true, false, false, true, false)
-	if ready || !strings.Contains(message, "Session reuse scope") {
-		t.Fatalf("a Suspend class without Session reuse must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message = shape("acp-suspend-policy", true, true, false, true, false); !ready {
-		t.Fatalf("a Suspend class with a DataOnly profile policy must be Ready (message=%q)", message)
-	}
-	if ready, message = shape("acp-suspend-quota-only", true, true, false, false, false); ready ||
-		!strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a quota-only Suspend class must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message = shape("acp-suspend-capped-idle-only", true, true, true, false, false); ready ||
-		!strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a capped idle-only Suspend class must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message = shape("acp-suspend-zero-cap-default", true, true, false, true, true); ready ||
-		!strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a zero-cap Suspend-default class must not be Ready even when Delete is allowed (ready=%v message=%q)", ready, message)
-	}
-}
 
 // A sandbox-backend Suspend class goes Ready only when its profile passes the
 // SAME validators Task resolution runs: the frozen durable-volume shape and
 // the pinned Delete-reclaim storage class - and never while the profile also
 // carries substrate inputs.
-func TestExecutionWorkspaceClassReconcilerValidatesSandboxSuspendProfile(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	const sandboxProfileName = "acp-sandbox-profile"
-	retain := corev1.PersistentVolumeReclaimRetain
-	shape := func(
-		nsName string,
-		mutate func(
-			profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile,
-			storageClass *storagev1.StorageClass,
-			class *workspacev1alpha1.ExecutionWorkspaceClass,
-		),
-	) (bool, string) {
-		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
-		provider := testGenericProvider("acp-provider-" + nsName)
-		provider.Spec.ControllerName = acpWorkspaceProviderControllerName
-		provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
-			workspacev1alpha1.WorkspaceFeatureExec,
-			workspacev1alpha1.WorkspaceFeatureReset,
-			workspacev1alpha1.WorkspaceFeatureSuspend,
-			workspacev1alpha1.WorkspaceFeatureTLS,
-		}
-		provider.Status.Conditions = []metav1.Condition{{
-			Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
-		}}
-		provider.Spec.ParametersRef = workspacev1alpha1.TypedObjectReference{
-			Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderConfigKind, Name: "acp-config-" + nsName,
-		}
-		providerConfig := &acpworkspacev1alpha1.RuntimeProviderConfig{
-			ObjectMeta: metav1.ObjectMeta{Name: "acp-config-" + nsName},
-			Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox},
-		}
-		class := testGenericClass(ns.Name, "class", provider.Name)
-		class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
-			Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: sandboxProfileName,
-		}
-		class.Spec.Lifecycle.AllowedOnDetach = append(class.Spec.Lifecycle.AllowedOnDetach,
-			workspacev1alpha1.WorkspaceOnDetachSuspend)
-		class.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 24 * time.Hour}
-		mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
-		profile := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: sandboxProfileName, UID: sandboxProfileName + "-uid", Generation: 1},
-			Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
-				Retention: &acpworkspacev1alpha1.RetentionPolicy{
-					MaxSuspendedWorkspaces: func() *int32 { limit := int32(1); return &limit }(),
-				},
-				AgentSandbox: &acpworkspacev1alpha1.AgentSandboxProfileSpec{
-					Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
-						Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
-						Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{
-							Capacity:         "1Gi",
-							StorageClassName: "durable-" + nsName,
-						},
-					},
-				},
-			},
-		}
-		storageClass := &storagev1.StorageClass{
-			ObjectMeta:  metav1.ObjectMeta{Name: "durable-" + nsName},
-			Provisioner: "durable.csi.example",
-		}
-		if mutate != nil {
-			mutate(profile, storageClass, class)
-		}
-		scheme := testWorkspaceScheme(t)
-		if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
-			t.Fatalf("add acp scheme: %v", err)
-		}
-		c := fake.NewClientBuilder().WithScheme(scheme).
-			WithStatusSubresource(class).
-			WithObjects(ns, provider, providerConfig, class, parameters, profile, storageClass).
-			Build()
-		reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
-		request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
-		if _, err := reconciler.Reconcile(ctx, request); err != nil {
-			t.Fatalf("reconcile class: %v", err)
-		}
-		got := &workspacev1alpha1.ExecutionWorkspaceClass{}
-		if err := c.Get(ctx, request.NamespacedName, got); err != nil {
-			t.Fatalf("get class: %v", err)
-		}
-		condition := workspaceprovider.FindCondition(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
-		if condition == nil {
-			t.Fatal("class readiness condition missing")
-		}
-		return condition.Status == metav1.ConditionTrue, condition.Message
-	}
-
-	if ready, message := shape("acp-sandbox-valid", nil); !ready {
-		t.Fatalf("a valid sandbox suspend profile must be Ready (message=%q)", message)
-	}
-	if ready, message := shape("acp-sandbox-quota-only", func(_ *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, class *workspacev1alpha1.ExecutionWorkspaceClass) {
-		class.Spec.Lifecycle.MaxLifetime = nil
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a quota-only sandbox Suspend class must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message := shape("acp-sandbox-capped-idle-only", func(_ *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, class *workspacev1alpha1.ExecutionWorkspaceClass) {
-		class.Spec.Lifecycle.MaxLifetime = nil
-		class.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: time.Hour}
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a capped idle-only sandbox Suspend class must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message := shape("acp-sandbox-mode", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
-		profile.Spec.AgentSandbox.Suspend.Volume.AccessModes = []string{string(corev1.ReadOnlyMany)}
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a read-only durable volume must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message := shape("acp-sandbox-capacity", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
-		profile.Spec.AgentSandbox.Suspend.Volume.Capacity = "-1Gi"
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a non-positive durable capacity must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message := shape("acp-sandbox-reclaim", func(_ *acpworkspacev1alpha1.RuntimeWorkspaceProfile, storageClass *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
-		storageClass.ReclaimPolicy = &retain
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a Retain-reclaim storage class must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message := shape("acp-sandbox-missing-class", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
-		profile.Spec.AgentSandbox.Suspend.Volume.StorageClassName = "absent-storage-class"
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a missing storage class must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message := shape("acp-sandbox-substrate", func(profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile, _ *storagev1.StorageClass, _ *workspacev1alpha1.ExecutionWorkspaceClass) {
-		profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
-			Suspend: &acpworkspacev1alpha1.SubstrateSuspendPolicy{Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly},
-		}
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("simultaneous substrate inputs on a sandbox backend must not be Ready (ready=%v message=%q)", ready, message)
-	}
-	if ready, message := shape("acp-sandbox-delete-only-invalid", func(
-		profile *acpworkspacev1alpha1.RuntimeWorkspaceProfile,
-		_ *storagev1.StorageClass,
-		class *workspacev1alpha1.ExecutionWorkspaceClass,
-	) {
-		class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachDelete
-		class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{workspacev1alpha1.WorkspaceOnDetachDelete}
-		profile.Spec.AgentSandbox.Suspend.Volume.Capacity = "-1Gi"
-	}); ready || !strings.Contains(message, "RuntimeWorkspaceProfile is invalid") {
-		t.Fatalf("a Delete-only class with an invalid durable profile must not be Ready (ready=%v message=%q)", ready, message)
-	}
-}
-
-func TestExecutionWorkspaceClassReconcilerReadsACPSuspendPolicyFromAPIReader(t *testing.T) {
-	t.Parallel()
-	const (
-		namespace   = "acp-suspend-reader"
-		profileName = "acp-profile"
-	)
-	profile := func(withPolicy bool) *acpworkspacev1alpha1.RuntimeWorkspaceProfile {
-		result := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace:  namespace,
-				Name:       profileName,
-				UID:        profileName + "-uid",
-				Generation: 1,
-			},
-			Spec: acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{
-				Substrate: &acpworkspacev1alpha1.SubstrateProfileSpec{
-					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: testSubstrateTemplateName},
-				},
-			},
-		}
-		if withPolicy {
-			result.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{
-				Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
-			}
-		}
-		return result
-	}
-	for _, test := range []struct {
-		name                string
-		cachedPolicy        bool
-		authoritativePolicy bool
-		want                bool
-	}{
-		{
-			name:                "current policy enables suspension",
-			cachedPolicy:        false,
-			authoritativePolicy: true,
-			want:                true,
-		},
-		{
-			name:                "current policy disables suspension",
-			cachedPolicy:        true,
-			authoritativePolicy: false,
-			want:                false,
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			const configName = "acp-config"
-			scheme := testWorkspaceScheme(t)
-			if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatalf("add acp scheme: %v", err)
-			}
-			providerConfig := &acpworkspacev1alpha1.RuntimeProviderConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: configName},
-				Spec: acpworkspacev1alpha1.RuntimeProviderConfigSpec{
-					Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate,
-				},
-			}
-			cached := fake.NewClientBuilder().WithScheme(scheme).
-				WithObjects(profile(test.cachedPolicy), providerConfig.DeepCopy()).
-				Build()
-			authoritative := fake.NewClientBuilder().WithScheme(scheme).
-				WithObjects(profile(test.authoritativePolicy), providerConfig.DeepCopy()).
-				Build()
-			class := testGenericClass(namespace, "class", "provider")
-			class.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: time.Hour}
-			class.Spec.ParametersRef = &workspacev1alpha1.TypedObjectReference{
-				Group: acpworkspacev1alpha1.GroupVersion.Group,
-				Kind:  acpWorkspaceProviderProfileKind,
-				Name:  profileName,
-			}
-			provider := testGenericProvider("provider")
-			provider.Spec.ParametersRef = workspacev1alpha1.TypedObjectReference{
-				Group: acpworkspacev1alpha1.GroupVersion.Group,
-				Kind:  acpWorkspaceProviderConfigKind,
-				Name:  configName,
-			}
-
-			valid, got, err := (&ExecutionWorkspaceClassReconciler{
-				Client: cached, APIReader: authoritative,
-			}).validateACPClassProfile(context.Background(), class, provider)
-			if err != nil {
-				t.Fatalf("read suspend policy: %v", err)
-			}
-			if !valid {
-				t.Fatal("authoritative profile must be valid")
-			}
-			if got != test.want {
-				t.Fatalf("permits suspend = %v, want %v", got, test.want)
-			}
-		})
-	}
-}

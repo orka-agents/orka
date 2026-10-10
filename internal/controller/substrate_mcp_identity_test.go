@@ -75,7 +75,7 @@ func TestSubstrateMCPLegacyIdentityResumesWithoutReplacingActor(t *testing.T) {
 			executor := &recordingToolWorkspaceExecutor{}
 			newReconciler := func() *ToolReconciler {
 				return &ToolReconciler{
-					Client: c, Scheme: scheme, HTTPClient: server.Client(), SubstrateEnabled: true,
+					Client: c, Scheme: scheme, HTTPClient: server.Client(), SubstrateMCPToolsEnabled: true,
 					SubstrateConfig: SubstrateConfig{RouterURL: server.URL, ClaimTimeout: time.Second},
 					SubstrateTemplateValidator: func(_ context.Context, request *ExecutionWorkspaceRequest) error {
 						request.TemplateUID = "native-template-uid"

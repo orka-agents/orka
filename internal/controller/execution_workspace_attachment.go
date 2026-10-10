@@ -23,8 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -164,6 +164,21 @@ func (m WorkspaceAttachmentManager) Attach(
 	task *corev1alpha1.Task,
 	annotations map[string]string,
 ) (*WorkspaceAttachmentResult, error) {
+	return m.attach(ctx, workspace, task, annotations, validateWorkspaceAttachmentAttempt)
+}
+
+// attach revalidates the caller's admission policy at every ownership fence.
+// The public Attach path always requires a reusable workspace; ACP may also
+// attach its exact materialized workspace before provider compute is started.
+//
+//nolint:gocyclo // Lease acquisition, epoch fencing, Secret creation, and rollback must remain ordered.
+func (m WorkspaceAttachmentManager) attach(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	annotations map[string]string,
+	validate func(*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.Task, time.Time) error,
+) (*WorkspaceAttachmentResult, error) {
 	if m.Client == nil || workspace == nil || task == nil {
 		return nil, fmt.Errorf("workspace attachment manager, workspace, and task are required")
 	}
@@ -171,7 +186,7 @@ func (m WorkspaceAttachmentManager) Attach(
 		return nil, fmt.Errorf("workspace and task must be persisted in the same namespace")
 	}
 	now := m.now()
-	if err := validateWorkspaceAttachmentAttempt(workspace, task, now); err != nil {
+	if err := validate(workspace, task, now); err != nil {
 		return nil, err
 	}
 	ttl := m.LeaseTTL
@@ -212,7 +227,7 @@ func (m WorkspaceAttachmentManager) Attach(
 	if current.UID != workspace.UID {
 		return nil, fail(fmt.Errorf("workspace %s/%s was replaced before attachment", workspace.Namespace, workspace.Name))
 	}
-	if err := validateWorkspaceAttachmentAttempt(current, task, now); err != nil {
+	if err := validate(current, task, now); err != nil {
 		return nil, fail(fmt.Errorf("revalidate workspace before attachment: %w", err))
 	}
 
@@ -274,7 +289,7 @@ func (m WorkspaceAttachmentManager) Attach(
 		if current.UID != workspace.UID {
 			return fmt.Errorf("workspace %s/%s was replaced during attachment", workspace.Namespace, workspace.Name)
 		}
-		if err := validateWorkspaceAttachmentAttempt(current, task, now); err != nil {
+		if err := validate(current, task, now); err != nil {
 			return fmt.Errorf("revalidate workspace attachment intent: %w", err)
 		}
 		nextEpoch, err := nextWorkspaceAttachmentEpoch(current)

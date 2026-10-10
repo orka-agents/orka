@@ -971,10 +971,7 @@ func TestResolveExecution_IgnoresWorkspace(t *testing.T) {
 	task := &corev1alpha1.Task{
 		Spec: corev1alpha1.TaskSpec{
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:     true,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "default"},
-				},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 			},
 		},
 	}

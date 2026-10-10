@@ -140,15 +140,13 @@ func TestACPRuntimeDeliveryPlanForBoundWorkspacePoolRejectsChangedImage(t *testi
 		Profile:  profile,
 		Digest:   digest,
 		Workspace: &ACPRuntimeWorkspaceBinding{
-			Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+			Provider:      corev1alpha1.WorkspaceProvider(testResolvedACPWorkspaceClass(t).Binding.ControllerName),
+			Class:         &testResolvedACPWorkspaceClass(t).Binding,
 			BindingDigest: "sha256:" + strings.Repeat("b", 64),
 		},
 	}
 	pool := runtimePoolForImageRotationTest("default", types.UID("workspace-pool-uid"), plan)
-	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-		Provider:      plan.Workspace.Provider,
-		BindingDigest: plan.Workspace.BindingDigest,
-	}
+	pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(plan.Workspace, "workspace", "workspace-uid")
 	pool.Spec.Runtime.Image = "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)
 	execution := &corev1alpha1.TaskExecutionStatus{
 		RuntimePoolName:   pool.Name,
@@ -295,15 +293,13 @@ func TestHistoricalWorkspaceDeliveryDoesNotRecreateDeletedPool(t *testing.T) {
 		Profile:  profile,
 		Digest:   digest,
 		Workspace: &ACPRuntimeWorkspaceBinding{
-			Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+			Provider:      corev1alpha1.WorkspaceProvider(testResolvedACPWorkspaceClass(t).Binding.ControllerName),
+			Class:         &testResolvedACPWorkspaceClass(t).Binding,
 			BindingDigest: "sha256:" + strings.Repeat("b", 64),
 		},
 	}
 	pool := runtimePoolForImageRotationTest("default", types.UID("historical-workspace-pool-uid"), plan)
-	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-		Provider:      plan.Workspace.Provider,
-		BindingDigest: plan.Workspace.BindingDigest,
-	}
+	pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(plan.Workspace, "workspace", "workspace-uid")
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)

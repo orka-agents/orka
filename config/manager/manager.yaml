@@ -101,14 +101,7 @@ spec:
           - --gateway-delivery-timeout=15s
           - --gateway-delivery-max-attempts=10
 
-          - --execution-workspace-default-provider=agent-sandbox
-          - --agent-sandbox-enabled=false
-          - --agent-sandbox-warm-pool-policy=disabled
-          - --agent-sandbox-namespace-strategy=task
-          - --agent-sandbox-claim-timeout=2m
-          - --agent-sandbox-command-timeout=30m
-          - --agent-sandbox-cleanup-policy=delete
-          - --substrate-enabled=false
+          - --substrate-mcp-tools-enabled=false
           - --substrate-api-endpoint=api.ate-system.svc:443
           - --substrate-router-url=http://atenet-router.ate-system.svc
           - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev

@@ -11,7 +11,7 @@ spec:
     generation: 1
     profileHash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   providerBinding:
-    name: fake-local
+    name: example-provider
     uid: 00000000-0000-0000-0000-000000000002
     generation: 1
   slot: default

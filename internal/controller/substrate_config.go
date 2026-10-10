@@ -8,8 +8,11 @@ package controller
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/workspace"
@@ -22,7 +25,6 @@ const (
 	EnvSubstrateAPIKeyFile                = "ORKA_SUBSTRATE_API_KEY_FILE"
 	EnvSubstrateAPIBearerTokenFile        = "ORKA_SUBSTRATE_API_BEARER_TOKEN_FILE"
 	EnvSubstrateAPIInsecureSkipVerify     = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
-	EnvSubstrateDirectEgressEnabled       = "ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED"
 	EnvSubstrateRouterURL                 = "ORKA_SUBSTRATE_ROUTER_URL"
 	EnvSubstrateActorDNSSuffix            = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
 	EnvSubstrateDefaultTemplate           = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
@@ -51,7 +53,7 @@ const (
 )
 
 // SubstrateConfig holds disabled-by-default alpha configuration for the
-// Agent Substrate execution workspace provider.
+// in-tree Substrate MCP Tool support.
 type SubstrateConfig struct {
 	APIEndpoint        string
 	APICAFile          string
@@ -59,11 +61,8 @@ type SubstrateConfig struct {
 	APIKeyFile         string
 	APIBearerTokenFile string
 	// Atespace is selected from the immutable workspace binding by the controller.
-	Atespace              string
-	APIInsecureSkipVerify bool
-	// DirectEgressEnabled acknowledges that ateapi has tunneled egress disabled.
-	// ACP requires worker-scoped NetworkPolicies to see the Actor's destinations.
-	DirectEgressEnabled       bool
+	Atespace                  string
+	APIInsecureSkipVerify     bool
 	RouterURL                 string
 	ActorDNSSuffix            string
 	DefaultTemplate           string
@@ -116,9 +115,7 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateAPIInsecureSkipVerify)); value != "" {
 		cfg.APIInsecureSkipVerify = strings.EqualFold(value, "true")
 	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateDirectEgressEnabled)); value != "" {
-		cfg.DirectEgressEnabled = strings.EqualFold(value, "true")
-	}
+
 	if value := strings.TrimSpace(getenv(EnvSubstrateRouterURL)); value != "" {
 		cfg.RouterURL = value
 	}
@@ -205,11 +202,8 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	return c
 }
 
-// ValidateACPRuntimePool rejects invalid configuration used by the
-// credential-bootstrap Substrate RuntimePool backend. Legacy workspace-agent
-// bootstrap and SessionIdentity settings are intentionally not required: ACP
-// supervisors boot credential-free and receive pool credentials post-boot.
-func (c SubstrateConfig) ValidateACPRuntimePool() error {
+// ValidateMCPTools validates the control API and routing used by MCP actors.
+func (c SubstrateConfig) ValidateMCPTools() error {
 	cfg := c.WithDefaults()
 
 	if strings.TrimSpace(cfg.APIEndpoint) == "" {
@@ -235,8 +229,22 @@ func (c SubstrateConfig) ValidateACPRuntimePool() error {
 	if cfg.ClaimTimeout <= 0 {
 		return fmt.Errorf("substrate claim timeout must be greater than zero")
 	}
-	if _, err := substrateRouteHTTPTransport(cfg.RouterURL, cfg.ActorDNSSuffix); err != nil {
-		return err
+	return validateSubstrateRouting(cfg.RouterURL, cfg.ActorDNSSuffix)
+}
+
+// validateSubstrateRouting checks the router URL and actor DNS suffix that MCP
+// actor requests are routed with.
+func validateSubstrateRouting(routerURL, actorDNSSuffix string) error {
+	parsed, err := url.Parse(strings.TrimSpace(routerURL))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
+		return fmt.Errorf("substrate router URL is invalid")
+	}
+	suffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
+	if suffix == "" {
+		return fmt.Errorf("substrate actor DNS suffix is required")
+	}
+	if problems := validation.IsDNS1123Subdomain(suffix); len(problems) > 0 {
+		return fmt.Errorf("substrate actor DNS suffix is invalid: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }
@@ -244,7 +252,7 @@ func (c SubstrateConfig) ValidateACPRuntimePool() error {
 // Validate rejects unsupported legacy Substrate workspace-agent config values.
 func (c SubstrateConfig) Validate() error {
 	cfg := c.WithDefaults()
-	if err := cfg.ValidateACPRuntimePool(); err != nil {
+	if err := cfg.ValidateMCPTools(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(cfg.BootstrapSecretName) == "" {

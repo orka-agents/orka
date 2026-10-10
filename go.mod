@@ -19,6 +19,7 @@ require (
 	github.com/onsi/gomega v1.43.0
 	github.com/open-policy-agent/cert-controller v0.16.0
 	github.com/openai/openai-go/v3 v3.50.0
+	github.com/orka-agents/orka-workspace v0.1.0-alpha.2.0.20261010204757-327a82dfdfcd
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/robfig/cron/v3 v3.0.1
@@ -51,7 +52,6 @@ require (
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	modernc.org/sqlite v1.57.0
 	oras.land/oras-go/v2 v2.6.2
-	sigs.k8s.io/agent-sandbox v1.0.3
 	sigs.k8s.io/controller-runtime v0.25.0
 	sigs.k8s.io/yaml v1.6.0
 )

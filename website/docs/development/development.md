@@ -85,7 +85,13 @@ approval permits tagging and publication of the qualified artifacts. See
 for environment setup, dispatch, evidence, and retries. Ordinary nightly smoke
 and component tests do not satisfy the publication gate.
 
-CRDs are generated into `config/crd/bases/`, while `config/crd/kustomization.yaml` selects the production APIs packaged in the installer and chart. The development-only fake workspace CRDs and RBAC are kept in the separate `config/development/fake-workspace-provider` package. Helm makes production CRDs available on fresh install but does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller — see [Upgrading](../operations/upgrading.md).
+Core CRDs are generated into `config/crd/bases/`; `config/crd/kustomization.yaml`
+selects the APIs packaged in the installer and chart. Shared workspace contracts
+and provider-owned APIs are maintained in the
+[orka-workspace repository](https://github.com/orka-agents/orka-workspace).
+Fake, Sandbox, and Substrate controllers are independently built and deployed.
+Helm does not update CRDs during upgrades. Drain legacy in-tree allocations before
+applying the pruned RuntimePool schema; see [Upgrading](../operations/upgrading.md#external-workspace-migration).
 
 ## Testing
 
@@ -110,45 +116,76 @@ The repository has additional GitHub Actions workflows in addition to the normal
 - `Agent Runtime E2E` runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes Codex, OpenCode, Claude, and Copilot RuntimePools against real model providers. It uses the repository's `COPILOT_GITHUB_TOKEN` secret and runs as ordinary CI without a deployment environment.
 - `Release Qualification` verifies the candidate chart, recovery, agent execution, Git publication and GitHub API fixture tests, and cleanup. The release workflow dispatches it automatically; environment approval permits model-provider access. GitHub observations use the job token, with no stored Git publication credentials.
 - `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. `Agent Runtime E2E` separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
-- `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller, the immutable Codex ACP runtime image, and fixture/router images, then validates the direct workspace-adapter lifecycle (claim, exec, cleanup, retained reuse, token scrubbing) **and** a workspace-backed ACP Task end to end: a `Task.spec.execution.workspace` agent Task binds a dedicated `acp-ws-*` RuntimePool whose SandboxClaim hosts the real supervisor, executes a real Codex prompt against the local Responses-compatible fixture, reaches `Succeeded`, keeps Task status provider-neutral, and cleans up. It also runs the class-backed suspend/cold-resume conformance: with the workspace provider API enabled, a session-scoped `classRef` Task suspends its workspace on detach (the exact Sandbox is consensually suspended through `operatingMode: Suspended` while its durable workspace PVC stays Bound and no runtime Pod remains), a continuation Task cold-resumes the same Sandbox, and explicit workspace deletion removes the pool, claim, Sandbox, and PVC. A lifecycle/recovery conformance additionally proves Session continuation with a preserved RuntimeSession UID, explicit cancellation of a Running prompt with bounded controller-owned settlement and no replay, a controller restart during a Running prompt with no prompt replay, and physical runtime replacement that recovers the Session from zero. It requires no external model access.
-- `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Gateway Live E2E` — runs on relevant pushes and pull requests or by manual dispatch. It creates a fresh Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid authentication, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. It is model-free and secret-free and does not use repository or provider credentials.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
 - `Live Connectors E2E` — builds the PR controller, the native AI worker, and the connectors fixture (an OIDC issuer, a fake OAuth provider with short-lived tokens, a resource API, and a scripted model) into Kind, then proves the linked-account lifecycle end to end: a person signs in through the OIDC fixture, links the fake provider (`POST /api/v1/connections`, the consent redirect, and the fragment-carried completion), a native `type: ai` Task created by that person reads through the linked token, its write parks for approval and runs once approved, the second read is served by a refreshed token because the first one expired meanwhile, another person sees no link, and disconnecting revokes the tokens and removes the Connection. It runs the controller with the fixture-only `--connectors-allow-private-endpoints` allowance (a literal acknowledgement value that the controller accepts only together with a plain-http localhost callback base) so the provider may live in the cluster. It is model-free and secret-free.
-- `Agent Substrate E2E` builds the PR controller, immutable Codex ACP runtime, and fixture images on a gVisor Kind cluster using the unmodified official provider pin. It checks direct native workspaces, MCP Tools, and fixture-backed ACP Tasks through the atenet-router. The class-backed lane requires DataOnly suspension, an independent Tag, exact worker termination, cold continuation with rotated credentials, and checkpoint export and restore after source deletion. The native protocol does not provide atomic Suspend/Resume/Delete preconditions; ADR 0031 defines the observed identity checks and durable recovery journal. The suite requires no external model access. Clean-room publication remains covered by `Release Qualification`.
 
 Validate workflow/script edits locally before pushing:
 
 ```bash
 bash -n scripts/live-copilot-proxy-e2e.sh
 bash -n scripts/agent-runtime-e2e.sh scripts/agent-runtime-kind-e2e.sh scripts/lib/agent-runtime-kind-bootstrap.sh
-bash -n scripts/live-agent-sandbox-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
-bash -n scripts/agent-substrate-e2e.sh
 bash -n scripts/live-connectors-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-runtime-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/release-qualification.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-agent-sandbox-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/gateway-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repository-monitor-smoke.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-connectors-e2e.yml
 ```
 
-The agent-sandbox and Substrate scripts validate workspace-backed Orka harness v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by `Agent Runtime E2E` and `Release Qualification`. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
+### External workspace local proof
 
-The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
-
-Run the Agent Substrate E2E locally with:
+Use both source repositories: [Orka core](https://github.com/orka-agents/orka)
+provides the real controller and ACP supervisor; [orka-workspace](https://github.com/orka-agents/orka-workspace)
+provides shared contracts, independently deployed providers, and local proof harnesses.
+Run cluster commands from the shared repository with its `kindctl` tag; the
+scripts preserve the cluster and scoped kubeconfig.
 
 ```bash
-PATH="$(go env GOPATH)/bin:$PATH" \
-bash scripts/agent-substrate-e2e.sh
+# Run from the orka-workspace checkout.
+scripts/external-workspace-e2e.sh provider
+ORKA_CORE_BUILD_RELEASED=1 ORKA_CORE_SOURCE=/path/to/orka-checkout \
+  scripts/external-workspace-e2e.sh core
 ```
 
+The provider lane deploys two fake replicas and checks leader election, ordinary
+and foreign-writer rejection, field ownership, exact public Pod identity, and
+retirement. The core lane runs an actual authenticated RuntimeSession and Task
+using the production supervisor and a deterministic model-free ACP agent. It
+requires success, exact process/Pod fences, credential revocation, and physical
+termination. This verifies the generic external handoff rather than native backend
+conformance or publication.
+
+The separate `scripts/external-sandbox-e2e.sh` and
+`scripts/external-substrate-e2e.sh` in the shared repository exercise the installed
+native backends. They prove durable data and exact lifetime cleanup; their
+standalone lanes do not claim real core credential bootstrap or Task execution.
+Default kind CNI checks policy objects without proving packet enforcement.
+See the [shared proof instructions](https://github.com/orka-agents/orka-workspace/blob/main/hack/external-workspace-e2e/README.md)
+for prerequisites, frozen source/image evidence, and private artifact handling.
+
+The additional `scripts/external-substrate-core-e2e.sh proof` runs an actual Task
+through deployed Core and native provider controllers. It verifies authenticated
+Serving on port 80, RuntimeSession execution, persisted result, and exact native,
+Core pool, and credential retirement. Follow the
+[native Core proof instructions](https://github.com/orka-agents/orka-workspace/blob/v0.1.0-alpha.2/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
+after installing its dedicated backend cluster.
+
+`scripts/external-workspace-upgrade-e2e.sh` uses the same released core image to
+prove stock startup rejects retained legacy objects, even after old backend
+settings have been pruned by the new CRD. It creates isolated synthetic records,
+checks all legacy states, verifies no adoption or credential/compute creation,
+and removes only exact synthetic UIDs after passing. It preserves evidence and
+resources on failure. Run it only after the final core build has been released;
+the shared README documents its required image, frozen source, and old-schema inputs.
+
+The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual
+`ORKA_GITHUB_OIDC_TOKEN`; without either, it fails before creating a cluster.
+Transaction-token provider E2E lives in the external integration repository.
 
 ## Harness wrapper real-world validation
 

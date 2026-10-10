@@ -12,6 +12,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -275,46 +276,17 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		workspace.BindingDigest != plan.Workspace.BindingDigest {
 		return false
 	}
-	switch plan.Workspace.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		planSuspendMode := ""
-		var planVolume *ACPSandboxDurableVolume
-		if plan.Workspace.Class != nil {
-			planSuspendMode = plan.Workspace.Class.SuspendMode
-			planVolume = plan.Workspace.Class.SandboxVolume
-		}
-		if planVolume == nil {
-			if workspace.AgentSandbox != nil {
-				return false
-			}
-		} else {
-			sandbox := workspace.AgentSandbox
-			if sandbox == nil || sandbox.SuspendMode != planSuspendMode || sandbox.SuspendVolume == nil ||
-				sandbox.SuspendVolume.StorageClassName != planVolume.StorageClassName ||
-				sandbox.SuspendVolume.StorageClassUID != planVolume.StorageClassUID ||
-				sandbox.SuspendVolume.Capacity != planVolume.Capacity ||
-				!slices.Equal(sandbox.SuspendVolume.AccessModes, planVolume.AccessModes) {
-				return false
-			}
-		}
-		return workspace.Substrate == nil &&
-			plan.Workspace.TemplateNamespace == "" && plan.Workspace.TemplateName == ""
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		poolSuspendMode := ""
-		if workspace.Substrate != nil {
-			poolSuspendMode = workspace.Substrate.SuspendMode
-		}
-		// A stray agentSandbox block on a substrate pool is drift the CRD
-		// cannot express away; reject it so cross-provider suspend settings
-		// can never be smuggled onto a mismatched backend.
-		return workspace.AgentSandbox == nil && workspace.Substrate != nil &&
-			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
-			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName &&
-			reflect.DeepEqual(workspace.Substrate.RestoreFrom, plan.Workspace.RestoreFrom) &&
-			acpSubstratePoolSuspendModeMatches(plan.Workspace, poolSuspendMode)
-	default:
-		return false
+	if plan.Workspace.Class != nil && plan.Workspace.Class.ControllerName != "" {
+		class := plan.Workspace.Class
+		return workspace.WorkspaceRef != nil &&
+			workspace.WorkspaceRef.Name != "" && workspace.WorkspaceRef.UID != "" &&
+			workspace.Workload != nil && workspace.Workload.ContractVersion == workspacev1alpha1.LifecycleContractV1 &&
+			workspace.Workload.ProtocolVersion == corev1alpha1.RuntimePoolProtocolHarnessV2 &&
+			reflect.DeepEqual(workspace.ParametersRef, class.ParametersRef) &&
+			reflect.DeepEqual(workspace.ParametersBinding, class.ParametersBinding) &&
+			reflect.DeepEqual(workspace.RestoreFrom, acpWorkspaceWorkloadCheckpointReference(plan.Workspace.RestoreFrom))
 	}
+	return false
 }
 
 func acpRuntimePoolBindingMatches(status *corev1alpha1.TaskExecutionStatus, pool *corev1alpha1.RuntimePool) bool {

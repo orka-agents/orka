@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 )
 
 const (

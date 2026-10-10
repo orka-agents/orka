@@ -8,11 +8,7 @@ package workspace
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"maps"
-	"path"
 	"strings"
 	"time"
 )
@@ -41,17 +37,6 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 	}
 }
 
-func workspaceKey(ref WorkspaceRef) string {
-	if ref.Namespace == "" || ref.ClaimName == "" {
-		return ""
-	}
-	return ref.Namespace + "/" + ref.ClaimName
-}
-
-func reuseIndexKey(namespace string, template TemplateRef, reuseKey string) string {
-	return namespace + "/" + template.Namespace + "/" + template.Name + "/" + reuseKey
-}
-
 func copyStringMap(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
@@ -59,31 +44,6 @@ func copyStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	maps.Copy(out, in)
 	return out
-}
-
-func cleanArtifactPath(artifactPath string) (string, error) {
-	artifactPath = strings.TrimSpace(artifactPath)
-	if artifactPath == "" {
-		return "", fmt.Errorf("artifact path is required")
-	}
-	artifactPath = path.Clean("/" + artifactPath)
-	artifactPath = strings.TrimPrefix(artifactPath, "/")
-	if artifactPath == "." || artifactPath == "" {
-		return "", fmt.Errorf("artifact path is required")
-	}
-	return artifactPath, nil
-}
-
-func digest(data []byte) string {
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-func truncateBytes(value string, maxBytes int64) (string, bool) {
-	if maxBytes < 0 || int64(len(value)) <= maxBytes {
-		return value, false
-	}
-	return value[:int(maxBytes)], true
 }
 
 func releaseMessage(reason, fallback string) string {

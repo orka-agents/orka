@@ -279,6 +279,7 @@ func mergeTerminalExecutionStatus(existing *corev1alpha1.TaskExecutionStatus, pr
 	return merged
 }
 
+//nolint:gocyclo // Projection delivery handles the finite set of durable sink and stale-record outcomes.
 func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.OutboxProjection) (string, error) {
 	if projection.ProjectionKind != taskTerminalProjectionKind {
 		return "", permanentOutboxDelivery(fmt.Errorf("unsupported projection kind %q", projection.ProjectionKind))

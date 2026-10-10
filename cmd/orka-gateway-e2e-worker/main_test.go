@@ -25,6 +25,7 @@ func fixtureConfig(t *testing.T, server *httptest.Server, capable bool) workerCo
 	}
 }
 
+//nolint:gocyclo // Protocol regression covers immutable identity and release/replay failures together.
 func TestWorkerAuthenticatedReplayAndReleaseFence(t *testing.T) {
 	for _, capable := range []bool{true, false} {
 		t.Run(map[bool]string{true: "capable", false: "unsupported"}[capable], func(t *testing.T) {

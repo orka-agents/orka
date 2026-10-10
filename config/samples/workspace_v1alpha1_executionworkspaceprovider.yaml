@@ -1,15 +1,19 @@
 apiVersion: workspace.orka.ai/v1alpha1
 kind: ExecutionWorkspaceProvider
 metadata:
-  name: fake-local
+  name: example-provider
 spec:
-  controllerName: fake.workspace.orka.ai/v1
+  controllerName: example.workspace.orka.ai
   parametersRef:
-    group: fake.workspace.orka.ai
-    kind: FakeProviderConfig
+    group: example.workspace.orka.ai
+    kind: ExampleProviderConfig
     name: local
+  serviceAccountRef:
+    namespace: example-provider-system
+    name: example-provider
   lifecycleState: Active
   requiredContracts:
     - workspace.orka.ai/v1
+    - orka.workspace.lifecycle.v1
   usagePolicy:
     allowedNamespaceSelector: {}

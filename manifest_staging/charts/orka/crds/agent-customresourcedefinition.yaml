@@ -1094,24 +1094,13 @@ spec:
                     type: array
                   workspace:
                     description: |-
-                      Workspace requests an execution workspace. Worker-backed Task types use
-                      it directly. ACP agent Tasks may bind a workspace-provider-backed
-                      RuntimeSession through it (a provider/templateRef request, or a classRef
-                      with the workspace provider API enabled); these dispatch paths are
-                      flag-gated behind --acp-workspace-dispatch-enabled plus the matching
-                      provider flag and fail closed otherwise. Clean-room publication remains
-                      owned by RuntimeSession lifecycle.
+                      Workspace selects an ExecutionWorkspaceClass for an ACP agent Task.
+                      Omit workspace for ordinary execution. Workspace dispatch requires the
+                      workspace provider API, ACP workspace dispatch, and an installed provider.
                     properties:
-                      boot:
-                        description: |-
-                          Boot asks providers that support it to boot the workspace workload from scratch
-                          instead of resuming from the provider's default snapshot. Currently supported
-                          by the Substrate provider.
-                        type: boolean
                       classRef:
-                        description: |-
-                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
-                          classRef implicitly enables the controller-first workspace path.
+                        description: ClassRef selects an immutable ExecutionWorkspaceClass
+                          in the Task namespace.
                         properties:
                           name:
                             description: Name is the class name.
@@ -1120,67 +1109,12 @@ spec:
                         required:
                         - name
                         type: object
-                      cleanupPolicy:
-                        description: |-
-                          CleanupPolicy controls whether the workspace is deleted or retained after use.
-                          Defaults to delete when omitted.
-                        enum:
-                        - delete
-                        - retain
-                        type: string
-                      enabled:
-                        default: false
-                        description: Enabled requests use of a durable workspace for
-                          the task execution.
-                        type: boolean
-                      hibernation:
-                        description: |-
-                          Hibernation configures process lifetime inside the workspace. Resident
-                          mode is currently rejected until the worker protocol can report per-turn
-                          completion separately from resident process lifetime.
-                        properties:
-                          processMode:
-                            description: |-
-                              ProcessMode controls whether each turn starts fresh or reuses a resident
-                              process. Defaults to fresh.
-                            enum:
-                            - fresh
-                            - resident
-                            type: string
-                          residentKey:
-                            description: |-
-                              ResidentKey selects the process slot for resident mode. When omitted, the
-                              worker derives a stable key from namespace, template, and reuse key.
-                            type: string
-                        type: object
                       onDetach:
                         description: OnDetach requests an action allowed by the selected
                           class.
                         enum:
                         - Suspend
                         - Delete
-                        type: string
-                      poolRef:
-                        description: |-
-                          PoolRef references an operator-managed Substrate actor pool for placement,
-                          density tracking, and oversubscription policy.
-                        properties:
-                          name:
-                            description: Name is the pool name.
-                            type: string
-                          namespace:
-                            description: Namespace is the pool namespace. It defaults
-                              to the Task namespace.
-                            type: string
-                        type: object
-                      provider:
-                        description: |-
-                          Provider selects the workspace backend. When omitted, the controller
-                          resolves the configured default workspace provider; the built-in
-                          compatibility default is agent-sandbox.
-                        enum:
-                        - agent-sandbox
-                        - substrate
                         type: string
                       restoreFrom:
                         description: |-
@@ -1220,43 +1154,6 @@ spec:
                         - none
                         - session
                         type: string
-                      snapshot:
-                        description: |-
-                          Snapshot configures explicit provider snapshot restore/checkpoint behavior.
-                          Non-empty settings are currently rejected until provider checkpoint/restore
-                          support is available through Orka.
-                        properties:
-                          checkpointOnRelease:
-                            description: |-
-                              CheckpointOnRelease requests a checkpoint when cleanup releases or retains
-                              the workspace. CheckpointURI must be set when this is true.
-                            type: boolean
-                          checkpointURI:
-                            description: |-
-                              CheckpointURI is a provider-native snapshot URI prefix to write when the
-                              workspace is retained or released.
-                            type: string
-                          restoreURI:
-                            description: |-
-                              RestoreURI is a provider-native snapshot URI prefix to restore before the
-                              workspace command runs.
-                            type: string
-                        type: object
-                      templateRef:
-                        description: |-
-                          TemplateRef references the workspace template to instantiate or reuse.
-                          The template name is required when enabled is true unless the controller
-                          is configured with a provider-specific default template.
-                        properties:
-                          name:
-                            description: Name is the name of the workspace template.
-                            type: string
-                          namespace:
-                            description: |-
-                              Namespace is the namespace of the workspace template and claim.
-                              It defaults to the Task namespace, or the controller namespace when configured.
-                            type: string
-                        type: object
                       workspaceSlot:
                         default: default
                         description: WorkspaceSlot names one independently reusable
@@ -1265,16 +1162,9 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                    required:
+                    - classRef
                     type: object
-                    x-kubernetes-validations:
-                    - message: classRef cannot be combined with legacy enabled, provider,
-                        template, pool, cleanup, boot, snapshot, or hibernation settings
-                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
-                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
-                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
-                        && !has(self.snapshot) && !has(self.hibernation))'
-                    - message: restoreFrom requires classRef
-                      rule: '!has(self.restoreFrom) || has(self.classRef)'
                 type: object
               model:
                 description: |-
@@ -1584,8 +1474,8 @@ spec:
                 type: string
             type: object
             x-kubernetes-validations:
-            - message: execution.workspace.classRef is only supported on Task specs
-              rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
+            - message: execution.workspace is only supported on Task specs
+              rule: '!has(self.execution) || !has(self.execution.workspace)'
             - message: opencode orka.harness.v2 runtime does not support spec.systemPrompt
               rule: '!(has(self.runtime) && has(self.runtime.type) && self.runtime.type
                 == ''opencode'' && has(self.runtime.contractVersion) && self.runtime.contractVersion

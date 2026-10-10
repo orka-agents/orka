@@ -1,134 +1,124 @@
 ---
 slug: /agent-sandbox
-description: "Running an agent's workspace in a kubernetes-sigs Agent Sandbox, behind Orka's ACP lifecycle."
+description: "External Agent Sandbox workspaces with Orka ACP execution and PVC-backed cold resume."
 ---
 
 # Agent Sandbox workspaces
 
-Upstream `agent-sandbox` is an externally installed and operated
-execution-workspace provider. Orka can host a built-in agent Task's ACP
-RuntimeSession inside a provider-owned sandbox through a
-**workspace-provider-backed RuntimePool**. The integration is disabled by
-default and fails closed.
+Orka runs an ACP RuntimeSession in an upstream Agent Sandbox through the separately
+deployed `orka-workspace-sandbox` provider. Core owns Task execution, runtime
+credentials, admission, and settlement. The provider owns Sandbox resources and
+reports infrastructure identity through the shared `workspace.orka.ai` API.
+
+The external provider is tested against unmodified upstream `agent-sandbox`
+`v1.0.3`. Install and operate that backend separately. For an existing v0.5
+installation, complete the upstream
+[storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)
+before installing v1.
 
 :::tip[Video demo]
 Watch [Suspend an agent workspace and keep its files](https://www.youtube.com/watch?v=DyS9JioSRa0).
 :::
 
-Orka targets the latest stable agent-sandbox release for testing. The Go
-dependency, local installer, and bundled E2E currently pin `v1.0.3` for
-reproducibility; this test pin is not a minimum supported version. Older releases
-are not considered unsupported solely because they predate the pin, though
-compatibility outside the tested version is not guaranteed. Any minimum-version
-requirement must identify the required API, feature, or bug fix.
+## Install and select a class
 
-Operators upgrading an existing v0.5 installation to v1 must complete the
-upstream [storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)
-before installing v1. Orka does not install, upgrade, or migrate the provider
-in production.
+Install the shared CRDs and ownership admission policies, then the provider's
+CRDs, RBAC, registration, and Deployment from the
+[external provider repository](https://github.com/orka-agents/orka-workspace/blob/main/providers/sandbox/README.md).
+Use a digest-pinned provider image. Its two replicas share a provider-specific
+leader-election Lease and use a ServiceAccount distinct from Orka core.
 
-`Task.spec.workspace` remains the only repository surface — verified source,
-workspace intent, and clean-room publication policy:
+An operator creates a `SandboxProviderConfig` and a same-namespace
+`SandboxWorkspaceProfile` for an `ExecutionWorkspaceClass`. These kinds belong to
+`sandbox.workspace.orka.ai/v1alpha1`. The class references the registered provider
+and immutable profile. An ACP class explicitly requires `acp.runtime.v2`; add
+`Suspend` to its allowed lifecycle actions only when the profile enables it.
 
-```yaml
-spec:
-  type: agent
-  workspace:
-    intent: read
-    gitRepo: https://github.com/example/project.git
-    readCredentialRef:
-      name: project-read
-```
+Enable Orka's provider API and ACP workspace dispatch with the required
+provenance and class-use admission webhooks. There is no core Agent Sandbox
+backend flag. See [workspace configuration](../reference/configuration.md#workspace-providers).
 
-`Task.spec.execution.workspace` additionally requests a physical
-execution-workspace provider for the RuntimeSession:
+A Task selects only a class:
 
 ```yaml
 spec:
   type: agent
   execution:
     workspace:
-      enabled: true
-      provider: agent-sandbox
-      # reusePolicy: session   # with spec.sessionRef, continuation reuses the
-      #                        # same workspace-backed pool while it is alive
+      classRef:
+        name: sandbox-coding
+      reusePolicy: session
 ```
 
-## Execution model
+Session reuse requires `spec.sessionRef`. Top-level `Task.spec.workspace` remains
+the repository contract for verified source access and clean-room publication.
+Provider, template, pool, and native resource selectors do not belong in a Task.
 
-```text
-Task
-  -> workspace binding frozen into the immutable execution snapshot
-  -> dedicated single-session RuntimePool (acp-ws-<runtime>-<hash>)
-  -> credential-free controller-rendered SandboxTemplate + zero-replica SandboxWarmPool
-  -> one SandboxClaim; the sandbox Pod runs the immutable ACP runtime image
-  -> exact Sandbox blueprint attestation + controller-signed credential bootstrap
-  -> the authenticated exact-instance fence probe selects the ActiveInstance
-  -> ephemeral RuntimeSession, fenced prompts, workspace validation,
-     optional clean-room Workspace/Publisher transaction — all unchanged
+## Startup and ownership
+
+Core freezes the class binding and public supervisor request in a dedicated
+single-session RuntimePool. The provider creates an isolated SandboxTemplate,
+zero-replica SandboxWarmPool, and SandboxClaim from that request. It verifies the
+realized Pod, request revision, and allocation identity before reporting startup
+evidence. Core independently verifies the Pod and network policy, completes the
+sealed bootstrap exchange, and admits the authenticated runtime instance.
+Provider readiness alone never authorizes a prompt.
+
+The provider receives no private attachment credentials. Core releases them only
+to the attested process and verifies the resulting boot identity. The runtime Pod
+has no Kubernetes service-account token or Git publication credential. Core-owned
+NetworkPolicies select its admitted labels; the provider cannot move the Pod or
+change its execution template and still receive credentials.
+
+The provider advertises ACP runtime allocation and data-only suspension. It does
+not advertise generic exec, files, TLS endpoints, pooled capacity, checkpoint
+export, or full-memory restore. Unsupported class requirements fail admission.
+
+## Suspension and deletion
+
+A suspend-capable `SandboxWorkspaceProfile` supplies:
+
+```yaml
+apiVersion: sandbox.workspace.orka.ai/v1alpha1
+kind: SandboxWorkspaceProfile
+metadata:
+  name: sandbox-data
+spec:
+  suspend:
+    mode: DataOnly
+    volume:
+      capacity: 1Gi
+      accessModes: [ReadWriteOnce]
 ```
 
-Only workload materialization changes: the provider control plane owns the
-sandbox and its Pod, while Orka owns the Task attempt, RuntimeSession, prompt
-lease, fences, publication records, drain barriers, and recovery. The sandbox
-Pod has no Git credential and no direct SCM publication egress; the pool's own
-default-deny NetworkPolicies select it, and the provider's managed
-NetworkPolicy is disabled.
+The class must permit interactive session reuse and suspension, and set
+`idleTimeout` or `maxLifetime`. A suspended-workspace count cap additionally
+requires `maxLifetime`.
 
-## Enablement and fail-closed boundaries
+The claim uses a dedicated durable workspace PVC rather than warm capacity. Its
+StorageClass must support dynamic provisioning and deletion of the backing PV.
+Suspension verifies the exact claim, Sandbox, PVC, and PV, puts the Sandbox in
+`Suspended` operating mode, and observes the exact Pod UID's absence before
+reporting suspension. Process memory and credentials are not retained.
 
-Dispatch requires both controller flags:
+Cold resume creates a new Pod against the retained volume and repeats startup
+attestation and credential bootstrap. Delete waits for the runtime Pod and exact
+PVC/PV to disappear. Missing journals, changed storage identities, and uncertain
+native outcomes fail closed; removing finalizers is not a recovery procedure.
 
-- `--agent-sandbox-enabled` — the provider is installed and admitted;
-- `--acp-workspace-dispatch-enabled` — workspace-provider-backed RuntimeSession
-  dispatch (also `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED=true`).
+## Upgrades and proof limits
 
-Everything the adapter cannot host is rejected before any workspace or
-RuntimePool demand exists, with the reason projected to
-`Task.status.executionWorkspace`:
+Before installing the pruned RuntimePool CRD or new core binary, drain every
+legacy in-tree workspace through its original owner, including retained workspaces
+in `Ready`, `Suspended`, `Failed`, and `Deleted` states. The new core startup gate
+rejects these records across all namespaces. It does not adopt or clean them.
+See [Upgrading](../operations/upgrading.md#external-workspace-migration).
 
-- unsupported providers (only `agent-sandbox` and `substrate` are implemented; see the [Substrate](substrate.md) page for the Phase 2 backend);
-- `templateRef` — ACP RuntimeSessions run only controller-rendered sandbox
-  templates, because the immutable runtime image, fence environment,
-  materialization attestation, and signed bootstrap key must be rendered as one
-  exact unit. The provider-visible template carries no credential references;
-- `cleanupPolicy: retain`, `onDetach`, `boot`, `poolRef`, `snapshot`,
-  `hibernation`;
-- any workspace request on the harness-v1 path — there is no cross-mode
-  fallback in either direction;
-- missing provider CRDs — the pool degrades and closes admission rather than
-  falling back to a Deployment workload.
-
-Task status stays provider-neutral: provider, phase, reason, and policies.
-Claim, sandbox, and template names, Pod IPs, and other provider-native
-identifiers never enter public Task status.
-
-## Lifecycle
-
-The claim is deleted after an authenticated supervisor drain and a persisted
-quiescence barrier (scale-to-zero, rollout, supervisor restart, or
-identity-capacity rotation), and the provider cascades the sandbox and Pod.
-Pool finalization removes the claim, warm pool, and template idempotently. A
-stopped, idle workspace pool object is garbage-collected after a second idle
-TTL; recovery treats the missing pool as proof of RuntimeSession cleanup and
-fresh demand recreates it deterministically by name.
-
-See `docs/adr/0024-acp-execution-workspace-runtime-pools.md` for the full
-provider-neutral contract, ownership state machine, and recovery semantics.
-
-## RuntimeClass
-
-`Task.spec.execution.runtimeClassName`, per-Task placement, and custom Task
-resource requests remain unsupported by the built-in ACP path. Runtime
-isolation and resources are selected through reviewed RuntimePool profiles.
-Container and native `ai` Tasks keep their existing `spec.execution` behavior.
-
-## Local evaluation material
-
-The repository still contains local/kind evaluation scripts for the older
-worker-based execution-workspace prototype. They are not the supported Orka harness v2
-deployment path and should not be used as release evidence. Agent runtime
-validation should verify RuntimePool scale-up, exact-instance fencing, Session
-continuation, cancellation, workspace validation, clean-room publication,
-controller restart behavior, pool replacement, and cleanup — including the
-workspace-backed pool variants when the dispatch flag is enabled.
+The [standalone Sandbox proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-sandbox-e2e.sh)
+writes a non-root filesystem marker, suspends and resumes with a new Pod and
+bootstrap nonce while retaining exact PVC/PV identities, then observes deletion.
+It proves provider lifecycle and storage behavior. The
+[separate fake-provider core proof](https://github.com/orka-agents/orka-workspace/blob/main/hack/external-workspace-e2e/README.md)
+proves actual authenticated Orka RuntimeSession and Task execution. The standalone
+Sandbox proof does not make that core integration claim. Kind's default CNI does
+not prove NetworkPolicy packet enforcement.

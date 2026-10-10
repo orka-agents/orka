@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,8 +19,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -158,9 +160,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			if errors.Is(err, store.ErrNotReady) {
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
-			if errors.Is(err, errACPRuntimeWorkspaceNamespace) {
-				return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
-			}
+
 			if errors.Is(err, store.ErrValidation) {
 				return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
 			}
@@ -1337,25 +1337,6 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 	return nil
 }
 
-var errACPRuntimeWorkspaceNamespace = errors.New("invalid ACP runtime workspace namespace")
-
-func validateACPRuntimeWorkspaceNamespace(
-	plan ACPRuntimePlan,
-	taskNamespace, configuredRuntimeNamespace string,
-) error {
-	if plan.Workspace == nil || plan.Workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
-		return nil
-	}
-	runtimeNamespace := strings.TrimSpace(configuredRuntimeNamespace)
-	if runtimeNamespace == "" {
-		runtimeNamespace = strings.TrimSpace(taskNamespace)
-	}
-	if err := validateSubstrateTemplateRuntimeNamespace(plan.Workspace.TemplateNamespace, runtimeNamespace); err != nil {
-		return fmt.Errorf("%w: %v", errACPRuntimeWorkspaceNamespace, err)
-	}
-	return nil
-}
-
 func (r *TaskReconciler) ensureACPRuntimePool(
 	ctx context.Context,
 	namespace string,
@@ -1377,11 +1358,15 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 	allowCreate bool,
 	requiredUID types.UID,
 ) (*corev1alpha1.RuntimePool, bool, error) {
+	if plan.Workspace != nil && (plan.Workspace.Class == nil || plan.Workspace.Class.ControllerName == "") {
+		return nil, false, store.ValidationErrorf("new workspace RuntimePools require an external provider class; legacy bindings are cleanup-only")
+	}
 	pool := &corev1alpha1.RuntimePool{}
 	key := types.NamespacedName{Namespace: namespace, Name: plan.PoolName}
 	poolPreexisting := true
 	err := r.Get(ctx, key, pool)
 	if apierrors.IsNotFound(err) {
+
 		if !allowCreate {
 			return nil, false, store.ValidationErrorf(
 				"the already-bound RuntimePool %s for the frozen ACP runtime profile no longer exists; create a new Task for the upgraded runtime",
@@ -1398,6 +1383,7 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 		// frozen namespace the current controller no longer permits fails
 		// the pool visibly instead of silently splitting the two.
 		poolRuntimeNamespace := strings.TrimSpace(r.ACPRuntimeNamespace)
+		var workspaceRequiredFeatures []workspacev1alpha1.ExecutionWorkspaceFeature
 		if plan.Workspace != nil && workspaceName != "" {
 			reader := client.Reader(r.Client)
 			if r.APIReader != nil {
@@ -1407,13 +1393,21 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 			if getErr := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: workspaceName}, workspace); getErr != nil {
 				return nil, false, fmt.Errorf("resolve the linked workspace's frozen runtime namespace: %w", getErr)
 			}
+			if workspaceUID == "" || string(workspace.UID) != workspaceUID {
+				return nil, false, fmt.Errorf("linked workspace no longer matches the frozen incarnation")
+			}
+			workspaceRequiredFeatures, err = r.acpWorkspacePoolRequiredFeatures(ctx, reader, plan, workspace)
+			if err != nil {
+				return nil, false, err
+			}
 			if frozen := strings.TrimSpace(workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation]); frozen != "" {
 				poolRuntimeNamespace = frozen
 			}
 		}
-		if namespaceErr := validateACPRuntimeWorkspaceNamespace(plan, namespace, poolRuntimeNamespace); namespaceErr != nil {
-			return nil, false, namespaceErr
+		if plan.Workspace != nil && len(workspaceRequiredFeatures) == 0 {
+			return nil, false, fmt.Errorf("new workspace RuntimePools require exact frozen workspace requirements")
 		}
+
 		capacity := &corev1alpha1.RuntimePoolCapacitySpec{
 			MaxResidentSessions: corev1alpha1.DefaultRuntimePoolMaxResidentSessions,
 			MaxRunningPrompts:   corev1alpha1.DefaultRuntimePoolMaxRunningPrompts,
@@ -1444,26 +1438,16 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 				Provider:      plan.Workspace.Provider,
 				BindingDigest: plan.Workspace.BindingDigest,
 			}
-			if plan.Workspace.Provider == corev1alpha1.WorkspaceProviderSubstrate {
-				executionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-					BaseTemplateNamespace: plan.Workspace.TemplateNamespace,
-					BaseTemplateName:      plan.Workspace.TemplateName,
-					SuspendMode:           acpSubstratePoolSuspendMode(plan.Workspace),
-					RestoreFrom:           plan.Workspace.RestoreFrom.DeepCopy(),
+			if class := plan.Workspace.Class; class != nil && class.ControllerName != "" {
+				executionWorkspace.WorkspaceRef = &workspacev1alpha1.ObjectIdentityReference{Name: workspaceName, UID: types.UID(workspaceUID)}
+				executionWorkspace.ParametersRef = class.ParametersRef.DeepCopy()
+				executionWorkspace.ParametersBinding = class.ParametersBinding.DeepCopy()
+				if ref := plan.Workspace.RestoreFrom; ref != nil {
+					executionWorkspace.RestoreFrom = &workspacev1alpha1.WorkloadCheckpointReference{Name: ref.Name, UID: types.UID(ref.UID), Digest: ref.Digest}
 				}
+				executionWorkspace.Workload = &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{ContractVersion: workspacev1alpha1.LifecycleContractV1, ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, RequiredFeatures: workspaceRequiredFeatures}
 			}
-			if plan.Workspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&
-				plan.Workspace.Class != nil && plan.Workspace.Class.SandboxVolume != nil {
-				executionWorkspace.AgentSandbox = &corev1alpha1.RuntimePoolAgentSandboxWorkspaceSpec{
-					SuspendMode: plan.Workspace.Class.SuspendMode,
-					SuspendVolume: &corev1alpha1.RuntimePoolSandboxDurableVolumeSpec{
-						StorageClassName: plan.Workspace.Class.SandboxVolume.StorageClassName,
-						StorageClassUID:  plan.Workspace.Class.SandboxVolume.StorageClassUID,
-						AccessModes:      append([]string(nil), plan.Workspace.Class.SandboxVolume.AccessModes...),
-						Capacity:         plan.Workspace.Class.SandboxVolume.Capacity,
-					},
-				}
-			}
+
 		}
 		pool = &corev1alpha1.RuntimePool{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1518,9 +1502,7 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 	if poolRuntimeNamespace == "" {
 		poolRuntimeNamespace = strings.TrimSpace(r.ACPRuntimeNamespace)
 	}
-	if namespaceErr := validateACPRuntimeWorkspaceNamespace(plan, namespace, poolRuntimeNamespace); namespaceErr != nil {
-		return nil, false, namespaceErr
-	}
+
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
 			return nil, false, store.ValidationErrorf(
@@ -1576,6 +1558,91 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 		return nil, false, err
 	}
 	return pool, poolPreexisting, nil
+}
+
+// Collect requirements only from the exact class/profile frozen in the plan.
+// The nonempty set also freezes whether this pool materializes a native process.
+func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, reader client.Reader, plan ACPRuntimePlan, workspace *workspacev1alpha1.ExecutionWorkspace) ([]workspacev1alpha1.ExecutionWorkspaceFeature, error) {
+	if err := verifyACPClassWorkspaceBindings(workspace, plan.Workspace, plan.PoolName); err != nil {
+		return nil, err
+	}
+	bound := plan.Workspace.Class
+	class := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: bound.Name}, class); err != nil {
+		return nil, err
+	}
+	if !class.DeletionTimestamp.IsZero() || string(class.UID) != bound.UID || class.Generation != bound.Generation || class.Status.ProfileHash != bound.ProfileHash {
+		return nil, fmt.Errorf("workspace class no longer matches the frozen identity and profile")
+	}
+	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: bound.ProviderName}, provider); err != nil {
+		return nil, err
+	}
+	providerGenerationMatches := provider.Generation == bound.ProviderGeneration
+	if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining {
+		// Draining advances the registration generation without replacing an
+		// admitted Session workspace's frozen installation. Reuse only that
+		// exact logical workspace; new identities still require Active.
+		providerGenerationMatches = bound.ProviderGeneration > 0 && bound.ProviderGeneration <= provider.Generation &&
+			plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && plan.Workspace.SessionUID != "" &&
+			workspace.Spec.SessionRef != nil && string(workspace.Spec.SessionRef.UID) == plan.Workspace.SessionUID &&
+			workspace.Spec.Slot == plan.Workspace.WorkspaceSlot && workspaceCurrentlyAdmittedByCore(workspace)
+	}
+	if !provider.DeletionTimestamp.IsZero() || string(provider.UID) != bound.ProviderUID || !providerGenerationMatches ||
+		provider.Spec.ControllerName != bound.ControllerName || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
+		return nil, fmt.Errorf("workspace provider no longer matches the frozen identity and capabilities")
+	}
+	if err := r.verifyFrozenACPProfile(ctx, reader, class, provider, bound.ProfileHash); err != nil {
+		return nil, err
+	}
+	required := executionWorkspaceClassRequiredFeatures(class)
+	add := func(feature workspacev1alpha1.ExecutionWorkspaceFeature) {
+		if !slices.Contains(required, feature) {
+			required = append(required, feature)
+		}
+	}
+	add(workspacev1alpha1.WorkspaceFeatureACPRuntime)
+	if plan.Workspace.RestoreFrom != nil {
+		add(workspacev1alpha1.WorkspaceFeatureRestore)
+		add(workspacev1alpha1.WorkspaceFeatureCheckpoint)
+	}
+	if slices.Contains(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+		add(workspacev1alpha1.WorkspaceFeatureNativeProcess)
+	}
+	if !featureSetContainsAll(provider.Status.SupportedFeatures, required) {
+		return nil, fmt.Errorf("workspace provider no longer supports the frozen class requirements")
+	}
+	return required, nil
+}
+
+// verifyFrozenACPProfile rereads the provider and class parameters and requires
+// the provider's protected pin and the frozen profile hash to still match.
+func (r *TaskReconciler) verifyFrozenACPProfile(
+	ctx context.Context,
+	reader client.Reader,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+	profileHash string,
+) error {
+	config, err := resolveExternalWorkspaceParameters(ctx, reader, r.RESTMapper(), "", &provider.Spec.ParametersRef, meta.RESTScopeNameRoot)
+	if err != nil {
+		return err
+	}
+	if provider.Status.PinnedParametersUID != string(config.GetUID()) {
+		return fmt.Errorf("provider parameters do not match its protected UID pin")
+	}
+	parameters, err := resolveExternalWorkspaceParameters(ctx, reader, r.RESTMapper(), class.Namespace, class.Spec.ParametersRef, meta.RESTScopeNameNamespace)
+	if err != nil {
+		return err
+	}
+	hash, err := externalACPClassProfileHash(class, provider, config, parameters)
+	if err != nil {
+		return err
+	}
+	if hash != profileHash {
+		return fmt.Errorf("workspace class or parameters drifted from the frozen profile")
+	}
+	return nil
 }
 
 func (r *TaskReconciler) recordACPRuntimePoolImageProvenance(
@@ -1730,10 +1797,6 @@ func acpWorkspacePoolReadinessFailure(
 		return errors.New("the linked workspace does not name this RuntimePool")
 	case workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady:
 		return fmt.Errorf("the linked workspace desired state is %q", workspace.Spec.DesiredState)
-	case !workspaceCurrentlyAdmittedByCore(workspace):
-		return errors.New("core admission is no longer current")
-	case workspace.Status.ObservedGeneration != workspace.Generation:
-		return errors.New("provider status has not observed the current workspace generation")
 	case workspace.Spec.Attachment == nil:
 		return errors.New("the linked workspace attachment is being revoked")
 	case string(workspace.Spec.Attachment.TaskRef.UID) != workspaceTaskUID:
@@ -1745,9 +1808,30 @@ func acpWorkspacePoolReadinessFailure(
 		return errors.New("the linked workspace attachment has expired")
 	case strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]) != "":
 		return errors.New("attachment revocation has started for the linked workspace")
+	case workspace.Labels[workspacev1alpha1.QuarantinedLabel] == booleanTrueValue ||
+		workspaceprovider.ConditionIsTrue(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceQuarantined)):
+		return errors.New("the linked workspace is quarantined")
 	}
 	if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, now); bounded && remaining <= 0 {
 		return errors.New("the linked workspace maximum lifetime has elapsed")
+	}
+	if !workspaceCurrentlyAdmittedByCore(workspace) {
+		if runtimePoolHasExternalWorkspace(pool) && workspaceHasCoreAdmission(workspace) && workspace.Spec.CoreAdmission.AdmittedGeneration > 0 {
+			condition := workspaceprovider.FindCondition(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted))
+			if (workspaceHasCoreAdmissionEvidence(workspace) && workspace.Spec.CoreAdmission.AdmittedGeneration < workspace.Generation) ||
+				(condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration == workspace.Generation && workspaceAdmissionRetryable(condition.Reason)) {
+				return errACPWorkspaceRecoveryPending
+			}
+		}
+		return errors.New("core admission is no longer current")
+	}
+	if workspace.Status.ObservedGeneration != workspace.Generation {
+		if runtimePoolHasExternalWorkspace(pool) {
+			// Publishing workload and admission each advance generation. The
+			// provider acknowledges them asynchronously before prompt dispatch.
+			return errACPWorkspaceRecoveryPending
+		}
+		return errors.New("provider status has not observed the current workspace generation")
 	}
 	provisioned := meta.FindStatusCondition(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceProvisioned))
 	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateProvisioning &&

@@ -42,8 +42,8 @@ type SubstrateActorPoolReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	SubstrateEnabled bool
-	SubstrateConfig  SubstrateConfig
+	SubstrateMCPToolsEnabled bool
+	SubstrateConfig          SubstrateConfig
 
 	SubstrateTemplateValidator func(context.Context, *ExecutionWorkspaceRequest) error
 	SubstrateExecutorFactory   func(SubstrateConfig) (SubstratePoolExecutor, error)
@@ -67,7 +67,7 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if !pool.DeletionTimestamp.IsZero() {
 		return r.finalizeSubstrateActorPool(ctx, pool, prefix)
 	}
-	if !r.SubstrateEnabled {
+	if !r.SubstrateMCPToolsEnabled {
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, "substrate is disabled")
 	}
 	template := workspace.TemplateRef{

@@ -45,7 +45,7 @@ func TestSubstrateMCPPoolRequiresPinnedTemplateIdentity(t *testing.T) {
 			executorCreated := false
 			r := &ToolReconciler{
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(tool, pool).WithObjects(tool, pool).Build(),
-				Scheme: scheme, HTTPClient: server.Client(), SubstrateEnabled: true,
+				Scheme: scheme, HTTPClient: server.Client(), SubstrateMCPToolsEnabled: true,
 				SubstrateConfig: SubstrateConfig{RouterURL: server.URL, ClaimTimeout: time.Second},
 				SubstrateTemplateValidator: func(_ context.Context, request *ExecutionWorkspaceRequest) error {
 					request.TemplateUID = "current-template-uid"

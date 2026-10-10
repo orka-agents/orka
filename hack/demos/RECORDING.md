@@ -573,6 +573,9 @@ the successful Task and renders:
 
 ### Demo 60 — Agent sandbox workspaces (`60-agent-sandbox.sh`, archived prototype)
 
+This storyboard records the former in-tree prototype. It is not a current setup
+recipe; the script and runtime assets need migration before recording again.
+
 **Why this matters.** The other demos all show one-shot work. Demo 60 shows
 *continuity*: a coding session's repo, dependency cache, and built artifacts
 survive across turns and across agents. This is the difference between "AI
@@ -583,13 +586,17 @@ how humans actually iterate."
 Builder ships. Builder comes back when CI fails. Same warm workspace through
 all of it."*
 
-**Prerequisites the recording assumes.** Upstream `agent-sandbox` installed.
-Controller running with `ORKA_AGENT_SANDBOX_ENABLED=true` and a default
-template called `orka-live-template`. Demo does not install the sandbox.
-Target repo: `github.com/sozercan/vekil`.
+**Current prerequisites for revival.** Install the upstream `agent-sandbox`
+backend, then independently install an external ACP provider, its profiles, and
+the selected `ExecutionWorkspaceClass` (`sandbox-coding` by default). Enable
+Orka's generic workspace API and ACP dispatch flags. The backend installer only
+applies the upstream stack and archived `orka-live-template` assets; it does not
+configure Orka or register a provider. Replace the archived runtime and broad Git
+Secret with the harness v2 and Workspace/Publisher contract in the
+[workspace provider guide](../../docs/development/workspace-provider-authoring.md).
+The historical target repo was `github.com/sozercan/vekil`.
 
-**What the demo highlights.** A single arc covers three real upstream
-capabilities Orka already ships, none of which need new platform work:
+**What the prototype highlighted.** A single arc covered three capabilities:
 
 - **Session-scoped reuse.** `reusePolicy: session` + `cleanupPolicy: retain`
   with `sessionRef.name: vekil-metrics-77`. Deterministic claim name; later
@@ -692,13 +699,16 @@ by an order of magnitude.
 
 ### Demo 70 — Agent Substrate workspaces (`70-agent-substrate.sh`, archived prototype)
 
+This storyboard records the former in-tree prototype. It is not bootstrapped by
+the current Substrate MCP Tools conformance target.
+
 **Why this matters.** Orka's execution workspace is provider-neutral. Demo 60
 shows agent-sandbox; Demo 70 shows the *same Orka agent Task API* backed by a
 second provider — **Agent Substrate** — where each workspace is a
 gVisor-isolated Actor drawn from a pre-warmed WorkerPool and kept warm between
 turns. A **real `gpt-5.5` codex agent** runs inside the gVisor sandbox: it
 clones a repo, makes a change, and a real PR is opened. The message: swap one
-field (`execution.workspace.provider: substrate`) and the entire agent Task
+field (`execution.workspace.classRef.name: substrate-coding`) and the entire agent Task
 contract — model call, git push, PR — is unchanged. Orka abstracts the
 execution substrate.
 
@@ -712,20 +722,15 @@ session on agent-sandbox; Demo 70 runs the same kind of real agentic work on
 Substrate's **gVisor** isolation and shows warm-workspace reuse. Complementary,
 not duplicates.
 
-**Prerequisites.** Demo 70 runs on its **own** kind cluster — Substrate needs a
-custom registry + gVisor node config, so it cannot attach to the shared
-demo-magic cluster. Stand it up with `make demo-substrate-up`
-(`hack/demos/cluster/install-substrate.sh`), which: (1) runs the CI-proven
-`scripts/agent-substrate-e2e.sh` standup (`KEEP_CLUSTER=1`) — Substrate control
-plane in `ate-system`, a `WorkerPool` + gVisor `ActorTemplate` (`orka-codex-ci`
-in `ate-demo`), Orka wired with `--substrate-*` flags; (2) builds a
-**prototype codex-capable Actor image** (workspace daemon + Codex CLI + git; not a supported Orka harness v2 runtime image) and points the ActorTemplate at it; (3) deploys the **vekil**
-model proxy (one-time GitHub **device-code** login — the operator completes it
-from the pod logs, since a plain `gho_` gh token has no Copilot entitlement);
-(4) creates the model Secret (endpoint → vekil) and the git Secret. Requires
-`kind`, `ko`, `docker`, `go`, `git`, `jq`, `kubectl`, `gh`. A
-Copilot-enabled GitHub account is required for the proxy login; the git token
-comes from `GIT_TOKEN`/`GITHUB_TOKEN` or the local `gh` CLI.
+**Current prerequisites for revival.** Install the Substrate backend with its
+registry and gVisor configuration, then independently install an external ACP
+provider, its profiles, and the selected `ExecutionWorkspaceClass`
+(`substrate-coding` by default). Enable Orka's generic workspace API and ACP
+dispatch flags, and use the harness v2 runtime and Workspace/Publisher credential
+contract in the [workspace provider guide](../../docs/development/workspace-provider-authoring.md).
+`make demo-substrate-up` runs `scripts/agent-substrate-e2e.sh` with
+`KEEP_CLUSTER=1` for pooled MCP Tools conformance only. It does not install an
+external ACP provider/class, a codex runtime, a model proxy, or demo credentials.
 
 **Beats.**
 
@@ -909,11 +914,9 @@ spec:
   prompt: <contents of prompt-file>
   execution:
     workspace:
-      enabled: true
-      templateRef:
-        name: orka-live-template
+      classRef:
+        name: sandbox-coding
       reusePolicy: session
-      cleanupPolicy: retain
 ```
 
 Turn 1 passes `--create-session`; turns 2 and 3 omit it. The session store
@@ -946,12 +949,11 @@ demo only applies the Orka `Agent` + two `Task`s and opens the PR. All carry
   `OPENAI_API_KEY`. The system prompt tells the agent to edit files only and stop. A revived v2
   demo requires the Workspace/Publisher to prepare, publish, verify, and reconcile the PR.
 - **Task** (`render_substrate_task <name> <none|session> <create> <prompt>`) —
-  agent Task whose `execution.workspace` selects `provider: substrate` with
-  `templateRef` → `ate-demo/orka-codex-ci`, plus top-level `spec.workspace`
+  agent Task whose `execution.workspace` selects `classRef.name: substrate-coding`, plus top-level `spec.workspace`
   (`intent`, `gitRepo`, `branch`, `readCredentialRef`, `publicationGitRepo`,
   `publicationCredentialRef`, and `pushBranch`) and
   `env: ORKA_CODEX_DISABLE_SANDBOX=true` (gVisor is the sandbox). `reusePolicy`
-  defaults to `session`; `cleanupPolicy` is `retain` for session tasks so the
+  defaults to `session`; the class controls retention so the
   workspace stays warm. The 3rd arg sets `sessionRef.create`.
   - Cold beat: `render_substrate_task <n> session true  "<prompt>"` (**creates**
     the session — `create: true`).
@@ -1013,7 +1015,7 @@ hack/demos/
 │   ├── cluster-up.sh      # creates kind cluster, builds + loads Orka image, helm install
 │   ├── cluster-down.sh    # kind delete cluster --name orka-demo
 │   ├── install-agent-sandbox.sh   # upstream operator + SandboxTemplate
-│   ├── install-substrate.sh       # Agent Substrate on a dedicated kind cluster (Demo 70)
+│   ├── install-substrate.sh       # dedicated Substrate MCP Tools conformance cluster
 │   ├── install-demo-model.sh      # Provider + model/git Secrets for demos 10/20/30/40
 │   ├── demo-env.sh                # sourceable consolidated DEMO_* env for the SDLC demos
 │   └── templates/
@@ -1254,8 +1256,8 @@ writing the relevant render functions:
 - [ ] `hack/demos/cluster/` — new directory holding the kind bootstrap:
    - `cluster-up.sh` — creates a kind cluster named `orka-demo`, builds
      and loads the Orka controller image, installs Orka via the existing
-     Helm chart with `controller.agentSandbox.enabled=true` and
-     `defaultTemplate: orka-live-template`.
+     Helm chart. External ACP providers and classes are installed separately;
+     legacy `controller.agentSandbox` values no longer configure Orka.
      `ORKA_CONTEXT_TOKEN_AUTHZ_MODE=enforce`, issuer + audience pointed
      at the in-cluster TTS service. Reuses the ephemeral RSA key/JWKS
      pattern from `scripts/live-github-oidc-e2e.sh` so no external secrets
@@ -1386,6 +1388,8 @@ and have been folded into §11.5.
    Phase 1 for the deliverable.
 4. **agent-sandbox setup approach.** **Decided: kind bootstrap.** Same
    `make demo-cluster-up` target also installs the upstream `agent-sandbox`
-   operator and provisions an `orka-live-template` `SandboxTemplate`. One
+   operator and provisions an archived `orka-live-template` `SandboxTemplate`.
+   External ACP provider/class installation and harness v2 migration remain
+   separate prerequisites.
 5. **Order of work.** *Dissolved by §11.5* — both polish and infra are
    sequenced (infra first, then polish, then new scenarios).

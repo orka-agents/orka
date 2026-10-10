@@ -6,7 +6,10 @@ MIT License - see LICENSE file for details.
 
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 const (
 	// DefaultRuntimePoolDesiredReplicas keeps an idle pool scaled to zero until
@@ -220,14 +223,38 @@ type RuntimePoolProfileSpec struct {
 // allowlist, epoch-scoped Secrets, endpoint fencing, and admission semantics
 // are identical to plain pools; only workload materialization changes.
 // Provider-native identifiers never enter public Task status.
-// +kubebuilder:validation:XValidation:rule="(self.provider == 'substrate') == has(self.substrate)",message="substrate settings are required exactly when provider is substrate"
-// +kubebuilder:validation:XValidation:rule="self.provider == 'agent-sandbox' || !has(self.agentSandbox)",message="agentSandbox settings are only valid when provider is agent-sandbox"
+// +kubebuilder:validation:XValidation:rule="has(self.workload) == has(self.workspaceRef)",message="workload and exact workspaceRef must be supplied together"
+// +kubebuilder:validation:XValidation:rule="has(self.parametersRef) == has(self.parametersBinding)",message="parametersRef and parametersBinding must be supplied together"
+// +kubebuilder:validation:XValidation:rule="!has(self.workload) || (has(self.parametersRef))",message="external workloads require immutable parameters"
+// +kubebuilder:validation:XValidation:rule="!has(self.parametersRef) || self.parametersRef.name == self.parametersBinding.name",message="parameter binding must pin the referenced name"
+// +kubebuilder:validation:XValidation:rule="!has(self.restoreFrom) || has(self.workload)",message="checkpoint restore requires an external workload binding"
 type RuntimePoolExecutionWorkspaceSpec struct {
 	// Provider selects the execution-workspace provider control plane hosting
 	// this pool's single runtime instance.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=agent-sandbox;substrate
 	Provider WorkspaceProvider `json:"provider"`
+
+	// WorkspaceRef pins the shared workspace that owns this workload.
+	// +optional
+	WorkspaceRef *workspacev1alpha1.ObjectIdentityReference `json:"workspaceRef,omitempty"`
+
+	// ParametersRef selects the provider-owned profile in this namespace.
+	// +optional
+	ParametersRef *workspacev1alpha1.TypedObjectReference `json:"parametersRef,omitempty"`
+
+	// ParametersBinding freezes the exact immutable provider profile revision.
+	// +optional
+	ParametersBinding *workspacev1alpha1.ImmutableObjectBinding `json:"parametersBinding,omitempty"`
+
+	// Workload freezes the provider-neutral workload contract. The RuntimePool
+	// controller renders each numbered public request on the shared workspace.
+	// +optional
+	Workload *RuntimePoolWorkspaceWorkloadSpec `json:"workload,omitempty"`
+
+	// RestoreFrom pins a public Data checkpoint. Its provider-owned artifact
+	// remains outside this pool and the destination workspace's public intent.
+	// +optional
+	RestoreFrom *workspacev1alpha1.WorkloadCheckpointReference `json:"restoreFrom,omitempty"`
 
 	// BindingDigest is the canonical digest of the frozen workspace binding
 	// (provider, policies, and session key) that names this pool. It is part of
@@ -235,93 +262,22 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	BindingDigest string `json:"bindingDigest"`
-
-	// Substrate configures the Substrate-provider backend.
-	// +optional
-	Substrate *RuntimePoolSubstrateWorkspaceSpec `json:"substrate,omitempty"`
-
-	// AgentSandbox configures the agent-sandbox-provider backend.
-	// +optional
-	AgentSandbox *RuntimePoolAgentSandboxWorkspaceSpec `json:"agentSandbox,omitempty"`
 }
 
-// RuntimePoolAgentSandboxWorkspaceSpec configures the agent-sandbox backend.
-// +kubebuilder:validation:XValidation:rule="has(self.suspendMode) == has(self.suspendVolume)",message="suspendMode and suspendVolume must be set together"
-type RuntimePoolAgentSandboxWorkspaceSpec struct {
-	// SuspendMode enables operator-governed PVC-backed cold suspension for
-	// this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one
-	// controller-owned durable workspace PVC (forcing a cold start instead of
-	// warm-pool adoption) and a requested suspension terminates the Sandbox
-	// Pod while that PVC persists. Empty preserves delete-and-recreate
-	// behavior and keeps every suspension fail-closed.
-	// +kubebuilder:validation:Enum=DataOnly
-	// +optional
-	SuspendMode string `json:"suspendMode,omitempty"`
+// RuntimePoolWorkspaceWorkloadSpec identifies the lifecycle and supervisor
+// contracts required by this pool. Runtime image and behavior remain in Runtime.
+type RuntimePoolWorkspaceWorkloadSpec struct {
+	// ContractVersion is the exact installed provider lifecycle contract.
+	// +kubebuilder:validation:Enum=orka.workspace.lifecycle.v1
+	ContractVersion string `json:"contractVersion"`
 
-	// SuspendVolume freezes the durable workspace PVC shape. Required exactly
-	// when suspendMode is set.
-	// +optional
-	SuspendVolume *RuntimePoolSandboxDurableVolumeSpec `json:"suspendVolume,omitempty"`
-}
+	// ProtocolVersion is the supervisor protocol rendered by core.
+	ProtocolVersion RuntimePoolProtocolVersion `json:"protocolVersion"`
 
-// RuntimePoolSandboxDurableVolumeSpec is the frozen durable workspace PVC
-// shape for a suspend-capable agent-sandbox pool.
-type RuntimePoolSandboxDurableVolumeSpec struct {
-	// StorageClassName optionally selects the storage class.
-	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
-	// StorageClassUID pins the exact StorageClass validated at class
-	// resolution. Provisioning reverifies the live class carries this UID
-	// (and Delete reclaim semantics) before requesting the durable PVC.
-	// +optional
-	StorageClassUID string `json:"storageClassUID,omitempty"`
-
-	// AccessModes defaults to ReadWriteOnce when empty.
+	// RequiredFeatures freezes the capabilities needed for this workload.
 	// +listType=set
 	// +optional
-	AccessModes []string `json:"accessModes,omitempty"`
-
-	// Capacity is the requested storage quantity.
-	// +kubebuilder:validation:MinLength=1
-	Capacity string `json:"capacity"`
-}
-
-// RuntimePoolSubstrateWorkspaceSpec binds a Substrate-backed pool to the
-// operator-owned infrastructure ActorTemplate whose placement fields
-// (workerPoolRef, runsc, snapshotsConfig) seed the controller-rendered
-// runtime template. The runtime container itself is always controller-owned.
-type RuntimePoolSubstrateWorkspaceSpec struct {
-	// RestoreFrom is the immutable, namespaced Data checkpoint selected by the
-	// Task's frozen workspace binding. Only class-backed pools may restore.
-	// +optional
-	RestoreFrom *WorkspaceCheckpointReference `json:"restoreFrom,omitempty"`
-	// BaseTemplateNamespace is the namespace of the operator-owned
-	// infrastructure ActorTemplate. Controller-rendered runtime templates are
-	// created in the same namespace so the provider can resolve them. It must
-	// differ from the resolved runtime namespace so provider template
-	// principals cannot resolve pool Secrets.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	BaseTemplateNamespace string `json:"baseTemplateNamespace"`
-
-	// BaseTemplateName names the operator-owned infrastructure ActorTemplate.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	BaseTemplateName string `json:"baseTemplateName"`
-
-	// SuspendMode enables operator-governed data-only cold suspension for this
-	// pool's actor. When set to DataOnly, the derived runtime template carries
-	// a controller-owned DurableDir workspace volume and an explicit
-	// data-only snapshot policy, and a requested suspension checkpoints only
-	// that volume. Empty preserves delete-and-recreate behavior and keeps
-	// every suspension fail-closed.
-	// +kubebuilder:validation:Enum=DataOnly
-	// +optional
-	SuspendMode string `json:"suspendMode,omitempty"`
+	RequiredFeatures []workspacev1alpha1.ExecutionWorkspaceFeature `json:"requiredFeatures,omitempty"`
 }
 
 // RuntimePoolRuntimeSpec selects the immutable supervisor image and profile.

@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -26,9 +25,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -51,13 +50,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
-	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
@@ -346,27 +344,14 @@ type RuntimePoolReconciler struct {
 	// CleanupOnly keeps deletion finalization active while ACP runtime admission
 	// is disabled without adding finalizers or creating runtime resources.
 	CleanupOnly bool
+	// WorkspaceCleanupOnly disables external workspace admission while keeping
+	// ordinary Deployment-backed pools and exact workspace cleanup active.
+	WorkspaceCleanupOnly bool
 	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
 	// fault marker projected into built-in runtime supervisors.
 	E2EPromptWriteAmbiguityMarker string
 
-	// AgentSandboxEnabled admits Agent Sandbox-backed workspace pools.
-	AgentSandboxEnabled bool
-	// SubstrateEnabled admits Substrate-backed workspace pools.
-	SubstrateEnabled bool
-	// SubstrateConfig carries the externally operated Substrate control-plane
-	// and router configuration for Substrate-backed workspace pools.
-	SubstrateConfig SubstrateConfig
-	// SubstrateActorControlFactory builds the narrow, suspension-free actor
-	// control client. Tests inject fakes; production defaults to the gRPC client.
-	SubstrateActorControlFactory func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error)
-	SubstrateNativeClientFactory func(SubstrateConfig) (*workspace.SubstrateNativeClient, error)
-	SubstrateTemplates           substrateTemplateStore
-	// SubstrateCredentialSeeder overrides the fresh-boot credential PUT for
-	// tests. Production sends fresh boots through the router; data-resumed actors
-	// require the provider control's operation-fenced bootstrap contract.
-	SubstrateCredentialSeeder func(ctx context.Context, routeHost, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) error
-	// WorkspaceCredentialSeeder overrides the Agent Sandbox credential
+	// WorkspaceCredentialSeeder overrides the external runtime credential
 	// bootstrap PUT for tests. Production seeds the exact attested Pod endpoint
 	// directly after provider materialization is verified.
 	WorkspaceCredentialSeeder func(ctx context.Context, endpoint, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) (alreadyComplete bool, err error)
@@ -375,10 +360,6 @@ type RuntimePoolReconciler struct {
 	HTTPClient       *http.Client
 	Rand             io.Reader
 	Now              func() time.Time
-
-	substrateSupervisorOnce  sync.Once
-	substrateSupervisorHTTP  *http.Client
-	substrateSupervisorSetup error
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
@@ -402,11 +383,15 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
+	if runtimePoolHasExternalWorkspace(pool) {
+		return r.reconcileExternalWorkspaceRuntimePool(ctx, pool)
+	}
+	if pool.Spec.ExecutionWorkspace != nil {
+		return ctrl.Result{}, fmt.Errorf("legacy workspace RuntimePool %s/%s must retire under its original provider before upgrade", pool.Namespace, pool.Name)
+	}
 	if !pool.DeletionTimestamp.IsZero() {
 		orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
-		if pool.Spec.ExecutionWorkspace != nil && !runtimePoolWorkspaceDeletionDrainComplete(pool) {
-			return r.reconcileDeletingWorkspaceRuntimePool(ctx, pool)
-		}
+
 		return r.finalizeRuntimePool(ctx, pool)
 	}
 	if r.CleanupOnly {
@@ -437,17 +422,7 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 	if err != nil {
-		if pool.Spec.ExecutionWorkspace != nil {
-			preserveFence, preserveErr := r.workspacePoolFailureRequiresDurableStatePreservation(ctx, pool)
-			if preserveErr != nil {
-				return ctrl.Result{}, errors.Join(err, fmt.Errorf("check linked workspace suspension intent: %w", preserveErr))
-			}
-			if preserveFence {
-				return r.finishWorkspacePoolFailureWithPreservedDurableState(
-					ctx, pool, "runtime configuration failed", err,
-				)
-			}
-		}
+
 		status := r.baseRuntimePoolStatus(pool, 0)
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -460,25 +435,16 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	logger.Info("Reconciling RuntimePool", "runtimePool", pool.Name, "runtimeNamespace", cfg.namespace, "desiredReplicas", pool.Spec.DesiredReplicas)
 
-	if runtimePoolIsSubstrateBacked(pool) {
-		return r.reconcileSubstrateBackedRuntimePool(ctx, pool, cfg)
-	}
-
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
-		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime namespace prerequisite failed", err)
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
-		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
-			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, pool, cfg)
-		}
-		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime credential prerequisite failed", err)
+
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
-		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime ancillary-resource prerequisite failed", err)
-	}
-	if pool.Spec.ExecutionWorkspace != nil {
-		return r.reconcileWorkspaceBackedRuntimePool(ctx, pool, cfg, authSecret, providerSecret)
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
@@ -535,41 +501,10 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, pods, readyPods, authSecret, status)
 }
 
-func runtimePoolWorkspaceDeletionDrainComplete(pool *corev1alpha1.RuntimePool) bool {
-	return pool != nil && pool.Status.ObservedGeneration == pool.Generation &&
-		pool.Status.DesiredReplicas == 0 && pool.Status.CurrentReplicas == 0 &&
-		pool.Status.ActiveInstance == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped
-}
-
 // reconcileDeletingWorkspaceRuntimePool routes deletion through the same
 // authenticated scale-to-zero state machine as idle shutdown. The local spec
 // override is never persisted; it only closes admission and proves quiescence
 // before finalization removes the provider workload and isolation boundary.
-func (r *RuntimePoolReconciler) reconcileDeletingWorkspaceRuntimePool(
-	ctx context.Context,
-	pool *corev1alpha1.RuntimePool,
-) (ctrl.Result, error) {
-	draining := pool.DeepCopy()
-	draining.Spec.DesiredReplicas = 0
-	cfg, err := r.runtimePoolConfigForDrain(draining)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if runtimePoolIsSubstrateBacked(draining) {
-		return r.reconcileSubstrateBackedRuntimePool(ctx, draining, cfg)
-	}
-	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, draining, cfg, err)
-	}
-	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, draining, cfg)
-	if err != nil {
-		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
-			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, draining, cfg)
-		}
-		return r.finishRuntimePoolResourceFailure(ctx, draining, cfg, err)
-	}
-	return r.reconcileWorkspaceBackedRuntimePool(ctx, draining, cfg, authSecret, providerSecret)
-}
 
 type runtimePoolConfig struct {
 	namespace           string
@@ -859,9 +794,6 @@ func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
 	}
 	namespace, err := r.runtimePoolNamespace(pool)
 	if err != nil {
-		return runtimePoolConfig{}, err
-	}
-	if err := validateRuntimePoolExecutionWorkspaceNamespace(pool, namespace); err != nil {
 		return runtimePoolConfig{}, err
 	}
 	epoch := r.effectiveControllerEpoch(pool)
@@ -1851,42 +1783,11 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (*corev1.Secret, *corev1.Secret, error) {
-	reader := uncachedReader(r.APIReader, r.Client)
-	epoch := strconv.FormatInt(cfg.controllerEpoch, 10)
-
-	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, epoch)
+	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, strconv.FormatInt(cfg.controllerEpoch, 10))
 	if err != nil {
 		return nil, nil, err
 	}
-
-	var providerSecrets corev1.SecretList
-	if err := reader.List(ctx, &providerSecrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
-		runtimePoolUIDLabel:       string(pool.UID),
-	}); err != nil {
-		return nil, nil, err
-	}
-	providerMatches := runtimePoolProviderSecretsForGeneration(
-		providerSecrets.Items, cfg.controllerEpoch, cfg.providerProxy.tokenGeneration,
-	)
-	if len(providerMatches) > 1 {
-		return nil, nil, fmt.Errorf("workspace RuntimePool requires exactly one private provider Secret for controller epoch %d and token generation %s", cfg.controllerEpoch, cfg.providerProxy.tokenGeneration)
-	}
-	providerName := ""
-	if len(providerMatches) == 1 {
-		providerName = providerMatches[0].Name
-	} else {
-		suffix, err := r.randomHex(12)
-		if err != nil {
-			return nil, nil, fmt.Errorf("generate private RuntimePool provider Secret name: %w", err)
-		}
-		providerName = runtimePoolChildName(cfg.baseName, "provider-e"+epoch+"-g"+cfg.providerProxy.tokenGeneration+"-"+suffix)
-	}
-	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
-		runtimePoolProviderCredentialLabel: booleanTrueValue,
-		runtimePoolCredentialEpochLabel:    epoch,
-		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
-	})
+	provider, err := r.ensureExternalPrivateProviderCredential(ctx, pool, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1899,65 +1800,10 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	cfg runtimePoolConfig,
 	epoch string,
 ) (*corev1.Secret, error) {
-	reader := uncachedReader(r.APIReader, r.Client)
-	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
-	authKeys := map[string]int{
-		runtimePoolControllerTokenKey:      32,
-		runtimePoolCapabilitySecretKey:     32,
-		runtimePoolBootstrapNonceKey:       32,
-		runtimePoolBootstrapSigningSeedKey: 32,
+	if epoch != strconv.FormatInt(cfg.controllerEpoch, 10) {
+		return nil, fmt.Errorf("private credential controller epoch differs from the admitted configuration")
 	}
-	authLabels := map[string]string{
-		runtimePoolAuthLabel:            booleanTrueValue,
-		runtimePoolCredentialEpochLabel: epoch,
-	}
-	binding := strings.TrimSpace(pool.Annotations[bindingKey])
-	if binding != "" {
-		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, cfg.controllerEpoch)
-	}
-
-	var candidates corev1.SecretList
-	if err := reader.List(ctx, &candidates, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: booleanTrueValue,
-		runtimePoolUIDLabel:  string(pool.UID),
-	}); err != nil {
-		return nil, err
-	}
-	authoritativePool := &corev1alpha1.RuntimePool{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), authoritativePool); err != nil {
-		return nil, fmt.Errorf("refresh RuntimePool before private auth Secret cleanup: %w", err)
-	}
-	if authoritativePool.UID != pool.UID {
-		return nil, fmt.Errorf("RuntimePool UID changed before private auth Secret cleanup")
-	}
-	if authoritativeBinding := strings.TrimSpace(authoritativePool.Annotations[bindingKey]); authoritativeBinding != "" {
-		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, authoritativePool, cfg, cfg.controllerEpoch)
-	}
-	matches := runtimePoolAuthSecretsForEpoch(candidates.Items, cfg.controllerEpoch)
-	for i := range matches {
-		if !runtimePoolPrivateAuthSecretMatchesPool(&matches[i], pool, cfg) {
-			return nil, fmt.Errorf("refusing to adopt an unbound private RuntimePool auth Secret for controller epoch %d", cfg.controllerEpoch)
-		}
-	}
-	for i := range matches {
-		if err := r.deleteRuntimePoolManagedSecret(ctx, &matches[i]); err != nil {
-			return nil, fmt.Errorf("discard unbound private RuntimePool auth Secret: %w", err)
-		}
-	}
-
-	suffix, err := r.randomHex(12)
-	if err != nil {
-		return nil, fmt.Errorf("generate private RuntimePool auth Secret name: %w", err)
-	}
-	name := runtimePoolChildName(cfg.baseName, "auth-e"+epoch+"-"+suffix)
-	secret, err := r.createRuntimePoolSecret(ctx, pool, cfg, name, authKeys, authLabels)
-	if err != nil {
-		return nil, err
-	}
-	if err := r.bindPrivateRuntimePoolAuthSecret(ctx, pool, bindingKey, secret); err != nil {
-		return nil, err
-	}
-	return secret, nil
+	return r.ensureExternalPrivateAuthCredential(ctx, pool, cfg)
 }
 
 func (r *RuntimePoolReconciler) boundPrivateWorkspaceRuntimePoolAuthSecret(
@@ -2694,14 +2540,6 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 	return template
 }
 
-func runtimePoolJSONRevision(payload any) (string, error) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal RuntimePool template revision: %w", err)
-	}
-	return store.CanonicalBytesDigest(data), nil
-}
-
 func runtimePoolPodTemplateRevision(template corev1.PodTemplateSpec) string {
 	copy := *template.DeepCopy()
 	delete(copy.Annotations, runtimePoolTemplateRevisionAnnotation)
@@ -2742,6 +2580,9 @@ func runtimePoolHTTPProbe(failureThreshold, periodSeconds, timeoutSeconds int32)
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolService(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	if runtimePoolHasExternalWorkspace(pool) && cfg.namespace != pool.Namespace {
+		return r.ensureExternalDiscoveryResource(ctx, pool, cfg, "Service")
+	}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: cfg.baseName, Namespace: cfg.namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
 		service.Labels = mergeStringMap(service.Labels, cfg.labels)
@@ -2770,7 +2611,7 @@ func controllerNamespaceForRuntimePool(namespace string) string {
 	return namespace
 }
 
-func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+func (r *RuntimePoolReconciler) runtimePoolNetworkPolicies(cfg runtimePoolConfig) []networkingv1.NetworkPolicy {
 	selector := metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}
 	controllerNamespace := controllerNamespaceForRuntimePool(r.ControllerNamespace)
 	policies := make([]networkingv1.NetworkPolicy, 0, 6)
@@ -2839,6 +2680,11 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 			},
 		},
 	)
+	return policies
+}
+
+func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	policies := r.runtimePoolNetworkPolicies(cfg)
 	for i := range policies {
 		policy := &networkingv1.NetworkPolicy{ObjectMeta: policies[i].ObjectMeta}
 		desired := policies[i].Spec
@@ -2858,6 +2704,21 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolPDB(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	if runtimePoolHasExternalWorkspace(pool) && cfg.namespace != pool.Namespace {
+		if r.EnablePDB {
+			return r.ensureExternalDiscoveryResource(ctx, pool, cfg, "PodDisruptionBudget")
+		}
+		object := externalDiscoveryObject(cfg, "PodDisruptionBudget")
+		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		owned, err := externalDiscoveryResourceOwned(pool, cfg, object)
+		if err != nil || !owned {
+			return err
+		}
+		_, err = r.deleteExternalCoreResource(ctx, object)
+		return err
+	}
 	name := runtimePoolChildName(cfg.baseName, "pdb")
 	pdb := &policyv1.PodDisruptionBudget{}
 	key := types.NamespacedName{Namespace: cfg.namespace, Name: name}
@@ -3493,21 +3354,7 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if pool.Spec.ExecutionWorkspace != nil {
-		var workspaceRemaining bool
-		var workspaceErr error
-		if runtimePoolIsSubstrateBacked(pool) {
-			workspaceRemaining, workspaceErr = r.deleteSubstrateRuntimePoolChildren(ctx, pool, cfg)
-		} else {
-			workspaceRemaining, workspaceErr = r.deleteRuntimePoolWorkspaceChildren(ctx, pool, cfg)
-		}
-		if workspaceErr != nil {
-			return ctrl.Result{}, workspaceErr
-		}
-		if workspaceRemaining {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-	}
+
 	remaining, err := r.deleteRuntimePoolChildren(ctx, cfg)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -3670,132 +3517,30 @@ func (r *RuntimePoolReconciler) supervisorClient() RuntimePoolSupervisorClient {
 // backend: Substrate-backed pools reach the exact actor through the provider
 // router with the logical route host preserved; every other pool dials the
 // exact Pod address directly.
-func (r *RuntimePoolReconciler) supervisorClientForPool(pool *corev1alpha1.RuntimePool) RuntimePoolSupervisorClient {
-	if r.SupervisorClient != nil {
-		return r.SupervisorClient
-	}
-	if pool != nil && pool.Spec.ExecutionWorkspace != nil &&
-		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate {
-		httpClient, err := r.substrateSupervisorHTTPClient()
-		if err != nil {
-			return &runtimePoolFailingSupervisorClient{err: err}
-		}
-		return &runtimePoolHTTPSupervisorClient{client: httpClient, now: r.now}
-	}
+func (r *RuntimePoolReconciler) supervisorClientForPool(_ *corev1alpha1.RuntimePool) RuntimePoolSupervisorClient {
 	return r.supervisorClient()
 }
 
-func (r *RuntimePoolReconciler) substrateSupervisorHTTPClient() (*http.Client, error) {
-	r.substrateSupervisorOnce.Do(func() {
-		transport, err := substrateRouteHTTPTransport(r.SubstrateConfig.RouterURL, r.SubstrateConfig.ActorDNSSuffix)
-		if err != nil {
-			r.substrateSupervisorSetup = err
-			return
-		}
-		client := &http.Client{Timeout: runtimePoolProbeTimeout, Transport: transport}
-		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-		r.substrateSupervisorHTTP = client
-	})
-	return r.substrateSupervisorHTTP, r.substrateSupervisorSetup
-}
-
-// runtimePoolFailingSupervisorClient surfaces a supervisor-transport
-// configuration failure as an authenticated-probe failure so the pool degrades
-// with a sanitized message instead of dialing an unintended endpoint.
-type runtimePoolFailingSupervisorClient struct{ err error }
-
-func (c *runtimePoolFailingSupervisorClient) Probe(context.Context, string, string, []byte) (RuntimePoolProbeResult, error) {
-	return RuntimePoolProbeResult{}, c.err
-}
-
-func (c *runtimePoolFailingSupervisorClient) RequestDrain(
-	context.Context, string, string, []byte, harnessv2.StatusResponse, string,
-) error {
-	return c.err
-}
-
-// runtimePoolInstanceEndpoint resolves the authenticated control endpoint for
-// the exact selected instance. Substrate-backed pools use the actor route host
-// (dialed through the provider router by the pool's substrate transport);
-// every other pool dials the exact Pod address.
+// Only Core's exact native-process binding can supply a routed endpoint.
+// Real runtime Pods always use their independently observed address.
 func runtimePoolInstanceEndpoint(pool *corev1alpha1.RuntimePool, pod *corev1.Pod) string {
-	if pool != nil && pool.Spec.ExecutionWorkspace != nil &&
-		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate {
-		return urlSchemeHTTP + "://" + strings.TrimSpace(pod.Status.PodIP)
+	if runtimePoolHasExternalWorkspace(pool) {
+		evidence, err := externalRuntimeEvidence(pool)
+		if err != nil {
+			return ""
+		}
+		if evidence != nil && evidence.NativeProcess {
+			if evidence.WorkspaceUID != pool.Spec.ExecutionWorkspace.WorkspaceRef.UID ||
+				pod == nil || pod.UID != evidence.RuntimeUID {
+				return ""
+			}
+			return evidence.Endpoint
+		}
+		if slices.Contains(pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+			return ""
+		}
 	}
 	return runtimePoolPodEndpoint(pod)
-}
-
-// substrateRouteHTTPTransport dials the Substrate router for every host under
-// the actor DNS suffix while preserving the logical route host as the HTTP
-// Host header, exactly like the verified MCP actor routing. Hosts outside the
-// suffix are refused: this transport exists only for actor-routed requests.
-type substrateRouteRoundTripper struct {
-	scheme    string
-	basePath  string
-	transport *http.Transport
-}
-
-func (t *substrateRouteRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request == nil || request.URL == nil {
-		return nil, fmt.Errorf("substrate route request URL is required")
-	}
-	clone := request.Clone(request.Context())
-	urlCopy := *request.URL
-	urlCopy.Scheme = t.scheme
-	if t.basePath != "" {
-		urlCopy.Path = strings.TrimRight(t.basePath, "/") + "/" + strings.TrimLeft(urlCopy.Path, "/")
-		// Path now contains the decoded combination. Clear RawPath so net/http
-		// derives a matching escaped form instead of reusing the actor-relative
-		// path from the original request.
-		urlCopy.RawPath = ""
-	}
-	clone.URL = &urlCopy
-	return t.transport.RoundTrip(clone)
-}
-
-func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (http.RoundTripper, error) {
-	parsed, err := url.Parse(strings.TrimSpace(routerURL))
-	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
-		return nil, fmt.Errorf("substrate router URL is invalid")
-	}
-	routerAddress := parsed.Host
-	if parsed.Port() == "" {
-		port := "80"
-		if parsed.Scheme == urlSchemeHTTPS {
-			port = "443"
-		}
-		routerAddress = net.JoinHostPort(parsed.Hostname(), port)
-	}
-	normalizedSuffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
-	if normalizedSuffix == "" {
-		return nil, fmt.Errorf("substrate actor DNS suffix is required")
-	}
-	if problems := validation.IsDNS1123Subdomain(normalizedSuffix); len(problems) > 0 {
-		return nil, fmt.Errorf("substrate actor DNS suffix is invalid: %s", strings.Join(problems, "; "))
-	}
-	suffix := "." + normalizedSuffix
-	transport := harnessv2.NewProxylessTransport()
-	if parsed.Scheme == urlSchemeHTTPS {
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: parsed.Hostname(),
-		}
-	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, _, splitErr := net.SplitHostPort(address)
-		if splitErr != nil {
-			host = address
-		}
-		if !strings.HasSuffix(strings.ToLower(host), suffix) {
-			return nil, fmt.Errorf("substrate route transport refuses non-actor host")
-		}
-		return dialer.DialContext(ctx, network, routerAddress)
-	}
-	return &substrateRouteRoundTripper{
-		scheme: parsed.Scheme, basePath: strings.TrimRight(parsed.Path, "/"), transport: transport,
-	}, nil
 }
 
 func (r *RuntimePoolReconciler) randomSecret(size int) (string, error) {
@@ -4086,9 +3831,19 @@ func runtimePoolRequestForChild(_ context.Context, object client.Object) []recon
 
 // SetupWithManager sets up watches for RuntimePools and their cross-namespace children.
 func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1alpha1.RuntimePool{}).
-		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
+	builder := ctrl.NewControllerManagedBy(mgr).For(&corev1alpha1.RuntimePool{})
+	if _, err := mgr.GetRESTMapper().RESTMapping(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace").GroupKind(), workspacev1alpha1.GroupVersion.Version); err == nil {
+		builder = builder.Watches(&workspacev1alpha1.ExecutionWorkspace{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+			name := obj.GetAnnotations()[acpExecutionWorkspacePoolAnnotation]
+			if name == "" {
+				return nil
+			}
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}}}
+		}))
+	} else if !meta.IsNoMatchError(err) {
+		return err
+	}
+	return builder.Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).

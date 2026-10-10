@@ -688,6 +688,7 @@ func (b *ACPMCPBroker) Validate() error {
 	return nil
 }
 
+//nolint:gocyclo // The MCP request dispatcher keeps authentication and per-operation authorization explicit.
 func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || r.URL.Path != harnessv2.MCPBrokerCallPath {
 		http.NotFound(w, r)

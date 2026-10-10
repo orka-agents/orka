@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -165,24 +167,30 @@ type agentExecutionSnapshotWorkspaceBinding struct {
 // binding for class-selected execution workspaces. It carries only Orka-owned
 // identity and policy: no provider-native identifiers and no secrets.
 type agentExecutionSnapshotWorkspaceClass struct {
-	Name               string                               `json:"name"`
-	UID                string                               `json:"uid"`
-	Generation         int64                                `json:"generation"`
-	ProfileHash        string                               `json:"profileHash"`
-	ProviderName       string                               `json:"providerName"`
-	ProviderUID        string                               `json:"providerUID"`
-	ProviderGeneration int64                                `json:"providerGeneration"`
-	ProviderConfigUID  string                               `json:"providerConfigUID,omitempty"`
-	EffectiveOnDetach  string                               `json:"effectiveOnDetach"`
-	SuspendMode        string                               `json:"suspendMode,omitempty"`
-	SandboxVolume      *agentExecutionSnapshotSandboxVolume `json:"sandboxVolume,omitempty"`
-	MaxSuspended       *int32                               `json:"maxSuspended,omitempty"`
-	DefaultOnDetach    string                               `json:"defaultOnDetach"`
-	AllowedOnDetach    []string                             `json:"allowedOnDetach"`
-	DetachTimeout      string                               `json:"detachTimeout"`
-	IdleTimeout        string                               `json:"idleTimeout,omitempty"`
-	MaxLifetime        string                               `json:"maxLifetime,omitempty"`
-	DeletionPolicy     struct {
+	Name                     string                                    `json:"name"`
+	UID                      string                                    `json:"uid"`
+	Generation               int64                                     `json:"generation"`
+	ProfileHash              string                                    `json:"profileHash"`
+	ProviderName             string                                    `json:"providerName"`
+	ProviderUID              string                                    `json:"providerUID"`
+	ProviderGeneration       int64                                     `json:"providerGeneration"`
+	ProviderConfigUID        string                                    `json:"providerConfigUID,omitempty"`
+	ControllerName           string                                    `json:"controllerName,omitempty"`
+	LifecycleContractVersion string                                    `json:"lifecycleContractVersion,omitempty"`
+	ProviderConfigRef        *workspacev1alpha1.TypedObjectReference   `json:"providerConfigRef,omitempty"`
+	ProviderConfigBinding    *workspacev1alpha1.ImmutableObjectBinding `json:"providerConfigBinding,omitempty"`
+	ParametersRef            *workspacev1alpha1.TypedObjectReference   `json:"parametersRef,omitempty"`
+	ParametersBinding        *workspacev1alpha1.ImmutableObjectBinding `json:"parametersBinding,omitempty"`
+	EffectiveOnDetach        string                                    `json:"effectiveOnDetach"`
+	SuspendMode              string                                    `json:"suspendMode,omitempty"`
+	SandboxVolume            *agentExecutionSnapshotSandboxVolume      `json:"sandboxVolume,omitempty"`
+	MaxSuspended             *int32                                    `json:"maxSuspended,omitempty"`
+	DefaultOnDetach          string                                    `json:"defaultOnDetach"`
+	AllowedOnDetach          []string                                  `json:"allowedOnDetach"`
+	DetachTimeout            string                                    `json:"detachTimeout"`
+	IdleTimeout              string                                    `json:"idleTimeout,omitempty"`
+	MaxLifetime              string                                    `json:"maxLifetime,omitempty"`
+	DeletionPolicy           struct {
 		ProviderResources string `json:"providerResources"`
 		PersistentVolumes string `json:"persistentVolumes"`
 		Checkpoints       string `json:"checkpoints"`
@@ -364,7 +372,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, classifyACPWorkspaceClassResolutionError(err)
 	}
-	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
+	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, resolvedClass)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
@@ -387,7 +395,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			}
 		}
 		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
-			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID, resolvedClass,
+			task, workspaceSessionUID, resolvedClass,
 		)
 		if err != nil {
 			return nil, permanentACPAgentConfiguration(err)
@@ -1060,21 +1068,27 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		return nil
 	}
 	frozen := &agentExecutionSnapshotWorkspaceClass{
-		Name:               class.Name,
-		UID:                class.UID,
-		Generation:         class.Generation,
-		ProfileHash:        class.ProfileHash,
-		ProviderName:       class.ProviderName,
-		ProviderUID:        class.ProviderUID,
-		ProviderGeneration: class.ProviderGeneration,
-		ProviderConfigUID:  class.ProviderConfigUID,
-		EffectiveOnDetach:  class.EffectiveOnDetach,
-		SuspendMode:        class.SuspendMode,
-		DefaultOnDetach:    class.DefaultOnDetach,
-		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
-		DetachTimeout:      class.DetachTimeout,
-		IdleTimeout:        class.IdleTimeout,
-		MaxLifetime:        class.MaxLifetime,
+		Name:                     class.Name,
+		UID:                      class.UID,
+		Generation:               class.Generation,
+		ProfileHash:              class.ProfileHash,
+		ProviderName:             class.ProviderName,
+		ProviderUID:              class.ProviderUID,
+		ProviderGeneration:       class.ProviderGeneration,
+		ProviderConfigUID:        class.ProviderConfigUID,
+		ControllerName:           class.ControllerName,
+		LifecycleContractVersion: class.LifecycleContractVersion,
+		ProviderConfigRef:        class.ProviderConfigRef.DeepCopy(),
+		ProviderConfigBinding:    class.ProviderConfigBinding.DeepCopy(),
+		ParametersRef:            class.ParametersRef.DeepCopy(),
+		ParametersBinding:        class.ParametersBinding.DeepCopy(),
+		EffectiveOnDetach:        class.EffectiveOnDetach,
+		SuspendMode:              class.SuspendMode,
+		DefaultOnDetach:          class.DefaultOnDetach,
+		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
+		DetachTimeout:            class.DetachTimeout,
+		IdleTimeout:              class.IdleTimeout,
+		MaxLifetime:              class.MaxLifetime,
 	}
 	if class.SandboxVolume != nil {
 		frozen.SandboxVolume = &agentExecutionSnapshotSandboxVolume{
@@ -1101,22 +1115,28 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 		return nil
 	}
 	return &ACPWorkspaceClassBinding{
-		Name:               class.Name,
-		UID:                class.UID,
-		Generation:         class.Generation,
-		ProfileHash:        class.ProfileHash,
-		ProviderName:       class.ProviderName,
-		ProviderUID:        class.ProviderUID,
-		ProviderGeneration: class.ProviderGeneration,
-		ProviderConfigUID:  class.ProviderConfigUID,
-		EffectiveOnDetach:  class.EffectiveOnDetach,
-		SuspendMode:        class.SuspendMode,
-		DefaultOnDetach:    class.DefaultOnDetach,
-		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
-		DetachTimeout:      class.DetachTimeout,
-		IdleTimeout:        class.IdleTimeout,
-		MaxLifetime:        class.MaxLifetime,
-		SandboxVolume:      sandboxVolumeFromSnapshot(class.SandboxVolume),
+		Name:                     class.Name,
+		UID:                      class.UID,
+		Generation:               class.Generation,
+		ProfileHash:              class.ProfileHash,
+		ProviderName:             class.ProviderName,
+		ProviderUID:              class.ProviderUID,
+		ProviderGeneration:       class.ProviderGeneration,
+		ProviderConfigUID:        class.ProviderConfigUID,
+		ControllerName:           class.ControllerName,
+		LifecycleContractVersion: class.LifecycleContractVersion,
+		ProviderConfigRef:        class.ProviderConfigRef.DeepCopy(),
+		ProviderConfigBinding:    class.ProviderConfigBinding.DeepCopy(),
+		ParametersRef:            class.ParametersRef.DeepCopy(),
+		ParametersBinding:        class.ParametersBinding.DeepCopy(),
+		EffectiveOnDetach:        class.EffectiveOnDetach,
+		SuspendMode:              class.SuspendMode,
+		DefaultOnDetach:          class.DefaultOnDetach,
+		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
+		DetachTimeout:            class.DetachTimeout,
+		IdleTimeout:              class.IdleTimeout,
+		MaxLifetime:              class.MaxLifetime,
+		SandboxVolume:            sandboxVolumeFromSnapshot(class.SandboxVolume),
 		MaxSuspendedWorkspaces: func() *int32 {
 			if class.MaxSuspended == nil {
 				return nil

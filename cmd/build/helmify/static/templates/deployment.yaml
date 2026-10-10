@@ -341,32 +341,13 @@ spec:
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
             {{- if .Values.controller.executionWorkspace.dispatchEnabled }}
+            - --enable-workspace-provider-api=true
             - --acp-workspace-dispatch-enabled=true
             {{- end }}
-            {{- with .Values.controller.executionWorkspace }}
-            - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
-            {{- end }}
-            {{- with .Values.controller.agentSandbox }}
-            {{- if .enabled }}
-            - --agent-sandbox-enabled=true
-            {{- if .routerUrl }}
-            - {{ printf "--agent-sandbox-router-url=%s" .routerUrl | quote }}
-            {{- end }}
-            {{- if .defaultTemplate }}
-            - {{ printf "--agent-sandbox-default-template=%s" .defaultTemplate | quote }}
-            {{- end }}
-            - --agent-sandbox-warm-pool-policy={{ .warmPoolPolicy | default "disabled" }}
-            - --agent-sandbox-namespace-strategy={{ .namespaceStrategy | default "task" }}
-            - --agent-sandbox-claim-timeout={{ .claimTimeout | default "2m" }}
-            - --agent-sandbox-command-timeout={{ .commandTimeout | default "30m" }}
-            - --agent-sandbox-cleanup-policy={{ .cleanupPolicy | default "delete" }}
-            {{- end }}
-            {{- end }}
             {{- with .Values.controller.substrate }}
-            {{- if .enabled }}
-            - --substrate-enabled=true
+            {{- if .mcpToolsEnabled }}
+            - --substrate-mcp-tools-enabled=true
             {{- end }}
-            - --substrate-direct-egress-enabled={{ .directEgressEnabled | default false }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
             {{- if $substrateCredentials.existingSecret }}
             {{- if $substrateCredentials.certKey }}

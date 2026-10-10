@@ -30,13 +30,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
-	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
 const (
@@ -110,7 +110,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if err := r.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue {
+	if !workspaceHasACPControllerOwnership(workspace) {
 		return ctrl.Result{}, nil
 	}
 	if !workspace.DeletionTimestamp.IsZero() ||
@@ -1079,7 +1079,7 @@ func listACPSuspendQuotaWorkspaces(
 	workspaces := make(map[string]*workspacev1alpha1.ExecutionWorkspace, len(list.Items))
 	for i := range list.Items {
 		workspace := &list.Items[i]
-		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
+		if !workspaceHasACPControllerOwnership(workspace) ||
 			workspace.Spec.ClassBinding.UID != classUID || workspace.UID == "" {
 			continue
 		}
@@ -1415,7 +1415,7 @@ func countSuspendedClassWorkspaces(
 	count := 0
 	for i := range list.Items {
 		workspace := &list.Items[i]
-		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
+		if !workspaceHasACPControllerOwnership(workspace) ||
 			workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
@@ -1685,7 +1685,7 @@ func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.Executi
 // SetupWithManager registers retention enforcement for ACP class workspaces.
 func (r *ACPWorkspaceRetentionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ours := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+		return object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue || (object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] != "" && object.GetAnnotations()[acpExecutionWorkspacePoolAnnotation] != "")
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspace{}).

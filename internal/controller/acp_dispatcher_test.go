@@ -29,8 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -408,6 +408,9 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	}
 	if len(epochs) > 0 {
 		binder.ControllerEpochManager = epochs[0]
+	}
+	if taskRequestsExecutionWorkspace(task) {
+		installTestACPWorkspaceClass(t, binder)
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
 	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
@@ -2832,9 +2835,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}},
 	}
 	if workspaceLifetime {
-		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled: true, Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-		}}
+		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
@@ -2848,7 +2849,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
 	if workspaceLifetime {
-		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		binding, err := resolveTestACPWorkspaceBinding(t, task, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2861,12 +2862,20 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	profileDigest := plan.Digest
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
 	task.Status.Execution.RuntimePoolName = plan.PoolName
+	runtimeUID := types.UID("pod-uid")
+	if workspaceLifetime {
+		runtimeUID = externalNativeRuntimeUID(&workspacev1alpha1.WorkloadRequest{
+			Sequence: 1, Key: workspacev1alpha1.AllocationKey{WorkspaceUID: "expiring-workspace-uid"},
+			Runtime: &workspacev1alpha1.RuntimeWorkload{PoolBinding: workspacev1alpha1.ImmutableObjectBinding{UID: "pool-uid"}},
+		})
+	}
+	runtimeInstanceID := harnessv2.RuntimeInstanceID(runtimePoolRuntimeInstanceID(runtimeUID, "boot-id"))
 	var deleteCalls atomic.Int32
 	deadlineCancels := make(chan context.CancelCauseFunc, 1)
 	accepted := make(chan struct{})
 	server := newDispatcherTimeoutRuntimeServer(t, profile, profileDigest, &deleteCalls, func() {
 		close(accepted)
-	})
+	}, runtimeInstanceID)
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -2883,15 +2892,13 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 			Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
 			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
 				PodNamespace: "orka-runtimes", PodName: "runtime-pod", PodAddress: parsed.Host,
-				PodUID: "pod-uid", BootID: "boot-id", RuntimeInstanceID: "pod-uid.boot-id", ControllerEpoch: 1,
+				PodUID: string(runtimeUID), BootID: "boot-id", RuntimeInstanceID: string(runtimeInstanceID), ControllerEpoch: 1,
 				ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, ProfileDigest: string(profileDigest), ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
 			},
 		},
 	}
 	if workspaceLifetime {
-		pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-			Provider: plan.Workspace.Provider, BindingDigest: plan.Workspace.BindingDigest,
-		}
+		pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(plan.Workspace, "expiring-workspace", "expiring-workspace-uid")
 		pool.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: "expiring-workspace"}
 		pool.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: "expiring-workspace-uid"}
 	}
@@ -2913,7 +2920,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}
 		pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(1)] = secret.Name + "/" + string(secret.UID)
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}).WithObjects(task, pool, secret, agent).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "timeout-store.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -2930,7 +2937,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
+	task = prepareBoundACPDispatcherTaskWithStoresForTest(t, ctx, kubeClient, scheme, controlStore, controlStore, task, agent, images, epochs)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
@@ -2958,17 +2965,31 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		// authenticated cancellation. The Task's own 30-second timeout must
 		// not be the cause of settlement within this test's 10-second bound.
 		dispatcher.runtimeContextFactory = nil
-		workspace := &workspacev1alpha1.ExecutionWorkspace{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: task.Namespace, Name: "expiring-workspace", UID: types.UID("expiring-workspace-uid"),
-				CreationTimestamp: metav1.NewTime(time.Now().UTC().Truncate(time.Second)),
-				Annotations:       map[string]string{acpExecutionWorkspacePoolAnnotation: pool.Name},
-			},
-			Spec: workspacev1alpha1.ExecutionWorkspaceSpec{Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
-				MaxLifetime: &metav1.Duration{Duration: 5 * time.Second},
-			}},
+		bootstrapPort, err := strconv.ParseInt(parsed.Port(), 10, 32)
+		if err != nil {
+			t.Fatal(err)
 		}
+		workspace := testAdmittedNativeDispatchWorkspace(t, plan.Workspace, pool, server.URL, int32(bootstrapPort))
+		workspace.CreationTimestamp = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+		workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 5 * time.Second}
 		if err := kubeClient.Create(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+		worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "deadline-worker", UID: "deadline-worker-uid"}}
+		if err := kubeClient.Create(ctx, worker); err != nil {
+			t.Fatal(err)
+		}
+		// Model the core fence persisted after the one-time native challenge. This
+		// test exercises deadline settlement; the endpoint test verifies admission.
+		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), pool); err != nil {
+			t.Fatal(err)
+		}
+		pool.Status.ActiveInstance.PodAddress = parsed.Hostname()
+		if err := kubeClient.Status().Update(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		observer := &RuntimePoolReconciler{Client: kubeClient, APIReader: kubeClient}
+		if err := observer.bindExternalRuntimeInstanceEvidence(ctx, pool, workspace); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -3359,6 +3380,7 @@ type dispatcherPublisherServerOptions struct {
 	inspectPullRequest    func(publisher.PullRequestIntent)
 }
 
+//nolint:gocyclo // Publisher test fixture exposes protocol operations and their fault-injection controls.
 func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest string, options ...dispatcherPublisherServerOptions) *httptest.Server {
 	t.Helper()
 	bundleArtifactID, err := artifactcap.ArtifactIDForDigest(bundleDigest)
@@ -3525,6 +3547,7 @@ func newDispatcherTimeoutRuntimeServer(
 	digest harnessv2.ProfileDigest,
 	deleteCalls *atomic.Int32,
 	onAccepted func(),
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
 ) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -3536,7 +3559,9 @@ func newDispatcherTimeoutRuntimeServer(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+		response := dispatcherRuntimeStatusResponse(digest, current)
+		response.Fence.RuntimeInstanceID = runtimeInstanceID
+		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{

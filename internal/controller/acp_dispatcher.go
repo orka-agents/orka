@@ -27,8 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -116,12 +116,6 @@ type ACPDispatcher struct {
 	ACPRuntimeImages         ACPRuntimeImages
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
-	// SubstrateRouterURL and SubstrateActorDNSSuffix route Substrate-backed
-	// RuntimePool instances through the provider router while preserving the
-	// exact actor route host. Empty values fail closed for substrate pools.
-	SubstrateRouterURL      string
-	SubstrateActorDNSSuffix string
-
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
 	sem             chan struct{}
@@ -131,25 +125,10 @@ type ACPDispatcher struct {
 
 	approvalRecoveryMu sync.Mutex
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
-
-	substrateRouteOnce  sync.Once
-	substrateRouteHTTP  *http.Client
-	substrateRouteSetup error
 }
 
 // substrateRouteHTTPClient lazily builds the router-pinned transport for
 // Substrate-backed RuntimePool instances.
-func (d *ACPDispatcher) substrateRouteHTTPClient() (*http.Client, error) {
-	d.substrateRouteOnce.Do(func() {
-		transport, err := substrateRouteHTTPTransport(d.SubstrateRouterURL, d.SubstrateActorDNSSuffix)
-		if err != nil {
-			d.substrateRouteSetup = fmt.Errorf("substrate route transport is not configured: %w", err)
-			return
-		}
-		d.substrateRouteHTTP = &http.Client{Transport: transport}
-	})
-	return d.substrateRouteHTTP, d.substrateRouteSetup
-}
 
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
 
@@ -4313,6 +4292,8 @@ func (d *ACPDispatcher) transitionDelivery(ctx context.Context, id string, fence
 	return err
 }
 
+const externalRuntimeFinalizePublicationOperation = "finalize_runtime_session_publication"
+
 func (d *ACPDispatcher) runtimeClient(
 	ctx context.Context,
 	target acpDispatchTarget,
@@ -4325,10 +4306,10 @@ func (d *ACPDispatcher) runtimeClient(
 	if target.pool == nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("ACP runtime target is missing")
 	}
-	return d.runtimePoolClient(ctx, target.pool)
+	return d.runtimePoolClient(ctx, target.pool, requireAdmission)
 }
 
-func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha1.RuntimePool) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
+func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha1.RuntimePool, requireAdmission bool) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
 	active := pool.Status.ActiveInstance
 	if active == nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool has no active instance")
@@ -4350,6 +4331,16 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool auth Secret is incomplete")
 	}
 	endpoint := exactPodEndpoint(active.PodAddress)
+	if runtimePoolHasExternalWorkspace(pool) {
+		readEndpoint := runtimePoolWorkspaceStartupEndpoint
+		if !requireAdmission {
+			readEndpoint = runtimePoolWorkspaceCleanupEndpoint
+		}
+		endpoint, err = readEndpoint(ctx, uncachedReader(d.APIReader, d.Client), pool)
+		if err != nil {
+			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool admitted endpoint: %w", err)
+		}
+	}
 	options := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{pool: pool})),
 		harnessv2.WithControllerBearerToken(controllerToken),
@@ -4359,17 +4350,7 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(active.RuntimeInstanceID),
 		}),
 	}
-	if runtimePoolIsSubstrateBacked(pool) {
-		// Substrate-backed instances are reached through the provider router:
-		// the endpoint is the exact actor route host, and the pinned router
-		// transport preserves it as the logical Host header.
-		endpoint = urlSchemeHTTP + "://" + strings.TrimSpace(active.PodAddress)
-		substrateHTTPClient, substrateErr := d.substrateRouteHTTPClient()
-		if substrateErr != nil {
-			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, substrateErr
-		}
-		options = append(options, harnessv2.WithHTTPClient(substrateHTTPClient))
-	}
+
 	runtimeClient, err := harnessv2.NewClient(endpoint, options...)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
@@ -4610,7 +4591,7 @@ const (
 
 func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
 	switch operation {
-	case "cancel_prompt", "create_workspace_delta", "finalize_runtime_session_publication", externalRuntimeDeleteSessionOperation:
+	case "cancel_prompt", "create_workspace_delta", externalRuntimeFinalizePublicationOperation, externalRuntimeDeleteSessionOperation:
 		return true
 	default:
 		return false
@@ -4620,7 +4601,7 @@ func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
 func externalRuntimeCleanupMutationAllowed(authority *externalRuntimeCleanupAuthority, operation string) bool {
 	if authority != nil && authority.sessionCleanup != nil {
 		return operation == externalRuntimeDeleteSessionOperation ||
-			(authority.sessionCleanup.allowPublicationFinalization && operation == "finalize_runtime_session_publication")
+			(authority.sessionCleanup.allowPublicationFinalization && operation == externalRuntimeFinalizePublicationOperation)
 	}
 	return externalRuntimeMutationUsesFrozenCleanupAuthority(operation)
 }
@@ -5087,7 +5068,7 @@ func validateExternalRuntimeStatus(
 func externalRuntimeMutationRequiresAdmission(operation string) bool {
 	switch operation {
 	case "renew_prompt_lease", "resolve_permission", "cancel_prompt", "create_workspace_delta",
-		"finalize_runtime_session_publication", externalRuntimeDeleteSessionOperation, externalRuntimeDrainOperation:
+		externalRuntimeFinalizePublicationOperation, externalRuntimeDeleteSessionOperation, externalRuntimeDrainOperation:
 		return false
 	default:
 		// Unknown mutations fail closed as admissions. This also covers the two

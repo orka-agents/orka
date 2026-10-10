@@ -252,9 +252,8 @@ spec:
                     type: object
                   provider:
                     description: Provider is the actor provider.
-                    enum:
-                    - agent-sandbox
-                    - substrate
+                    maxLength: 253
+                    minLength: 1
                     type: string
                   routeHost:
                     description: RouteHost is the HTTP Host value used with the provider

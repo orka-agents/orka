@@ -326,8 +326,18 @@ func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
 			}
 			foundMarkerFence := false
 			foundAttachmentFence := false
+			foundProviderFence := false
+			foundWorkloadFence := false
 			for _, validation := range policy.Spec.Validations {
-				if strings.Contains(validation.Expression, "variables.acpMarkersUnchanged") {
+				if strings.Contains(validation.Expression, "variables.providerMarkersUnchanged") &&
+					strings.Contains(validation.Expression, ".check('provider-status').allowed()") {
+					foundProviderFence = true
+				}
+				if strings.Contains(validation.Expression, "variables.workloadIntentUnchanged") &&
+					strings.Contains(validation.Expression, ".check('admit').allowed()") {
+					foundWorkloadFence = true
+				}
+				if strings.Contains(validation.Expression, "variables.coreMarkersUnchanged") {
 					foundMarkerFence = true
 				}
 				if strings.Contains(validation.Expression, "variables.attachmentIntentUnchanged") {
@@ -335,10 +345,13 @@ func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
 				}
 			}
 			if !foundMarkerFence {
-				t.Fatal("status-routed policy does not enforce unchanged ACP materialization markers")
+				t.Fatal("status-routed policy does not enforce unchanged workspace routing and core materialization markers")
 			}
 			if !foundAttachmentFence {
 				t.Fatal("policy does not reserve attachment intent for the Orka core controller")
+			}
+			if !foundProviderFence || !foundWorkloadFence {
+				t.Fatal("policy does not reserve provider observations and workload intent for their approved writers")
 			}
 		})
 	}

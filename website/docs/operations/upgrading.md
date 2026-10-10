@@ -29,11 +29,56 @@ and keep its records. Keep the data volume and encryption key together.
 If startup reports `unsupported SQLite schema`, preserve the database and stop.
 Orka does not convert, reset, or replace an incompatible database.
 
-## Update CRDs first {#the-one-thing-that-will-bite-you}
+## CRD update ordering {#the-one-thing-that-will-bite-you}
 
 CRDs define Orka's Kubernetes resource types. Helm installs them on a fresh
-install, but does not update them during `helm upgrade`. Apply the target
-chart's CRDs before updating Orka, or Kubernetes may drop new fields.
+install but does not update them during `helm upgrade`. Apply target CRDs before
+starting the target controller. When removing the in-tree workspace providers,
+first drain the old allocations through their original owner, as described below.
+Applying the pruned RuntimePool schema before that drain can discard settings
+needed by the old owner to clean up.
+
+## External workspace migration {#external-workspace-migration}
+
+The external-provider core binary does not allocate, suspend, resume, or delete
+old in-tree Agent Sandbox or Substrate ACP workspaces. It does not adopt their
+resources. Keep the original core binary, backend access, credentials, worker
+RBAC, and NetworkPolicies available while draining them.
+
+Before applying the pruned RuntimePool CRD or replacing the core binary:
+
+1. Stop new legacy workspace demand and settle active Tasks and RuntimeSessions
+   through the original controller.
+2. Drain and delete every legacy RuntimePool and retained ExecutionWorkspace,
+   including records in `Ready`, `Suspended`, `Failed`, and `Deleted` states.
+   Allow the original owner to observe exact Pod/native termination and storage
+   cleanup before its finalizers complete.
+3. Retire legacy checkpoint references, catalogs, and template journals through
+   their original owner. Preserve required data separately before destructive
+   cleanup. Do not strip finalizers or relabel an allocation to transfer ownership.
+4. Verify no old allocations or retained records remain, then apply the target
+   CRDs and start the new core. Install external provider CRDs, registrations,
+   immutable profiles, and Deployments as separate components.
+
+Stock core startup lists RuntimePools and legacy-labelled ExecutionWorkspaces
+across all namespaces. It rejects every remaining legacy workspace state and
+names the blockers before starting dispatch. A pruned pool missing its generic
+external binding also blocks startup. The gate does not mutate provider status,
+seed runtime credentials, recreate compute, or perform native cleanup. Return to
+the original owner to finish the drain when it rejects startup.
+
+Tasks now select `execution.workspace.classRef` only. Provider-specific Task
+selectors, `RuntimeProviderConfig`, `RuntimeWorkspaceProfile`, and the old
+Sandbox/Substrate ACP flags are removed. Install the selected provider's own
+config/profile kinds instead. Native MCP Tools remain separate and use
+`--substrate-mcp-tools-enabled`; their control credentials are not external ACP
+provider credentials.
+
+The [local upgrade proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-workspace-upgrade-e2e.sh)
+uses actual API objects and a released stock core image. It covers old-shaped
+pools, all retained workspace states, schema pruning, unchanged legacy identities,
+and fresh startup after exact synthetic cleanup. This scoped migration proof does
+not establish general release-to-release or database restore support.
 
 ## Upgrade steps
 
@@ -94,12 +139,16 @@ If you have the workspace provider API enabled, back up its resources too:
 ```bash
 kubectl --context "$TARGET_CONTEXT" -n orka-system get \
   executionworkspaceclasses,executionworkspaceproviders,executionworkspacepools,\
-executionworkspaces,executionworkspacecheckpoints,runtimeproviderconfigs,runtimeworkspaceprofiles \
+executionworkspaces,executionworkspacecheckpoints \
   -o json > orka-workspace-crs.json
 ```
 
-Include the `RuntimeProviderConfig` and `RuntimeWorkspaceProfile` resources.
-Workspace classes need them to run.
+Export provider-owned configuration and profile resources from each installed
+provider group as well, such as `SandboxProviderConfig`, `SandboxWorkspaceProfile`,
+`SubstrateProviderConfig`, and `SubstrateWorkspaceProfile`. They are installed by
+the separate providers. Before migrating an old installation, also back up its
+legacy `RuntimeProviderConfig` and `RuntimeWorkspaceProfile` records for the
+original owner's drain.
 
 Leave out any kind your cluster does not have; `kubectl` fails the whole command on an
 unknown resource rather than skipping it.
@@ -109,9 +158,11 @@ Copying `orka.db` while the controller is writing can lose records.
 Snapshot the whole data volume, or stop the controller before copying it.
 :::
 
-### 2. Apply the target CRDs
+### 2. Drain legacy workspaces, then apply the target CRDs
 
-From a checkout matching the version you are upgrading to:
+If the target removes in-tree ACP workspace providers, complete the
+[external workspace migration drain](#external-workspace-migration) first.
+Then, from a checkout matching the version you are upgrading to:
 
 ```bash
 scripts/apply-helm-crds.sh "$TARGET_CHART" "$TARGET_CONTEXT"

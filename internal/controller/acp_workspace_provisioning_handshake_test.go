@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -99,6 +99,67 @@ func TestWorkspacePoolHandshakeWaitsForProvisioning(t *testing.T) {
 	}
 	if err := r.verifyACPWorkspaceReadyForPool(t.Context(), pool, workspace.Name, string(workspace.UID), provisioningHandshakeTaskUID); err != nil {
 		t.Fatalf("same original pool did not become admissible after exact attachment: %v", err)
+	}
+}
+
+func TestExternalWorkspacePoolHandshakeWaitsForGenerationAcknowledgement(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pending bool
+		mutate  func(*workspacev1alpha1.ExecutionWorkspace)
+	}{
+		{name: "provider acknowledgement pending", pending: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) { w.Status.ObservedGeneration-- }},
+		{name: "new workload needs core admission", pending: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) { w.Generation++ }},
+		{name: "provider outage", pending: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.Conditions[0].Status = metav1.ConditionFalse
+			w.Status.Conditions[0].Reason = reasonClassNotReady
+		}},
+		{name: "admission withdrawn", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Spec.CoreAdmission.AdmittedGeneration = 0
+			w.Status.ObservedGeneration--
+		}},
+		{name: "attachment revoked while provider is stale", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) { w.Spec.Attachment = nil; w.Status.ObservedGeneration-- }},
+		{name: "foreign task while provider is stale", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Spec.Attachment.TaskRef.UID = "foreign"
+			w.Status.ObservedGeneration--
+		}},
+		{name: "quarantined while provider is stale", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Labels = map[string]string{workspacev1alpha1.QuarantinedLabel: "true"}
+			w.Status.ObservedGeneration--
+		}},
+		{name: "class binding denied", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.Conditions[0].Status = metav1.ConditionFalse
+			w.Status.Conditions[0].Reason = "ClassBindingMismatch"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme, workspace, pool := provisioningHandshakeObjects(t)
+			workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
+			workspace.Status.AttachedEpoch = workspace.Spec.Attachment.Epoch
+			for i := range workspace.Status.Conditions {
+				if workspace.Status.Conditions[i].Type == string(workspacev1alpha1.ConditionWorkspaceAttached) {
+					workspace.Status.Conditions[i].Status = metav1.ConditionTrue
+				}
+			}
+			pool.Spec.ExecutionWorkspace.WorkspaceRef = &workspacev1alpha1.ObjectIdentityReference{Name: workspace.Name, UID: workspace.UID}
+			pool.Spec.ExecutionWorkspace.Workload = &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{ContractVersion: workspacev1alpha1.LifecycleContractV1, ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2}
+			tc.mutate(workspace)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, pool).Build()
+			r := &TaskReconciler{Client: c, APIReader: c, Scheme: scheme}
+			err := r.verifyACPWorkspaceReadyForPool(t.Context(), pool, workspace.Name, string(workspace.UID), provisioningHandshakeTaskUID)
+			if errors.Is(err, store.ErrNotReady) != tc.pending || err == nil {
+				t.Fatalf("handshake = %v, want pending %v", err, tc.pending)
+			}
+			current := &corev1alpha1.RuntimePool{}
+			getErr := c.Get(t.Context(), client.ObjectKeyFromObject(pool), current)
+			if tc.pending {
+				if getErr != nil || current.UID != pool.UID || !current.DeletionTimestamp.IsZero() {
+					t.Fatalf("pending handshake lost the exact pool: %v", getErr)
+				}
+			} else if !apierrors.IsNotFound(getErr) {
+				t.Fatalf("withdrawn authority kept pool demand: %v", getErr)
+			}
+		})
 	}
 }
 

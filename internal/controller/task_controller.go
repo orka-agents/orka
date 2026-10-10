@@ -44,8 +44,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
@@ -140,20 +140,19 @@ type TaskReconciler struct {
 	HarnessV1Enabled             bool
 	// Mode is the controller's static execution mode; it classifies built-in
 	// Agents that omitted contractVersion.
-	Mode                              executionmode.Mode
-	HarnessV1Endpoint                 string
-	HarnessV1AuthSecretNamespace      string
-	HarnessV1AuthSecretName           string
-	HarnessV1AuthSecretKey            string
-	HarnessV1Attempts                 store.HarnessV1AttemptStore
-	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
-	ACPRuntimeEnabled                 bool
-	ACPRuntimeImages                  ACPRuntimeImages
-	ACPRuntimeNamespace               string
-	EnforceNamespaceIsolation         bool
-	MaxTasksPerNamespace              int32
-	ExecutionWorkspaceDefaultProvider corev1alpha1.WorkspaceProvider
-	WorkspaceProviderAPIEnabled       bool
+	Mode                            executionmode.Mode
+	HarnessV1Endpoint               string
+	HarnessV1AuthSecretNamespace    string
+	HarnessV1AuthSecretName         string
+	HarnessV1AuthSecretKey          string
+	HarnessV1Attempts               store.HarnessV1AttemptStore
+	HarnessV1SettlementAcknowledger HarnessV1SettlementAcknowledger
+	ACPRuntimeEnabled               bool
+	ACPRuntimeImages                ACPRuntimeImages
+	ACPRuntimeNamespace             string
+	EnforceNamespaceIsolation       bool
+	MaxTasksPerNamespace            int32
+	WorkspaceProviderAPIEnabled     bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
 	// guards the reserved acp.workspace.orka.ai/ metadata settlement reads
 	// from. When false (a cleanup-only installation without the webhook),
@@ -165,10 +164,6 @@ type TaskReconciler struct {
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.
 	ACPWorkspaceDispatchEnabled       bool
-	AgentSandboxEnabled               bool
-	AgentSandboxConfig                AgentSandboxConfig
-	SubstrateEnabled                  bool
-	SubstrateConfig                   SubstrateConfig
 	AIWorkerServiceAccountName        string
 	VendorWorkerServiceAccountName    string
 	ContainerWorkerServiceAccountName string
@@ -212,14 +207,9 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
-// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // The Events-v1 retention recorder needs write verbs: recording emits create
 // and patch requests that the read-only grant rejects at the API server.
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
 
 // updateStatusWithRetry updates the task status with retry on conflict.
 // It re-fetches the task on conflict, applies the mutate function, and retries.
@@ -1444,7 +1434,6 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 	return status != "" && status != approvals.StatusApproved
 }
 
-// createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
 // missingToolPolicyGrace bounds how long a native dispatch waits for an
 // OutboundAccessPolicy that one of the Task's Tools references but that does
 // not exist. Tools are classified strictly (a missing policy cannot be judged
@@ -1468,6 +1457,9 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 	return result, true, failErr
 }
 
+// createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
+//
+//nolint:gocyclo // Job creation revalidates provenance, credentials and runtime contract immediately before creation.
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -2251,7 +2243,7 @@ func (r *TaskReconciler) handleFinalizing(
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
 		revocationEpoch := workspaceStatus.AttachedEpoch
-		acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+		acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 		if acpWorkspace {
 			revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 			// Attach and the Task epoch annotation are separate API writes.
@@ -2293,7 +2285,7 @@ func (r *TaskReconciler) handleFinalizing(
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
 			revocationEpoch := workspaceStatus.AttachedEpoch
-			acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+			acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 			if acpWorkspace {
 				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
@@ -2601,10 +2593,6 @@ func (r *TaskReconciler) completeExecutedTask(
 
 func taskExecutionWorkspaceNeedsFinalization(task *corev1alpha1.Task) bool {
 	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
-		return false
-	}
-	request := task.Spec.Execution.Workspace
-	if !request.Enabled && request.ClassRef == nil {
 		return false
 	}
 	status := task.Status.ExecutionWorkspace
@@ -3097,42 +3085,16 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	}
 
 	ws := task.Spec.Execution.Workspace
-	if ws.ClassRef != nil {
-		if strings.TrimSpace(ws.ClassRef.Name) == "" {
-			return fmt.Errorf("execution workspace classRef.name is required")
-		}
-		if !r.WorkspaceProviderAPIEnabled {
-			return fmt.Errorf("execution workspace classRef requires the workspace provider API")
-		}
-		if task.Spec.Type != corev1alpha1.TaskTypeAgent {
-			return fmt.Errorf("execution workspace classRef is only supported for type: agent tasks")
-		}
-		// Class resolution, policy validation, and provider gating run on the
-		// ACP execution plan path, which owns every class-shaped rejection.
-		return validateExecutionWorkspacePolicyShape(task, ws)
+	if ws.ClassRef == nil || strings.TrimSpace(ws.ClassRef.Name) == "" {
+		return fmt.Errorf("execution workspace classRef.name is required")
 	}
-	if !ws.Enabled {
-		return nil
-	}
-	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
-
-	if err := validateExecutionWorkspaceBasics(task, provider); err != nil {
-		return err
-	}
-	return validateExecutionWorkspacePolicyShape(task, ws)
-}
-
-func validateExecutionWorkspaceBasics(
-	task *corev1alpha1.Task,
-	provider corev1alpha1.WorkspaceProvider,
-) error {
-	if !supportedWorkspaceProvider(provider) {
-		return fmt.Errorf("unsupported execution workspace provider %q", provider)
+	if !r.WorkspaceProviderAPIEnabled {
+		return fmt.Errorf("execution workspace classRef requires the workspace provider API")
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
 	}
-	return nil
+	return validateExecutionWorkspacePolicyShape(task, ws)
 }
 
 func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
@@ -3140,9 +3102,6 @@ func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1al
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
 
-	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
-		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
-	}
 	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
 		return fmt.Errorf("execution workspace reusePolicy %q requires spec.sessionRef.name", ws.ReusePolicy)
 	}
@@ -3151,8 +3110,7 @@ func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1al
 }
 
 func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Context, task *corev1alpha1.Task, validationErr error) error {
-	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
-		(!task.Spec.Execution.Workspace.Enabled && task.Spec.Execution.Workspace.ClassRef == nil) {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return nil
 	}
 
@@ -3166,54 +3124,14 @@ func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Cont
 		Message:    message,
 		ObservedAt: &now,
 	}
-	// A class-shaped request has no author-selected provider or template; the
-	// backend is resolved through the class and stays out of a failed
-	// projection so a wrong default is never displayed.
-	provider := corev1alpha1.WorkspaceProvider("")
-	if ws.ClassRef == nil {
-		provider = resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
-		if supportedWorkspaceProvider(provider) {
-			failure.Provider = provider
-			failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
-		}
-	}
 	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
 		failure.ReusePolicy = reusePolicy
-	}
-	if cleanupPolicy, ok := r.executionWorkspaceStatusCleanupPolicy(ws, provider); ok {
-		failure.CleanupPolicy = cleanupPolicy
 	}
 	status := statusrules.ValidationFailedStatus(failure)
 
 	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.ExecutionWorkspace = status
 	})
-}
-
-func (r *TaskReconciler) executionWorkspaceStatusTemplateRef(task *corev1alpha1.Task, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.WorkspaceTemplateReference {
-	ws := task.Spec.Execution.Workspace
-	var name string
-	var namespace string
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		cfg := r.AgentSandboxConfig.WithDefaults()
-		name = executionWorkspaceTemplateName(ws, cfg)
-		namespace = executionWorkspaceTemplateNamespace(ws, task.Namespace, cfg)
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		cfg := r.SubstrateConfig.WithDefaults()
-		name = substrateTemplateName(ws, cfg)
-		namespace = substrateTemplateNamespace(ws, task.Namespace, cfg)
-	default:
-		return nil
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
-	return &corev1alpha1.WorkspaceTemplateReference{
-		Name:      name,
-		Namespace: strings.TrimSpace(namespace),
-	}
 }
 
 func executionWorkspaceStatusReusePolicy(ws *corev1alpha1.ExecutionWorkspaceSpec) (corev1alpha1.WorkspaceReusePolicy, bool) {
@@ -3226,29 +3144,6 @@ func executionWorkspaceStatusReusePolicy(ws *corev1alpha1.ExecutionWorkspaceSpec
 	default:
 		return "", false
 	}
-}
-
-func (r *TaskReconciler) executionWorkspaceStatusCleanupPolicy(ws *corev1alpha1.ExecutionWorkspaceSpec, provider corev1alpha1.WorkspaceProvider) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	if ws != nil && ws.CleanupPolicy != "" {
-		switch ws.CleanupPolicy {
-		case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-			return ws.CleanupPolicy, true
-		default:
-			return "", false
-		}
-	}
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		return executionWorkspaceStatusValidCleanupPolicy(r.AgentSandboxConfig.WithDefaults().CleanupPolicy)
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		return executionWorkspaceStatusValidCleanupPolicy(r.SubstrateConfig.WithDefaults().CleanupPolicy)
-	default:
-		return corev1alpha1.WorkspaceCleanupPolicyDelete, true
-	}
-}
-
-func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	return statusrules.StatusCleanupPolicy(cleanupPolicy, "")
 }
 
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -3369,8 +3264,7 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	default:
 		return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 	}
-	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil &&
-		(agent.Spec.Execution.Workspace.Enabled || agent.Spec.Execution.Workspace.ClassRef != nil) {
+	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil {
 		return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
 	}
 	if agent.Spec.ProviderRef != nil {

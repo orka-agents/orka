@@ -17,9 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
-	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
 const (
@@ -50,11 +50,9 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// was disabled would otherwise never gain it, retention would wait on
 		// it forever, and neither idleTimeout nor maxLifetime could ever
 		// reclaim the workspace and its pool. Only ACP-owned workspaces get
-		// this recovery: adapters registered solely under the enabled API
-		// (the development fake provider) are not running in cleanup-only
-		// mode, and a finalizer no adapter can ever settle with StateDeleted
-		// would make the object undeletable.
-		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue {
+		// this recovery, identified by the protected materialization markers.
+		// Generic provider-routed workspaces keep their adapter-owned cleanup.
+		if !workspaceHasACPControllerOwnership(workspace) {
 			return ctrl.Result{}, nil
 		}
 		if !controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {
@@ -674,7 +672,30 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceDeletion(
 		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil
 	}
 	var dispositionErr error
-	if workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
+	if workspaceCarriesACPMaterializationMarkers(workspace) {
+		// External providers never held core's credentials. Their disposition
+		// covers provider resources; core separately proves pool and attachment
+		// credentials gone. The protected materialization markers identify this
+		// ownership before the pool publishes its first workload request.
+		dispositionErr = workspaceprovider.ValidateDeletedDisposition(workspace.Status.Disposition, workspace.Spec.Lifecycle.DeletionPolicy)
+		if dispositionErr == nil {
+			core := &workspaceCoreCleanup{Client: r.Client, APIReader: r.APIReader}
+			gone, foreign, err := core.ensureLinkedRuntimePoolDeleted(ctx, workspace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !gone || foreign {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			credentialsGone, err := core.ensureACPWorkspaceAttachmentCredentialsDeleted(ctx, workspace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !credentialsGone {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
+	} else if workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
 		dispositionErr = workspaceprovider.ValidateInteractiveDeletedDisposition(
 			workspace.Status.Disposition,
 			workspace.Spec.Lifecycle.DeletionPolicy,

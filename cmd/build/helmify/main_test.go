@@ -1831,9 +1831,9 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			name: "Substrate workspace provider",
 			args: []string{
 				"--set-string", "controller.mode=harness-v1",
-				"--set", "controller.substrate.enabled=true",
+				"--set", "controller.substrate.mcpToolsEnabled=true",
 			},
-			wantError: "controller.substrate.enabled is unsupported when controller.mode=harness-v1",
+			wantError: "controller.substrate.mcpToolsEnabled is unsupported when controller.mode=harness-v1",
 		},
 		{
 			name: "inline bearer token",

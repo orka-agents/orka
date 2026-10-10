@@ -21,25 +21,45 @@ spec:
       expression: >-
         oldObject != null && has(oldObject.metadata.labels) && 'workspace.orka.ai/controller-name' in oldObject.metadata.labels
         ? oldObject.metadata.labels['workspace.orka.ai/controller-name'] : ''
-    - name: acpControllerLabelValues
-      expression: "['acp.workspace.orka.ai/runtime-pool', 'runtime-pool.acp.workspace.orka.ai']"
-    - name: newACPAnnotationKeys
+    - name: newCoreAnnotationKeys
       expression: >-
         has(object.metadata.annotations)
-        ? object.metadata.annotations.filter(k, k.startsWith('acp.workspace.orka.ai/')) : []
-    - name: oldACPAnnotationKeys
+        ? object.metadata.annotations.filter(k,
+          k.startsWith('workspace.orka.ai/') || k.startsWith('acp.workspace.orka.ai/')) : []
+    - name: oldCoreAnnotationKeys
       expression: >-
         oldObject != null && has(oldObject.metadata.annotations)
-        ? oldObject.metadata.annotations.filter(k, k.startsWith('acp.workspace.orka.ai/')) : []
-    - name: acpMarkersUnchanged
+        ? oldObject.metadata.annotations.filter(k,
+          k.startsWith('workspace.orka.ai/') || k.startsWith('acp.workspace.orka.ai/')) : []
+    - name: coreMarkersUnchanged
       expression: >-
-        (variables.newControllerLabel == variables.oldControllerLabel ||
-         (!(variables.newControllerLabel in variables.acpControllerLabelValues) &&
-          !(variables.oldControllerLabel in variables.acpControllerLabelValues))) &&
-        size(variables.newACPAnnotationKeys) == size(variables.oldACPAnnotationKeys) &&
-        variables.newACPAnnotationKeys.all(k, k in variables.oldACPAnnotationKeys) &&
-        variables.newACPAnnotationKeys.all(k,
+        variables.newControllerLabel == variables.oldControllerLabel &&
+        size(variables.newCoreAnnotationKeys) == size(variables.oldCoreAnnotationKeys) &&
+        variables.newCoreAnnotationKeys.all(k, k in variables.oldCoreAnnotationKeys) &&
+        variables.newCoreAnnotationKeys.all(k,
           object.metadata.annotations[k] == oldObject.metadata.annotations[k])
+    - name: newProviderAnnotationKeys
+      expression: >-
+        has(object.metadata.annotations) && variables.newControllerLabel != ''
+        ? object.metadata.annotations.filter(k, k.startsWith(variables.newControllerLabel + '/')) : []
+    - name: oldProviderAnnotationKeys
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations) && variables.oldControllerLabel != ''
+        ? oldObject.metadata.annotations.filter(k, k.startsWith(variables.oldControllerLabel + '/')) : []
+    - name: providerMarkersUnchanged
+      expression: >-
+        size(variables.newProviderAnnotationKeys) == size(variables.oldProviderAnnotationKeys) &&
+        variables.newProviderAnnotationKeys.all(k, k in variables.oldProviderAnnotationKeys) &&
+        variables.newProviderAnnotationKeys.all(k,
+          object.metadata.annotations[k] == oldObject.metadata.annotations[k])
+    - name: workloadIntentUnchanged
+      expression: >-
+        (oldObject == null && !has(object.spec.workload) && !has(object.spec.retirement)) ||
+        (oldObject != null &&
+         has(object.spec.workload) == has(oldObject.spec.workload) &&
+         (!has(object.spec.workload) || object.spec.workload == oldObject.spec.workload) &&
+         has(object.spec.retirement) == has(oldObject.spec.retirement) &&
+         (!has(object.spec.retirement) || object.spec.retirement == oldObject.spec.retirement))
     - name: attachmentIntentUnchanged
       expression: >-
         (oldObject == null &&
@@ -55,15 +75,15 @@ spec:
     - expression: >-
         !has(object.spec.coreAdmission) ||
         (oldObject != null && has(oldObject.spec.coreAdmission) &&
-             object.spec.coreAdmission.admittedGeneration == oldObject.spec.coreAdmission.admittedGeneration &&
-             has(object.spec.coreAdmission.poolBinding) == has(oldObject.spec.coreAdmission.poolBinding) &&
-             (!has(object.spec.coreAdmission.poolBinding) ||
-              (object.spec.coreAdmission.poolBinding.name == oldObject.spec.coreAdmission.poolBinding.name &&
-               object.spec.coreAdmission.poolBinding.uid == oldObject.spec.coreAdmission.poolBinding.uid &&
-               object.spec.coreAdmission.poolBinding.generation == oldObject.spec.coreAdmission.poolBinding.generation &&
-               has(object.spec.coreAdmission.poolBinding.profileHash) == has(oldObject.spec.coreAdmission.poolBinding.profileHash) &&
-               (!has(object.spec.coreAdmission.poolBinding.profileHash) ||
-                object.spec.coreAdmission.poolBinding.profileHash == oldObject.spec.coreAdmission.poolBinding.profileHash)))) ||
+         object.spec.coreAdmission.admittedGeneration == oldObject.spec.coreAdmission.admittedGeneration &&
+         has(object.spec.coreAdmission.poolBinding) == has(oldObject.spec.coreAdmission.poolBinding) &&
+         (!has(object.spec.coreAdmission.poolBinding) ||
+          (object.spec.coreAdmission.poolBinding.name == oldObject.spec.coreAdmission.poolBinding.name &&
+           object.spec.coreAdmission.poolBinding.uid == oldObject.spec.coreAdmission.poolBinding.uid &&
+           object.spec.coreAdmission.poolBinding.generation == oldObject.spec.coreAdmission.poolBinding.generation &&
+           has(object.spec.coreAdmission.poolBinding.profileHash) == has(oldObject.spec.coreAdmission.poolBinding.profileHash) &&
+           (!has(object.spec.coreAdmission.poolBinding.profileHash) ||
+            object.spec.coreAdmission.poolBinding.profileHash == oldObject.spec.coreAdmission.poolBinding.profileHash)))) ||
         authorizer.group('workspace.orka.ai')
           .resource('executionworkspaces')
           .namespace(request.namespace)
@@ -72,17 +92,37 @@ spec:
       message: only the Orka core controller may establish or advance ExecutionWorkspace core admission
       reason: Forbidden
     - expression: >-
-        variables.acpMarkersUnchanged ||
+        variables.coreMarkersUnchanged ||
         authorizer.group('workspace.orka.ai')
           .resource('executionworkspaces')
           .namespace(request.namespace)
           .name(object.metadata.name)
           .check('admit').allowed()
       message: >-
-        only the Orka core controller may set or change the ACP materialization
-        markers (the ACP controller-name label and acp.workspace.orka.ai/
-        annotations); forged markers would advertise a physical environment that
-        does not exist
+        only the Orka core controller may set or change workspace routing and
+        core materialization markers
+      reason: Forbidden
+    - expression: >-
+        variables.providerMarkersUnchanged ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaceproviders')
+          .name(object.spec.providerBinding.name)
+          .check('provider-status').allowed() ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaces')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('admit').allowed()
+      message: only an approved provider may change its workspace observations
+      reason: Forbidden
+    - expression: >-
+        variables.workloadIntentUnchanged ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaces')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('admit').allowed()
+      message: only Orka core may write workload and exact-instance retirement intent
       reason: Forbidden
     - expression: >-
         variables.attachmentIntentUnchanged ||

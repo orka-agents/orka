@@ -23,13 +23,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
@@ -40,9 +39,15 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
 
-func TestManagerSchemeRegistersAgentSandboxCoreAPI(t *testing.T) {
-	if _, err := scheme.New(sandboxv1beta1.GroupVersion.WithKind(sandboxv1beta1.SandboxKind)); err != nil {
-		t.Fatalf("create core Sandbox from manager scheme: %v", err)
+func TestManagerSchemeExcludesNativeProviderAPIs(t *testing.T) {
+	for _, gvk := range []schema.GroupVersionKind{
+		{Group: "agents.x-k8s.io", Version: "v1beta1", Kind: "Sandbox"},
+		{Group: "acp.workspace.orka.ai", Version: "v1alpha1", Kind: "RuntimeProviderConfig"},
+		{Group: "fake.workspace.orka.ai", Version: "v1alpha1", Kind: "FakeWorkspaceProfile"},
+	} {
+		if _, err := scheme.New(gvk); err == nil {
+			t.Fatalf("Core registered provider API %s", gvk)
+		}
 	}
 }
 
@@ -80,24 +85,6 @@ func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
 	}
 	if first == "workstation" || second == "workstation" {
 		t.Fatal("holder ID omitted its process incarnation")
-	}
-}
-
-func TestValidateEnabledSubstrateConfigSelectsActivePathRequirements(t *testing.T) {
-	cfg := controller.SubstrateConfig{
-		APIEndpoint:           "api.ate-system.svc:443",
-		APIInsecureSkipVerify: true,
-		APICertFile:           "/run/substrate-client/credential-bundle.pem",
-		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
-		RouterURL:             "http://atenet-router.ate-system.svc",
-		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
-	}
-	if err := validateEnabledSubstrateConfig(cfg, false); err != nil {
-		t.Fatalf("ACP-only Substrate configuration rejected: %v", err)
-	}
-	if err := validateEnabledSubstrateConfig(cfg, true); err == nil ||
-		!strings.Contains(err.Error(), "bootstrap token secret name") {
-		t.Fatalf("legacy workspace-provider configuration error = %v, want bootstrap Secret requirement", err)
 	}
 }
 
@@ -165,24 +152,7 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			objects: []client.Object{pool("sandbox", corev1alpha1.WorkspaceProviderAgentSandbox)},
 			config:  invalidConfig,
 		},
-		{
-			name:      "existing substrate pool preserves environment parse failures",
-			objects:   []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
-			config:    validConfig,
-			configErr: errors.New("invalid disabled-only duration"),
-			wantError: "parse substrate recovery configuration",
-		},
-		{
-			name:      "existing substrate pool requires provider trust",
-			objects:   []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
-			config:    invalidConfig,
-			wantError: "requires valid recovery configuration",
-		},
-		{
-			name:    "existing substrate pool accepts valid recovery configuration",
-			objects: []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
-			config:  validConfig,
-		},
+
 		{
 			name:      "existing actor pool requires control authentication",
 			objects:   []client.Object{actorPool("team-a", true)},
@@ -243,24 +213,7 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			config:    invalidConfig,
 			configErr: errors.New("invalid disabled-only duration"),
 		},
-		{
-			name:      "retained checkpoint outside watch namespace requires recovery credentials",
-			objects:   []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
-			config:    invalidConfig,
-			wantError: "recovery ConfigMap controller-system/retained-native-data requires valid recovery configuration",
-		},
-		{
-			name:      "retained template preserves configuration parse failure",
-			objects:   []client.Object{journal("orka.ai/substrate-template-binding")},
-			config:    validConfig,
-			configErr: errors.New("invalid disabled-only duration"),
-			wantError: "parse substrate recovery configuration for existing recovery ConfigMap",
-		},
-		{
-			name:    "retained checkpoint accepts valid cleanup credentials",
-			objects: []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
-			config:  validConfig,
-		},
+
 		{
 			name:      "ordinary configmap does not require recovery credentials",
 			objects:   []client.Object{journal("example.invalid/unrelated")},
@@ -306,7 +259,7 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 				reader = noACPRecoveryScanReader{Reader: reader}
 			}
 			err := validateDisabledSubstrateRecoveryConfig(
-				context.Background(), reader, "team-a", "controller-system", !tt.acpDisabled, tt.config, tt.configErr,
+				context.Background(), reader, "team-a", tt.config, tt.configErr,
 			)
 			if tt.wantError == "" {
 				if err != nil {
@@ -842,35 +795,37 @@ func TestWorkspaceCleanupAPIsInstalled(t *testing.T) {
 	if !installed {
 		t.Fatal("complete workspace API discovery reported missing")
 	}
+	checkpointInstalled, err := workspaceCheckpointAPIInstalled(mapper)
+	if err != nil || checkpointInstalled {
+		t.Fatalf("checkpoint API discovery = %t, %v; cleanup must not require the optional CRD", checkpointInstalled, err)
+	}
 }
 
-func TestSubstrateCheckpointAPIInstalled(t *testing.T) {
+func TestWorkspaceCheckpointAPIInstalled(t *testing.T) {
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{workspacev1alpha1.GroupVersion})
-	// Existing workspace CRDs do not imply that the newer checkpoint API exists.
-	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"), meta.RESTScopeNamespace)
-	installed, err := substrateCheckpointAPIInstalled(mapper)
+	installed, err := workspaceCheckpointAPIInstalled(mapper)
 	if err != nil || installed {
-		t.Fatalf("missing checkpoint API = %v, %v; want false, nil", installed, err)
+		t.Fatalf("absent checkpoint API discovery = %t, %v", installed, err)
 	}
 	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint"), meta.RESTScopeNamespace)
-	installed, err = substrateCheckpointAPIInstalled(mapper)
+	installed, err = workspaceCheckpointAPIInstalled(mapper)
 	if err != nil || !installed {
-		t.Fatalf("installed checkpoint API = %v, %v; want true, nil", installed, err)
+		t.Fatalf("installed checkpoint API discovery = %t, %v", installed, err)
 	}
-	// A discovery outage is not absence and must still fail controller startup.
-	failure := errors.New("discovery unavailable")
-	installed, err = substrateCheckpointAPIInstalled(checkpointDiscoveryFailureMapper{RESTMapper: mapper, err: failure})
-	if installed || !errors.Is(err, failure) {
-		t.Fatalf("failed checkpoint discovery = %v, %v; want false and original error", installed, err)
+
+	discoveryErr := errors.New("discovery unavailable")
+	installed, err = workspaceCheckpointAPIInstalled(checkpointDiscoveryErrorMapper{RESTMapper: mapper, err: discoveryErr})
+	if installed || !errors.Is(err, discoveryErr) {
+		t.Fatalf("failed checkpoint API discovery = %t, %v; want discovery error", installed, err)
 	}
 }
 
-type checkpointDiscoveryFailureMapper struct {
+type checkpointDiscoveryErrorMapper struct {
 	meta.RESTMapper
 	err error
 }
 
-func (m checkpointDiscoveryFailureMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
+func (m checkpointDiscoveryErrorMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
 	return nil, m.err
 }
 

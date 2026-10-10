@@ -46,7 +46,7 @@ rules:
   # "admit" verb and class/checkpoint selection on the "use" verb. The
   # controller needs both or admission rejects its own Task updates.
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaces"]
+    resources: ["executionworkspaceproviders", "executionworkspaceclasses", "executionworkspacepools", "executionworkspaces", "executionworkspacecheckpoints"]
     verbs: ["admit"]
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaceclasses", "executionworkspacecheckpoints"]
@@ -57,21 +57,6 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces/finalizers", "executionworkspaceclasses/finalizers", "executionworkspacecheckpoints/finalizers"]
     verbs: ["update"]
-  # Class resolution reads the namespaced RuntimeWorkspaceProfile the class's
-  # parametersRef selects; without it a Helm-installed controller cannot
-  # resolve any classRef Task.
-  - apiGroups: ["acp.workspace.orka.ai"]
-    resources: ["runtimeworkspaceprofiles"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "patch", "update", "watch"]
   {{- end }}
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -133,6 +118,65 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if and $harnessV2 .Values.controller.executionWorkspace.dispatchEnabled }}
+---
+# Providers opt namespaced profile reads into this release's watch namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        workspace.orka.ai/aggregate-to-parameter-reader: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Separate opt-in for cluster-scoped provider configs, never namespaced profiles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- if $harnessV2 }}
 ---
 # Runtime child resources are confined to the v2 installation's runtime namespace.
@@ -156,12 +200,6 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "patch", "update", "watch"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -214,6 +252,13 @@ rules:
     resourceNames: [{{ include "orka.controllerWebhookName" . | quote }}]
     verbs: ["update", "patch"]
   {{- end }}
+  # Startup preflight checks retained allocations even when dispatch is disabled.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["runtimepools"]
+    verbs: ["list"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaces"]
+    verbs: ["list"]
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
@@ -254,6 +299,9 @@ rules:
     resources: ["executionworkspaceproviders"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceproviders"]
+    verbs: ["admit"]
+  - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaceproviders/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["workspace.orka.ai"]
@@ -262,24 +310,14 @@ rules:
   # Provider deletion protection scans namespaced references across all
   # namespaces. The namespaced manager RoleBinding cannot authorize those lists.
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaceclasses", "executionworkspacepools", "executionworkspaces"]
+    resources: ["executionworkspaceclasses", "executionworkspacepools", "executionworkspaces", "executionworkspacecheckpoints"]
     verbs: ["list"]
-  # Provider advertisement and class resolution read the cluster-scoped
-  # RuntimeProviderConfig selected by the provider's parametersRef.
-  - apiGroups: ["acp.workspace.orka.ai"]
-    resources: ["runtimeproviderconfigs"]
-    verbs: ["get", "list", "watch"]
-  # Native template selectors discover WorkerPools across provider namespaces.
-  # Workload mutation remains confined to explicitly bound namespaced Roles.
-  - apiGroups: ["ate.dev"]
-    resources: ["workerpools"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["list"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -505,16 +543,6 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "delete"]
-  # Agent sandbox workspace backend: create/reattach/delete claims and connect to sandbox pods
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
     verbs: ["create"]
@@ -593,16 +621,6 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["get", "list", "watch"]
-  # Agent sandbox workspace backend for agent task workers: create/reattach/delete claims and connect to sandbox pods
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]

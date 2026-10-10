@@ -26,8 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -257,6 +257,7 @@ func TestSettleACPClassWorkspaceRequiresFrozenSessionUID(t *testing.T) {
 				},
 			}
 			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), workspace)
+			installTestACPWorkspaceClass(t, reconciler)
 			reconciler.APIReader = reconciler.Client
 			reconciler.WorkspaceSettlementProtected = true
 			candidate, err := reconciler.resolveAgentExecutionCandidateWithWorkspaceSessionUID(

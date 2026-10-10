@@ -248,8 +248,8 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 				return selected, createdTasks, skipped, err
 			}
 			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "item_skipped", fmt.Sprintf("Pull request #%d skipped: %s", pr.Number, skipReason), map[string]any{
-				eventReasonField:           skipReason,
-				substrateObjectLabelsField: pr.Labels,
+				eventReasonField:  skipReason,
+				objectLabelsField: pr.Labels,
 			}); err != nil {
 				return selected, createdTasks, skipped, err
 			}
@@ -678,7 +678,7 @@ func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor,
 		"headRepo":                          pr.HeadRepo,
 		"headRepoURL":                       pr.HeadRepoURL,
 		repositoryMonitorFieldHeadSHA:       pr.HeadSHA,
-		substrateObjectLabelsField:          pr.Labels,
+		objectLabelsField:                   pr.Labels,
 		"draft":                             pr.Draft,
 		"mergeableState":                    pr.MergeableState,
 		repositoryMonitorCommandIntentReview: map[string]any{

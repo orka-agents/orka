@@ -1,112 +1,8 @@
 #!/usr/bin/env bash
-# Orka and the local provider fixture used by native Substrate conformance.
-
-deploy_responses_fixture() {
-  local image="$1"
-
-  log "Deploying local Responses-compatible provider fixture"
-  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
-  kubectl -n vekil-system apply -f - <<YAML
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vekil
-  labels:
-    app.kubernetes.io/name: vekil
-    app.kubernetes.io/component: responses-fixture
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: vekil
-      app.kubernetes.io/component: responses-fixture
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: vekil
-        app.kubernetes.io/component: responses-fixture
-    spec:
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: responses
-          image: ${image}
-          imagePullPolicy: Always
-          ports:
-            - name: http
-              containerPort: 1337
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: http
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vekil
-  labels:
-    app.kubernetes.io/name: vekil
-spec:
-  selector:
-    app.kubernetes.io/name: vekil
-    app.kubernetes.io/component: responses-fixture
-  ports:
-    - name: http
-      port: 1337
-      targetPort: http
-YAML
-  # The fixture stores request counts in memory. Force a new Pod even when a
-  # reused cluster receives the same fixed image and Pod template.
-  kubectl -n vekil-system rollout restart deployment/vekil
-  kubectl -n vekil-system rollout status deployment/vekil --timeout=2m
-}
-
-grant_substrate_worker_access() {
-  # Match the production chart's worker namespace permissions. The generated
-  # manager RoleBinding applies only in the controller's tenant namespace.
-  jq -n --arg namespace "${ORKA_NAMESPACE}" '{apiVersion:"v1",kind:"List",items:[
-    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"Role",
-      metadata:{name:"orka-substrate-worker",namespace:"ate-demo"},rules:[
-        {apiGroups:[""],resources:["pods"],verbs:["get","list","delete"]},
-        {apiGroups:["networking.k8s.io"],resources:["networkpolicies"],verbs:["get","list","watch","create","update","patch","delete"]}]},
-    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"RoleBinding",
-      metadata:{name:"orka-substrate-worker",namespace:"ate-demo"},
-      roleRef:{apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:"orka-substrate-worker"},
-      subjects:[{kind:"ServiceAccount",name:"orka-controller-manager",namespace:$namespace}]}]}' |
-    kubectl -n ate-demo apply -f - || return 1
-
-  local controller_user="system:serviceaccount:${ORKA_NAMESPACE}:orka-controller-manager" permission verb resource
-  if ! kubectl auth can-i list workerpools.ate.dev --all-namespaces --as="${controller_user}" --quiet; then
-    printf 'Orka lacks cluster-wide WorkerPool discovery permission\n' >&2
-    return 1
-  fi
-  for permission in get:pods list:pods delete:pods get:networkpolicies list:networkpolicies watch:networkpolicies create:networkpolicies update:networkpolicies patch:networkpolicies delete:networkpolicies; do
-    verb="${permission%%:*}"
-    resource="${permission#*:}"
-    if ! kubectl -n ate-demo auth can-i "${verb}" "${resource}" --as="${controller_user}" --quiet; then
-      printf 'Orka lacks %s on %s in the dedicated Substrate worker namespace\n' "${verb}" "${resource}" >&2
-      return 1
-    fi
-  done
-}
+# Orka deployment used by native Substrate MCP tool conformance.
 
 deploy_orka() {
   local controller_image="$1"
-  local codex_runtime_actor_ref="${2:-}"
   local tmp_config
   tmp_config="$(mktemp -d "${TMP_ROOT}/orka-config.XXXXXX")"
 
@@ -114,28 +10,24 @@ deploy_orka() {
   make -C "${ROOT_DIR}" manifests generate
   make -C "${ROOT_DIR}" install
   make -C "${ROOT_DIR}" kustomize
-  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
-    log "Bootstrapping test-only admission TLS"
-    orka_e2e_remove_admission_webhooks
-    orka_e2e_bootstrap_admission_tls kubectl "${ORKA_NAMESPACE}"
-  fi
+  log "Bootstrapping test-only admission TLS"
+  orka_e2e_remove_admission_webhooks
+  orka_e2e_bootstrap_admission_tls kubectl "${ORKA_NAMESPACE}"
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
   (cd "${tmp_config}/config/provider-proxy" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
-  # Agent Substrate validation exercises the workspace provider directly. Omit
-  # the unrelated clean-room publisher and SCM proxy workloads, but retain the
-  # authenticated provider proxy used by the real Codex prompt smoke.
+  # This run exercises MCP tools. Keep the base controller configuration and
+  # provider proxy, while omitting unused publisher and SCM proxy workloads.
   (
     cd "${tmp_config}/config/acp-workload"
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../publisher
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../scm-egress-proxy
   )
-  local placeholder_digest codex_runtime_image
+  local placeholder_digest
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
-  codex_runtime_image="${codex_runtime_actor_ref:-example.invalid/orka/acp-codex@${placeholder_digest}}"
   kubectl -n orka-system create configmap acp-runtime-images \
-    --from-literal="ORKA_ACP_CODEX_RUNTIME_IMAGE=${codex_runtime_image}" \
+    --from-literal="ORKA_ACP_CODEX_RUNTIME_IMAGE=example.invalid/orka/acp-codex@${placeholder_digest}" \
     --from-literal="ORKA_ACP_CLAUDE_RUNTIME_IMAGE=example.invalid/orka/acp-claude@${placeholder_digest}" \
     --from-literal="ORKA_ACP_COPILOT_RUNTIME_IMAGE=example.invalid/orka/acp-copilot@${placeholder_digest}" \
     --from-literal="ORKA_ACP_OPENCODE_RUNTIME_IMAGE=example.invalid/orka/acp-opencode@${placeholder_digest}" \
@@ -177,11 +69,8 @@ deploy_orka() {
   bash "${ROOT_DIR}/scripts/lib/ensure-static-mode-namespace.sh" \
     kubectl "${ORKA_NAMESPACE}" harness-v2
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
-  grant_substrate_worker_access
-  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
-    log "Deploying the dedicated fail-closed admission runtime"
-    orka_e2e_deploy_admission "${controller_image}" kubectl "${ORKA_NAMESPACE}"
-  fi
+  log "Deploying the dedicated fail-closed admission runtime"
+  orka_e2e_deploy_admission "${controller_image}" kubectl "${ORKA_NAMESPACE}"
   # Substrate actor traffic originates from its single-workload WorkerPool Pod
   # in ate-demo rather than a native orka-runtimes Pod. Keep the same
   # authenticated proxy boundary while allowing only that provider namespace.
@@ -211,32 +100,9 @@ deploy_orka() {
   kubectl -n orka-system rollout status deployment/orka-provider-auth-proxy --timeout=5m
 
   local patch
-  local workspace_dispatch="false"
-  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" || "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" || "${SUBSTRATE_E2E_LIFECYCLE}" == "1" ]]; then
-    workspace_dispatch="true"
-  fi
-  local workspace_api="false"
-  if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
-    workspace_api="true"
-    # The dedicated admission runtime above is the API server boundary. These
-    # controller flags also register equivalent local handlers, so give the
-    # manager webhook server a certificate even though no Service routes to it.
-    local webhook_cert_dir
-    webhook_cert_dir="$(mktemp -d "${TMP_ROOT}/webhook-certs.XXXXXX")"
-    openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-      -keyout "${webhook_cert_dir}/tls.key" -out "${webhook_cert_dir}/tls.crt" \
-      -subj "/CN=orka-controller-manager.orka-system.svc" >/dev/null 2>&1
-    kubectl -n orka-system create secret tls orka-webhook-serving-certs \
-      --cert="${webhook_cert_dir}/tls.crt" --key="${webhook_cert_dir}/tls.key" \
-      --dry-run=client -o yaml | kubectl apply -f -
-    rm -rf "${webhook_cert_dir}"
-  fi
   patch="$(jq -cn \
     --arg bootstrap_secret_name "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
     --arg bootstrap_secret_key "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}" \
-    --arg workspaceDispatch "${workspace_dispatch}" \
-    --arg workspaceAPI "${workspace_api}" \
-    --arg ambiguityMarker "${LIFECYCLE_AMBIGUITY_MARKER}" \
     '{
       spec: {
         template: {
@@ -282,25 +148,21 @@ deploy_orka() {
                   "--watch-namespace=orka-system",
                   "--enforce-namespace-isolation=true",
                   "--execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager",
-                  "--execution-workspace-default-provider=substrate",
-                  "--agent-sandbox-enabled=false",
-                  "--substrate-enabled=true",
-                  "--substrate-direct-egress-enabled=true",
+                  "--substrate-mcp-tools-enabled=true",
                   "--substrate-api-endpoint=api.ate-system.svc:443",
                   "--substrate-api-ca-file=/run/substrate-server/trust-bundle.pem",
                   "--substrate-api-cert-file=/run/substrate-client/credential-bundle.pem",
                   "--substrate-api-key-file=/run/substrate-client/credential-bundle.pem",
                   "--substrate-router-url=http://atenet-router.ate-system.svc",
                   "--substrate-actor-dns-suffix=actors.resources.substrate.ate.dev",
-                  "--substrate-default-template=orka-direct",
+                  "--substrate-default-template=orka-mcp",
                   "--substrate-default-template-namespace=orka-system",
                   "--substrate-bootstrap-token-secret-name=" + $bootstrap_secret_name,
                   "--substrate-bootstrap-token-secret-key=" + $bootstrap_secret_key,
                   "--substrate-claim-timeout=2m",
                   "--substrate-command-timeout=10m",
                   "--substrate-cleanup-policy=delete",
-                  "--acp-workspace-dispatch-enabled=" + $workspaceDispatch,
-                  "--acp-e2e-prompt-write-ambiguity-marker=" + $ambiguityMarker,
+                  "--acp-workspace-dispatch-enabled=false",
                   # RuntimePool reconciliation and prompt execution use the
                   # authenticated provider-proxy boundary deployed above; the
                   # token Secret is created above and mounted by the base manifest.
@@ -308,26 +170,9 @@ deploy_orka() {
                   "--acp-provider-proxy-namespace=orka-system",
                   "--acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy",
                   "--acp-provider-proxy-token-file=/var/run/orka/provider-auth/token"
-                ] + (if $workspaceAPI == "true" then [
-                  "--enable-workspace-provider-api=true",
-                  "--workspace-class-use-admission-enabled=true",
-                  "--task-provenance-admission-enabled=true"
-                ] else [] end)),
-                volumeMounts: (if $workspaceAPI == "true" then [
-                  {
-                    name: "webhook-serving-certs",
-                    mountPath: "/tmp/k8s-webhook-server/serving-certs",
-                    readOnly: true
-                  }
-                ] else [] end)
+                ])
               }
-            ],
-            volumes: (if $workspaceAPI == "true" then [
-              {
-                name: "webhook-serving-certs",
-                secret: { secretName: "orka-webhook-serving-certs" }
-              }
-            ] else [] end)
+            ]
           }
         }
       }

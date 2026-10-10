@@ -26,13 +26,9 @@ type ExecutionSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
-	// Workspace requests an execution workspace. Worker-backed Task types use
-	// it directly. ACP agent Tasks may bind a workspace-provider-backed
-	// RuntimeSession through it (a provider/templateRef request, or a classRef
-	// with the workspace provider API enabled); these dispatch paths are
-	// flag-gated behind --acp-workspace-dispatch-enabled plus the matching
-	// provider flag and fail closed otherwise. Clean-room publication remains
-	// owned by RuntimeSession lifecycle.
+	// Workspace selects an ExecutionWorkspaceClass for an ACP agent Task.
+	// Omit workspace for ordinary execution. Workspace dispatch requires the
+	// workspace provider API, ACP workspace dispatch, and an installed provider.
 	// +optional
 	Workspace *ExecutionWorkspaceSpec `json:"workspace,omitempty"`
 }
@@ -59,14 +55,16 @@ const (
 	WorkspaceCleanupPolicyRetain WorkspaceCleanupPolicy = "retain"
 )
 
-// WorkspaceProvider selects the execution workspace backend.
-// +kubebuilder:validation:Enum=agent-sandbox;substrate
+// WorkspaceProvider identifies a registered execution workspace controller.
+// Resolution against an ExecutionWorkspaceProvider validates installed support.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=253
 type WorkspaceProvider string
 
 const (
-	// WorkspaceProviderAgentSandbox uses the Kubernetes SIG agent-sandbox backend.
+	// WorkspaceProviderAgentSandbox is the legacy snapshot identity; new bindings use registered controller names.
 	WorkspaceProviderAgentSandbox WorkspaceProvider = "agent-sandbox"
-	// WorkspaceProviderSubstrate uses the Agent Substrate actor backend.
+	// WorkspaceProviderSubstrate identifies retained Substrate MCP Tools and legacy snapshots.
 	WorkspaceProviderSubstrate WorkspaceProvider = "substrate"
 )
 
@@ -121,16 +119,11 @@ const (
 	WorkspaceOnDetachDelete  WorkspaceOnDetachPolicy = "Delete"
 )
 
-// ExecutionWorkspaceSpec defines an optional durable execution workspace request.
-// ClassRef selects the provider-neutral controller-first path. Legacy provider/template/pool fields
-// remain served during migration.
-// +kubebuilder:validation:XValidation:rule="!has(self.classRef) || (!has(self.provider) && !has(self.templateRef) && !has(self.poolRef) && (!has(self.enabled) || !self.enabled) && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot) && !has(self.snapshot) && !has(self.hibernation))",message="classRef cannot be combined with legacy enabled, provider, template, pool, cleanup, boot, snapshot, or hibernation settings"
-// +kubebuilder:validation:XValidation:rule="!has(self.restoreFrom) || has(self.classRef)",message="restoreFrom requires classRef"
+// ExecutionWorkspaceSpec selects a durable workspace through an administrator-managed class.
 type ExecutionWorkspaceSpec struct {
-	// ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
-	// classRef implicitly enables the controller-first workspace path.
-	// +optional
-	ClassRef *WorkspaceClassReference `json:"classRef,omitempty"`
+	// ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace.
+	// +required
+	ClassRef *WorkspaceClassReference `json:"classRef"`
 
 	// RestoreFrom seeds a new workspace from a retained Data checkpoint in the
 	// Task namespace. This is a cold start with fresh credentials. It does not
@@ -139,33 +132,11 @@ type ExecutionWorkspaceSpec struct {
 	// +optional
 	RestoreFrom *WorkspaceCheckpointReference `json:"restoreFrom,omitempty"`
 
-	// Enabled requests use of a durable workspace for the task execution.
-	// +kubebuilder:default=false
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// Provider selects the workspace backend. When omitted, the controller
-	// resolves the configured default workspace provider; the built-in
-	// compatibility default is agent-sandbox.
-	// +optional
-	Provider WorkspaceProvider `json:"provider,omitempty"`
-
-	// TemplateRef references the workspace template to instantiate or reuse.
-	// The template name is required when enabled is true unless the controller
-	// is configured with a provider-specific default template.
-	// +optional
-	TemplateRef *WorkspaceTemplateReference `json:"templateRef,omitempty"`
-
 	// ReusePolicy controls whether the workspace is fresh or session-scoped.
 	// Defaults to none when omitted.
 	// +kubebuilder:default=none
 	// +optional
 	ReusePolicy WorkspaceReusePolicy `json:"reusePolicy,omitempty"`
-
-	// CleanupPolicy controls whether the workspace is deleted or retained after use.
-	// Defaults to delete when omitted.
-	// +optional
-	CleanupPolicy WorkspaceCleanupPolicy `json:"cleanupPolicy,omitempty"`
 
 	// WorkspaceSlot names one independently reusable workspace within a Session.
 	// +kubebuilder:default=default
@@ -178,29 +149,6 @@ type ExecutionWorkspaceSpec struct {
 	// OnDetach requests an action allowed by the selected class.
 	// +optional
 	OnDetach WorkspaceOnDetachPolicy `json:"onDetach,omitempty"`
-
-	// Boot asks providers that support it to boot the workspace workload from scratch
-	// instead of resuming from the provider's default snapshot. Currently supported
-	// by the Substrate provider.
-	// +optional
-	Boot bool `json:"boot,omitempty"`
-
-	// PoolRef references an operator-managed Substrate actor pool for placement,
-	// density tracking, and oversubscription policy.
-	// +optional
-	PoolRef *SubstrateActorPoolReference `json:"poolRef,omitempty"`
-
-	// Snapshot configures explicit provider snapshot restore/checkpoint behavior.
-	// Non-empty settings are currently rejected until provider checkpoint/restore
-	// support is available through Orka.
-	// +optional
-	Snapshot *ExecutionWorkspaceSnapshotSpec `json:"snapshot,omitempty"`
-
-	// Hibernation configures process lifetime inside the workspace. Resident
-	// mode is currently rejected until the worker protocol can report per-turn
-	// completion separately from resident process lifetime.
-	// +optional
-	Hibernation *ExecutionWorkspaceHibernationSpec `json:"hibernation,omitempty"`
 }
 
 // WorkspaceCheckpointReference pins a namespaced ExecutionWorkspaceCheckpoint
@@ -240,47 +188,4 @@ type SubstrateActorPoolReference struct {
 	// Namespace is the pool namespace. It defaults to the Task namespace.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
-}
-
-// ExecutionWorkspaceSnapshotSpec selects explicit provider snapshots.
-type ExecutionWorkspaceSnapshotSpec struct {
-	// RestoreURI is a provider-native snapshot URI prefix to restore before the
-	// workspace command runs.
-	// +optional
-	RestoreURI string `json:"restoreURI,omitempty"`
-
-	// CheckpointURI is a provider-native snapshot URI prefix to write when the
-	// workspace is retained or released.
-	// +optional
-	CheckpointURI string `json:"checkpointURI,omitempty"`
-
-	// CheckpointOnRelease requests a checkpoint when cleanup releases or retains
-	// the workspace. CheckpointURI must be set when this is true.
-	// +optional
-	CheckpointOnRelease bool `json:"checkpointOnRelease,omitempty"`
-}
-
-// ExecutionWorkspaceProcessMode controls process lifetime inside a workspace.
-// +kubebuilder:validation:Enum=fresh;resident
-type ExecutionWorkspaceProcessMode string
-
-const (
-	// ExecutionWorkspaceProcessModeFresh starts a fresh command for each task.
-	ExecutionWorkspaceProcessModeFresh ExecutionWorkspaceProcessMode = "fresh"
-	// ExecutionWorkspaceProcessModeResident reuses a long-lived process when the
-	// runtime command supports a stdin-driven resident protocol.
-	ExecutionWorkspaceProcessModeResident ExecutionWorkspaceProcessMode = "resident"
-)
-
-// ExecutionWorkspaceHibernationSpec configures resident process reuse.
-type ExecutionWorkspaceHibernationSpec struct {
-	// ProcessMode controls whether each turn starts fresh or reuses a resident
-	// process. Defaults to fresh.
-	// +optional
-	ProcessMode ExecutionWorkspaceProcessMode `json:"processMode,omitempty"`
-
-	// ResidentKey selects the process slot for resident mode. When omitted, the
-	// worker derives a stable key from namespace, template, and reuse key.
-	// +optional
-	ResidentKey string `json:"residentKey,omitempty"`
 }

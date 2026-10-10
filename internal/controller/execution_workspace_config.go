@@ -10,32 +10,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
-
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
-
-const (
-	EnvExecutionWorkspaceDefaultProvider = "ORKA_EXECUTION_WORKSPACE_DEFAULT_PROVIDER"
-
-	defaultExecutionWorkspaceProvider = corev1alpha1.WorkspaceProviderAgentSandbox
-)
-
-// ExecutionWorkspaceDefaultProviderFromEnv reads the provider-neutral default
-// workspace backend. Empty preserves the compatibility default.
-func ExecutionWorkspaceDefaultProviderFromEnv(getenv func(string) string) corev1alpha1.WorkspaceProvider {
-	if value := strings.TrimSpace(getenv(EnvExecutionWorkspaceDefaultProvider)); value != "" {
-		return corev1alpha1.WorkspaceProvider(value)
-	}
-	return defaultExecutionWorkspaceProvider
-}
-
-func executionWorkspaceDefaultProvider(provider corev1alpha1.WorkspaceProvider) corev1alpha1.WorkspaceProvider {
-	if provider == "" {
-		return defaultExecutionWorkspaceProvider
-	}
-	return provider
-}
 
 // ExecutionWorkspaceRequest identifies a Substrate ActorTemplate (plus the
 // controller-configured bootstrap Secret) for template validation by the Tool
@@ -47,23 +22,6 @@ type ExecutionWorkspaceRequest struct {
 
 	SubstrateBootstrapSecretName string
 	SubstrateBootstrapSecretKey  string
-}
-
-func resolveWorkspaceProvider(ws *corev1alpha1.ExecutionWorkspaceSpec, defaultProvider corev1alpha1.WorkspaceProvider) corev1alpha1.WorkspaceProvider {
-	if ws != nil && ws.Provider != "" {
-		return ws.Provider
-	}
-	return executionWorkspaceDefaultProvider(defaultProvider)
-}
-
-func supportedWorkspaceProvider(provider corev1alpha1.WorkspaceProvider) bool {
-	return statusrules.IsSupportedProvider(provider)
-}
-
-// WorkspaceProviderSupported reports whether provider is a recognized execution
-// workspace backend.
-func WorkspaceProviderSupported(provider corev1alpha1.WorkspaceProvider) bool {
-	return supportedWorkspaceProvider(provider)
 }
 
 func deterministicSubstratePoolActorID(prefix string, ordinal int) string {

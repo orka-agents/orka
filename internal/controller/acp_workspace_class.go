@@ -14,28 +14,27 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
-	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
 // acpWorkspaceProviderControllerName is the reserved adapter identity for the
 // in-tree ACP RuntimePool execution-workspace adapter. Only
 // ExecutionWorkspaceProvider objects carrying this controllerName may back
 // class-selected ACP RuntimeSessions.
+const acpWorkspaceSuspendDataOnly = "DataOnly"
+
 const acpWorkspaceProviderControllerName = "acp.workspace.orka.ai/runtime-pool"
 
 // acpWorkspaceControllerLabelValue is the label-safe encoding of the reserved
@@ -75,6 +74,15 @@ type ACPWorkspaceClassBinding struct {
 	ProviderName       string
 	ProviderUID        string
 	ProviderGeneration int64
+	// External bindings pin the installed lifecycle contract and both opaque
+	// provider-owned parameter objects. Empty ControllerName identifies only
+	// the legacy snapshot format retained for migration.
+	ControllerName           string
+	LifecycleContractVersion string
+	ProviderConfigRef        *workspacev1alpha1.TypedObjectReference
+	ProviderConfigBinding    *workspacev1alpha1.ImmutableObjectBinding
+	ParametersRef            *workspacev1alpha1.TypedObjectReference
+	ParametersBinding        *workspacev1alpha1.ImmutableObjectBinding
 	// ProviderConfigUID pins the exact cluster-scoped RuntimeProviderConfig
 	// that selected the physical backend: recreating the immutable config
 	// under the same name must read as drift, never as a silent backend swap.
@@ -192,6 +200,11 @@ func mayResolveFrozenACPContinuation(
 	frozenContinuation bool,
 	requiredFeatures []workspacev1alpha1.ExecutionWorkspaceFeature,
 ) bool {
+	if frozenContinuation && class.Status.ObservedGeneration == class.Generation && ready != nil &&
+		ready.Status == metav1.ConditionFalse && ready.ObservedGeneration == class.Generation &&
+		ready.Reason == string(workspacev1alpha1.ReasonProviderDraining) {
+		return true
+	}
 	continuation := frozenContinuation && task != nil && task.Spec.Execution != nil &&
 		task.Spec.Execution.Workspace != nil &&
 		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession &&
@@ -333,7 +346,7 @@ func frozenACPContinuationWorkspaceMatches(
 	sessionUID, slot string,
 ) bool {
 	return workspace != nil && workspace.UID != "" && workspace.DeletionTimestamp.IsZero() &&
-		workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue &&
+		workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != "" &&
 		workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive &&
 		workspace.Spec.ClassBinding.Name == class.Name && workspace.Spec.ClassBinding.UID == class.UID &&
 		workspace.Spec.ClassBinding.Generation == class.Generation &&
@@ -350,6 +363,15 @@ func frozenACPContinuationPoolMatches(
 ) bool {
 	if pool == nil || workspace == nil || !pool.DeletionTimestamp.IsZero() || pool.Spec.ExecutionWorkspace == nil {
 		return false
+	}
+	if pool.Spec.ExecutionWorkspace.WorkspaceRef != nil {
+		ref := pool.Spec.ExecutionWorkspace.WorkspaceRef
+		return pool.Namespace == workspace.Namespace && ref.Name == workspace.Name && ref.UID == workspace.UID &&
+			workspace.Spec.CoreAdmission != nil &&
+			workspace.Spec.CoreAdmission.ProviderBinding == workspace.Spec.ProviderBinding &&
+			workspace.Spec.CoreAdmission.ClassBinding == workspace.Spec.ClassBinding &&
+			string(pool.Spec.ExecutionWorkspace.Provider) == workspace.Labels[workspacev1alpha1.ProviderControllerLabel] &&
+			pool.Spec.ExecutionWorkspace.BindingDigest != ""
 	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
 		pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting ||
@@ -426,14 +448,6 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 		strings.TrimSpace(class.Status.ProviderRef.Name) == "" {
 		return nil, fmt.Errorf("execution workspace class %q has no pinned profile hash or resolved provider", className)
 	}
-	if class.Spec.ParametersRef.Group != acpworkspacev1alpha1.GroupVersion.Group ||
-		class.Spec.ParametersRef.Kind != "RuntimeWorkspaceProfile" {
-		return nil, fmt.Errorf(
-			"execution workspace class %q parametersRef %s/%s is not an ACP RuntimeWorkspaceProfile",
-			className, class.Spec.ParametersRef.Group, class.Spec.ParametersRef.Kind,
-		)
-	}
-
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: class.Status.ProviderRef.Name}, provider); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -444,231 +458,10 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 	if !provider.DeletionTimestamp.IsZero() {
 		return nil, fmt.Errorf("execution workspace provider %q is deleting", provider.Name)
 	}
-	if provider.Spec.ControllerName != acpWorkspaceProviderControllerName {
-		return nil, fmt.Errorf(
-			"execution workspace provider %q controllerName %q is not the ACP RuntimePool adapter; ACP RuntimeSessions have no fallback execution path",
-			provider.Name, provider.Spec.ControllerName,
-		)
+	if provider.Spec.ControllerName == acpWorkspaceProviderControllerName {
+		return nil, fmt.Errorf("legacy execution workspace provider must retire under its original controller before upgrade")
 	}
-	if provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
-		return nil, fmt.Errorf("execution workspace provider %q is %s and rejects new ACP workspaces", provider.Name, provider.Spec.LifecycleState)
-	}
-	providerReady := workspaceprovider.FindCondition(provider.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady))
-	if provider.Status.ObservedGeneration != provider.Generation ||
-		providerReady == nil || providerReady.Status != metav1.ConditionTrue ||
-		providerReady.ObservedGeneration != provider.Generation {
-		return nil, fmt.Errorf("execution workspace provider %q is not ready at its current generation", provider.Name)
-	}
-	if !featureSetContainsAll(provider.Status.SupportedFeatures, requiredFeatures) {
-		return nil, fmt.Errorf(
-			"execution workspace provider %q no longer supports every required class or Task feature",
-			provider.Name,
-		)
-	}
-	// The class's cached Ready condition lags provider policy edits (the
-	// class controller refreshes on a timer and the profile hash excludes
-	// usagePolicy), so the live selector is re-checked here: a namespace the
-	// operator just disallowed must fail closed immediately, not after the
-	// next class reconciliation.
-	allowed, policyErr := namespaceAllowedByWorkspaceProvider(ctx, reader, class.Namespace, provider)
-	if policyErr != nil {
-		return nil, fmt.Errorf("validate provider namespace usage policy: %w", policyErr)
-	}
-	if !allowed {
-		return nil, fmt.Errorf(
-			"execution workspace provider %q usage policy does not allow namespace %q",
-			provider.Name, class.Namespace,
-		)
-	}
-	if provider.Spec.ParametersRef.Group != acpworkspacev1alpha1.GroupVersion.Group ||
-		provider.Spec.ParametersRef.Kind != "RuntimeProviderConfig" {
-		return nil, fmt.Errorf(
-			"execution workspace provider %q parametersRef %s/%s is not an ACP RuntimeProviderConfig",
-			provider.Name, provider.Spec.ParametersRef.Group, provider.Spec.ParametersRef.Kind,
-		)
-	}
-	config := &acpworkspacev1alpha1.RuntimeProviderConfig{}
-	if err := reader.Get(ctx, types.NamespacedName{Name: provider.Spec.ParametersRef.Name}, config); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("ACP runtime provider config %q does not exist", provider.Spec.ParametersRef.Name)
-		}
-		return nil, fmt.Errorf("resolve ACP runtime provider config: %w", err)
-	}
-	if !config.DeletionTimestamp.IsZero() {
-		// The operator has withdrawn this configuration; freezing its identity
-		// into a new Task would dispatch against it before the provider
-		// advertisement heartbeat notices the deletion.
-		return nil, fmt.Errorf("ACP runtime provider config %q is being deleted", config.Name)
-	}
-	pinned := strings.TrimSpace(provider.Status.PinnedParametersUID)
-	if pinned == "" {
-		return nil, fmt.Errorf(
-			"execution workspace provider %q has no protected RuntimeProviderConfig UID pin",
-			provider.Name,
-		)
-	}
-	if pinned != string(config.UID) {
-		// The immutable RuntimeProviderConfig was deleted and recreated under
-		// the same name (possibly switching backends). The provider UID,
-		// generation, and recomputed profile hash cannot see that
-		// replacement, so the status-pinned config identity is the fence: a
-		// new Task must never silently snapshot and execute on the
-		// replacement backend under the same frozen class identity.
-		return nil, fmt.Errorf(
-			"ACP runtime provider config %q was replaced (uid %s, pinned %s); create a new provider and class",
-			config.Name, config.UID, pinned,
-		)
-	}
-	var backend corev1alpha1.WorkspaceProvider
-	switch config.Spec.Backend {
-	case acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox:
-		backend = corev1alpha1.WorkspaceProviderAgentSandbox
-	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
-		backend = corev1alpha1.WorkspaceProviderSubstrate
-	default:
-		return nil, fmt.Errorf("ACP runtime provider config %q backend %q is not supported", config.Name, config.Spec.Backend)
-	}
-
-	profile, profileSpec, err := r.resolveACPWorkspaceProfile(ctx, reader, class)
-	if err != nil {
-		return nil, err
-	}
-	resolvedHash, err := acpWorkspaceClassProfileHash(class, provider, profile)
-	if err != nil {
-		return nil, fmt.Errorf("recompute execution workspace class profile hash: %w", err)
-	}
-	if resolvedHash != class.Status.ProfileHash {
-		return nil, fmt.Errorf(
-			"execution workspace class %q resolved profile drifted from its pinned hash; create a new class",
-			className,
-		)
-	}
-
-	resolved := &acpResolvedWorkspaceClass{
-		Binding: ACPWorkspaceClassBinding{
-			Name:               class.Name,
-			UID:                string(class.UID),
-			Generation:         class.Generation,
-			ProfileHash:        class.Status.ProfileHash,
-			ProviderName:       provider.Name,
-			ProviderUID:        string(provider.UID),
-			ProviderGeneration: provider.Generation,
-			ProviderConfigUID:  string(config.UID),
-			DefaultOnDetach:    string(class.Spec.Lifecycle.DefaultOnDetach),
-			AllowedOnDetach:    onDetachActionsToStrings(class.Spec.Lifecycle.AllowedOnDetach),
-			DetachTimeout:      class.Spec.Lifecycle.DetachTimeout.Duration.String(),
-			DeletionPolicy: ACPWorkspaceClassDeletionPolicy{
-				ProviderResources: string(class.Spec.Lifecycle.DeletionPolicy.ProviderResources),
-				PersistentVolumes: string(class.Spec.Lifecycle.DeletionPolicy.PersistentVolumes),
-				Checkpoints:       string(class.Spec.Lifecycle.DeletionPolicy.Checkpoints),
-			},
-		},
-		Backend:            backend,
-		Mode:               class.Spec.Mode,
-		AllowedReuseScopes: append([]workspacev1alpha1.WorkspaceReuseScope(nil), class.Spec.AllowedReuseScopes...),
-		AllowedOnDetach:    append([]workspacev1alpha1.WorkspaceOnDetach(nil), class.Spec.Lifecycle.AllowedOnDetach...),
-		DefaultOnDetach:    class.Spec.Lifecycle.DefaultOnDetach,
-	}
-	if class.Spec.Lifecycle.IdleTimeout != nil {
-		resolved.Binding.IdleTimeout = class.Spec.Lifecycle.IdleTimeout.Duration.String()
-	}
-	if class.Spec.Lifecycle.MaxLifetime != nil {
-		resolved.Binding.MaxLifetime = class.Spec.Lifecycle.MaxLifetime.Duration.String()
-	}
-	// Retained provider resources, volumes, and checkpoints require the
-	// bounded-retention machinery; until it exists every category must delete.
-	for category, action := range map[string]workspacev1alpha1.WorkspaceDeletionAction{
-		"providerResources": class.Spec.Lifecycle.DeletionPolicy.ProviderResources,
-		"persistentVolumes": class.Spec.Lifecycle.DeletionPolicy.PersistentVolumes,
-		"checkpoints":       class.Spec.Lifecycle.DeletionPolicy.Checkpoints,
-	} {
-		if action != workspacev1alpha1.WorkspaceDeletionActionDelete {
-			return nil, fmt.Errorf(
-				"execution workspace class %q deletion policy retains %s; retained workspace data is not yet supported for ACP RuntimeSessions",
-				className, category,
-			)
-		}
-	}
-	if retention := profileSpec.Retention; retention != nil && retention.MaxSuspendedWorkspaces != nil {
-		limit := *retention.MaxSuspendedWorkspaces
-		resolved.Binding.MaxSuspendedWorkspaces = &limit
-	}
-
-	switch backend {
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		if profileSpec.Substrate == nil || strings.TrimSpace(profileSpec.Substrate.TemplateRef.Name) == "" {
-			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q must name the operator-owned Substrate infrastructure ActorTemplate for backend substrate",
-				class.Spec.ParametersRef.Name,
-			)
-		}
-		templateName := strings.TrimSpace(profileSpec.Substrate.TemplateRef.Name)
-		templateNamespace := strings.TrimSpace(profileSpec.Substrate.TemplateRef.Namespace)
-		if templateNamespace == "" {
-			templateNamespace = class.Namespace
-		}
-		if err := validateSubstrateWorkspaceTemplateReference(templateNamespace, templateName); err != nil {
-			return nil, err
-		}
-		resolved.SubstrateTemplateNamespace = templateNamespace
-		resolved.SubstrateTemplateName = templateName
-		if suspend := profileSpec.Substrate.Suspend; suspend != nil {
-			if suspend.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
-				return nil, fmt.Errorf(
-					"ACP runtime workspace profile %q suspend mode %q is not admitted; only DataOnly is executable, and full-memory restore stays gated until its credential-safety prerequisites are met (ADR 0030)",
-					class.Spec.ParametersRef.Name, suspend.Mode,
-				)
-			}
-			resolved.Binding.SuspendMode = string(suspend.Mode)
-		}
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if profileSpec.Substrate != nil {
-			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q sets substrate inputs, but provider %q backend is agent-sandbox",
-				class.Spec.ParametersRef.Name, provider.Name,
-			)
-		}
-		if suspend := profileSpec.AgentSandbox; suspend != nil && suspend.Suspend != nil {
-			volume, err := frozenACPSandboxDurableVolume(suspend.Suspend, class.Spec.ParametersRef.Name)
-			if err != nil {
-				return nil, err
-			}
-			resolved.Binding.SuspendMode = string(suspend.Suspend.Mode)
-			continuationVolume, found, err := r.frozenACPContinuationSandboxVolume(
-				ctx, reader, task, resolved, workspaceSessionUID, volume,
-			)
-			if err != nil {
-				return nil, err
-			}
-			if found {
-				volume = continuationVolume
-			} else {
-				storageClass, err := validateDurableStorageClassReclaim(ctx, reader, volume.StorageClassName, class.Spec.ParametersRef.Name)
-				if err != nil {
-					return nil, err
-				}
-				// A new workspace pins the resolved class, either the named one
-				// or the cluster default at freeze time. A continuation instead
-				// keeps the immutable identity of its already-bound volume.
-				volume.StorageClassName = storageClass.Name
-				volume.StorageClassUID = string(storageClass.UID)
-			}
-			resolved.Binding.SandboxVolume = volume
-		}
-	}
-	if backend != corev1alpha1.WorkspaceProviderAgentSandbox && profileSpec.AgentSandbox != nil {
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q sets agent-sandbox inputs, but provider %q backend is %s",
-			class.Spec.ParametersRef.Name, provider.Name, backend,
-		)
-	}
-	if err := validateACPWorkspaceRetentionBound(&resolved.Binding); err != nil {
-		return nil, fmt.Errorf("execution workspace class %q: %w", class.Name, err)
-	}
-	if err := r.enforceACPWorkspaceSuspendQuota(ctx, reader, task, class, resolved); err != nil {
-		return nil, err
-	}
-	return resolved, nil
+	return r.resolveExternalACPWorkspaceClass(ctx, reader, task, class, provider, workspaceSessionUID, frozenContinuation, requiredFeatures)
 }
 
 // errACPWorkspacePlanningTransient marks workspace-plan resolution failures
@@ -775,7 +568,7 @@ func (r *TaskReconciler) readySessionWorkspaceAwaitingSuspendQuota(
 		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
 		return false, nil
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, sessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, sessionUID, resolved)
 	if err != nil {
 		return false, err
 	}
@@ -804,291 +597,6 @@ func (r *TaskReconciler) readySessionWorkspaceAwaitingSuspendQuota(
 		return false, nil
 	}
 	return true, nil
-}
-
-// frozenACPContinuationSandboxVolume returns the durable-volume identity
-// already frozen into a session workspace's linked RuntimePool. StorageClass
-// replacement must not change a continuation snapshot for an existing PVC.
-func (r *TaskReconciler) frozenACPContinuationSandboxVolume(
-	ctx context.Context,
-	reader client.Reader,
-	task *corev1alpha1.Task,
-	resolved *acpResolvedWorkspaceClass,
-	workspaceSessionUID string,
-	requested *ACPSandboxDurableVolume,
-) (*ACPSandboxDurableVolume, bool, error) {
-	workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
-	if workspaceSessionUID == "" || task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
-		return nil, false, nil
-	}
-	probeResolved := *resolved
-	probeResolved.Binding = resolved.Binding
-	probeResolved.Binding.SandboxVolume = requested
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, workspaceSessionUID, &probeResolved)
-	if err != nil {
-		return nil, false, err
-	}
-	workspace := &workspacev1alpha1.ExecutionWorkspace{}
-	workspaceName := acpClassWorkspaceName(task, binding)
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, false, nil
-		}
-		return nil, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
-			"resolve existing execution workspace for durable-volume continuation: %w", err,
-		))
-	}
-	poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation])
-	if poolName == "" {
-		return nil, false, fmt.Errorf("%w: workspace %s is missing its linked RuntimePool identity", errACPWorkspaceBindingConflict, workspace.Name)
-	}
-	if err := verifyACPClassWorkspace(workspace, task, binding, poolName); err != nil {
-		return nil, false, err
-	}
-	pool := &corev1alpha1.RuntimePool{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: poolName}, pool); err != nil {
-		if apierrors.IsNotFound(err) {
-			if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
-				return nil, false, fmt.Errorf(
-					"%w: resumed workspace %s is missing its linked RuntimePool %s",
-					errACPWorkspaceBindingConflict, workspace.Name, poolName,
-				)
-			}
-			return nil, false, nil
-		}
-		return nil, false, markRetryableACPWorkspaceClassResolution(fmt.Errorf(
-			"resolve linked RuntimePool for durable-volume continuation: %w", err,
-		))
-	}
-	if pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name ||
-		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) ||
-		pool.Spec.ExecutionWorkspace == nil ||
-		pool.Spec.ExecutionWorkspace.Provider != corev1alpha1.WorkspaceProviderAgentSandbox ||
-		pool.Spec.ExecutionWorkspace.AgentSandbox == nil ||
-		pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendMode != resolved.Binding.SuspendMode ||
-		pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume == nil {
-		return nil, false, fmt.Errorf("%w: workspace %s linked RuntimePool does not carry the exact agent-sandbox suspension binding", errACPWorkspaceBindingConflict, workspace.Name)
-	}
-	frozen := pool.Spec.ExecutionWorkspace.AgentSandbox.SuspendVolume
-	if strings.TrimSpace(frozen.StorageClassName) == "" || strings.TrimSpace(frozen.StorageClassUID) == "" ||
-		(requested.StorageClassName != "" && frozen.StorageClassName != requested.StorageClassName) ||
-		frozen.Capacity != requested.Capacity || !slices.Equal(frozen.AccessModes, requested.AccessModes) {
-		return nil, false, fmt.Errorf("%w: workspace %s linked RuntimePool durable-volume shape does not match the frozen class profile", errACPWorkspaceBindingConflict, workspace.Name)
-	}
-	continuation := &ACPSandboxDurableVolume{
-		StorageClassName: frozen.StorageClassName,
-		StorageClassUID:  frozen.StorageClassUID,
-		AccessModes:      append([]string(nil), frozen.AccessModes...),
-		Capacity:         frozen.Capacity,
-	}
-	probeResolved.Binding.SandboxVolume = continuation
-	continuationBinding, err := resolveACPWorkspaceBindingWithClass(task, "", false, workspaceSessionUID, &probeResolved)
-	if err != nil {
-		return nil, false, err
-	}
-	if continuationBinding.BindingDigest != pool.Spec.ExecutionWorkspace.BindingDigest {
-		return nil, false, fmt.Errorf("%w: workspace %s linked RuntimePool durable-volume binding digest is inconsistent", errACPWorkspaceBindingConflict, workspace.Name)
-	}
-	return continuation, true, nil
-}
-
-// frozenACPSandboxDurableVolume validates and freezes the profile's durable
-// workspace PVC shape.
-func frozenACPSandboxDurableVolume(
-	policy *acpworkspacev1alpha1.AgentSandboxSuspendPolicy,
-	profileName string,
-) (*ACPSandboxDurableVolume, error) {
-	if policy.Mode != acpworkspacev1alpha1.SubstrateSuspendModeDataOnly {
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q suspend mode %q is not supported; only DataOnly is admitted",
-			profileName, policy.Mode,
-		)
-	}
-	shape, err := validateACPSandboxDurableVolumeShape(
-		policy.Volume.Capacity,
-		policy.Volume.AccessModes,
-		policy.Volume.StorageClassName,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("ACP runtime workspace profile %q durable volume %w", profileName, err)
-	}
-	return &ACPSandboxDurableVolume{
-		StorageClassName: shape.storageClassName,
-		AccessModes:      shape.accessModes,
-		Capacity:         shape.capacity,
-	}, nil
-}
-
-type acpSandboxDurableVolumeShape struct {
-	storageClassName string
-	accessModes      []string
-	capacity         string
-}
-
-// validateACPSandboxDurableVolumeShape applies the provider-independent PVC
-// checks used both when a class binding is frozen and when a persisted
-// RuntimePool is admitted after controller restart.
-func validateACPSandboxDurableVolumeShape(
-	capacityValue string,
-	accessModes []string,
-	storageClassName string,
-) (acpSandboxDurableVolumeShape, error) {
-	capacity := strings.TrimSpace(capacityValue)
-	parsedCapacity, err := resource.ParseQuantity(capacity)
-	if err != nil {
-		return acpSandboxDurableVolumeShape{}, fmt.Errorf("capacity %q is invalid: %w", capacityValue, err)
-	}
-	if parsedCapacity.Sign() <= 0 {
-		// ParseQuantity accepts signed values, but a non-positive storage
-		// request freezes a class whose SandboxClaim can never materialize.
-		return acpSandboxDurableVolumeShape{}, fmt.Errorf("capacity %q must be positive", capacityValue)
-	}
-
-	modes := append([]string(nil), accessModes...)
-	if len(modes) == 0 {
-		modes = []string{string(corev1.ReadWriteOnce)}
-	}
-	// The mounted durable directory is the active repository workspace: the
-	// supervisor clones, edits, and commits in it, so every admitted mode must
-	// be writable. A read-only-capable driver honoring ReadOnlyMany would
-	// reject the writable mount or hand the session a read-only workspace.
-	for _, mode := range modes {
-		switch corev1.PersistentVolumeAccessMode(mode) {
-		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod, corev1.ReadWriteMany:
-		default:
-			return acpSandboxDurableVolumeShape{}, fmt.Errorf("access mode %q is not a writable mode", mode)
-		}
-	}
-	slices.Sort(modes)
-
-	storageClassName = strings.TrimSpace(storageClassName)
-	if storageClassName != "" {
-		if errs := validation.IsDNS1123Subdomain(storageClassName); len(errs) > 0 {
-			// A syntactically invalid storage class freezes a class whose
-			// SandboxClaim can never create its PVC.
-			return acpSandboxDurableVolumeShape{}, fmt.Errorf(
-				"storage class %q is not a valid storage class name: %s",
-				storageClassName, errs[0],
-			)
-		}
-	}
-
-	return acpSandboxDurableVolumeShape{
-		storageClassName: storageClassName,
-		accessModes:      modes,
-		capacity:         capacity,
-	}, nil
-}
-
-// validateDurableStorageClassReclaim resolves the StorageClass the durable
-// workspace PVC will bind to (the named class, or the cluster default when
-// the profile leaves it empty) and requires Delete reclaim semantics. Only
-// the all-Delete lifecycle is executable: under a retaining class,
-// finalization would delete the SandboxClaim and PVC and report the volume
-// deleted while Kubernetes leaves the PV and its repository data behind.
-func validateDurableStorageClassReclaim(
-	ctx context.Context,
-	reader client.Reader,
-	storageClassName string,
-	profileName string,
-) (*storagev1.StorageClass, error) {
-	class := &storagev1.StorageClass{}
-	if storageClassName != "" {
-		if err := reader.Get(ctx, types.NamespacedName{Name: storageClassName}, class); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf(
-					"ACP runtime workspace profile %q durable volume storage class %q does not exist",
-					profileName, storageClassName,
-				)
-			}
-			return nil, markRetryableACPWorkspaceClassResolution(
-				fmt.Errorf("resolve durable volume storage class: %w", err),
-			)
-		}
-	} else {
-		classes := &storagev1.StorageClassList{}
-		if err := reader.List(ctx, classes); err != nil {
-			return nil, markRetryableACPWorkspaceClassResolution(
-				fmt.Errorf("resolve the default storage class for the durable volume: %w", err),
-			)
-		}
-		found := false
-		for i := range classes.Items {
-			candidate := &classes.Items[i]
-			if candidate.Annotations["storageclass.kubernetes.io/is-default-class"] != booleanTrueValue &&
-				candidate.Annotations["storageclass.beta.kubernetes.io/is-default-class"] != booleanTrueValue {
-				// Kubernetes still honors the legacy beta annotation when
-				// defaulting ordinary PVCs; rejecting such a cluster with
-				// "no default storage class" would diverge from what an
-				// unqualified claim actually binds to.
-				continue
-			}
-			// Kubernetes resolves an unqualified PVC to the MOST RECENTLY
-			// created default class; freeze the same one deterministically
-			// (creation timestamp, name as the tiebreak) instead of list
-			// order.
-			if !found ||
-				candidate.CreationTimestamp.After(class.CreationTimestamp.Time) ||
-				(candidate.CreationTimestamp.Equal(&class.CreationTimestamp) && candidate.Name < class.Name) {
-				*class = *candidate
-			}
-			found = true
-		}
-		if !found {
-			return nil, fmt.Errorf(
-				"ACP runtime workspace profile %q leaves the durable volume storage class empty and the cluster has no default storage class",
-				profileName,
-			)
-		}
-	}
-	if !class.DeletionTimestamp.IsZero() {
-		// Freezing a terminating class pins the Task to a UID that is about
-		// to vanish; claim creation would race its disappearance and retries
-		// could never select the replacement.
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q durable volume storage class %q is being deleted; refusing to freeze a terminating class",
-			profileName, class.Name,
-		)
-	}
-	if class.ReclaimPolicy != nil && *class.ReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
-		return nil, fmt.Errorf(
-			"ACP runtime workspace profile %q durable volume storage class %q reclaim policy %q violates the all-Delete lifecycle; only Delete reclaim is admitted",
-			profileName, class.Name, *class.ReclaimPolicy,
-		)
-	}
-	return class, nil
-}
-
-// resolveACPWorkspaceProfile reads the class's RuntimeWorkspaceProfile both as
-// the unstructured object hashed by the class controller and as the typed spec
-// consumed by the resolver, so hash recomputation matches the pinned profile
-// byte for byte.
-func (r *TaskReconciler) resolveACPWorkspaceProfile(
-	ctx context.Context,
-	reader client.Reader,
-	class *workspacev1alpha1.ExecutionWorkspaceClass,
-) (*unstructured.Unstructured, acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec, error) {
-	profile := &unstructured.Unstructured{}
-	profile.SetGroupVersionKind(acpworkspacev1alpha1.GroupVersion.WithKind("RuntimeWorkspaceProfile"))
-	key := types.NamespacedName{Namespace: class.Namespace, Name: class.Spec.ParametersRef.Name}
-	if err := reader.Get(ctx, key, profile); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{}, fmt.Errorf(
-				"ACP runtime workspace profile %q does not exist in namespace %q", class.Spec.ParametersRef.Name, class.Namespace,
-			)
-		}
-		return nil, acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{}, fmt.Errorf("resolve ACP runtime workspace profile: %w", err)
-	}
-	if profile.GetDeletionTimestamp() != nil {
-		return nil, acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{}, fmt.Errorf(
-			"ACP runtime workspace profile %q is deleting", class.Spec.ParametersRef.Name,
-		)
-	}
-	typed := &acpworkspacev1alpha1.RuntimeWorkspaceProfile{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(profile.Object, typed); err != nil {
-		return nil, acpworkspacev1alpha1.RuntimeWorkspaceProfileSpec{}, fmt.Errorf("decode ACP runtime workspace profile: %w", err)
-	}
-	return profile, typed.Spec, nil
 }
 
 // acpWorkspaceClassProfileHash recomputes the class profile hash with the same
@@ -1157,7 +665,7 @@ func effectiveACPWorkspaceOnDetach(
 	switch effective {
 	case workspacev1alpha1.WorkspaceOnDetachDelete:
 	case workspacev1alpha1.WorkspaceOnDetachSuspend:
-		if resolved.Binding.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		if resolved.Binding.SuspendMode != acpWorkspaceSuspendDataOnly {
 			return "", fmt.Errorf(
 				"execution workspace onDetach Suspend requires a class whose profile permits DataOnly suspension; class %q does not",
 				resolved.Binding.Name,
@@ -1197,6 +705,23 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 	if strings.TrimSpace(class.ProviderName) == "" || strings.TrimSpace(class.ProviderUID) == "" || class.ProviderGeneration < 1 {
 		return fmt.Errorf("frozen execution workspace class binding is missing its immutable provider identity")
 	}
+	if class.ControllerName != "" {
+		if len(class.ControllerName) > 63 || len(validation.IsDNS1123Subdomain(class.ControllerName)) != 0 || class.LifecycleContractVersion != workspacev1alpha1.LifecycleContractV1 {
+			return fmt.Errorf("frozen external workspace controller or lifecycle contract is invalid")
+		}
+		for _, pair := range []struct {
+			ref     *workspacev1alpha1.TypedObjectReference
+			binding *workspacev1alpha1.ImmutableObjectBinding
+		}{{class.ProviderConfigRef, class.ProviderConfigBinding}, {class.ParametersRef, class.ParametersBinding}} {
+			if pair.ref == nil || pair.binding == nil || pair.ref.Group == "" || pair.ref.Kind == "" ||
+				pair.ref.Name != pair.binding.Name || pair.binding.UID == "" || pair.binding.Generation < 1 || !validSHA256Digest(pair.binding.ProfileHash) {
+				return fmt.Errorf("frozen external workspace parameters lack an exact immutable binding")
+			}
+		}
+		if class.ProviderConfigUID != string(class.ProviderConfigBinding.UID) || class.SandboxVolume != nil {
+			return fmt.Errorf("frozen external workspace config pin or parameters are inconsistent")
+		}
+	}
 	return validateACPWorkspaceClassLifecycleValues(class)
 }
 
@@ -1204,13 +729,13 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 	switch class.EffectiveOnDetach {
 	case string(workspacev1alpha1.WorkspaceOnDetachDelete):
 	case string(workspacev1alpha1.WorkspaceOnDetachSuspend):
-		if class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		if class.SuspendMode != acpWorkspaceSuspendDataOnly {
 			return fmt.Errorf("frozen execution workspace class binding permits Suspend without a DataOnly suspension policy")
 		}
 	default:
 		return fmt.Errorf("frozen execution workspace class binding detach action %q is not executable", class.EffectiveOnDetach)
 	}
-	if class.SuspendMode != "" && class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+	if class.SuspendMode != "" && class.SuspendMode != acpWorkspaceSuspendDataOnly {
 		return fmt.Errorf("frozen execution workspace class binding suspension mode %q is not supported", class.SuspendMode)
 	}
 	if class.MaxSuspendedWorkspaces != nil && *class.MaxSuspendedWorkspaces < 0 {
@@ -1220,7 +745,7 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 	// older controllers remain executable so an upgrade cannot wedge a Task
 	// whose immutable binding predates that requirement.
 	if class.SandboxVolume != nil {
-		if class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+		if class.SuspendMode != acpWorkspaceSuspendDataOnly {
 			return fmt.Errorf("frozen execution workspace class binding carries a durable volume without a DataOnly suspension policy")
 		}
 		if _, err := resource.ParseQuantity(class.SandboxVolume.Capacity); err != nil {
@@ -1266,20 +791,6 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 		if action != string(workspacev1alpha1.WorkspaceDeletionActionDelete) {
 			return fmt.Errorf("frozen execution workspace class binding deletion policy action %q is not executable; only Delete is supported", action)
 		}
-	}
-	return nil
-}
-
-func validateACPWorkspaceRetentionBound(class *ACPWorkspaceClassBinding) error {
-	if class == nil || class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) ||
-		!slices.Contains(class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) {
-		return nil
-	}
-	if class.IdleTimeout == "" && class.MaxLifetime == "" {
-		return errors.New("a suspend-capable class requires an expiry bound: idleTimeout or maxLifetime; maxSuspendedWorkspaces only caps suspended occupancy")
-	}
-	if class.MaxSuspendedWorkspaces != nil && class.MaxLifetime == "" {
-		return errors.New("a suspend-capable class with maxSuspendedWorkspaces requires maxLifetime because quota can defer suspension past idleTimeout")
 	}
 	return nil
 }
