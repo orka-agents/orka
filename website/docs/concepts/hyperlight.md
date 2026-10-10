@@ -107,3 +107,17 @@ cooperative, so a busy thread holds the vCPU. Guest memory is fixed per runtime
 (`python` 256 MiB, `node` 512 MiB, `bash` 128 MiB; `ORKA_HYPERLIGHT_SCRATCH_MB`
 overrides it), and exceeding it ends the run. A run that prints more than
 64 MiB is stopped, since `hluk` keeps a copy of everything the guest prints.
+
+## Continuous integration
+
+The `Hyperlight E2E` workflow builds the pinned production bundle and runs real
+KVM guests without LLM credentials. It tests cold boot and warm snapshots,
+`code_exec` in a non-root read-only container, and the ACP `sandbox_exec` MCP
+path with distinct session identities. Checks cover workspace persistence,
+host-file and environment isolation, output limits, timeouts, cancellation,
+and Python and JavaScript script compatibility.
+
+These are tool-path tests, not a Kubernetes deployment E2E. Run them with the
+`hyperlight_e2e` Go build tag on Linux with the bundle at
+`/opt/orka/hyperlight` and access to `/dev/kvm`. The workflow fails if KVM is
+missing; it does not turn an unavailable hypervisor into a passing skip.

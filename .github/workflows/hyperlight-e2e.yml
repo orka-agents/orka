@@ -1,0 +1,139 @@
+name: Hyperlight E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/hyperlight-e2e.yml'
+      - '.dockerignore'
+      - 'cmd/main.go'
+      - 'Makefile'
+      - 'go.mod'
+      - 'go.sum'
+      - 'internal/acp/**'
+      - 'internal/controller/hyperlight_pod.go'
+      - 'internal/controller/job_builder*'
+      - 'internal/controller/runtime_pool*'
+      - 'internal/harness/v2/**'
+      - 'internal/hyperlight/**'
+      - 'internal/tools/**'
+      - 'internal/workerenv/**'
+      - 'workers/acp/supervisor/**'
+      - 'workers/hyperlight/**'
+  push:
+    paths:
+      - '.github/workflows/hyperlight-e2e.yml'
+      - '.dockerignore'
+      - 'cmd/main.go'
+      - 'Makefile'
+      - 'go.mod'
+      - 'go.sum'
+      - 'internal/acp/**'
+      - 'internal/controller/hyperlight_pod.go'
+      - 'internal/controller/job_builder*'
+      - 'internal/controller/runtime_pool*'
+      - 'internal/harness/v2/**'
+      - 'internal/hyperlight/**'
+      - 'internal/tools/**'
+      - 'internal/workerenv/**'
+      - 'workers/acp/supervisor/**'
+      - 'workers/hyperlight/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperlight-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hyperlight-e2e:
+    name: Real KVM guests and tool isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      HYPERLIGHT_BUNDLE_IMG: orka-hyperlight-e2e:${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          cache: true
+
+      - name: Require KVM
+        run: |
+          set -Eeuo pipefail
+          E2E_DIR="$RUNNER_TEMP/hyperlight-e2e"
+          mkdir -p "$E2E_DIR"
+          echo "E2E_DIR=$E2E_DIR" >> "$GITHUB_ENV"
+          if [[ ! -c /dev/kvm ]]; then
+            echo '::error::This E2E requires /dev/kvm. Nested virtualization is not guaranteed on hosted runners; do not silently skip the guest tests.'
+            exit 1
+          fi
+          sudo chgrp kvm /dev/kvm
+          sudo chmod 0660 /dev/kvm
+          echo "HYPERLIGHT_DEVICE_GID=$(stat -c '%g' /dev/kvm)" >> "$GITHUB_ENV"
+          stat /dev/kvm | tee "$E2E_DIR/kvm.txt"
+
+      - name: Compile real-guest E2E tests
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          set -Eeuo pipefail
+          make ensure-ui-embed
+          go test -tags hyperlight_e2e -c -o "$E2E_DIR/runner.test" ./internal/hyperlight
+          go test -tags hyperlight_e2e -c -o "$E2E_DIR/code-exec.test" ./internal/tools
+          go test -tags hyperlight_e2e -c -o "$E2E_DIR/sandbox-exec.test" ./workers/acp/supervisor
+
+      - name: Build the pinned production bundle
+        run: |
+          set -Eeuo pipefail
+          make docker-build-hyperlight-bundle 2>&1 | tee "$E2E_DIR/bundle-build.log"
+
+      - name: Run non-root runner and code_exec E2E
+        run: |
+          set -Eeuo pipefail
+          for suite in runner code-exec; do
+            docker run --rm --network none --read-only \
+              --device /dev/kvm --user 1000:1000 --group-add "$HYPERLIGHT_DEVICE_GID" \
+              --cap-drop ALL --security-opt no-new-privileges \
+              --memory 4g --cpus 2 --pids-limit 256 \
+              --tmpfs /tmp:rw,nosuid,nodev,size=2g,mode=1777 \
+              --mount "type=bind,src=$E2E_DIR/$suite.test,dst=/e2e.test,readonly" \
+              --entrypoint /e2e.test "$HYPERLIGHT_BUNDLE_IMG" \
+              -test.run '^TestHyperlightE2E' -test.v -test.timeout 5m \
+              2>&1 | tee "$E2E_DIR/$suite.log"
+          done
+
+      - name: Run ACP MCP sandbox_exec with session identities
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network none --read-only \
+            --device /dev/kvm --user 0:0 \
+            --cap-drop ALL --cap-add CHOWN --cap-add KILL --cap-add SETUID --cap-add SETGID \
+            --security-opt no-new-privileges \
+            --memory 4g --cpus 2 --pids-limit 256 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=2g,mode=1777 \
+            --env "ORKA_HYPERLIGHT_DEVICE_GID=$HYPERLIGHT_DEVICE_GID" \
+            --mount "type=bind,src=$E2E_DIR/sandbox-exec.test,dst=/e2e.test,readonly" \
+            --entrypoint /e2e.test "$HYPERLIGHT_BUNDLE_IMG" \
+            -test.run '^TestHyperlightE2E' -test.v -test.timeout 5m \
+            2>&1 | tee "$E2E_DIR/sandbox-exec.log"
+
+      - name: Upload bounded E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hyperlight-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.E2E_DIR }}/*.log
+            ${{ env.E2E_DIR }}/kvm.txt
+          if-no-files-found: warn
+          retention-days: 7
