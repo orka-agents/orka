@@ -590,6 +590,18 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if cfg.ProviderProxy.UpstreamBearerToken != "provider-capability" {
 		t.Fatal("provider proxy token was not loaded from the supervisor-only file")
 	}
+	t.Run("Hyperlight device group must not belong to a session", func(t *testing.T) {
+		t.Setenv(EnvSandboxExecEnabled, "true")
+		t.Setenv(EnvHyperlightDeviceGID, "20005")
+		if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "session primary GID range") {
+			t.Fatalf("overlapping device group was accepted: %v", err)
+		}
+		t.Setenv(EnvHyperlightDeviceGID, "30000")
+		cfg, err := LoadConfigFromEnv()
+		if err != nil || cfg.SandboxExec == nil || cfg.SandboxExec.DeviceGID != 30000 {
+			t.Fatalf("disjoint device group did not load: %v", err)
+		}
+	})
 	t.Run("dedicated durable workspace", func(t *testing.T) {
 		t.Setenv(EnvDurableWorkspaceDir, filepath.Join(dir, "durable"))
 		t.Setenv(EnvDurableWorkspaceKey, "workspace")

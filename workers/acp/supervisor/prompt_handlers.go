@@ -2147,7 +2147,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			policy := state.mcpProxy.configuration.ToolPolicy
 			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, policy, permission.ToolName)
 			if state.profile.ProviderKind == providerKindCodex && !known {
-				if descriptor, allowed := policy.Descriptor(permission.ToolName); allowed && descriptor.Source.Brokered() {
+				if descriptor, allowed := policy.Descriptor(permission.ToolName); allowed && descriptor.Source.MCPServed() {
 					return nil, fmt.Errorf("codex brokered permission lacks a correlated MCP tool identity")
 				}
 			}

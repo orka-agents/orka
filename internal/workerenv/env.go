@@ -141,6 +141,7 @@ const (
 
 	// Code execution tool env vars.
 	CodeExecBackend                 = "ORKA_CODE_EXEC_BACKEND"
+	CodeExecBackendEnforced         = "ORKA_CODE_EXEC_BACKEND_ENFORCED"
 	CodeExecLocalCPUSeconds         = "ORKA_CODE_EXEC_LOCAL_CPU_SECONDS"
 	CodeExecLocalMemoryKB           = "ORKA_CODE_EXEC_LOCAL_MEMORY_KB"
 	CodeExecLocalMaxProcesses       = "ORKA_CODE_EXEC_LOCAL_MAX_PROCESSES"

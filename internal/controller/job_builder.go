@@ -139,7 +139,12 @@ type JobBuilder struct {
 	OutboundAccessTrustedGatewayServices       string
 	OutboundAccessTrustedTokenEndpointServices string
 	EnableTelemetry                            bool
-	directSecrets                              directRuntimeSecretPolicy
+	// CodeExecBackend pins the backend AI workers run code_exec with; empty
+	// leaves it to the worker's default. A hyperlight worker gets what
+	// Hyperlight holds: the device, its group and the bundle.
+	CodeExecBackend string
+	Hyperlight      HyperlightPodConfig
+	directSecrets   directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -594,7 +599,34 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		job.Spec.ActiveDeadlineSeconds = &seconds
 	}
 
+	b.applyCodeExecBackend(job, task)
+
 	return job, nil
+}
+
+const codeExecBackendHyperlight = "hyperlight"
+
+// applyCodeExecBackend pins the operator's code_exec backend on an AI worker:
+// the backend and Hyperlight settings a Task or Agent supplied, scoped
+// variants included, are dropped, and a Hyperlight worker gets the device.
+func (b *JobBuilder) applyCodeExecBackend(job *batchv1.Job, task *corev1alpha1.Task) {
+	backend := strings.ToLower(strings.TrimSpace(b.CodeExecBackend))
+	if backend == "" || task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
+		return
+	}
+	podSpec := &job.Spec.Template.Spec
+	container := &podSpec.Containers[0]
+	env := make([]corev1.EnvVar, 0, len(container.Env)+2)
+	for _, envVar := range container.Env {
+		if !strings.HasPrefix(envVar.Name, workerenv.CodeExecBackend) && !strings.HasPrefix(envVar.Name, "ORKA_HYPERLIGHT_") {
+			env = append(env, envVar)
+		}
+	}
+	env = setControllerEnvValue(env, workerenv.CodeExecBackend, backend)
+	container.Env = setControllerEnvValue(env, workerenv.CodeExecBackendEnforced, "true")
+	if backend == codeExecBackendHyperlight {
+		b.Hyperlight.apply(podSpec, container)
+	}
 }
 
 // buildPodSecurityContext builds a secure pod security context

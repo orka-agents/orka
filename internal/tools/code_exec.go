@@ -153,6 +153,8 @@ func newCodeExecutorFromBackend(backend string) (CodeExecutor, string) {
 		return &KubernetesJobCodeExecutor{}, codeExecBackendKubernetes
 	case codeExecBackendInProcess:
 		return &InProcessCodeExecutor{}, codeExecBackendInProcess
+	case codeExecBackendHyperlight:
+		return &HyperlightCodeExecutor{}, codeExecBackendHyperlight
 	default:
 		return &unsupportedCodeExecutor{backend: backend}, backend
 	}
@@ -193,6 +195,8 @@ func populateCodeExecRequestResourceAudit(req *CodeExecutionRequest) error {
 		resourceAudit = codeExecLocalResourceAuditForRequest(*req)
 	case codeExecBackendKubernetes:
 		resourceAudit, err = codeExecKubernetesResourceAuditForRequest(*req)
+	case codeExecBackendHyperlight:
+		resourceAudit = codeExecHyperlightResourceAuditForRequest(*req)
 	}
 	if err != nil {
 		return err
@@ -334,6 +338,8 @@ func normalizeCodeExecBackend(backend string) string {
 		return codeExecBackendKubernetes
 	case "in-process", "in_process", "inprocess", "local":
 		return codeExecBackendInProcess
+	case codeExecBackendHyperlight:
+		return codeExecBackendHyperlight
 	default:
 		return strings.ToLower(strings.TrimSpace(backend))
 	}
@@ -442,6 +448,11 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 }
 
 func (t *CodeExecTool) resolveCodeExecBackend(provider, providerType, tenant string) string {
+	// A backend the controller pinned is the only one: no provider- or
+	// tenant-scoped variable can choose another.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.CodeExecBackendEnforced)), "true") {
+		return normalizeCodeExecBackend(os.Getenv(codeExecBackendEnv))
+	}
 	fallback := codeExecBackendKubernetes
 	if t.backend != "" {
 		fallback = t.backend

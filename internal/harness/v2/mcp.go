@@ -31,10 +31,20 @@ const (
 	MCPToolSourceBrokeredBuiltin MCPToolSource = "brokered_builtin"
 	MCPToolSourceBrokeredCustom  MCPToolSource = "brokered_custom"
 	MCPToolSourceProviderNative  MCPToolSource = "provider_native"
+	// MCPToolSourceRuntimeLocal is a tool the runtime Pod's supervisor runs
+	// itself, served over the session's MCP server but never brokered.
+	MCPToolSourceRuntimeLocal MCPToolSource = "runtime_local"
 )
 
+// Brokered reports a tool the controller broker executes.
 func (s MCPToolSource) Brokered() bool {
 	return s == MCPToolSourceBrokeredBuiltin || s == MCPToolSourceBrokeredCustom
+}
+
+// MCPServed reports a tool served over the session's Orka MCP server: a
+// brokered tool, or one the runtime Pod runs itself.
+func (s MCPToolSource) MCPServed() bool {
+	return s.Brokered() || s == MCPToolSourceRuntimeLocal
 }
 
 type MCPToolEffect string
@@ -57,11 +67,11 @@ func (d MCPToolDescriptor) Validate() error {
 	if err := requireIdentifier("MCP tool name", d.Name); err != nil {
 		return err
 	}
-	if err := validateBoundedString("MCP tool description", d.Description, d.Source.Brokered(), MaxProtocolStringBytes); err != nil {
+	if err := validateBoundedString("MCP tool description", d.Description, d.Source.MCPServed(), MaxProtocolStringBytes); err != nil {
 		return err
 	}
 	switch d.Source {
-	case MCPToolSourceBrokeredBuiltin, MCPToolSourceBrokeredCustom, MCPToolSourceProviderNative:
+	case MCPToolSourceBrokeredBuiltin, MCPToolSourceBrokeredCustom, MCPToolSourceProviderNative, MCPToolSourceRuntimeLocal:
 	default:
 		return fmt.Errorf("unsupported MCP tool source %q", d.Source)
 	}
@@ -77,9 +87,9 @@ func (d MCPToolDescriptor) Validate() error {
 	} else if d.DefinitionDigest != "" {
 		return fmt.Errorf("only custom MCP tools may carry a definition digest")
 	}
-	if d.Source.Brokered() {
+	if d.Source.MCPServed() {
 		if len(d.InputSchema) == 0 {
-			return fmt.Errorf("brokered MCP tool %q requires an input schema", d.Name)
+			return fmt.Errorf("MCP-served tool %q requires an input schema", d.Name)
 		}
 		if len(d.InputSchema) > MaxRawConfigBytes {
 			return fmt.Errorf("MCP tool %q input schema exceeds %d bytes", d.Name, MaxRawConfigBytes)

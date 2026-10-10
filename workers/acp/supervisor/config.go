@@ -100,10 +100,12 @@ type Config struct {
 	// DurableWorkspaceKey gives a dedicated single-session pool one stable
 	// data directory across checkpoint restores into new RuntimeSession IDs.
 	// Empty keeps the default directory per RuntimeSession.
-	DurableWorkspaceKey   string
-	UIDAllocator          *acp.UIDAllocator
-	ProviderProxy         ProviderProxyConfig
-	MCPBroker             MCPBroker
+	DurableWorkspaceKey string
+	UIDAllocator        *acp.UIDAllocator
+	ProviderProxy       ProviderProxyConfig
+	MCPBroker           MCPBroker
+	// SandboxExec enables the runtime-local sandbox_exec tool; nil disables it.
+	SandboxExec           *SandboxExecConfig
 	WorkspaceMaterializer WorkspaceMaterializer
 	ArtifactUploader      *RemoteArtifactUploader
 	DeltaOptions          workspacedelta.Options
@@ -159,6 +161,13 @@ func (c Config) Validate() error {
 	}
 	if c.UIDAllocator == nil {
 		return fmt.Errorf("UID allocator is required")
+	}
+	if c.SandboxExec != nil && c.SandboxExec.DeviceGID != 0 {
+		_, _, firstGID, lastGID := c.UIDAllocator.Range()
+		gid := uint64(c.SandboxExec.DeviceGID)
+		if gid >= uint64(firstGID) && gid <= uint64(lastGID) {
+			return fmt.Errorf("hyperlight device GID %d overlaps session primary GID range %d-%d", gid, firstGID, lastGID)
+		}
 	}
 	requiredIdentityCapacity := uint64(c.Capabilities.Limits.MaxResidentSessions) + sessionIdentityExhaustionReserve
 	if uint64(c.UIDAllocator.Capacity()) < requiredIdentityCapacity {

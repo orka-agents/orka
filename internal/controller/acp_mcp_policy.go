@@ -408,6 +408,15 @@ func buildCanonicalMCPToolDescriptors(
 		if !policy.Allows(name) {
 			continue
 		}
+		if name == acp.SandboxExecToolName {
+			// The runtime Pod runs it in a Hyperlight micro-VM under the
+			// prompt grant; it never reaches the broker.
+			descriptors = append(descriptors, harnessv2.MCPToolDescriptor{
+				Name: name, Description: acp.SandboxExecDescription, InputSchema: json.RawMessage(acp.SandboxExecInputSchema),
+				Source: harnessv2.MCPToolSourceRuntimeLocal, Effect: harnessv2.MCPToolEffectConsequential,
+			})
+			continue
+		}
 		if registry != nil {
 			if tool, ok := registry.Get(name); ok {
 				if _, localOnly := controllerLocalOnlyTools[name]; localOnly {

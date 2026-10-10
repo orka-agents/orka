@@ -19,6 +19,10 @@ AGENTKIT_RUNTIME_IMAGE ?=
 # Digest-pinned AgentKit source image identity used as the adapter authority.
 AGENTKIT_ADAPTER_DIGEST ?=
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
+# hluk and its guest images, for Pods that run Hyperlight micro-VMs (opt-in).
+HYPERLIGHT_BUNDLE_IMG ?= ghcr.io/orka-agents/orka/hyperlight-bundle:latest
+# hluk cargo features: empty drives KVM; "mshv" for /dev/mshv-only nodes.
+HYPERLIGHT_BUNDLE_FEATURES ?=
 # Providers backing the generated docker-build-acp-<provider>-runtime and
 # docker-push-acp-<provider>-runtime targets.
 ACP_RUNTIME_PROVIDERS = codex claude copilot opencode
@@ -329,6 +333,11 @@ docker-push: ## Push docker image with the manager.
 .PHONY: docker-build-ai-worker
 docker-build-ai-worker: ## Build docker image for the AI worker.
 	$(CONTAINER_TOOL) build -t ${AI_WORKER_IMG} -f workers/ai/Dockerfile .
+
+.PHONY: docker-build-hyperlight-bundle
+docker-build-hyperlight-bundle: ## Build the opt-in Hyperlight bundle (hluk and its guest images).
+	$(CONTAINER_TOOL) build --build-arg HLUK_FEATURES="$(HYPERLIGHT_BUNDLE_FEATURES)" \
+		-t ${HYPERLIGHT_BUNDLE_IMG} -f workers/hyperlight/Dockerfile .
 
 .PHONY: docker-build-general-worker
 docker-build-general-worker: ## Build docker image for the general worker.

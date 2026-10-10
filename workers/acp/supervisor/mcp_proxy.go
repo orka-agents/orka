@@ -39,7 +39,9 @@ const (
 )
 
 type mcpProxy struct {
-	broker   MCPBroker
+	broker MCPBroker
+	// sandbox runs the runtime-local sandbox_exec tool; nil when disabled.
+	sandbox  sandboxRunner
 	listener net.Listener
 	server   *http.Server
 	slots    chan struct{}
@@ -68,6 +70,7 @@ type mcpProxySession struct {
 	leaseVersion  uint64
 	closed        bool
 	calls         chan struct{}
+	sandbox       sandboxWorkspace
 }
 
 type mcpJSONRPCRequest struct {
@@ -353,7 +356,7 @@ func (s *mcpProxySession) authorizeCall(toolName string, now time.Time) (
 		return s.revokedGate, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, fmt.Errorf("prompt-scoped MCP authority is inactive")
 	}
 	descriptor, ok := s.authorization.ToolPolicy.Descriptor(toolName)
-	if !ok || !descriptor.Source.Brokered() {
+	if !ok || !descriptor.Source.MCPServed() {
 		return nil, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, fmt.Errorf("MCP tool is not allowed")
 	}
 	return s.gateContext, clonePromptMCPAuthorization(*s.authorization), s.lease, nil
@@ -464,6 +467,12 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 		writeMCPRPCError(w, rpc.ID, -32001, "MCP tool call is not authorized")
 		return
 	}
+	if descriptor, _ := authorization.ToolPolicy.Descriptor(params.Name); descriptor.Source == harnessv2.MCPToolSourceRuntimeLocal {
+		// Runtime-local tools run in this Pod under the same prompt grant,
+		// never through the controller broker.
+		s.handleRuntimeLocalCall(w, r, rpc, gate, params)
+		return
+	}
 	call := harnessv2.MCPToolCall{CallID: callID, ToolName: params.Name, Arguments: params.Arguments}
 	expiresAt := now.Add(30 * time.Second)
 	if authorization.ExpiresAt.Before(expiresAt) {
@@ -510,10 +519,7 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 		writeMCPRPCError(w, rpc.ID, -32002, "MCP broker returned an invalid response")
 		return
 	}
-	result := map[string]any{
-		"content": []map[string]any{{"type": "text", "text": string(response.Result)}},
-		"isError": response.IsError,
-	}
+	result := mcpToolTextResult(string(response.Result), response.IsError)
 	var structured map[string]any
 	if json.Unmarshal(response.Result, &structured) == nil && structured != nil {
 		result["structuredContent"] = structured
@@ -532,7 +538,7 @@ func (s *mcpProxySession) listTools(_ time.Time) []map[string]any {
 	}
 	result := make([]map[string]any, 0, len(s.configuration.ToolPolicy.Tools))
 	for _, descriptor := range s.configuration.ToolPolicy.Tools {
-		if !descriptor.Source.Brokered() {
+		if !descriptor.Source.MCPServed() {
 			continue
 		}
 		var schema any

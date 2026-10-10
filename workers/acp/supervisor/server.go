@@ -430,6 +430,9 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		_ = proxy.close(closeCtx)
 		return nil, err
 	}
+	if executor := newSandboxExecutor(cfg.SandboxExec); executor != nil {
+		mcp.sandbox = executor
+	}
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	cfg.MCPBroker = nil
 	server := &Server{
@@ -1130,6 +1133,7 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
 	}
+	mcpProxy.bindSandboxWorkspace(paths.Workspace, uid, gid)
 	cleanupMCPProxy := true
 	defer func() {
 		if cleanupMCPProxy {
