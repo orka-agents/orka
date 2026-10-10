@@ -52,7 +52,8 @@ printf 'bash-ok\n'`,
 from __future__ import annotations
 import os
 assert __doc__ == 'sandbox module documentation'
-assert os.getcwd() == '/workspace'
+# Unikraft may include a trailing slash for a mounted directory.
+assert os.path.normpath(os.getcwd()) == '/workspace'
 def annotated(value: NotDefinedYet) -> NotDefinedYet:
     return value
 assert annotated.__annotations__['value'] == 'NotDefinedYet'
