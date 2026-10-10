@@ -96,7 +96,7 @@ dump_diagnostics() {
   {
     kubectl get pods,svc,deploy -n "${aikit_namespace}" -o wide || true
     kubectl get events -n "${aikit_namespace}" --sort-by=.lastTimestamp || true
-    kubectl logs -n "${aikit_namespace}" deployment/"${aikit_service}" --tail=100 || true
+    sample_backend_counters 2>/dev/null || true
     kubectl logs -n "${orka_namespace}" deployment/orka-controller-manager --tail=100 || true
     kubectl logs -n "${orka_namespace}" deployment/orka-provider-auth-proxy --tail=100 || true
   } 2>&1 | redact >&2

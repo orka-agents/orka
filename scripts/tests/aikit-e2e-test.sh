@@ -169,6 +169,15 @@ script = open(sys.argv[1]).read()
 assert script.index("make ensure-ui-embed") < script.index("AIKIT_PROBE_URL=")
 PYEMBED
 printf '%s\n' 'ok - fresh checkouts initialize UI embed before the full-prompt Go probe'
+python3 - "${root}/scripts/aikit-e2e.sh" <<'PYDIAGNOSTICS'
+import sys
+script = open(sys.argv[1]).read()
+body = script.split("dump_diagnostics() {", 1)[1].split("\non_exit()", 1)[0]
+assert "sample_backend_counters 2>/dev/null" in body
+assert 'kubectl logs -n "${aikit_namespace}"' not in body
+PYDIAGNOSTICS
+printf '%s\n' 'ok - failure diagnostics never dump raw model logs'
+
 
 work_dir="${work}"
 curl() {
