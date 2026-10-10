@@ -273,9 +273,10 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 			if message, ok := runtimePoolToolboxTerminationFailure(status); ok {
 				return corev1alpha1.RuntimePoolReasonToolboxUnavailable, message, true
 			}
-			// A toolbox init container exists only to bind a toolbox, so any
+			// A toolbox init container exists only to bind a toolbox, so an
 			// unsuccessful end without the stable line (OOM kill, a crash
-			// before the copier starts) is still a toolbox failure.
+			// before the copier starts) is still a toolbox failure once it has
+			// exhausted a bounded number of retries.
 			if message, ok := runtimePoolToolboxUnexplainedTermination(status); ok {
 				return corev1alpha1.RuntimePoolReasonToolboxUnavailable, message, true
 			}
@@ -364,7 +365,17 @@ func runtimePoolToolboxTerminationFailure(status corev1.ContainerStatus) (string
 
 // runtimePoolToolboxUnexplainedTermination classifies a toolbox init container
 // that ended unsuccessfully without a stable FAIL line.
+// runtimePoolToolboxUnexplainedRestartLimit is how many unexplained failed
+// attempts (no stable FAIL line: a SIGKILL or OOM mid-copy, for example) a
+// toolbox init container may make before the failure is treated as
+// permanent. The copier's retry is idempotent, so a transient interruption
+// gets a bounded chance to recover before waiting Tasks are failed.
+const runtimePoolToolboxUnexplainedRestartLimit int32 = 3
+
 func runtimePoolToolboxUnexplainedTermination(status corev1.ContainerStatus) (string, bool) {
+	if status.RestartCount < runtimePoolToolboxUnexplainedRestartLimit {
+		return "", false
+	}
 	terminated := runtimePoolToolboxFailedTermination(status)
 	if terminated == nil {
 		return "", false
