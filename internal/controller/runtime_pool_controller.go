@@ -2580,6 +2580,9 @@ func runtimePoolHTTPProbe(failureThreshold, periodSeconds, timeoutSeconds int32)
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolService(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	if runtimePoolHasExternalWorkspace(pool) && cfg.namespace != pool.Namespace {
+		return r.ensureExternalDiscoveryResource(ctx, pool, cfg, "Service")
+	}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: cfg.baseName, Namespace: cfg.namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
 		service.Labels = mergeStringMap(service.Labels, cfg.labels)
@@ -2701,6 +2704,21 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolPDB(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	if runtimePoolHasExternalWorkspace(pool) && cfg.namespace != pool.Namespace {
+		if r.EnablePDB {
+			return r.ensureExternalDiscoveryResource(ctx, pool, cfg, "PodDisruptionBudget")
+		}
+		object := externalDiscoveryObject(cfg, "PodDisruptionBudget")
+		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		owned, err := externalDiscoveryResourceOwned(pool, cfg, object)
+		if err != nil || !owned {
+			return err
+		}
+		_, err = r.deleteExternalCoreResource(ctx, object)
+		return err
+	}
 	name := runtimePoolChildName(cfg.baseName, "pdb")
 	pdb := &policyv1.PodDisruptionBudget{}
 	key := types.NamespacedName{Namespace: cfg.namespace, Name: name}

@@ -2221,8 +2221,11 @@ func runtimePoolTestReconciler(
 		WithStatusSubresource(statusObjects...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, delegate client.WithWatch, object client.Object, opts ...client.CreateOption) error {
-				if secret, ok := object.(*corev1.Secret); ok && secret.UID == "" {
-					secret.UID = types.UID("test-uid-" + secret.Name)
+				switch object.(type) {
+				case *corev1.Secret, *corev1.Service, *policyv1.PodDisruptionBudget:
+					if object.GetUID() == "" {
+						object.SetUID(types.UID("test-uid-" + object.GetName()))
+					}
 				}
 				return delegate.Create(ctx, object, opts...)
 			},

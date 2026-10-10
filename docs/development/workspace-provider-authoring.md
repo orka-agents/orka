@@ -14,7 +14,8 @@ ACP classes may select any independently deployed adapter that supports
 ServiceAccount must hold the registration-scoped virtual `provider-status`
 permission. The class uses the adapter's own configuration/profile kinds; core
 resolves and freezes their UIDs, generations, and functional hashes through the
-REST mapper. Grant read access to both kinds used in that resolution.
+REST mapper. Grant read access to both kinds used in that resolution through
+the separate profile and provider-config aggregates described below.
 
 Core admits and attaches the exact materialized workspace before publishing
 physical demand. The provider acknowledges attachment without waiting for a
@@ -100,6 +101,14 @@ With `--enable-workspace-provider-api=false`, Core preserves checkpoint requests
 and existing routes without assigning a provider or writing routing diagnostics.
 Runtime retirement and workspace retention cleanup remain active.
 
+Cross-namespace Core Services and disruption budgets have no Kubernetes owner
+reference. Core persists their deterministic key and acknowledged creation UID
+before using or deleting them; matching labels and specifications are not
+ownership evidence. Objects from an older controller without a receipt remain
+untouched. An issued create with a lost response or unsaved UID blocks automatic
+reuse and finalization until an operator verifies and reconciles the exact
+creation outcome. Core never reconstructs a child UID from public metadata.
+
 The shared repository contains the [provider installation and retirement
 guide](https://github.com/orka-agents/orka-workspace/blob/327a82dfdfcd74a146c4e18747b54d2d13b3e3b5/docs/external-providers.md),
 provider-specific prerequisites, and conformance/live proof scripts. External ACP
@@ -135,11 +144,54 @@ rules:
   verbs: ["get", "list", "watch"]
 ```
 
-The Orka installation binds its controller ServiceAccount to an aggregated
-`workspace-parameter-reader` ClusterRole. Removing an adapter also removes its
-specific read grant without changing Orka core RBAC. Provider configuration and
-pool parameter CRDs remain adapter-owned and are not granted through this class
-profile reader unless the adapter explicitly requires them for class resolution.
+The Orka installation binds only its controller ServiceAccount to the aggregated
+`workspace-parameter-reader` ClusterRole through a RoleBinding in the controller's
+watch namespace. This grants profile reads only in that namespace, not across
+tenants. Keep this label and binding for namespaced profile permissions.
+
+`ExecutionWorkspaceProvider.spec.parametersRef` instead references a cluster-scoped
+provider configuration. Each adapter installation must create a separate
+ClusterRole with `workspace.orka.ai/aggregate-to-provider-config-reader: "true"`
+and explicit read-only access to its provider-config CRD. For Substrate and Sandbox:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: substrate-workspace-provider-config-reader
+  labels:
+    workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+rules:
+- apiGroups: ["substrate.workspace.orka.ai"]
+  resources: ["substrateproviderconfigs"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-workspace-provider-config-reader
+  labels:
+    workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+rules:
+- apiGroups: ["sandbox.workspace.orka.ai"]
+  resources: ["sandboxproviderconfigs"]
+  verbs: ["get", "list", "watch"]
+```
+
+Use the exact API group and plural resource name of the adapter's cluster-scoped
+config CRD. Orka binds only its controller ServiceAccount to the separate
+`workspace-provider-config-reader` aggregate through a ClusterRoleBinding.
+Never add namespaced profile or pool permissions to this aggregate or put both
+aggregation labels on the same ClusterRole. Doing so grants those permissions
+across tenant namespaces. Neither aggregate ships fixed provider permissions or
+wildcards; adapter grants must remain read-only and name only the required CRDs.
+Removing an adapter's reader roles removes its grants without changing core RBAC.
+
+The canonical kustomize installation wires both aggregates and their separate
+bindings. Helm renders both only when `rbac.create=true`,
+`controller.mode=harness-v2`, and `controller.executionWorkspace.dispatchEnabled=true`.
+Helm prefixes the role names for the release and uses the selected controller
+ServiceAccount in the release namespace for both bindings.
 
 ## Workspace-agent process identity and capability contract
 

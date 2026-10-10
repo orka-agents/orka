@@ -2132,6 +2132,19 @@ metadata:
   name: orka-workspace-parameter-reader
 rules: []
 ---
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-provider-config-reader
+rules: []
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -2299,6 +2312,22 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: orka-v2-controller-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-provider-config-reader-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-workspace-provider-config-reader
 subjects:
 - kind: ServiceAccount
   name: orka-controller-manager

@@ -120,7 +120,7 @@ subjects:
     namespace: {{ .Release.Namespace }}
 {{- if and $harnessV2 .Values.controller.executionWorkspace.dispatchEnabled }}
 ---
-# Providers opt their parameter read permissions into this release's controller.
+# Providers opt namespaced profile reads into this release's watch namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -144,6 +144,34 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Separate opt-in for cluster-scoped provider configs, never namespaced profiles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
 subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
