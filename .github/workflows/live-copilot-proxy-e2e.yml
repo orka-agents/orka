@@ -23,7 +23,9 @@ jobs:
   aikit-e2e:
     name: AIKit Qwen E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # Setup, bounded model qualification and the 45-minute suite need
+    # separate time for teardown and cleanup-evidence upload.
+    timeout-minutes: 120
     env:
       KIND_CLUSTER: orka-aikit-e2e
       E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/aikit
