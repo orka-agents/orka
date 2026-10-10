@@ -148,3 +148,40 @@ endpoint. Export requires `get` on `core.orka.ai/sessions`. Import requires
 `create` on the Session collection and `get` on the requested name, plus the
 corresponding context-token Session scopes when enabled. Session deletion removes
 the native bundle and its receipts with the existing cleanup flow.
+
+## Abrupt-crash verification
+
+The subprocess regressions use explicit barrier acknowledgements and SIGKILL,
+not graceful shutdown or returned persistence errors. They cover completed
+capture before checkpoint commit, committed checkpoint before runtime deletion,
+and supervisor death after capture admission but before snapshot publication.
+They use scripted ACP responses, without live inference.
+
+The controller test runs the production dispatcher in subprocesses. It keeps
+the Kubernetes API and runtime fixture outside the killed process and reopens
+the same SQLite database in a replacement process.
+It checks the prior checkpoint, canonical boundary, immutable capture receipt,
+epoch fences, prompt counts, and exact-generation cleanup. By default it uses
+an isolated envtest API server. To exercise a disposable kind API, run from the
+VM checkout with a kindctl-scoped kubeconfig:
+
+```bash
+ORKA_NATIVE_CRASH_KUBECONFIG="$(.agents/skills/kindctl/bin/kindctl path --tag native-crash)" \
+  go test ./internal/controller \
+    -run '^TestACPDispatcherNativeSessionProcessCrash$' -count=3 -v
+```
+
+The supervisor test is Linux-only and requires root plus the production ACP
+exec helper from the pinned runtime image. Its parent kills the subprocess at
+an acknowledged in-progress capture and checks the missing success receipt,
+unchanged committed bundle, private evidence, and replacement-boot fencing.
+It pins the ACP child with a pidfd and proves child exit after supervisor death
+before any failure-path test cleanup signals the child:
+
+```bash
+./supervisor.test -test.run '^TestSupervisorNativeCaptureProcessCrash$' -test.count=3 -test.v
+```
+
+Run these checks only in disposable test environments. They do not make
+uncommitted runtime storage durable or enable automatic recovery of a missing
+capture receipt after forced runtime loss. That case still fails closed.
