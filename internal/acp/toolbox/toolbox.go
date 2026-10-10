@@ -54,6 +54,7 @@ const (
 	ReasonCopyFailed          = "TOOLBOX_COPY_FAILED"
 	ReasonInvalidArguments    = "TOOLBOX_INVALID_ARGUMENTS"
 	ReasonMissingMount        = "TOOLBOX_MISSING_MOUNT"
+	ReasonPermissionDenied    = "TOOLBOX_PERMISSION_DENIED"
 	ReasonImagePull           = "TOOLBOX_IMAGE_PULL"
 	ReasonMountFailed         = "TOOLBOX_MOUNT_FAILED"
 	ReasonUnsupported         = "TOOLBOX_UNSUPPORTED_PLATFORM"

@@ -56,17 +56,30 @@ func Handoff(dst string) (string, error) {
 	return final, nil
 }
 
+// worldAccessBits are the permission bits every session identity needs:
+// agent processes run as arbitrary UIDs that own nothing in a toolbox and
+// belong to none of its groups, so only the "other" bits matter.
+const worldAccessBits = os.FileMode(0o005)
+
 // VerifyMounted checks, with lstat only, that each toolbox mount path and
-// each of its path entry folders exists and is a real folder. It never opens,
-// reads, or follows anything inside a toolbox, so the root supervisor can
-// call it safely.
+// each of its path entry folders exists, is a real folder, and is readable
+// and traversable by every session identity. It never opens, reads, or
+// follows anything inside a toolbox, so the root supervisor can call it
+// safely.
 func VerifyMounted(mountPath string, pathEntries []string) error {
 	if err := requireRealDirectory(mountPath); err != nil {
 		return failf(ReasonMissingMount, "toolbox %s is not mounted: %v", mountPath, err)
 	}
+	if err := requireWorldAccessible(mountPath); err != nil {
+		return failf(ReasonPermissionDenied, "toolbox %s: %v", mountPath, err)
+	}
 	for _, entry := range pathEntries {
-		if err := requireRealDirectory(filepath.Join(mountPath, entry)); err != nil {
+		dir := filepath.Join(mountPath, entry)
+		if err := requireRealDirectory(dir); err != nil {
 			return failf(ReasonMissingPathEntry, "toolbox %s path entry %s: %v", mountPath, entry, err)
+		}
+		if err := requireWorldAccessible(dir); err != nil {
+			return failf(ReasonPermissionDenied, "toolbox %s path entry %s: %v", mountPath, entry, err)
 		}
 	}
 	return nil
@@ -82,6 +95,19 @@ func requireRealDirectory(dir string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a folder", dir)
+	}
+	return nil
+}
+
+// requireWorldAccessible checks the mode bits of an already verified real
+// folder, independently of who owns it.
+func requireWorldAccessible(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&worldAccessBits != worldAccessBits {
+		return fmt.Errorf("%s (mode %04o) is not readable and traversable by every agent identity; it needs o+rx", dir, info.Mode().Perm())
 	}
 	return nil
 }

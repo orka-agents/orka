@@ -442,6 +442,9 @@ func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch st
 			}
 			fileArch, isELF, err := elfArchAt(rootFd, resolved)
 			if err != nil {
+				if _, ok := errors.AsType[*Failure](err); ok {
+					return err
+				}
 				return failf(ReasonCopyFailed, "inspect %s: %v", path.Join(mountPath, relative), err)
 			}
 			if !isELF {
@@ -543,7 +546,17 @@ func elfArchAt(rootFd int, relative string) (string, bool, error) {
 	if statMode(&st)&unix.S_IFMT != unix.S_IFREG {
 		return "", false, fmt.Errorf("%s is not a regular file", relative)
 	}
-	return elfArch(file)
+	arch, isELF, err := elfArch(file)
+	if err != nil || !isELF {
+		return arch, isELF, err
+	}
+	// A tool on PATH that is not world readable and executable fails every
+	// agent identity; the check runs as one fixed UID, so the bits are tested
+	// independently of ownership.
+	if statMode(&st)&uint32(worldAccessBits) != uint32(worldAccessBits) {
+		return "", false, failf(ReasonPermissionDenied, "%s (mode %04o) is not readable and executable by every agent identity; it needs o+rx", relative, statMode(&st)&0o7777)
+	}
+	return arch, isELF, nil
 }
 
 // CheckMounted verifies a toolbox that is already mounted at mountPath: every
@@ -563,15 +576,13 @@ func CheckMounted(mountPath string, pathEntries []string, arch string) error {
 			return failf(ReasonInvalidArguments, "path entry %q must be a clean relative path", entry)
 		}
 	}
+	if err := VerifyMounted(mountPath, pathEntries); err != nil {
+		return err
+	}
 	rootFd, err := openSourceDirectory(mountPath)
 	if err != nil {
 		return failf(ReasonMissingMount, "%v", err)
 	}
 	defer unix.Close(rootFd) //nolint:errcheck
-	for _, entry := range pathEntries {
-		if err := requireDirectoryAt(rootFd, entry); err != nil {
-			return failf(ReasonMissingPathEntry, "path entry %s is not a folder in %s: %v", entry, mountPath, err)
-		}
-	}
 	return checkArchInTree(rootFd, mountPath, pathEntries, arch)
 }

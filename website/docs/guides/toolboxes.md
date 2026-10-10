@@ -220,6 +220,7 @@ reason. The message carries one stable code:
 | `TOOLBOX_SOURCE_CHANGED` | A file changed while it was being copied. | Rebuild the image; a toolbox must be immutable. |
 | `TOOLBOX_MOUNT_FAILED` | With `imageVolume`, the `subPath` does not exist in the image or the node runtime cannot mount image volumes. | Check the image layout and the containerd or CRI-O version on the selected nodes. |
 | `TOOLBOX_MISSING_MOUNT` | The supervisor did not find the toolbox folder in the runtime Pod. | Check the node runtime and the RuntimePool events. |
+| `TOOLBOX_PERMISSION_DENIED` | A toolbox folder is not readable and traversable by everyone (`o+rx`), or a tool in a `pathEntries` folder is not readable and executable by everyone. Agent processes run as arbitrary UIDs that own nothing in the image. | Build the image with world-accessible folders and `0755` tools. The copier already sanitizes modes, so this applies to image volumes. |
 | `TOOLBOX_COPY_FAILED` | Another I/O error during the copy. | See the init container logs (`toolbox-copy-<n>`) on the runtime Pod. |
 
 `kubectl describe runtimepool <name>` shows the condition;

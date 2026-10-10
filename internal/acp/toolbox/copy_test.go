@@ -476,6 +476,42 @@ func TestCheckMountedBoundsDirectoryEntries(t *testing.T) {
 	}
 }
 
+func TestMountedToolboxMustBeWorldAccessible(t *testing.T) {
+	root := realTempDir(t)
+	mount := filepath.Join(root, "opt", "tools")
+	mustWrite(t, filepath.Join(mount, "bin", "tool"), elfFor(runtime.GOARCH), 0o755)
+	if err := os.Chmod(filepath.Join(mount, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyMounted(mount, []string{"bin"}); failureReason(t, err) != ReasonPermissionDenied {
+		t.Fatalf("a 0700 path entry must fail: %v", err)
+	}
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonPermissionDenied {
+		t.Fatalf("check must fail on a 0700 path entry: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(mount, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(mount, "bin", "tool"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonPermissionDenied {
+		t.Fatalf("a tool without o+rx must fail: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(mount, "bin", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(mount, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyMounted(mount, nil); failureReason(t, err) != ReasonPermissionDenied {
+		t.Fatalf("a 0750 mount root must fail: %v", err)
+	}
+}
+
 func TestHandoffPublishesExecutableCopy(t *testing.T) {
 	dir := realTempDir(t)
 	final, err := Handoff(dir)
