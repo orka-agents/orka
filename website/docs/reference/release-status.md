@@ -10,17 +10,27 @@ For a new installation, follow [Install Orka](../operations/installation.md).
 
 ## Release files
 
-The release workflow publishes these files:
+The release workflow publishes these files. Replace `<version>` with a version
+number such as `0.3.0`:
 
 | File | What it contains |
 | --- | --- |
 | `orka-<version>.tgz` | The Helm chart used to install Orka |
-| `candidate.json` | The version, source commit, image IDs, and chart checksum |
+| `orka_v<version>_linux_amd64.tar.gz` | The CLI for Linux on x86-64 |
+| `orka_v<version>_linux_arm64.tar.gz` | The CLI for Linux on ARM64 |
+| `orka_v<version>_darwin_amd64.tar.gz` | The CLI for macOS on Intel |
+| `orka_v<version>_darwin_arm64.tar.gz` | The CLI for macOS on Apple silicon |
+| `orka_v<version>_windows_amd64.zip` | The CLI for Windows on x86-64 |
+| `orka_v<version>_checksums.txt` | SHA-256 checksums for the five CLI archives |
+| `orka_v<version>_checksums.txt.bundle` | The keyless Cosign signature and verification material for the checksum file |
+| `candidate.json` | The version, source commit, image digests, and SHA-256 hashes for the chart and CLI assets |
 | `qualification.json` | The release test run and checksums for its reports |
 | `acceptance.json` | Results for installation, restart, agent, publication, and cleanup tests |
 
 The chart uses release version tags by default. `candidate.json` records the
-exact image digests and chart checksum for inspecting a release or pinning images.
+exact image digests and SHA-256 hashes for the chart, CLI archives, checksum file,
+and signature bundle. Use these to inspect a release or pin images. See
+[CLI installation](./cli.md#installation) to choose a download and verify it.
 The chart is also available from Orka's Helm repository
 at `https://orka-agents.github.io/orka/charts`.
 
@@ -55,8 +65,8 @@ and may lag behind the source code.
 ## How a release is published {#release-publication}
 
 1. A maintainer starts **Prepare Release** from `main` and enters the version.
-2. The workflow prepares a release branch, builds the images and chart, and
-   waits for approval to run the release tests.
+2. The workflow prepares a release branch, builds the images, chart, and CLI
+   archives, and waits for approval to run the release tests.
 3. After the tests pass, a maintainer approves publication. The workflow tags
    the tested commit and publishes the images, chart, and GitHub Release files.
 

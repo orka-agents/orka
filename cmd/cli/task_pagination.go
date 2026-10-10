@@ -24,7 +24,20 @@ func listFilteredTasks(
 	limit int,
 	match func(client.TaskSummary) bool,
 ) ([]client.TaskSummary, bool, error) {
-	return listFilteredTasksWithPagination(ctx, c, namespace, limit, match, true)
+	return listFilteredTasksWithPagination(ctx, c, namespace, limit, "", match, true)
+}
+
+// listFilteredTasksWithSelector is listFilteredTasks with a server-side
+// label selector applied to every page.
+func listFilteredTasksWithSelector(
+	ctx context.Context,
+	c *client.Client,
+	namespace string,
+	limit int,
+	selector string,
+	match func(client.TaskSummary) bool,
+) ([]client.TaskSummary, bool, error) {
+	return listFilteredTasksWithPagination(ctx, c, namespace, limit, selector, match, true)
 }
 
 func listFilteredTasksWithPagination(
@@ -32,6 +45,7 @@ func listFilteredTasksWithPagination(
 	c *client.Client,
 	namespace string,
 	limit int,
+	selector string,
 	match func(client.TaskSummary) bool,
 	usePagination bool,
 ) ([]client.TaskSummary, bool, error) {
@@ -42,7 +56,7 @@ func listFilteredTasksWithPagination(
 	var tasks []client.TaskSummary
 	continueToken := ""
 	for {
-		opts := client.ListTasksOptions{Namespace: namespace}
+		opts := client.ListTasksOptions{Namespace: namespace, LabelSelector: selector}
 		if usePagination {
 			opts.Limit = filteredTaskListPageSize
 			opts.Continue = continueToken
@@ -52,7 +66,7 @@ func listFilteredTasksWithPagination(
 		page, err := c.ListTasksPage(ctx, opts)
 		if err != nil {
 			if usePagination && isCachePaginationUnsupported(err) {
-				return listFilteredTasksWithPagination(ctx, c, namespace, limit, match, false)
+				return listFilteredTasksWithPagination(ctx, c, namespace, limit, selector, match, false)
 			}
 			return nil, false, err
 		}

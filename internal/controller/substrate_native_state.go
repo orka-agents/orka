@@ -73,22 +73,23 @@ type substrateNativeState struct {
 }
 
 type substrateNativeAttempt struct {
-	Name               string                          `json:"name"`
-	StartedAt          metav1.Time                     `json:"startedAt"`
-	BootStartedAt      metav1.Time                     `json:"bootStartedAt,omitempty"`
-	DrainStartedAt     metav1.Time                     `json:"drainStartedAt,omitempty"`
-	UID                string                          `json:"uid,omitempty"`
-	Template           substrateNativeTemplateRevision `json:"template"`
-	CreateTemplate     substrateNativeTemplateRevision `json:"createTemplate"`
-	CreateIssued       bool                            `json:"createIssued,omitempty"`
-	BootRequested      bool                            `json:"bootRequested,omitempty"`
-	Seeded             bool                            `json:"seeded,omitempty"`
-	BootstrapChallenge string                          `json:"bootstrapChallenge,omitempty"`
-	BootID             string                          `json:"bootID,omitempty"`
-	Worker             *substrateNativeWorkerFence     `json:"worker,omitempty"`
-	WorkerDrained      bool                            `json:"workerDrained,omitempty"`
-	WorkloadAbsent     bool                            `json:"workloadAbsent,omitempty"`
-	DeleteIssued       bool                            `json:"deleteIssued,omitempty"`
+	Name                    string                          `json:"name"`
+	StartedAt               metav1.Time                     `json:"startedAt"`
+	BootStartedAt           metav1.Time                     `json:"bootStartedAt,omitempty"`
+	DrainStartedAt          metav1.Time                     `json:"drainStartedAt,omitempty"`
+	SettlementWaitStartedAt *metav1.Time                    `json:"settlementWaitStartedAt,omitempty"`
+	UID                     string                          `json:"uid,omitempty"`
+	Template                substrateNativeTemplateRevision `json:"template"`
+	CreateTemplate          substrateNativeTemplateRevision `json:"createTemplate"`
+	CreateIssued            bool                            `json:"createIssued,omitempty"`
+	BootRequested           bool                            `json:"bootRequested,omitempty"`
+	Seeded                  bool                            `json:"seeded,omitempty"`
+	BootstrapChallenge      string                          `json:"bootstrapChallenge,omitempty"`
+	BootID                  string                          `json:"bootID,omitempty"`
+	Worker                  *substrateNativeWorkerFence     `json:"worker,omitempty"`
+	WorkerDrained           bool                            `json:"workerDrained,omitempty"`
+	WorkloadAbsent          bool                            `json:"workloadAbsent,omitempty"`
+	DeleteIssued            bool                            `json:"deleteIssued,omitempty"`
 }
 
 type substrateNativeWorkerFence struct {

@@ -9,7 +9,7 @@ description: "Controller flags, Helm values, environment variables, and CRD sett
 
 ### Task
 
-The core work unit. Supports container commands, native AI prompts, or ACP v2 coding-agent RuntimeSessions.
+The core work unit. Supports container commands, native AI prompts, or Orka harness v2 coding-agent RuntimeSessions.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -320,7 +320,7 @@ When `validation.image` is set, the reviewer must call `run_validation` once and
 
 Before upgrading a monitor that uses the former `validation.mode` and `validation.commands` fields, replace them with `validation.image`. The CRD retains the old fields so the controller can detect existing policies, but it does not execute them. A non-empty legacy command list puts the monitor in `Error` with reason `LegacyValidationCommandsUnsupported`; Orka does not silently disable validation. Apply the updated CRD before upgrading the controller, then update each affected monitor with a digest-pinned image and remove the legacy fields.
 
-`targets.issues`, durable `orka:*` label commands, issue triage/research/planning/implementation, PR review/repair, `review.requireGreenCI`, and optional head-bound automerge are active RepositoryMonitor workflows. `targets.commits` remain rejected until commit inventory is implemented. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, branch pushes, PR creation, label consumption, and automerge attempts are controller-owned and audited through mutation records; read-only agents never receive the GitHub mutation token.
+`targets.issues`, the `orka:implement` label command, issue triage/research/planning/implementation, PR review/repair, `review.requireGreenCI`, and exact-head readiness are active RepositoryMonitor workflows. `targets.commits` remain rejected until commit inventory is implemented. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, branch pushes, PR creation, label consumption, and readiness publication are controller-owned and audited through mutation records; read-only agents never receive the GitHub mutation token. GitHub's per-PR auto-merge setting owns merging. Orka never enables auto-merge or calls the merge endpoint; when it is disabled, the PR stays open and ready.
 
 **Status fields:**
 
@@ -567,6 +567,10 @@ status:
 
 Custom tool definitions for agents. Tools can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors. Plain HTTP tools require `http.url` and support header-based or body-based auth injection.
 
+:::tip[Video demo]
+Watch [Allow stock checks but block purchasing](https://www.youtube.com/watch?v=1vDI6PxhmfY).
+:::
+
 This example uses a placeholder catalog API. Replace its URL and Secret reference with your service's values.
 
 ```yaml
@@ -692,7 +696,9 @@ spec:
 
 ## Helm chart
 
-Key configuration values for the Helm chart:
+Key configuration values for the Helm chart. Published charts use release image
+tags; development charts use the rolling `0.0.0-dev` tag. See
+[Image overrides](#image-overrides) for exact source image selection.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -762,6 +768,17 @@ Released charts include matching version tags for the controller, workers,
 Publisher, and coding-agent runtimes. For controller, worker, and Publisher
 images, set `image.tag` to choose another version or `image.digest` to pin a
 SHA256 digest. A digest takes precedence over the tag.
+
+The development chart uses version and image tag `0.0.0-dev`, selecting the latest
+validated `main` build. For an exact checkout, use its `sha-<full-commit>` tags or
+the digest-pinned `values.json` from the Development Images workflow artifact.
+The workflow validates all nine images before updating rolling aliases; use
+pinned values to avoid mixing images during those individual tag updates.
+
+Tagged controller, Publisher, and native worker images use `Always` pull policy.
+Digest-pinned native workers and RuntimePools remain cacheable with `IfNotPresent`.
+New image publication does not restart existing Pods. When testing source upgrades,
+`--reuse-values` retains prior references, so replace them and clear unused runtimes.
 
 Runtime fields such as `controller.acpRuntime.codexImage` accept a full image
 reference with a tag or digest. The controller resolves tags to digests once at
@@ -977,6 +994,8 @@ controller:
       monitorRead: orka:monitors:read
       monitorWrite: orka:monitors:write
       monitorOperate: orka:monitors:operate
+      connectorRead: orka:connectors:read
+      connectorManage: orka:connectors:manage
       gatewayRead: orka:gateways:read
       gatewayOperate: orka:gateways:operate
     tts:
@@ -1016,7 +1035,11 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 |------|---------|-------------|
 | `--api-port` | `8080` | REST API server port |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
+| `--connectors-enabled` | `false` | Enable per-user connector reconciliation (`ConnectorProvider` and `Connection`). Requires Task provenance admission (`--task-provenance-admission-enabled` or `--task-provenance-admission-external`); the controller refuses to start otherwise, because connector use trusts `spec.requestedBy` only when the API server provably stamped it. Env: `ORKA_CONNECTORS_ENABLED` |
+| `--connectors-allow-private-endpoints` | empty | **Local fixtures only.** Accept private, loopback, and cluster-local connector provider endpoints and, for Tools behind a connection-mode outbound access policy, private tool endpoints (HTTPS is still required), and let linked-account requests reach them over the same hardened transport (no proxy, verified TLS). A person's token would be sent to such an address, so the flag takes only the literal `i-understand-tokens-may-leave-the-cluster`, and the controller refuses to start with it unless `--connector-callback-base-url` is a plain-http `localhost` origin, which no production deployment has. The Live Connectors E2E uses it for its in-cluster fake provider. Env: `ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS` |
+| `--connector-callback-base-url` | `ORKA_CONNECTOR_CALLBACK_BASE_URL` env or `""` | Required with `--connectors-enabled`. Absolute https origin (scheme and host only, no path) the OAuth provider redirects back to; the provider must register exactly this origin plus `/api/v1/connections/callback`. Plain http is accepted only for `localhost`. Helm: `controller.connectors.callbackBaseUrl`. Sealed linked-account credentials live in the controller store, which the chart already requires to be persistent in every mode. |
 | `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
+| `--gateway-interim-messages-per-task` | `10` | Lifetime cap for distinct accepted interim messages per Task; failed/expired messages count, retries do not. Helm: `controller.gateway.interimMessagesPerTask` |
 | `--gateway-max-records-per-gateway` | `1000` | Maximum retained accepted/dead-letter event records per Gateway before ingress is throttled |
 | `--gateway-max-rejected-records-per-gateway` | `250` | Separate audit budget for rejected events so unauthorized traffic cannot consume operational capacity |
 | `--gateway-event-expiry` | `24h` | Queue and delivery retry expiry |
@@ -1072,6 +1095,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--context-token-monitor-read-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_READ_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor reads. Defaults to `orka:monitors:read` |
 | `--context-token-monitor-write-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor create, update, and delete operations. Defaults to `orka:monitors:write` |
 | `--context-token-monitor-operate-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor manual runs. Defaults to `orka:monitors:operate` |
+| `--context-token-connector-read-scopes` | `ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES` env or `""` | Comma-separated scopes authorizing a person to read their own connector Connections. Defaults to `orka:connectors:read` |
+| `--context-token-connector-manage-scopes` | `ORKA_CONTEXT_TOKEN_CONNECTOR_MANAGE_SCOPES` env or `""` | Comma-separated scopes authorizing a person to link, update, and disconnect their own connector Connections. Defaults to `orka:connectors:manage` |
 | `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
 | `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
 | `--context-token-gateway-read-scopes` | `ORKA_CONTEXT_TOKEN_GATEWAY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing gateway resource and ledger reads. Defaults to `orka:gateways:read` |
@@ -1187,6 +1212,21 @@ bin/kustomize build --load-restrictor LoadRestrictionsNone \
 That split is the point: users name a class, and provider identity, backend parameters,
 pool implementation, and provider versions all stay with the operator. The older direct
 agent-sandbox and Substrate settings below still work during migration.
+
+`kubectl get executionworkspaceclass` shows each class's lifecycle rules, so a person
+choosing a class can see whether their workspace is kept asleep (`Suspend`) or deleted
+(`Delete`) when the agent stops, how long it may sit idle, and how long it may exist:
+
+```console
+$ kubectl get executionworkspaceclass
+NAME              MODE         PROVIDER       ON DETACH   IDLE TIMEOUT   MAX LIFETIME   READY   AGE
+sandbox-session   Interactive  agent-sandbox  Suspend     30m            24h            True    2d
+scratch           Interactive  agent-sandbox  Delete                     2h             True    2d
+```
+
+`-o wide` adds the detach timeout. Helm does not update CRDs during an upgrade, so the
+columns appear once the CRDs from the new chart are applied (see
+[Upgrading](../operations/upgrading.md)).
 
 #### Who is allowed to use a class
 

@@ -239,7 +239,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent task")
 
-		By("verifying ACP v2 execution state is persisted")
+		By("verifying Orka harness v2 execution state is persisted")
 		verifyACPTaskRuntimeForTask(agentTaskName, acpTaskExpectation{
 			ProviderKind:    "claude",
 			WorkspaceIntent: "read",

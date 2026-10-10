@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -40,7 +41,9 @@ func (b *ACPMCPBroker) taskDataGuard(request harnessv2.MCPBrokerCallRequest, exp
 		if b.EpochMutations == nil || access == nil {
 			return fmt.Errorf("MCP task data requires the authoritative epoch mutation guard")
 		}
-		return b.EpochMutations.WithControllerEpochMutation(ctx, expected.ControllerFence, func(guardCtx context.Context) error {
+		entered := false
+		err := b.EpochMutations.WithControllerEpochMutation(ctx, expected.ControllerFence, func(guardCtx context.Context) error {
+			entered = true
 			// Prompt cancellation, settlement, and Session generation changes use
 			// this same durable interlock. Refresh authority after acquiring it,
 			// then retain it until the short SQLite transaction has completed.
@@ -63,5 +66,14 @@ func (b *ACPMCPBroker) taskDataGuard(request harnessv2.MCPBrokerCallRequest, exp
 			}
 			return access(guardCtx)
 		})
+		if err != nil && !entered {
+			// Only acquisition contention and unreadable authority can recover.
+			// A confirmed stale fence must keep its definitive classification.
+			if errors.Is(err, store.ErrControllerEpochMutationContention) {
+				return fmt.Errorf("%w: %w", errACPMCPAuthorityUnavailable, err)
+			}
+			return acpMCPAuthorityReadError(err)
+		}
+		return err
 	}
 }

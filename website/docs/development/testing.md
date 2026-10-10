@@ -116,7 +116,6 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
 | `.github/workflows/gateway-e2e.yml` | Focused, model-free, secret-free Gateway live E2E in Kind using generated bearer tokens, an ephemeral CA, the TLS reference adapter, and the deterministic echo runtime |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
-| `.github/workflows/live-github-label-trigger-e2e.yml` / `scripts/live-github-label-trigger-e2e.sh` | Manual model-free GitHub label trigger validation for HMAC rejection, signed webhook Task creation, scoped workspace settings, and duplicate delivery idempotency |
 | `.github/workflows/repository-monitor-smoke.yml` | Focused RepositoryMonitor smoke coverage for store CRUD, API handlers, pull request event handling, targeted single-PR inventory runs, controller queue/review flow, blocked status counts, read-only review task job building, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling |
 | `.github/workflows/security-scan-e2e.yml` / `scripts/security-scan-e2e.sh` | Secret-free repository security scan Kind validation against pinned `sozercan/nodejs-goof` using the real mapper, deterministic fake Codex analyzer, v2 finding ingestion/drop diagnostics, threat-model rejection, idempotent rescan, and HITL no-auto-patch gating |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
@@ -208,7 +207,6 @@ missing or mismatched artifacts staying not ready.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
   local Go, Kind, kubectl, curl, and jq toolchain.
 
-- The live GitHub label trigger workflow is manual, model-free, and secret-free. It requires Docker, Kind, kubectl, curl, jq, and Python locally, accepts `GITHUB_LABEL_TRIGGER_TARGET_REPO_URL` and `GITHUB_LABEL_TRIGGER_TARGET_NUMBER` overrides, and sends only synthetic webhook payloads to the local Orka API.
 - Gateway Live E2E is model-free and secret-free. Its focused invocation sets `E2E_GATEWAY=true` and `E2E_EPHEMERAL_CLUSTER=true`; the last flag skips per-resource suite cleanup because the caller deletes the entire Kind cluster.
 - GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. Provider-specific transaction-token E2E lives in the external integration repositories.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
@@ -273,7 +271,7 @@ from failure diagnostics.
 
 
 The live agent-sandbox workflow validates both the direct workspace-adapter
-lifecycle and the initial workspace-backed ACP v2 happy path. It builds the
+lifecycle and the initial workspace-backed Orka harness v2 happy path. It builds the
 real Codex supervisor, routes a prompt through a local Responses-compatible
 fixture, waits for the Task to succeed, verifies provider-neutral status, and
 cleans up the dedicated RuntimePool. It does not replace release qualification
@@ -285,14 +283,7 @@ also include:
 - `cleanupPolicy: retain` plus `reusePolicy: session` reattaches to the deterministic session claim
 - retained workspace state persists across tasks
 
-The live GitHub label trigger workflow (`.github/workflows/live-github-label-trigger-e2e.yml`) runs `scripts/live-github-label-trigger-e2e.sh` from manual `workflow_dispatch`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures a generated `ORKA_GITHUB_WEBHOOK_SECRET`, creates a synthetic runtime Agent, and posts a signed `agent:implement` issue label payload to `/webhooks/github`. The script asserts:
-
-- invalid webhook signatures return `401`
-- a signed label event returns `201` and creates a `type: agent` Task
-- the created Task points at the configured GitHub repository clone URL and default branch
-- no push branch or git credential Secret is configured for the synthetic task
-- GitHub delivery annotations are recorded on the Task
-- a repeated delivery returns `202` with the original task name
+The RepositoryMonitor validation bundle covers the canonical signed `orka:implement` entrypoint, durable intake, pause controls, and replay against GitHub fixtures.
 
 The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures the GitHub OIDC issuer and workflow audience, fetches a real Actions OIDC token, and validates:
 

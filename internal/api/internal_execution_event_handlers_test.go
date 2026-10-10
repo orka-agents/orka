@@ -258,6 +258,15 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 			want: http.StatusForbidden,
 		},
 		{
+			name: "approval execution outcome denied",
+			path: "/internal/v1/events/default/task/task-1",
+			body: map[string]any{
+				"type":    events.ExecutionEventTypeApprovalExecutionUpdated,
+				"content": map[string]any{"approvalID": "approval-1", "executionOutcome": "succeeded"},
+			},
+			want: http.StatusForbidden,
+		},
+		{
 			name: "cross namespace service account denied",
 			path: "/internal/v1/events/other/task/task-1",
 			body: map[string]any{"type": events.ExecutionEventTypeTaskStarted},

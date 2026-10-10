@@ -1021,7 +1021,7 @@ Create release-scoped static worker RoleBinding names.
 {{- printf "%s-container-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Use the release tag unless a SHA256 digest override is configured. */}}
+{{/* Require an explicit image tag or SHA256 digest. Release preparation supplies tags. */}}
 {{- define "orka.imageRef" -}}
 {{- $repository := required "image.repository is required" .repository -}}
 {{- if .digest -}}

@@ -55,7 +55,7 @@ var _ = Describe("Orka CLI binary", Ordered, func() {
 
 	It("authenticates from isolated config and lists model catalogs", func() {
 		By("validating the configured service-account token")
-		validate := runOrka(home, "auth", "validate")
+		validate := runOrka(home, "auth", "validate", "-o", "json")
 		expectOrkaSuccess(validate, token)
 		validateJSON := expectJSONObject(validate.Stdout)
 		Expect(validateJSON["authenticated"]).To(Equal(true))

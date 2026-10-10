@@ -33,14 +33,15 @@ func (r HealthResponse) Validate() error {
 }
 
 type ProviderCapabilities struct {
-	ProviderKinds             []string `json:"providerKinds"`
-	Models                    []string `json:"models,omitempty"`
-	SupportsPermissions       bool     `json:"supportsPermissions"`
-	SupportsCancel            bool     `json:"supportsCancel"`
-	SupportsTools             bool     `json:"supportsTools"`
-	SupportsImages            bool     `json:"supportsImages,omitempty"`
-	SupportsAudio             bool     `json:"supportsAudio,omitempty"`
-	SupportsEmbeddedResources bool     `json:"supportsEmbeddedResources,omitempty"`
+	ProviderKinds                 []string `json:"providerKinds"`
+	Models                        []string `json:"models,omitempty"`
+	SupportsPermissions           bool     `json:"supportsPermissions"`
+	SupportsBrokeredToolApprovals bool     `json:"supportsBrokeredToolApprovals,omitempty"`
+	SupportsCancel                bool     `json:"supportsCancel"`
+	SupportsTools                 bool     `json:"supportsTools"`
+	SupportsImages                bool     `json:"supportsImages,omitempty"`
+	SupportsAudio                 bool     `json:"supportsAudio,omitempty"`
+	SupportsEmbeddedResources     bool     `json:"supportsEmbeddedResources,omitempty"`
 }
 
 func (c ProviderCapabilities) Validate() error {
@@ -187,6 +188,7 @@ type CapabilitiesResponse struct {
 	SupportsDrain                     bool                            `json:"supportsDrain"`
 	SupportsPublicationFinalization   bool                            `json:"supportsPublicationFinalization"`
 	SupportsAgentSessionConfiguration bool                            `json:"supportsAgentSessionConfiguration,omitempty"`
+	SupportsFoundryRecovery           bool                            `json:"supportsFoundryRecovery,omitempty"`
 }
 
 func (r CapabilitiesResponse) Validate() error {
@@ -407,6 +409,7 @@ type StatusResponse struct {
 	PendingPermissions      []PendingPermissionStatus `json:"pendingPermissions"`
 	Pressure                PressureMetadata          `json:"pressure"`
 	SessionIdentityCapacity *SessionIdentityCapacity  `json:"sessionIdentityCapacity,omitempty"`
+	FoundryBroker           *FoundryBrokerIdentity    `json:"foundryBroker,omitempty"`
 	Timestamp               time.Time                 `json:"timestamp"`
 }
 
@@ -429,6 +432,11 @@ func (r StatusResponse) Validate() error {
 	}
 	if r.SessionIdentityCapacity != nil {
 		if err := r.SessionIdentityCapacity.Validate(); err != nil {
+			return err
+		}
+	}
+	if r.FoundryBroker != nil {
+		if err := r.FoundryBroker.Validate(); err != nil {
 			return err
 		}
 	}
@@ -519,6 +527,7 @@ const (
 	ErrorCodeSessionPoisoned     ErrorCode = "session_poisoned"
 	ErrorCodeWorkspaceResumeLost ErrorCode = "workspace_resume_lost"
 	ErrorCodeOutcomeUnknown      ErrorCode = "outcome_unknown"
+	ErrorCodeCleanupUnproven     ErrorCode = "cleanup_unproven"
 )
 
 type ErrorResponse struct {
@@ -536,7 +545,7 @@ func (r ErrorResponse) Validate() error {
 	switch r.Code {
 	case ErrorCodeInvalidRequest, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodeExpired,
 		ErrorCodeStaleFence, ErrorCodeDigestConflict, ErrorCodeAlreadyAccepted, ErrorCodeSettled,
-		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown:
+		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
 	default:
 		return fmt.Errorf("unsupported error code %q", r.Code)
 	}

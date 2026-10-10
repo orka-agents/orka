@@ -85,9 +85,16 @@ helm install orka ./manifest_staging/charts/orka \
 The controller issues its own webhook certificate. To bring your own, see
 [Webhook certificate](../reference/configuration.md#webhook-certificate).
 
-To disable an unused runtime, set its image to an empty string, for example
-`--set-string controller.acpRuntime.codexImage=`. Otherwise, the chart uses its
-release image tag for any runtime you do not override.
+The chart defaults to `0.0.0-dev`, the latest validated `main` build, not
+necessarily your checkout. Keep the overrides above for a feature branch or older
+commit. The Development Images workflow publishes `sha-<full-commit>` image tags
+and a `development-images-<full-commit>` artifact with `images.json` and
+`values.json`; using that values file pins all nine images to the matching build.
+
+Tagged controller, publisher, and native worker images use `Always` pull policy.
+Changing a registry tag does not restart existing Pods. Coding-runtime tags are
+resolved to digests at controller startup. To disable an unused runtime, set its
+image to an empty string, for example `--set-string controller.acpRuntime.codexImage=`.
 
 If Helm refuses to render, that is deliberate — the chart checks its inputs up front
 rather than installing something broken. [Troubleshooting](../operations/troubleshooting.md)
@@ -106,6 +113,11 @@ image variables must use the pushed `repository@sha256:...` references.
 
 Orka currently supports new installations only. Read
 [Upgrading](../operations/upgrading.md) for support details and CRD requirements.
+
+When testing a source upgrade, replace all image references with images from the
+target checkout. `--reuse-values` preserves previously supplied images; it does
+not select images for the new source. Explicitly clear unused runtime image
+fields so older image references are not retained.
 
 ## Next
 

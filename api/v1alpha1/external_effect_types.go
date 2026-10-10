@@ -44,6 +44,15 @@ type ExternalEffectSpec struct {
 
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	RequestDigest string `json:"requestDigest"`
+
+	// ApprovalTaskUID binds an approval effect to its Task when continuation
+	// Tasks share a runtime-session aggregate. Cleanup may exclude another
+	// Task's effect only from this immutable binding, never from discovery labels.
+	// Older records without this field retain conservative aggregate matching.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	ApprovalTaskUID string `json:"approvalTaskUID,omitempty"`
 }
 
 // ExternalEffectStatus contains the mutable state, response, lease, and epoch

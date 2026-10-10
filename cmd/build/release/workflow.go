@@ -28,6 +28,13 @@ const (
 	runCompleted             = "completed"
 	controllerImage          = "controller"
 	publisherImage           = "workspace-publisher"
+	aiWorkerImage            = "ai-worker"
+	generalWorkerImage       = "general-worker"
+	harnessWrapperImage      = "agent-harness-wrapper"
+	codexRuntimeImage        = "acp-codex-runtime"
+	claudeRuntimeImage       = "acp-claude-runtime"
+	copilotRuntimeImage      = "acp-copilot-runtime"
+	opencodeRuntimeImage     = "acp-opencode-runtime"
 	makefilePath             = "Makefile"
 	chartInputPath           = "cmd/build/helmify/static/Chart.yaml"
 	valuesInputPath          = "cmd/build/helmify/static/values.yaml"
@@ -51,14 +58,14 @@ var (
 	numberRE   = regexp.MustCompile(`^[0-9]+$`)
 	branchRE   = regexp.MustCompile(`^release-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	imageNames = []string{
-		controllerImage, "ai-worker", "general-worker", "agent-harness-wrapper",
-		"acp-codex-runtime", "acp-claude-runtime", "acp-copilot-runtime",
-		"acp-opencode-runtime", publisherImage,
+		controllerImage, aiWorkerImage, generalWorkerImage, harnessWrapperImage,
+		codexRuntimeImage, claudeRuntimeImage, copilotRuntimeImage,
+		opencodeRuntimeImage, publisherImage,
 	}
 	imageRoles = map[string]string{
 		controllerImage: controllerImage, "publisher": publisherImage,
-		"codex": "acp-codex-runtime", "claude": "acp-claude-runtime",
-		"copilot": "acp-copilot-runtime", "opencode": "acp-opencode-runtime",
+		"codex": codexRuntimeImage, "claude": claudeRuntimeImage,
+		"copilot": copilotRuntimeImage, "opencode": opencodeRuntimeImage,
 	}
 	gitAuth = []string{gitCommand, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"}
 )

@@ -236,10 +236,15 @@ func ValidateDeliveryRequest(request *DeliveryRequest) error {
 			return err
 		}
 	}
-	if request.Kind != DeliveryKindFinal && request.Kind != DeliveryKindError {
+	textLimit := MaxTextBytes
+	switch request.Kind {
+	case DeliveryKindMessage:
+		textLimit = MaxInterimTextBytes
+	case DeliveryKindFinal, DeliveryKindError:
+	default:
 		return fmt.Errorf("unsupported delivery kind %q", request.Kind)
 	}
-	if request.Text == "" || len(request.Text) > MaxTextBytes || !utf8.ValidString(request.Text) || containsUnsafeControl(request.Text, true) {
+	if request.Text == "" || len(request.Text) > textLimit || !utf8.ValidString(request.Text) || containsUnsafeControl(request.Text, true) {
 		return errors.New("delivery text is invalid")
 	}
 	return nil

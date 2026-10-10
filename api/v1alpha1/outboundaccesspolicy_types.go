@@ -27,7 +27,7 @@ const (
 
 // OutboundAccessPolicySpec configures exactly one outbound credential or
 // routing adapter.
-// +kubebuilder:validation:XValidation:rule="has(self.direct) != has(self.gateway)",message="exactly one of direct or gateway is required"
+// +kubebuilder:validation:XValidation:rule="[has(self.direct), has(self.gateway), has(self.connection)].filter(x, x).size() == 1",message="exactly one of direct, gateway, or connection is required"
 type OutboundAccessPolicySpec struct {
 	// Direct exchanges a resolved subject for a downstream resource credential.
 	// +optional
@@ -36,6 +36,25 @@ type OutboundAccessPolicySpec struct {
 	// Gateway routes the original Tool request through a trusted Kubernetes Service.
 	// +optional
 	Gateway *GatewayOutboundAccess `json:"gateway,omitempty"`
+
+	// Connection injects the requesting person's linked-account credential for
+	// a ConnectorProvider. The Task's verified requester must hold a Ready
+	// Connection to that provider; otherwise the call fails closed with no
+	// fallback to any other credential.
+	// +optional
+	Connection *ConnectionOutboundAccess `json:"connection,omitempty"`
+}
+
+// ConnectionOutboundAccess selects the per-person credential source.
+type ConnectionOutboundAccess struct {
+	// ProviderRef names the same-namespace ConnectorProvider whose Connections
+	// supply the credential.
+	// +kubebuilder:validation:Required
+	ProviderRef LocalObjectReference `json:"providerRef"`
+
+	// Output configures credential injection. Defaults to Authorization: Bearer.
+	// +optional
+	Output *OutboundCredentialOutput `json:"output,omitempty"`
 }
 
 // DirectOutboundAccess configures RFC 8693 or RFC 7523 resource credentials.

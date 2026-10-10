@@ -20,25 +20,49 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
 
+// Bound all retained identities, including failed fixture attempts. Do not evict
+// receipts: forgetting one could turn a retry into a duplicate provider send.
+const maxRetainedDeliveries = 1024
+
+type eventRoute struct {
+	event, account, context, thread, reply string
+}
+
+// Option configures immutable reference adapter behavior at construction.
+type Option func(*Server)
+
+// WithInterimDelivery allows legacy fixtures/controllers to omit the capability.
+func WithInterimDelivery(enabled bool) Option {
+	return func(s *Server) { s.interimDelivery = enabled }
+}
+
 // Server is an in-memory deterministic reference adapter.
 type Server struct {
-	authValue string
+	authValue       string
+	interimDelivery bool
 
-	mu            sync.Mutex
-	deliveries    map[string]protocol.DeliveryRequest
-	deliveryOrder []string
-	responses     map[string]protocol.DeliveryResponse
-	attempts      map[string]int
+	mu             sync.Mutex
+	deliveries     map[string]protocol.DeliveryRequest
+	deliveryOrder  []string
+	responses      map[string]protocol.DeliveryResponse
+	attempts       map[string]int
+	terminalEvents map[eventRoute]bool
 }
 
 // New creates a reference adapter protected by one outbound bearer token.
-func New(token string) *Server {
-	return &Server{
-		authValue:  strings.TrimSpace(token),
-		deliveries: map[string]protocol.DeliveryRequest{},
-		responses:  map[string]protocol.DeliveryResponse{},
-		attempts:   map[string]int{},
+func New(token string, options ...Option) *Server {
+	s := &Server{
+		authValue:       strings.TrimSpace(token),
+		interimDelivery: true,
+		terminalEvents:  map[eventRoute]bool{},
+		deliveries:      map[string]protocol.DeliveryRequest{},
+		responses:       map[string]protocol.DeliveryResponse{},
+		attempts:        map[string]int{},
 	}
+	for _, option := range options {
+		option(s)
+	}
+	return s
 }
 
 // Handler returns the HTTP adapter contract; callers choose the TLS serving layer.
@@ -90,7 +114,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		AdapterVersion:  "v1",
 		Capabilities: protocol.Capabilities{
 			InboundText: true, OutboundText: true, Threads: true, SenderIdentity: true,
-			ExplicitSessions: true, IdempotentDelivery: true,
+			ExplicitSessions: true, IdempotentDelivery: true, InterimDelivery: s.interimDelivery,
 		},
 	})
 }
@@ -110,11 +134,22 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
+	if _, known := s.attempts[delivery.DeliveryID]; !known && len(s.attempts) >= maxRetainedDeliveries {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "reference fixture capacity reached"})
+		return
+	}
 	s.attempts[delivery.DeliveryID]++
 	attempt := s.attempts[delivery.DeliveryID]
 	if response, ok := s.responses[delivery.DeliveryID]; ok {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	route := eventRoute{delivery.OriginatingEvent, delivery.AccountID, delivery.ContextID, delivery.ThreadID, delivery.ReplyTarget}
+	if delivery.Kind == protocol.DeliveryKindMessage && (!s.interimDelivery || s.terminalEvents[route]) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "interim delivery unsupported or event already terminal"})
 		return
 	}
 	s.mu.Unlock()
@@ -149,7 +184,13 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if existing, ok := s.responses[delivery.DeliveryID]; ok {
 		response = existing
+	} else if delivery.Kind == protocol.DeliveryKindMessage && (!s.interimDelivery || s.terminalEvents[route]) {
+		// Recheck under the send lock: a delayed fixture may race a terminal send.
+		response = protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "interim delivery unsupported or event already terminal"}
 	} else {
+		if delivery.Kind != protocol.DeliveryKindMessage {
+			s.terminalEvents[route] = true
+		}
 		s.deliveries[delivery.DeliveryID] = delivery
 		s.deliveryOrder = append(s.deliveryOrder, delivery.DeliveryID)
 		s.responses[delivery.DeliveryID] = response

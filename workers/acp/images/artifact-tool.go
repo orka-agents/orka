@@ -22,18 +22,22 @@ import (
 	"time"
 )
 
+const (
+	githubReleaseAssetsHost = "release-assets.githubusercontent.com"
+)
+
 var allowedDownloadHosts = map[string]struct{}{
-	"codeload.github.com":                  {},
-	"deb.debian.org":                       {},
-	"github.com":                           {},
-	"raw.githubusercontent.com":            {},
-	"registry.npmjs.org":                   {},
-	"release-assets.githubusercontent.com": {},
-	"snapshot.debian.org":                  {},
+	"codeload.github.com":       {},
+	"deb.debian.org":            {},
+	"github.com":                {},
+	"raw.githubusercontent.com": {},
+	"registry.npmjs.org":        {},
+	githubReleaseAssetsHost:     {},
+	"snapshot.debian.org":       {},
 }
 
 var allowedDownloadQueryHosts = map[string]struct{}{
-	"release-assets.githubusercontent.com": {},
+	githubReleaseAssetsHost: {},
 }
 
 func main() {
@@ -186,7 +190,7 @@ func validatedURL(rawURL string) (*url.URL, error) {
 		if !strings.HasPrefix(parsed.EscapedPath(), "/github/copilot-cli/releases/download/") {
 			return nil, errors.New("GitHub download path is not allowlisted")
 		}
-	case "release-assets.githubusercontent.com":
+	case githubReleaseAssetsHost:
 		if !strings.HasPrefix(parsed.EscapedPath(), "/github-production-release-asset/") {
 			return nil, errors.New("GitHub release asset path is not allowlisted")
 		}

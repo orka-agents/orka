@@ -59,6 +59,9 @@ it was delivered, so a controller restart never sends the same prompt twice.
 **Harness** — the contract between the controller and the thing executing agent work.
 `harness-v1` is the deprecated sidecar-wrapper design, to be removed in a future release; `harness-v2` is the current ACP pool
 design. An installation picks one at install time and cannot switch.
+Orka harness v2 uses the `orka.harness.v2` controller-to-supervisor contract. The
+supervisor separately speaks ACP to agent CLIs over stdin/stdout. The harness
+version describes Orka's contract, independently of the ACP protocol version.
 See [Harness modes](../operations/harness-modes.md).
 
 **Producer** — anything that creates Tasks: a person with the CLI, CI, a webhook, another

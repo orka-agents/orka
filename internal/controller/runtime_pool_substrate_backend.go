@@ -70,6 +70,10 @@ import (
 )
 
 const (
+	runtimePoolBootstrapNonceEnv = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"
+)
+
+const (
 	runtimePoolSubstrateTemplateSuffix         = "actor-template"
 	runtimePoolSubstrateActorSuffix            = "actor"
 	runtimePoolSubstrateDenyEgressSuffix       = "substrate-deny-egress"
@@ -4889,13 +4893,13 @@ func (r *RuntimePoolReconciler) getSubstrateActorTemplate(ctx context.Context, n
 }
 
 func (r *RuntimePoolReconciler) getSubstrateActorTemplateForCleanup(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
-	store := r.substrateTemplates()
-	if cleanup, ok := store.(interface {
+	templateStore := r.substrateTemplates()
+	if cleanup, ok := templateStore.(interface {
 		GetForCleanup(context.Context, string, string) (*unstructured.Unstructured, error)
 	}); ok {
 		return cleanup.GetForCleanup(ctx, namespace, name)
 	}
-	return store.Get(ctx, namespace, name)
+	return templateStore.Get(ctx, namespace, name)
 }
 
 func (r *RuntimePoolReconciler) createSubstrateActorTemplate(ctx context.Context, pool *corev1alpha1.RuntimePool, desired *unstructured.Unstructured) error {
@@ -5060,7 +5064,7 @@ func substrateRuntimeContainer(
 			env = append(env, item)
 		}
 	}
-	env = append(env, corev1.EnvVar{Name: "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE", Value: bootstrapNonce})
+	env = append(env, corev1.EnvVar{Name: runtimePoolBootstrapNonceEnv, Value: bootstrapNonce})
 	env = append(env, corev1.EnvVar{Name: harnessv2.CredentialBootstrapPublicKeyEnv, Value: bootstrapPublicKey})
 	container.Env = env
 	return container
@@ -5365,7 +5369,7 @@ func substrateRuntimeTemplateBootstrapNeutralRevision(template *unstructured.Uns
 				}
 				name, _ := env["name"].(string)
 				switch name {
-				case "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE", harnessv2.CredentialBootstrapPublicKeyEnv,
+				case runtimePoolBootstrapNonceEnv, harnessv2.CredentialBootstrapPublicKeyEnv,
 					"ORKA_ACP_RUNTIME_POOL_GENERATION", "ORKA_ACP_CONTROLLER_EPOCH",
 					"ORKA_ACP_PROVIDER_TOKEN_GENERATION":
 					// Every cold-boot fence input is bootstrap-scoped: the

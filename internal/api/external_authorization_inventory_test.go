@@ -29,6 +29,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -37,6 +38,9 @@ import (
 // actual HTTP request and its expected resource authorization, including every
 // write in compound operations. An omitted route fails the inventory check.
 const externalAuthorizationInventory = `
+GET /api/v1/usage | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
+GET /api/v1/usage/work/:id | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
+GET /api/v1/usage/other/:category | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
 POST /api/v1/tasks | create core.orka.ai:tasks
 GET /api/v1/tasks | list core.orka.ai:tasks
 GET /api/v1/tasks/:id | get core.orka.ai:tasks protected
@@ -119,6 +123,7 @@ GET /api/v1/security/repositories/:name/threat-model | get core.orka.ai:reposito
 PUT /api/v1/security/repositories/:name/threat-model | update core.orka.ai:repositoryscans/threatmodel protected
 GET /api/v1/security/repositories/:name/scans | list core.orka.ai:repositoryscans/scans protected
 POST /api/v1/security/repositories/:name/scans | create core.orka.ai:repositoryscans/scans protected; list core.orka.ai:tasks; create core.orka.ai:tasks; delete core.orka.ai:tasks; patch core.orka.ai:repositoryscans protected; patch core.orka.ai:repositoryscans/status protected
+GET /api/v1/security/repositories/:name/scans/:scanID/progress | list core.orka.ai:repositoryscans/scans protected
 GET /api/v1/security/repositories/:name/slices | list core.orka.ai:repositoryscans/slices protected
 GET /api/v1/security/repositories/:name/slices/:sliceID | get core.orka.ai:repositoryscans/slices protected
 GET /api/v1/security/repositories/:name/dropped-findings | list core.orka.ai:repositoryscans/droppedfindings protected
@@ -158,11 +163,20 @@ PUT /api/v1/substrate-actor-pools/:name | update core.orka.ai:substrateactorpool
 DELETE /api/v1/substrate-actor-pools/:name | delete core.orka.ai:substrateactorpools protected
 GET /api/v1/auth/validate | identity
 GET /api/v1/auth/whoami | identity
+GET /api/v1/connectors | identity
+GET /api/v1/connections | identity
+POST /api/v1/connections | identity
+GET /api/v1/connections/:name | identity
+PUT /api/v1/connections/:name | identity
+DELETE /api/v1/connections/:name | identity
+POST /api/v1/connections/:name/authorize | identity
+POST /api/v1/connections/:name/complete | identity
 GET /api/v1/secrets | list :secrets
 POST /api/v1/chat | create core.orka.ai:chats
 GET /api/v1/chat/config | get core.orka.ai:chats/config
 DELETE /api/v1/chat/:sessionId | delete core.orka.ai:sessions protected
 POST /openai/v1/chat/completions | create core.orka.ai:chats
+POST /openai/v1/responses | create core.orka.ai:chats
 GET /openai/v1/models | list core.orka.ai:providers
 POST /anthropic/v1/messages | create core.orka.ai:chats
 GET /anthropic/v1/models | list core.orka.ai:providers
@@ -243,6 +257,8 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 	}
 	meta := metav1.ObjectMeta{Name: "protected", Namespace: "default"}
 	f.kube = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "other", UID: "other-namespace-uid"}},
 		&corev1alpha1.Task{ObjectMeta: meta, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}, Status: corev1alpha1.TaskStatus{Phase: "Succeeded"}},
 		&corev1alpha1.Tool{ObjectMeta: meta, Spec: corev1alpha1.ToolSpec{Description: "protected-content"}},
 		&corev1alpha1.Skill{ObjectMeta: meta},
@@ -363,6 +379,9 @@ func TestExternalAPIRouteInventory(t *testing.T) {
 		key := route.Method + " " + route.Path
 		if key == "POST /api/v1/gateways/:namespace/:name/events" {
 			continue // Bound-secret ingress has a separate tested contract.
+		}
+		if key == "GET "+connectors.CallbackPath {
+			continue // The OAuth callback is authenticated by signed single-use state; see connection_handlers_test.go.
 		}
 		require.Contains(t, externalAPIPolicies, key, "external route lacks an explicit policy")
 		require.True(t, cases[key], "external route lacks an HTTP authorization test: %s", key)

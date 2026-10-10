@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,6 +70,7 @@ func newCompatRouterIntegration(t *testing.T) *compatRouterIntegration {
 		results := sqlite.NewStore(db, ":memory:")
 		require.NoError(t, results.SaveResult(t.Context(), namespace, "same-task", []byte("RESULT:"+namespace)))
 		kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace, UID: types.UID(namespace + "-uid")}},
 			&corev1alpha1.Provider{
 				ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: namespace},
 				Spec: corev1alpha1.ProviderSpec{Type: corev1alpha1.ProviderTypeOpenAI, BaseURL: model.URL + "/v1", DefaultModel: namespace + "-catalog",

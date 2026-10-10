@@ -466,16 +466,25 @@ func TestExternalAPIMonitorCommandPreflightsRunCreation(t *testing.T) {
 }
 
 func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
-	for _, path := range []string{"/api/v1/chat", "/openai/v1/chat/completions", "/anthropic/v1/messages"} {
+	for _, path := range []string{"/api/v1/chat", "/openai/v1/chat/completions", "/openai/v1/responses", "/anthropic/v1/messages"} {
 		t.Run(path, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
 			f.allowRoute(t, "POST "+path)
 			before := f.changes(t)
-			status, body := f.request(t, http.MethodPost, path, `{"message":"hello","model":"protected/fixture","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
+			requestBody := `{"message":"hello","model":"protected/fixture","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
+			if path == "/openai/v1/responses" {
+				requestBody = `{"model":"protected/fixture","store":false,"input":"hello"}`
+			}
+			status, body := f.request(t, http.MethodPost, path, requestBody)
 			require.Equal(t, http.StatusOK, status, body)
 			require.Contains(t, body, "Done.")
 			require.Equal(t, int64(1), f.externalCalls.Load())
 			require.Equal(t, 1, f.tokenReviews)
+			usage, err := f.store.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			require.Len(t, usage.Observations, 2)
+			require.Equal(t, store.UsageStatusStarted, usage.Observations[0].Status)
+			require.Equal(t, store.UsageStatusCompleted, usage.Observations[1].Status)
 			if path == "/api/v1/chat" {
 				var response ChatResponse
 				require.NoError(t, json.Unmarshal([]byte(body), &response))
@@ -484,7 +493,7 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 				require.Len(t, messages, 2)
 				require.Equal(t, "hello", messages[0].Content)
 			} else {
-				require.Equal(t, before, f.changes(t))
+				require.Equal(t, before+2, f.changes(t), "only usage start and completion should be retained")
 			}
 		})
 	}

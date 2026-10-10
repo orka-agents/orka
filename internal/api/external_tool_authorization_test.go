@@ -589,7 +589,9 @@ func TestExternalToolChatNamedSessionExactPermissions(t *testing.T) {
 			})
 			provider := &chatMockProvider{name: providerType, responses: []*llm.CompletionResponse{{Content: "continued"}}}
 			llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
-			backend := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(providerCRD("chat-provider", externalToolNamespace, providerType, "test-model")...).Build()
+			backend := fake.NewClientBuilder().WithScheme(newTestScheme()).
+				WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: externalToolNamespace, UID: "namespace-uid"}}).
+				WithRuntimeObjects(providerCRD("chat-provider", externalToolNamespace, providerType, "test-model")...).Build()
 			sessions := newTestSessionStore(t)
 			if existing {
 				if err := sessions.CreateSession(context.Background(), &store.SessionRecord{Namespace: externalToolNamespace, Name: sessionID, SessionType: "chat"}); err != nil {

@@ -35,6 +35,7 @@ type Config struct {
 	SupportsPublicationFinalization   bool
 	SupportsAgentSessionConfiguration bool
 	SupportsPermissions               *bool
+	SupportsBrokeredToolApprovals     bool
 	WorkspaceGovernance               conformance.WorkspaceGovernanceClaims
 	AllowUnauthenticatedStatus        bool
 	OmitStatusControllerEpoch         bool
@@ -254,11 +255,12 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 			AdapterDigests:             s.config.Profile.AdapterDigests,
 			Limits:                     s.config.Limits,
 			Provider: harnessv2.ProviderCapabilities{
-				ProviderKinds:       providerKinds,
-				Models:              models,
-				SupportsPermissions: supportsPermissions,
-				SupportsCancel:      true,
-				SupportsTools:       true,
+				ProviderKinds:                 providerKinds,
+				Models:                        models,
+				SupportsPermissions:           supportsPermissions,
+				SupportsBrokeredToolApprovals: s.config.SupportsBrokeredToolApprovals,
+				SupportsCancel:                true,
+				SupportsTools:                 true,
 			},
 			WorkspaceGovernance:               s.config.WorkspaceGovernance,
 			SupportsDrain:                     s.config.SupportsDrain,
@@ -445,6 +447,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+//nolint:gocyclo // This conformance fixture keeps all prompt faults and protocol responses in one handler.
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutationHeaders(w, r) {
 		return

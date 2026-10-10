@@ -2220,9 +2220,9 @@ func TestToolReconcilerMCPSubstrateActorRejectsCrossNamespaceTemplateWhenIsolati
 func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) {
 	scheme := newToolScheme()
 	template := approvedMCPActorTemplateForTest()
-	labels := template.GetLabels()
-	delete(labels, "orka.ai/execution-workspace")
-	template.SetLabels(labels)
+	templateLabels := template.GetLabels()
+	delete(templateLabels, "orka.ai/execution-workspace")
+	template.SetLabels(templateLabels)
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool", Namespace: "default"},
 		Spec: corev1alpha1.ToolSpec{

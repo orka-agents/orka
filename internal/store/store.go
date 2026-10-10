@@ -16,11 +16,20 @@ var ErrConflict = errors.New("conflict")
 // ErrSessionConfigurationMismatch marks an immutable conflict, not lease contention.
 var ErrSessionConfigurationMismatch = errors.New("session configuration mismatch")
 
+// ErrControllerEpochMutationContention marks an exhausted mutation-lock
+// acquisition retry window. Errors carrying it also wrap ErrConflict;
+// definitive epoch authority failures do not carry this marker.
+var ErrControllerEpochMutationContention = errors.New("controller epoch mutation contention")
+
 // ErrNotReady is returned when a durable prerequisite is expected to become ready shortly.
 var ErrNotReady = errors.New("not ready")
 
 // ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
 var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
+
+// ErrGatewayMessageReplayOnly is returned when receipt-only admission finds no
+// existing message. The caller must return its original live admission gate error.
+var ErrGatewayMessageReplayOnly = errors.New("gateway message receipt not found for replay-only admission")
 
 // ErrCapacity is returned when a bounded durable store quota is full.
 var ErrCapacity = errors.New("capacity exceeded")
@@ -156,6 +165,8 @@ type GatewayEventStore interface {
 
 // GatewayDeliveryStore handles durable adapter outbox records.
 type GatewayDeliveryStore interface {
+	GetGatewayMessageBudget(ctx context.Context, query GatewayMessageBudgetQuery) (*GatewayMessageBudget, error)
+	EnqueueGatewayMessage(ctx context.Context, request GatewayMessageEnqueue) (*GatewayDelivery, bool, error)
 	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
 	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
 	ListGatewayDeliveries(ctx context.Context, filter GatewayDeliveryFilter) ([]GatewayDelivery, error)
@@ -268,7 +279,7 @@ type RepositoryMonitorStore interface {
 	UpdateWorkAction(ctx context.Context, action *WorkAction) error
 	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
 	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
-	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
+	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error)
 
 	CreateActionRecord(ctx context.Context, record *ActionRecord) error
 	UpdateActionRecord(ctx context.Context, record *ActionRecord) error

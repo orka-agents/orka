@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { RootLayout } from '@/components/layout/root-layout'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
+import { rememberLoginReturn } from '@/lib/login-return'
 
 function RootComponent() {
   const location = useLocation()
@@ -16,9 +17,13 @@ function RootComponent() {
 
   useEffect(() => {
     if (!token && location.pathname !== '/login') {
-      navigate({ to: '/login' })
+      // Come back here after signing in, and keep the fragment in the address
+      // bar: a connector consent callback carries its completion token there.
+      rememberLoginReturn(location.pathname + location.searchStr)
+      const hash = window.location.hash.slice(1)
+      navigate({ to: '/login', ...(hash && { hash }) })
     }
-  }, [token, location.pathname, navigate])
+  }, [token, location.pathname, location.searchStr, navigate])
 
   if (location.pathname === '/login') {
     return <Outlet />

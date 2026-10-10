@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -57,6 +59,8 @@ import (
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/envutil"
@@ -76,6 +80,7 @@ import (
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	// +kubebuilder:scaffold:imports
@@ -281,6 +286,9 @@ func main() {
 	var chatMaxSessionSize int
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
+	var connectorsEnabled bool
+	var connectorCallbackBaseURL string
+	var connectorsAllowPrivateEndpointsAck string
 	var gatewayPendingPerSession int
 	var gatewayMaxRecordsPerGateway int
 	var gatewayMaxRejectedRecordsPerGateway int
@@ -288,12 +296,14 @@ func main() {
 	var gatewayTerminalRetention time.Duration
 	var gatewayDeliveryTimeout time.Duration
 	var gatewayDeliveryMaxAttempts int
+	var gatewayInterimMessagesPerTask int
 	var gatewayClaimLease time.Duration
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
+	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var agentExecutionSnapshotRetention time.Duration
@@ -358,6 +368,8 @@ func main() {
 	var contextTokenMonitorReadScopes string
 	var contextTokenMonitorWriteScopes string
 	var contextTokenMonitorOperateScopes string
+	var contextTokenConnectorReadScopes string
+	var contextTokenConnectorManageScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
 	var contextTokenGatewayReadScopes string
@@ -486,6 +498,15 @@ func main() {
 			"no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true "+
 			"final turn — see coordinatorSystemPrompt.")
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
+	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
+		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
+		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
+			"and let linked-account requests reach them. A person's token would be sent to such an address, so the flag takes only the literal "+
+			ConnectorPrivateEndpointsAcknowledgement+" and only with a plain-http localhost --connector-callback-base-url; never enable this in production.")
+	flag.StringVar(&connectorCallbackBaseURL, "connector-callback-base-url", os.Getenv("ORKA_CONNECTOR_CALLBACK_BASE_URL"),
+		"Absolute origin the OAuth provider redirects back to for connector consent, for example https://orka.example.com. "+
+			"The provider must register exactly this origin plus /api/v1/connections/callback.")
 	flag.IntVar(&gatewayPendingPerSession, "gateway-pending-per-session", 100,
 		"Maximum pending gateway events per Session.")
 	flag.IntVar(&gatewayMaxRecordsPerGateway, "gateway-max-records-per-gateway", 1000,
@@ -496,8 +517,12 @@ func main() {
 		"Maximum age for queued events and delivery retries.")
 	flag.DurationVar(&gatewayTerminalRetention, "gateway-terminal-retention", 30*24*time.Hour,
 		"Retention for terminal gateway events and deliveries.")
+	flag.DurationVar(&usageRetention, "usage-retention", 90*24*time.Hour,
+		"Retention for inactive usage reporting cohorts; 0 retains records indefinitely.")
 	flag.DurationVar(&gatewayDeliveryTimeout, "gateway-delivery-timeout", 15*time.Second,
 		"Timeout for one synchronous adapter delivery call.")
+	flag.IntVar(&gatewayInterimMessagesPerTask, "gateway-interim-messages-per-task", 10,
+		"Maximum distinct accepted interim gateway messages per Task.")
 	flag.IntVar(&gatewayDeliveryMaxAttempts, "gateway-delivery-max-attempts", 10,
 		"Maximum adapter delivery attempts before dead-lettering.")
 	flag.DurationVar(&gatewayClaimLease, "gateway-claim-lease", time.Minute,
@@ -790,6 +815,14 @@ func main() {
 		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
+	flag.StringVar(&contextTokenConnectorReadScopes, "context-token-connector-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize reading a person's own connector Connections. "+
+			"Defaults to orka:connectors:read.")
+	flag.StringVar(&contextTokenConnectorManageScopes, "context-token-connector-manage-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_MANAGE_SCOPES"),
+		"Comma-separated context-token scopes that authorize linking, updating, and disconnecting a person's own connector Connections. "+
+			"Defaults to orka:connectors:manage.")
 
 	opts := zap.Options{
 		Development: true,
@@ -985,6 +1018,8 @@ func main() {
 		MonitorReadScopes:          contextTokenMonitorReadScopes,
 		MonitorWriteScopes:         contextTokenMonitorWriteScopes,
 		MonitorOperateScopes:       contextTokenMonitorOperateScopes,
+		ConnectorReadScopes:        contextTokenConnectorReadScopes,
+		ConnectorManageScopes:      contextTokenConnectorManageScopes,
 		SkillReadScopes:            contextTokenSkillReadScopes,
 		SkillWriteScopes:           contextTokenSkillWriteScopes,
 		GatewayReadScopes:          contextTokenGatewayReadScopes,
@@ -1293,6 +1328,7 @@ func main() {
 	var acpMCPRegistry *tools.Registry
 	if acpRuntimeEnabled {
 		acpMCPRegistry = tools.NewRegistry()
+		acpMCPRegistry.Register(tools.NewReplyInConversationTool())
 		if err := tools.RegisterBrokeredWebTools(acpMCPRegistry); err != nil {
 			setupLog.Error(err, "unable to register ACP MCP broker web tools")
 			os.Exit(1)
@@ -1300,6 +1336,21 @@ func main() {
 		if err := tools.RegisterBrokeredCoordinationTools(acpMCPRegistry, mgr.GetClient()); err != nil {
 			setupLog.Error(err, "unable to register ACP MCP broker coordination tools")
 			os.Exit(1)
+		}
+		if connectorsEnabled {
+			// list_connections describes linked accounts, which do not
+			// exist without connectors; it is not registered otherwise.
+			if err := tools.RegisterBrokeredConnectionTools(acpMCPRegistry); err != nil {
+				setupLog.Error(err, "unable to register ACP MCP broker connection tools")
+				os.Exit(1)
+			}
+			// GitHub built-ins reach ACP runtimes only through the
+			// requester's linked account; without connectors there is no
+			// such account and the tools are not offered at all.
+			if err := tools.RegisterBrokeredGitHubTools(acpMCPRegistry, mgr.GetClient()); err != nil {
+				setupLog.Error(err, "unable to register ACP MCP broker GitHub tools")
+				os.Exit(1)
+			}
 		}
 		if err := tools.RegisterBrokeredDelegateTaskTool(
 			acpMCPRegistry,
@@ -1334,7 +1385,7 @@ func main() {
 		os.Exit(1)
 	}
 	storePreexisted := storeStatErr == nil
-	var snapshotCipher *sqlite.AgentExecutionSnapshotCipher
+	var snapshotKey []byte
 	if agentExecutionSnapshotSecretOpts.enabled() {
 		key, keyErr := ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 			currentPodNamespace(), agentExecutionSnapshotSecretOpts, storePreexisted)
@@ -1343,21 +1394,20 @@ func main() {
 				"secret", agentExecutionSnapshotSecretOpts.Name)
 			os.Exit(1)
 		}
-		cipher, cipherErr := sqlite.NewAgentExecutionSnapshotCipher(key)
-		if cipherErr != nil {
-			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
-				"secret", agentExecutionSnapshotSecretOpts.Name)
-			os.Exit(1)
-		}
-		snapshotCipher = cipher
+		snapshotKey = key
 	} else {
-		cipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
-		if cipherErr != nil {
-			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+		key, keyErr := loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
 				"path", agentExecutionSnapshotKeyFile)
 			os.Exit(1)
 		}
-		snapshotCipher = cipher
+		snapshotKey = key
+	}
+	snapshotCipher, cipherErr := sqlite.NewAgentExecutionSnapshotCipher(snapshotKey)
+	if cipherErr != nil {
+		setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed")
+		os.Exit(1)
 	}
 	sqliteStore, err := sqlite.OpenLockedStore(storePath)
 	if err != nil {
@@ -1368,12 +1418,90 @@ func main() {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
 	}
+	if usageRetention < 0 {
+		setupLog.Error(fmt.Errorf("usage retention must not be negative"), "invalid usage retention")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&usage.Retention{Store: sqliteStore, Period: usageRetention}); err != nil {
+		setupLog.Error(err, "unable to add usage retention")
+		os.Exit(1)
+	}
 	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
 		setupLog.Error(cipherErr, "unable to activate agent execution snapshot key; snapshot encryption fails closed",
 			"path", agentExecutionSnapshotKeyFile)
 		os.Exit(1)
 	}
 	agentExecutionSnapshotStore := sqliteStore
+	connectorConfig := api.ConnectorConfig{Enabled: connectorsEnabled}
+	// The OAuth client exists whether or not new consent is enabled: the
+	// Connection finalizer must still be able to revoke committed tokens for
+	// accounts linked before an operator disabled connectors.
+	connectorsAllowPrivateEndpoints, permitErr := connectorPrivateEndpointsPermitted(connectorsAllowPrivateEndpointsAck, connectorCallbackBaseURL)
+	if permitErr != nil {
+		setupLog.Error(permitErr, "refusing the private-endpoint allowance")
+		os.Exit(1)
+	}
+	if connectorsAllowPrivateEndpoints {
+		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
+		connectors.SetAllowPrivateEndpoints(true)
+		worker.SetAllowPrivateConnectionEndpoints(true)
+	}
+	connectorOAuthClient := connectors.NewOAuthClient(connectors.OAuthClientOptions{AllowPrivateEndpoints: connectorsAllowPrivateEndpoints})
+	if connectorsEnabled {
+		// Connector use trusts spec.requestedBy only when the controller-only
+		// provenance annotation proves the API server stamped it. Without
+		// provenance admission any Task writer could forge both, so the
+		// feature fails closed at startup.
+		if !taskProvenanceProtected {
+			setupLog.Error(errors.New("--connectors-enabled requires --task-provenance-admission-enabled or --task-provenance-admission-external"),
+				"connectors fail closed without Task provenance admission")
+			os.Exit(1)
+		}
+		stateKey, keyErr := deriveConnectorStateKey(snapshotKey)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to derive the connector state key; connectors fail closed")
+			os.Exit(1)
+		}
+		stampKey, keyErr := deriveRequesterStampKey(snapshotKey)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to derive the requester stamp key; connectors fail closed")
+			os.Exit(1)
+		}
+		// The API seals the stamp onto Tasks it creates; the controller
+		// verifies it before freezing anyone's Connection.
+		api.SetRequesterStampKey(stampKey)
+		controller.SetRequesterStampKey(stampKey)
+		connectorConfig = api.ConnectorConfig{
+			Enabled:         true,
+			CallbackBaseURL: strings.TrimSpace(connectorCallbackBaseURL),
+			StateKey:        stateKey,
+			Credentials:     sqliteStore,
+			Consents:        sqliteStore,
+			OAuth:           connectorOAuthClient,
+		}
+		if err := api.ValidateConnectorConfig(connectorConfig); err != nil {
+			setupLog.Error(err, "invalid connector configuration; set --connector-callback-base-url or disable --connectors-enabled")
+			os.Exit(1)
+		}
+	}
+	// chatLinkedAccounts lets chat and the compatibility proxies run the
+	// GitHub built-ins as the signed-in person; nil until connectors exist.
+	var chatLinkedAccounts api.LinkedAccountsFactory
+	if connectorsEnabled {
+		// Connection-mode outbound access resolves a person's credential only
+		// here, in the controller. Worker Pods keep a nil source and fail closed.
+		outboundAccessResolver.Connections = &credential.Source{
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			Credentials: sqliteStore,
+			OAuth:       connectorOAuthClient,
+		}
+		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
+			// Fresh point reads from the API server; namespace-wide scans
+			// (providers, the authoritative Connection listing) from the cache.
+			return controller.LiveLinkedAccountsWithCache(mgr.GetAPIReader(), mgr.GetClient(), tools.DefaultRegistry, outboundAccessResolver.Connections, namespace, requester)
+		}
+	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
 		APIReader: mgr.GetAPIReader(),
@@ -1402,6 +1530,7 @@ func main() {
 	var durableControlStore store.DurableControlStore
 	var controllerEpochManager *controller.ControllerEpochManager
 	var acpSessionContinuity *controller.ACPSessionContinuity
+	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
 		// Session deletion must retain runtime cleanup even when admission is
@@ -1506,7 +1635,8 @@ func main() {
 		EventExpiry:                  gatewayEventExpiry,
 		TerminalRetention:            gatewayTerminalRetention, DeliveryTimeout: gatewayDeliveryTimeout,
 		DeliveryMaxAttempts: gatewayDeliveryMaxAttempts, ClaimLease: gatewayClaimLease,
-		PollInterval: gatewayPollInterval, BatchSize: gatewayBatchSize,
+		InterimMessagesPerTask: gatewayInterimMessagesPerTask,
+		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()
@@ -1652,6 +1782,7 @@ func main() {
 		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
 		JobBuilder:                   jobBuilder,
+		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
 		KubeClient:                   kubeClient,
@@ -1780,6 +1911,7 @@ func main() {
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
+			PromptLeases:         acpPromptLeases,
 			ACPRuntimeImages: controller.ACPRuntimeImages{
 				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 				Opencode: acpOpencodeRuntimeImage,
@@ -1825,6 +1957,43 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The provider reconciler runs whether or not new consent is enabled: it
+	// owns the finalizer that holds a provider while Connections reference
+	// it, and that finalizer must be released by a running controller even
+	// after an operator disables connectors.
+	{
+		if err := (&controller.ConnectorProviderReconciler{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Scheme:    mgr.GetScheme(),
+			// Looked up at reconcile time, not snapshotted here: tools such as
+			// the proxy PR tools are registered later in startup.
+			KnownBuiltinTool: func(name string) bool {
+				return slices.Contains(tools.KnownBuiltInToolNames(), name)
+			},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ConnectorProvider")
+			os.Exit(1)
+		}
+	}
+	// The Connection reconciler runs even when connectors are disabled: it
+	// owns the custody finalizer, so Connections created earlier must still
+	// finalize (custody deleted, tokens revoked where the OAuth client is
+	// available) instead of wedging in Terminating. New consent stays
+	// closed because the API routes are gated.
+	connectionReconciler := &controller.ConnectionReconciler{
+		Client:      mgr.GetClient(),
+		APIReader:   mgr.GetAPIReader(),
+		Scheme:      mgr.GetScheme(),
+		Credentials: sqliteStore,
+		Consents:    sqliteStore,
+	}
+	connectionReconciler.Revoker = connectorOAuthClient
+	if err := connectionReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Connection")
+		os.Exit(1)
+	}
+
 	if err := (&controller.ToolReconciler{
 		Client:                      mgr.GetClient(),
 		Scheme:                      mgr.GetScheme(),
@@ -1833,6 +2002,10 @@ func main() {
 		EnforceNamespaceIsolation:   enforceNamespaceIsolation,
 		WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
 		OutboundAccessTrust:         outboundAccessTrust,
+		// The fixture allowance reaches Tool reconciliation too, or the
+		// fixture's Tools would sit at Available=False while the same
+		// endpoints are accepted on the provider and at execution.
+		AllowPrivateConnectorEndpoints: connectorsAllowPrivateEndpoints,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tool")
 		os.Exit(1)
@@ -2080,8 +2253,12 @@ func main() {
 
 	// Start REST API server
 	var publisherControllerEpochs api.ControllerEpochFenceSource
+	// Consequential connector calls are recorded in the same durable ledger
+	// as ACP effects; a nil pointer must not become a non-nil interface.
+	var connectorToolEffects store.ExternalEffectStore
 	if kubeControlStore != nil {
 		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
+		connectorToolEffects = kubeControlStore
 	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
@@ -2119,7 +2296,20 @@ func main() {
 		ControllerEpochs:          publisherControllerEpochs,
 		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
+		Connectors:                connectorConfig,
+		ConnectorTools: api.ConnectorToolExecutionConfig{
+			Enabled:                          connectorsEnabled,
+			OutboundAccess:                   outboundAccessResolver,
+			KubeClient:                       kubeClient,
+			TransactionExchange:              brokeredTransactionExchange,
+			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
+			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
+			ExternalEffects:                  connectorToolEffects,
+			ControllerEpochs:                 publisherControllerEpochs,
+		},
 		Chat: api.ChatConfig{
+			LinkedAccounts:         chatLinkedAccounts,
+			ConnectorsEnabled:      connectorsEnabled,
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,
 			Model:                  chatModel,
@@ -2137,8 +2327,12 @@ func main() {
 		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
 			AgentExecutionSnapshots: agentExecutionSnapshotStore,
+			ExecutionEvents:         sqliteStore,
+			PromptLeases:            acpPromptLeases,
 			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
+			Connections:                      outboundAccessResolver.Connections,
+			ConnectorReadScopes:              append([]string(nil), contextTokenAuthzConfig.ConnectorReadScopes...),
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
 			ContextFactory: func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {
@@ -2150,10 +2344,19 @@ func main() {
 				if !ok {
 					return nil, fmt.Errorf("authenticated ACP MCP prompt data guard is unavailable")
 				}
+				var gatewayReplySender tools.GatewayReplySender
+				if request.Call.ToolName == "reply_in_conversation" {
+					// The broker has already checked this call against the frozen descriptor policy.
+					gatewayReplySender = api.NewBrokeredGatewayReplySender(mgr.GetAPIReader(), gatewayService,
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, dataGuard)
+				}
 				return &tools.ToolContext{
 					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
-					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+					// Children the broker creates for this Task inherit its
+					// verified requester only through this seal.
+					SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
+					TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
@@ -2162,7 +2365,8 @@ func main() {
 					ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
 					MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
 						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
-					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
+					GatewayReplySender: gatewayReplySender,
+					MemoryReader:       sqliteStore, MemoryProposalWriter: sqliteStore,
 					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
 						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				}, nil
@@ -2473,16 +2677,39 @@ func currentPodNamespace() string {
 
 // loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file
 // holding either exactly 32 raw bytes or whitespace-padded base64 text.
-func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
+func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied key path.
 	if err != nil {
 		return nil, err
 	}
-	key, err := decodeAgentExecutionSnapshotKey(raw)
+	return decodeAgentExecutionSnapshotKey(raw)
+}
+
+func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
+	key, err := loadAgentExecutionSnapshotKey(path)
 	if err != nil {
 		return nil, err
 	}
 	return sqlite.NewAgentExecutionSnapshotCipher(key)
+}
+
+// connectorStateKeyInfo is the HKDF label separating the connector state
+// signing key from every other use of the controller key.
+const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// requesterStampKeyInfo is the HKDF label for the requester stamp key.
+const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"
+
+// deriveRequesterStampKey derives the key that binds API-created Tasks to the
+// requester the API verified for them.
+func deriveRequesterStampKey(controllerKey []byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, controllerKey, nil, requesterStampKeyInfo, connectors.MinRequesterStampKeyBytes)
+}
+
+// deriveConnectorStateKey derives the OAuth state signing key from the
+// controller key so connectors need no additional operator secret.
+func deriveConnectorStateKey(controllerKey []byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, controllerKey, nil, connectorStateKeyInfo, connectors.MinStateKeyBytes)
 }
 
 func validateAgentExecutionSnapshotOptions(

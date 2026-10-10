@@ -117,7 +117,7 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create first Task")
 
-		By("verifying the first task is queued on an ACP v2 RuntimePool")
+		By("verifying the first task is queued on an Orka harness v2 RuntimePool")
 		verifyACPTaskRuntimeForTask(taskName1, acpTaskExpectation{
 			ProviderKind:    "claude",
 			WorkspaceIntent: "read",

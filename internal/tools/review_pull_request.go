@@ -9,9 +9,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,6 +22,8 @@ import (
 type ReviewPullRequestTool struct {
 	k8sClient  client.Client
 	apiBaseURL string // override for testing; empty uses https://api.github.com
+	// maxResultBytes bounds the encoded result when positive.
+	maxResultBytes int
 }
 
 // ReviewPullRequestArgs are the arguments for the review_pull_request tool.
@@ -52,6 +55,55 @@ type ReviewPullRequestResult struct {
 	Diff       string       `json:"diff"`
 	Files      []FileChange `json:"files"`
 	Status     string       `json:"status"`
+	// Truncated reports that the result was cut to fit a size budget; the
+	// note says what was dropped.
+	Truncated      bool   `json:"truncated,omitempty"`
+	TruncationNote string `json:"truncation_note,omitempty"`
+}
+
+// WithMaxResultBytes bounds the encoded result: file patches are dropped
+// first, then the unified diff is cut, so a large pull request returns
+// usable partial data instead of a result too big for its transport.
+func (t *ReviewPullRequestTool) WithMaxResultBytes(limit int) *ReviewPullRequestTool {
+	t.maxResultBytes = limit
+	return t
+}
+
+// boundReviewPullRequestResult trims result until its JSON encoding fits
+// limit; a nonpositive limit leaves it unchanged.
+func boundReviewPullRequestResult(result ReviewPullRequestResult, limit int) ReviewPullRequestResult {
+	if limit <= 0 {
+		return result
+	}
+	encoded, _ := json.Marshal(result)
+	if len(encoded) <= limit {
+		return result
+	}
+	listNote := ""
+	if result.Truncated {
+		listNote = result.TruncationNote + "; "
+	}
+	result.Truncated = true
+	result.TruncationNote = listNote + "file patches omitted to fit the result size limit; the unified diff carries the changes"
+	files := make([]FileChange, len(result.Files))
+	for i, file := range result.Files {
+		file.Patch = ""
+		files[i] = file
+	}
+	result.Files = files
+	encoded, _ = json.Marshal(result)
+	for len(encoded) > limit && result.Diff != "" {
+		excess := len(encoded) - limit
+		cut := excess + excess/8 + 64
+		if cut >= len(result.Diff) {
+			result.Diff = ""
+		} else {
+			result.Diff = strings.ToValidUTF8(result.Diff[:len(result.Diff)-cut], "")
+		}
+		result.TruncationNote = listNote + "file patches omitted and the unified diff cut to fit the result size limit; fetch the remaining hunks separately"
+		encoded, _ = json.Marshal(result)
+	}
+	return result
 }
 
 // NewReviewPullRequestTool creates a new review_pull_request tool.
@@ -75,7 +127,7 @@ func (t *ReviewPullRequestTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *ReviewPullRequestTool) Parameters() json.RawMessage {
-	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL. Requires task_name or current task context and must match that task's repository scope."}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to review"}}, jsonSchemaRequiredField: []string{githubPRNumberField}}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: scopedRepositoryURLDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to review"}}, jsonSchemaRequiredField: []string{githubPRNumberField}}
 	data, _ := json.Marshal(schema)
 	return data
 }
@@ -91,7 +143,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("pr_number is required")
 	}
 
-	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}
@@ -111,7 +163,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 
 	// Fetch PR files
-	files, err := fetchPRFiles(ctx, httpClient, baseURL, token, owner, repo, args.PRNumber)
+	files, complete, err := fetchPRFiles(ctx, httpClient, baseURL, token, owner, repo, args.PRNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch PR files: %w", err)
 	}
@@ -126,7 +178,11 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		Files:      files,
 		Status:     "fetched",
 	}
-	resultJSON, _ := json.Marshal(result)
+	if !complete {
+		result.Truncated = true
+		result.TruncationNote = fmt.Sprintf("only the first %d changed files are listed; the unified diff carries the changes", len(files))
+	}
+	resultJSON, _ := json.Marshal(boundReviewPullRequestResult(result, t.maxResultBytes))
 	return string(resultJSON), nil
 }
 
@@ -148,10 +204,13 @@ func fetchPRDetails(ctx context.Context, httpClient *http.Client, baseURL, token
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return "", "", "", "", "", err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", "", "", "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", "", "", "", "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var prResp struct {
@@ -192,22 +251,99 @@ func fetchPRDiff(ctx context.Context, httpClient *http.Client, baseURL, token, o
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	// A diff past the limit is refused rather than silently cut: a cut
+	// diff would read as the whole change. Below it, the result bound trims
+	// the diff and says so.
+	respBody, err := readGitHubResponse(resp.Body, prDiffResponseLimit)
+	if err != nil {
+		return "", err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	return string(respBody), nil
 }
 
-// fetchPRFiles fetches the list of changed files in a PR.
-func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) ([]FileChange, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files", baseURL, owner, repo, prNumber)
+// prDiffResponseLimit bounds the unified diff read for a pull request.
+const prDiffResponseLimit int64 = 10 << 20
+
+// prFilesPerPage and maxPRFilePages bound the changed-file pages one
+// review_pull_request call reads; maxPRFilesBytes bounds what those pages
+// may hold together.
+const (
+	prFilesPerPage = 100
+	maxPRFilePages = 10
+)
+
+var maxPRFilesBytes = maxPRFilePages * githubResponseLimit
+
+// prFilesSplitSizes are the smaller page sizes a changed-file page past the
+// document limit is re-read with, each dividing the one before it, so the
+// smaller pages cover exactly the files of the page they replace.
+var prFilesSplitSizes = []int{25, 5, 1}
+
+// fetchPRFiles reads the pull request's changed files page by page, up to
+// maxPRFilePages pages and maxPRFilesBytes in all; complete is false when
+// either cap cut the list, so more files may exist. A page whose patches
+// exceed the document limit is re-read as smaller pages rather than
+// failing the call, and the result budget then trims those patches.
+func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) (files []FileChange, complete bool, err error) {
+	budget := maxPRFilesBytes
+	for page := 1; page <= maxPRFilePages; page++ {
+		pageFiles, more, err := fetchPRFilesSpan(ctx, httpClient, baseURL, token, owner, repo, prNumber, prFilesPerPage, page, prFilesSplitSizes, &budget)
+		if err != nil {
+			return nil, false, err
+		}
+		files = append(files, pageFiles...)
+		if !more {
+			return files, true, nil
+		}
+		if budget <= 0 {
+			return files, false, nil
+		}
+	}
+	return files, false, nil
+}
+
+// fetchPRFilesSpan reads the changed files that page covers at perPage files
+// per page, splitting it into smaller pages when it is past the document
+// limit. more reports that the list may continue past what was read: the
+// span was full, or the byte budget cut it short.
+func fetchPRFilesSpan(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber, perPage, page int, smaller []int, budget *int64) (files []FileChange, more bool, err error) {
+	files, read, err := fetchPRFilesPage(ctx, httpClient, baseURL, token, owner, repo, prNumber, perPage, page)
+	if err == nil {
+		*budget -= read
+		return files, len(files) == perPage, nil
+	}
+	if !errors.Is(err, errGitHubResponseTooLarge) || len(smaller) == 0 {
+		return nil, false, err
+	}
+	size := smaller[0]
+	parts := perPage / size
+	for part := range parts {
+		partFiles, partMore, err := fetchPRFilesSpan(ctx, httpClient, baseURL, token, owner, repo, prNumber, size, (page-1)*parts+part+1, smaller[1:], budget)
+		if err != nil {
+			return nil, false, err
+		}
+		files = append(files, partFiles...)
+		if !partMore {
+			return files, false, nil
+		}
+		if *budget <= 0 {
+			return files, true, nil
+		}
+	}
+	return files, true, nil
+}
+
+func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber, perPage, page int) ([]FileChange, int64, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d", baseURL, owner, repo, prNumber, perPage, page)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -215,14 +351,19 @@ func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, 
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, 0, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	// One page of file entries is a JSON document: an oversized page is
+	// refused before decoding, never parsed from a cut prefix.
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, 0, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var filesResp []struct {
@@ -233,7 +374,7 @@ func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, 
 		Patch     string `json:"patch"`
 	}
 	if err := json.Unmarshal(respBody, &filesResp); err != nil {
-		return nil, fmt.Errorf("failed to parse GitHub response: %w", err)
+		return nil, 0, fmt.Errorf("failed to parse GitHub response: %w", err)
 	}
 
 	files := make([]FileChange, len(filesResp))
@@ -247,5 +388,5 @@ func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, 
 		}
 	}
 
-	return files, nil
+	return files, int64(len(respBody)), nil
 }

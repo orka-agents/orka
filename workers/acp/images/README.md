@@ -67,7 +67,7 @@ Base images are immutable multi-platform manifest-list references:
 | Input | Immutable reference |
 | --- | --- |
 | Dockerfile frontend | `docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e` |
-| Go builder | `golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466` |
+| Go builder | `golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61` |
 | Node builder/runtime | `node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94` |
 | Debian OpenCode runtime | `debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd` |
 
@@ -75,13 +75,13 @@ Codex inputs:
 
 | Input | Pin |
 | --- | --- |
-| Codex ACP source | commit `307d81018f7cc0c3141ddf71c7532d38310e2cfb`; codeload archive SHA-256 `4d3cc46a901bdd4abf112e703e734078e09a172ecd535aa3e556318a051a7c39` |
-| Codex ACP release | `1.1.7`; npm tar SHA-256 `642920240baa0b6b1951fb2c56b9ff11689648019499615f941000d95d127301` |
-| Orka Codex ACP external-sandbox patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `4b1fc39dc7ac0d6aa404030a3433f46c8b9c67e8e8223efca490a6ab8bf4287a` |
-| Patched Codex ACP `dist/index.js` | SHA-256 `bcfb6a2772a7de2d027e977d9bc9db5fa210a462de1af7ab061361be4410cc75` |
-| Codex CLI | `0.145.0`; source commit `25af12f7e61572b0bc18ddb1008be543b91519b0` |
-| Codex CLI `linux/amd64` | npm tar SHA-256 `11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2` |
-| Codex CLI `linux/arm64` | npm tar SHA-256 `b78c57e172b2f18e5969ae26183253cd3cdd9abb3b424a8f7334f4b5530c2b27` |
+| Codex ACP source | commit `68d7d2d5ddfc0ed5746f9f6130892dda685e65dd`; codeload archive SHA-256 `51ba8d1d302f8a854c0501887ffbe12fb267f6e8fdae9ad2b58e2c8fc9513b1e` |
+| Codex ACP release | `2.1.1`; npm tar SHA-256 `9da0d580518d006d257609a4b64b7c5bd96a7f36f2d86db5c8f2cb9385de5872` |
+| Orka Codex ACP external-sandbox patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `538ac5d7ae6e3d46f3f0961439f914bfb9e427be6aea83c9b1025548ef8cac1d` |
+| Patched Codex ACP `dist/index.js` | SHA-256 `6792f51a6af4e1ae6317ad2197240836038bc53cb9f0fc9152a62d31b132d5a2` |
+| Codex CLI | `0.160.0`; source commit `a956835d020762cb2b570053af06f643a11c0ecc` |
+| Codex CLI `linux/amd64` | npm tar SHA-256 `37a41d61c3399182b8c727b77090cc7a1566bd849d0f09070a0bbc6fec4c58dc` |
+| Codex CLI `linux/arm64` | npm tar SHA-256 `9286a7e01d500ab224c9e5b4b223b7adf5dd901fba23efd6a438316426798b17` |
 
 Claude inputs:
 
@@ -130,6 +130,23 @@ selects Codex's `externalSandbox` policy with restricted network so the
 RuntimeSession and Pod security boundary is authoritative without nested
 namespaces.
 
+Codex ACP 2.1.1 still negotiates ACP `protocolVersion: 1`; its package version
+is independent of the ACP wire version. The Orka mode passes `standard` and
+`user` for the adapter's mode kind and approvals reviewer, keeping `on-request`
+approvals under the RuntimeSession security boundary.
+
+The adapter returns JSON-RPC `invalid_request` (`-32600`) with
+`data.reason: "thread_active_writer"` when another Codex client owns a thread.
+A caller must release that writer before retrying. For an unmaterialized
+thread, the adapter falls back to `thread/read` in the same live app-server;
+a missing persisted thread still fails. Orka currently creates provider
+sessions with `session/new` and continues them with `session/prompt`. It does
+not expose native `session/load` or `session/resume`; installing an imported
+SessionKit bundle and handling these restore errors remain consumer work.
+A native restore consumer must also set the adapter's `MODEL_PROVIDER` to the
+destination provider ID. `CODEX_CONFIG.model_provider` alone does not select
+the provider passed to `thread/resume` in this adapter release.
+
 The Copilot image instead installs the unmodified official per-architecture
 release executable. Its tar asset is checksum-verified, must contain exactly one
 `copilot` entry, and is never downloaded at runtime. The four built-in final
@@ -167,7 +184,7 @@ docker buildx build \
   --builder remote-vm \
   --platform linux/amd64,linux/arm64 \
   --file workers/acp/images/codex/Dockerfile \
-  --tag docker.io/sozercan/orka-acp-codex:1.1.7-codex-0.145.0 \
+  --tag docker.io/sozercan/orka-acp-codex:2.1.1-codex-0.160.0 \
   --provenance=mode=max \
   --sbom=true \
   --push \

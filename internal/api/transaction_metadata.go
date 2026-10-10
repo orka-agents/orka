@@ -7,32 +7,52 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/orka-agents/orka/internal/connectors"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/taskmeta"
+)
+
+const (
+	contextTaskTypeKey         = "taskType"
+	contextAgentKey            = "agent"
+	contextAllowedAgentsKey    = "allowedAgents"
+	contextRepoKey             = "repo"
+	contextBranchKey           = "branch"
+	contextRefKey              = "ref"
+	contextAllowedToolsKey     = "allowedTools"
+	contextAllowedProvidersKey = "allowedProviders"
+	contextAllowedModelsKey    = "allowedModels"
 )
 
 var safeTransactionContextKeys = []string{
 	"purpose",
-	"namespace",
-	"taskType",
-	"agent",
-	"allowedAgents",
-	"repo",
-	"branch",
-	"ref",
+	toolNamespaceArg,
+	contextTaskTypeKey,
+	contextAgentKey,
+	contextAllowedAgentsKey,
+	contextRepoKey,
+	contextBranchKey,
+	contextRefKey,
 	"maxDepth",
-	"allowedTools",
-	"provider",
-	"allowedProviders",
-	"model",
-	"allowedModels",
+	contextAllowedToolsKey,
+	chatProviderKey,
+	contextAllowedProvidersKey,
+	chatModelKey,
+	contextAllowedModelsKey,
 	"e2e",
 	"trace_id",
 	"secret",
@@ -41,26 +61,97 @@ var safeTransactionContextKeys = []string{
 const maxSafeTransactionContextValueLength = 1024
 
 var setValuedContextDigestKeys = map[string]struct{}{
-	"allowedAgents":    {},
-	"allowedModels":    {},
-	"allowedProviders": {},
-	"allowedTools":     {},
+	contextAllowedAgentsKey:    {},
+	contextAllowedModelsKey:    {},
+	contextAllowedProvidersKey: {},
+	contextAllowedToolsKey:     {},
 }
 
 var authorizationTransactionContextKeys = map[string]struct{}{
-	"namespace":        {},
-	"taskType":         {},
-	"agent":            {},
-	"allowedAgents":    {},
-	"repo":             {},
-	"branch":           {},
-	"ref":              {},
-	"maxDepth":         {},
-	"allowedTools":     {},
-	"provider":         {},
-	"allowedProviders": {},
-	"model":            {},
-	"allowedModels":    {},
+	toolNamespaceArg:           {},
+	contextTaskTypeKey:         {},
+	contextAgentKey:            {},
+	contextAllowedAgentsKey:    {},
+	contextRepoKey:             {},
+	contextBranchKey:           {},
+	contextRefKey:              {},
+	"maxDepth":                 {},
+	contextAllowedToolsKey:     {},
+	chatProviderKey:            {},
+	contextAllowedProvidersKey: {},
+	chatModelKey:               {},
+	contextAllowedModelsKey:    {},
+}
+
+// requesterStampKey seals the requester stamp onto Tasks the API creates.
+// Without it, stamped Tasks stay unverified for connector use (fail closed).
+var requesterStampKey []byte
+
+// SetRequesterStampKey installs the key the API seals requester stamps with.
+func SetRequesterStampKey(key []byte) {
+	requesterStampKey = append([]byte(nil), key...)
+}
+
+// sealRequesterStamp binds a just-created, API-stamped Task's UID to its
+// requester. A failure leaves the Task unverified for connector use rather
+// than failing the creation; the Task itself is intact.
+func sealRequesterStamp(ctx context.Context, c client.Client, task *corev1alpha1.Task) {
+	if task == nil || task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {
+		return
+	}
+	if len(requesterStampKey) == 0 {
+		// Connectors are disabled: nothing verifies stamps, so none is sealed.
+		return
+	}
+	// A transient write failure is retried briefly: the seal is the only
+	// thing that lets the controller trust the requester, and nothing else
+	// repairs it once the creation has been reported.
+	backoff := requesterStampSealBackoff
+	var err error
+	for attempt := range requesterStampSealAttempts {
+		if err = connectors.SealRequesterStamp(ctx, c, requesterStampKey, task.DeepCopy()); err == nil {
+			return
+		}
+		if attempt+1 == requesterStampSealAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			log.Error(err, "requester stamp could not be sealed before the request ended; the task stays unverified for connector use", "task", task.Name, "namespace", task.Namespace)
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	log.Error(err, "requester stamp could not be sealed; the task stays unverified for connector use", "task", task.Name, "namespace", task.Namespace)
+}
+
+// requesterStampSealAttempts and requesterStampSealBackoff bound the retries
+// of the post-create seal; tests shorten the backoff.
+var (
+	requesterStampSealAttempts = 3
+	requesterStampSealBackoff  = 200 * time.Millisecond
+)
+
+// requesterStampSealer is the tool-side hook that seals Tasks created by
+// chat and compatibility tools on the API's behalf.
+func requesterStampSealer(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
+	sealRequesterStamp(ctx, c, task)
+	return nil
+}
+
+// requesterFromUserInfo returns the verified person behind ui as a
+// requester identity, or nil when the caller has no personal identity
+// (ServiceAccount tokens, anonymous callers).
+func requesterFromUserInfo(ui *UserInfo) *corev1alpha1.RequestedBy {
+	if ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) ||
+		strings.TrimSpace(ui.Issuer) == "" || strings.TrimSpace(ui.Subject) == "" {
+		return nil
+	}
+	return &corev1alpha1.RequestedBy{
+		Subject: ui.Subject, Issuer: ui.Issuer, Username: ui.Username, Email: ui.Email,
+		Groups: append([]string{}, ui.Groups...), Roles: append([]string{}, ui.Roles...),
+	}
 }
 
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
@@ -68,6 +159,12 @@ func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
 		return
 	}
 
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	// Only controller identities may write this annotation, so it proves the
+	// requester below came from a verified sign-in rather than a worker.
+	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
 	task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
 		Subject:  ui.Subject,
 		Issuer:   ui.Issuer,

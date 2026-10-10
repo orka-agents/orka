@@ -132,6 +132,18 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	// Connector-backed tools freeze and bind a person's Connection through
+	// the v2 execution snapshot; the v1 path has no such binding, so they
+	// must never be exposed there.
+	candidates := connectorCandidateTools(task, agent, nil)
+	if connectorTools, err := classifyConnectorTools(ctx, reader, r.MCPRegistry, task.Namespace, candidates, connectorScope{strictPolicies: true}); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentHarnessV1Candidate(errors.New("connector-backed tools require harness v2 execution"))
+	}
+	if linked := brokeredLinkedBuiltins(r.MCPRegistry, candidates); len(linked) > 0 {
+		return nil, permanentHarnessV1Candidate(fmt.Errorf("built-in tools that run under a linked account (%s) require harness v2 execution", strings.Join(linked, ", ")))
+	}
 	if task.Spec.Transaction != nil && toolGovernance.mode != harness.ToolExecutionModeBrokered {
 		return nil, permanentHarnessV1Candidate(
 			errors.New("harness v1 transaction authority requires brokered tool execution"),

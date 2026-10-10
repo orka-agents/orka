@@ -1,5 +1,5 @@
 # Build the CLI harness wrapper binary.
-FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
 
 ARG TARGETARCH
 
@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
     go build -a -o /out/orka-workspace-agent ./cmd/orka-workspace-agent
 
-FROM --platform=$TARGETPLATFORM golang:1.27.0 AS target-go
+FROM --platform=$TARGETPLATFORM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS target-go
 
 # Runtime stage with common CLI dependencies for generic, Codex, Claude,
 # Copilot, and OpenCode v1 adapters. Deployment admission requires the final
@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex@0.145.0 @anthropic-ai/claude-code@2.1.217 opencode-ai@1.18.2 \
+RUN npm install -g @openai/codex@0.160.0 @anthropic-ai/claude-code@2.1.217 opencode-ai@1.18.2 \
     && command -v codex \
     && command -v claude \
     && command -v opencode \

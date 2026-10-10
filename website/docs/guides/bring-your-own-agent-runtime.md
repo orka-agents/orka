@@ -241,11 +241,14 @@ never replays an uncertain prompt. Tasks created before boot enrollment do
 not acquire recovery evidence retroactively.
 
 Foundry may use a supervisor plus a broker sidecar with broker-only durable
-storage and Azure identity. Only authenticated drain can prove its remote
-cleanup. Container death cannot retire Foundry execution, and the current
-protocol cannot import broker proof after losing the supervisor. Those cases
-remain unresolved until remote ownership can be established; do not remove
-finalizers or discard the broker ledger to bypass them.
+storage and Azure identity. Orka records the authenticated broker identity
+before admitting work. After the exact witnessed supervisor container
+terminates, a replacement supervisor can relay a retirement request to that
+same broker ledger. Cleanup requires proof that the broker sealed the old
+boot and retired every owner recorded under it. Container death alone cannot
+prove remote cleanup, and missing historical enrollment evidence cannot be
+recreated. Unproven cases remain unresolved; do not remove finalizers or
+discard the broker ledger to bypass them.
 
 ## Implement the protocol
 

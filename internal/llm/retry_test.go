@@ -175,7 +175,7 @@ func TestRetryProvider_Stream_PeekRetry(t *testing.T) {
 	mock := &retryMockProvider{
 		name: "test",
 		streamResults: [][]StreamChunk{
-			{{Error: &ProviderError{StatusCode: 429, Message: "rate limited"}, Done: true}},
+			{{InputTokens: 10, UsageReported: true}, {Error: &ProviderError{StatusCode: 429, Message: "rate limited"}, Done: true}},
 			{{Content: "hello"}, {Content: " world"}, {Done: true}},
 		},
 	}
@@ -204,7 +204,7 @@ func TestRetryProvider_Stream_PeekPassthrough(t *testing.T) {
 	mock := &retryMockProvider{
 		name: "test",
 		streamResults: [][]StreamChunk{
-			{{Content: "chunk1"}, {Content: "chunk2"}, {Done: true}},
+			{{InputTokens: 10, UsageReported: true}, {Content: "chunk1"}, {Content: "chunk2"}, {Done: true}},
 		},
 	}
 	rp := NewRetryProvider(mock)

@@ -6,6 +6,29 @@ description: "Giving Tools a reusable, namespaced way to reach an external API w
 
 `OutboundAccessPolicy` gives HTTP and MCP-over-HTTP Tools one reusable, namespaced access adapter. The Tool and policy must be in the same namespace.
 
+:::tip[Video demo]
+Watch [Allow stock checks but block purchasing](https://www.youtube.com/watch?v=1vDI6PxhmfY).
+:::
+
+## Linked-account credentials (connection mode)
+
+When a person has linked an account through a `ConnectorProvider`, a policy in `connection` mode lets a Tool act as that person:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: github-as-me
+spec:
+  connection:
+    providerRef:
+      name: github
+```
+
+The credential belongs to the Task's verified requester, never to the namespace or the Agent. The controller looks up that person's Connection at call time, refreshes the token if it is about to expire, and injects it. Nothing falls back: a missing, revoked, or expired Connection, a Task without a verified requester, or a Connection that changed since the Task was dispatched all fail the call. Tools behind such a policy execute only in the controller, so runtime Pods and worker Pods never see the token: ACP runtimes reach them through the MCP broker, and native `type: ai` workers call an internal controller endpoint that re-checks the caller, the tool, and the frozen Connection. A `readOnly` Connection hides the provider's write tools from the agent, and write tools always ask for approval through the existing approval prompt. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md).
+
+Orka's built-in GitHub tools use the same links without a policy: a `ConnectorProvider` declares them with `source: Builtin`, and the controller's MCP broker runs them under the requester's frozen Connection for ACP runtimes (write tools only where brokered approval exists). Native worker Pods keep the Task's own credential Secrets for those tools. The [Connectors guide](../guides/connectors.md) covers the setup.
+
 ## Direct credential exchange
 
 ```yaml

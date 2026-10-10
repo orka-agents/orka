@@ -62,17 +62,18 @@ const (
 	OutboundAccessTrustedTokenEndpointServices = "ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"
 
 	// AI worker env vars.
-	AIProvider        = "ORKA_AI_PROVIDER"
-	AIModel           = "ORKA_AI_MODEL"
-	AITemperature     = "ORKA_AI_TEMPERATURE"
-	AIMaxTokens       = "ORKA_AI_MAX_TOKENS"
-	AIPrompt          = "ORKA_AI_PROMPT"
-	AISystemPrompt    = "ORKA_AI_SYSTEM_PROMPT"
-	AIBaseURL         = "ORKA_AI_BASE_URL"
-	AIAzureAPIVersion = "ORKA_AI_AZURE_API_VERSION"
-	AITools           = "ORKA_AI_TOOLS"
-	AIFallbackCount   = "ORKA_AI_FALLBACK_COUNT"
-	ControllerMode    = "ORKA_CONTROLLER_MODE"
+	AIProvider          = "ORKA_AI_PROVIDER"
+	AIModel             = "ORKA_AI_MODEL"
+	AITemperature       = "ORKA_AI_TEMPERATURE"
+	AIMaxTokens         = "ORKA_AI_MAX_TOKENS"
+	AIPrompt            = "ORKA_AI_PROMPT"
+	AISystemPrompt      = "ORKA_AI_SYSTEM_PROMPT"
+	AIBaseURL           = "ORKA_AI_BASE_URL"
+	AIAzureAPIVersion   = "ORKA_AI_AZURE_API_VERSION"
+	AITools             = "ORKA_AI_TOOLS"
+	GatewayReplyEnabled = "ORKA_GATEWAY_REPLY_ENABLED"
+	AIFallbackCount     = "ORKA_AI_FALLBACK_COUNT"
+	ControllerMode      = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -91,7 +92,13 @@ const (
 	AutonomousMaxIterations   = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
 	TaskUID                   = "ORKA_TASK_UID"
 	ApprovalRequiredTools     = "ORKA_APPROVAL_REQUIRED_TOOLS"
-	ResolvedApprovals         = "ORKA_RESOLVED_APPROVALS"
+	// ConnectorToolDigests is a JSON object mapping each connector-backed
+	// tool dispatched with the Job to the digest of its Tool spec at dispatch.
+	ConnectorToolDigests = "ORKA_CONNECTOR_TOOL_DIGESTS"
+	// ConnectionBindings is the JSON list of Connection identities frozen
+	// for the Task at dispatch (no token material).
+	ConnectionBindings = "ORKA_CONNECTION_BINDINGS"
+	ResolvedApprovals  = "ORKA_RESOLVED_APPROVALS"
 
 	// Agent runtime env vars.
 	Prompt                      = "ORKA_PROMPT"
@@ -413,6 +420,7 @@ type AIWorkerEnv struct {
 	BaseURL                          string
 	AzureAPIVersion                  string
 	Tools                            []string
+	GatewayReplyEnabled              bool
 	Fallbacks                        []FallbackProviderEnv
 	EnforceTransactionCredentialAuth bool
 	TransactionCredentialReadScopes  []string
@@ -440,6 +448,9 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	)
 	envVars = AppendIfSet(envVars, AIBaseURL, e.BaseURL)
 	envVars = AppendIfSet(envVars, AIAzureAPIVersion, e.AzureAPIVersion)
+	if e.GatewayReplyEnabled {
+		envVars = append(envVars, Env(GatewayReplyEnabled, "true"))
+	}
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
 	}
@@ -478,6 +489,7 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		BaseURL:                          getenv(AIBaseURL),
 		AzureAPIVersion:                  getenv(AIAzureAPIVersion),
 		Tools:                            SplitCSV(getenv(AITools)),
+		GatewayReplyEnabled:              IsTrue(getenv(GatewayReplyEnabled)),
 		Fallbacks:                        ParseFallbacks(getenv),
 		EnforceTransactionCredentialAuth: IsTrue(getenv(TransactionCredentialAuthorizationEnforced)),
 		TransactionCredentialReadScopes:  SplitCSV(getenv(TransactionCredentialReadScopes)),

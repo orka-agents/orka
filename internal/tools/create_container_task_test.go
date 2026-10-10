@@ -532,3 +532,29 @@ func TestCreateContainerTaskTool_Execute_MissingContext(t *testing.T) {
 		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
 	}
 }
+
+// TestCreateContainerTaskTool_ExecuteCoordination_SealsChild covers the
+// worker coordination path: the owned child inherits requestedBy and is
+// handed to the sealer, as delegate_task does.
+func TestCreateContainerTaskTool_ExecuteCoordination_SealsChild(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	fc := newFakeClient(parentTask())
+	var sealed []string
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client: fc,
+		SealTaskCreate: func(_ context.Context, _ client.Client, task *corev1alpha1.Task) error {
+			sealed = append(sealed, task.Name)
+			return nil
+		},
+	})
+	result, err := NewCreateContainerTaskTool(fc).Execute(ctx, json.RawMessage(`{"image":"busybox","command":["echo"],"args":["hello"]}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	expectContainerTaskSuccess(t, result)
+	if len(sealed) != 1 || sealed[0] == parentTaskName {
+		t.Fatalf("sealed = %v, want the created child", sealed)
+	}
+}

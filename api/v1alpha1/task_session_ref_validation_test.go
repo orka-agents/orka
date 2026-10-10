@@ -66,7 +66,7 @@ func TestTaskSessionRefImmutabilityMarkerAdmission(t *testing.T) {
 		"throughMessageId": "message-42",
 		"promptIncluded":   true,
 	}
-	oldTask := taskSpecForSessionRefAdmission("agent", fullSessionRef)
+	oldTask := taskSpecForSessionRefAdmission(fullSessionRef)
 
 	tests := []struct {
 		name    string
@@ -76,64 +76,64 @@ func TestTaskSessionRefImmutabilityMarkerAdmission(t *testing.T) {
 	}{
 		{
 			name:    "create with reference",
-			newSpec: taskSpecForSessionRefAdmission("agent", fullSessionRef),
+			newSpec: taskSpecForSessionRefAdmission(fullSessionRef),
 		},
 		{
 			name:    "unchanged absent reference",
-			oldSpec: taskSpecForSessionRefAdmission("agent", nil),
-			newSpec: taskSpecForSessionRefAdmission("agent", nil),
+			oldSpec: taskSpecForSessionRefAdmission(nil),
+			newSpec: taskSpecForSessionRefAdmission(nil),
 		},
 		{
 			name:    "unchanged complete reference",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", fullSessionRef),
+			newSpec: taskSpecForSessionRefAdmission(fullSessionRef),
 		},
 		{
 			name:    "add reference",
-			oldSpec: taskSpecForSessionRefAdmission("agent", nil),
-			newSpec: taskSpecForSessionRefAdmission("agent", fullSessionRef),
+			oldSpec: taskSpecForSessionRefAdmission(nil),
+			newSpec: taskSpecForSessionRefAdmission(fullSessionRef),
 			wantErr: true,
 		},
 		{
 			name:    "remove reference",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", nil),
+			newSpec: taskSpecForSessionRefAdmission(nil),
 			wantErr: true,
 		},
 		{
 			name:    "change name",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "name", "session-b")),
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "name", "session-b")),
 			wantErr: true,
 		},
 		{
 			name:    "change create",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "create", false)),
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "create", false)),
 			wantErr: true,
 		},
 		{
 			name:    "change append",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "append", false)),
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "append", false)),
 			wantErr: true,
 		},
 		{
 			name:    "change max messages",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "maxMessages", int64(10))),
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "maxMessages", int64(10))),
 			wantErr: true,
 		},
 		{
 			name:    "change transcript cutoff",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "throughMessageId", "message-41")),
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "throughMessageId", "message-41")),
 			wantErr: true,
 		},
 		{
 			name:    "change prompt included",
 			oldSpec: oldTask,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "promptIncluded", false)),
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "promptIncluded", false)),
 			wantErr: true,
 		},
 	}
@@ -172,8 +172,8 @@ func TestTaskSessionRefImmutabilityMarkerAdmission(t *testing.T) {
 	}
 }
 
-func taskSpecForSessionRefAdmission(taskType string, sessionRef map[string]any) map[string]any {
-	spec := map[string]any{"type": taskType}
+func taskSpecForSessionRefAdmission(sessionRef map[string]any) map[string]any {
+	spec := map[string]any{"type": "agent"}
 	if sessionRef != nil {
 		spec["sessionRef"] = changedSessionRef(sessionRef, "", nil)
 	}

@@ -19,6 +19,10 @@ import (
 )
 
 const (
+	truncationSuffix = "..."
+)
+
+const (
 	ArtifactThreatModel    = "security-threat-model.md"
 	ArtifactValidation     = "security-validation.json"
 	ArtifactValidationText = "security-validation.txt"
@@ -670,7 +674,7 @@ func BuildReviewResultPrompt(
 		Findings: FindingsV2Artifact{
 			SchemaVersion: SchemaVersionFindingsV2,
 			Repository:    repository,
-			Scan:          FindingsV2Scan{Mode: mode, SliceID: slice.ID, Summary: "..."},
+			Scan:          FindingsV2Scan{Mode: mode, SliceID: slice.ID, Summary: truncationSuffix},
 			Findings:      []FindingsV2Finding{},
 		},
 	}
@@ -746,7 +750,7 @@ func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *sto
 			Version:   1,
 			FindingID: finding.ID,
 			Status:    "validated",
-			Summary:   "...",
+			Summary:   truncationSuffix,
 		},
 	}
 	resultJSON, _ := json.Marshal(result)
@@ -800,7 +804,7 @@ func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding,
 		Kind:           AgentResultKindPatch,
 		RepositoryScan: scan.Name,
 		FindingID:      finding.ID,
-		Summary:        "...",
+		Summary:        truncationSuffix,
 		ChangedFiles:   []string{"path/to/changed-file"},
 		TestsRun:       []PatchTestRun{{Command: "go test ./...", ExitCode: 0}},
 		Risk:           "low|medium|high",

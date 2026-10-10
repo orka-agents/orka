@@ -23,6 +23,11 @@ turn it off — the behavior is identical on both compatibility endpoints.
 
 See also [OpenAI compatibility](openai-compat.md) for the OpenAI-shaped equivalent.
 
+:::tip[Video demos]
+- [From chat to a GitHub pull request](https://www.youtube.com/watch?v=FlLgdh2lKMk)
+- [Two teams, one AI endpoint](https://www.youtube.com/watch?v=-x0tKk9epWU)
+:::
+
 ## Endpoints
 
 | Method | Path | Description |

@@ -56,11 +56,20 @@ func TestPrepareSessionPathsRejectsUnsafeInputs(t *testing.T) {
 		}
 	}
 	symlink := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(t.TempDir(), symlink); err != nil {
+	target := t.TempDir()
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, symlink); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := PrepareSessionPaths(symlink, "session"); err == nil {
 		t.Fatal("symlink base unexpectedly accepted")
+	}
+	after, err := os.Stat(target)
+	if err != nil || after.Mode() != before.Mode() {
+		t.Fatalf("rejected symlink changed target permissions: %v", err)
 	}
 }
 

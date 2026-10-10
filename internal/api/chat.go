@@ -44,6 +44,11 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
+const (
+	apiFieldContent = "content"
+	apiFieldName    = "name"
+)
+
 var chatLog = logf.Log.WithName("chat-handler")
 
 const (
@@ -64,7 +69,10 @@ const (
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
-	Enabled                bool
+	Enabled bool
+	// ConnectorsEnabled mirrors --connectors-enabled: without it the
+	// linked-account surfaces (list_connections) are not offered at all.
+	ConnectorsEnabled      bool
 	Provider               string
 	Model                  string
 	MaxIterations          int
@@ -76,7 +84,15 @@ type ChatConfig struct {
 	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
 	RuntimeAvailability    ACPRuntimeAvailability
 	ExecutionMode          executionmode.Mode
+	// LinkedAccounts builds the linked-account resolver for one signed-in
+	// person's chat turn; nil leaves built-in GitHub tools on their own
+	// credentials. The controller wires it when connectors are enabled.
+	LinkedAccounts LinkedAccountsFactory
 }
+
+// LinkedAccountsFactory returns a resolver for a person's linked accounts
+// in a namespace, or nil when there is nothing to resolve.
+type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) chattools.LinkedAccountCredentials
 
 // ACPRuntimeAvailability identifies built-in profiles backed by configured,
 // digest-pinned RuntimePool images.
@@ -311,6 +327,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Resolve or create session ID
 	sessionID := resolveChatSessionID(req.SessionID)
+	ctx = usageRequestContext(ctx, ch.resultStore, uncachedReaderOr(ch.apiReader, ch.client), namespace, sessionID)
 	if req.SessionID != "" {
 		for _, verb := range []string{"get", "update"} {
 			if err := authorizeKubernetesResourceAction(ctx, ch.kubeClient, userInfo, namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", sessionID); err != nil {
@@ -446,6 +463,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
 	executor.userInfo = userInfo
 	executor.gatewayEventStore = ch.gatewayEventStore
+	executor.requester = requesterFromUserInfo(userInfo)
+	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
+	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
+	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type
@@ -472,6 +493,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())
+	if !ch.config.ConnectorsEnabled {
+		tools = filterCompletionToolsExcluding(tools, chattools.ListConnectionsToolName)
+	}
 	tools = filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, tools)
 	if err := authorizeContextTokenToolUse(c, ch.contextTokenAuthorization, "chatTools", completionToolNames(tools)); err != nil {
 		return err
@@ -547,6 +571,7 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		trace.ContextWithSpanContext(context.Background(), req.span.SpanContext()),
 		baggage.FromContext(req.parentCtx),
 	)
+	sseParentCtx = llm.CopyUsageRecorder(sseParentCtx, req.parentCtx)
 	var streamOwnership atomic.Uint32
 	finalizeStream := sync.OnceFunc(func() {
 		req.finalizeTurn()
@@ -990,11 +1015,11 @@ func (ch *ChatHandler) runToolLoop(
 			// If so, re-prompt the LLM to keep waiting instead of ending the session.
 			if executor.tasksCreated > 0 && hasRunningTasks(iterCtx, taskClient, namespace, sessionID) {
 				if emitSSE != nil && resp.Content != "" {
-					msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+					msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 					emitSSE("message", string(msgData))
 				}
 				appendTurnMessages(
-					llm.Message{Role: "assistant", Content: resp.Content},
+					llm.Message{Role: chatRoleAssistant, Content: resp.Content},
 					llm.Message{Role: chatRoleUser, Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
 				)
 				// Don't increment iteration here — the for loop's post-statement handles it
@@ -1065,7 +1090,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	usage.InputTokens += resp.InputTokens
 	usage.OutputTokens += resp.OutputTokens
 
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: resp.Content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: resp.Content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1075,7 +1100,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	}
 
 	if emitSSE != nil && resp.Content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 		emitSSE("message", string(msgData))
 	}
 
@@ -1129,7 +1154,7 @@ func (ch *ChatHandler) executeToolCalls(
 	repetitionTracker map[string]int,
 ) ([]llm.Message, []ToolCallInfo, int) {
 	messages := []llm.Message{{
-		Role:      "assistant",
+		Role:      chatRoleAssistant,
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
 	}}
@@ -1141,9 +1166,9 @@ func (ch *ChatHandler) executeToolCalls(
 	for _, tc := range resp.ToolCalls {
 		if emitSSE != nil {
 			tcData, _ := json.Marshal(map[string]any{
-				"id":   tc.ID,
-				"name": tc.Name,
-				"args": tc.Arguments,
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"args":       tc.Arguments,
 			})
 			emitSSE("tool_call", string(tcData))
 		}
@@ -1167,15 +1192,15 @@ func (ch *ChatHandler) executeToolCalls(
 
 		if emitSSE != nil {
 			trData, _ := json.Marshal(map[string]any{
-				"id":     tc.ID,
-				"name":   tc.Name,
-				"result": json.RawMessage(result),
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"result":     json.RawMessage(result),
 			})
 			emitSSE("tool_result", string(trData))
 		}
 
 		messages = append(messages, llm.Message{
-			Role:       "tool",
+			Role:       chatRoleTool,
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
 			Content:    result,
@@ -1213,7 +1238,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	turnID string,
 	start time.Time,
 ) (string, error) {
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1223,7 +1248,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	}
 
 	if emitSSE != nil && content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: content})
 		emitSSE("message", string(msgData))
 	}
 
@@ -1341,6 +1366,12 @@ func (ch *ChatHandler) saveChatSession(
 // HandleChatConfig handles GET /api/v1/chat/config.
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	toolNames := chattools.ChatToolNames()
+	// The advertised set matches what a turn will actually offer: no
+	// list_connections without connectors, or for a delegated token that
+	// may not read linked accounts.
+	if !ch.config.ConnectorsEnabled || !contextTokenAllowsConnectorRead(GetUserInfo(c), ch.contextTokenAuthorization) {
+		toolNames = slices.DeleteFunc(slices.Clone(toolNames), func(name string) bool { return name == chattools.ListConnectionsToolName })
+	}
 
 	// Context-token callers must name a Provider explicitly: the resolver
 	// refuses the implicit server default for them, so the UI must not offer
@@ -1360,6 +1391,7 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 		"maxTasksPerTurn":         ch.config.MaxTasksPerTurn,
 		"maxConcurrent":           ch.config.MaxConcurrent,
 		"availableTools":          toolNames,
+		"connectorsEnabled":       ch.config.ConnectorsEnabled,
 	})
 }
 

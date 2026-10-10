@@ -31,6 +31,7 @@ func TestFormatAge(t *testing.T) {
 	}{
 		{"empty", "", "<unknown>", ""},
 		{"invalid", "not-a-date", "not-a-date", ""},
+		{"future", time.Now().Add(5 * time.Minute).Format(time.RFC3339), "0s", ""},
 		{"seconds_ago", time.Now().Add(-30 * time.Second).Format(time.RFC3339), "", "s"},
 		{"minutes_ago", time.Now().Add(-5 * time.Minute).Format(time.RFC3339), "", "m"},
 		{"hours_ago", time.Now().Add(-3 * time.Hour).Format(time.RFC3339), "", "h"},

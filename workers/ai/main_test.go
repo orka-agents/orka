@@ -17,8 +17,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
@@ -30,7 +34,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const customToolName = "custom_tool"
@@ -621,7 +624,7 @@ func TestCreateK8sClient_OutsideCluster(t *testing.T) {
 
 func TestLoadCustomTools_NilClient(t *testing.T) {
 	// With nil client and no tool names, should return empty map
-	tools := loadCustomTools(context.Background(), nil, "default", nil)
+	tools, _ := loadCustomTools(context.Background(), nil, "default", nil)
 	if len(tools) != 0 {
 		t.Errorf("expected empty map, got %d tools", len(tools))
 	}
@@ -629,7 +632,7 @@ func TestLoadCustomTools_NilClient(t *testing.T) {
 
 func TestLoadCustomTools_BuiltinToolSkipped(t *testing.T) {
 	// Built-in tools should be skipped (no k8s lookup needed)
-	tools := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
+	tools, _ := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
 	if len(tools) != 0 {
 		t.Errorf("expected empty map for built-in tools, got %d tools", len(tools))
 	}
@@ -1671,5 +1674,141 @@ func TestParseSessionContextIncludesGatewaySenderProvenance(t *testing.T) {
 		if !strings.Contains(messages[0].Content, want) {
 			t.Fatalf("parsed content = %q, want %q", messages[0].Content, want)
 		}
+	}
+}
+
+func TestSealChildTaskViaControllerAsksTheParentEndpoint(t *testing.T) {
+	var path, auth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, auth = r.URL.EscapedPath(), r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previous := sealHTTPClient
+	sealHTTPClient = server.Client
+	t.Cleanup(func() { sealHTTPClient = previous })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	wantPath := "/internal/v1/tasks/default/parent-task/children/child%20task/requester-stamp"
+	if path != wantPath || auth != "Bearer sa-token" {
+		t.Fatalf("path = %q auth = %q", path, auth)
+	}
+	// A child without a requester has nothing to seal.
+	path = ""
+	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}
+	if err := sealChildTaskViaController(context.Background(), nil, plain); err != nil || path != "" {
+		t.Fatalf("plain child: err = %v path = %q", err, path)
+	}
+}
+
+// A conflict means a reconcile touched the child between the controller's
+// read and its fenced seal; the worker asks again rather than leaving the
+// child unsealed.
+func TestSealChildTaskViaControllerRetriesConflicts(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previousClient, previousBackoff := sealHTTPClient, sealConflictBackoff
+	sealHTTPClient, sealConflictBackoff = server.Client, time.Millisecond
+	t.Cleanup(func() { sealHTTPClient, sealConflictBackoff = previousClient, previousBackoff })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want two conflicts then success", got)
+	}
+	// A conflict that never clears stops after a bounded number of tries.
+	attempts.Store(-1000)
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got != -996 {
+		t.Fatalf("bounded attempts = %d, want 4", got+1000)
+	}
+}
+
+// TestSealChildTaskViaControllerRetriesTransientFailures covers a controller
+// that is briefly unavailable: a 5xx is retried like a conflict, while a
+// definitive 4xx is final.
+func TestSealChildTaskViaControllerRetriesTransientFailures(t *testing.T) {
+	var attempts atomic.Int32
+	var status atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(int(status.Load()))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previousClient, previousBackoff := sealHTTPClient, sealConflictBackoff
+	sealHTTPClient, sealConflictBackoff = server.Client, time.Millisecond
+	t.Cleanup(func() { sealHTTPClient, sealConflictBackoff = previousClient, previousBackoff })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	for _, tc := range []struct {
+		status int32
+		want   int32
+	}{{http.StatusServiceUnavailable, 2}, {http.StatusForbidden, 1}} {
+		attempts.Store(0)
+		status.Store(tc.status)
+		if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+			t.Fatal(err)
+		}
+		if got := attempts.Load(); got != tc.want {
+			t.Fatalf("status %d: attempts = %d, want %d", tc.status, got, tc.want)
+		}
+	}
+}
+
+// TestSealHTTPClientStaysOnTheController covers the client that carries the
+// worker's ServiceAccount token to the controller: it ignores proxy settings
+// and never follows a redirect elsewhere.
+func TestSealHTTPClientStaysOnTheController(t *testing.T) {
+	client := sealHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatalf("transport = %#v, want no proxy", client.Transport)
+	}
+	if client.CheckRedirect == nil || client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+		t.Fatal("the seal client must not follow redirects")
 	}
 }

@@ -1321,7 +1321,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	if err := dispatcher.handlePromptStreamError(
 		ctx, nil, runtimeClient, "runtime-session-1", task.DeepCopy(), attempt.ID, fence, runtimeFence,
 		nil, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(errors.New("event store unavailable"), nil),
+		acpUpdatePersistenceError(errors.New("event store unavailable"), nil), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1520,6 +1520,49 @@ func (f *promptStreamLifecycleFixture) assertTerminalLifecycle(
 	}
 }
 
+func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
+	for _, persistenceFailure := range []bool{false, true} {
+		name := "cancelled stream"
+		if persistenceFailure {
+			name = "plan persistence failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
+			})
+			cancellation := requestACPPromptCancellation(fixture.ctx, fixture.runtimeClient, "runtime-session-1",
+				fixture.task.DeepCopy(), fixture.runtimeFence, harnessv2.CancelReasonControllerShutdown)
+			if cancellation.err != nil {
+				t.Fatal(cancellation.err)
+			}
+			var streamErr = context.Canceled
+			wantState := corev1alpha1.TaskExecutionStateCancelled
+			if persistenceFailure {
+				streamErr = acpUpdatePersistenceError(nil, errors.New("plan store unavailable"))
+				wantState = corev1alpha1.TaskExecutionStateFailed
+			}
+			if err := fixture.dispatcher.handlePromptStreamError(
+				fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
+				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{},
+				context.Canceled, streamErr, cancellation,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if len(fixture.cancelRequests) != 1 {
+				t.Fatalf("cancellation requests = %d, want exactly one sealed operation", len(fixture.cancelRequests))
+			}
+			completed := &corev1alpha1.Task{}
+			if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
+				t.Fatal(err)
+			}
+			if completed.Status.Execution == nil || completed.Status.Execution.State != wantState {
+				t.Fatalf("cached cancellation execution = %v, want %s", completed.Status.Execution, wantState)
+			}
+		})
+	}
+}
+
 func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *testing.T) {
 	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
 		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
@@ -1528,7 +1571,7 @@ func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *tes
 	if err := fixture.dispatcher.handlePromptStreamError(
 		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")),
+		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1555,7 +1598,7 @@ func TestPromptStreamFailureClosesLifecycleBeforeOutcomeUnknown(t *testing.T) {
 	if err := fixture.dispatcher.handlePromptStreamError(
 		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		errors.New("stream disconnected"),
+		errors.New("stream disconnected"), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1609,7 +1652,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 			if err := fixture.dispatcher.handlePromptStreamError(
 				fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{},
-				context.DeadlineExceeded, context.DeadlineExceeded,
+				context.DeadlineExceeded, context.DeadlineExceeded, nil,
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -3075,8 +3118,17 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 	}
 }
 
-//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, true)
+}
+
+func TestACPDispatcherPublishesPreparedWorkspaceDeltaWithLegacyPublisher(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, false)
+}
+
+//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
+func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPresentation bool) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -3097,12 +3149,17 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 				PublicationCredentialRef:     &corev1alpha1.WorkspaceCredentialReference{Name: "github-publish"},
 				ForgeCredentialRef:           &corev1alpha1.WorkspaceCredentialReference{Name: "github-forge"},
 				CreatePR:                     true, PRBaseBranch: "main",
+				PRTitle: "fix: publish the authored title", PRBody: "Publish the reviewed change.",
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
 			State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 			Attempt: 1, PromptID: promptID, RequestDigest: testControlDigestForDispatcher("write-task"), ControllerEpoch: 1,
 		}},
+	}
+
+	if !supportsPresentation {
+		task.Spec.Workspace.PRTitle, task.Spec.Workspace.PRBody = "", ""
 	}
 
 	scheme := runtime.NewScheme()
@@ -3170,8 +3227,9 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	prepareRoots := make(chan string, 1)
 	publishRoots := make(chan string, 1)
 	publisherServer := newDispatcherPublisherServer(t, treeOID, commitOID, bundleDigest, dispatcherPublisherServerOptions{
-		inspectPullRequest: func(intent publisher.PullRequestIntent) { prIntents <- intent },
-		inspectPrepare:     func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
+		disablePRPresentation: !supportsPresentation,
+		inspectPullRequest:    func(intent publisher.PullRequestIntent) { prIntents <- intent },
+		inspectPrepare:        func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
 		inspectPublish: func(request publisherservice.PublicationPublishRequest) {
 			publishRoots <- request.Prepared.RelativeRoot
 		},
@@ -3227,6 +3285,14 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	}
 	select {
 	case intent := <-prIntents:
+		if supportsPresentation {
+			if intent.Title != task.Spec.Workspace.PRTitle || intent.Body != task.Spec.Workspace.PRBody ||
+				intent.TaskName != task.Name || intent.TaskNamespace != task.Namespace {
+				t.Fatal("publisher did not receive the Task-authored PR presentation")
+			}
+		} else if intent != withoutTaskPullRequestMetadata(intent) {
+			t.Fatal("legacy publisher received Task presentation")
+		}
 		if intent.BaseRepository.ID != "github.com/orka-agents/orka" || intent.HeadRepository.ID != "github.com/sozercan/orka-fork" {
 			t.Fatalf("continuation PR repositories = base %#v head %#v", intent.BaseRepository, intent.HeadRepository)
 		}
@@ -3287,9 +3353,10 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 }
 
 type dispatcherPublisherServerOptions struct {
-	inspectPrepare     func(publisherservice.PublicationPrepareRequest)
-	inspectPublish     func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest func(publisher.PullRequestIntent)
+	disablePRPresentation bool
+	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
+	inspectPublish        func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest    func(publisher.PullRequestIntent)
 }
 
 func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest string, options ...dispatcherPublisherServerOptions) *httptest.Server {
@@ -3306,6 +3373,12 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case publisherservice.CapabilitiesPath:
+			supportsPresentation := len(options) == 0 || !options[0].disablePRPresentation
+			writeDispatcherJSON(w, publisherservice.CapabilitiesResponse{
+				Protocol: publisherservice.ProtocolVersion, PullRequestReconciliation: true,
+				PullRequestPresentation: supportsPresentation && r.URL.Query().Get("features") == publisherservice.PullRequestPresentationFeature,
+			})
 		case publisherservice.WorkspaceResolvePath:
 			var request publisherservice.WorkspaceResolveRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3419,6 +3492,11 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 			var request publisherservice.PullRequestReconcileRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode pull request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(options) > 0 && options[0].disablePRPresentation && request.Intent != withoutTaskPullRequestMetadata(request.Intent) {
+				t.Error("legacy publisher received unsupported presentation fields")
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -3780,6 +3858,8 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 }
 
 type dispatcherRuntimeServerOptions struct {
+	beforeTerminal                   func(harnessv2.StartPromptRequest, harnessv2.Event)
+	onCancel                         func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
 	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
@@ -3923,7 +4003,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				Result: harnessv2.PromptResult{
 					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "from runtime"}},
 					Model:   "served-model",
-					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
+					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: new(uint64(40))},
 				},
 			}
 		case harnessv2.EventCancelled:
@@ -3947,6 +4027,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			t.Errorf("unsupported deterministic terminal event %q", terminalType)
 			return
 		}
+		if options.beforeTerminal != nil {
+			w.(http.Flusher).Flush()
+			options.beforeTerminal(request, terminal)
+		}
 		if err := encoder.Encode(terminal); err != nil {
 			t.Errorf("encode terminal event: %v", err)
 			return
@@ -3954,6 +4038,19 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		if err := encoder.Close(); err != nil {
 			t.Errorf("close encoder: %v", err)
 		}
+	})
+	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if options.onCancel == nil {
+			http.NotFound(w, r)
+			return
+		}
+		var request harnessv2.CancelPromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode cancellation: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writeDispatcherJSON(w, options.onCancel(request))
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.CreateWorkspaceDeltaRequest
@@ -5546,6 +5643,15 @@ func TestFrozenMCPPermissionDecisionAllowsGrantedToolsOnce(t *testing.T) {
 			permission: &harnessv2.PermissionRequestedEvent{
 				ToolName: "lookup", Options: options,
 			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:     "provider-native tool cannot borrow brokered approval",
+			policy:   providerNativePolicy,
+			approval: harnessv2.MCPApprovalPolicy{RequiredTools: []string{providerNativeToolRead}},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead, Options: options,
+			},
 			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
 		},
 		{
@@ -5725,7 +5831,7 @@ func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization,
-			harnessv2.DefaultProtocolLimits(),
+			harnessv2.DefaultProtocolLimits(), nil,
 		)
 	}()
 	select {
@@ -5826,7 +5932,7 @@ func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization,
-			harnessv2.DefaultProtocolLimits(),
+			harnessv2.DefaultProtocolLimits(), nil,
 		)
 	}()
 	select {
@@ -5853,7 +5959,7 @@ func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, func() { cancelled <- struct{}{} }, nil, "", &corev1alpha1.Task{}, harnessv2.Fence{},
-			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{},
+			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{}, nil,
 		)
 	}()
 	cancel()

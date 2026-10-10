@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/gateway"
@@ -23,6 +24,12 @@ import (
 func newAISoulGatewayTask(t *testing.T, r *TaskReconciler, ss *sqlite.Store, suffix string) *corev1alpha1.Task {
 	t.Helper()
 	ctx := context.Background()
+	if r.GatewayService == nil {
+		require.NoError(t, gatewayv1alpha1.AddToScheme(r.Scheme))
+		require.NoError(t, r.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}}))
+		require.NoError(t, r.Create(ctx, &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "default", UID: "gateway-uid", Generation: 1}}))
+		r.GatewayService = gateway.NewService(r.Client, ss, ss, ss, gateway.DefaultConfig())
+	}
 	now := time.Now().UTC()
 	event := store.GatewayEvent{
 		ID: "soul-" + suffix, Namespace: "default", NamespaceUID: "namespace-uid",

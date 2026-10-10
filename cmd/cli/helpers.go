@@ -25,6 +25,10 @@ import (
 )
 
 const (
+	cliProgramName = "orka"
+)
+
+const (
 	configDir  = ".orka"
 	configFile = "config.yaml"
 
@@ -210,7 +214,7 @@ func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 
 	// Try the user's namespace first, then well-known orka namespaces
 	namespacesToTry := []string{defaultNS}
-	for _, ns := range []string{"orka-system", "orka", defaultNamespace} {
+	for _, ns := range []string{"orka-system", cliProgramName, defaultNamespace} {
 		if ns != defaultNS {
 			namespacesToTry = append(namespacesToTry, ns)
 		}
@@ -289,7 +293,7 @@ func discoverOrkaService(restConfig *rest.Config, namespace string) string {
 	httpClient := &http.Client{Transport: rt, Timeout: 5 * time.Second}
 
 	// Strategy 1: check well-known service names
-	for _, candidate := range []string{"orka-api", "orka", "orka-controller-manager"} {
+	for _, candidate := range []string{"orka-api", cliProgramName, "orka-controller-manager"} {
 		if checkServiceExists(httpClient, restConfig.Host, namespace, candidate) {
 			return candidate
 		}

@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as UsageRouteImport } from './routes/usage'
 import { Route as RuntimeSimulatorRouteImport } from './routes/runtime-simulator'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as LiveRouteImport } from './routes/live'
@@ -26,6 +27,7 @@ import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as ToolsToolNameRouteImport } from './routes/tools/$toolName'
 import { Route as TasksNewRouteImport } from './routes/tasks/new'
 import { Route as TasksTaskIdRouteImport } from './routes/tasks/$taskId'
+import { Route as SettingsConnectorsRouteImport } from './routes/settings/connectors'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessionId'
 import { Route as SecurityNewRouteImport } from './routes/security/new'
 import { Route as SecurityRepoIdRouteImport } from './routes/security/$repoId'
@@ -37,6 +39,11 @@ import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security
 import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
 import { Route as GatewaysBindingsBindingIdRouteImport } from './routes/gateways/bindings/$bindingId'
 
+const UsageRoute = UsageRouteImport.update({
+  id: '/usage',
+  path: '/usage',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RuntimeSimulatorRoute = RuntimeSimulatorRouteImport.update({
   id: '/runtime-simulator',
   path: '/runtime-simulator',
@@ -122,6 +129,11 @@ const TasksTaskIdRoute = TasksTaskIdRouteImport.update({
   path: '/tasks/$taskId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsConnectorsRoute = SettingsConnectorsRouteImport.update({
+  id: '/settings/connectors',
+  path: '/settings/connectors',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsSessionIdRoute = SessionsSessionIdRouteImport.update({
   id: '/sessions/$sessionId',
   path: '/sessions/$sessionId',
@@ -182,6 +194,7 @@ export interface FileRoutesByFullPath {
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
@@ -189,6 +202,7 @@ export interface FileRoutesByFullPath {
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/settings/connectors': typeof SettingsConnectorsRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
@@ -211,6 +225,7 @@ export interface FileRoutesByTo {
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
@@ -218,6 +233,7 @@ export interface FileRoutesByTo {
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/settings/connectors': typeof SettingsConnectorsRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
@@ -241,6 +257,7 @@ export interface FileRoutesById {
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
@@ -248,6 +265,7 @@ export interface FileRoutesById {
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/settings/connectors': typeof SettingsConnectorsRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
@@ -272,6 +290,7 @@ export interface FileRouteTypes {
     | '/live'
     | '/login'
     | '/runtime-simulator'
+    | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
@@ -279,6 +298,7 @@ export interface FileRouteTypes {
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/settings/connectors'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
@@ -301,6 +321,7 @@ export interface FileRouteTypes {
     | '/live'
     | '/login'
     | '/runtime-simulator'
+    | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
@@ -308,6 +329,7 @@ export interface FileRouteTypes {
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/settings/connectors'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
@@ -330,6 +352,7 @@ export interface FileRouteTypes {
     | '/live'
     | '/login'
     | '/runtime-simulator'
+    | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
@@ -337,6 +360,7 @@ export interface FileRouteTypes {
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/settings/connectors'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
@@ -360,6 +384,7 @@ export interface RootRouteChildren {
   LiveRoute: typeof LiveRoute
   LoginRoute: typeof LoginRoute
   RuntimeSimulatorRoute: typeof RuntimeSimulatorRoute
+  UsageRoute: typeof UsageRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
   GatewaysGatewayIdRoute: typeof GatewaysGatewayIdRoute
@@ -367,6 +392,7 @@ export interface RootRouteChildren {
   SecurityRepoIdRoute: typeof SecurityRepoIdRoute
   SecurityNewRoute: typeof SecurityNewRoute
   SessionsSessionIdRoute: typeof SessionsSessionIdRoute
+  SettingsConnectorsRoute: typeof SettingsConnectorsRoute
   TasksTaskIdRoute: typeof TasksTaskIdRoute
   TasksNewRoute: typeof TasksNewRoute
   ToolsToolNameRoute: typeof ToolsToolNameRoute
@@ -385,6 +411,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/usage': {
+      id: '/usage'
+      path: '/usage'
+      fullPath: '/usage'
+      preLoaderRoute: typeof UsageRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/runtime-simulator': {
       id: '/runtime-simulator'
       path: '/runtime-simulator'
@@ -504,6 +537,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TasksTaskIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/connectors': {
+      id: '/settings/connectors'
+      path: '/settings/connectors'
+      fullPath: '/settings/connectors'
+      preLoaderRoute: typeof SettingsConnectorsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions/$sessionId': {
       id: '/sessions/$sessionId'
       path: '/sessions/$sessionId'
@@ -584,6 +624,7 @@ const rootRouteChildren: RootRouteChildren = {
   LiveRoute: LiveRoute,
   LoginRoute: LoginRoute,
   RuntimeSimulatorRoute: RuntimeSimulatorRoute,
+  UsageRoute: UsageRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
   GatewaysGatewayIdRoute: GatewaysGatewayIdRoute,
@@ -591,6 +632,7 @@ const rootRouteChildren: RootRouteChildren = {
   SecurityRepoIdRoute: SecurityRepoIdRoute,
   SecurityNewRoute: SecurityNewRoute,
   SessionsSessionIdRoute: SessionsSessionIdRoute,
+  SettingsConnectorsRoute: SettingsConnectorsRoute,
   TasksTaskIdRoute: TasksTaskIdRoute,
   TasksNewRoute: TasksNewRoute,
   ToolsToolNameRoute: ToolsToolNameRoute,

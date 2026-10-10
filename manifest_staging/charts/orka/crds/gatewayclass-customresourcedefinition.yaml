@@ -81,6 +81,10 @@ spec:
                     description: InboundText indicates support for authenticated inbound
                       text events.
                     type: boolean
+                  interimDelivery:
+                    description: InterimDelivery indicates support for bounded nonterminal
+                      text messages.
+                    type: boolean
                   outboundText:
                     description: OutboundText indicates support for final text and
                       sanitized error delivery.

@@ -18,7 +18,7 @@ the countersign.
 The `acp` line is an intentional v2-only hard cutover: the turn-oriented
 harness-wrapper path (`workers/harness`, `cmd/orka-agent-harness-wrapper`,
 `internal/controller/harness_wrapper.go`) exists only on `origin/main`
-(`21f8ef15`), while the ACP v2 RuntimePool path exists only on `acp`
+(`21f8ef15`), while the Orka harness v2 RuntimePool path exists only on `acp`
 (`77bdc4db`). The two controllers cannot run concurrently against one Task
 population, the v2 CRD prunes v1-only fields, `runtime.type: opencode` exists in
 both baselines with incompatible configuration contracts, and the wrapper keeps

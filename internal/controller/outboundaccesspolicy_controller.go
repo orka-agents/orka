@@ -34,6 +34,10 @@ import (
 	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
+const (
+	rbacRoleKind = "Role"
+)
+
 // OutboundAccessPolicyReconciler validates policy structure and references.
 type OutboundAccessPolicyReconciler struct {
 	client.Client
@@ -61,6 +65,7 @@ const (
 // +kubebuilder:rbac:groups=core.orka.ai,resources=outboundaccesspolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=outboundaccesspolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets;services;serviceaccounts,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=connectorproviders,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;delete
 
@@ -358,7 +363,7 @@ func (r *OutboundAccessPolicyReconciler) desiredOutboundTokenRequestGrant(
 			Labels:      bindingLabels,
 			Annotations: bindingAnnotations,
 		},
-		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: name},
 		Subjects: []rbacv1.Subject{{
 			Kind:      rbacv1.ServiceAccountKind,
 			Name:      workerServiceAccountName(r.AIWorkerServiceAccountName, AIWorkerServiceAccount),
@@ -612,6 +617,8 @@ func outboundPolicyReferencesObject(policy *corev1alpha1.OutboundAccessPolicy, o
 		if policy.Spec.Gateway != nil {
 			return matchService(&policy.Spec.Gateway.ServiceRef)
 		}
+	case *corev1alpha1.ConnectorProvider:
+		return policy.Spec.Connection != nil && namespace == policy.Namespace && policy.Spec.Connection.ProviderRef.Name == name
 	case *corev1.ServiceAccount:
 		if namespace != policy.Namespace {
 			return false
@@ -639,6 +646,7 @@ func (r *OutboundAccessPolicyReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		Watches(&corev1.Secret{}, mapReferenced).
 		Watches(&corev1.Service{}, mapReferenced).
 		Watches(&corev1.ServiceAccount{}, mapReferenced).
+		Watches(&corev1alpha1.ConnectorProvider{}, mapReferenced).
 		Named("outboundaccesspolicy").
 		Complete(r)
 }

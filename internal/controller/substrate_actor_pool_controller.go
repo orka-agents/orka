@@ -239,7 +239,7 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 	pool.Status.ActorsPerWorker = density.ActorsPerWorker
 	pool.Status.Message = sanitizeSubstrateActorPoolMessage(message)
 	condition := metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReasonReady,
 		LastTransitionTime: now,
 		ObservedGeneration: pool.Generation,
 	}

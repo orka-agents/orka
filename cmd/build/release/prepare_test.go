@@ -25,14 +25,23 @@ func testGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(result.stdout)
 }
 
+func initTestGitRemoteAndCheckout(t *testing.T, root, remote, checkout string) {
+	t.Helper()
+	// Disable receive-pack housekeeping before any push into the bare fixture.
+	// Detached maintenance can otherwise outlive Git and race TempDir cleanup.
+	testGit(t, root, "init", "--bare", remote)
+	testGit(t, root, "--git-dir", remote, "config", "--local", "receive.autogc", "false")
+	// Clone persists this setting before fetching; it also covers later commits and fetches.
+	testGit(t, root, "clone", "--config", "maintenance.auto=false", remote, checkout)
+}
+
 func newPreparationFixture(t *testing.T) *preparationFixture {
 	t.Helper()
 	f := newReleaseFixture(t)
 	p := &preparationFixture{
 		releaseFixture: f, remote: filepath.Join(f.root, "origin.git"), checkout: filepath.Join(f.root, "checkout"),
 	}
-	testGit(t, f.root, "init", "--bare", p.remote)
-	testGit(t, f.root, "clone", p.remote, p.checkout)
+	initTestGitRemoteAndCheckout(t, f.root, p.remote, p.checkout)
 	p.git(t, "checkout", "--orphan", "main")
 	p.git(t, "config", "user.name", "Test")
 	p.git(t, "config", "user.email", "test@example.invalid")
@@ -130,6 +139,16 @@ func (p *preparationFixture) apiRequest(t *testing.T, request apiRequest) (any, 
 		return map[string]any{"workflow_runs": runs}, nil, true
 	}
 	return nil, nil, false
+}
+
+func TestPreparationFixtureDisablesAutomaticGitMaintenance(t *testing.T) {
+	p := newPreparationFixture(t)
+	if got := testGit(t, p.remote, "config", "--local", "--bool", "--get", "receive.autogc"); got != "false" {
+		t.Fatalf("bare fixture receive.autogc = %q, want false", got)
+	}
+	if got := p.git(t, "config", "--local", "--bool", "--get", "maintenance.auto"); got != "false" {
+		t.Fatalf("checkout fixture maintenance.auto = %q, want false", got)
+	}
 }
 
 func TestPreparationCreatesReleaseBranchAndLeavesMainUnchanged(t *testing.T) {
@@ -264,6 +283,97 @@ func TestPreviousReleaseVersionDoesNotChangeToolingIdentity(t *testing.T) {
 	}
 }
 
+func newDevelopmentPreparationFixture(t *testing.T) *preparationFixture {
+	t.Helper()
+	p := newPreparationFixture(t)
+	for path, content := range repositoryDevelopmentInputs(t) {
+		writeTestFile(t, filepath.Join(p.checkout, path), content)
+	}
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "trusted repository development inputs")
+	p.main = p.git(t, "rev-parse", "HEAD")
+	p.env["GITHUB_SHA"] = p.main
+	p.git(t, "push", "origin", "main")
+	return p
+}
+
+func TestRepositoryDevelopmentInputsMatchGeneratedReleaseInputs(t *testing.T) {
+	p := newDevelopmentPreparationFixture(t)
+	for _, version := range []string{testVersion, "v0.2.0-beta.1", "v0.2.0-rc.2"} {
+		t.Run(version, func(t *testing.T) {
+			p.git(t, "checkout", "-B", testBranch, "main")
+			must(t, updateVersion(p.checkout, version))
+			p.git(t, "add", ".")
+			p.git(t, "commit", "-m", "generated release inputs")
+			candidate := p.git(t, "rev-parse", "HEAD")
+			p.git(t, "checkout", "main")
+			must(t, p.w.checkPreparationAutomation(p.main, candidate))
+			if p.git(t, "rev-parse", "HEAD") != p.main {
+				t.Fatal("identity check changed checkout")
+			}
+		})
+	}
+}
+
+func TestDevelopmentInputNormalizationRejectsUntrustedChanges(t *testing.T) {
+	p := newDevelopmentPreparationFixture(t)
+	p.git(t, "checkout", "-b", testBranch)
+	must(t, updateVersion(p.checkout, testVersion))
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "generated release inputs")
+	generated := p.git(t, "rev-parse", "HEAD")
+	type change struct{ path, old, new string }
+	changes := map[string]change{
+		"makefile operator":   {makefilePath, "VERSION ?= ", "VERSION := "},
+		"makefile command":    {makefilePath, "VERSION ?= " + testVersion, "VERSION ?= $(shell touch untrusted-command-ran)"},
+		"makefile whitespace": {makefilePath, "VERSION ?= ", "VERSION ?=  "},
+		"other dev version":   {makefilePath, testVersion, "v0.2.0-dev"},
+		"chart content":       {chartInputPath, "name: orka", "name: changed"},
+		"chart comment":       {chartInputPath, "version: 0.2.0", "version: 0.2.0 # changed"},
+		"chart whitespace":    {chartInputPath, "version: ", "version:  "},
+		"unrelated value":     {valuesInputPath, "replicas: 1", "replicas: 2"},
+		"values comment":      {valuesInputPath, "# Orka Helm Chart Values", "# Changed Helm Chart Values"},
+		"tag comment":         {valuesInputPath, `tag: "0.2.0"`, `tag: "0.2.0" # changed`},
+		"tag whitespace":      {valuesInputPath, `tag: "0.2.0"`, `tag:  "0.2.0"`},
+		"non-release tag":     {valuesInputPath, `tag: "0.2.0"`, `tag: "latest"`},
+		"tag preceding comment": {valuesInputPath, "repository: " + imageRepository(controllerImage) + "\n",
+			"repository: " + imageRepository(controllerImage) + "\n    # changed\n"},
+		"repository whitespace": {valuesInputPath, "repository: " + imageRepository(controllerImage) + "\n",
+			"repository:  " + imageRepository(controllerImage) + "\n"},
+		"runtime whitespace": {valuesInputPath, "codexImage: ", "codexImage:  "},
+		"runtime comment": {valuesInputPath, "codexImage: " + imageRepository("acp-codex-runtime") + ":0.2.0",
+			"codexImage: " + imageRepository("acp-codex-runtime") + ":0.2.0 # changed"},
+	}
+	for _, name := range versionedImages {
+		changes["repository/"+name] = change{valuesInputPath,
+			"repository: " + imageRepository(name) + "\n", "repository: registry.example/changed\n"}
+	}
+	for _, provider := range versionedRuntimeProviders {
+		changes["runtime/"+provider] = change{valuesInputPath,
+			provider + "Image: " + imageRepository("acp-"+provider+"-runtime") + ":0.2.0",
+			provider + "Image: registry.example/changed-runtime:0.2.0"}
+	}
+	for name, edit := range changes {
+		t.Run(name, func(t *testing.T) {
+			p.git(t, "checkout", "-B", testBranch, generated)
+			path := filepath.Join(p.checkout, edit.path)
+			content := readTestFile(t, path)
+			if !strings.Contains(content, edit.old) {
+				t.Fatalf("missing fixture field %q in %s", edit.old, edit.path)
+			}
+			writeTestFile(t, path, strings.Replace(content, edit.old, edit.new, 1))
+			p.git(t, "add", edit.path)
+			p.git(t, "commit", "-m", "untrusted release input change")
+			candidate := p.git(t, "rev-parse", "HEAD")
+			p.git(t, "checkout", "main")
+			wantError(t, p.w.checkPreparationAutomation(p.main, candidate), "release automation differs")
+			if p.git(t, "rev-parse", "HEAD") != p.main {
+				t.Fatal("identity check changed checkout")
+			}
+		})
+	}
+}
+
 func TestRuntimeRepositoryChangesStopBeforeCheckoutOrGeneration(t *testing.T) {
 	p := newPreparationFixture(t)
 	values := readTestFile(t, filepath.Join(p.checkout, valuesInputPath))
@@ -358,8 +468,7 @@ func TestExactChartPublicationPreservesSiteRepairsIndexAndRetries(t *testing.T) 
 	f.data, err = loadBundle(f.directory)
 	must(t, err)
 	remote, checkout := filepath.Join(f.root, "pages.git"), filepath.Join(f.root, "pages")
-	testGit(t, f.root, "init", "--bare", remote)
-	testGit(t, f.root, "clone", remote, checkout)
+	initTestGitRemoteAndCheckout(t, f.root, remote, checkout)
 	testGit(t, checkout, "checkout", "--orphan", pagesBranch)
 	writeTestFile(t, filepath.Join(checkout, "index.html"), "preserved website")
 	must(t, os.MkdirAll(filepath.Join(checkout, "charts"), 0o700))
@@ -376,7 +485,12 @@ func TestExactChartPublicationPreservesSiteRepairsIndexAndRetries(t *testing.T) 
 		if len(spec.args) >= 4 && slices.Equal(spec.args[:4], []string{"git", "remote", "add", "origin"}) {
 			spec.args = []string{"git", "remote", "add", "origin", remote}
 		}
-		return runCommand(spec), true
+		result := runCommand(spec)
+		if result.err == nil && slices.Equal(spec.args, []string{"git", "init", "--quiet"}) {
+			// Keep publishChart's scratch checkouts isolated from background maintenance too.
+			testGit(t, spec.dir, "config", "--local", "maintenance.auto", "false")
+		}
+		return result, true
 	}
 	first, firstHash, err := f.w.publishChart(f.data, f.directory)
 	must(t, err)
@@ -399,4 +513,25 @@ func TestExactChartPublicationPreservesSiteRepairsIndexAndRetries(t *testing.T) 
 	if hashBytes([]byte(archive.stdout)) != f.data.Chart.SHA256 {
 		t.Fatal("publication changed the tested chart bytes")
 	}
+}
+
+func TestRollingDevelopmentInputsMatchGeneratedReleaseInputs(t *testing.T) {
+	p := newDevelopmentPreparationFixture(t)
+	valuesPath := filepath.Join(p.checkout, valuesInputPath)
+	values := readTestFile(t, valuesPath)
+	values = strings.ReplaceAll(values, `tag: ""`, `tag: "`+developmentVersion+`"`)
+	for _, provider := range versionedRuntimeProviders {
+		values = strings.ReplaceAll(values, provider+`Image: ""`,
+			provider+"Image: "+imageRepository("acp-"+provider+"-runtime")+":"+developmentVersion)
+	}
+	writeTestFile(t, valuesPath, values)
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "trusted rolling development inputs")
+	trusted := p.git(t, "rev-parse", "HEAD")
+	p.git(t, "checkout", "-b", testBranch)
+	must(t, updateVersion(p.checkout, testVersion))
+	p.git(t, "add", ".")
+	p.git(t, "commit", "-m", "generated release inputs")
+	candidate := p.git(t, "rev-parse", "HEAD")
+	must(t, p.w.checkPreparationAutomation(trusted, candidate))
 }

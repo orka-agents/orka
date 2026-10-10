@@ -107,6 +107,12 @@ func newReleaseFixture(t *testing.T) *releaseFixture {
 		writeTestFile(t, filepath.Join(f.directory, "digests", "digest-"+name+".txt"), testDigest)
 	}
 	writeTestFile(t, filepath.Join(f.directory, "orka-0.2.0.tgz"), "packaged chart bytes")
+	for _, target := range cliTargets {
+		path := filepath.Join(f.directory, target.archiveName(testVersion))
+		writeTestFile(t, path, "CLI archive "+target.os+"/"+target.arch)
+	}
+	must(t, writeCLIChecksums(f.directory, testVersion))
+	writeTestFile(t, filepath.Join(f.directory, cliChecksumFile(testVersion)+".bundle"), "signature bundle fixture")
 	must(t, f.w.bundle(f.directory, testVersion, testSHA, "1"))
 	var err error
 	f.data, err = loadBundle(f.directory)
@@ -215,11 +221,16 @@ func (f *releaseFixture) qualification(t *testing.T) {
 
 func (f *releaseFixture) record(draft bool) releaseRecord {
 	metadata := metadataFor(f.data, qualificationProof{RunID: "456"})
+	assets := make([]runArtifact, 0, 4+len(f.data.CLI))
+	for _, name := range []string{candidateFile, qualificationFile, acceptanceFile, f.data.Chart.File} {
+		assets = append(assets, runArtifact{Name: name})
+	}
+	for _, asset := range f.data.CLI {
+		assets = append(assets, runArtifact{Name: asset.File})
+	}
 	return releaseRecord{ID: 789, TagName: metadata.TagName, TargetCommitish: metadata.TargetCommitish,
 		Name: metadata.Name, Prerelease: &metadata.Prerelease, Body: metadata.Body, Draft: &draft,
-		Assets: []runArtifact{
-			{Name: candidateFile}, {Name: qualificationFile}, {Name: acceptanceFile}, {Name: f.data.Chart.File},
-		},
+		Assets: assets,
 	}
 }
 

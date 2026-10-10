@@ -11,9 +11,11 @@ import (
 
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/orka-agents/orka/internal/llm"
 )
 
 func detachedSpanContext(ctx context.Context) context.Context {
 	detached := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
-	return baggage.ContextWithBaggage(detached, baggage.FromContext(ctx))
+	return llm.CopyUsageRecorder(baggage.ContextWithBaggage(detached, baggage.FromContext(ctx)), ctx)
 }

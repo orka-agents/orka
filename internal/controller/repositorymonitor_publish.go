@@ -57,6 +57,7 @@ const (
 	repositoryMonitorPublishSkipValidationPolicyChanged    = "validation_policy_changed"
 	repositoryMonitorPublishSkipValidationUnavailable      = "validation_unavailable"
 
+	repositoryMonitorPublishFailureGitHubAuthentication   = "github_authentication_failed"
 	repositoryMonitorPublishFailureGitHubPermissionDenied = "github_permission_denied"
 	repositoryMonitorPublishFailureGitHubPermanent        = "github_permanent_error"
 	repositoryMonitorPublishFailureGitHubAPI              = "github_api_error"
@@ -130,7 +131,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		return skip(repositoryMonitorPublishSkipDisabled, fmt.Sprintf("Pull request #%d review publishing skipped: publishing is disabled", item.Number), nil)
 	}
 	if event := effectiveRepositoryMonitorPublishEvent(publish); event != repositoryMonitorPublishEventComment {
-		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported publish event", item.Number), map[string]any{"event": event})
+		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported publish event", item.Number), map[string]any{eventField: event})
 	}
 	if policy := effectiveRepositoryMonitorPublishSameHeadPolicy(publish); policy != repositoryMonitorPublishSameHeadPolicySkip {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported same-head policy", item.Number), map[string]any{"sameHeadPolicy": policy})
@@ -143,7 +144,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		if record.Verdict == repositoryMonitorReviewVerdictStale {
 			reason = repositoryMonitorPublishSkipHeadSHAChanged
 		}
-		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: review verdict %q is not publishable", item.Number, record.Verdict), map[string]any{"verdict": record.Verdict})
+		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: review verdict %q is not publishable", item.Number, record.Verdict), map[string]any{eventVerdictField: record.Verdict})
 	}
 	if !repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
 		return skip(repositoryMonitorPublishSkipValidationPolicyChanged, fmt.Sprintf("Pull request #%d review publishing skipped: validation policy changed after the review started", item.Number), map[string]any{
@@ -161,18 +162,18 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		}
 	}
 	if shouldPost, reason := repositoryMonitorPublishShouldPostVerdict(publish, record); !shouldPost {
-		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: verdict %q is not enabled for publishing", item.Number, record.Verdict), map[string]any{"verdict": record.Verdict})
+		return skip(reason, fmt.Sprintf("Pull request #%d review publishing skipped: verdict %q is not enabled for publishing", item.Number, record.Verdict), map[string]any{eventVerdictField: record.Verdict})
 	}
 	if strings.EqualFold(strings.TrimSpace(record.SecurityStatus), "security_sensitive") && !publish.PostSecuritySensitive {
-		return skip(repositoryMonitorPublishSkipSecuritySensitiveNotPublic, fmt.Sprintf("Pull request #%d review publishing skipped: review result is security-sensitive", item.Number), map[string]any{"securityStatus": record.SecurityStatus, "verdict": record.Verdict})
+		return skip(repositoryMonitorPublishSkipSecuritySensitiveNotPublic, fmt.Sprintf("Pull request #%d review publishing skipped: review result is security-sensitive", item.Number), map[string]any{"securityStatus": record.SecurityStatus, eventVerdictField: record.Verdict})
 	}
 	if err := validateRepositoryMonitorPublishRecordBinding(monitor, item, task, record); err != nil {
-		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: %s", item.Number, err.Error()), map[string]any{"error": err.Error()})
+		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: %s", item.Number, err.Error()), map[string]any{errorField: err.Error()})
 	}
 
 	owner, repository, err := repositoryMonitorOwnerRepository(monitor)
 	if err != nil {
-		return skip(repositoryMonitorPublishSkipRepoMismatch, fmt.Sprintf("Pull request #%d review publishing skipped: %s", item.Number, err.Error()), map[string]any{"error": err.Error()})
+		return skip(repositoryMonitorPublishSkipRepoMismatch, fmt.Sprintf("Pull request #%d review publishing skipped: %s", item.Number, err.Error()), map[string]any{errorField: err.Error()})
 	}
 	if taskRepo := strings.TrimSpace(task.Annotations[labels.AnnotationGitHubRepository]); taskRepo != "" && !strings.EqualFold(taskRepo, owner+"/"+repository) {
 		return skip(repositoryMonitorPublishSkipRepoMismatch, fmt.Sprintf("Pull request #%d review publishing skipped: result repo does not match monitor repository", item.Number), map[string]any{"resultRepo": taskRepo, "monitorRepo": owner + "/" + repository})
@@ -198,15 +199,15 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		if err != nil {
 			message = err.Error()
 		}
-		return skip(repositoryMonitorPublishSkipMissingGitSecret, fmt.Sprintf("Pull request #%d review publishing skipped: missing GitHub credentials", item.Number), map[string]any{"error": message})
+		return skip(repositoryMonitorPublishSkipMissingGitSecret, fmt.Sprintf("Pull request #%d review publishing skipped: missing GitHub credentials", item.Number), map[string]any{errorField: message})
 	}
 
 	currentPR, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, item.Number)
 	if err != nil {
-		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "fetch_pull_request"})
+		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "fetch_pull_request"})
 	}
 	if !strings.EqualFold(strings.TrimSpace(currentPR.State), repositoryMonitorItemStateOpen) {
-		return skip(repositoryMonitorPublishSkipPRClosed, fmt.Sprintf("Pull request #%d review publishing skipped: pull request is not open", item.Number), map[string]any{"state": currentPR.State})
+		return skip(repositoryMonitorPublishSkipPRClosed, fmt.Sprintf("Pull request #%d review publishing skipped: pull request is not open", item.Number), map[string]any{stateField: currentPR.State})
 	}
 	if baseBranch := effectiveRepositoryMonitorBranch(monitor); strings.TrimSpace(currentPR.BaseBranch) != baseBranch {
 		return skip(repositoryMonitorPublishSkipBaseBranchMismatch, fmt.Sprintf("Pull request #%d review publishing skipped: base branch changed", item.Number), map[string]any{"currentBase": currentPR.BaseBranch, "monitorBase": baseBranch})
@@ -230,7 +231,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	}
 	matchedReview, matchedPublishID, err := r.repositoryMonitorGitHubReviewMarkerMatch(ctx, monitor, item, owner, repository, token, reviewedHead)
 	if err != nil {
-		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "list_reviews"})
+		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "list_reviews"})
 	}
 	if matchedReview != nil {
 		mutationID := "ghmut-" + repositoryMonitorShortHash(matchedPublishID+"-submit-review")
@@ -268,7 +269,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 
 	body, comments, err := r.renderRepositoryMonitorGitHubReview(ctx, monitor, item, task, record, publishRecord.ID, token, owner, repository)
 	if err != nil {
-		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "inline_mapping"})
+		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "inline_mapping"})
 	}
 	if len([]byte(body)) > repositoryMonitorReviewBodyMaxBytes {
 		return skip(repositoryMonitorPublishSkipBodyTooLarge, fmt.Sprintf("Pull request #%d review publishing skipped: rendered review body is too large", item.Number), map[string]any{"bytes": len([]byte(body))})
@@ -291,9 +292,9 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	}
 
 	if err := r.createMonitorEvent(ctx, monitor, repositoryMonitorReviewRunID(task), repositoryMonitorPullRequestKind, item.Number, reviewedHead, "review_publish_started", fmt.Sprintf("Pull request #%d review publishing started", item.Number), map[string]any{
-		"reviewID":           record.ID,
+		eventReviewIDField:   record.ID,
 		"reviewTaskName":     task.Name,
-		"event":              repositoryMonitorPublishEventComment,
+		eventField:           repositoryMonitorPublishEventComment,
 		"inlineCommentCount": len(comments),
 	}); err != nil {
 		return err
@@ -322,7 +323,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 			if auditErr := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); auditErr != nil {
 				return fmt.Errorf("publish review failed: %w; additionally failed to update mutation audit: %v", err, auditErr)
 			}
-			return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "create_review"})
+			return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "create_review"})
 		}
 		mutation.Status = repositoryMonitorRunPhaseSucceeded
 		mutation.Error = ""
@@ -336,7 +337,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	publishRecord.GitHubReviewID = strconv.FormatInt(response.ID, 10)
 	publishRecord.GitHubReviewURL = response.HTMLURL
 	return r.finishRepositoryMonitorReviewPublish(ctx, monitor, item, publishRecord, "review_publish_succeeded", fmt.Sprintf("Pull request #%d review published to GitHub", item.Number), map[string]any{
-		"reviewID":           record.ID,
+		eventReviewIDField:   record.ID,
 		"githubReviewID":     publishRecord.GitHubReviewID,
 		"githubReviewURL":    publishRecord.GitHubReviewURL,
 		"inlineCommentCount": publishRecord.InlineCommentCount,
@@ -432,7 +433,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRecordNeedsPublishR
 				activeReservation = true
 			}
 		case repositoryMonitorPublishPhaseFailed:
-			if publishRecord.SkipReason != repositoryMonitorPublishFailureGitHubAPI {
+			if publishRecord.SkipReason != repositoryMonitorPublishFailureGitHubAPI &&
+				publishRecord.SkipReason != repositoryMonitorPublishFailureGitHubAuthentication {
 				needsPublish = false
 				continue
 			}
@@ -537,7 +539,7 @@ func (r *RepositoryMonitorReconciler) finishRepositoryMonitorReviewPublish(ctx c
 		metadata["skipReason"] = record.SkipReason
 	}
 	if record.Error != "" {
-		metadata["error"] = record.Error
+		metadata[errorField] = record.Error
 	}
 	return r.createMonitorEvent(ctx, monitor, record.RunID, repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, eventType, summary, metadata)
 }
@@ -1005,7 +1007,12 @@ func repositoryMonitorGitHubPublishFailureReason(err error) string {
 			return repositoryMonitorPublishFailureGitHubAPI
 		}
 		return repositoryMonitorPublishFailureGitHubPermissionDenied
-	case http.StatusUnauthorized, http.StatusNotFound:
+	case http.StatusUnauthorized:
+		// Installation tokens can expire between review completion and publication.
+		// Retry with the current forge Secret after the normal publish cooldown;
+		// the full PR safety and duplicate checks still run before another POST.
+		return repositoryMonitorPublishFailureGitHubAuthentication
+	case http.StatusNotFound:
 		return repositoryMonitorPublishFailureGitHubPermissionDenied
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		return repositoryMonitorPublishFailureGitHubPermanent

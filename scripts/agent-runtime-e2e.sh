@@ -14,7 +14,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/agent-runtime-e2e.sh --context CONTEXT [--namespace NAMESPACE]
 
-Validates an already deployed ACP v2 Orka installation without printing Secret
+Validates an already deployed Orka harness v2 installation without printing Secret
 material. The kubectl context is required and is passed to every kubectl call.
 
 Modes:
@@ -2227,10 +2227,10 @@ wait_pool_profile_projection() {
   local model="$3"
   local intent="$4"
   local output_file="$5"
-  wait_until_fast "RuntimePool/${pool} complete stable ACP v2 ${provider}/${intent} profile projection" \
+  wait_until_fast "RuntimePool/${pool} complete stable Orka harness v2 ${provider}/${intent} profile projection" \
     "${wait_seconds}" pool_profile_projection_stable \
     "${pool}" "${provider}" "${model}" "${intent}" "${output_file}" || \
-    die "RuntimePool/${pool} did not reach the expected stable ACP v2 ${provider}/${intent} profile projection"
+    die "RuntimePool/${pool} did not reach the expected stable Orka harness v2 ${provider}/${intent} profile projection"
 }
 
 capture_pool_snapshot() {
@@ -3052,7 +3052,7 @@ prepare_release_gate_environment() {
   write_branch="${ACP_E2E_WRITE_BRANCH:-orka/acp-release-gate-${run_id}}"
   write_pr_base="${ACP_E2E_WRITE_PR_BASE:-main}"
   write_expected_file="orka-acp-release-gate-${run_id}.txt"
-  write_expected_content="ACP v2 release gate ${run_id}"
+  write_expected_content="Orka harness v2 release gate ${run_id}"
   write_prompt="${ACP_E2E_WRITE_PROMPT:-Create exactly one file named ${write_expected_file}. Its entire content must be one line: ${write_expected_content}. Do not modify, rename, or delete any other file.}"
 
   [[ -n "${write_source_repo}" ]] || die "RELEASE_GATE=1 requires ACP_E2E_WRITE_SOURCE_REPO"
@@ -3824,11 +3824,11 @@ if [[ "${release_gate}" -eq 1 ]]; then
   [[ "${completion_base_sha}" == "${release_source_commit}" ]] || \
     die "candidate branch moved before release-gate completion; candidate is not qualified"
   acp_report_update '.checks.baseUnchanged = true | .validation = "passed" | .stage = "cleanup"'
-  log "ACP v2 release checks passed on context ${context}; final qualification requires the cleanup report"
+  log "Orka harness v2 release checks passed on context ${context}; final qualification requires the cleanup report"
 else
   if [[ "${shared_mutation_checks_skipped}" -eq 1 ]]; then
-    log "ACP v2 shared-namespace smoke validation passed on context ${context}; controller restart and RuntimePool lifecycle/replacement checks were skipped. Use an isolated namespace for complete smoke acceptance."
+    log "Orka harness v2 shared-namespace smoke validation passed on context ${context}; controller restart and RuntimePool lifecycle/replacement checks were skipped. Use an isolated namespace for complete smoke acceptance."
   else
-    log "ACP v2 smoke validation passed on context ${context}; Task result/fork, scale-to-zero, and required publication tests were skipped. Use RELEASE_GATE=1 with the Kind wrapper for release acceptance."
+    log "Orka harness v2 smoke validation passed on context ${context}; Task result/fork, scale-to-zero, and required publication tests were skipped. Use RELEASE_GATE=1 with the Kind wrapper for release acceptance."
   fi
 fi

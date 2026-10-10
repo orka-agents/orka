@@ -87,6 +87,8 @@ LLM-visible parameter schema:
         "publicationCredentialRef": {"type": "string", "description": "Secret used only by the Workspace/Publisher"},
         "pushBranch":               {"type": "string", "description": "Publication branch"},
         "prBaseBranch":             {"type": "string", "description": "Pull-request base branch"},
+        "prTitle":                  {"type": "string", "maxLength": 256, "description": "Optional Task-authored PR title. Supply descriptive text when createPR is true; omitted or empty text uses the prompt-derived fallback."},
+        "prBody":                   {"type": "string", "maxLength": 32768, "description": "Optional Task-authored PR body describing the change and validation plan. Omitted or empty text uses the publisher's default body."},
         "createPR":                 {"type": "boolean", "description": "Request PR reconciliation after verified publication"}
       }
     },
@@ -100,6 +102,15 @@ LLM-visible parameter schema:
   "required": ["agent", "prompt"]
 }
 ```
+
+Both `delegate_task` and `create_agent_task` accept optional `workspace.prTitle`
+and `workspace.prBody` strings. When requesting a PR, the Task-creating agent
+should author descriptive text from the request before execution, not from the
+executing sandbox's output. Omitting either field or supplying an empty string
+keeps its fallback. Metadata alone does not enable `createPR` or write intent.
+Nonempty whitespace-only titles are invalid. Both fields reject secret-like
+text, and bodies reject reserved publisher reconciliation comments. Validation
+also applies when `createPR` is false.
 
 Implementation (`internal/tools/delegate_task.go`):
 1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE`, `ORKA_COORDINATION_DEPTH` from env
@@ -582,7 +593,7 @@ For the request above, a failed child's result includes:
 
 Orka supports iterative multi-agent workflows where a coordinator orchestrates coding, review, and feedback loops until code is approved.
 
-The current ACP core runtime does not accept `priorTaskRef`; use `sessionRef` for runtime continuity in direct ACP manifests. Existing `prior_task` coordination examples describe the older diff-handoff loop and are not an ACP v2 release gate.
+The current ACP core runtime does not accept `priorTaskRef`; use `sessionRef` for runtime continuity in direct ACP manifests. Existing `prior_task` coordination examples describe the older diff-handoff loop and are not an Orka harness v2 release gate.
 
 ### Flow
 

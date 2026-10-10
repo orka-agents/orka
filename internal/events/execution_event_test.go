@@ -47,6 +47,7 @@ func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 		ExecutionEventTypeApprovalDeclined,
 		ExecutionEventTypeApprovalExpired,
 		ExecutionEventTypeApprovalCancelled,
+		ExecutionEventTypeApprovalExecutionUpdated,
 		ExecutionEventTypePlanUpdated,
 	}
 	got := executionEventTypes

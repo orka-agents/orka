@@ -79,7 +79,7 @@ orka_e2e_bootstrap_admission_tls kubectl "${namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace vekil-system         --dry-run=client -o yaml | kubectl apply -f -
 
-log "Installing ACP v2 CRDs"
+log "Installing Orka harness v2 CRDs"
 (cd "${repo_root}" && make install)
 
 log "Deploying Orka (namespace ${namespace}, image ${manager_ref})"

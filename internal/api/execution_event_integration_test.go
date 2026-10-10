@@ -900,6 +900,18 @@ func (s *terminalAppearsBetweenStreamQueriesStore) GetLatestExecutionEventSeq(
 	return 1, nil
 }
 
+func (s *terminalAppearsBetweenStreamQueriesStore) GetLatestExecutionEventSeqs(
+	_ context.Context,
+	_, _ string,
+	streamIDs []string,
+) (map[string]int64, error) {
+	sequences := make(map[string]int64, len(streamIDs))
+	for _, streamID := range streamIDs {
+		sequences[streamID] = 1
+	}
+	return sequences, nil
+}
+
 func (s *terminalAppearsBetweenStreamQueriesStore) DeleteExecutionEvents(context.Context, string, string, string) error {
 	return nil
 }

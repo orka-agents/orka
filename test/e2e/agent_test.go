@@ -44,7 +44,7 @@ var _ = Describe("Agent Task", Ordered, func() {
 		dumpDebugInfo(taskName)
 	})
 
-	It("should queue an agent task on an ACP v2 RuntimePool", func() {
+	It("should queue an agent task on an Orka harness v2 RuntimePool", func() {
 		By("creating an Agent CRD with claude runtime")
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
@@ -94,7 +94,7 @@ var _ = Describe("Agent Task", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent Task")
 
-		By("verifying ACP v2 execution and RuntimePool status")
+		By("verifying Orka harness v2 execution and RuntimePool status")
 		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
 			ProviderKind:    "claude",
 			WorkspaceIntent: "read",

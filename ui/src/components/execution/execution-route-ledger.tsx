@@ -103,7 +103,7 @@ function ExecutionRouteLedger({ title, summary, summaryTone, rows }: LedgerProps
 function bindingRouteTitle(task: Task) {
   const binding = task.status?.agentExecutionBinding
   if (!binding) return 'No execution route recorded'
-  const contract = binding.contractVersion === 'orka.harness.v1' ? 'Harness v1' : 'ACP v2'
+  const contract = binding.contractVersion === 'orka.harness.v1' ? 'Harness v1' : 'Harness v2'
   const backend = words(binding.backend)
   return `${contract} · ${backend}`
 }
@@ -191,7 +191,7 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   const blocked = control.availability === 'ReconciliationBlocked'
   const available = control.availability === 'Available'
   const routeTitle = lineage
-    ? `${lineage.contractVersion === 'orka.harness.v1' ? 'Harness v1' : 'ACP v2'} · lineage ${lineage.generation}`
+    ? `${lineage.contractVersion === 'orka.harness.v1' ? 'Harness v1' : 'Harness v2'} · lineage ${lineage.generation}`
     : 'Lineage not yet established'
 
   return (

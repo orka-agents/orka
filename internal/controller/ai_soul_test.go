@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -39,18 +40,31 @@ func TestAISoulBindingAndLiteralDelivery(t *testing.T) {
 	if err := validatePreparedAISoul(task, agent, prepared); err != nil {
 		t.Fatal(err)
 	}
-	env := NewJobBuilder(c).buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{AISoul: prepared})
-	found := false
-	for _, v := range env {
-		if v.Name == workerenv.AISystemPrompt {
-			found = true
-			if v.Value != literalKubernetesPrompt(prepared.Prompt) || !strings.Contains(v.Value, "$$(VOICE_NOTE), $$$$") {
-				t.Fatal("prompt is not literal-safe")
-			}
+	bindings := []corev1alpha1.ConnectionBinding{{PolicyName: "github", ConnectionName: "linked-account", UID: "connection-uid", Generation: 1, Mode: "readOnly"}}
+	for _, eligible := range []bool{false, true} {
+		env, err := NewJobBuilder(c).buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{
+			AISoul: prepared, GatewayReplyEligible: eligible, ConnectionBindings: bindings,
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !found {
-		t.Fatal("missing prompt environment")
+		prompt, found := findEnvVar(env, workerenv.AISystemPrompt)
+		if !found || prompt.Value != literalKubernetesPrompt(prepared.Prompt) || !strings.Contains(prompt.Value, "$$(VOICE_NOTE), $$$$") {
+			t.Fatal("missing or non-literal soul prompt")
+		}
+		tools, found := findEnvVar(env, workerenv.AITools)
+		if !found || strings.Contains(tools.Value, "reply_in_conversation") != eligible {
+			t.Fatal("soul delivery changed gateway reply tool eligibility")
+		}
+		reply, found := findEnvVar(env, workerenv.GatewayReplyEnabled)
+		if !found || (reply.Value == "true") != eligible {
+			t.Fatal("soul delivery changed gateway reply enablement")
+		}
+		bindingEnv, found := findEnvVar(env, workerenv.ConnectionBindings)
+		var decoded []corev1alpha1.ConnectionBinding
+		if !found || json.Unmarshal([]byte(bindingEnv.Value), &decoded) != nil || !ConnectionBindingsEqual(decoded, bindings) {
+			t.Fatal("soul delivery lost frozen connection bindings")
+		}
 	}
 	task.Status.Attempts = 1
 	now := metav1.Now()

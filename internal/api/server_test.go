@@ -440,13 +440,11 @@ func TestCustomErrorHandler_CompatAPI404_ReturnsProviderError(t *testing.T) {
 	}
 }
 
-func TestCustomErrorHandler_OpenAIResponses_ReturnsNotImplemented(t *testing.T) {
-	// The Responses API is the default wire format of several agent
-	// frameworks. It is a real endpoint this server does not serve, so it
-	// answers 501 and names the route that does work, rather than 404.
+func TestCustomErrorHandler_OpenAIConversations_ReturnsNotImplemented(t *testing.T) {
+	// Saved conversations remain unsupported; the error names the stateless route.
 	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
 
-	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil))
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/openai/v1/conversations", nil))
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
 	}
@@ -465,7 +463,7 @@ func TestCustomErrorHandler_OpenAIResponses_ReturnsNotImplemented(t *testing.T) 
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
 	}
-	if !strings.Contains(payload.Error.Message, "/openai/v1/chat/completions") {
+	if !strings.Contains(payload.Error.Message, "/openai/v1/responses") {
 		t.Errorf("error.message = %q, want it to name the supported route", payload.Error.Message)
 	}
 }
@@ -514,6 +512,7 @@ func TestServer_SetupRoutes_OpenAI(t *testing.T) {
 		path   string
 	}{
 		{http.MethodPost, "/openai/v1/chat/completions"},
+		{http.MethodPost, "/openai/v1/responses"},
 		{http.MethodGet, "/openai/v1/models"},
 	}
 

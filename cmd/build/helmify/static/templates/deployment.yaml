@@ -149,6 +149,7 @@ spec:
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
             - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}
+            - --gateway-interim-messages-per-task={{ .Values.controller.gateway.interimMessagesPerTask }}
             - --gateway-max-records-per-gateway={{ .Values.controller.gateway.maxRecordsPerGateway }}
             - --gateway-max-rejected-records-per-gateway={{ .Values.controller.gateway.maxRejectedRecordsPerGateway }}
             - --gateway-event-expiry={{ .Values.controller.gateway.eventExpiry }}
@@ -158,6 +159,15 @@ spec:
             - --gateway-claim-lease={{ .Values.controller.gateway.claimLease }}
             - --gateway-poll-interval={{ .Values.controller.gateway.pollInterval }}
             - --gateway-batch-size={{ .Values.controller.gateway.batchSize }}
+            {{- with .Values.controller.connectors }}
+            {{- if .enabled }}
+            - --connectors-enabled=true
+            {{- if not .callbackBaseUrl }}
+            {{- fail "controller.connectors.callbackBaseUrl is required when controller.connectors.enabled=true" }}
+            {{- end }}
+            - {{ printf "--connector-callback-base-url=%s" .callbackBaseUrl | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
             - {{ printf "--oidc-issuer=%s" .issuer | quote }}
@@ -257,6 +267,12 @@ spec:
             {{- end }}
             {{- if .monitorOperate }}
             - {{ printf "--context-token-monitor-operate-scopes=%s" .monitorOperate | quote }}
+            {{- end }}
+            {{- if .connectorRead }}
+            - {{ printf "--context-token-connector-read-scopes=%s" .connectorRead | quote }}
+            {{- end }}
+            {{- if .connectorManage }}
+            - {{ printf "--context-token-connector-manage-scopes=%s" .connectorManage | quote }}
             {{- end }}
             {{- if .skillRead }}
             - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}
@@ -424,36 +440,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.github.webhook.secretName | quote }}
                   key: {{ .Values.github.webhook.secretKey | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.agent }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_AGENT
-              value: {{ .Values.github.labelTrigger.agent | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.namespace }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE
-              value: {{ .Values.github.labelTrigger.namespace | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.gitSecret }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET
-              value: {{ .Values.github.labelTrigger.gitSecret | quote }}
-            {{- end }}
-            {{- if or .Values.github.webhook.secretName .Values.github.labelTrigger.agent .Values.github.labelTrigger.namespace .Values.github.labelTrigger.gitSecret .Values.github.labelTrigger.agents }}
-            {{- if .Values.github.labelTrigger.prefix }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_PREFIX
-              value: {{ .Values.github.labelTrigger.prefix | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.timeout }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT
-              value: {{ .Values.github.labelTrigger.timeout | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.maxTurns }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS
-              value: {{ .Values.github.labelTrigger.maxTurns | quote }}
-            {{- end }}
-            {{- end }}
-            {{- range $action, $agent := .Values.github.labelTrigger.agents }}
-            - name: ORKA_GITHUB_LABEL_AGENT_{{ regexReplaceAll "[^A-Z0-9]+" (upper $action) "_" | trimAll "_" }}
-              value: {{ $agent | quote }}
             {{- end }}
           ports:
             - name: api

@@ -11,11 +11,21 @@ RuntimeSession inside a provider-owned sandbox through a
 **workspace-provider-backed RuntimePool**. The integration is disabled by
 default and fails closed.
 
-Orka requires agent-sandbox `v1.0.0`; older releases are unsupported. Operators
-upgrading an existing v0.5 installation must complete the upstream
-[storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)
-before installing v1.0.0. Orka does not install, upgrade, or migrate the
-provider in production.
+:::tip[Video demo]
+Watch [Suspend an agent workspace and keep its files](https://www.youtube.com/watch?v=DyS9JioSRa0).
+:::
+
+Orka targets the latest stable agent-sandbox release for testing. The Go
+dependency, local installer, and bundled E2E currently pin `v1.0.3` for
+reproducibility; this test pin is not a minimum supported version. Older releases
+are not considered unsupported solely because they predate the pin, though
+compatibility outside the tested version is not guaranteed. Any minimum-version
+requirement must identify the required API, feature, or bug fix.
+
+Operators upgrading an existing v0.5 installation to v1 must complete the
+upstream [storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)
+before installing v1. Orka does not install, upgrade, or migrate the provider
+in production.
 
 `Task.spec.workspace` remains the only repository surface — verified source,
 workspace intent, and clean-room publication policy:
@@ -116,7 +126,7 @@ Container and native `ai` Tasks keep their existing `spec.execution` behavior.
 ## Local evaluation material
 
 The repository still contains local/kind evaluation scripts for the older
-worker-based execution-workspace prototype. They are not the supported ACP v2
+worker-based execution-workspace prototype. They are not the supported Orka harness v2
 deployment path and should not be used as release evidence. Agent runtime
 validation should verify RuntimePool scale-up, exact-instance fencing, Session
 continuation, cancellation, workspace validation, clean-room publication,

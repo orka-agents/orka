@@ -54,16 +54,9 @@ For operators:
 
   Upgrade guidance: helm show readme <the same chart reference or archive>
 
-  Generic Gateway CRD upgrade:
-    Helm installs CRDs on first install but does not upgrade them automatically.
-    If CRDs are managed separately, pass --skip-crds to helm install/upgrade.
-    Before enabling gateways on an existing release, apply the CRDs from the published chart version, then upgrade again:
-
-      helm repo add orka https://orka-agents.github.io/orka/charts
-      helm repo update orka
-      helm show readme orka/orka --version {{ .Chart.Version }}
-
-    Follow the README's guarded exact-spec replacement procedure (or the matching
-    source checkout's scripts/apply-helm-crds.sh) before upgrading. The controller
-    remains gateway-disabled until all three Gateway CRDs and the Task
-    session-cutoff schema are observed.
+  Gateway CRDs:
+    Before enabling gateways on an existing installation, update the Task and
+    Gateway CRDs from the exact target chart using the matching source checkout's
+    scripts/apply-helm-crds.sh. See the README's Upgrading link for supported
+    upgrade paths and the full procedure. The controller remains gateway-disabled
+    until all three Gateway CRDs and the Task session-cutoff schema are observed.

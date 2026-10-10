@@ -56,6 +56,8 @@ export const chatConfigSchema = z.object({
   availableTools: z.array(z.string()),
   // Set for context-token callers, for whom the server refuses the implicit default provider.
   requireExplicitProvider: z.boolean().optional(),
+  // Whether the controller runs with --connectors-enabled (linked accounts).
+  connectorsEnabled: z.boolean().optional(),
 })
 
 export type ChatConfig = z.infer<typeof chatConfigSchema>

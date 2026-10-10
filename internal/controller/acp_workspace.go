@@ -23,6 +23,11 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	sourceRefField    = "sourceRef"
+	relativeRootField = "relativeRoot"
+)
+
 const defaultACPSourceBranch = "main"
 
 const workspaceRepositoryProviderGitHub = "github"
@@ -371,11 +376,11 @@ func externalEffectSucceededAt(
 func acpRuntimeWorkspaceBindingDigest(sourceRef string, workspace harnessv2.WorkspaceSpec) (string, error) {
 	return acpDomainDigest("runtime-session-workspace-binding", map[string]any{
 		"repositoryIdentity": strings.TrimSpace(workspace.Baseline.RepositoryIdentity),
-		"sourceRef":          strings.TrimSpace(sourceRef),
+		sourceRefField:       strings.TrimSpace(sourceRef),
 		"revision":           strings.TrimSpace(workspace.Baseline.Revision),
 		"treeDigest":         strings.TrimSpace(workspace.Baseline.TreeDigest),
-		"intent":             workspace.Intent,
-		"relativeRoot":       strings.TrimSpace(workspace.RelativeRoot),
+		intentField:          workspace.Intent,
+		relativeRootField:    strings.TrimSpace(workspace.RelativeRoot),
 	})
 }
 

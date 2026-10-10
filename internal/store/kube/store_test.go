@@ -2843,6 +2843,7 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	}
 }
 
+//nolint:gocyclo // The cross-store finalization and publication-baseline assertions form one scenario.
 func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.T) {
 	ctx := context.Background()
 	_, rawClient, fence := newTestStoreWithEpoch(t)

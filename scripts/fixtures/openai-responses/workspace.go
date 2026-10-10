@@ -180,7 +180,7 @@ func writeWorkspaceCanaryCall(
 		"output": []any{item}, "end_turn": false,
 	}
 	if !request.Stream {
-		writeJSON(w, http.StatusOK, completed)
+		writeJSON(w, completed)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

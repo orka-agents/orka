@@ -9,6 +9,16 @@ package tools
 import "github.com/orka-agents/orka/internal/workerenv"
 
 const (
+	optionalWorkspaceTaskDescription = "Optional task whose workspace config has the repo and git credentials"
+	scopedRepositoryURLDescription   = "Optional GitHub repository URL. Requires task_name or current task context and must match that task's repository scope."
+	branchField                      = "branch"
+	refField                         = "ref"
+	readCredentialRefField           = "readCredentialRef"
+	invalidArgumentsErrorType        = "invalid_arguments"
+	providerField                    = "provider"
+)
+
+const (
 	envOrkaTaskName                  = workerenv.TaskName
 	envOrkaTaskNamespace             = workerenv.TaskNamespace
 	envOrkaParentTask                = workerenv.ParentTask

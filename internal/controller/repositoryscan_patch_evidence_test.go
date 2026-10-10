@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/orka-agents/orka/internal/publisher"
 )
 
 func TestSecurityPatchDecorationPreservesEditedPublisherBody(t *testing.T) {
@@ -28,7 +30,7 @@ func TestSecurityPatchDecorationPreservesEditedPublisherBody(t *testing.T) {
 				pr.body = strings.Replace(pr.body, "Created by the Orka clean-room workspace publisher.", "Reviewed by the owner.", 1)
 			}
 			original := pr.body
-			fixture.reconciler.decorateSecurityPatchPullRequest(context.Background(), fixture.scan, patchTaskForFixture(fixture, true), fixture.finding.ID, 42, "")
+			fixture.reconciler.decorateSecurityPatchPullRequest(context.Background(), fixture.scan, patchTaskForFixture(fixture, true), fixture.finding.ID, 42, 1, "")
 			if pr.patched != nil || pr.body != original {
 				t.Fatal("decoration overwrote an edited publisher body")
 			}
@@ -108,4 +110,84 @@ func TestIngestPatchTaskRetriesTransientPublishedDiffFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
+}
+
+func TestSecurityPatchDecorationWithTaskPresentation(t *testing.T) {
+	for _, test := range []struct {
+		name                                                                                string
+		legacy, missingTitle, session, editedTitle, editedBody, explicitTitle, explicitBody bool
+	}{
+		{name: "prompt default"},
+		{name: "legacy default", legacy: true},
+		{name: "missing finding title", missingTitle: true},
+		{name: "session footer", session: true},
+		{name: "human title", editedTitle: true},
+		{name: "human body", editedBody: true},
+		{name: "explicit Task title", explicitTitle: true},
+		{name: "explicit Task body", explicitBody: true},
+		{name: "explicit body without finding title", explicitBody: true, missingTitle: true},
+		{name: "explicit body with edited title", explicitBody: true, editedTitle: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			var seenToken string
+			server, pr := newPatchCommitServerWithPullRequest(t, nil, &seenToken)
+			fixture := patchFixtureWithForgeSecret(t, "task-presentation", server, true)
+			task := patchTaskForFixture(fixture, true)
+			task.Spec.Prompt = "  Repair the redirect validation  \nDetails"
+			if test.missingTitle {
+				fixture.finding.Title = ""
+				if err := fixture.store.UpsertFinding(ctx, fixture.finding); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.explicitTitle {
+				task.Spec.Workspace.PRTitle = "fix: authored security title"
+			}
+			if test.explicitBody {
+				task.Spec.Workspace.PRBody = "Authored security summary"
+			}
+			marker := "<!-- orka.publisher.pr-intent.v1 key=sha256:" + strings.Repeat("c", 64) + " -->"
+			if test.session {
+				marker += "\n\n<!-- orka.publisher.pr-session.v1 key=sha256:" + strings.Repeat("d", 64) + " -->"
+			}
+			if !test.legacy {
+				intent := withTaskPullRequestMetadata(publisher.PullRequestIntent{PublicationGeneration: 1}, task)
+				pr.title, pr.body = intent.Title, intent.Description()+"\n\n"+marker
+			}
+			if test.editedTitle {
+				pr.title = "Reviewed title"
+			}
+			if test.editedBody {
+				pr.body += "\n\nReviewed summary"
+			}
+			originalTitle, originalBody := pr.title, pr.body
+			fixture.reconciler.decorateSecurityPatchPullRequest(ctx, fixture.scan, task, fixture.finding.ID, 42, 1, "")
+			if test.editedTitle || test.editedBody || test.explicitTitle || (test.explicitBody && test.missingTitle) {
+				if pr.patched != nil || pr.title != originalTitle || pr.body != originalBody {
+					t.Fatal("decoration overwrote authored PR presentation")
+				}
+				return
+			}
+			wantTitle := "fix(security): Patch target"
+			if test.missingTitle {
+				wantTitle = "Repair the redirect validation"
+			}
+			if pr.patched == nil || pr.title != wantTitle || !strings.Contains(pr.body, "Publication generation: 1") || !strings.HasSuffix(pr.body, "\n\n"+marker) {
+				t.Fatal("decoration lost the finding title, generation, or reconciliation footer")
+			}
+			if test.explicitBody {
+				if _, sentBody := pr.patched[repositoryScanPullRequestBodyField]; sentBody || pr.body != originalBody {
+					t.Fatal("title-only decoration rewrote the authored body")
+				}
+			} else if !strings.Contains(pr.body, "Task: `"+task.Namespace+"/"+task.Name+"`") {
+				t.Fatal("default decorated body lost the Task identity")
+			}
+			pr.patched = nil
+			fixture.reconciler.decorateSecurityPatchPullRequest(ctx, fixture.scan, task, fixture.finding.ID, 42, 1, "")
+			if pr.patched != nil {
+				t.Fatal("decorated an already decorated PR again")
+			}
+		})
+	}
 }

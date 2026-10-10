@@ -25,6 +25,13 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	apiErrorAuthorizationFailed              = "authorization_failed"
+	apiErrorInvalidRequest                   = "invalid_request"
+	apiErrorArtifactTransportUnavailable     = "artifact_transport_unavailable"
+	apiErrorArtifactAuthorizationUnavailable = "artifact_authorization_unavailable"
+)
+
 const acpArtifactAuthorizationPath = "/internal/v2/acp/artifact-authorizations"
 
 var (
@@ -93,6 +100,7 @@ func (s *Server) installACPArtifactAuthorizationBroker() {
 	s.app.Post(publisherservice.CredentialBrokerPath, s.issuePublisherCredential)
 }
 
+//nolint:gocyclo // Artifact grants keep identity, ownership, and capability checks in one authorization boundary.
 func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 	// Authenticate on the provider bearer resolved from the non-secret pool
 	// namespace/UID headers before consuming the body: runtimes can reach
@@ -102,32 +110,32 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 	poolNamespace := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolNamespaceHeader)))
 	poolUID := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolUIDHeader)))
 	if poolNamespace == "" || poolUID == "" {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	provider, err := s.resolveArtifactRuntimeProviderByIdentity(c.Context(), poolNamespace, poolUID)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
 	if !constantAPIStringEqual(bearer, provider.controllerBearer) {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	var request acpArtifactAuthorizationRequest
 	if err := json.Unmarshal(c.Body(), &request); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
 	// The body's pool identity must match the pre-authenticated headers so a
 	// valid bearer for one pool cannot authorize an artifact for another.
 	if request.Namespace != poolNamespace || string(request.Metadata.Fence.RuntimePoolUID) != poolUID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	now := time.Now().UTC()
 	if request.Namespace == "" || request.Metadata.PromptID == "" || request.Metadata.TaskUID == "" ||
 		request.Artifact.MediaType != artifactcap.MediaTypeWorkspaceDelta || request.Artifact.Validate() != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
 	if got, err := harnessv2.CanonicalRequestDigest(request); err != nil || got != request.Metadata.RequestDigest {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
 	capabilityHeader := string(c.Request().Header.Peek(harnessv2.OperationCapabilityHeader))
 	if provider.pool != nil {
@@ -135,24 +143,24 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 		// Kubernetes I/O, and a capability that expired while it ran must not be
 		// accepted against the stale pre-resolution clock.
 		if err := harnessv2.VerifyOperationCapability(provider.operationCapabilitySecret, capabilityHeader, request.Metadata, true, time.Now().UTC()); err != nil {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 		}
 		if provider.pool.Status.ActiveInstance == nil || provider.pool.Status.ActiveInstance.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) {
-			return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "stale_runtime"})
+			return c.Status(fiber.StatusGone).JSON(fiber.Map{apiFieldError: "stale_runtime"})
 		}
 		task, taskErr := findTaskByUIDWithReader(c.Context(), s.authorizationReader(), request.Namespace, string(request.Metadata.TaskUID))
 		if taskErr != nil || task.Status.Execution == nil || task.Status.Execution.PromptID != string(request.Metadata.PromptID) ||
 			task.Status.Execution.RuntimeSessionUID != string(request.Metadata.Fence.RuntimeSessionUID) ||
 			task.Status.Execution.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) ||
 			(task.Status.Execution.State != corev1alpha1.TaskExecutionStateRunning && task.Status.Execution.State != corev1alpha1.TaskExecutionStateSettling) {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 		}
 	} else if err := s.authorizeExternalACPArtifactRequest(c.Context(), provider, request, bearer, capabilityHeader); err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	artifactSecret, err := readACPArtifactCapabilitySecret()
 	if err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	binding := artifactcap.OperationRequest{
 		Operation: artifactcap.OperationUpload, ObjectDigest: request.Artifact.Digest,
@@ -163,13 +171,13 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 	const capabilityTTL = 2 * time.Minute
 	authorization, err := artifactcap.Issue(artifactSecret, binding, now, capabilityTTL)
 	if err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	if s.config.ArtifactReservations == nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	if err := s.config.ArtifactReservations.Reserve(c.Context(), binding, now.Add(capabilityTTL+artifactcap.MaxClockSkew)); err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	return c.JSON(acpArtifactAuthorizationResponse{Capability: authorization.Capability, RequestDigest: authorization.RequestDigest})
 }
@@ -771,49 +779,49 @@ func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
 	// being allowed to stream request bodies.
 	expectedBearer, err := readSecretAtEnvPath(envWorkspacePublisherControllerTokenFile, 16)
 	if err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactAuthorizationUnavailable})
 	}
 	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
 	if !constantAPIStringEqual(bearer, string(expectedBearer)) {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	var request publisherservice.ArtifactAuthorizationRequest
 	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
 	if err := s.authorizePublisherArtifactRequest(c.Context(), request); err != nil {
 		if errors.Is(err, errPublisherArtifactAuthorizationUnavailable) {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactAuthorizationUnavailable})
 		}
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	if err := s.authorizePublisherParentEffect(c.Context(), request.ParentOperation, request.Metadata); err != nil {
 		if errors.Is(err, errPublisherArtifactAuthorizationUnavailable) {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactAuthorizationUnavailable})
 		}
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	artifactSecret, err := readACPArtifactCapabilitySecret()
 	if err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	binding, err := publisherservice.ArtifactBinding(request)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
 	now := time.Now().UTC()
 	const capabilityTTL = 2 * time.Minute
 	authorization, err := artifactcap.Issue(artifactSecret, binding, now, capabilityTTL)
 	if err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	if s.config.ArtifactReservations == nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	if err := s.config.ArtifactReservations.Reserve(c.Context(), binding, now.Add(capabilityTTL+artifactcap.MaxClockSkew)); err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 	}
 	return c.JSON(publisherservice.ArtifactAuthorizationResponse{
 		Capability: authorization.Capability, RequestDigest: authorization.RequestDigest,
@@ -844,7 +852,7 @@ func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request 
 	}
 	task, err := s.findTaskByUID(ctx, request.Metadata.Namespace, request.Metadata.TaskID)
 	if err != nil && !errors.Is(err, errPublisherAuthorizationObjectNotFound) {
-		log.Info("publisher artifact authorization denied", "reason", "workspace_task_read_failed", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID, "error", err)
+		log.Info("publisher artifact authorization denied", "reason", "workspace_task_read_failed", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID, apiFieldError, err)
 		return fmt.Errorf("%w: workspace Task could not be read", errPublisherArtifactAuthorizationUnavailable)
 	}
 	if err != nil || task.Status.Execution == nil {
@@ -979,7 +987,7 @@ func (s *Server) authorizePublisherParentEffect(
 	}
 	currentFence, err := s.config.ControllerEpochs.CurrentFence(ctx)
 	if err != nil || strings.TrimSpace(currentFence.Name) == "" || currentFence.Epoch <= 0 || strings.TrimSpace(currentFence.HolderID) == "" {
-		log.Info("publisher artifact authorization denied", "reason", "parent_epoch_unavailable", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "error", err)
+		log.Info("publisher artifact authorization denied", "reason", "parent_epoch_unavailable", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, apiFieldError, err)
 		return fmt.Errorf("%w: controller epoch could not be read", errPublisherArtifactAuthorizationUnavailable)
 	}
 	kind := ""
@@ -1015,7 +1023,7 @@ func (s *Server) authorizePublisherParentEffect(
 			log.Info("publisher artifact authorization denied", "reason", "parent_effect_not_in_flight", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
 			return fmt.Errorf("publisher parent effect is not exactly in flight")
 		}
-		log.Info("publisher artifact authorization denied", "reason", "parent_effect_read_failed", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "error", err)
+		log.Info("publisher artifact authorization denied", "reason", "parent_effect_read_failed", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, apiFieldError, err)
 		return fmt.Errorf("%w: parent effect could not be read: %v", errPublisherArtifactAuthorizationUnavailable, err)
 	}
 	now := time.Now().UTC()

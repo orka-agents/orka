@@ -34,6 +34,10 @@ Orka's auth proxy authenticates each runtime request and forwards it to your
 gateway. Coding agents receive only a session token and permission to use
 their configured model. The gateway supplies its own provider credentials.
 
+:::tip[Video demo]
+Watch [Compare hosted and routed agents on the same workload](https://www.youtube.com/watch?v=L6W3IPuLmeQ).
+:::
+
 ## Choose a model gateway
 
 Any gateway that serves the APIs your agents need will work. Codex uses the

@@ -39,20 +39,9 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	root = filepath.Clean(root)
-	if root == "." || root == "" {
-		return nil, ErrInvalidRoot
-	}
-	absolute, err := filepath.Abs(root)
+	absolute, rootInfo, err := captureRoot(root)
 	if err != nil {
-		return nil, fmt.Errorf("absolute workspace root: %w", err)
-	}
-	rootInfo, err := os.Lstat(absolute)
-	if err != nil {
-		return nil, pathError("inspect root", "", fmt.Errorf("%w: %v", ErrInvalidRoot, err))
-	}
-	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
-		return nil, pathError("inspect root", "", ErrInvalidRoot)
+		return nil, err
 	}
 
 	optionsDigest, err := options.digest()
@@ -151,6 +140,26 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 		return nil, err
 	}
 	return snapshot, nil
+}
+
+func captureRoot(root string) (string, os.FileInfo, error) {
+	root = filepath.Clean(root)
+	if root == "." || root == "" {
+		return "", nil, ErrInvalidRoot
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", nil, fmt.Errorf("absolute workspace root: %w", err)
+	}
+	rootInfo, err := os.Lstat(absolute)
+	if err != nil {
+		return "", nil, pathError("inspect root", "", fmt.Errorf("%w: %v", ErrInvalidRoot, err))
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return "", nil, pathError("inspect root", "", ErrInvalidRoot)
+	}
+
+	return absolute, rootInfo, nil
 }
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.

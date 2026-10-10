@@ -2,37 +2,37 @@
 
 # The tag documents the human-readable version; the manifest-list digest makes
 # every supported platform immutable.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS upstream-artifacts
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS upstream-artifacts
 ARG TARGETARCH
 COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
 RUN go build -buildvcs=false -trimpath -ldflags='-s -w' -o /usr/local/bin/artifact-tool /tmp/artifact-tool.go
 RUN set -eu; \
     mkdir -p /artifacts; \
     artifact-tool download \
-      "https://codeload.github.com/agentclientprotocol/codex-acp/tar.gz/307d81018f7cc0c3141ddf71c7532d38310e2cfb" \
-      "4d3cc46a901bdd4abf112e703e734078e09a172ecd535aa3e556318a051a7c39" \
+      "https://codeload.github.com/agentclientprotocol/codex-acp/tar.gz/68d7d2d5ddfc0ed5746f9f6130892dda685e65dd" \
+      "51ba8d1d302f8a854c0501887ffbe12fb267f6e8fdae9ad2b58e2c8fc9513b1e" \
       /artifacts/codex-acp-source.tgz 16777216; \
     artifact-tool download \
-      "https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-1.1.7.tgz" \
-      "642920240baa0b6b1951fb2c56b9ff11689648019499615f941000d95d127301" \
+      "https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-2.1.1.tgz" \
+      "9da0d580518d006d257609a4b64b7c5bd96a7f36f2d86db5c8f2cb9385de5872" \
       /artifacts/codex-acp-release.tgz 16777216; \
     case "$TARGETARCH" in \
       amd64) \
-        native_url="https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-linux-x64.tgz"; \
-        native_sha="11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2" ;; \
+        native_url="https://registry.npmjs.org/@openai/codex/-/codex-0.160.0-linux-x64.tgz"; \
+        native_sha="37a41d61c3399182b8c727b77090cc7a1566bd849d0f09070a0bbc6fec4c58dc" ;; \
       arm64) \
-        native_url="https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-linux-arm64.tgz"; \
-        native_sha="b78c57e172b2f18e5969ae26183253cd3cdd9abb3b424a8f7334f4b5530c2b27" ;; \
+        native_url="https://registry.npmjs.org/@openai/codex/-/codex-0.160.0-linux-arm64.tgz"; \
+        native_sha="9286a7e01d500ab224c9e5b4b223b7adf5dd901fba23efd6a438316426798b17" ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     artifact-tool download \
       "$native_url" "$native_sha" /artifacts/codex-native.tgz 201326592; \
     artifact-tool download \
-      "https://raw.githubusercontent.com/openai/codex/25af12f7e61572b0bc18ddb1008be543b91519b0/LICENSE" \
+      "https://raw.githubusercontent.com/openai/codex/a956835d020762cb2b570053af06f643a11c0ecc/LICENSE" \
       "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc" \
       /artifacts/codex-LICENSE 65536; \
     artifact-tool download \
-      "https://raw.githubusercontent.com/openai/codex/25af12f7e61572b0bc18ddb1008be543b91519b0/NOTICE" \
+      "https://raw.githubusercontent.com/openai/codex/a956835d020762cb2b570053af06f643a11c0ecc/NOTICE" \
       "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915" \
       /artifacts/codex-NOTICE 65536; \
     artifact-tool download \
@@ -61,10 +61,10 @@ RUN npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npm
 RUN npm run build
 RUN artifact-tool compare /src/dist /published/package/dist
 RUN set -eu; \
-    printf '%s  %s\n' '4b1fc39dc7ac0d6aa404030a3433f46c8b9c67e8e8223efca490a6ab8bf4287a' /tmp/patch-agent-mode.mjs | sha256sum -c -; \
+    printf '%s  %s\n' '538ac5d7ae6e3d46f3f0961439f914bfb9e427be6aea83c9b1025548ef8cac1d' /tmp/patch-agent-mode.mjs | sha256sum -c -; \
     node /tmp/patch-agent-mode.mjs /src/src/AgentMode.ts; \
     npm run build; \
-    printf '%s  %s\n' 'bcfb6a2772a7de2d027e977d9bc9db5fa210a462de1af7ab061361be4410cc75' /src/dist/index.js | sha256sum -c -
+    printf '%s  %s\n' '6792f51a6af4e1ae6317ad2197240836038bc53cb9f0fc9152a62d31b132d5a2' /src/dist/index.js | sha256sum -c -
 
 FROM --platform=$BUILDPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS codex-layout
 ARG TARGETARCH
@@ -77,14 +77,14 @@ RUN set -eu; \
       arm64) package_arch=arm64; target_triple=aarch64-unknown-linux-musl ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    node -e 'const p=require("/tmp/native/package/package.json"); if(p.name!=="@openai/codex"||p.version!==`0.145.0-linux-${process.argv[1]}`) throw new Error(`unexpected Codex package ${p.name}@${p.version}`)' "$package_arch"; \
+    node -e 'const p=require("/tmp/native/package/package.json"); if(p.name!=="@openai/codex"||p.version!==`0.160.0-linux-${process.argv[1]}`) throw new Error(`unexpected Codex package ${p.name}@${p.version}`)' "$package_arch"; \
     test -x "/tmp/native/package/vendor/$target_triple/bin/codex"; \
     mv /tmp/native/package/vendor /opt/codex/vendor; \
     cp /tmp/native/package/README.md /opt/codex/README.md; \
     cp /tmp/native/package/package.json /opt/codex/package.json; \
     ln -s "../vendor/$target_triple/bin/codex" /opt/codex/bin/codex
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS supervisor-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -103,19 +103,19 @@ RUN set -eu; \
 
 FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
 LABEL org.opencontainers.image.title="Orka ACP Codex runtime" \
-      org.opencontainers.image.description="Orka harness v2 ACP supervisor with Codex ACP 1.1.7 and Codex CLI 0.145.0" \
+      org.opencontainers.image.description="Orka harness v2 ACP supervisor with Codex ACP 2.1.1 and Codex CLI 0.160.0" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
       org.opencontainers.image.licenses="MIT AND Apache-2.0" \
       ai.orka.acp.provider="codex" \
-      ai.orka.acp.adapter.version="1.1.7" \
-      ai.orka.acp.adapter.revision="307d81018f7cc0c3141ddf71c7532d38310e2cfb" \
-      ai.orka.acp.adapter.digest="sha256:642920240baa0b6b1951fb2c56b9ff11689648019499615f941000d95d127301" \
-      ai.orka.acp.adapter.patch.digest="sha256:4b1fc39dc7ac0d6aa404030a3433f46c8b9c67e8e8223efca490a6ab8bf4287a" \
-      ai.orka.acp.adapter.dist.digest="sha256:bcfb6a2772a7de2d027e977d9bc9db5fa210a462de1af7ab061361be4410cc75" \
-      ai.orka.acp.provider.version="0.145.0" \
-      ai.orka.acp.provider.revision="25af12f7e61572b0bc18ddb1008be543b91519b0" \
-      ai.orka.acp.provider.digest.amd64="sha256:11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2" \
-      ai.orka.acp.provider.digest.arm64="sha256:b78c57e172b2f18e5969ae26183253cd3cdd9abb3b424a8f7334f4b5530c2b27"
+      ai.orka.acp.adapter.version="2.1.1" \
+      ai.orka.acp.adapter.revision="68d7d2d5ddfc0ed5746f9f6130892dda685e65dd" \
+      ai.orka.acp.adapter.digest="sha256:9da0d580518d006d257609a4b64b7c5bd96a7f36f2d86db5c8f2cb9385de5872" \
+      ai.orka.acp.adapter.patch.digest="sha256:538ac5d7ae6e3d46f3f0961439f914bfb9e427be6aea83c9b1025548ef8cac1d" \
+      ai.orka.acp.adapter.dist.digest="sha256:6792f51a6af4e1ae6317ad2197240836038bc53cb9f0fc9152a62d31b132d5a2" \
+      ai.orka.acp.provider.version="0.160.0" \
+      ai.orka.acp.provider.revision="a956835d020762cb2b570053af06f643a11c0ecc" \
+      ai.orka.acp.provider.digest.amd64="sha256:37a41d61c3399182b8c727b77090cc7a1566bd849d0f09070a0bbc6fec4c58dc" \
+      ai.orka.acp.provider.digest.arm64="sha256:9286a7e01d500ab224c9e5b4b223b7adf5dd901fba23efd6a438316426798b17"
 ENV HOME=/root \
     NODE_ENV=production \
     ORKA_ACP_PROVIDER=codex \

@@ -35,6 +35,15 @@ import (
 )
 
 const (
+	temporaryRoot = "/tmp"
+)
+
+const (
+	applicationRoot  = "/app"
+	sharedMemoryRoot = "/dev/shm"
+)
+
+const (
 	defaultListenAddr              = ":8080"
 	defaultCommandTimeout          = 30 * time.Minute
 	attachmentRevocationTimeout    = 30 * time.Second
@@ -71,11 +80,11 @@ const (
 	envMaxDownloadBytes            = "ORKA_WORKSPACE_AGENT_MAX_DOWNLOAD_BYTES"
 )
 
-var allowedRoots = []string{"/app", defaultWorkspaceRoot, "/home/worker", "/tmp", "/dev/shm"}
+var allowedRoots = []string{applicationRoot, defaultWorkspaceRoot, "/home/worker", temporaryRoot, "/dev/shm"}
 
 // commandWritableRoots is the complete write allowlist applied to secured v1
 // command processes. Every root is also cleared by reset before rebinding.
-var commandWritableRoots = []string{defaultWorkspaceRoot, "/home/worker", "/tmp", "/dev/shm"}
+var commandWritableRoots = []string{defaultWorkspaceRoot, "/home/worker", temporaryRoot, "/dev/shm"}
 
 var (
 	errHandoffAuthMissing    = errors.New("handoff token file is missing")
@@ -87,11 +96,10 @@ var (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == commandConfinementWrapperArg {
-		if err := runWriteConfinedCommand(os.Args[2:]); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "workspace command confinement failed:", err)
-			os.Exit(126)
-		}
-		return
+		// A successful exec replaces this process; any return is a launch failure.
+		err := runWriteConfinedCommand(os.Args[2:])
+		_, _ = fmt.Fprintln(os.Stderr, "workspace command confinement failed:", err)
+		os.Exit(126)
 	}
 	if err := run(); err != nil {
 		slog.Error("workspace agent failed", "err", err)
@@ -1011,7 +1019,7 @@ func normalizeAgentPath(value string) (string, error) {
 		return "", fmt.Errorf("path is required")
 	}
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	return filepath.Clean(value), nil
 }
@@ -1970,7 +1978,7 @@ func defaultDownloadRoot() string {
 		}
 	}
 	for _, root := range allowedRoots {
-		if filepath.Clean(root) != "/app" {
+		if filepath.Clean(root) != applicationRoot {
 			return root
 		}
 	}
@@ -2177,7 +2185,7 @@ func safePath(value string) (string, error) {
 		return "", fmt.Errorf("path is required")
 	}
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	clean := filepath.Clean(value)
 	for _, root := range allowedRoots {

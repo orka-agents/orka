@@ -1,0 +1,5 @@
+FROM python:3.12-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+COPY runtime_fixture.py simulated_tools.py held_tools.py /fixture/
+USER 1000:1000
+ENTRYPOINT ["python", "/fixture/runtime_fixture.py"]

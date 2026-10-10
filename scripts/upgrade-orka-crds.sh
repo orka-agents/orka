@@ -16,7 +16,7 @@ Usage:
     [--gateway-workload GATEWAY_NAMESPACE/GATEWAY_NAME=KIND/WORKLOAD_NAMESPACE/WORKLOAD_NAME]... \
     [--delete-legacy-wrapper]
 
-The script performs a fail-closed ACP v2 CRD hard cutover. It will not apply
+The script performs a fail-closed Orka harness v2 CRD hard cutover. It will not apply
 CRDs while any of the following remain:
   * an orka.harness.v1 AgentRuntime;
   * an Agent that references a live or backed-up v1 AgentRuntime;
@@ -662,4 +662,4 @@ fi
 validate_backups
 
 kube apply --server-side --force-conflicts -f "${crd_dir}"
-echo "ACP v2 CRD hard cutover applied to context ${context}." >&2
+echo "Orka harness v2 CRD hard cutover applied to context ${context}." >&2

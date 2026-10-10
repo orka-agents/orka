@@ -9,6 +9,8 @@ import "context"
 // immutable ownership checks; neither timeout nor expiry proves completion.
 // The callback must not invoke another control-store mutation or wait for a
 // runtime/network operation to settle.
+// Acquisition contention wraps ErrControllerEpochMutationContention and
+// ErrConflict. Confirmed authority loss must not carry the contention marker.
 type ControllerEpochMutationStore interface {
 	WithControllerEpochMutation(context.Context, ControllerEpochFence, func(context.Context) error) error
 }

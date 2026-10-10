@@ -319,7 +319,7 @@ func validateChildProviderModelConstraints(txCtx map[string]string, childCtx chi
 }
 
 func childHasProviderModelConstraints(txCtx map[string]string) bool {
-	for _, key := range []string{"provider", "allowedProviders", "model", "allowedModels"} {
+	for _, key := range []string{providerField, "allowedProviders", "model", "allowedModels"} {
 		if strings.TrimSpace(txCtx[key]) != "" {
 			return true
 		}
@@ -328,7 +328,7 @@ func childHasProviderModelConstraints(txCtx map[string]string) bool {
 }
 
 func validateChildProviderModel(txCtx map[string]string, provider transactionProviderInfo, model, tokenNamespace string, hasTokenNamespace bool, prefix string) error {
-	if want := strings.TrimSpace(txCtx["provider"]); want != "" && !transactionProviderMatches(provider, want, tokenNamespace, hasTokenNamespace) {
+	if want := strings.TrimSpace(txCtx[providerField]); want != "" && !transactionProviderMatches(provider, want, tokenNamespace, hasTokenNamespace) {
 		return fmt.Errorf("child task %sprovider %q is not allowed by transaction context", prefix, transactionProviderDisplayName(provider))
 	}
 	if allowed, ok := transactionContextStringList(txCtx["allowedProviders"]); ok && !transactionProviderAllowed(provider, allowed, tokenNamespace, hasTokenNamespace) {
@@ -819,14 +819,14 @@ func validateChildWorkspaceSelectorConstraints(txCtx map[string]string, workspac
 		got string
 	}{
 		{key: "repo", got: workspaceGitRepo(workspace)},
-		{key: "branch", got: workspaceBranch(workspace)},
-		{key: "ref", got: workspaceRef(workspace)},
+		{key: branchField, got: workspaceBranch(workspace)},
+		{key: refField, got: workspaceRef(workspace)},
 	} {
 		if want := strings.TrimSpace(txCtx[constraint.key]); want != "" && constraint.got != want {
 			return fmt.Errorf("child task workspace %s %q does not match transaction context %q", constraint.key, constraint.got, want)
 		}
 	}
-	if strings.TrimSpace(txCtx["branch"]) != "" && strings.TrimSpace(txCtx["ref"]) == "" && workspaceRef(workspace) != "" {
+	if strings.TrimSpace(txCtx[branchField]) != "" && strings.TrimSpace(txCtx[refField]) == "" && workspaceRef(workspace) != "" {
 		return fmt.Errorf("child task workspace ref %q overrides the branch constrained by transaction context", workspaceRef(workspace))
 	}
 	return nil

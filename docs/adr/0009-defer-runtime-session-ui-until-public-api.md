@@ -4,7 +4,7 @@ Date: 2026-06-13
 
 ## Status
 
-Accepted; updated for the ACP v2 cutover.
+Accepted; updated for the Orka harness v2 cutover.
 
 ## Context
 

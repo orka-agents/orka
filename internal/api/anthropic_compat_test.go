@@ -1061,7 +1061,7 @@ func TestHandleStreamingMessages_ForwardsTerminalUsage(t *testing.T) {
 	mock := &mockAnthropicProvider{
 		streamChunks: []llm.StreamChunk{
 			{Content: "hello"},
-			{Done: true, StopReason: oaiStopReasonEndTurn, OutputTokens: 11},
+			{Done: true, StopReason: oaiStopReasonEndTurn, InputTokens: 13, OutputTokens: 11, UsageReported: true},
 		},
 	}
 
@@ -1081,7 +1081,7 @@ func TestHandleStreamingMessages_ForwardsTerminalUsage(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
-	if !strings.Contains(bodyStr, `"usage":{"input_tokens":0,"output_tokens":11`) {
+	if !strings.Contains(bodyStr, `"usage":{"input_tokens":13,"output_tokens":11`) {
 		t.Fatalf("expected streamed tool-loop usage in body, got: %s", bodyStr)
 	}
 }
@@ -1163,7 +1163,7 @@ func TestHandleStreamingRawMessages_ForwardsTerminalUsage(t *testing.T) {
 	mock := &mockAnthropicProvider{
 		streamChunks: []llm.StreamChunk{
 			{Content: "hello"},
-			{Done: true, StopReason: oaiStopReasonEndTurn, OutputTokens: 9},
+			{Done: true, StopReason: oaiStopReasonEndTurn, InputTokens: 17, OutputTokens: 9, UsageReported: true},
 		},
 	}
 
@@ -1183,7 +1183,7 @@ func TestHandleStreamingRawMessages_ForwardsTerminalUsage(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
-	if !strings.Contains(bodyStr, `"usage":{"input_tokens":0,"output_tokens":9`) {
+	if !strings.Contains(bodyStr, `"usage":{"input_tokens":17,"output_tokens":9`) {
 		t.Fatalf("expected streamed usage in body, got: %s", bodyStr)
 	}
 }

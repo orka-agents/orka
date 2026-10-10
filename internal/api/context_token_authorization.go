@@ -33,6 +33,10 @@ import (
 )
 
 const (
+	credentialRoleSourceRead = "source-read"
+)
+
+const (
 	defaultTaskUpdateScope = "orka:tasks:update"
 
 	// ContextTokenAuthorizationModeOff disables context-token authorization checks.
@@ -50,6 +54,10 @@ const (
 	ContextTokenScopeTaskList = "orka:tasks:list"
 	// ContextTokenScopeTaskDelete authorizes context-token callers to delete Tasks.
 	ContextTokenScopeTaskDelete = "orka:tasks:delete"
+	// ContextTokenScopeConnectorsRead lists and reads a person's Connections.
+	ContextTokenScopeConnectorsRead = "orka:connectors:read"
+	// ContextTokenScopeConnectorsManage links, changes, and disconnects them.
+	ContextTokenScopeConnectorsManage = "orka:connectors:manage"
 	// ContextTokenScopeToolsRead authorizes context-token callers to read Tool definitions.
 	ContextTokenScopeToolsRead = "orka:tools:read"
 	// ContextTokenScopeToolsUse authorizes context-token callers to execute Orka-managed tools.
@@ -118,6 +126,10 @@ type ContextTokenAuthorizationConfig struct {
 	GatewayReadScopes             []string
 	GatewayOperateScopes          []string
 	ConfigMapReadScopeList        []string
+	// ConnectorReadScopes and ConnectorManageScopes gate a delegated
+	// context token's access to a person's linked accounts.
+	ConnectorReadScopes   []string
+	ConnectorManageScopes []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
@@ -150,6 +162,8 @@ type ContextTokenAuthorizationConfigOptions struct {
 	GatewayReadScopes          string
 	GatewayOperateScopes       string
 	ConfigMapReadScopes        string
+	ConnectorReadScopes        string
+	ConnectorManageScopes      string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -184,6 +198,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	securityWrite := defaultScopes(opts.SecurityWriteScopes, ContextTokenScopeSecurityWrite)
 	monitorRead := defaultScopes(opts.MonitorReadScopes, ContextTokenScopeMonitorsRead)
 	monitorWrite := defaultScopes(opts.MonitorWriteScopes, ContextTokenScopeMonitorsWrite)
+	connectorRead := defaultScopes(opts.ConnectorReadScopes, ContextTokenScopeConnectorsRead)
+	connectorManage := defaultScopes(opts.ConnectorManageScopes, ContextTokenScopeConnectorsManage)
 	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
@@ -212,6 +228,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		SecurityWriteScopes:           securityWrite,
 		MonitorReadScopes:             monitorRead,
 		MonitorWriteScopes:            monitorWrite,
+		ConnectorReadScopes:           connectorRead,
+		ConnectorManageScopes:         connectorManage,
 		MonitorOperateScopes:          monitorOperate,
 		SkillReadScopes:               skillRead,
 		SkillWriteScopes:              skillWrite,
@@ -1722,7 +1740,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 		role string
 		ref  *corev1alpha1.WorkspaceCredentialReference
 	}{
-		{role: "source-read", ref: workspace.ReadCredentialRef},
+		{role: credentialRoleSourceRead, ref: workspace.ReadCredentialRef},
 		{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 		{role: "target-write", ref: workspace.PublicationCredentialRef},
 		{role: "forge", ref: workspace.ForgeCredentialRef},
@@ -1993,11 +2011,67 @@ func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthoriza
 		return tools
 	}
 
+	// list_connections shows the person's linked accounts, which the
+	// connector routes guard with the connector-read scope; a delegated
+	// token narrowed away from that boundary does not see the tool at all.
+	if !hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes) {
+		tools = filterCompletionToolsExcluding(tools, toolspkg.ListConnectionsToolName)
+	}
 	allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools")
 	if !ok {
 		return tools
 	}
 	return filterCompletionToolsByName(tools, allowed)
+}
+
+// contextTokenAllowsConnectorRead reports whether a context-token caller
+// may read the person's linked accounts; every other caller may.
+func contextTokenAllowsConnectorRead(ui *UserInfo, cfg ContextTokenAuthorizationConfig) bool {
+	if !cfg.Enabled() || !cfg.enforcing() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true
+	}
+	return hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes)
+}
+
+// connectorReadToolAuthorizer is the execution-time twin of the exposure
+// filter for list_connections: connectors disabled on the controller, or a
+// delegated token without the connector-read scope, refuse the call.
+func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConfig, connectorsEnabled bool) func() *toolspkg.ChatToolError {
+	if !connectorsEnabled {
+		return func() *toolspkg.ChatToolError {
+			return &toolspkg.ChatToolError{
+				Type: "unauthorized_tool", Message: "connectors are disabled on this controller", Suggestion: "Ask the operator to enable --connectors-enabled",
+			}
+		}
+	}
+	if !cfg.Enabled() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil ||
+		hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes) {
+		return nil
+	}
+	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ConnectorReadScopes, ","))}
+	return func() *toolspkg.ChatToolError {
+		// Audit mode allows the call but records the failure, as the
+		// connector routes do for the same scope.
+		if err := handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, string(connectorActionRead), failures); err == nil {
+			return nil
+		}
+		return &toolspkg.ChatToolError{
+			Type:       "unauthorized_tool",
+			Message:    fmt.Sprintf("this token lacks one of the scopes %q needed to read linked accounts", strings.Join(cfg.ConnectorReadScopes, ",")),
+			Suggestion: "Use a token that carries the connector-read scope",
+		}
+	}
+}
+
+func filterCompletionToolsExcluding(tools []llm.Tool, name string) []llm.Tool {
+	filtered := make([]llm.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.Name) == name {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
 }
 
 func filterCompletionToolsByName(tools []llm.Tool, allowed []string) []llm.Tool {

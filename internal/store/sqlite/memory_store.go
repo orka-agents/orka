@@ -104,7 +104,8 @@ func (s *Store) ListMemories(ctx context.Context, filter store.MemoryFilter) ([]
 	}
 
 	query := selectMemorySQL() + ` WHERE namespace = ?`
-	args := []any{filter.Namespace}
+	args := make([]any, 0, 2)
+	args = append(args, filter.Namespace)
 	query = appendMemoryFilters(query, &args, filter)
 	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
 	args = append(args, boundedLimit(filter.Limit, defaultMemoryLimit, maxMemoryLimit))
@@ -533,6 +534,7 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	return nil, lastErr
 }
 
+//nolint:gocyclo // Proposal validation and memory application share one transaction.
 func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

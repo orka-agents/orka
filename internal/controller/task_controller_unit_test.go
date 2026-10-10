@@ -152,6 +152,10 @@ func (s failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, 
 	return 0, s.err
 }
 
+func (s failingExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, s.err
+}
+
 func (s failingExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
 	return s.err
 }
@@ -6456,6 +6460,75 @@ func TestCreateTaskJob_JobAlreadyExists(t *testing.T) {
 	_ = jobName
 }
 
+func TestCreateTaskJob_RecoveredJobKeepsItsOwnConnectionBindings(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "create-recover-bindings", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890ab"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "busybox:latest", Command: []string{"echo", "hello"}},
+	}
+	r := newUnitReconciler(scheme, task)
+	if _, err := r.createTaskJob(context.Background(), task, nil, nil); err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	// The Job that already exists was dispatched against a frozen
+	// Connection; a later reconcile must adopt those bindings rather than
+	// the ones it would freeze now.
+	job := &batchv1.Job{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		t.Fatal(err)
+	}
+	frozen := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
+	encoded, _ := json.Marshal(frozen)
+	// The fake API server assigns no UID; recovery adopts only a recorded one.
+	job.UID = "job-uid-1"
+	for i := range job.Spec.Template.Spec.Containers {
+		if job.Spec.Template.Spec.Containers[i].Name == workerContainerName {
+			job.Spec.Template.Spec.Containers[i].Env = setControllerEnvValue(job.Spec.Template.Spec.Containers[i].Env, workerenv.ConnectionBindings, string(encoded))
+		}
+	}
+	if err := r.Update(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	stored := &batchv1.Job{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if got, present, err := FrozenConnectionBindingsFromJob(stored); err != nil || !present || !ConnectionBindingsEqual(got, frozen) {
+		t.Fatalf("stored job bindings = %+v present = %v err = %v", got, present, err)
+	}
+	// A status write that landed before the crash recorded the Job's
+	// identity but not yet its bindings; the next reconcile dispatches again.
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	task.Status.Attempts = 0
+	task.Status.StartTime = nil
+	task.Status.Conditions = nil
+	task.Status.ConnectionBindings = nil
+	task.Status.JobUID = "job-uid-1"
+	if err := r.Status().Update(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	firstJob := job.Name
+	if _, err := r.createTaskJob(context.Background(), task, nil, nil); err != nil {
+		t.Fatalf("recovery dispatch: %v", err)
+	}
+	if task.Status.JobName != firstJob || task.Status.JobUID != "job-uid-1" {
+		t.Fatalf("recovery dispatched job %q uid %q, want the existing %q", task.Status.JobName, task.Status.JobUID, firstJob)
+	}
+	if !ConnectionBindingsEqual(task.Status.ConnectionBindings, frozen) {
+		t.Fatalf("recovered bindings = %+v, want the Job's own %+v (phase %s message %q)", task.Status.ConnectionBindings, frozen, task.Status.Phase, task.Status.Message)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if !ConnectionBindingsEqual(updated.Status.ConnectionBindings, frozen) {
+		t.Fatalf("persisted bindings = %+v, want the Job's own %+v", updated.Status.ConnectionBindings, frozen)
+	}
+}
+
 func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 	scheme := newTestScheme()
 	current := &corev1alpha1.Task{
@@ -7226,6 +7299,10 @@ func (failingTaskExecutionEventStore) ListSessionExecutionEvents(
 
 func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
 	return 0, errors.New("not implemented")
+}
+
+func (failingTaskExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (failingTaskExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {

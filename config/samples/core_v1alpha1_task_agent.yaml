@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # type: agent uses a fenced ACP v2 RuntimeSession in a controller-owned pool.
+  # type: agent uses a fenced Orka harness v2 RuntimeSession in a controller-owned pool.
   # Provider authentication comes only through the central provider proxy;
   # neither this Task nor the Agent references a provider credential Secret.
   type: agent

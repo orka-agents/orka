@@ -18,7 +18,7 @@ func chatToolAuthorizationError[T any](authorize func(context.Context, *T) error
 	}
 	if err := authorize(ctx, obj); err != nil {
 		return &tools.ChatToolError{
-			Type:       "authorization_failed",
+			Type:       apiErrorAuthorizationFailed,
 			Message:    err.Error(),
 			Suggestion: suggestion,
 		}

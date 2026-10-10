@@ -47,10 +47,12 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -62,6 +64,10 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	taskTerminalMessage = "task is terminal"
 )
 
 const (
@@ -101,6 +107,7 @@ const (
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
+	taskRetryPendingReason          = "RetryPending"
 )
 
 // TaskReconciler reconciles a Task object
@@ -109,6 +116,7 @@ type TaskReconciler struct {
 	APIReader                    client.Reader
 	Scheme                       *runtime.Scheme
 	JobBuilder                   *JobBuilder
+	GatewayService               *gatewayruntime.Service
 	SessionManager               *SessionManager
 	WebhookNotifier              *WebhookNotifier
 	Recorder                     record.EventRecorder
@@ -325,6 +333,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			return ctrl.Result{}, nil
 		}
 		log.Error(err, "unable to fetch Task")
+		return ctrl.Result{}, err
+	}
+	if err := r.retainUsageTask(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
 	if tx := task.Spec.Transaction; tx != nil {
@@ -738,6 +749,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		if deadline, ok := r.pendingAgentTaskDeadline(ctx, task, now); ok && !now.Before(deadline) {
 			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
 		}
+	}
+	if delay := r.remainingRetryDelay(task, time.Now()); delay > 0 {
+		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 
 	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
@@ -1435,6 +1449,29 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 }
 
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
+// missingToolPolicyGrace bounds how long a native dispatch waits for an
+// OutboundAccessPolicy that one of the Task's Tools references but that does
+// not exist. Tools are classified strictly (a missing policy cannot be judged
+// connector-backed or not), so the wait is retried for a while in case the
+// policy is being applied, and then the Task fails with the reason rather
+// than staying Pending without one.
+const missingToolPolicyGrace = 2 * time.Minute
+
+// boundMissingToolPolicy handles a dispatch error caused by a missing
+// OutboundAccessPolicy: within the grace period dispatch is retried shortly,
+// after it the Task fails naming the policy. Other errors are not handled.
+func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev1alpha1.Task, err error) (ctrl.Result, bool, error) {
+	if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, false, nil
+	}
+	if task.CreationTimestamp.IsZero() || time.Since(task.CreationTimestamp.Time) < missingToolPolicyGrace {
+		logf.FromContext(ctx).Info("A Tool's outbound access policy does not exist yet; retrying dispatch", "error", err.Error())
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
+	}
+	result, failErr := r.failTask(ctx, task, fmt.Sprintf("a Tool references an outbound access policy that does not exist: %v", err))
+	return result, true, failErr
+}
+
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -1442,13 +1479,6 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return ctrl.Result{}, err
-	}
-	if (task.Spec.Type == corev1alpha1.TaskTypeAI || latest.Spec.Type == corev1alpha1.TaskTypeAI) &&
-		(task.UID != latest.UID || task.Generation != latest.Generation) {
-		// Agent/provider resolution belongs to the reconcile's spec revision.
-		// Retry that resolution instead of failing or rendering an edited Task
-		// with dependencies selected from its previous generation.
-		return ctrl.Result{}, aiSoulTaskChanged(task)
 	}
 	if !canStartTaskJob(latest.Status.Phase) || executionOutcomePreventsReplay(latest.Status.ExecutionOutcome) {
 		task.Status = latest.Status
@@ -1460,6 +1490,11 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			return ctrl.Result{}, err
 		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
+	}
+	// Recheck the persisted deadline after the uncached read so an older
+	// Pending snapshot cannot admit a Job before its retry delay has elapsed.
+	if delay := r.remainingRetryDelay(latest, time.Now()); delay > 0 {
+		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
 	if err != nil {
@@ -1507,6 +1542,53 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Do not freeze a tool-less Job in the create-before-durable-link window.
+	gatewayReplyEligible, err := r.GatewayService.ResolveReplyEligibility(ctx, latest)
+	if errors.Is(err, store.ErrNotReady) {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	existingGatewayJob := false
+	if gatewayReplyEligible && jobTask.Spec.Type == corev1alpha1.TaskTypeAI {
+		// A recorded UID can belong to an earlier attempt. Check the exact name
+		// we would build, and keep existing Jobs on the identity recovery path.
+		key := client.ObjectKey{Namespace: jobTask.Namespace, Name: buildTaskJobName(jobTask)}
+		err := reader.Get(ctx, key, &batchv1.Job{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		existingGatewayJob = err == nil
+		if !existingGatewayJob {
+			// Compatibility and provider resolution used the caller's snapshots.
+			// Defer the entire tuple rather than mix fresh policy with old inputs.
+			if latest.UID != task.UID || latest.Generation != task.Generation || task.Spec.AgentRef == nil || agent == nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			agentKey := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
+			if agentKey.Namespace == "" {
+				agentKey.Namespace = task.Namespace
+			}
+			latestAgent := &corev1alpha1.Agent{}
+			if err := reader.Get(ctx, agentKey, latestAgent); err != nil {
+				return ctrl.Result{}, fmt.Errorf("recheck gateway Job Agent: %w", err)
+			}
+			if latestAgent.UID != agent.UID || latestAgent.Generation != agent.Generation || !latestAgent.DeletionTimestamp.IsZero() {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
+	}
+
+	if (task.Spec.Type == corev1alpha1.TaskTypeAI || latest.Spec.Type == corev1alpha1.TaskTypeAI) &&
+		((agent != nil && agent.Spec.Soul != nil) || latest.Status.SoulBinding != nil) &&
+		(task.UID != latest.UID || task.Generation != latest.Generation) {
+		// Do not prepare a soul using Agent/provider inputs resolved for a
+		// different Task generation. Preserve no-soul Job recovery behavior.
+		return ctrl.Result{}, aiSoulTaskChanged(task)
+	}
+
 	aiSoul, err := r.prepareAISoul(ctx, jobTask, agent)
 	if err != nil {
 		if isPermanentAISoulConfigurationError(err) {
@@ -1519,13 +1601,41 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		task.Status = jobTask.Status
 	}
 
+	// Freeze the requester's Connections before anything is created, so a
+	// transient read failure retries dispatch instead of starting a worker
+	// whose connector-backed tools could never bind. The freeze reads the
+	// same Task object the Job is built from (the fresh one for a validation
+	// Task), so its bindings never belong to another revision.
+	frozenConnections, frozenClassification, err := freezeClassifiedRequesterConnections(ctx, reader, NativeWorkerToolRegistry(jobTask, agent), jobTask, aitools.Resolve(jobTask, agent), connectorScope{})
+	if err != nil {
+		if result, handled, failErr := r.boundMissingToolPolicy(ctx, task, err); handled {
+			return result, failErr
+		}
+		log.Error(err, "failed to freeze requester connections; retrying dispatch")
+		return ctrl.Result{}, err
+	}
+
+	connectionBindings := taskConnectionBindings(frozenConnections)
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
 		AISoul:                      aiSoul,
 		RepositoryMonitorValidation: validationTask,
+		ConnectionBindings:          connectionBindings,
+		ConnectionBindingsFrozen:    true,
+		ConnectorToolDigests:        nativeConnectorToolDigests(frozenClassification),
+		Reader:                      reader,
+		GatewayReplyEligible:        gatewayReplyEligible,
 	})
 	if err != nil {
+		if errors.Is(err, ErrConnectorToolResolution) {
+			if result, handled, failErr := r.boundMissingToolPolicy(ctx, task, err); handled {
+				return result, failErr
+			}
+			log.Error(err, "failed to resolve connector-backed tools; retrying dispatch")
+			return ctrl.Result{}, err
+		}
 		log.Error(err, "failed to build Job")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
 	}
@@ -1536,24 +1646,36 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 
-	// Create the Job
-	if err := r.Create(ctx, job); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
-			if recoveryErr != nil {
-				if errors.Is(recoveryErr, errTaskJobIdentity) || errors.Is(recoveryErr, errRepositoryMonitorValidationConfinement) {
-					return r.failTask(ctx, task, recoveryErr.Error())
-				}
-				return ctrl.Result{}, recoveryErr
+	// Once an existing gateway Job was observed, recover rather than create:
+	// deletion between the reads must not turn a skipped freshness check into
+	// a new execution from stale inputs.
+	if !existingGatewayJob {
+		err = r.Create(ctx, job)
+	}
+	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
+		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
+		if recoveryErr != nil {
+			if errors.Is(recoveryErr, errTaskJobIdentity) || errors.Is(recoveryErr, errRepositoryMonitorValidationConfinement) {
+				return r.failTask(ctx, task, recoveryErr.Error())
 			}
-			job = existing
-		} else {
-			log.Error(err, "failed to create Job")
-			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
+			return ctrl.Result{}, recoveryErr
 		}
+		job = existing
+		// The recovered Job was built against the Connections frozen
+		// for it; a freeze taken now must not hand it authority over a
+		// Connection that changed since.
+		recovered, _, bindingErr := FrozenConnectionBindingsFromJob(existing)
+		if bindingErr != nil {
+			return r.failTask(ctx, task, fmt.Sprintf("%v: %v", errTaskJobIdentity, bindingErr))
+		}
+		connectionBindings = recovered
+	} else if err != nil {
+		log.Error(err, "failed to create Job")
+		return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
 	}
 	task.Status.JobName = job.Name
 	task.Status.JobUID = string(job.UID)
+	task.Status.ConnectionBindings = connectionBindings
 
 	// Update status to Running
 	now := metav1.Now()
@@ -1582,6 +1704,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		t.Status.Attempts = attempts
 		t.Status.JobName = jobName
 		t.Status.JobUID = jobUID
+		// The retry re-fetches the Task; the bindings frozen before the
+		// Job was created must land in the same status write.
+		t.Status.ConnectionBindings = connectionBindings
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeJobCreated,
 			Status:             metav1.ConditionTrue,
@@ -2041,7 +2166,7 @@ func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alph
 			if term.Reason == "OOMKilled" || term.ExitCode == 137 {
 				limit := podContainerMemoryLimit(pod, cs.Name)
 				if limit == "" {
-					limit = "unknown"
+					limit = repositoryMonitorIssueUnknownValue
 				}
 				oomMsg = fmt.Sprintf("job failed: container OOMKilled (memory limit %s exceeded). Recreate the agent with higher resources.limits.memory or set spec.resources on the task.", limit)
 				continue
@@ -2118,6 +2243,8 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 }
 
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
+//
+//nolint:gocyclo // Task finalization keeps publication, Session settlement, and cleanup ordering visible.
 func (r *TaskReconciler) handleFinalizing(
 	ctx context.Context, task *corev1alpha1.Task,
 ) (ctrl.Result, error) {
@@ -2613,10 +2740,10 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	switch phase {
 	case corev1alpha1.TaskPhaseFailed:
 		conditionStatus = metav1.ConditionFalse
-		reason = "TaskFailed"
+		reason = eventReasonTaskFailed
 	case corev1alpha1.TaskPhaseCancelled:
 		conditionStatus = metav1.ConditionFalse
-		reason = "TaskCancelled"
+		reason = eventReasonTaskCancelled
 	}
 
 	resultRef := task.Status.ResultRef
@@ -2640,7 +2767,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
 			Reason:             reason,
-			Message:            "task is terminal",
+			Message:            taskTerminalMessage,
 		})
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeComplete,
@@ -2718,6 +2845,7 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	// Calculate backoff delay
 	delay := r.calculateRetryDelay(task)
 	oldJobName := task.Status.JobName
+	now := metav1.Now()
 
 	// Reset to pending for retry before deleting the old Job so a transient
 	// NotFound from asynchronous Job deletion does not fail the task.
@@ -2728,6 +2856,10 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 		t.Status.Message = ""
 		t.Status.CompletionTime = nil
 		t.Status.ResultRef = nil
+		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+			Type: ConditionTypeJobCreated, Status: metav1.ConditionFalse, LastTransitionTime: now,
+			Reason: taskRetryPendingReason, Message: "waiting for the next retry attempt",
+		})
 	}); err != nil {
 		log.Error(err, "failed to update status for retry")
 		return ctrl.Result{}, err
@@ -2751,6 +2883,27 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+// RequeueAfter does not prevent Task or owned Job events from reconciling
+// sooner. Enforce the same retry deadline on every attempt to start a Job.
+func (r *TaskReconciler) remainingRetryDelay(task *corev1alpha1.Task, now time.Time) time.Duration {
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent || task.Status.Phase != corev1alpha1.TaskPhasePending {
+		return 0
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobCreated)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != taskRetryPendingReason || condition.LastTransitionTime.IsZero() {
+		return 0
+	}
+	delay := r.calculateRetryDelay(task)
+	if delay <= 0 {
+		return 0
+	}
+	// metav1.Time JSON drops fractional seconds. Start at the next second so
+	// persistence cannot shorten a positive delay, including subsecond delays.
+	// This conservatively adds at most one second to the requested backoff.
+	retryAt := condition.LastTransitionTime.Time.Truncate(time.Second).Add(time.Second).Add(delay)
+	return max(retryAt.Sub(now), 0)
 }
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff
@@ -3528,6 +3681,15 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	} else {
 		log.Info("Created scheduled child task", "child", childName)
 		r.Recorder.Eventf(task, "Normal", "ScheduledRun", "Created child task %s", childName)
+		// A run acts for the scheduled Task's requester, so it is sealed
+		// against its verified parent; an unsealed run's connector tools
+		// fail closed.
+		seal := ACPChildTaskSealer(r.taskMetadataReader(), task.Namespace, task.Name, string(task.UID))
+		if err := seal(ctx, r.Client, child); errors.Is(err, ErrChildSealRefused) {
+			log.V(1).Info("Scheduled child task requester was not sealed", "child", childName, "reason", err.Error())
+		} else if err != nil {
+			log.Info("Scheduled child task requester could not be sealed; its connector tools fail closed", "child", childName, "error", err.Error())
+		}
 	}
 
 	// Update status
@@ -3781,7 +3943,7 @@ func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, t
 		}
 		binding := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: maps.Clone(objectLabels)},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: key.Name},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: key.Name},
 			Subjects: []rbacv1.Subject{{
 				Kind: rbacv1.ServiceAccountKind, Name: r.aiWorkerServiceAccountName(), Namespace: taskNamespace,
 			}},
@@ -4094,7 +4256,7 @@ func trustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (st
 
 func legacyTrustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (string, bool) {
 	if binding == nil || !legacyTrustedServiceReadName(binding.Name) ||
-		binding.RoleRef != (rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: binding.Name}) ||
+		binding.RoleRef != (rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: binding.Name}) ||
 		len(binding.Subjects) != 1 {
 		return "", false
 	}

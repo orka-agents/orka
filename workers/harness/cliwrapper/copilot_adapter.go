@@ -59,7 +59,7 @@ func (a *CopilotAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 }
 
 func (a *CopilotAdapter) ParseResult(_ context.Context, _ TurnContext, run CommandResult) (TurnResult, error) {
-	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeCopilot}}, nil
+	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{adapterMetadataKey: RuntimeCopilot}}, nil
 }
 
 func RunCopilotTurnCLI(ctx context.Context, stdin io.Reader, stdout io.Writer) error {

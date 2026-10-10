@@ -60,11 +60,21 @@ func TestAgentKitProviderProfileUsesFrozenACPContract(t *testing.T) {
 	if !maps.Equal(environment, wantEnvironment) {
 		t.Fatalf("AgentKit session environment = %#v, want %#v", environment, wantEnvironment)
 	}
+	request := harnessv2.CreateRuntimeSessionRequest{MCPConfiguration: harnessv2.MCPPolicyConfiguration{
+		ApprovalPolicy: harnessv2.MCPApprovalPolicy{RequiredTools: []string{"lookup"}},
+	}}
+	environment, err = profile.EnvironmentForSession(request, acp.SessionPaths{}, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if environment[agentKitMCPTimeoutEnv] != "900" {
+		t.Fatalf("AgentKit approval call timeout = %q, want 900 seconds", environment[agentKitMCPTimeoutEnv])
+	}
 }
 
 func TestAgentKitProviderCapabilitiesDescribeComposedRuntime(t *testing.T) {
 	capabilities := providerCapabilities(providerKindAgentKit, "gpt-test")
-	if capabilities.SupportsPermissions || !capabilities.SupportsCancel || !capabilities.SupportsTools {
+	if capabilities.SupportsPermissions || capabilities.SupportsBrokeredToolApprovals || !capabilities.SupportsCancel || !capabilities.SupportsTools {
 		t.Fatalf("AgentKit composed runtime capabilities = %#v", capabilities)
 	}
 	if capabilities.SupportsImages || capabilities.SupportsAudio || capabilities.SupportsEmbeddedResources {
@@ -111,7 +121,7 @@ func TestAgentKitSessionProjectionRejectsPerTaskOverrides(t *testing.T) {
 	}
 }
 
-func TestAgentKitSessionProjectionRejectsApprovalRequiredTools(t *testing.T) {
+func TestAgentKitSessionProjectionAcceptsBrokeredApprovalRequiredTools(t *testing.T) {
 	t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
 	profile, err := providerProfile(providerKindAgentKit, "gpt-test", harnessv2.WorkspaceIntentRead)
 	if err != nil {
@@ -125,8 +135,7 @@ func TestAgentKitSessionProjectionRejectsApprovalRequiredTools(t *testing.T) {
 	}
 	request.MCPConfiguration.ApprovalPolicyDigest = approvalDigest
 	request.Profile.ApprovalPolicyDigest = approvalDigest
-	if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err == nil ||
-		!strings.Contains(err.Error(), "does not support approval-required MCP tools") {
+	if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err != nil {
 		t.Fatalf("AgentKit approval-required tool error = %v", err)
 	}
 }

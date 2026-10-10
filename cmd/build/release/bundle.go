@@ -7,11 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
 
-type chartArtifact struct {
+type releaseArtifact struct {
 	File   string `json:"file"`
 	SHA256 string `json:"sha256"`
 }
@@ -25,7 +26,8 @@ type candidateBundle struct {
 	BuildRunID      string            `json:"buildRunID"`
 	BuildRunAttempt string            `json:"buildRunAttempt"`
 	Images          map[string]string `json:"images"`
-	Chart           chartArtifact     `json:"chart"`
+	Chart           releaseArtifact   `json:"chart"`
+	CLI             []releaseArtifact `json:"cli"`
 }
 
 type qualificationProof struct {
@@ -94,10 +96,14 @@ func (w *workflow) bundle(directory, version, candidate, attempt string) error {
 	if err != nil {
 		return err
 	}
+	cli, err := cliArtifacts(directory, version)
+	if err != nil {
+		return err
+	}
 	return writeJSON(filepath.Join(directory, candidateFile), candidateBundle{
-		SchemaVersion: 1, Repository: repository, Version: version, CandidateSHA: candidate,
+		SchemaVersion: 2, Repository: repository, Version: version, CandidateSHA: candidate,
 		Branch: branch, BuildRunID: w.env("GITHUB_RUN_ID"), BuildRunAttempt: attempt,
-		Images: images, Chart: chartArtifact{File: archive, SHA256: digest},
+		Images: images, Chart: releaseArtifact{File: archive, SHA256: digest}, CLI: cli,
 	})
 }
 
@@ -106,7 +112,7 @@ func loadBundle(directory string) (candidateBundle, error) {
 	if err := readJSON(filepath.Join(directory, candidateFile), &data); err != nil {
 		return data, err
 	}
-	if data.SchemaVersion != 1 || data.Repository != repository {
+	if data.SchemaVersion != 2 || data.Repository != repository {
 		return data, errors.New("invalid release bundle")
 	}
 	if !shaRE.MatchString(data.CandidateSHA) {
@@ -135,7 +141,18 @@ func loadBundle(directory string) (candidateBundle, error) {
 	if data.Chart.File != "orka-"+strings.TrimPrefix(data.Version, "v")+".tgz" {
 		return data, errors.New("invalid chart archive path")
 	}
-	return data, verifyHash(filepath.Join(directory, data.Chart.File), data.Chart.SHA256, "candidate chart bytes changed")
+	err = verifyHash(filepath.Join(directory, data.Chart.File), data.Chart.SHA256, "candidate chart bytes changed")
+	if err != nil {
+		return data, err
+	}
+	cli, err := cliArtifacts(directory, data.Version)
+	if err != nil {
+		return data, err
+	}
+	if !slices.Equal(data.CLI, cli) {
+		return data, errors.New("candidate CLI assets changed or are incomplete")
+	}
+	return data, nil
 }
 
 func (w *workflow) downloadBundle(runID, attempt, branch, candidate, directory string) error {
@@ -314,7 +331,7 @@ func (w *workflow) verifyPublication(directory string) (candidateBundle, error) 
 	if err := w.verifyProof(data, directory); err != nil {
 		return data, err
 	}
-	// A rerun cannot replace the images or chart while earlier evidence awaits approval.
+	// A rerun cannot replace images, chart, or CLI assets while earlier evidence awaits approval.
 	temporary, err := os.MkdirTemp("", "orka-release-candidate-")
 	if err != nil {
 		return data, err
@@ -329,7 +346,11 @@ func (w *workflow) verifyPublication(directory string) (candidateBundle, error) 
 	if err != nil {
 		return data, err
 	}
-	return data, verifyHash(filepath.Join(original, candidateFile), digest, "build artifact changed after qualification")
+	err = verifyHash(filepath.Join(original, candidateFile), digest, "build artifact changed after qualification")
+	if err != nil {
+		return data, err
+	}
+	return data, w.verifyCLISignature(data, directory)
 }
 
 func (w *workflow) verifyProof(data candidateBundle, directory string) error {

@@ -247,7 +247,13 @@ _live_acp_release_chart_stable_state() {
   helm --kube-context "${LIVE_ACP_CONTEXT}" -n orka-system status orka -o json |
     jq '{revision:.version, status:.info.status}' >"${chart_work_dir}/release-state.json" || return 1
   helm --kube-context "${LIVE_ACP_CONTEXT}" -n orka-system get manifest orka >"${chart_work_dir}/release-manifest.yaml" || return 1
-  live_acp_release_chart_kubectl -n orka-system get -f "${chart_work_dir}/release-manifest.yaml" -o json |
+  # A context default fills omitted namespaces without rejecting explicit ones.
+  # Keep this override private to the lookup and omit credentials from it.
+  live_acp_release_chart_kubectl config view --minify -o json |
+    jq '{apiVersion, kind, contexts: [.contexts[] | .context.namespace = "orka-system"]}' \
+      >"${chart_work_dir}/release-context.json" || return 1
+  KUBECONFIG="${chart_work_dir}/release-context.json:${LIVE_ACP_KUBECONFIG}" \
+    live_acp_release_chart_kubectl get -f "${chart_work_dir}/release-manifest.yaml" -o json |
     jq -s '[.[] | if .kind == "List" then .items[] else . end | {
       kind, namespace:.metadata.namespace, name:.metadata.name, uid:.metadata.uid, generation:.metadata.generation,
       labels:.metadata.labels, annotations:.metadata.annotations, spec, rules, roleRef, subjects, webhooks

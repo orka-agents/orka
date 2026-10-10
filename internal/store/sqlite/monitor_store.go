@@ -224,7 +224,9 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 		`DELETE FROM review_publish_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM command_events WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM implementation_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
-		`DELETE FROM github_mutation_records WHERE monitor_namespace = ? AND monitor_name = ?`,
+		// GitHub commit statuses outlive monitors. Retain recorded readiness IDs
+		// so peer monitors still recognize and exclude them from repository CI.
+		`DELETE FROM github_mutation_records WHERE monitor_namespace = ? AND monitor_name = ? AND (operation != 'readiness_status' OR external_id = '')`,
 		`DELETE FROM repair_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_events WHERE monitor_namespace = ? AND monitor_name = ?`,
 	} {
@@ -1035,13 +1037,13 @@ func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilt
 	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanWorkAction)
 }
 
-// CancelWorkActions cancels non-terminal workflow actions for a target.
-func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error) {
+// CancelWorkActions cancels non-terminal target actions except the executing control action.
+func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error) {
 	now := time.Now()
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE work_actions SET status = 'cancelled', blocked_reason = ?, error = '', completed_at = ?, updated_at = ?
 		 WHERE monitor_namespace = ? AND monitor_name = ? AND target_kind = ? AND target_number = ?
-		 AND status IN ('queued', 'leased', 'running', 'retry_pending')`, reason, now, now, namespace, monitorName, targetKind, targetNumber)
+		 AND id <> ? AND status IN ('queued', 'leased', 'running', 'retry_pending')`, reason, now, now, namespace, monitorName, targetKind, targetNumber, exceptActionID)
 	if err != nil {
 		return 0, err
 	}
@@ -1284,10 +1286,15 @@ func (s *Store) GetGitHubMutationRecord(ctx context.Context, namespace, id strin
 // ListGitHubMutationRecords lists mutation records ordered newest first.
 func (s *Store) ListGitHubMutationRecords(ctx context.Context, filter store.GitHubMutationRecordFilter) ([]store.GitHubMutationRecord, string, error) {
 	q := newMonitorQuery(githubMutationRecordSelectSQL(), filter.Namespace)
+	if filter.AllNamespaces {
+		q = &monitorQuery{}
+		q.sql.WriteString(githubMutationRecordSelectSQL() + " WHERE 1 = 1")
+	}
 	monitorFilter(q, "monitor_name", filter.MonitorName)
 	monitorFilter(q, "operation", filter.Operation)
 	monitorFilter(q, "target_kind", filter.TargetKind)
 	monitorFilter(q, "target_number", filter.TargetNumber)
+	monitorFilter(q, "target_sha", filter.TargetSHA)
 	monitorFilter(q, "status", filter.Status)
 	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanGitHubMutationRecord)
 }

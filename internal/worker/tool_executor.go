@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -23,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +35,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/redact"
@@ -108,6 +111,12 @@ type ToolExecutor struct {
 	credentialSecret            string
 	transactionExchange         *TransactionExchangeConfig
 	authSecretValues            map[string]string
+	requester                   *corev1alpha1.RequestedBy
+	frozenConnections           map[string]outboundaccess.FrozenConnection
+	checkedPolicies             map[string]outboundaccess.PolicyIdentity
+	// sendGate, when set, is judged after every lookup and credential
+	// resolution and immediately before the request leaves the process.
+	sendGate func(context.Context) error
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
@@ -121,6 +130,76 @@ type TransactionExchangeConfig struct {
 	Exchanger        contexttoken.Exchanger
 	SubjectTokenType string
 	OutboundScope    string
+}
+
+// SetRequester records the Task's verified human identity for connection-mode
+// outbound access. A nil requester makes every connector-backed call fail
+// closed.
+func (e *ToolExecutor) SetRequester(requester *corev1alpha1.RequestedBy) {
+	if e == nil {
+		return
+	}
+	e.requester = requester.DeepCopy()
+}
+
+// SetFrozenConnections records the Connection identities frozen into the
+// Task's execution snapshot, keyed by OutboundAccessPolicy name.
+func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.FrozenConnection) {
+	if e == nil {
+		return
+	}
+	e.frozenConnections = make(map[string]outboundaccess.FrozenConnection, len(frozen))
+	maps.Copy(e.frozenConnections, frozen)
+}
+
+// SetSendGate installs a check run immediately before the tool request is
+// sent, after policy reads and credential resolution (which can refresh a
+// token and take a while). A failing gate sends nothing; its error is
+// returned unmarked, so the caller can tell nothing was attempted.
+func (e *ToolExecutor) SetSendGate(gate func(context.Context) error) {
+	if e == nil {
+		return
+	}
+	e.sendGate = gate
+}
+
+// SetCheckedPolicy records the OutboundAccessPolicy object the caller
+// validated before execution. Resolution of that policy name then refuses
+// any other policy object or generation.
+func (e *ToolExecutor) SetCheckedPolicy(name string, identity outboundaccess.PolicyIdentity) {
+	if e == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	if e.checkedPolicies == nil {
+		e.checkedPolicies = map[string]outboundaccess.PolicyIdentity{}
+	}
+	e.checkedPolicies[name] = identity
+}
+
+func (e *ToolExecutor) checkedPolicy(name string) *outboundaccess.PolicyIdentity {
+	identity, ok := e.checkedPolicies[name]
+	if !ok {
+		return nil
+	}
+	return &identity
+}
+
+// Requester returns a copy of the bound requester identity, or nil.
+func (e *ToolExecutor) Requester() *corev1alpha1.RequestedBy {
+	if e == nil || e.requester == nil {
+		return nil
+	}
+	return e.requester.DeepCopy()
+}
+
+// FrozenConnections returns a copy of the frozen Connection bindings.
+func (e *ToolExecutor) FrozenConnections() map[string]outboundaccess.FrozenConnection {
+	if e == nil || len(e.frozenConnections) == 0 {
+		return nil
+	}
+	frozen := make(map[string]outboundaccess.FrozenConnection, len(e.frozenConnections))
+	maps.Copy(frozen, e.frozenConnections)
+	return frozen
 }
 
 // SetTransactionAuthority sets task-scoped transaction authority. Calling it
@@ -360,18 +439,30 @@ func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha
 }
 
 func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
-	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway)
+	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway, prepared.connection)
 	if err != nil {
 		return "", err
 	}
 
 	if prepared.direct && !e.skipDirectPublicValidation {
 		dialContext := tokenexchange.PublicEndpointDialContext
-		if prepared.trustedActorRoute {
+		switch {
+		case prepared.trustedActorRoute:
 			dialContext = exactEndpointDialContext(prepared.request.URL)
+		case prepared.connection && allowPrivateConnectionEndpoints.Load():
+			// The fixture allowance relaxes only where a linked-account
+			// request may go; the transport keeps its hardening (no proxy,
+			// verified TLS 1.2 or newer, no custom TLS dial).
+			dialContext = privateConnectionEndpointDialContext
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
 		if err != nil {
+			return "", err
+		}
+	}
+
+	if e.sendGate != nil {
+		if err := e.sendGate(ctx); err != nil {
 			return "", err
 		}
 	}
@@ -391,6 +482,11 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 
 	return string(respBody), nil
 }
+
+// privateConnectionEndpointDialContext dials private addresses for the
+// fixture-only allowance on linked-account requests, still refusing the
+// infrastructure addresses.
+var privateConnectionEndpointDialContext = connectors.PrivateEndpointDialContext
 
 func directCredentialHTTPClient(
 	base *http.Client,
@@ -444,7 +540,17 @@ func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string
 	}
 }
 
-func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway bool) (*http.Client, error) {
+// allowPrivateConnectionEndpoints lets connection-mode (linked-account)
+// requests reach private and cluster-local destinations. It exists for
+// local and CI fixtures only and is set once by the controller from its
+// dev-only flag; worker Pods never set it.
+var allowPrivateConnectionEndpoints atomic.Bool
+
+// SetAllowPrivateConnectionEndpoints turns the fixture allowance on or off
+// for this process. Never enable it in production.
+func SetAllowPrivateConnectionEndpoints(allowed bool) { allowPrivateConnectionEndpoints.Store(allowed) }
+
+func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway, connection bool) (*http.Client, error) {
 	if base == nil {
 		base = http.DefaultClient
 	}
@@ -493,6 +599,12 @@ func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS toke
 			}
 		}
 		if gateway {
+			return http.ErrUseLastResponse
+		}
+		if connection {
+			// A linked-account credential travels only to the origin the
+			// provider declared: Go forwards custom headers on redirects,
+			// so the redirect is returned unfollowed instead.
 			return http.ErrUseLastResponse
 		}
 		if len(via) == 0 {
@@ -702,14 +814,17 @@ func toolIdempotencyKeyFromContext(ctx context.Context) string {
 }
 
 type preparedToolRequest struct {
-	httpConfig        corev1alpha1.HTTPExecution
-	request           *http.Request
-	authToken         string
-	transactionToken  string
-	redactionSecrets  []string
-	gatewayTLS        tokenexchange.TLSConfig
-	gateway           bool
-	direct            bool
+	httpConfig       corev1alpha1.HTTPExecution
+	request          *http.Request
+	authToken        string
+	transactionToken string
+	redactionSecrets []string
+	gatewayTLS       tokenexchange.TLSConfig
+	gateway          bool
+	direct           bool
+	// connection marks a request carrying a person's linked-account
+	// credential: it is never followed across a redirect.
+	connection        bool
 	mcp               bool
 	trustedActorRoute bool
 }
@@ -848,14 +963,14 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		trustedActorRoute: isMCP && routeHost != "",
 	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
-		if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
+		if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {
 			return preparedToolRequest{}, err
 		}
 	}
 	return prepared, nil
 }
 
-func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, prepared *preparedToolRequest) error {
+func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage, prepared *preparedToolRequest) error {
 	if e.outboundResolver == nil {
 		return errors.New("outbound access policy is configured but the resolver is unavailable")
 	}
@@ -894,19 +1009,50 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CredentialAuthorityEnforced: e.credentialAuthorityEnforced,
 		CredentialScopeAllowed:      e.credentialScopeAllowed,
 		CredentialSecret:            e.credentialSecret,
+		Requester:                   e.requester,
+		FrozenConnections:           e.frozenConnections,
+		CheckedPolicy:               e.checkedPolicy(ref.Name),
+		Tool: outboundaccess.ToolBinding{
+			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
+			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
+			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
+		},
+		Arguments: args,
+		MCPBacked: isMCPSubstrateActorTool(tool) || prepared.mcp,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)
 	}
 	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
 	switch resolution.Adapter {
-	case outboundaccess.AdapterDirect:
+	case outboundaccess.AdapterDirect, outboundaccess.AdapterConnection:
 		prepared.direct = true
 		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
-			return errors.New("direct outbound access requires an HTTPS Tool URL")
+			return errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
+		}
+		if resolution.Adapter == outboundaccess.AdapterConnection {
+			prepared.connection = true
+			// The linked-account credential is bound to the destination the
+			// provider declared. An MCP-backed Tool sends its requests to the
+			// actor endpoint rather than spec.http.url, and a prepared request
+			// whose origin differs from the declared URL would carry the token
+			// elsewhere; both fail closed.
+			if isMCPSubstrateActorTool(tool) || prepared.mcp {
+				return errors.New("connection outbound access policies are not supported on MCP-backed tools")
+			}
+			declared, err := neturl.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+			if err != nil || !sameHTTPOrigin(declared, prepared.request.URL) {
+				return errors.New("connection credential request must target the declared tool origin")
+			}
+			// The caller (a worker or an ACP runtime) is not trusted to have
+			// honored the provider's curated schema; the person's credential
+			// is attached only to arguments that schema admits.
+			if err := connectors.ValidateToolArguments(resolution.Parameters, args); err != nil {
+				return fmt.Errorf("connection credential request arguments rejected: %w", err)
+			}
 		}
 		if prepared.httpConfig.AuthSecretRef != nil {
-			return errors.New("direct outbound access cannot coexist with authSecretRef")
+			return errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
 		}
 		header := http.CanonicalHeaderKey(strings.TrimSpace(resolution.CredentialHeader))
 		if header == "" || strings.EqualFold(header, transactiontoken.HeaderName) {
@@ -1937,4 +2083,12 @@ func outboundTTSClientKey(cfg contexttoken.TTSConfig) string {
 		cfg.ChildTokenTTL.String(),
 		cfg.ToolTokenTTL.String(),
 	}, "\x00")
+}
+
+// toolHTTPTimeout is the Tool's declared request timeout, zero when none.
+func toolHTTPTimeout(tool *corev1alpha1.Tool) time.Duration {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.Timeout == nil {
+		return 0
+	}
+	return tool.Spec.HTTP.Timeout.Duration
 }

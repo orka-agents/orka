@@ -687,7 +687,7 @@ func TestCapabilitiesAdvertiseConfiguredPullRequestReconciliation(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !capabilities.PullRequestReconciliation || !slices.Contains(capabilities.Operations, OperationPullRequestReconcile) ||
+	if !capabilities.PullRequestReconciliation || !capabilities.PullRequestPresentation || !slices.Contains(capabilities.Operations, OperationPullRequestReconcile) ||
 		!slices.Contains(capabilities.CredentialKinds, CredentialForgeToken) {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}

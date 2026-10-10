@@ -60,6 +60,10 @@ import (
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
+const (
+	baselineField = "baseline"
+)
+
 var (
 	errRuntimePoolBootstrapInstanceConflict = errors.New("RuntimePool bootstrap credentials are bound to another physical workspace instance")
 	errWorkspaceRuntimePoolAuthBindingLost  = errors.New("bound private RuntimePool auth Secret no longer exists")
@@ -388,6 +392,8 @@ type RuntimePoolReconciler struct {
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the singleton Deployment and publishes exact-Pod pool status.
+//
+//nolint:gocyclo // Pool finalization, admission, materialization, and readiness form one lifecycle.
 func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	pool := &corev1alpha1.RuntimePool{}
@@ -1676,7 +1682,7 @@ func runtimePoolShortRevision(revision string) string {
 		return revision[:16]
 	}
 	if revision == "" {
-		return "unknown"
+		return repositoryMonitorIssueUnknownValue
 	}
 	return revision
 }
@@ -1814,8 +1820,8 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNamespace(ctx context.Context, 
 			"app.kubernetes.io/name":             "orka",
 			"app.kubernetes.io/component":        "acp-runtime",
 			"app.kubernetes.io/managed-by":       "orka",
-			"orka.ai/runtime-namespace":          "true",
-			"pod-security.kubernetes.io/enforce": "baseline",
+			"orka.ai/runtime-namespace":          booleanTrueValue,
+			"pod-security.kubernetes.io/enforce": baselineField,
 			"pod-security.kubernetes.io/warn":    "restricted",
 			"pod-security.kubernetes.io/audit":   "restricted",
 		},
@@ -1842,7 +1848,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 		runtimePoolCapabilitySecretKey: 32,
 		runtimePoolBootstrapNonceKey:   32,
 	}, map[string]string{
-		runtimePoolAuthLabel:            "true",
+		runtimePoolAuthLabel:            booleanTrueValue,
 		runtimePoolCredentialEpochLabel: epoch,
 	})
 	if err != nil {
@@ -1850,7 +1856,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 	}
 	providerName := runtimePoolChildName(cfg.baseName, "provider-e"+strconv.FormatInt(cfg.controllerEpoch, 10)+"-g"+cfg.providerProxy.tokenGeneration)
 	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
-		runtimePoolProviderCredentialLabel: "true",
+		runtimePoolProviderCredentialLabel: booleanTrueValue,
 		runtimePoolCredentialEpochLabel:    epoch,
 		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
 	})
@@ -1901,7 +1907,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 		providerName = runtimePoolChildName(cfg.baseName, "provider-e"+epoch+"-g"+cfg.providerProxy.tokenGeneration+"-"+suffix)
 	}
 	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
-		runtimePoolProviderCredentialLabel: "true",
+		runtimePoolProviderCredentialLabel: booleanTrueValue,
 		runtimePoolCredentialEpochLabel:    epoch,
 		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
 	})
@@ -1926,7 +1932,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 		runtimePoolBootstrapSigningSeedKey: 32,
 	}
 	authLabels := map[string]string{
-		runtimePoolAuthLabel:            "true",
+		runtimePoolAuthLabel:            booleanTrueValue,
 		runtimePoolCredentialEpochLabel: epoch,
 	}
 	binding := strings.TrimSpace(pool.Annotations[bindingKey])
@@ -1936,7 +1942,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 
 	var candidates corev1.SecretList
 	if err := reader.List(ctx, &candidates, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true",
+		runtimePoolAuthLabel: booleanTrueValue,
 		runtimePoolUIDLabel:  string(pool.UID),
 	}); err != nil {
 		return nil, err
@@ -2625,7 +2631,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			Containers: []corev1.Container{{
-				Name:            "runtime",
+				Name:            runtimeField,
 				Image:           pool.Spec.Runtime.Image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Ports:           []corev1.ContainerPort{{Name: "control", ContainerPort: runtimePoolPort, Protocol: corev1.ProtocolTCP}},
@@ -2682,8 +2688,8 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 					{Name: runtimePoolAuthVolume, MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
 					{Name: runtimePoolProviderCapabilityVolume, MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
 					{Name: runtimePoolSessionsVolume, MountPath: "/sessions"},
-					{Name: runtimePoolTempVolume, MountPath: "/tmp"},
-					{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
+					{Name: runtimePoolTempVolume, MountPath: workerTempPath},
+					{Name: runtimePoolHomeVolume, MountPath: workerHomePath},
 				},
 				StartupProbe:   runtimePoolHTTPProbe(30, 2, 1),
 				ReadinessProbe: runtimePoolHTTPProbe(3, 5, 2),
@@ -2808,7 +2814,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 				Ingress: []networkingv1.NetworkPolicyIngressRule{{
 					From: []networkingv1.NetworkPolicyPeer{{
 						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: controllerNamespace}},
-						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: "controller"}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: controllerNameValue}},
 					}},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(runtimePoolPort))}},
 				}},
@@ -2853,7 +2859,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 				Egress: []networkingv1.NetworkPolicyEgressRule{{
 					To: []networkingv1.NetworkPolicyPeer{{
 						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: controllerNamespace}},
-						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: "controller"}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: controllerNameValue}},
 					}},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(r.ControllerAPIPort))}},
 				}},
@@ -3853,7 +3859,7 @@ func runtimePoolResourceName(namespace, name string) string {
 	suffix := hex.EncodeToString(hash[:5])
 	prefix := strings.Trim(strings.ToLower(name), "-")
 	if prefix == "" {
-		prefix = "runtime"
+		prefix = runtimeField
 	}
 	maxPrefix := 63 - len(suffix) - 1
 	if len(prefix) > maxPrefix {
@@ -3886,7 +3892,7 @@ func runtimePoolRuntimeInstanceID(podUID types.UID, bootID harnessv2.SupervisorB
 
 func runtimePoolPodEndpoint(pod *corev1.Pod) string {
 	host := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(int(runtimePoolPort)))
-	return (&url.URL{Scheme: "http", Host: host}).String()
+	return (&url.URL{Scheme: urlSchemeHTTP, Host: host}).String()
 }
 
 func runtimePoolDigestSchemaMatches(spec string, observed uint32) bool {

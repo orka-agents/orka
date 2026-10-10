@@ -16,6 +16,10 @@ workers. Orka owns Task outcomes, durable Sessions and transcripts, prompt
 leases, cancellation, runtime admission, workspace data references, and
 publication. Reading a dormant Session does not start an Actor.
 
+:::tip[Video demo]
+Watch [Checkpoint and restore an agent workspace](https://www.youtube.com/watch?v=jsdRB-0LLAc).
+:::
+
 ## Native provider setup
 
 Actor, ActorTemplate, Atespace, Worker, and Tag are native ate-api resources.
@@ -242,6 +246,19 @@ waits for suspension and never interrupts an attached Task. When Ready, the
 checkpoint exposes an immutable digest, class revision, and timestamp, without
 native identifiers or storage URLs. Its private reference keeps the Data Tag
 and original template alive after source workspace deletion.
+
+The digest is the checkpoint's identity for restore, so `kubectl get` shows it
+next to the phase without extra flags:
+
+```console
+$ kubectl -n team get executionworkspacecheckpoint before-refactor
+NAME              WORKSPACE        PHASE   DIGEST                                                                  AGE
+before-refactor   workspace-name   Ready   sha256:3f1c0d9a7b2e4c6d8f0a1b3c5d7e9f2a4b6c8d0e1f3a5b7c9d0e2f4a6b8c0d2   2m
+```
+
+Helm does not update CRDs during an upgrade, so the column appears once the
+CRDs from the new chart are applied (see
+[Upgrading](../operations/upgrading.md)).
 
 If the source workspace disappears before Orka acquires that private reference,
 export fails with phase `Failed` and reason `SourceMissing`. Temporary read

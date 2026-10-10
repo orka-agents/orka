@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router'
 import { useTaskListAll } from '@/hooks/use-tasks'
 import { useSessionListAll } from '@/hooks/use-sessions'
 import { useAgentListAll } from '@/hooks/use-agents'
@@ -39,7 +40,7 @@ export function Overview() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Dashboard" description="Overview of your Orka workspace" />
+      <PageHeader title="Dashboard" description="Overview of your Orka workspace" action={<Link to="/usage" className="text-sm text-primary underline">Usage and PR outcomes</Link>} />
       {tasksTruncated && !tasksForbiddenMessage && (
         <p className="text-sm text-muted-foreground" role="status">
           Task counts and phase distribution use {tasks.length.toLocaleString()} loaded tasks in resource-key order. More tasks exist.

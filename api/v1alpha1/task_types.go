@@ -414,6 +414,19 @@ type AISpec struct {
 	Tools []string `json:"tools,omitempty"`
 }
 
+// MarshalJSON preserves an explicitly empty native tool policy instead of
+// omitting it. Nil and nonempty lists retain their existing wire representation.
+func (in AISpec) MarshalJSON() ([]byte, error) {
+	type aiSpecJSON AISpec
+	if in.Tools == nil || len(in.Tools) > 0 {
+		return json.Marshal(aiSpecJSON(in))
+	}
+	return json.Marshal(struct {
+		aiSpecJSON
+		Tools []string `json:"tools"`
+	}{aiSpecJSON: aiSpecJSON(in), Tools: in.Tools})
+}
+
 // SkillReference references a Skill CRD by name or inline skill content from a ConfigMap key.
 type SkillReference struct {
 	// Name references a Skill CR by name
@@ -491,6 +504,14 @@ type TaskStatus struct {
 	// digests only, never prompt text. Retries reject configuration drift.
 	// +optional
 	SoulBinding *TaskSoulBinding `json:"soulBinding,omitempty"`
+
+	// ConnectionBindings freezes, for native type: ai Tasks, the identity of
+	// the requester's Connection behind each connection-mode
+	// OutboundAccessPolicy at Job creation. Connector-backed tool calls from
+	// the worker are honored only while the live Connection still matches.
+	// No token material is ever recorded.
+	// +optional
+	ConnectionBindings []ConnectionBinding `json:"connectionBindings,omitempty"`
 
 	// ExecutionOutcome records the immutable outcome of a non-ACP workload before
 	// provider-neutral execution-workspace finalization completes.
@@ -721,6 +742,31 @@ type ChildTaskStatus struct {
 	// Result is the result from the child task (if completed)
 	// +optional
 	Result string `json:"result,omitempty"`
+}
+
+// ConnectionBinding is one frozen person-to-provider link for a policy.
+type ConnectionBinding struct {
+	// PolicyName is the connection-mode OutboundAccessPolicy.
+	PolicyName string `json:"policyName"`
+	// Provider is the ConnectorProvider the policy selects.
+	Provider string `json:"provider"`
+	// ConnectionName is the requester's Connection for that provider.
+	ConnectionName string `json:"connectionName"`
+	// UID and Generation pin the Connection as it was when frozen.
+	UID        string `json:"uid"`
+	Generation int64  `json:"generation"`
+	// GrantSequence is the Connection's consent count when frozen; a
+	// re-link of the same object raises it and invalidates this binding.
+	GrantSequence int64 `json:"grantSequence"`
+	// Mode is the Connection mode at freeze time.
+	Mode string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the policy object the binding was
+	// frozen under, so a policy deleted and recreated, or edited, after
+	// dispatch is refused rather than executed under the old binding.
+	// +optional
+	PolicyUID string `json:"policyUID,omitempty"`
+	// +optional
+	PolicyGeneration int64 `json:"policyGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -1044,6 +1090,26 @@ type WorkspaceConfig struct {
 	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	PRBaseBranch string `json:"prBaseBranch,omitempty"`
+
+	// PRTitle is the pull request title supplied by the Task author. When empty,
+	// the controller uses the prompt's first nonblank line, limited to 256 characters.
+	// An empty or whitespace-only prompt falls back to the publication generation title.
+	// Nonempty whitespace-only titles are rejected. Secret-like titles, including
+	// prompt-derived titles, are rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="prTitle must not be whitespace-only"
+	// +optional
+	PRTitle string `json:"prTitle,omitempty"`
+
+	// PRBody is the pull request body supplied by the Task author. When empty,
+	// the publisher describes the publication and identifies the Task. Publication
+	// generation and reconciliation markers are appended to either body.
+	// Orka reconciliation comments are reserved and must not be included.
+	// Secret-like text is rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:XValidation:rule="!self.contains('<!-- orka.publisher.pr-')",message="prBody must not contain reserved publisher reconciliation markers"
+	// +optional
+	PRBody string `json:"prBody,omitempty"`
 
 	// PushBranch is the publication branch. For write Tasks the controller derives
 	// a full-entropy Task- or Session-owned branch when this is omitted.

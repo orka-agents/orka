@@ -9,7 +9,7 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/release-chart-acceptance-test.XXXXXX")"
 trap 'rm -rf -- "${test_root}"' EXIT
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
-for command in helm jq openssl python3; do
+for command in helm jq kubectl openssl python3; do
   command -v "${command}" >/dev/null 2>&1 || fail "missing required command: ${command}"
 done
 
@@ -149,6 +149,98 @@ if live_acp_release_chart_assert_mode_rejection "${test_root}/mode-before.json" 
   fail "mode rejection accepted an unrelated Helm error"
 fi
 printf '%s\n' 'ok - mode rejection requires the expected guard and unchanged release state'
+
+# Exercise real kubectl namespace resolution against a local Kubernetes API
+# fixture, including resources that inherit Helm's release namespace.
+(
+  chart_work_dir="${test_root}/stable-state"
+  mkdir "${chart_work_dir}"
+  cat >"${chart_work_dir}/server.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+from pathlib import Path
+import sys
+from urllib.parse import urlsplit
+
+directory = Path(sys.argv[1])
+resources = {}
+for namespace, name in (("orka-system", "inherited"), ("orka-runtimes", "explicit")):
+    resources[f"/api/v1/namespaces/{namespace}/configmaps/{name}"] = {
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"namespace": namespace, "name": name, "uid": name, "resourceVersion": "1"}}
+for name in ("orka-system", "orka-runtimes"):
+    resources[f"/api/v1/namespaces/{name}"] = {
+        "apiVersion": "v1", "kind": "Namespace",
+        "metadata": {"name": name, "uid": name, "labels": {"orka.ai/controller-mode": "harness-v2"}}}
+for suffix in ("snapshot", "webhook", "publisher", "provider", "scm", "artifact"):
+    name = "release-chart-" + suffix
+    resources[f"/api/v1/namespaces/orka-system/secrets/{name}"] = {
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"namespace": "orka-system", "name": name, "uid": name, "resourceVersion": "1"}}
+resources["/api"] = {"apiVersion": "v1", "kind": "APIVersions", "versions": ["v1"]}
+resources["/apis"] = {"apiVersion": "v1", "kind": "APIGroupList", "groups": []}
+resources["/api/v1"] = {
+    "apiVersion": "v1", "kind": "APIResourceList", "groupVersion": "v1", "resources": [
+        {"name": name, "singularName": "", "namespaced": namespaced, "kind": kind, "verbs": ["get", "list"]}
+        for name, kind, namespaced in (("configmaps", "ConfigMap", True), ("namespaces", "Namespace", False),
+                                      ("secrets", "Secret", True))]}
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        resource = resources.get(urlsplit(self.path).path)
+        self.send_response(200 if resource is not None else 404)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resource or {
+            "apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "NotFound", "code": 404
+        }).encode())
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+(directory / "port").write_text(str(server.server_port))
+server.serve_forever()
+PY
+  python3 "${chart_work_dir}/server.py" "${chart_work_dir}" >"${chart_work_dir}/server.log" 2>&1 &
+  state_server_pid=$!
+  trap 'kill "${state_server_pid}" >/dev/null 2>&1 || true; wait "${state_server_pid}" >/dev/null 2>&1 || true' EXIT
+  deadline=$((SECONDS + 10))
+  while [[ ! -s "${chart_work_dir}/port" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+  [[ -s "${chart_work_dir}/port" ]] || fail "Kubernetes API fixture did not start"
+
+  export LIVE_ACP_CONTEXT=kind-chart-state LIVE_ACP_KUBECONFIG="${chart_work_dir}/original-kubeconfig.json"
+  export KUBECONFIG="${LIVE_ACP_KUBECONFIG}"
+  jq -n --arg server "http://127.0.0.1:$(cat "${chart_work_dir}/port")" --arg context "${LIVE_ACP_CONTEXT}" '
+    {apiVersion:"v1",kind:"Config",clusters:[{name:"fixture",cluster:{server:$server}}],
+     contexts:[{name:$context,context:{cluster:"fixture",namespace:"unrelated"}}],"current-context":$context}' \
+    >"${LIVE_ACP_KUBECONFIG}"
+  cp "${LIVE_ACP_KUBECONFIG}" "${chart_work_dir}/original-before.json"
+  jq -n '{apiVersion:"v1",kind:"List",items:[
+    {apiVersion:"v1",kind:"ConfigMap",metadata:{name:"inherited"}},
+    {apiVersion:"v1",kind:"ConfigMap",metadata:{name:"explicit",namespace:"orka-runtimes"}},
+    {apiVersion:"v1",kind:"Namespace",metadata:{name:"orka-runtimes"}}]}' >"${chart_work_dir}/manifest.json"
+  kubectl() { command kubectl --cache-dir="${chart_work_dir}/cache" "$@"; }
+  helm() {
+    case "$*" in
+      *" status orka -o json") printf '{"version":1,"info":{"status":"deployed"}}\n' ;;
+      *" get manifest orka") cat "${chart_work_dir}/manifest.json" ;;
+      *) fail "unexpected Helm operation in state observation" ;;
+    esac
+  }
+  _live_acp_release_chart_stable_state "${chart_work_dir}/state.json"
+  jq -e '(.objects | map([.kind,.namespace,.name])) == [
+    ["ConfigMap","orka-runtimes","explicit"], ["ConfigMap","orka-system","inherited"],
+    ["Namespace",null,"orka-runtimes"]] and (.secrets | length) == 6' "${chart_work_dir}/state.json" >/dev/null
+  cmp -s "${LIVE_ACP_KUBECONFIG}" "${chart_work_dir}/original-before.json" || fail "state observation changed the scoped kubeconfig"
+  jq '(.items[] | select(.metadata.name == "explicit")).metadata.namespace = "missing-namespace"' \
+    "${chart_work_dir}/manifest.json" >"${chart_work_dir}/missing.json"
+  mv "${chart_work_dir}/missing.json" "${chart_work_dir}/manifest.json"
+  if _live_acp_release_chart_stable_state "${chart_work_dir}/missing-state.json" >"${chart_work_dir}/missing.log" 2>&1; then
+    fail "state observation accepted a missing resource"
+  fi
+)
+printf '%s\n' 'ok - state observation preserves explicit namespaces and defaults inherited namespaces without editing kubeconfig'
 
 # A local HTTP server stands in for kubectl port-forward. Check the real curl
 # and PID cleanup path without creating a cluster or using provider access.

@@ -13,6 +13,10 @@ import (
 	"sync/atomic"
 )
 
+const (
+	jsonRPCVersion = "2.0"
+)
+
 const DefaultMaxMessageBytes = 8 << 20
 
 // DefaultMaxConcurrentRequests bounds concurrently handled adapter-initiated
@@ -171,7 +175,7 @@ func (c *Client) call(ctx context.Context, method string, params, result any, on
 	c.pending[key] = responseCh
 	c.pendingMu.Unlock()
 
-	request := rpcMessage{JSONRPC: "2.0", ID: idRaw, Method: method, Params: paramsRaw}
+	request := rpcMessage{JSONRPC: jsonRPCVersion, ID: idRaw, Method: method, Params: paramsRaw}
 	// The request write blocks indefinitely when the adapter stops reading
 	// stdin, so it must honor cancellation like the response wait below: run
 	// it in a goroutine and abandon it on ctx expiry. If the abandoned write
@@ -247,7 +251,7 @@ func (c *Client) Notify(ctx context.Context, method string, params any) error {
 	// exit closes the pipe, which unblocks the write and ends the goroutine.
 	written := make(chan error, 1)
 	go func() {
-		written <- c.writeMessage(rpcMessage{JSONRPC: "2.0", Method: method, Params: paramsRaw})
+		written <- c.writeMessage(rpcMessage{JSONRPC: jsonRPCVersion, Method: method, Params: paramsRaw})
 	}()
 	select {
 	case err := <-written:
@@ -334,7 +338,7 @@ func (c *Client) readLoop() {
 			c.fail(fmt.Errorf("decode ACP JSON-RPC message: %w", err))
 			return
 		}
-		if message.JSONRPC != "2.0" {
+		if message.JSONRPC != jsonRPCVersion {
 			c.fail(fmt.Errorf("unsupported ACP JSON-RPC version %q", message.JSONRPC))
 			return
 		}
@@ -393,7 +397,7 @@ func (c *Client) dispatchRequest(message rpcMessage) {
 		id := cloneRaw(message.ID)
 		go func() {
 			defer func() { <-c.rejectGate }()
-			response := rpcMessage{JSONRPC: "2.0", ID: id, Error: &RPCError{Code: -32000, Message: "too many concurrent requests"}}
+			response := rpcMessage{JSONRPC: jsonRPCVersion, ID: id, Error: &RPCError{Code: -32000, Message: "too many concurrent requests"}}
 			if err := c.writeMessage(response); err != nil {
 				c.fail(err)
 			}
@@ -411,7 +415,7 @@ func (c *Client) handleRequest(message rpcMessage) {
 	} else {
 		rpcErr = &RPCError{Code: -32601, Message: "method not supported"}
 	}
-	response := rpcMessage{JSONRPC: "2.0", ID: cloneRaw(message.ID), Error: rpcErr}
+	response := rpcMessage{JSONRPC: jsonRPCVersion, ID: cloneRaw(message.ID), Error: rpcErr}
 	if rpcErr == nil {
 		raw, err := marshalOptional(result)
 		if err != nil {

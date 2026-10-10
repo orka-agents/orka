@@ -45,9 +45,9 @@ func authorizeKubernetesTaskCreate(ctx context.Context, clientset kubernetes.Int
 			Extra:  extra,
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
 				Namespace: task.Namespace,
-				Verb:      "create",
+				Verb:      externalToolCreateVerb,
 				Group:     corev1alpha1.GroupVersion.Group,
-				Resource:  "tasks",
+				Resource:  externalToolTaskResource,
 			},
 		},
 	}, metav1.CreateOptions{})

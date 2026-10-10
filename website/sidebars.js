@@ -5,6 +5,7 @@ const sidebars = {
   tutorialSidebar: [
     'getting-started',
     'operations/installation',
+    'demos',
     {
       type: 'category',
       label: 'Guides',
@@ -19,7 +20,9 @@ const sidebars = {
         'guides/repository-security-scanning',
         'guides/repository-monitors',
         'guides/github-label-triggers',
+        'guides/connectors',
         'guides/issue-to-pr-automation',
+        'guides/usage-and-pr-outcomes',
         'guides/ui',
         'guides/observability',
       ],

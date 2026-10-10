@@ -74,8 +74,7 @@ func (r *RetryProvider) Complete(ctx context.Context, req *CompletionRequest) (*
 	return nil, lastErr
 }
 
-// Stream calls the inner provider's Stream with peek-at-first-chunk retry logic.
-// Both providers' Stream() always return (ch, nil) — errors appear as the first chunk.
+// Stream retries transient errors until the provider emits output or completes.
 func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
 	var lastErr error
 	for attempt := 0; attempt <= r.maxRetries; attempt++ {
@@ -93,8 +92,8 @@ func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 			continue
 		}
 
-		// Peek at the first chunk to check for errors
-		firstChunk, ok := <-innerCh
+		// Usage-only updates do not commit this attempt before output arrives.
+		firstChunk, ok := firstStreamResult(innerCh)
 		if !ok {
 			ch := make(chan StreamChunk)
 			close(ch)

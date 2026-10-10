@@ -320,9 +320,9 @@ type AgentRuntimeMCPPolicySpec struct {
 	// AllowBash controls whether an allowed tool named Bash may execute.
 	AllowBash bool `json:"allowBash"`
 
-	// ApprovalRequiredTools must remain an explicit empty list until the
-	// controller owns external-runtime permission review.
-	// +kubebuilder:validation:MaxItems=0
+	// ApprovalRequiredTools lists brokered tools whose exact calls require an
+	// Orka reviewer decision. The runtime must support brokered tool approvals.
+	// +kubebuilder:validation:MaxItems=128
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=128
 	ApprovalRequiredTools []string `json:"approvalRequiredTools"`

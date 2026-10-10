@@ -140,7 +140,7 @@ func (s *Server) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 	s.writePublicJSON(writer, http.StatusOK, HealthResponse{Status: "ok", Ready: true})
 }
 
-func (s *Server) handleCapabilities(writer http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleCapabilities(writer http.ResponseWriter, request *http.Request) {
 	operations := []Operation{
 		OperationWorkspaceResolve, OperationWorkspacePrepare, OperationPublicationPreflight, OperationPublicationPrepare,
 		OperationPublicationPublish, OperationPublicationVerify, OperationPublicationReclaim,
@@ -156,6 +156,7 @@ func (s *Server) handleCapabilities(writer http.ResponseWriter, _ *http.Request)
 		CredentialKinds: append([]CredentialKind(nil), credentialKinds...),
 		SCMSchemes:      []string{schemeHTTPS}, GitVersion: s.gitVersion, RedirectsAllowed: false,
 		ProviderOrMCPAccess: false, PullRequestReconciliation: s.config.PRFactory != nil,
+		PullRequestPresentation: s.config.PRFactory != nil && request.URL.Query().Get("features") == PullRequestPresentationFeature,
 		Limits: CapabilityLimits{
 			MaxConcurrentOperations: s.config.MaxConcurrentOperations,
 			MaxRequestBytes:         s.config.MaxRequestBytes, MaxResponseBytes: s.config.MaxResponseBytes,
