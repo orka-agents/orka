@@ -43,9 +43,14 @@ const (
 	podWaitingReasonRunContainer          = "RunContainerError"
 )
 
+// runtimePoolToolboxVolumeHeadroomBytes covers directory metadata and the
+// copier's completion marker on top of the accepted content bytes, so a
+// toolbox at the documented limit still fits a size-enforced emptyDir.
+const runtimePoolToolboxVolumeHeadroomBytes int64 = 64 << 20
+
 var (
 	runtimePoolToolboxHandoffSizeLimit = resource.MustParse("64Mi")
-	runtimePoolToolboxVolumeSizeLimit  = resource.MustParse(strconv.FormatInt(toolbox.DefaultMaxTotalBytes, 10))
+	runtimePoolToolboxVolumeSizeLimit  = resource.MustParse(strconv.FormatInt(toolbox.DefaultMaxTotalBytes+runtimePoolToolboxVolumeHeadroomBytes, 10))
 )
 
 func runtimePoolToolboxVolumeName(index int) string {

@@ -1072,9 +1072,17 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 			status.Message = "previously active runtime Pod is not Ready; preserving its exact fence while admission is closed"
+			rolloutReason := corev1alpha1.RuntimePoolReasonRolloutFailed
+			// A restarted active Pod that fails its toolbox checks must still
+			// surface ToolboxUnavailable so waiting Tasks fail instead of
+			// retrying against a fence that can never serve again.
+			if reason, message, ok := runtimePoolToolboxFailure(pods, cfg.profile.Toolboxes); ok {
+				rolloutReason = reason
+				status.Message = message
+			}
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, rolloutReason, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.ActiveInstance = nil

@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp/toolbox"
@@ -179,7 +180,7 @@ func assertToolboxCopyVolumes(t *testing.T, template corev1.PodTemplateSpec, cou
 	}
 	for i := range count {
 		volume := volumes[runtimePoolToolboxVolumeName(i)]
-		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit.Value() != toolbox.DefaultMaxTotalBytes {
+		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit.Value() <= toolbox.DefaultMaxTotalBytes {
 			t.Fatalf("toolbox volume %d = %#v", i, volume)
 		}
 	}
@@ -501,5 +502,59 @@ func TestRuntimePoolToolboxesFromEnvironment(t *testing.T) {
 	decoded, err := runtimePoolToolboxesFromEnvironment(map[string]string{runtimePoolToolboxesEnv: encoded})
 	if err != nil || len(decoded) != 2 || decoded[0].MountPath != "/opt/yq-jq" {
 		t.Fatalf("round trip: %v %#v", err, decoded)
+	}
+}
+
+// A previously active runtime Pod that restarts and fails its toolbox checks
+// must report ToolboxUnavailable (not the generic RolloutFailed) so waiting
+// Tasks fail instead of retrying against a fence that can never serve again.
+func TestRuntimePoolReconcileReportsToolboxUnavailableForRestartedActivePod(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "codex-pod", "pod-uid-1", "10.0.0.21")
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "boot-1", false)}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+
+	runtimePoolReconcile(t, r, pool)
+	var current corev1alpha1.RuntimePool
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.ActiveInstance == nil || current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("pool with toolboxes did not become serving: %#v", current.Status)
+	}
+
+	// The active Pod restarts and the supervisor's startup toolbox check fails.
+	runtimePoolTestSetPodReady(t, r, &pod, false)
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatal(err)
+	}
+	currentPod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: runtimeField,
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 1, Message: "FAIL reason=TOOLBOX_MISSING_PATH_ENTRY msg=toolbox /opt/yq-jq path entry bin: not a folder",
+		}},
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+	}}
+	if err := r.Status().Update(context.Background(), currentPod); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonToolboxUnavailable ||
+		!strings.Contains(condition.Message, "TOOLBOX_MISSING_PATH_ENTRY") {
+		t.Fatalf("rollout condition = %#v", condition)
+	}
+	if current.Status.ActiveInstance == nil {
+		t.Fatal("the exact active-instance fence must be preserved while admission is closed")
+	}
+	if _, ok := runtimePoolToolboxUnavailableMessage(&current); !ok {
+		t.Fatal("dispatcher settlement must see the ToolboxUnavailable condition")
 	}
 }

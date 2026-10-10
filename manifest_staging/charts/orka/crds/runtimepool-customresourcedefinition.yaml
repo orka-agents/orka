@@ -407,7 +407,7 @@ spec:
                               items:
                                 maxLength: 256
                                 minLength: 1
-                                pattern: ^[^/:,\s][^:,\s]*$
+                                pattern: ^[A-Za-z0-9._-][A-Za-z0-9._/-]*$
                                 type: string
                               maxItems: 8
                               type: array

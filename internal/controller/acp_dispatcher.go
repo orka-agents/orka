@@ -3860,6 +3860,19 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 			}
 			return nil, acpDispatchTarget{}, claimErr
 		}
+		// A reservation that already existed is returned without rechecking
+		// the pool lifecycle, so a toolbox failure after the reservation (or a
+		// controller restart) must still fail the Task here instead of
+		// renewing the reservation forever.
+		if _, unavailable := runtimePoolToolboxUnavailableMessage(pool); unavailable {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			releaseErr := d.releaseRuntimePoolReservation(releaseCtx, *reservation)
+			cancel()
+			if releaseErr != nil {
+				return nil, acpDispatchTarget{}, releaseErr
+			}
+			return nil, acpDispatchTarget{}, d.settleRuntimePoolToolboxUnavailableForPool(ctx, task, attemptID, fence, pool)
+		}
 		target.pool = pool
 		target.reservation = reservation
 	}
@@ -6972,21 +6985,34 @@ func (d *ACPDispatcher) settleRuntimePoolToolboxUnavailable(
 	if poolUID := strings.TrimSpace(task.Status.Execution.RuntimePoolUID); poolUID != "" && poolUID != string(pool.UID) {
 		return false, nil
 	}
-	message, unavailable := runtimePoolToolboxUnavailableMessage(pool)
-	if !unavailable {
+	if _, unavailable := runtimePoolToolboxUnavailableMessage(pool); !unavailable {
 		return false, nil
 	}
-	reason := corev1alpha1.TaskExecutionReason(corev1alpha1.RuntimePoolReasonToolboxUnavailable)
-	message = boundACPStatusMessage(message)
-	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "toolbox-unavailable", reason, message); err != nil {
-		return false, err
-	}
-	if err := d.failTaskBeforeSessionBinding(
-		ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
-	); err != nil {
+	if err := d.settleRuntimePoolToolboxUnavailableForPool(ctx, task, attemptID, fence, pool); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// settleRuntimePoolToolboxUnavailableForPool fails the queued or reserved
+// Task with the pool's ToolboxUnavailable message. The caller has already
+// verified the pool reports that condition and released any reservation.
+func (d *ACPDispatcher) settleRuntimePoolToolboxUnavailableForPool(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	pool *corev1alpha1.RuntimePool,
+) error {
+	message, _ := runtimePoolToolboxUnavailableMessage(pool)
+	reason := corev1alpha1.TaskExecutionReason(corev1alpha1.RuntimePoolReasonToolboxUnavailable)
+	message = boundACPStatusMessage(message)
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "toolbox-unavailable", reason, message); err != nil {
+		return err
+	}
+	return d.failTaskBeforeSessionBinding(
+		ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+	)
 }
 
 // runtimePoolToolboxUnavailableMessage reports the pool's current-generation

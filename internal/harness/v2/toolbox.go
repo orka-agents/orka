@@ -32,7 +32,13 @@ var RuntimeToolboxReservedOptNames = []string{
 	"codex", "codex-acp", "claude", "claude-agent-acp", "copilot", "opencode", "ripgrep", "yarn-v1.22.22",
 }
 
-var runtimeToolboxOptNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var (
+	runtimeToolboxOptNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	// runtimeToolboxPathEntryPattern keeps path entries to characters that are
+	// safe in PATH, in the copier's comma-separated flag, and in the generated
+	// login profile (no shell metacharacters or whitespace).
+	runtimeToolboxPathEntryPattern = regexp.MustCompile(`^[A-Za-z0-9._-][A-Za-z0-9._/-]*$`)
+)
 
 // RuntimeToolbox is one read-only tool image bound into a runtime Pod. The
 // declared order is significant: it decides PATH precedence between toolboxes
@@ -160,6 +166,9 @@ func validateRuntimeToolboxPathEntry(mountPath, entry string) error {
 	}
 	if strings.HasPrefix(entry, "/") {
 		return fmt.Errorf("toolbox pathEntry %q must be relative to %s", entry, mountPath)
+	}
+	if !runtimeToolboxPathEntryPattern.MatchString(entry) {
+		return fmt.Errorf("toolbox pathEntry %q may contain only letters, digits, '.', '_', '-' and '/'", entry)
 	}
 	if path.Clean(entry) != entry || entry == "." {
 		return fmt.Errorf("toolbox pathEntry %q must be a clean relative path", entry)

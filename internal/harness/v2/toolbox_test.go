@@ -94,7 +94,7 @@ func TestRuntimeToolboxValidatePathEntries(t *testing.T) {
 		}
 	}
 	invalid := [][]string{
-		{"/bin"}, {"../bin"}, {"bin/../sbin"}, {"."}, {""}, {"bin/"}, {"bin//sbin"}, {"./bin"}, {"bi:n"}, {"bin,legacy"}, {"bin", "bin"},
+		{"/bin"}, {"../bin"}, {"bin/../sbin"}, {"."}, {""}, {"bin/"}, {"bin//sbin"}, {"./bin"}, {"bi:n"}, {"bin,legacy"}, {"bin$cache"}, {"bin cache"}, {"bin`id`"}, {"bin\\x"}, {"bin'x"}, {"bin", "bin"},
 		{"a", "b", "c", "d", "e", "f", "g", "h", "i"}, {strings.Repeat("a", 257)}, {"bi\x00n"},
 	}
 	for _, entries := range invalid {

@@ -2585,7 +2585,7 @@ func resolveACPToolboxPolicy(
 	// running. Toolbox Agents then get the stable ToolboxUnavailable result.
 	unavailable := func(err error) controller.ACPToolboxPolicy {
 		policy.UnavailableReason = fmt.Sprintf(
-			"could not verify image-volume support from the API server version (%v); restart the controller with registry access or use --acp-toolbox-mount-method=copy", err,
+			"could not verify image-volume support from the API server version (%v); check the controller's API server connectivity and discovery access, then restart it, or use --acp-toolbox-mount-method=copy", err,
 		)
 		setupLog.Error(err, "toolbox image volumes are unavailable; Agents with toolboxes are rejected until the controller restarts")
 		return policy
