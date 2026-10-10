@@ -585,7 +585,7 @@ func TestUpdateAgentTool_Execute_AcceptsOpenCodeSystemPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated.Spec.SystemPrompt == nil || updated.Spec.SystemPrompt.Inline != "You write code" {
-		t.Fatalf("systemPrompt = %#v, want unchanged nil value", updated.Spec.SystemPrompt)
+		t.Fatalf("systemPrompt = %#v, want inline %q", updated.Spec.SystemPrompt, "You write code")
 	}
 }
 
