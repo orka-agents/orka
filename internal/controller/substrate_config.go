@@ -235,9 +235,16 @@ func (c SubstrateConfig) ValidateMCPTools() error {
 // validateSubstrateRouting checks the router URL and actor DNS suffix that MCP
 // actor requests are routed with.
 func validateSubstrateRouting(routerURL, actorDNSSuffix string) error {
-	parsed, err := url.Parse(strings.TrimSpace(routerURL))
+	trimmed := strings.TrimSpace(routerURL)
+	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
 		return fmt.Errorf("substrate router URL is invalid")
+	}
+	// Tool.status.endpoint republishes the router URL to Tool readers, and the
+	// MCP path is appended to it as text.
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.Contains(trimmed, "#") {
+		return fmt.Errorf("substrate router URL must not contain credentials, a query, or a fragment")
 	}
 	suffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
 	if suffix == "" {
