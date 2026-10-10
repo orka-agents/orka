@@ -301,6 +301,9 @@ func main() {
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
 	var aiWorkerImage string
+	var aiWorkerCodeExecBackend string
+	var hyperlightDeviceResource string
+	var hyperlightDeviceGID int64
 	var storeBackend string
 	var storePath string
 	var usageRetention time.Duration
@@ -466,6 +469,15 @@ func main() {
 		"Enable the development-only fake.workspace.orka.ai/v1 adapter; requires --enable-workspace-provider-api.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
+	flag.StringVar(&aiWorkerCodeExecBackend, "ai-worker-code-exec-backend",
+		os.Getenv("ORKA_AI_WORKER_CODE_EXEC_BACKEND"),
+		"Pin the code_exec backend of AI workers (kubernetes, in-process or hyperlight); empty leaves the worker default. "+
+			"hyperlight needs an AI worker image with hluk and the Hyperlight device plugin on the nodes.")
+	flag.StringVar(&hyperlightDeviceResource, "hyperlight-device-resource",
+		controller.DefaultHyperlightDeviceResource,
+		"Extended resource a Pod requests for the Hyperlight hypervisor device.")
+	flag.Int64Var(&hyperlightDeviceGID, "hyperlight-device-gid", 0,
+		"Group that owns the Hyperlight hypervisor device in Pods (the device plugin's DEVICE_GID); 0 adds none.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
 	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
@@ -1683,6 +1695,16 @@ func main() {
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
+	switch backend := strings.ToLower(strings.TrimSpace(aiWorkerCodeExecBackend)); backend {
+	case "", "kubernetes", "in-process", "hyperlight":
+		jobBuilder.CodeExecBackend = backend
+	default:
+		setupLog.Error(fmt.Errorf("unsupported value %q", aiWorkerCodeExecBackend),
+			"invalid --ai-worker-code-exec-backend; want kubernetes, in-process or hyperlight")
+		os.Exit(1)
+	}
+	jobBuilder.HyperlightDeviceResource = hyperlightDeviceResource
+	jobBuilder.HyperlightDeviceGID = hyperlightDeviceGID
 	jobBuilder.EnforceTransactionCredentialAuth =
 		contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce
 	jobBuilder.TransactionCredentialReadScopes = append(
