@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -323,6 +324,32 @@ func TestRunBootsColdFromACacheOthersCanWrite(t *testing.T) {
 	}
 	if result, _, _, err = run(t, f.runner, context.Background(), Request{Script: "true"}); err != nil || !result.Warm {
 		t.Fatalf("shared Pod: result=%+v err=%v, want a warm run under a sticky parent", result, err)
+	}
+}
+
+// The ACP supervisor runs with umask 077; the users it runs hluk as must
+// still reach the snapshots and scripts.
+func TestRunOpensItsDirectoriesWhateverTheUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	f := newFixture(t)
+	cache := filepath.Join(f.cache, "c")
+	f.runner.cfg.CacheDir = cache
+	result, stdout, _, err := run(t, f.runner, context.Background(), Request{Script: `ls -ld "$(dirname "$script")/.."`})
+	if err != nil || !result.Warm {
+		t.Fatalf("result=%+v err=%v, want a warm run", result, err)
+	}
+	if !strings.HasPrefix(stdout, "drwx--x--x") {
+		t.Fatalf("scripts directory = %q, want rwx--x--x", stdout)
+	}
+	for _, dir := range []string{cache, filepath.Join(cache, "snapshots"), filepath.Join(cache, "snapshots", "bash-128mb-k0123abcd-c4")} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Fatalf("%s mode = %o, want 755", dir, info.Mode().Perm())
+		}
 	}
 }
 

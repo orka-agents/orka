@@ -190,7 +190,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	scriptParent := ""
 	if private {
 		scriptParent = filepath.Join(r.cfg.CacheDir, "scripts")
-		if err := os.MkdirAll(scriptParent, 0o711); err != nil {
+		if err := mkdirMode(scriptParent, 0o711); err != nil {
 			return Result{ExitCode: -1}, fmt.Errorf("create script dir: %w", err)
 		}
 	}
@@ -327,7 +327,7 @@ func (r *Runner) privateCache() bool {
 	if r.cfg.CacheDir == "" || !filepath.IsAbs(r.cfg.CacheDir) {
 		return false
 	}
-	if err := os.MkdirAll(r.cfg.CacheDir, 0o755); err != nil {
+	if err := mkdirMode(r.cfg.CacheDir, 0o755); err != nil {
 		return false
 	}
 	info, err := os.Lstat(r.cfg.CacheDir)
@@ -394,7 +394,7 @@ func (r *Runner) warmSnapshot(ctx context.Context, runtime, rootfs string) (stri
 	}
 	// A snapshot is a freshly booted runtime image, nothing of any run: it
 	// stays readable by every user a Credential may run as.
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+	if err := mkdirMode(filepath.Dir(dir), 0o755); err != nil {
 		return "", false
 	}
 	partial, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".part-*")
@@ -420,6 +420,20 @@ func (r *Runner) warmSnapshot(ctx context.Context, runtime, rootfs string) (stri
 		return "", false
 	}
 	return dir, true
+}
+
+// mkdirMode makes dir with mode whatever the process umask (the ACP
+// supervisor's is 077): the users a Credential runs as traverse it. A
+// directory that already exists keeps its mode, so one left open to others
+// stays untrusted rather than adopted with whatever they put in it.
+func mkdirMode(dir string, mode os.FileMode) error {
+	if _, err := os.Lstat(dir); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, mode); err != nil {
+		return err
+	}
+	return os.Chmod(dir, mode)
 }
 
 func makeReadable(root string) error {
