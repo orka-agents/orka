@@ -128,6 +128,7 @@ for key,value in [('temperature','0.7'),('top_p','0.8'),('top_k','20'),('min_p',
     assert re.search(r'^    '+key+r': '+re.escape(value)+r'$',configuration,re.M)
 assert 'enable_thinking: false' in configuration
 assert '"n_ubatch:128"' in configuration
+assert 'flash_attention: "off"' in configuration
 assert re.search(r'^  reasoning:\n    disable: true$',configuration,re.M)
 assert re.search(r'^    runs-on: ubuntu-latest$',workflow,re.M)
 assert re.search(r'^    timeout-minutes: 120$',workflow,re.M)

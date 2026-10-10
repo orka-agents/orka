@@ -9,6 +9,7 @@
     presence_penalty: 1.5
     repeat_penalty: 1.0
   f16: true
+  flash_attention: "off"
   mmap: true
   reasoning_effort: none
   reasoning:
