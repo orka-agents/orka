@@ -2042,10 +2042,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			streamErr = acpUpdatePersistenceError(persistErr, nil)
 		}
 		cancel()
-		return d.handlePromptStreamError(
+		settlementErr := d.handlePromptStreamError(
 			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence, journalState,
 			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextErr, streamErr,
 		)
+		if runtimeContextErr == nil {
+			return settlementErr
+		}
+		// A proven cancellation can settle the PromptAttempt without the
+		// in-memory SessionTurn. Commit its marker and carried checkpoint before
+		// the runtime cleanup defer runs; the earlier Session finalization defer
+		// otherwise executes only after cleanup has already failed closed.
+		settlementCtx, cancelSettlement := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
+		defer cancelSettlement()
+		if finalizeErr := d.reconcileUnfinalizedTaskSession(settlementCtx, task, fence, sessionExecution, settlementErr); finalizeErr != nil {
+			return errors.Join(settlementErr, finalizeErr)
+		}
+		return settlementErr
 	}
 	if terminal == nil {
 		if err := flushInterruptedOutput(ctx); err != nil {

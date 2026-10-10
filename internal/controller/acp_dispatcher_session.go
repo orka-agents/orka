@@ -201,7 +201,13 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 	default:
 		return fmt.Errorf("unsupported unfinalized ACP SessionTurn attempt state %s", attempt.ExecutionState)
 	}
-	return d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence)
+	if err := d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
+		return err
+	}
+	// Recovery reconstructs a separate SessionTurn. Reflect its completed
+	// durable finalization on the live turn before runtime cleanup examines it.
+	session.finalized = d.finalizedSessionTurnKnown(task.UID, session.Turn.Turn.ID)
+	return nil
 }
 
 type acpTaskSessionPreparation struct {

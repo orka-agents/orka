@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orka-agents/orka/internal/codexstate"
@@ -15,6 +16,13 @@ import (
 )
 
 const maxNativeSessionBundleBytes = harnessv2.MaxNativeSessionBytes
+
+// isNativeSessionImportPath identifies only the bounded native import route.
+func isNativeSessionImportPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) == 5 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], "sessions") && parts[3] != "" && strings.EqualFold(parts[4], "native")
+}
 
 type nativeSessionImportRequest struct {
 	OperationID string `json:"operationID"`

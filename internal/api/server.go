@@ -202,6 +202,13 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
 	}
+	// Use Fiber's fasthttp path semantics for the streaming exemption, including
+	// fragment handling. net/url would retain a literal '#' in the path and
+	// leave a routed native import without its bounded read deadline.
+	var nativeURI fasthttp.URI
+	if nativeURI.Parse(header.Host(), header.RequestURI()) == nil && isNativeSessionImportPath(string(nativeURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: 2 * maxNativeSessionBundleBytes, ReadTimeout: 30 * time.Second}
+	}
 	// Internal broker endpoints authorize against per-pool secrets that are
 	// only resolvable from the request body, so unauthenticated peers cannot
 	// be rejected on headers alone. Bound both the body size and the full
