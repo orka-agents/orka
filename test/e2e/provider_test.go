@@ -75,7 +75,7 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "What is 2+2? Reply with just the number.",
+					"prompt": "What is 2+2? Reply with just the number. [e2e:provider-openai]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
@@ -95,6 +95,13 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 
 		By("verifying the result is available")
 		verifyResultAvailable(openaiTaskName)
+
+		if e2eMockOpenAI {
+			By("verifying the worker called the OpenAI Responses API with the Task model")
+			served := expectMockLLMServed("[e2e:provider-openai]", 30*time.Second)
+			Expect(served[0].Path).To(Equal("/v1/responses"))
+			Expect(served[0].Body.Model).To(Equal(model))
+		}
 	})
 
 	It("should complete an AI task using an Anthropic provider", func() {
@@ -119,7 +126,7 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "What is 2+2? Reply with just the number.",
+					"prompt": "What is 2+2? Reply with just the number. [e2e:provider-anthropic]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
@@ -139,5 +146,12 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 
 		By("verifying the result is available")
 		verifyResultAvailable(anthropicTaskName)
+
+		if e2eMockAnthropic {
+			By("verifying the worker called the Anthropic Messages API with the Task model")
+			served := expectMockLLMServed("[e2e:provider-anthropic]", 30*time.Second)
+			Expect(served[0].Path).To(Equal("/v1/messages"))
+			Expect(served[0].Body.Model).To(Equal(model))
+		}
 	})
 })

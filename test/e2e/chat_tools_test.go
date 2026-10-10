@@ -10,8 +10,8 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -57,18 +57,21 @@ var _ = Describe("Chat with Tool Execution", Ordered, func() {
 	})
 
 	It("should execute tools during chat and return tool results in SSE stream", func() {
+		const marker = "[e2e:chat-tools-list-tools]"
 		model := e2eOpenAIModel
 		if model == "" {
 			model = "gpt-4o-mini"
 		}
 
-		By("sending a chat message that should trigger code_exec tool use")
+		// The chat coordinator exposes management tools such as list_tools,
+		// not worker built-ins such as code_exec.
+		By("sending a chat message that should trigger list_tools tool use")
 		chatBody := fmt.Sprintf(`{
-			"message": "Use the code_exec tool to calculate 123 * 456. You MUST use the code_exec tool, do not calculate it yourself.",
+			"message": "Use the list_tools tool to list the tools in this namespace, then summarize them in one sentence. You MUST use the list_tools tool. %s",
 			"provider": "%s",
 			"model": "%s",
-			"tools": ["code_exec"]
-		}`, providerName, model)
+			"tools": ["list_tools"]
+		}`, marker, providerName, model)
 
 		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/chat",
 			strings.NewReader(chatBody))
@@ -85,33 +88,34 @@ var _ = Describe("Chat with Tool Execution", Ordered, func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusOK), "Chat endpoint should return 200")
 
 		By("reading SSE events and checking for tool-related events")
-		scanner := bufio.NewScanner(resp.Body)
-		var events []string
-		hasMessage := false
-		hasDone := false
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "event:") {
-				eventType := strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-				events = append(events, eventType)
-				if eventType == "message" {
-					hasMessage = true
-				}
-				if eventType == "done" {
-					hasDone = true
-					break
-				}
-			}
-		}
+		sseEvents := readChatSSEEvents(resp.Body)
+		events := chatSSEEventNames(sseEvents)
 
 		_, _ = fmt.Fprintf(GinkgoWriter, "Received SSE events: %v\n", events)
 
-		Expect(hasMessage).To(BeTrue(), "Should have message events in stream")
-		Expect(hasDone).To(BeTrue(), "Should have done event to terminate stream")
+		Expect(events).To(ContainElement("message"), "Should have message events in stream")
+		Expect(events).To(ContainElement("done"), "Should have done event to terminate stream")
+
+		if e2eMockOpenAI {
+			By("verifying the coordinator executed list_tools and streamed its result")
+			Expect(events).To(Equal([]string{"status", "tool_call", "tool_result", "message", "done"}))
+			var toolResult struct {
+				Name   string          `json:"name"`
+				Result json.RawMessage `json:"result"`
+			}
+			Expect(json.Unmarshal([]byte(sseEvents[2].Data), &toolResult)).To(Succeed())
+			Expect(toolResult.Name).To(Equal("list_tools"))
+			Expect(string(toolResult.Result)).To(ContainSubstring(`"success":true`))
+			Expect(expectMockLLMToolResult(marker, "list_tools", 30*time.Second)).To(ContainSubstring(`"success":true`))
+			Expect(chatSSEMessageText(sseEvents)).To(Equal("list_tools returned the tools in this namespace."))
+			usage := chatSSEDoneUsage(sseEvents)
+			Expect(usage.LLMCalls).To(Equal(2))
+			Expect(usage.ToolCalls).To(Equal(1))
+		}
 	})
 
 	It("should handle chat with web_search tool", func() {
+		const marker = "[e2e:chat-tools-direct-answer]"
 		model := e2eOpenAIModel
 		if model == "" {
 			model = "gpt-4o-mini"
@@ -119,10 +123,10 @@ var _ = Describe("Chat with Tool Execution", Ordered, func() {
 
 		By("sending a chat message with web_search tool enabled")
 		chatBody := fmt.Sprintf(`{
-			"message": "What is the capital of France? Just answer directly.",
+			"message": "What is the capital of France? Just answer directly. %s",
 			"provider": "%s",
 			"model": "%s"
-		}`, providerName, model)
+		}`, marker, providerName, model)
 
 		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/chat",
 			strings.NewReader(chatBody))
@@ -139,35 +143,20 @@ var _ = Describe("Chat with Tool Execution", Ordered, func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 		By("verifying we get a complete response")
-		scanner := bufio.NewScanner(resp.Body)
-		hasMessage := false
-		hasDone := false
-		var contentParts []string
+		sseEvents := readChatSSEEvents(resp.Body)
+		events := chatSSEEventNames(sseEvents)
 
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "event:") {
-				eventType := strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-				if eventType == "message" {
-					hasMessage = true
-				}
-				if eventType == "done" {
-					hasDone = true
-					break
-				}
-			}
-			if strings.HasPrefix(line, "data:") {
-				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-				if data != "" {
-					contentParts = append(contentParts, data)
-				}
-			}
-		}
+		Expect(events).To(ContainElement("message"), "Should receive message events")
+		Expect(events).To(ContainElement("done"), "Should receive done event")
 
-		Expect(hasMessage).To(BeTrue(), "Should receive message events")
-		Expect(hasDone).To(BeTrue(), "Should receive done event")
-
-		fullContent := strings.Join(contentParts, "")
+		fullContent := chatSSEMessageText(sseEvents)
 		_, _ = fmt.Fprintf(GinkgoWriter, "Chat response content: %s\n", fullContent)
+
+		if e2eMockOpenAI {
+			By("verifying the scripted direct answer needed no tools")
+			Expect(events).To(Equal([]string{"status", "message", "done"}))
+			Expect(fullContent).To(Equal("Paris"))
+			expectMockLLMServed(marker, 30*time.Second)
+		}
 	})
 })

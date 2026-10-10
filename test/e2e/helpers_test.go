@@ -166,9 +166,17 @@ type apiMemoryProposalListResponse struct {
 	Items []store.MemoryProposal `json:"items"`
 }
 
-// skipIfNoKey skips the current test if the given environment variable is not set or empty.
+// skipIfNoKey skips the current test when the credential named by envVar is
+// unavailable. Model keys resolve to aimock unless E2E_DISABLE_MOCK_LLM is set.
 func skipIfNoKey(envVar string) {
-	if os.Getenv(envVar) == "" {
+	value := os.Getenv(envVar)
+	switch envVar {
+	case "E2E_OPENAI_API_KEY":
+		value = e2eOpenAIAPIKey
+	case "E2E_ANTHROPIC_API_KEY":
+		value = e2eAnthropicAPIKey
+	}
+	if value == "" {
 		Skip(fmt.Sprintf("Skipping: %s not set", envVar))
 	}
 }

@@ -25,9 +25,11 @@ jobs:
   test-e2e:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     env:
       KIND_CLUSTER: orka-test-e2e
+      # Model-backed specs run against the in-cluster aimock fixtures.
+      E2E_GO_TEST_TIMEOUT: 70m
       E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/general
     steps:
       - name: Clone the code

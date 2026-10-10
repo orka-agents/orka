@@ -10,6 +10,7 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -110,11 +111,12 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "Use the code_exec tool to run this Python code and tell me the result:\n\nimport json\ndata = {'numbers': [i**2 for i in range(1, 6)], 'sum': sum(i**2 for i in range(1, 6))}\nprint(json.dumps(data))\n\nAfter running it, confirm the sum is correct by explaining the calculation.",
+					"prompt": "Use the code_exec tool to run this Python code and tell me the result:\n\nimport json\ndata = {'numbers': [i**2 for i in range(1, 6)], 'sum': sum(i**2 for i in range(1, 6))}\nprint(json.dumps(data))\n\nAfter running it, confirm the sum is correct by explaining the calculation. [e2e:comprehensive-ai]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
-					}
+					},
+					"tools": ["code_exec"]
 				}
 			}
 		}`, aiCompTaskName, namespace, model, aiProviderName)
@@ -130,6 +132,20 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 
 		By("verifying the result is stored")
 		verifyResultAvailable(aiCompTaskName)
+
+		if e2eMockOpenAI {
+			By("verifying code_exec ran the script and returned its output to the model")
+			output := expectMockLLMToolResult("[e2e:comprehensive-ai]", "code_exec", 30*time.Second)
+			var result struct {
+				Output   string `json:"output"`
+				Error    string `json:"error"`
+				ExitCode int    `json:"exit_code"`
+			}
+			Expect(json.Unmarshal([]byte(output), &result)).To(Succeed(), "code_exec output: %s", output)
+			Expect(result.Error).To(BeEmpty(), "code_exec output: %s", output)
+			Expect(result.ExitCode).To(Equal(0), "code_exec output: %s", output)
+			Expect(result.Output).To(ContainSubstring(`{"numbers": [1, 4, 9, 16, 25], "sum": 55}`))
+		}
 	})
 
 	// ACP agent task: validates shared RuntimePool planning instead of per-Task Jobs.

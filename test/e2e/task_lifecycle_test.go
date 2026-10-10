@@ -34,6 +34,9 @@ var _ = Describe("Task Lifecycle Advanced", Ordered, func() {
 		serialProviderName = "e2e-serial-provider"
 		serialSessionRef   = "e2e-serial-session"
 		lockSessionRef     = "e2e-lock-session"
+
+		serialFirstMarker  = "[e2e:lifecycle-serial-first]"
+		serialSecondMarker = "[e2e:lifecycle-serial-second]"
 	)
 
 	AfterAll(func() {
@@ -221,12 +224,12 @@ var _ = Describe("Task Lifecycle Advanced", Ordered, func() {
 				"type": "ai",
 				"sessionRef": {"name": "%s", "create": true},
 				"ai": {
-					"prompt": "Write a short paragraph about the history of computing, covering at least five key milestones. Take your time and be thorough.",
+					"prompt": "Write a short paragraph about the history of computing, covering at least five key milestones. Take your time and be thorough. %s",
 					"model": "%s",
 					"providerRef": {"name": "%s"}
 				}
 			}
-		}`, serialSession1Name, namespace, serialSessionRef, model, serialProviderName)
+		}`, serialSession1Name, namespace, serialSessionRef, serialFirstMarker, model, serialProviderName)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(task1Manifest)
@@ -245,12 +248,12 @@ var _ = Describe("Task Lifecycle Advanced", Ordered, func() {
 				"type": "ai",
 				"sessionRef": {"name": "%s", "create": true},
 				"ai": {
-					"prompt": "Say hello.",
+					"prompt": "Say hello. %s",
 					"model": "%s",
 					"providerRef": {"name": "%s"}
 				}
 			}
-		}`, serialSession2Name, namespace, serialSessionRef, model, serialProviderName)
+		}`, serialSession2Name, namespace, serialSessionRef, serialSecondMarker, model, serialProviderName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(task2Manifest)
@@ -300,6 +303,13 @@ var _ = Describe("Task Lifecycle Advanced", Ordered, func() {
 
 		Expect(task2StartTime).To(BeTemporally(">=", task1CompletionTime.Add(-1*time.Second)),
 			"Task 2 should start after task 1 completes (session serial execution)")
+
+		if e2eMockOpenAI {
+			By("verifying task 2 saw task 1's appended turn in its session history")
+			requests := expectMockLLMServed(serialSecondMarker, time.Minute)
+			Expect(requests[0].RoleText("user")).To(ContainSubstring(serialFirstMarker))
+			Expect(requests[0].RoleText("assistant")).To(ContainSubstring("E2E_SERIAL_FIRST_ANSWER"))
+		}
 	})
 
 	It("should release session lock when task fails", func() {

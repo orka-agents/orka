@@ -170,6 +170,7 @@ var _ = BeforeSuite(func() {
 		"E2E_COPILOT_PROXY_BASE_URL",
 		"COPILOT_PROXY_BASE_URL",
 	)
+	configureMockLLMCredentials()
 
 	By("bootstrapping manager namespace identity")
 	cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "ensure-static-mode-namespace.sh"),
@@ -191,6 +192,11 @@ var _ = BeforeSuite(func() {
 	cmd.Stdin = strings.NewReader(vekilNamespace)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create the Vekil namespace")
+
+	if e2eMockLLMEnabled() {
+		By("deploying the aimock mock LLM for providers without a live key")
+		deployMockLLM(projectDir)
+	}
 
 	By("creating e2e K8s secrets from environment variables")
 	if e2eOpenAIAPIKey != "" {
@@ -362,6 +368,9 @@ var _ = AfterSuite(func() {
 			return runBoundedE2ECleanup(30*time.Second, "kubectl", "delete", "secret", s,
 				"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s")
 		})
+	}
+	if e2eMockLLMEnabled() {
+		step("deleting the aimock mock LLM", deleteMockLLM)
 	}
 	step("undeploying the controller-manager", func() error {
 		return runBoundedE2ECleanup(2*time.Minute, "make", "undeploy", "ignore-not-found=true")

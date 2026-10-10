@@ -1,0 +1,10 @@
+{
+  "fixtures": [
+    {
+      "match": {},
+      "response": {
+        "content": "aimock catch-all response: no scripted fixture matched this request."
+      }
+    }
+  ]
+}

@@ -1,0 +1,199 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:coord-adv-sleeper]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "code_exec",
+            "arguments": {"language": "python", "code": "import time\ntime.sleep(50)\nprint('E2E-SLEEPER-AWAKE-1')", "timeout": 60}
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-sleeper]", "toolResultContains": "E2E-SLEEPER-AWAKE-1"},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "code_exec",
+            "arguments": {"language": "python", "code": "import time\ntime.sleep(50)\nprint('E2E-SLEEPER-AWAKE-2')", "timeout": 60}
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-sleeper]", "toolResultContains": "E2E-SLEEPER-AWAKE-2"},
+      "response": {"content": "E2E-SLEEPER-DONE: the sleeper finished without being cancelled."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-cancel]", "toolResultContains": "\"status\":\"cancelled\""},
+      "response": {"content": "Cancellation succeeded: the delegated task was cancelled."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-cancel]", "toolResultContains": "\"status\":\"created\""},
+      "response": {
+        "toolCalls": [
+          {"name": "wait_for_tasks", "arguments": {"tasks": ["e2e-coord-adv-cancel-hold"], "timeout": "30s"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-cancel]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-coord-adv-worker",
+              "prompt": "[e2e:coord-adv-sleeper] Sleep for a very long time by running code that takes minutes."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-sender]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {"name": "send_message", "arguments": {"to_task": "*", "content": "E2E-HELLO-FROM-A: hello from task A"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-sender]", "hasToolResult": true},
+      "response": {"content": "E2E-SENDER-DONE: message sent."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-reader]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {"name": "check_messages", "arguments": {"mark_read": false}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-reader]", "hasToolResult": true},
+      "response": {"content": "E2E-READER-DONE: checked messages."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-msg]", "toolResultContains": "E2E-READER-DONE"},
+      "response": {"content": "Both delegated tasks completed: task A sent its message and task B checked messages."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-msg]", "toolResultContains": "\"status\":\"created\""},
+      "response": {
+        "toolCalls": [
+          {"name": "wait_for_tasks", "arguments": {"tasks": ["e2e-coord-adv-msg-hold"], "timeout": "30s"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-msg]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-coord-adv-worker",
+              "prompt": "[e2e:coord-adv-sender] Send a message to all siblings saying hello from task A using the send_message tool with to_task set to *. Then report message sent."
+            }
+          },
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-coord-adv-worker",
+              "prompt": "[e2e:coord-adv-reader] Check for messages using the check_messages tool. Report any messages you received."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-flaky]"},
+      "response": {
+        "error": {"message": "e2e scripted model failure", "type": "invalid_request_error"},
+        "status": 400
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-recovered]"},
+      "response": {"content": "E2E-RECOVERED: the retried task succeeded."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-retry]", "toolResultContains": "E2E-RECOVERED"},
+      "response": {"content": "The first attempt failed with retry metadata; the retried task succeeded."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-retry]", "toolResultContains": "failureDetails"},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-coord-adv-worker",
+              "prompt": "[e2e:coord-adv-recovered] Retry the failed task and report that it recovered.",
+              "auto_retry": true,
+              "max_retries": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-retry]", "toolResultContains": "\"status\":\"created\""},
+      "response": {
+        "toolCalls": [
+          {"name": "wait_for_tasks", "arguments": {"tasks": ["e2e-coord-adv-retry-hold"], "timeout": "30s"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-retry]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-coord-adv-worker",
+              "prompt": "[e2e:coord-adv-flaky] Exit with an error by calling code_exec with invalid syntax: }}}",
+              "auto_retry": true,
+              "max_retries": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-sum]"},
+      "response": {"content": "E2E-SUM-20: 20"}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-dynagent]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "create_agent",
+            "arguments": {"role": "dynamic", "systemPrompt": "You answer arithmetic questions with just the number."}
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-dynagent]", "toolResultContains": "\"agentName\""},
+      "response": {
+        "toolCalls": [
+          {"name": "wait_for_tasks", "arguments": {"tasks": ["e2e-coord-adv-dynagent-hold-1"], "timeout": "30s"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-adv-dynagent]", "toolResultContains": "\"taskName\""},
+      "response": {
+        "toolCalls": [
+          {"name": "wait_for_tasks", "arguments": {"tasks": ["e2e-coord-adv-dynagent-hold-2"], "timeout": "30s"}}
+        ]
+      }
+    }
+  ]
+}

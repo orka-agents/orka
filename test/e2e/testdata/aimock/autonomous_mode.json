@@ -1,0 +1,239 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[e2e:auto-goal]",
+        "systemMessage": "Current iteration: 1 of 5",
+        "toolResultContains": "goal marked as COMPLETE"
+      },
+      "response": {
+        "content": "Goal complete: 2+2=4 and 3+3=6."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-goal]",
+        "systemMessage": "Current iteration: 1 of 5",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "update_plan",
+            "arguments": {
+              "summary": "Both delegated computations finished: 2+2=4 and 3+3=6.",
+              "progress_pct": 100,
+              "goal_complete": true,
+              "plan_document": "# Goal\nDelegate 2+2 and 3+3 and report both results.\n\n# Completed\n- [x] Phase 1: delegated both computations\n- [x] Phase 2: collected 2+2=4 and 3+3=6\n\n# Remaining\n- none\n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-goal]",
+        "systemMessage": "Current iteration: 0 of 5",
+        "toolResultContains": "Plan updated:"
+      },
+      "response": {
+        "content": "Iteration 0 complete: both computations were delegated."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-goal]",
+        "systemMessage": "Current iteration: 0 of 5",
+        "toolResultContains": "\"taskName\""
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "update_plan",
+            "arguments": {
+              "summary": "Delegated 2+2 and 3+3 to the worker agent.",
+              "progress_pct": 50,
+              "goal_complete": false,
+              "plan_document": "# Goal\nDelegate 2+2 and 3+3 and report both results.\n\n# Completed\n- [x] Phase 1: delegated both computations\n\n# Remaining\n- [ ] Phase 2: collect both results\n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-goal]",
+        "systemMessage": "Current iteration: 0 of 5",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-auto-worker",
+              "prompt": "Compute 2+2. Reply with only the number. [e2e:auto-goal-child-a]"
+            }
+          },
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-auto-worker",
+              "prompt": "Compute 3+3. Reply with only the number. [e2e:auto-goal-child-b]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-goal-child-a]"
+      },
+      "response": {
+        "content": "4"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-goal-child-b]"
+      },
+      "response": {
+        "content": "6"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-maxiter]",
+        "toolResultContains": "Plan updated:"
+      },
+      "response": {
+        "content": "Iteration complete; the goal intentionally stays open."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-maxiter]",
+        "toolResultContains": "\"taskName\""
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "update_plan",
+            "arguments": {
+              "summary": "Delegated another 1+1 computation; the goal stays open.",
+              "progress_pct": 10,
+              "goal_complete": false,
+              "plan_document": "# Goal\nDelegate 1+1 every iteration.\n\n# In Progress\n- [ ] Delegate 1+1 again next iteration\n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-maxiter]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-auto-worker",
+              "prompt": "Compute 1+1. Reply with only the number. [e2e:auto-maxiter-child]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-maxiter-child]"
+      },
+      "response": {
+        "content": "2"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-env]",
+        "toolResultContains": "goal marked as COMPLETE"
+      },
+      "response": {
+        "content": "Hello! The goal is complete."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-env]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "update_plan",
+            "arguments": {
+              "summary": "Said hello.",
+              "progress_pct": 100,
+              "goal_complete": true,
+              "plan_document": "# Goal\nSay hello.\n\n# Completed\n- [x] Said hello\n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-suspend]",
+        "toolResultContains": "Plan updated:"
+      },
+      "response": {
+        "content": "Iteration complete; delegating again next iteration."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-suspend]",
+        "toolResultContains": "\"taskName\""
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "update_plan",
+            "arguments": {
+              "summary": "Delegated another 1+1 computation; the goal stays open.",
+              "progress_pct": 10,
+              "goal_complete": false,
+              "plan_document": "# Goal\nDelegate 1+1 every iteration until suspended.\n\n# In Progress\n- [ ] Delegate 1+1 again next iteration\n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-suspend]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-auto-worker",
+              "prompt": "Compute 1+1. Reply with only the number. [e2e:auto-suspend-child]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:auto-suspend-child]"
+      },
+      "response": {
+        "content": "2"
+      }
+    }
+  ]
+}

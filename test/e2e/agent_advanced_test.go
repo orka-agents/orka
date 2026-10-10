@@ -225,6 +225,8 @@ var _ = Describe("Agent Advanced Features", func() {
 		taskName1 := prefix + "session-t1"
 		taskName2 := prefix + "session-t2"
 		sessionName := prefix + "session"
+		firstMarker := "[e2e:agent-session-first]"
+		secondMarker := "[e2e:agent-session-second]"
 
 		defer dumpDebugInfo(taskName1, taskName2)
 
@@ -257,12 +259,12 @@ var _ = Describe("Agent Advanced Features", func() {
 					"create": true
 				},
 				"ai": {
-					"prompt": "What is 2+2? Reply with just the number.",
+					"prompt": "What is 2+2? Reply with just the number. %s",
 					"model": "%s",
 					"providerRef": {"name": "%s"}
 				}
 			}
-		}`, taskName1, namespace, sessionName, model, providerName)
+		}`, taskName1, namespace, sessionName, firstMarker, model, providerName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(task1Manifest)
@@ -290,12 +292,12 @@ var _ = Describe("Agent Advanced Features", func() {
 					"maxMessages": 2
 				},
 				"ai": {
-					"prompt": "What was my previous question? Reply briefly.",
+					"prompt": "What was my previous question? Reply briefly. %s",
 					"model": "%s",
 					"providerRef": {"name": "%s"}
 				}
 			}
-		}`, taskName2, namespace, sessionName, model, providerName)
+		}`, taskName2, namespace, sessionName, secondMarker, model, providerName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(task2Manifest)
@@ -308,5 +310,28 @@ var _ = Describe("Agent Advanced Features", func() {
 
 		By("verifying the second task has a result")
 		verifyResultAvailable(taskName2)
+
+		if e2eMockOpenAI {
+			By("verifying the second task replayed at most maxMessages of session history")
+			requests := expectMockLLMServed(secondMarker, time.Minute)
+			messages := requests[0].Body.Messages
+			lastUser := -1
+			for i, message := range messages {
+				if message.Role == "user" {
+					lastUser = i
+				}
+			}
+			Expect(lastUser).To(BeNumerically(">=", 0), "second task request should carry its prompt")
+			Expect(messages[lastUser].Text()).To(ContainSubstring(secondMarker))
+			var history []mockLLMMessage
+			for _, message := range messages[:lastUser] {
+				if message.Role == "user" || message.Role == "assistant" {
+					history = append(history, message)
+				}
+			}
+			Expect(len(history)).To(BeNumerically("<=", 2), "maxMessages: 2 should bound the replayed history")
+			Expect(requests[0].RoleText("assistant")).To(ContainSubstring("E2E_SESSION_FIRST_ANSWER"),
+				"the first task's answer should be replayed from the session")
+		}
 	})
 })

@@ -1,0 +1,20 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:chat-api-sse]" },
+      "response": { "content": "4" }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-api-openai-compat]" },
+      "response": { "content": "<ORKA_GOAL_STATE_REACHED>\n2" }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-api-session]" },
+      "response": { "content": "Hello from the aimock chat session." }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-api-session-followup]" },
+      "response": { "content": "Your first message asked me to say hello." }
+    }
+  ]
+}

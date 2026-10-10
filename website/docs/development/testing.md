@@ -193,6 +193,11 @@ missing or mismatched artifacts staying not ready.
   mode also exercises Task forks.
 - `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
+  When either key is unset, the suite deploys [aimock](https://github.com/CopilotKit/aimock)
+  in the test namespace and backs that provider with scripted fixtures from
+  `test/e2e/testdata/aimock`, so those specs run on every PR without credentials.
+  Set `E2E_DISABLE_MOCK_LLM=1` to skip them instead. Fixture conventions are in
+  `test/e2e/testdata/aimock/README.md`.
 - `COPILOT_GITHUB_TOKEN` also remains the credential for
   `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
   Provider test infrastructure. `Agent Runtime E2E` provides the

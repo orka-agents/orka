@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:provider-openai]"},
+      "response": {"content": "4"}
+    },
+    {
+      "match": {"userMessage": "[e2e:provider-anthropic]"},
+      "response": {"content": "4"}
+    }
+  ]
+}
