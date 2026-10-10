@@ -154,7 +154,7 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 			}
 		} else {
 			expected = "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK"
-			if len(body.Instructions) < 30000 || len(body.Tools) != 18 || body.MaxOutputTokens != 128 || body.Temperature != nil {
+			if len(body.Instructions) < 30000 || len(body.Tools) != len(builtinProxyTools)+len(coordinatorProxyTools) || body.MaxOutputTokens != 128 || body.Temperature != nil {
 				t.Errorf("compatibility probe dropped prompt/schema/limits: bytes=%d tools=%d cap=%d", len(body.Instructions), len(body.Tools), body.MaxOutputTokens)
 			}
 		}
