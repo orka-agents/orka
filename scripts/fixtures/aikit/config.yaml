@@ -9,7 +9,6 @@
     presence_penalty: 1.5
     repeat_penalty: 1.0
   f16: true
-  flash_attention: "off"
   mmap: true
   reasoning_effort: none
   reasoning:
@@ -20,8 +19,6 @@
     use_tokenizer_template: true
     system_messages_after_first: merge
   options:
-    # Keep the 512-token logical batch; use smaller physical CPU microbatches.
-    - "n_ubatch:128"
     - "use_jinja:true"
     - "--chat-template-file:/etc/orka-aikit/chat-template.jinja"
   function:

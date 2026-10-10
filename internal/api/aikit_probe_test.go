@@ -95,13 +95,13 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 	}{
 		{name: "chat prefix preload", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
 			message: "Reply with exactly ORKA_LIVE_CHAT_OK and nothing else.", expected: "ORKA_LIVE_CHAT_OK", maxTokens: 16, temperature: true, startup: true},
-		{name: "compatibility prefix preload", prompt: coordinatorSystemPrompt("orka-system"), tools: compat.Tools,
-			message:  "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly <ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK and nothing else. Do not use any tools.",
-			expected: "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK", maxTokens: 128, startup: true},
 		{name: "chat prefilled", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
 			message: "Reply with exactly ORKA_LIVE_CHAT_OK and nothing else.", expected: "ORKA_LIVE_CHAT_OK", maxTokens: 16, temperature: true},
 		{name: "chat warm", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
 			message: "Reply with exactly ORKA_LIVE_CHAT_OK and nothing else.", expected: "ORKA_LIVE_CHAT_OK", maxTokens: 16, temperature: true},
+		{name: "compatibility prefix preload", prompt: coordinatorSystemPrompt("orka-system"), tools: compat.Tools,
+			message:  "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly <ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK and nothing else. Do not use any tools.",
+			expected: "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK", maxTokens: 128, startup: true},
 		{name: "compatibility", prompt: coordinatorSystemPrompt("orka-system"), tools: compat.Tools,
 			message:  "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly <ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK and nothing else. Do not use any tools.",
 			expected: "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK", maxTokens: 128},
@@ -224,13 +224,18 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 		Passed       bool   `json:"passed"`
 		InputTokens  int    `json:"inputTokens"`
 		OutputTokens int    `json:"outputTokens"`
+		Startup      bool   `json:"startup"`
 	}
 	if err := json.Unmarshal(data, &results); err != nil || len(results) != 5 {
 		t.Fatalf("invalid probe counter report: %v", err)
 	}
-	for _, r := range results {
+	wantNames := []string{"chat prefix preload", "chat prefilled", "chat warm", "compatibility prefix preload", "compatibility"}
+	for i, r := range results {
 		if !r.Passed || r.InputTokens != 9000 || r.OutputTokens != 16 {
 			t.Fatalf("probe result missing verified token usage: %+v", r)
+		}
+		if r.Name != wantNames[i] || r.Startup != (i == 0 || i == 3) {
+			t.Fatalf("probe startup/qualification ordering mismatch at %d", i)
 		}
 	}
 	var fields []map[string]json.RawMessage

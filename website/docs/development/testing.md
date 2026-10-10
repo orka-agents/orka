@@ -196,8 +196,7 @@ missing or mismatched artifacts staying not ready.
 - `AIKit Qwen E2E` uses a digest-pinned Qwen 3.5 4B image as local CPU model
   infrastructure for native Provider, compatibility API, and runtime checks.
   The lane uses the standard free `ubuntu-latest` runner and records only
-  allowlisted CPU capabilities. Physical CPU microbatches use 128 tokens; the
-  model context, logical batch and request/test limits remain unchanged.
+  allowlisted CPU capabilities.
   It requires no cloud credentials and routes through Orka's auth/session proxies
   directly to AIKit, without Vekil. Its Qwen template merges system/developer
   instructions into a leading system block so multi-turn Responses requests
@@ -207,8 +206,10 @@ missing or mismatched artifacts staying not ready.
   Model Pod CPU and memory counters from kubelet statistics are saved with the
   cleanup evidence without requiring a shell in the distroless AIKit container.
   Startup can prefill the full Chat and compatibility instruction/tool prefixes
-  within a shared ten-minute preparation budget. Subsequent prompt qualification
-  still uses the existing contracts within 170 seconds before the stack build:
+  within a shared ten-minute preparation budget. Each API is qualified directly
+  after its prefix is prepared so warm performance is observable even when a
+  later cold request exhausts startup. Qualification still uses the existing
+  contracts within 170 seconds before the stack build:
   exact Chat text and the compatibility final sentinel plus connectivity marker.
   It uses the real prompt builders and tool schemas. The AIKit and ordinary E2E
   workflows use the public Docker Hub cache
