@@ -68,6 +68,7 @@ jobs:
           "${RUNNER_TEMP}/aikit-template-test/bin/python" scripts/tests/aikit-template-test.py
           bash scripts/tests/aikit-e2e-test.sh
           bash scripts/tests/e2e-cleanup-test.sh
+          bash .github/actions/docker-hub-mirror/configure_test.sh
 
       - name: Check Go coverage reporting
         run: bash scripts/tests/go-coverage-summary-test.sh
