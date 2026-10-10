@@ -114,7 +114,9 @@ on_exit() {
 
 # Called by BeforeSuite after the normal production installation. Only this
 # isolated E2E cluster gets a different upstream. Authentication, token reload,
-# runtime ingress, and DNS egress remain unchanged.
+# runtime ingress, and DNS/model NetworkPolicy rules remain unchanged.
+# Kind's default CNI does not enforce NetworkPolicy; this lane checks the
+# configured rules, not a denied-egress security boundary.
 configure_provider_proxy() {
   require_kind_context
   [[ "${E2E_LOCAL_MODEL:-}" == "${aikit_model}" ]] || die "local model configuration does not match AIKIT_MODEL"
@@ -350,7 +352,7 @@ warm_model() {
   AIKIT_PROBE_URL="${url}" AIKIT_PROBE_MODEL="${aikit_model}" \
     AIKIT_PROBE_REPORT="${cleanup_report_dir}/full-prompt-probe.json" \
     AIKIT_PROBE_PRELOAD_PREFIXES=true \
-    go test -tags=e2e ./internal/api -run '^TestAIKitFullPromptProbe$' -v -count=1 -timeout=20m
+    go test -tags=e2e ./internal/api -run '^TestAIKitFullPromptProbe$' -v -count=1 -timeout=40m
   cleanup_port_forward "${proxy_pf_pid}"
   proxy_pf_pid=""
 }

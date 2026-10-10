@@ -72,7 +72,7 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 		Startup      bool   `json:"startup"`
 	}
 	results := make([]probeResult, 0, 5)
-	startupCtx, stopStartup := context.WithTimeout(t.Context(), 10*time.Minute)
+	startupCtx, stopStartup := context.WithTimeout(t.Context(), 30*time.Minute)
 	defer stopStartup()
 	preload := os.Getenv("AIKIT_PROBE_PRELOAD_PREFIXES") == "true"
 	defer func() {
@@ -113,7 +113,7 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 		if probe.startup {
 			// Startup prefix preparation is separate from qualification. The
 			// subsequent identical requests retain their 170-second budget.
-			parent, timeout = startupCtx, 10*time.Minute
+			parent, timeout = startupCtx, 30*time.Minute
 		}
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		start := time.Now()

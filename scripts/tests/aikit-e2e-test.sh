@@ -80,7 +80,7 @@ jq -e '.spec.egress | length == 2 and
   .[1].ports == [{protocol:"TCP",port:8080}]' "${work}/network-patch.json" >/dev/null
 jq -e '.spec.template.spec.containers[0] | .name == "manager" and
   .args == ["--enable-acp","--chat-max-concurrent=10","--chat-max-duration=170s"]' "${work}/controller-patch.json" >/dev/null
-printf '%s\n' 'ok - local upstream keeps auth flags and restricted DNS/model egress'
+printf '%s\n' 'ok - local upstream keeps auth flags and DNS/model NetworkPolicy rules'
 printf '%s\n' 'ok - CI server work ends before the unchanged 180s client deadline'
 sample_model_resources >"${work}/model-resources.log"
 jq -e '.cpu.usageNanoCores == 1234 and .memory.rssBytes == 3000000000 and

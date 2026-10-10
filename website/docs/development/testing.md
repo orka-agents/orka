@@ -198,7 +198,9 @@ missing or mismatched artifacts staying not ready.
   The lane uses the standard free `ubuntu-latest` runner and records only
   allowlisted CPU capabilities.
   It requires no cloud credentials and routes through Orka's auth/session proxies
-  directly to AIKit, without Vekil. Its Qwen template merges system/developer
+  directly to AIKit, without Vekil. DNS/model NetworkPolicy rules are checked
+  structurally; Kind's default CNI does not enforce them, so this lane does not
+  validate denied egress. Its Qwen template merges system/developer
   instructions into a leading system block so multi-turn Responses requests
   remain compatible without dropping instructions or changing tool permissions.
   CI-only API work is bounded to 170 seconds, below the unchanged 180-second
@@ -206,7 +208,7 @@ missing or mismatched artifacts staying not ready.
   Model Pod CPU and memory counters from kubelet statistics are saved with the
   cleanup evidence without requiring a shell in the distroless AIKit container.
   Startup can prefill the full Chat and compatibility instruction/tool prefixes
-  within a shared ten-minute preparation budget. Each API is qualified directly
+  within a shared thirty-minute preparation budget. Each API is qualified directly
   after its prefix is prepared so warm performance is observable even when a
   later cold request exhausts startup. Qualification still uses the existing
   contracts within 170 seconds before the stack build:
