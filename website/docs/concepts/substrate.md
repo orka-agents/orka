@@ -201,7 +201,7 @@ cleanup, and restores that marker in a fresh process after source deletion. It
 proves native provider lifecycle and checkpoint behavior. Its standalone lane
 uses fixture Core admission.
 
-The [native Core Task proof](https://github.com/orka-agents/orka-workspace/blob/f4495c5/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
+The [native Core Task proof](https://github.com/orka-agents/orka-workspace/blob/v0.1.0-alpha.2/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
 also passed with deployed Core and provider controllers. It verifies real
 fail-closed Task admission, sealed bootstrap, authenticated Serving on port 80,
 RuntimeSession execution, and a persisted prompt result. Exact Actor, worker,

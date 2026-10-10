@@ -282,7 +282,7 @@ filesystem data, and exact cleanup. Substrate also exports and imports verified
 data checkpoints after source deletion. They do not claim real core credential
 bootstrap or full-memory restore. NetworkPolicy object checks on default kind do
 not prove packet enforcement. An additional
-[native Core Task lane](https://github.com/orka-agents/orka-workspace/blob/f4495c5/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
+[native Core Task lane](https://github.com/orka-agents/orka-workspace/blob/v0.1.0-alpha.2/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
 passed real fail-closed admission, sealed bootstrap, authenticated Serving,
 RuntimeSession and prompt execution, persisted result, and exact native/Core
 compute and credential retirement. The upgrade lane tests stock binary rejection of
