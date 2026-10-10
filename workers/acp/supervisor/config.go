@@ -100,10 +100,12 @@ type Config struct {
 	// DurableWorkspaceKey gives a dedicated single-session pool one stable
 	// data directory across checkpoint restores into new RuntimeSession IDs.
 	// Empty keeps the default directory per RuntimeSession.
-	DurableWorkspaceKey   string
-	UIDAllocator          *acp.UIDAllocator
-	ProviderProxy         ProviderProxyConfig
-	MCPBroker             MCPBroker
+	DurableWorkspaceKey string
+	UIDAllocator        *acp.UIDAllocator
+	ProviderProxy       ProviderProxyConfig
+	MCPBroker           MCPBroker
+	// SandboxExec enables the runtime-local sandbox_exec tool; nil disables it.
+	SandboxExec           *SandboxExecConfig
 	WorkspaceMaterializer WorkspaceMaterializer
 	ArtifactUploader      *RemoteArtifactUploader
 	DeltaOptions          workspacedelta.Options

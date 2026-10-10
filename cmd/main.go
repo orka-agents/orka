@@ -304,6 +304,8 @@ func main() {
 	var aiWorkerCodeExecBackend string
 	var hyperlightDeviceResource string
 	var hyperlightDeviceGID int64
+	var hyperlightBundleImage string
+	var acpSandboxExec bool
 	var storeBackend string
 	var storePath string
 	var usageRetention time.Duration
@@ -472,7 +474,13 @@ func main() {
 	flag.StringVar(&aiWorkerCodeExecBackend, "ai-worker-code-exec-backend",
 		os.Getenv("ORKA_AI_WORKER_CODE_EXEC_BACKEND"),
 		"Pin the code_exec backend of AI workers (kubernetes, in-process or hyperlight); empty leaves the worker default. "+
-			"hyperlight needs an AI worker image with hluk and the Hyperlight device plugin on the nodes.")
+			"hyperlight needs the Hyperlight device plugin on the nodes, and hluk from --hyperlight-bundle-image or the worker image.")
+	flag.BoolVar(&acpSandboxExec, "acp-sandbox-exec", envBool("ORKA_ACP_SANDBOX_EXEC_ENABLED"),
+		"Run the runtime-local sandbox_exec tool of built-in ACP runtimes in Hyperlight micro-VMs: "+
+			"RuntimePool Pods get the Hyperlight device and bundle.")
+	flag.StringVar(&hyperlightBundleImage, "hyperlight-bundle-image", os.Getenv("ORKA_HYPERLIGHT_BUNDLE_IMAGE"),
+		"Image with hluk and its runtime images under /opt/orka/hyperlight, copied into Pods that run Hyperlight micro-VMs; "+
+			"empty expects them in the Pod's own image.")
 	flag.StringVar(&hyperlightDeviceResource, "hyperlight-device-resource",
 		controller.DefaultHyperlightDeviceResource,
 		"Extended resource a Pod requests for the Hyperlight hypervisor device.")
@@ -1703,8 +1711,12 @@ func main() {
 			"invalid --ai-worker-code-exec-backend; want kubernetes, in-process or hyperlight")
 		os.Exit(1)
 	}
-	jobBuilder.HyperlightDeviceResource = hyperlightDeviceResource
-	jobBuilder.HyperlightDeviceGID = hyperlightDeviceGID
+	hyperlightPod := controller.HyperlightPodConfig{
+		BundleImage:    strings.TrimSpace(hyperlightBundleImage),
+		DeviceResource: hyperlightDeviceResource,
+		DeviceGID:      hyperlightDeviceGID,
+	}
+	jobBuilder.Hyperlight = hyperlightPod
 	jobBuilder.EnforceTransactionCredentialAuth =
 		contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce
 	jobBuilder.TransactionCredentialReadScopes = append(
@@ -1758,6 +1770,9 @@ func main() {
 		runtimePoolReconciler.Epochs = controllerEpochManager
 		runtimePoolReconciler.EnablePDB = true
 		runtimePoolReconciler.EnableTelemetry = enableTracing
+		if acpSandboxExec {
+			runtimePoolReconciler.SandboxExec = &hyperlightPod
+		}
 		runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
 		runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
 		runtimePoolReconciler.SubstrateEnabled = substrateEnabled

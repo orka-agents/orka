@@ -113,6 +113,7 @@ const (
 	runtimePoolCapabilitySecretFileEnv = "ORKA_ACP_CAPABILITY_SECRET_FILE"
 	runtimePoolProviderTokenFileEnv    = "ORKA_ACP_PROVIDER_TOKEN_FILE"
 	runtimePoolE2EPromptWriteAmbiguity = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
+	runtimePoolSandboxExecEnv          = "ORKA_ACP_SANDBOX_EXEC_ENABLED"
 
 	runtimePoolAuthVolume               = "pool-auth"
 	runtimePoolProviderCapabilityVolume = "provider-capability"
@@ -349,6 +350,9 @@ type RuntimePoolReconciler struct {
 	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
 	// fault marker projected into built-in runtime supervisors.
 	E2EPromptWriteAmbiguityMarker string
+	// SandboxExec, when set, gives standard (Deployment) runtime Pods the
+	// Hyperlight device and bundle their supervisor runs sandbox_exec with.
+	SandboxExec *HyperlightPodConfig
 
 	// AgentSandboxEnabled admits Agent Sandbox-backed workspace pools.
 	AgentSandboxEnabled bool
@@ -2689,6 +2693,12 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{
 			Name: runtimePoolE2EPromptWriteAmbiguity, Value: marker,
 		})
+	}
+	// Workspace-backed pools run elsewhere (a sandbox with no hypervisor):
+	// only standard pools get sandbox_exec.
+	if r.SandboxExec != nil && pool.Spec.ExecutionWorkspace == nil {
+		r.SandboxExec.apply(&template.Spec, &template.Spec.Containers[0])
+		template.Spec.Containers[0].Env = setControllerEnvValue(template.Spec.Containers[0].Env, runtimePoolSandboxExecEnv, "true")
 	}
 	template.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(template)
 	return template

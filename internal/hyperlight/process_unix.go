@@ -34,3 +34,15 @@ func killProcessGroupOnCancel(cmd *exec.Cmd) {
 	}
 	cmd.WaitDelay = waitDelay
 }
+
+// runAs runs hluk as the credential's user, groups included.
+func runAs(cmd *exec.Cmd, credential *Credential) error {
+	if credential == nil {
+		return nil
+	}
+	cmd.SysProcAttr.Credential = &syscall.Credential{
+		Uid: credential.UID, Gid: credential.GID,
+		Groups: append([]uint32{}, credential.Groups...),
+	}
+	return nil
+}

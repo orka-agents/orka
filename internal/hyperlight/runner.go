@@ -121,6 +121,16 @@ type Request struct {
 	// Stdout and Stderr receive the guest's output; nil discards it.
 	Stdout io.Writer
 	Stderr io.Writer
+	// Credential runs hluk as another user, which then owns the script.
+	Credential *Credential
+}
+
+// Credential is a user to run hluk as: the owner of the files the guest is
+// given, with the hypervisor device's group among its Groups.
+type Credential struct {
+	UID    uint32
+	GID    uint32
+	Groups []uint32
 }
 
 // Result is how a run ended.
@@ -173,6 +183,13 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	if err := os.WriteFile(script, []byte(req.Script), 0o600); err != nil {
 		return Result{ExitCode: -1}, fmt.Errorf("write script: %w", err)
 	}
+	if req.Credential != nil {
+		for _, path := range []string{scriptDir, script} {
+			if err := os.Chown(path, int(req.Credential.UID), int(req.Credential.GID)); err != nil {
+				return Result{ExitCode: -1}, fmt.Errorf("hand the script to uid %d: %w", req.Credential.UID, err)
+			}
+		}
+	}
 
 	var args []string
 	snapshot, warm := r.warmSnapshot(ctx, req.Runtime, rootfs)
@@ -188,6 +205,9 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	cmd.Stdout = writerOrDiscard(req.Stdout)
 	cmd.Stderr = &nulFilter{w: writerOrDiscard(req.Stderr)}
 	killProcessGroupOnCancel(cmd)
+	if err := runAs(cmd, req.Credential); err != nil {
+		return Result{ExitCode: -1}, err
+	}
 
 	runErr := cmd.Run()
 	result := Result{Warm: warm}
@@ -273,7 +293,9 @@ func (r *Runner) warmSnapshot(ctx context.Context, runtime, rootfs string) (stri
 	if info, err := os.Stat(dir); err == nil && info.IsDir() {
 		return dir, true
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+	// A snapshot is a freshly booted runtime image, nothing of any run: it
+	// stays readable by every user a Credential may run as.
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return "", false
 	}
 	partial, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".part-*")
@@ -292,10 +314,26 @@ func (r *Runner) warmSnapshot(ctx context.Context, runtime, rootfs string) (stri
 	if err := cmd.Run(); err != nil {
 		return "", false
 	}
+	if err := makeReadable(partial); err != nil {
+		return "", false
+	}
 	if err := os.Rename(partial, dir); err != nil {
 		return "", false
 	}
 	return dir, true
+}
+
+func makeReadable(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if entry.IsDir() {
+			mode = 0o755
+		}
+		return os.Chmod(path, mode)
+	})
 }
 
 // snapshotKeys caches each hluk binary's snapshot key.

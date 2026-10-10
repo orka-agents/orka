@@ -140,12 +140,11 @@ type JobBuilder struct {
 	OutboundAccessTrustedTokenEndpointServices string
 	EnableTelemetry                            bool
 	// CodeExecBackend pins the backend AI workers run code_exec with; empty
-	// leaves it to the worker's default. Hyperlight also requests the
-	// hypervisor device resource, and adds the device's group when set.
-	CodeExecBackend          string
-	HyperlightDeviceResource string
-	HyperlightDeviceGID      int64
-	directSecrets            directRuntimeSecretPolicy
+	// leaves it to the worker's default. A hyperlight worker gets what
+	// Hyperlight holds: the device, its group and the bundle.
+	CodeExecBackend string
+	Hyperlight      HyperlightPodConfig
+	directSecrets   directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -605,15 +604,11 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	return job, nil
 }
 
-// DefaultHyperlightDeviceResource is the extended resource the Hyperlight
-// device plugin (hyperlight-on-kubernetes) advertises for /dev/kvm or /dev/mshv.
-const DefaultHyperlightDeviceResource = "hyperlight.dev/hypervisor"
-
 const codeExecBackendHyperlight = "hyperlight"
 
 // applyCodeExecBackend pins the operator's code_exec backend on an AI worker:
-// whatever backend a Task or Agent supplied, scoped variants included, is
-// dropped, and a Hyperlight worker gets the hypervisor device.
+// the backend and Hyperlight settings a Task or Agent supplied, scoped
+// variants included, are dropped, and a Hyperlight worker gets the device.
 func (b *JobBuilder) applyCodeExecBackend(job *batchv1.Job, task *corev1alpha1.Task) {
 	backend := strings.ToLower(strings.TrimSpace(b.CodeExecBackend))
 	if backend == "" || task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
@@ -623,37 +618,14 @@ func (b *JobBuilder) applyCodeExecBackend(job *batchv1.Job, task *corev1alpha1.T
 	container := &podSpec.Containers[0]
 	env := make([]corev1.EnvVar, 0, len(container.Env)+2)
 	for _, envVar := range container.Env {
-		if !strings.HasPrefix(envVar.Name, workerenv.CodeExecBackend) {
+		if !strings.HasPrefix(envVar.Name, workerenv.CodeExecBackend) && !strings.HasPrefix(envVar.Name, "ORKA_HYPERLIGHT_") {
 			env = append(env, envVar)
 		}
 	}
 	env = setControllerEnvValue(env, workerenv.CodeExecBackend, backend)
 	container.Env = setControllerEnvValue(env, workerenv.CodeExecBackendEnforced, "true")
-	if backend != codeExecBackendHyperlight {
-		return
-	}
-	resourceName := corev1.ResourceName(b.HyperlightDeviceResource)
-	if resourceName == "" {
-		resourceName = DefaultHyperlightDeviceResource
-	}
-	// The requirements may be the Task's or Agent's own maps: copy them.
-	resources := container.Resources.DeepCopy()
-	if resources.Limits == nil {
-		resources.Limits = corev1.ResourceList{}
-	}
-	if resources.Requests == nil {
-		resources.Requests = corev1.ResourceList{}
-	}
-	resources.Limits[resourceName] = resource.MustParse("1")
-	resources.Requests[resourceName] = resource.MustParse("1")
-	container.Resources = *resources
-	if b.HyperlightDeviceGID > 0 {
-		if podSpec.SecurityContext == nil {
-			podSpec.SecurityContext = &corev1.PodSecurityContext{}
-		}
-		if !slices.Contains(podSpec.SecurityContext.SupplementalGroups, b.HyperlightDeviceGID) {
-			podSpec.SecurityContext.SupplementalGroups = append(podSpec.SecurityContext.SupplementalGroups, b.HyperlightDeviceGID)
-		}
+	if backend == codeExecBackendHyperlight {
+		b.Hyperlight.apply(podSpec, container)
 	}
 }
 

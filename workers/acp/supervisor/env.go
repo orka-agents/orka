@@ -337,6 +337,9 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
+	if cfg.SandboxExec, err = sandboxExecConfigFromEnv(); err != nil {
+		return Config{}, err
+	}
 	if providerKind == providerKindFoundry {
 		// Remote Hosted Agent stop/delete must complete before settlement.
 		cfg.CancelGrace = foundryCleanupTimeout
@@ -621,7 +624,7 @@ func copilotSessionProjection(
 		args = append(args, "--allow-tool=write")
 	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
-		if descriptor.Source.Brokered() {
+		if descriptor.Source.MCPServed() {
 			// This grants access only to the configured Orka MCP server. The
 			// proxy checks each call against its prompt grant and independently
 			// requires Orka approval evidence for approval-required tools.
@@ -953,7 +956,7 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 	permissions := make(map[string]bool)
 	owners := make(map[string]string)
 	for _, descriptor := range policy.Tools {
-		if !descriptor.Source.Brokered() {
+		if !descriptor.Source.MCPServed() {
 			continue
 		}
 		// OpenCode prefixes tools from the controller MCP server with `orka_`,

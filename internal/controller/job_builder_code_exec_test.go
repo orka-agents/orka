@@ -52,7 +52,7 @@ func codeExecEnv(container corev1.Container) map[string]string {
 func TestJobBuilderPinsTheHyperlightCodeExecBackend(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.CodeExecBackend = "Hyperlight"
-	builder.HyperlightDeviceGID = 65534
+	builder.Hyperlight = HyperlightPodConfig{DeviceGID: 65534, BundleImage: "example.com/hyperlight-bundle@sha256:0000000000000000000000000000000000000000000000000000000000000000"}
 	task := codeExecTestTask(corev1alpha1.TaskTypeAI)
 
 	job, err := builder.Build(context.Background(), task, nil, nil)
@@ -90,12 +90,44 @@ func TestJobBuilderPinsTheHyperlightCodeExecBackend(t *testing.T) {
 	if !slices.Contains(job.Spec.Template.Spec.SecurityContext.SupplementalGroups, int64(65534)) {
 		t.Fatalf("supplementalGroups = %v, want the device group", job.Spec.Template.Spec.SecurityContext.SupplementalGroups)
 	}
+	if env[hyperlightDeviceGIDEnv] != "65534" {
+		t.Fatalf("device group env = %q", env[hyperlightDeviceGIDEnv])
+	}
+
+	// The bundle reaches the worker through an init container and an emptyDir.
+	initContainers := job.Spec.Template.Spec.InitContainers
+	bundle := initContainers[len(initContainers)-1]
+	if bundle.Name != hyperlightBundleInit || bundle.Image != builder.Hyperlight.BundleImage {
+		t.Fatalf("last init container = %s (%s), want the Hyperlight bundle", bundle.Name, bundle.Image)
+	}
+	if !slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
+		return m.Name == hyperlightVolume && m.MountPath == hyperlightDir
+	}) {
+		t.Fatalf("worker mounts = %v, want the Hyperlight volume at %s", container.VolumeMounts, hyperlightDir)
+	}
+	if env["ORKA_HYPERLIGHT_BINARY"] != hyperlightDir+"/bin/hluk" || env["ORKA_HYPERLIGHT_CACHE_DIR"] != hyperlightDir+"/cache" {
+		t.Fatalf("Hyperlight env = %v", env)
+	}
+}
+
+func TestJobBuilderDropsTaskHyperlightSettingsWhenPinned(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.CodeExecBackend = "hyperlight"
+	task := codeExecTestTask(corev1alpha1.TaskTypeAI)
+	task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: "ORKA_HYPERLIGHT_BINARY", Value: "/tmp/not-hluk"})
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if _, ok := codeExecEnv(job.Spec.Template.Spec.Containers[0])["ORKA_HYPERLIGHT_BINARY"]; ok {
+		t.Fatal("a Task chose the hluk binary of a pinned Hyperlight worker")
+	}
 }
 
 func TestJobBuilderCodeExecBackendLeavesOtherWorkersAlone(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.CodeExecBackend = "kubernetes"
-	builder.HyperlightDeviceResource = "example.com/kvm"
+	builder.Hyperlight = HyperlightPodConfig{DeviceResource: "example.com/kvm"}
 	job, err := builder.Build(context.Background(), codeExecTestTask(corev1alpha1.TaskTypeAI), nil, nil)
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
