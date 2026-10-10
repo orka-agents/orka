@@ -240,7 +240,12 @@ const (
 	SupervisorLifecycleUnhealthy   SupervisorLifecycle = "unhealthy"
 )
 
-const DrainReasonSessionIdentityCapacity = "session_identity_capacity"
+const (
+	DrainReasonSessionIdentityCapacity = "session_identity_capacity"
+	// DrainReasonToolboxUnavailable drains a supervisor whose pool lost
+	// toolbox admission so its workload can be stopped once idle.
+	DrainReasonToolboxUnavailable = "toolbox_unavailable"
+)
 
 type DrainStatus struct {
 	AcceptingNewSessions bool      `json:"acceptingNewSessions"`

@@ -2748,12 +2748,16 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxAdmission(pool *corev1alpha1.R
 	return nil
 }
 
-// finishRuntimePoolToolboxFailure closes admission and, once no controller
-// work, resident session, or running prompt remains, scales the existing
-// workload to zero so a pool whose toolboxes are no longer admitted (feature
-// disabled, registry removed, mounting unavailable) stops running or pulling
-// an image the current policy rejects instead of being recreated by the
-// Deployment controller after a Pod loss.
+// finishRuntimePoolToolboxFailure drains a pool whose frozen toolboxes are no
+// longer admitted (feature disabled, registry removed, mounting unavailable)
+// in two phases, like the rollout drain paths. The first reconcile persists
+// the admission-closed barrier with the ToolboxUnavailable condition while
+// preserving the exact active-instance fence, so the dispatcher can no longer
+// reserve against the pool. Later reconciles stop the Deployment only after
+// an authenticated quiescence observation of the active supervisor, or after
+// its Pod is confirmed gone, and clear the fence only once the workload is
+// stopped. The Deployment controller therefore never keeps a Pod with an
+// image the current policy rejects, and in-flight work is never interrupted.
 func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -2765,13 +2769,16 @@ func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 	status.ControllerEpoch = cfg.controllerEpoch
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-	status.ActiveInstance = nil
+	status.ActiveInstance = pool.Status.ActiveInstance.DeepCopy()
 	status.Message = sanitizeStatusMessage(err.Error())
-	if pool.Spec.ExecutionWorkspace == nil {
+	barrierPersisted := pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionClosed &&
+		runtimePoolRolloutConditionReason(pool) == corev1alpha1.RuntimePoolReasonToolboxUnavailable
+	if pool.Spec.ExecutionWorkspace == nil && barrierPersisted {
 		deployment := &appsv1.Deployment{}
 		getErr := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: cfg.baseName}, deployment)
 		switch {
 		case apierrors.IsNotFound(getErr):
+			status.ActiveInstance = nil
 		case getErr != nil:
 			return ctrl.Result{}, getErr
 		case ptr.Deref(deployment.Spec.Replicas, 0) > 0:
@@ -2783,15 +2790,28 @@ func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 				if stopErr := r.stopRuntimePoolDeployment(ctx, deployment); stopErr != nil {
 					return ctrl.Result{}, stopErr
 				}
+				status.ActiveInstance = nil
 				status.Message = sanitizeStatusMessage(err.Error() + "; runtime workload scaled to zero")
 			} else {
 				status.Message = sanitizeStatusMessage(err.Error() + "; admission is closed and the runtime workload is scaled to zero once its sessions and prompts finish")
 			}
+		default:
+			status.ActiveInstance = nil
 		}
 	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonToolboxUnavailable, status.Message)
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+}
+
+// runtimePoolRolloutConditionReason returns the persisted RolloutReady reason
+// for the pool's current generation, or empty.
+func runtimePoolRolloutConditionReason(pool *corev1alpha1.RuntimePool) string {
+	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if condition == nil || condition.ObservedGeneration != pool.Generation {
+		return ""
+	}
+	return condition.Reason
 }
 
 func runtimePoolJSONRevision(payload any) (string, error) {
@@ -3485,14 +3505,17 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 }
 
-// runtimePoolToolboxWorkloadIdle reports whether the pool's workload can be
-// stopped without interrupting work. Toolbox admission returns before the
-// normal rollout probe refreshes the pool's capacity counters, so this path
-// asks the live supervisor itself: no Ready Pod means nothing can be running;
-// otherwise the authenticated status probe must show no resident session,
-// prompt, queued admission, or pending permission, and the controller must
-// hold no reservation or finalization work. An unreachable supervisor is
-// never assumed idle.
+// runtimePoolToolboxWorkloadIdle reports whether the drained pool's workload
+// can be stopped without interrupting work. The toolbox gate runs before the
+// rollout probe that refreshes the pool's capacity counters, so this path
+// observes the live state itself: the controller must hold no reservation or
+// finalization work; with no active instance and no Ready Pod nothing can be
+// running; with an active instance whose Pod is confirmed gone nothing can be
+// running either; otherwise the active supervisor must be probed and report
+// the complete drained-and-quiescent invariant used by the rollout paths (a
+// requested drain that stopped new sessions, and no resident session, prompt,
+// queued admission, pending permission, or live descendant). A NotReady or
+// unreachable active supervisor is never assumed idle.
 func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -3506,23 +3529,43 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 	if err != nil {
 		return false, err
 	}
-	readyPods := readyRuntimePoolPods(pods)
-	if len(readyPods) == 0 {
+	active := pool.Status.ActiveInstance
+	if active == nil {
+		return len(readyRuntimePoolPods(pods)) == 0, nil
+	}
+	if !runtimePoolActiveInstancePodPresent(active, pods) {
 		return true, nil
 	}
-	if authSecret == nil {
+	var activePod *corev1.Pod
+	readyPods := readyRuntimePoolPods(pods)
+	for i := range readyPods {
+		if runtimePoolActiveInstanceMatchesPod(active, &readyPods[i]) {
+			activePod = &readyPods[i]
+			break
+		}
+	}
+	if activePod == nil || authSecret == nil {
 		return false, nil
 	}
-	probe, err := r.supervisorClientForPool(pool).Probe(
-		ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]),
-		string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey],
-	)
+	supervisor := r.supervisorClientForPool(pool)
+	endpoint := runtimePoolInstanceEndpoint(pool, activePod)
+	token := string(authSecret.Data[runtimePoolControllerTokenKey])
+	capability := authSecret.Data[runtimePoolCapabilitySecretKey]
+	probe, err := supervisor.Probe(ctx, endpoint, token, capability)
 	if err != nil {
 		return false, nil
 	}
-	pressure := probe.Status.Pressure
-	return pressure.ResidentSessions == 0 && pressure.ActivePrompts == 0 && pressure.QueuedAdmissions == 0 &&
-		pressure.PendingPermissions == 0 && len(probe.Status.Sessions) == 0 && len(probe.Status.ActivePrompts) == 0, nil
+	// Same two-step barrier as the rollout drain: the supervisor must stop
+	// accepting sessions itself (closing the window between a dispatcher's
+	// stale read of the pool and the scale-down), and only a later probe that
+	// shows the drained supervisor completely quiescent allows the stop.
+	if !probe.Status.Drain.Requested {
+		if err := supervisor.RequestDrain(ctx, endpoint, token, capability, probe.Status, harnessv2.DrainReasonToolboxUnavailable); err != nil {
+			return false, nil
+		}
+		return false, nil
+	}
+	return runtimePoolRolloutProbeIsQuiescent(pool.Status.Capacity, probe.Status), nil
 }
 
 // runtimePoolConflictRequeue is how soon a reconcile that lost the status

@@ -249,6 +249,18 @@ func TestCopyEnforcesLimits(t *testing.T) {
 			t.Fatalf("reason = %s, want %s", got, ReasonTooLarge)
 		}
 	})
+	t.Run("symlink text counts toward the total", func(t *testing.T) {
+		source, destination := newLayout(t)
+		if err := os.Symlink(strings.Repeat("t", 40), filepath.Join(source, "link")); err != nil {
+			t.Fatal(err)
+		}
+		opts := copyOptions(source, destination)
+		opts.Limits.MaxTotalBytes = 30
+		_, err := Copy(opts)
+		if got := failureReason(t, err); got != ReasonTooLarge {
+			t.Fatalf("reason = %s, want %s", got, ReasonTooLarge)
+		}
+	})
 	t.Run("too many entries", func(t *testing.T) {
 		source, destination := newLayout(t)
 		for _, name := range []string{"a", "b", "c", "d"} {

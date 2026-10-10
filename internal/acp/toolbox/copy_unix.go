@@ -237,6 +237,11 @@ func (s *copyState) copyEntry(srcFd, dstFd int, display, name string, depth int)
 			if err != nil {
 				return failf(ReasonCopyFailed, "read symlink %s: %v", entryDisplay, err)
 			}
+			// Link text occupies output space too; count it so the total
+			// stays within the volume sized for the copier's limit.
+			if err := s.account(0, int64(len(target))); err != nil {
+				return err
+			}
 			if err := unix.Symlinkat(target, dstFd, name); err != nil {
 				return failf(ReasonCopyFailed, "write symlink %s: %v", entryDisplay, err)
 			}

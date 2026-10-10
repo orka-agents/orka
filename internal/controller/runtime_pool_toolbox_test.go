@@ -344,6 +344,14 @@ func TestRuntimePoolReconcileReportsToolboxUnavailableWhenDisabled(t *testing.T)
 		t.Fatalf("admitted pool Deployment replicas = %d, want 1", ptr.Deref(deployment.Spec.Replicas, 0))
 	}
 	r.ToolboxPolicy = ACPToolboxPolicy{}
+	// First reconcile persists the admission-closed barrier only.
+	runtimePoolReconcile(t, r, pool)
+	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
+	if ptr.Deref(deployment.Spec.Replicas, 0) != 1 {
+		t.Fatalf("the barrier reconcile must not touch the Deployment, got %d replicas", ptr.Deref(deployment.Spec.Replicas, 0))
+	}
+	// With the barrier persisted and no Pod able to run anything, the next
+	// reconcile scales the workload to zero.
 	runtimePoolReconcile(t, r, pool)
 	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
 	if ptr.Deref(deployment.Spec.Replicas, 0) != 0 {
@@ -383,28 +391,70 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 		t.Fatal("admitted pool must run one replica")
 	}
 
-	// The supervisor is busy: toolboxes get disabled, admission closes, but
-	// the workload stays up.
+	// Toolboxes get disabled while the supervisor is busy. The first reconcile
+	// persists only the admission-closed barrier and keeps the exact fence.
 	supervisor.probe.Status.Pressure.ActivePrompts = 1
 	r.ToolboxPolicy = ACPToolboxPolicy{}
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || current.Status.ActiveInstance == nil ||
+		meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady).Reason != corev1alpha1.RuntimePoolReasonToolboxUnavailable {
+		t.Fatalf("barrier status = %#v", current.Status)
+	}
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("the barrier reconcile must not touch the Deployment")
+	}
+
+	// With the barrier persisted, a busy supervisor still keeps the workload
+	// and the fence.
 	runtimePoolReconcile(t, r, pool)
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
 		t.Fatal("a busy supervisor must not be scaled away")
 	}
-	current := runtimePoolTestGetPool(t, r, pool)
-	if current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || !strings.Contains(current.Status.Message, "once its sessions and prompts finish") {
-		t.Fatalf("status = %#v", current.Status)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil || !strings.Contains(current.Status.Message, "once its sessions and prompts finish") {
+		t.Fatalf("busy status = %#v", current.Status)
 	}
 
-	// The prompt finishes: the next reconcile observes the live idle probe
-	// and scales the workload to zero.
+	// A live descendant alone also keeps it; the idle invariant is complete.
 	supervisor.probe.Status.Pressure.ActivePrompts = 0
+	supervisor.probe.Status.Pressure.LiveDescendants = 1
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("a supervisor with live descendants must not be scaled away")
+	}
+
+	// A NotReady active Pod is a readiness blip, not idleness.
+	supervisor.probe.Status.Pressure.LiveDescendants = 0
+	runtimePoolTestSetPodReady(t, r, &pod, false)
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("a NotReady active Pod must not be treated as idle")
+	}
+	runtimePoolTestSetPodReady(t, r, &pod, true)
+
+	// Even with nothing running, the first idle observation only requests a
+	// supervisor drain; the workload stays until a later probe shows the
+	// drained supervisor quiescent.
+	drainCallsBefore := supervisor.drainCalls
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != drainCallsBefore+1 || supervisor.drainReason != harnessv2.DrainReasonToolboxUnavailable {
+		t.Fatalf("drain calls = %d (reason %q), want one toolbox drain request", supervisor.drainCalls, supervisor.drainReason)
+	}
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("the workload must stay until the drained supervisor is observed quiescent")
+	}
+	// The supervisor confirms the drain and reports the complete quiescence
+	// invariant: the workload is scaled to zero and the fence cleared only now.
+	supervisor.probe.Status.Drain.Requested = true
+	supervisor.probe.Status.Drain.AcceptingNewSessions = false
 	runtimePoolReconcile(t, r, pool)
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 0 {
 		t.Fatal("an idle supervisor must be scaled to zero")
 	}
-	if current := runtimePoolTestGetPool(t, r, pool); !strings.Contains(current.Status.Message, "scaled to zero") {
-		t.Fatalf("status = %#v", current.Status)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance != nil || !strings.Contains(current.Status.Message, "scaled to zero") {
+		t.Fatalf("stopped status = %#v", current.Status)
 	}
 }
 
@@ -499,6 +549,15 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 				}}
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_COPY_FAILED: toolbox-copy-0: exited 137 (OOMKilled)", ok: true,
+		},
+		"handoff container setup error is a runtime failure, not a toolbox failure": {
+			pods: pod(func(p *corev1.Pod) {
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name:  runtimePoolToolboxHandoffContainer,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerError", Message: "node setup failed"}},
+				}}
+			}),
+			toolboxes: toolboxes, ok: false,
 		},
 		"copy init container cannot be created": {
 			pods: pod(func(p *corev1.Pod) {

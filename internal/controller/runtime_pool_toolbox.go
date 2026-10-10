@@ -279,15 +279,17 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 			if message, ok := runtimePoolToolboxUnexplainedTermination(status); ok {
 				return corev1alpha1.RuntimePoolReasonToolboxUnavailable, message, true
 			}
-			if waiting := status.State.Waiting; waiting != nil {
+			// The handoff container runs the trusted runtime image; a pull or
+			// container-setup failure there is an ordinary rollout failure that
+			// keeps the usual retry behavior, not a toolbox failure. Only the
+			// toolbox-copy-* containers run the untrusted image.
+			waiting := status.State.Waiting
+			if waiting == nil || !strings.HasPrefix(status.Name, runtimePoolToolboxCopyPrefix) {
+				continue
+			}
+			{
 				switch waiting.Reason {
 				case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonInvalidImageName:
-					// The handoff container runs the trusted runtime image; a
-					// pull failure there is an ordinary rollout failure that
-					// keeps the usual retry behavior, not a toolbox failure.
-					if !strings.HasPrefix(status.Name, runtimePoolToolboxCopyPrefix) {
-						continue
-					}
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonImagePull, status.Name+": "+waiting.Reason+" "+waiting.Message), true
 				case podWaitingReasonCreateContainer, podWaitingReasonCreateContainerConfig, podWaitingReasonRunContainer:
