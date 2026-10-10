@@ -1592,23 +1592,8 @@ func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, r
 		provider.Spec.ControllerName != bound.ControllerName || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
 		return nil, fmt.Errorf("workspace provider no longer matches the frozen identity and capabilities")
 	}
-	config, err := resolveExternalWorkspaceParameters(ctx, reader, r.RESTMapper(), "", &provider.Spec.ParametersRef, meta.RESTScopeNameRoot)
-	if err != nil {
+	if err := r.verifyFrozenACPProfile(ctx, reader, class, provider, bound.ProfileHash); err != nil {
 		return nil, err
-	}
-	if provider.Status.PinnedParametersUID != string(config.GetUID()) {
-		return nil, fmt.Errorf("provider parameters do not match its protected UID pin")
-	}
-	parameters, err := resolveExternalWorkspaceParameters(ctx, reader, r.RESTMapper(), class.Namespace, class.Spec.ParametersRef, meta.RESTScopeNameNamespace)
-	if err != nil {
-		return nil, err
-	}
-	hash, err := externalACPClassProfileHash(class, provider, config, parameters)
-	if err != nil {
-		return nil, err
-	}
-	if hash != bound.ProfileHash {
-		return nil, fmt.Errorf("workspace class or parameters drifted from the frozen profile")
 	}
 	required := executionWorkspaceClassRequiredFeatures(class)
 	add := func(feature workspacev1alpha1.ExecutionWorkspaceFeature) {
@@ -1628,6 +1613,36 @@ func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, r
 		return nil, fmt.Errorf("workspace provider no longer supports the frozen class requirements")
 	}
 	return required, nil
+}
+
+// verifyFrozenACPProfile rereads the provider and class parameters and requires
+// the provider's protected pin and the frozen profile hash to still match.
+func (r *TaskReconciler) verifyFrozenACPProfile(
+	ctx context.Context,
+	reader client.Reader,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+	profileHash string,
+) error {
+	config, err := resolveExternalWorkspaceParameters(ctx, reader, r.RESTMapper(), "", &provider.Spec.ParametersRef, meta.RESTScopeNameRoot)
+	if err != nil {
+		return err
+	}
+	if provider.Status.PinnedParametersUID != string(config.GetUID()) {
+		return fmt.Errorf("provider parameters do not match its protected UID pin")
+	}
+	parameters, err := resolveExternalWorkspaceParameters(ctx, reader, r.RESTMapper(), class.Namespace, class.Spec.ParametersRef, meta.RESTScopeNameNamespace)
+	if err != nil {
+		return err
+	}
+	hash, err := externalACPClassProfileHash(class, provider, config, parameters)
+	if err != nil {
+		return err
+	}
+	if hash != profileHash {
+		return fmt.Errorf("workspace class or parameters drifted from the frozen profile")
+	}
+	return nil
 }
 
 func (r *TaskReconciler) recordACPRuntimePoolImageProvenance(
