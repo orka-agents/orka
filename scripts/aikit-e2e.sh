@@ -72,11 +72,20 @@ sample_model_resources() {
       if length == 1 then .[0] else error("model Pod stats unavailable") end'
 }
 
+# The standalone backend log endpoint includes model text. Project only fixed
+# performance event names and numeric fields, never copy the raw log buffer.
+sample_backend_counters() {
+  require_kind_context
+  kubectl --request-timeout=10s get --raw "/api/v1/namespaces/${aikit_namespace}/services/http:${aikit_service}:${aikit_port}/proxy/api/backend-logs/${aikit_model}" |
+    python3 "${script_dir}/fixtures/aikit/backend/counters.py"
+}
+
 start_model_monitor() {
   (
     while is_expected_kind_context; do
       date -u '+%Y-%m-%dT%H:%M:%SZ'
       sample_model_resources 2>&1 | redact || true
+      sample_backend_counters 2>/dev/null >>"${cleanup_report_dir}/backend-counters.jsonl" || true
       sleep 15
     done
   ) >"${cleanup_report_dir}/model-resources.log" &
@@ -365,7 +374,7 @@ warm_model() {
 }
 
 main() {
-  for command in make go kubectl kind curl jq; do require_cmd "${command}"; done
+  for command in make go kubectl kind curl jq python3; do require_cmd "${command}"; done
   [[ "${aikit_image}" =~ ^[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || die "AIKIT_IMAGE must be digest-pinned"
   [[ "${aikit_model}" =~ ^[a-zA-Z0-9._-]+$ ]] || die "AIKIT_MODEL must be a model identifier"
   work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/aikit-e2e.XXXXXX")"

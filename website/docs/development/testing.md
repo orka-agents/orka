@@ -212,14 +212,15 @@ missing or mismatched artifacts staying not ready.
   CI-only API work is bounded to 170 seconds, below the unchanged 180-second
   client deadline; failed Chat streams explicitly cancel their observed Session.
   Model Pod CPU/memory counters and allowlisted container restart/termination
-  metadata are saved with the
-  cleanup evidence without requiring a shell in the distroless AIKit container.
+  metadata are saved with the cleanup evidence without requiring a shell in the
+  distroless AIKit container. Backend log sampling projects only numeric timing
+  and cache-eviction events; raw backend text is never preserved.
   Startup can prefill the full Chat and compatibility instruction/tool prefixes
   within a shared thirty-minute preparation budget. Each API is qualified directly
   after its prefix is prepared so warm performance is observable even when a
   later cold request exhausts startup. Qualification still uses the existing
   contracts within 170 seconds before the stack build, including changed Chat
-  context to exercise partial-prefix reuse:
+  context and returning to Chat after compatibility to check cache retention:
   exact Chat text and the compatibility final sentinel plus connectivity marker.
   It uses the real prompt builders and tool schemas. The AIKit and ordinary E2E
   workflows use the public Docker Hub cache

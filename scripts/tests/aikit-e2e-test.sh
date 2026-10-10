@@ -20,6 +20,10 @@ kubectl() {
       fi
       ;;
     '--request-timeout=10s get --raw')
+      if [[ "$*" == *'/proxy/api/backend-logs/qwen-3.5-4b' ]]; then
+        printf '%s\n' '[{"text":"srv alloc: prompt state size 1500.0 MiB exceeds cache size limit 1024.0 MiB, skipping"},{"text":"slot print: prompt eval time = 123.0 ms / 456 tokens (0.27 ms per token, 3707.3 tokens per second)"},{"text":"Authorization: private-header"},{"text":"generated text private-output"}]'
+        return 0
+      fi
       [[ "$*" == *'/api/v1/nodes/e2e-node/proxy/stats/summary' ]]
       printf '%s\n' '{"pods":[{"podRef":{"uid":"foreign-pod","namespace":"private"},"cpu":{"usageNanoCores":99},"memory":{"rssBytes":99}},{"podRef":{"uid":"model-pod","namespace":"aikit-system"},"cpu":{"usageNanoCores":1234},"memory":{"rssBytes":3000000000}}]}'
       ;;
@@ -96,6 +100,13 @@ fi
 jq -e '.container.restartCount == 1 and .container.lastTermination ==
   {exitCode:137,signal:9,reason:"OOMKilled"} and
   (tostring | contains("private-output") | not)' "${work}/model-oom.json" >/dev/null
+sample_backend_counters >"${work}/backend-counters.jsonl"
+jq -se 'length == 2 and .[0] == {event:"cache_entry_skipped",entryMiB:1500,limitMiB:1024} and
+  .[1].event == "prompt_evaluated" and .[1].tokens == 456 and
+  (tostring | contains("private") | not)' "${work}/backend-counters.jsonl" >/dev/null
+if (wrong_context=true sample_backend_counters) >/dev/null 2>&1; then
+  echo 'backend sampling accepted a non-E2E context' >&2; exit 1
+fi
 printf '%s\n' 'ok - model diagnostics capture only counters on the verified E2E context'
 
 if (E2E_LOCAL_MODEL=wrong configure_provider_proxy) >/dev/null 2>&1; then
