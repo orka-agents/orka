@@ -232,8 +232,17 @@ func TestAIGatewaySoulDoesNotIgnoreJobAfterLostStartStatus(t *testing.T) {
 	require.NoError(t, r.List(ctx, &jobs))
 	require.Len(t, jobs.Items, 1, "the no-soul Job can execute despite the missing start status")
 	require.True(t, metav1.IsControlledBy(&jobs.Items[0], task))
+	jobs.Items[0].UID = "lost-status-job-uid"
+	require.NoError(t, r.Update(ctx, &jobs.Items[0]))
 
 	agent.Spec.Soul = &corev1alpha1.SoulSource{Inline: "invalid\x00"}
+	result, err := r.createTaskJob(ctx, task, agent, nil)
+	require.NoError(t, err)
+	require.Equal(t, time.Second, result.RequeueAfter)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(task), task))
+	require.Equal(t, corev1alpha1.TaskPhasePending, task.Status.Phase)
+	require.NoError(t, r.List(ctx, &jobs))
+	require.Empty(t, jobs.Items, "the live Job must retire before terminal projection")
 	_, err = r.createTaskJob(ctx, task, agent, nil)
 	require.NoError(t, err)
 	require.Equal(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)

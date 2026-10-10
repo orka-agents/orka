@@ -1489,6 +1489,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
 			return ctrl.Result{}, err
 		}
+		if latest.Spec.Type == corev1alpha1.TaskTypeAI {
+			job := &batchv1.Job{}
+			err := reader.Get(ctx, client.ObjectKey{Namespace: latest.Namespace, Name: latest.Status.JobName}, job)
+			if err == nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
 	}
 	// Recheck the persisted deadline after the uncached read so an older
@@ -1592,7 +1602,15 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	aiSoul, err := r.prepareAISoul(ctx, jobTask, agent)
 	if err != nil {
 		if isPermanentAISoulConfigurationError(err) {
-			return r.failTask(ctx, task, fmt.Sprintf("AI soul configuration: %v", err))
+			message := fmt.Sprintf("AI soul configuration: %v", err)
+			retired, retirementErr := r.retireAISoulTaskJob(ctx, jobTask, message)
+			if retirementErr != nil {
+				return ctrl.Result{}, retirementErr
+			}
+			if retired {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, message)
 		}
 		return ctrl.Result{}, err
 	}
