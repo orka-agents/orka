@@ -50,10 +50,14 @@ func TestCreateAITaskTool_Parameters(t *testing.T) {
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{nameField, promptField, agentRefField, providerRefField, namespaceField, timeoutField, priorityField, "sessionRef", scheduleField} {
+	for _, key := range []string{promptField, agentRefField, providerRefField, namespaceField, timeoutField, priorityField, "sessionRef", scheduleField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
+	}
+	// Task names are generated, so the model is not asked for one.
+	if _, ok := props[nameField]; ok {
+		t.Errorf("schema must not offer a %s argument the tool ignores", nameField)
 	}
 }
 

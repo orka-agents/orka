@@ -9,6 +9,8 @@ package api
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	chattools "github.com/orka-agents/orka/internal/tools"
 )
 
 func TestNewSystemPromptBuilder(t *testing.T) {
@@ -753,5 +756,133 @@ func TestBuildDynamicContextSkillListError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "listing skills") {
 		t.Errorf("error = %q, expected 'listing skills' message", err.Error())
+	}
+}
+
+func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	full, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(full, "<available_chat_tools>") || !strings.Contains(full, "<capabilities>") {
+		t.Error("unrestricted prompt must keep the capabilities section and not list available chat tools")
+	}
+
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetAvailableChatTools([]string{"create_container_task", "wait_for_task", "fetch_task_output"})
+	limited, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(limited, "<capabilities>") {
+		t.Error("limited prompt must not claim the unrestricted capabilities")
+	}
+	if !strings.Contains(limited, "- container:") || !strings.Contains(limited, "Writable paths") {
+		t.Error("container guidance must stay when create_container_task is offered")
+	}
+	for _, unavailable := range []string{"create_ai_task", "create_agent_task", "create_agent"} {
+		if regexp.MustCompile(`\b` + unavailable + `\b`).MatchString(limited) {
+			t.Errorf("limited prompt names unavailable tool %s", unavailable)
+		}
+	}
+	if !strings.Contains(limited, "only these Orka tools: create_container_task, fetch_task_output, wait_for_task") {
+		t.Error("limited prompt must list the offered chat tools")
+	}
+}
+
+func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	build := func(allowed ...string) string {
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+		b.SetAvailableChatTools(allowed)
+		prompt, err := b.BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return prompt
+	}
+
+	agentOnly := build("create_agent_task")
+	for _, want := range []string{"- agent:", "ALWAYS include the gitRepo URL", "Set timeout to at least 15m", "Do NOT use create_agent_task for non-runtime agents"} {
+		if !strings.Contains(agentOnly, want) {
+			t.Errorf("agent-task-only prompt is missing %q", want)
+		}
+	}
+	containerOnly := build("create_container_task")
+	if !strings.Contains(containerOnly, "you MUST include the tool\ncall in the SAME response.") || !strings.Contains(containerOnly, "Act first, summarize after.") {
+		t.Error("prompt without polling tools must keep the rule to call tools in the same response")
+	}
+	// Whole words, so the coordinator's own wait_for_tasks tool does not count.
+	unoffered := regexp.MustCompile(`\b(?:wait_for_task|create_ai_task)\b`)
+	for _, prompt := range []string{agentOnly, containerOnly} {
+		if unoffered.MatchString(prompt) {
+			t.Error("limited prompt names a tool that is not offered")
+		}
+	}
+	// Coordination guidance for create_agent survives without the other task tools.
+	coordinator := build("create_agent", "create_ai_task")
+	for _, want := range []string{"PREFERRED (one-shot)", "initialPrompt=", "use create_ai_task.", "use the one-shot coordinator pattern above"} {
+		if !strings.Contains(coordinator, want) {
+			t.Errorf("create_agent prompt is missing %q", want)
+		}
+	}
+	if aiOnly := build("create_ai_task"); !strings.Contains(aiOnly, "use create_ai_task.") || strings.Contains(aiOnly, "one-shot coordinator") {
+		t.Error("prompt without create_agent must keep the create_ai_task fallback and drop the one-shot pattern")
+	}
+	// Without a task creation tool, the model must not be told to create tasks.
+	for _, prompt := range []string{build("wait_for_task", "fetch_task_output"), build("list_agents"), build()} {
+		if strings.Contains(prompt, "create_*_task") || strings.Contains(prompt, "CRITICAL RULE") {
+			t.Error("prompt without a task creation tool still tells the model to create tasks")
+		}
+		if !strings.Contains(prompt, "<behavior>\nAct first, summarize after.") {
+			t.Error("prompt without a task creation tool must keep the act-first rule")
+		}
+	}
+}
+
+// TestPromptPartsDeclareTheChatToolsTheyName keeps each guidance part's
+// declared requirements in step with its text: a part that names a chat tool
+// must require it, and a part that refers to create_*_task must need a task
+// creation tool.
+func TestPromptPartsDeclareTheChatToolsTheyName(t *testing.T) {
+	for section, parts := range promptSections() {
+		for i, part := range parts {
+			for _, name := range chattools.ChatToolNames() {
+				if regexp.MustCompile(`\b`+name+`\b`).MatchString(part.text) && !slices.Contains(part.requires, name) {
+					t.Errorf("%s part %d names %s but does not require it", section, i, name)
+				}
+			}
+			if strings.Contains(part.text, "create_*_task") && !slices.Equal(part.anyOf, promptTaskCreators) {
+				t.Errorf("%s part %d refers to create_*_task but does not need a task creation tool", section, i)
+			}
+		}
+	}
+}
+
+// A scoped caller keeps the general rules even when it lacks tools that other
+// rules name, and the kept rules are numbered without gaps.
+func TestBuildSystemPromptKeepsGeneralRulesForScopedCallers(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetAvailableChatTools([]string{"list_agents", "list_tasks"})
+	prompt, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<rules>\n1. Use the current namespace (namespace in the Runtime line)",
+		"2. Provide clear summaries of what you did",
+		"4. Do not create more tasks than necessary.",
+		"<tool_call_style>",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("scoped prompt is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"<examples>", "<scheduling>", "<validation>", "create_*_task"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Errorf("scoped prompt without task tools contains %q", unwanted)
+		}
 	}
 }

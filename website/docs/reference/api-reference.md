@@ -881,7 +881,7 @@ The following tools are **auto-injected** when coordination is enabled:
 |------|-------------|------------|
 | `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `namespace`, `priority`, `auto_retry`, `max_retries` |
 | `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
-| `create_container_task` | Create a child container task | `name`, `image`, `command`/`args`, env/workspace fields |
+| `create_container_task` | Create a child container task | `image`, `command`/`args`; `workspace`, `priorTask`, `namespace`, `timeout`, `priority`, `schedule` |
 | `cancel_task` | Cancel a running child task | `task_name` (required); `namespace`, `reason` |
 | `send_message` | Send a message to a sibling task | `to_task` (required, or `*` to broadcast), `content` (required) |
 | `check_messages` | Check for messages from sibling tasks | `mark_read` (boolean, default true) |

@@ -40,7 +40,7 @@ func (t *CreateContainerTaskTool) Description() string {
 }
 
 func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, "image": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker. Custom images cannot publish workspace changes: do not combine with workspace.pushBranch."},
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{"image": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker. Custom images cannot publish workspace changes: do not combine with workspace.pushBranch."},
 		"command": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Command to execute"},
 		"args":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Arguments to the command"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Git workspace for the command. Required when the command validates, builds, tests, or inspects repository files. Orka prepares /workspace before running the container and records workspace provenance in the result.", jsonSchemaPropertiesField: map[string]any{
 			"gitRepo":                  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL"},
@@ -53,7 +53,7 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 			"pushBranch":               map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name. Omit for read-only validation. Requires publicationCredentialRef and the default worker image; not supported with a custom image."},
 		},
 		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command. If workspace is omitted, Orka copies the workspace from this prior task when available."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
-	}, jsonSchemaRequiredField: []string{nameField},
+	},
 	})
 }
 
@@ -80,6 +80,9 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		return r, nil
 	}
 
+	if r, ok := requireChatObjectArg(a, workspaceField); !ok {
+		return r, nil
+	}
 	task := buildContainerTask(a)
 	if err := applyContainerPriorTaskWorkspace(ctx, tc.Client, namespace, task); err != nil {
 		return classifyChatK8sErr(err)
@@ -147,6 +150,9 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		return "", fmt.Errorf("failed to get parent task: %w", err)
 	}
 
+	if r, ok := requireChatObjectArg(a, workspaceField); !ok {
+		return r, nil
+	}
 	task := buildContainerTask(a)
 	if err := applyContainerPriorTaskWorkspace(ctx, t.k8sClient, namespace, task); err != nil {
 		return classifyChatK8sErr(err)

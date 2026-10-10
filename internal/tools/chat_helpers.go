@@ -49,6 +49,21 @@ func checkChatNamespaceScope(tc *ToolContext, namespace string) (string, bool) {
 	return "", true
 }
 
+// requireChatObjectArg rejects a present, non-null argument that is not an
+// object. Registry.Execute already decodes JSON-encoded objects, so anything
+// left here is a value the tool would otherwise ignore.
+func requireChatObjectArg(a map[string]any, key string) (string, bool) {
+	value, ok := a[key]
+	if !ok || value == nil {
+		return "", true
+	}
+	if _, isObject := value.(map[string]any); isObject {
+		return "", true
+	}
+	result, _ := ChatToolErrorResult(invalidArgumentsErrorType, key+" must be an object", "Pass "+key+" as a JSON object")
+	return result, false
+}
+
 // chatGetStringArg extracts a string argument from a map.
 func chatGetStringArg(args map[string]any, key string) string {
 	v, ok := args[key]

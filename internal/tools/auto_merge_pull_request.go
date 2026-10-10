@@ -111,6 +111,9 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 	if args.MergeMethod == "" {
 		args.MergeMethod = defaultMergeMethod
 	}
+	if err := validateMergeMethod(args.MergeMethod); err != nil {
+		return "", err
+	}
 
 	if args.Timeout == "" {
 		args.Timeout = "30m"

@@ -92,6 +92,8 @@ const (
 	jsonSchemaDefaultField    = "default"
 	jsonSchemaMinimumField    = "minimum"
 	jsonSchemaMaximumField    = "maximum"
+	jsonSchemaMinLengthField  = "minLength"
+	jsonSchemaPatternField    = "pattern"
 	nameField                 = "name"
 	namespaceField            = "namespace"
 	taskNameField             = "task_name"

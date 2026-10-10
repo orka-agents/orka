@@ -95,8 +95,7 @@ func TestScannerEvalIgnoreInstructionsPattern(t *testing.T) {
 // patch stage edits files that Orka publishes.
 func TestScannerEvalPromptsTreatRepositoryContentAsUntrusted(t *testing.T) {
 	// Each stage has its own marker so stages can be fixed one at a time.
-	const defect = "the prompt does not tell the model to ignore instructions embedded in repository content"
-	knownDefects := map[string]string{"threat model": defect, "review": defect, "validation": defect, "patch": defect}
+	knownDefects := map[string]string{}
 	for name, prompt := range scannerEvalPrompts() {
 		t.Run(name, func(t *testing.T) {
 			if name == "review" && !strings.Contains(prompt, scannerEvalRepositoryExcerpt) {
@@ -121,7 +120,7 @@ func TestScannerEvalReviewPromptDoesNotTrustRepositoryContent(t *testing.T) {
 	section := prompt[strings.LastIndex(prompt[:at], "\n\n")+1 : at]
 	expectScannerEvalCheck(t, !regexp.MustCompile(`(?i)\btrusted\b`).MatchString(section),
 		"review prompt introduces repository content as trusted: "+strings.TrimSpace(section),
-		"the review prompt introduces inlined repository excerpts as TRUSTED context")
+		"")
 }
 
 // TestScannerEvalCustomPolicyCannotDisplaceDefaults checks that ConfigMap

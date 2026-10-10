@@ -605,7 +605,9 @@ func TestParseCoordinationConfig_EnabledClearsRuntimeAndSecretRef(t *testing.T) 
 		},
 	}
 
-	parseCoordinationConfig(args, agent)
+	if _, ok := parseCoordinationConfig(args, agent); !ok {
+		t.Fatal("parseCoordinationConfig() rejected valid coordination")
+	}
 
 	if agent.Spec.Coordination == nil {
 		t.Fatal("agent.Spec.Coordination is nil")
@@ -666,5 +668,57 @@ func TestParseRuntimeConfig_RejectsInvalidOpenCodeModel(t *testing.T) {
 				t.Fatalf("response = %#v, want invalid arguments", response)
 			}
 		})
+	}
+}
+
+// A coordination restriction with the wrong JSON type used to be ignored, and an
+// empty allowedAgents lets the Agent delegate to any agent.
+func TestChatCreateAgentTool_Execute_RejectsWrongTypedCoordination(t *testing.T) {
+	run := func(coordination string) (ChatToolResult, []corev1alpha1.Agent) {
+		t.Helper()
+		fc := newFakeClient()
+		ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
+		result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"lead","systemPrompt":"p","coordination":`+coordination+`}`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var r ChatToolResult
+		if err := json.Unmarshal([]byte(result), &r); err != nil {
+			t.Fatalf("failed to parse result: %v", err)
+		}
+		var agents corev1alpha1.AgentList
+		if err := fc.List(context.Background(), &agents); err != nil {
+			t.Fatal(err)
+		}
+		return r, agents.Items
+	}
+
+	r, agents := run(`{"enabled":true,"maxDepth":2,"maxConcurrentChildren":3,"allowedAgents":[{"name":"coder"}]}`)
+	if !r.Success || len(agents) != 1 {
+		t.Fatalf("valid coordination: result = %#v, agents = %d", r, len(agents))
+	}
+	if coord := agents[0].Spec.Coordination; coord == nil || !coord.Enabled || coord.MaxDepth != 2 || coord.MaxConcurrentChildren != 3 || len(coord.AllowedAgents) != 1 || coord.AllowedAgents[0].Name != "coder" {
+		t.Fatalf("valid coordination stored as %#v", agents[0].Spec.Coordination)
+	}
+
+	for _, tt := range []struct {
+		coordination string
+		field        string
+	}{
+		{`{"enabled":true,"allowedAgents":"coder"}`, "coordination.allowedAgents"},
+		{`{"enabled":true,"allowedAgents":{"name":"coder"}}`, "coordination.allowedAgents"},
+		{`{"enabled":true,"maxDepth":"2"}`, "coordination.maxDepth"},
+		{`{"enabled":true,"maxConcurrentChildren":1.5}`, "coordination.maxConcurrentChildren"},
+		{`{"enabled":true,"maxConcurrentChildren":4294967297}`, "coordination.maxConcurrentChildren"},
+		{`{"enabled":true,"maxDepth":4294967298}`, "coordination.maxDepth"},
+		{`{"enabled":"true"}`, "coordination.enabled"},
+	} {
+		r, agents := run(tt.coordination)
+		if r.Success || r.ErrorType != errTypeInvalidArgs || !strings.Contains(r.Error, tt.field) {
+			t.Errorf("coordination %s: result = %#v, want invalid arguments naming %s", tt.coordination, r, tt.field)
+		}
+		if len(agents) != 0 {
+			t.Errorf("coordination %s created %d Agents", tt.coordination, len(agents))
+		}
 	}
 }

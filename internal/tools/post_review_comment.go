@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -82,9 +83,9 @@ func (t *PostReviewCommentTool) Parameters() json.RawMessage {
 			jsonSchemaDescriptionField: "Review verdict: APPROVE, REQUEST_CHANGES, or COMMENT",
 		},
 		"comments": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "Optional line-level review comments", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-			"path":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "File path relative to repo root"},
-			"line":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Line number in the diff (new file line number)"},
-			githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Comment text"},
+			"path":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "File path relative to repo root", jsonSchemaMinLengthField: 1, jsonSchemaPatternField: `\S`},
+			"line":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Line number in the diff (new file line number)", jsonSchemaMinimumField: 1},
+			githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Comment text", jsonSchemaMinLengthField: 1, jsonSchemaPatternField: `\S`},
 		}, jsonSchemaRequiredField: []string{"path", "line", githubBodyField},
 		},
 		},
@@ -111,6 +112,11 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 		// valid
 	default:
 		return "", fmt.Errorf("invalid event value %q: must be APPROVE, REQUEST_CHANGES, or COMMENT", args.Event)
+	}
+	for i, comment := range args.Comments {
+		if strings.TrimSpace(comment.Path) == "" || comment.Line < 1 || strings.TrimSpace(comment.Body) == "" {
+			return "", fmt.Errorf("comments[%d] needs a path, a line of at least 1, and a body", i)
+		}
 	}
 
 	owner, repo, token, _, err := resolveScopedForgeRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)

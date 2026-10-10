@@ -155,13 +155,25 @@ var evalToolClusters = map[string]func() client.Client{
 
 const evalPlaceholder = "eval"
 
-// evalToolContextFor gives brokered tools the authenticated context the ACP
-// broker builds and other tools the chat context, so each takes its real path.
+// evalToolContextFor gives each tool the context its caller builds, so each
+// takes its real path: chat tools the chat executor's, worker tools a
+// worker's narrower one, and brokered tools the ACP broker's authenticated one.
 func evalToolContextFor(label string, fc client.Client) context.Context {
-	if label == "brokered" {
+	switch label {
+	case "worker":
+		return WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
+	case "brokered":
 		return WithToolContext(context.Background(), &ToolContext{Client: fc, Brokered: true, Namespace: defaultNamespace, TaskID: evalPlaceholder, TaskUID: "eval-uid"})
 	}
 	return evalToolContext(fc)
+}
+
+// evalRegistryExecute runs a tool through Registry.Execute, the path chat,
+// worker, and broker calls take, converting a panic into a reported failure.
+func evalRegistryExecute(ctx context.Context, registry *Registry, name, args string) (result string, panicked any, err error) {
+	defer func() { panicked = recover() }()
+	result, err = registry.Execute(ctx, name, json.RawMessage(args))
+	return result, nil, err
 }
 
 // evalToolContext is the chat tool context, with the execution mode a real
@@ -243,27 +255,11 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 // the model as an unknown tool.
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
-	const (
-		ignoredName        = "the create_*_task schemas require name, but the tools ignore it and always generate one"
-		droppedWorkspace   = "a workspace that is not an object is ignored, so the Task runs without the repository"
-		modelStringAsName  = "a JSON-encoded model object is stored as the model name"
-		droppedCoordinator = "a coordination value that is not an object is ignored, so the Agent is created without coordination"
-		droppedRuntime     = "a runtime value that is not an object is ignored, so a runtime Agent is created as a plain AI Agent"
-	)
-	knownDefects := map[string]string{
-		"chat/create_agent: coordination as JSON string":         droppedCoordinator,
-		"chat/create_agent: model as JSON string":                modelStringAsName,
-		"chat/create_agent: runtime as JSON string":              droppedRuntime,
-		"chat/update_agent: model as JSON string":                modelStringAsName,
-		"chat/create_container_task: empty object":               ignoredName,
-		"chat/create_container_task: null":                       ignoredName,
-		"chat/create_container_task: workspace as JSON string":   droppedWorkspace,
-		"chat/create_agent_task: missing name":                   ignoredName,
-		"chat/create_ai_task: missing name":                      ignoredName,
-		"worker/create_container_task: empty object":             ignoredName,
-		"worker/create_container_task: null":                     ignoredName,
-		"worker/create_container_task: workspace as JSON string": droppedWorkspace,
-	}
+	// Worker tools resolve their parent Task from the environment; the seeded
+	// cluster holds it.
+	t.Setenv(envOrkaTaskName, evalPlaceholder)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	knownDefects := map[string]string{}
 	wrongValue := map[string]string{
 		"string": `{"k":"v"}`, "integer": `"many"`, "number": `"many"`, "boolean": `"yes"`, "array": `"a,b"`, "object": `"{\"k\":\"v\"}"`,
 	}
@@ -321,8 +317,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			for _, input := range inputNames {
 				for _, cluster := range []string{"empty", "seeded"} {
 					fc := evalToolClusters[cluster]()
-					fresh, _ := evalToolRegistries(fc)[label].Get(name)
-					result, panicked, err := evalToolExecute(evalToolContextFor(label, fc), fresh, inputs[input])
+					result, panicked, err := evalRegistryExecute(evalToolContextFor(label, fc), evalToolRegistries(fc)[label], name, inputs[input])
 					key := fmt.Sprintf("%s/%s: %s", label, name, input)
 					failed, message := evalToolFailure(result, err)
 					switch {
@@ -381,8 +376,7 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 			}
 			raw, _ := json.Marshal(args)
 			fc := evalToolClusters[cluster]()
-			tool, _ := evalToolRegistries(fc)[label].Get(name)
-			result, panicked, err := evalToolExecute(evalToolContextFor(label, fc), tool, string(raw))
+			result, panicked, err := evalRegistryExecute(evalToolContextFor(label, fc), evalToolRegistries(fc)[label], name, string(raw))
 			if panicked != nil {
 				return true, evalPanicked + fmt.Sprintf(": %v", panicked)
 			}
@@ -465,7 +459,8 @@ func evalObjectPayload(prop string, schema map[string]any) map[string]any {
 	return payload
 }
 
-// evalClusterSnapshot renders the Agents and Tasks a tool call left behind.
+// evalClusterSnapshot renders the specs of the Agents and Tasks a tool call
+// left behind. Names are left out because worker tools add random suffixes.
 func evalClusterSnapshot(fc client.Client) string {
 	var agents corev1alpha1.AgentList
 	var tasks corev1alpha1.TaskList
@@ -474,11 +469,11 @@ func evalClusterSnapshot(fc client.Client) string {
 	parts := make([]string, 0, len(agents.Items)+len(tasks.Items))
 	for i := range agents.Items {
 		spec, _ := json.Marshal(agents.Items[i].Spec)
-		parts = append(parts, "agent "+agents.Items[i].Name+" "+string(spec))
+		parts = append(parts, "agent "+string(spec))
 	}
 	for i := range tasks.Items {
 		spec, _ := json.Marshal(tasks.Items[i].Spec)
-		parts = append(parts, "task "+tasks.Items[i].Name+" "+string(spec))
+		parts = append(parts, "task "+string(spec))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\n")
@@ -782,7 +777,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 	}
 	workerTool := func(name string, fc client.Client) (Tool, context.Context) {
 		tool, _ := evalToolRegistries(fc)["worker"].Get(name)
-		return tool, evalToolContext(fc)
+		return tool, evalToolContextFor("worker", fc)
 	}
 	githubTask := func() client.Client {
 		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
@@ -945,7 +940,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				}
 				return false, fmt.Sprintf("timeout 0 ran with %s", sandbox.req.Timeout)
 			},
-			knownDefect: "code_exec treats a timeout below 1 as unset and uses the 30s default instead of rejecting or clamping it",
 		},
 		{
 			name:   "brokered web_search",
@@ -980,7 +974,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				url := "https://1.1.1.1/" + long(brokeredWebFetchMaxURLBytes/utf8.UTFMax)
 				return evalRejects(context.Background(), tool, `{"url":"`+url+`","max_chars":50001}`, "url")
 			},
-			knownDefect: "brokered web_fetch advertises url maxLength in characters but only enforces its 64 KiB byte limit",
 		},
 		{
 			name:   "worker create_agent model contextWindow",
@@ -1005,7 +998,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				}
 				return evalRejectsChange(call, tokens(1), tokens(0), "maxTokens")
 			},
-			knownDefect: "worker create_agent stores maxTokens below 1, and the Agent CRD sets no minimum for it",
 		},
 		{
 			name:   "worker delegate_task workspace",
@@ -1069,10 +1061,9 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:        "worker merge_pull_request merge_method",
-			limits:      []string{"worker/merge_pull_request.merge_method enum=merge|squash|rebase"},
-			check:       evalMergeMethodEnforced(func(c client.Client, url string) Tool { return &MergePullRequestTool{k8sClient: c, apiBaseURL: url} }),
-			knownDefect: "merge_pull_request forwards an unsupported merge_method to GitHub instead of rejecting it",
+			name:   "worker merge_pull_request merge_method",
+			limits: []string{"worker/merge_pull_request.merge_method enum=merge|squash|rebase"},
+			check:  evalMergeMethodEnforced(func(c client.Client, url string) Tool { return &MergePullRequestTool{k8sClient: c, apiBaseURL: url} }),
 		},
 		{
 			name:   "worker auto_merge_pull_request merge_method",
@@ -1080,7 +1071,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check: evalMergeMethodEnforced(func(c client.Client, url string) Tool {
 				return &AutoMergePullRequestTool{k8sClient: c, apiBaseURL: url}
 			}),
-			knownDefect: "auto_merge_pull_request forwards an unsupported merge_method to GitHub instead of rejecting it",
 		},
 		{
 			name:   "worker post_review_comment event",
@@ -1132,9 +1122,8 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:        "worker request_approval severity",
-			limits:      []string{"worker/request_approval.severity enum=warning|critical"},
-			knownDefect: "request_approval forwards an unsupported severity to the approval emitter instead of rejecting it",
+			name:   "worker request_approval severity",
+			limits: []string{"worker/request_approval.severity enum=warning|critical"},
 			check: func(t *testing.T) (bool, string) {
 				var emitted []approvals.ApprovalTarget
 				tool, _ := workerTool("request_approval", newFakeClient())
@@ -1170,46 +1159,59 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:        "chat create_agent allowed agent name",
-			limits:      []string{"chat/create_agent.coordination.allowedAgents[].name required"},
-			check:       evalAllowedAgentNameRequired(chatTool, `"name":"a","systemPrompt":"p"`),
-			knownDefect: "chat create_agent drops an allowed agent without a name and reports success",
+			name:   "chat create_agent allowed agent name",
+			limits: []string{"chat/create_agent.coordination.allowedAgents[].name required"},
+			check:  evalAllowedAgentNameRequired(chatTool, `"name":"a","systemPrompt":"p"`),
 		},
 		{
-			name:        "worker create_agent allowed agent name",
-			limits:      []string{"worker/create_agent.coordination.allowedAgents[].name required"},
-			check:       evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
-			knownDefect: "worker create_agent stores an allowed agent with an empty name",
+			name:   "worker create_agent allowed agent name",
+			limits: []string{"worker/create_agent.coordination.allowedAgents[].name required"},
+			check:  evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
 		},
 		{
-			name:        "worker post_review_comment comment path",
-			limits:      []string{"worker/post_review_comment.comments[].path required"},
-			check:       evalReviewCommentFieldRequired("path"),
-			knownDefect: "post_review_comment forwards a line comment without path to GitHub instead of rejecting it",
+			name:   "worker post_review_comment comment path",
+			limits: []string{"worker/post_review_comment.comments[].path required"},
+			check:  evalReviewCommentFieldRequired("path"),
 		},
 		{
-			name:        "worker post_review_comment comment line",
-			limits:      []string{"worker/post_review_comment.comments[].line required"},
-			check:       evalReviewCommentFieldRequired("line"),
-			knownDefect: "post_review_comment forwards a line comment without line to GitHub instead of rejecting it",
+			name:   "worker post_review_comment comment line",
+			limits: []string{"worker/post_review_comment.comments[].line required"},
+			check:  evalReviewCommentFieldRequired("line"),
 		},
 		{
-			name:        "worker post_review_comment comment body",
-			limits:      []string{"worker/post_review_comment.comments[].body required"},
-			check:       evalReviewCommentFieldRequired("body"),
-			knownDefect: "post_review_comment forwards a line comment without body to GitHub instead of rejecting it",
+			name: "worker post_review_comment comment text",
+			limits: []string{
+				"worker/post_review_comment.comments[].path minLength=1", "worker/post_review_comment.comments[].path pattern=\\S",
+				"worker/post_review_comment.comments[].body minLength=1", "worker/post_review_comment.comments[].body pattern=\\S",
+			},
+			check: func(t *testing.T) (bool, string) {
+				return evalAll(
+					func() (bool, string) { return evalReviewCommentText(t, "path", "") },
+					func() (bool, string) { return evalReviewCommentText(t, "path", " ") },
+					func() (bool, string) { return evalReviewCommentText(t, "body", "") },
+					func() (bool, string) { return evalReviewCommentText(t, "body", " ") },
+				)
+			},
 		},
 		{
-			name:        "worker update_plan progress maximum",
-			limits:      []string{"worker/update_plan.progress_pct maximum=100"},
-			check:       evalProgressEnforced(100, 101),
-			knownDefect: "update_plan sends a progress_pct above 100 to the controller instead of rejecting or clamping it",
+			name:   "worker post_review_comment comment line minimum",
+			limits: []string{"worker/post_review_comment.comments[].line minimum=1"},
+			check:  evalReviewCommentLine(0),
 		},
 		{
-			name:        "worker update_plan progress minimum",
-			limits:      []string{"worker/update_plan.progress_pct minimum=0"},
-			check:       evalProgressEnforced(0, -1),
-			knownDefect: "update_plan sends a negative progress_pct to the controller instead of rejecting or clamping it",
+			name:   "worker post_review_comment comment body",
+			limits: []string{"worker/post_review_comment.comments[].body required"},
+			check:  evalReviewCommentFieldRequired("body"),
+		},
+		{
+			name:   "worker update_plan progress maximum",
+			limits: []string{"worker/update_plan.progress_pct maximum=100"},
+			check:  evalProgressEnforced(100, 101),
+		},
+		{
+			name:   "worker update_plan progress minimum",
+			limits: []string{"worker/update_plan.progress_pct minimum=0"},
+			check:  evalProgressEnforced(0, -1),
 		},
 	}
 
@@ -1352,6 +1354,44 @@ func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string
 		ok, detail := evalRejectsChange(call, review(""), review(field), "comments")
 		if !ok && stub.sent(`"comments":[`) {
 			detail = "sent a line comment without " + field + " to GitHub"
+		}
+		return ok, detail
+	}
+}
+
+// evalReviewCommentText checks that post_review_comment rejects a line comment
+// whose path or body is the given text.
+func evalReviewCommentText(t *testing.T, field, text string) (bool, string) {
+	task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+	stub := newEvalHTTPStub(t)
+	t.Setenv(envOrkaTaskName, testCoderTaskName)
+	tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
+	review := func(value string) string {
+		comment := map[string]any{"path": "main.go", "line": 1, "body": "nit"}
+		comment[field] = value
+		raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{comment}})
+		return string(raw)
+	}
+	call := func() (Tool, context.Context) { return tool, context.Background() }
+	return evalRejectsChange(call, review(map[string]string{"path": "main.go", "body": "nit"}[field]), review(text), field)
+}
+
+// evalReviewCommentLine checks that post_review_comment rejects a line comment
+// with an out-of-range line, reporting whether it reached the GitHub stub.
+func evalReviewCommentLine(line int) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+		stub := newEvalHTTPStub(t)
+		t.Setenv(envOrkaTaskName, testCoderTaskName)
+		tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
+		review := func(line int) string {
+			raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{map[string]any{"path": "main.go", "line": line, "body": "nit"}}})
+			return string(raw)
+		}
+		call := func() (Tool, context.Context) { return tool, context.Background() }
+		ok, detail := evalRejectsChange(call, review(1), review(line), "line")
+		if !ok && stub.sent(`"comments":[`) {
+			detail = fmt.Sprintf("sent a line comment with line %d to GitHub", line)
 		}
 		return ok, detail
 	}

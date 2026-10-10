@@ -223,13 +223,15 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 		{
 			name:         "read-only tools allowed",
 			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
-			knownDefect:  "the system prompt is static, so a token's allowedTools removes tools the prompt still tells the model to call",
+		},
+		{
+			name:         "polling tools without a task creation tool",
+			allowedTools: []string{"wait_for_task", "fetch_task_output"},
 		},
 		{
 			name:         "selected runtime agent without its task tool",
 			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
 			agentRef:     "coder",
-			knownDefect:  "the prompt and the selected-agent hint name task tools that a token's allowedTools removed",
 		},
 	}
 	for _, tt := range tests {
@@ -279,6 +281,10 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(chatEvalModelInput(req)) {
 					unavailable = append(unavailable, name)
 				}
+			}
+			taskCreator := func(name string) bool { return strings.HasPrefix(name, "create_") && strings.HasSuffix(name, "_task") }
+			if !slices.ContainsFunc(tt.allowedTools, taskCreator) && strings.Contains(chatEvalModelInput(req), "create_*_task") {
+				unavailable = append(unavailable, "create_*_task")
 			}
 			expectChatEvalCheck(t, len(unavailable) == 0, "model input names tools the caller cannot use: "+strings.Join(unavailable, ","), tt.knownDefect)
 			if tt.agentRef != "" {

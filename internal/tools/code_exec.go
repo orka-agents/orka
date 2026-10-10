@@ -101,7 +101,7 @@ type CodeExecTool struct {
 type CodeExecArgs struct {
 	Language string `json:"language"`
 	Code     string `json:"code"`
-	Timeout  int    `json:"timeout,omitempty"` // Timeout in seconds
+	Timeout  *int   `json:"timeout,omitempty"` // Timeout in seconds; nil when omitted
 }
 
 // CodeExecResult represents the execution result.
@@ -391,12 +391,15 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("unsupported language: %s", execArgs.Language)
 	}
 
+	if execArgs.Timeout != nil && *execArgs.Timeout < 1 {
+		return "", fmt.Errorf("timeout must be at least 1 second")
+	}
 	timeout := t.timeout
 	if timeout <= 0 {
 		timeout = defaultCodeExecTimeout
 	}
-	if execArgs.Timeout > 0 {
-		timeout = time.Duration(min(execArgs.Timeout, maxCodeExecTimeoutSeconds)) * time.Second
+	if execArgs.Timeout != nil {
+		timeout = time.Duration(min(*execArgs.Timeout, maxCodeExecTimeoutSeconds)) * time.Second
 	}
 
 	tenant, provider, providerType := codeExecScopeFromContext(ctx)

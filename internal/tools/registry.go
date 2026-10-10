@@ -413,6 +413,9 @@ func (r *Registry) Names() []string {
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	tool, ok := r.Get(name)
+	if ok {
+		args = decodeStringifiedObjectArgs(tool, args)
+	}
 	if telemetryDisabled() {
 		if !ok {
 			return "", fmt.Errorf("tool %q not found", name)
@@ -869,6 +872,52 @@ func KnownBuiltInToolNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// decodeStringifiedObjectArgs replaces top-level arguments that the tool schema
+// declares as objects, but that the model sent as JSON-encoded strings, with
+// the decoded object. Models often stringify nested objects, and tools that
+// type-switch on map[string]any would otherwise ignore them. Every other value
+// is left for the tool to validate.
+func decodeStringifiedObjectArgs(tool Tool, args json.RawMessage) json.RawMessage {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(args, &values); err != nil || len(values) == 0 {
+		return args
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type any `json:"type"`
+		} `json:"properties"`
+	}
+	changed := false
+	for name, value := range values {
+		var encoded string
+		if json.Unmarshal(value, &encoded) != nil {
+			continue
+		}
+		if schema.Properties == nil {
+			if err := json.Unmarshal(tool.Parameters(), &schema); err != nil || schema.Properties == nil {
+				return args
+			}
+		}
+		if schema.Properties[name].Type != jsonSchemaTypeObject {
+			continue
+		}
+		var object map[string]json.RawMessage
+		if json.Unmarshal([]byte(encoded), &object) != nil || object == nil {
+			continue
+		}
+		values[name] = json.RawMessage(encoded)
+		changed = true
+	}
+	if !changed {
+		return args
+	}
+	decoded, err := json.Marshal(values)
+	if err != nil {
+		return args
+	}
+	return decoded
 }
 
 // ChatToolNames returns the names of all chat tools in registration order.

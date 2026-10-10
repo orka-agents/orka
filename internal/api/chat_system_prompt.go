@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -28,6 +29,9 @@ type SystemPromptBuilder struct {
 	namespace           string
 	runtimeAvailability ACPRuntimeAvailability
 	chatProvider        string
+	// availableChatTools, when set, holds the only chat tools offered on the
+	// turn; nil means every chat tool is offered.
+	availableChatTools map[string]bool
 }
 
 // NewSystemPromptBuilder creates a new SystemPromptBuilder.
@@ -45,6 +49,90 @@ func (b *SystemPromptBuilder) SetChatProvider(name string) {
 	b.chatProvider = name
 }
 
+// SetAvailableChatTools limits the prompt to the chat tools offered on this
+// turn, such as for a caller whose token allows only some tools. Guidance parts
+// that require any other chat tool are left out, so the model is never told to
+// call a tool it does not have.
+func (b *SystemPromptBuilder) SetAvailableChatTools(names []string) {
+	b.availableChatTools = make(map[string]bool, len(names))
+	for _, name := range names {
+		b.availableChatTools[name] = true
+	}
+}
+
+// Chat tools that prompt guidance depends on.
+const (
+	promptToolContainerTask = "create_container_task"
+	promptToolAgentTask     = "create_agent_task"
+	promptToolCreateAgent   = "create_agent"
+	promptToolWait          = "wait_for_task"
+	promptToolFetch         = "fetch_task_output"
+	promptToolCancel        = "cancel_task"
+)
+
+// promptTaskCreators are the chat tools that create tasks.
+var promptTaskCreators = []string{promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask}
+
+// promptPart is one piece of guidance and the chat tools it needs. A part with
+// no requirements is general and always kept. Requirements are declared rather
+// than read from the text, so rewording a part cannot change who sees it.
+// TestPromptPartsDeclareTheChatToolsTheyName keeps them in step with the chat
+// tools each part names.
+type promptPart struct {
+	text string
+	// requires lists chat tools that must all be offered.
+	requires []string
+	// anyOf, when set, lists chat tools of which at least one must be offered.
+	anyOf []string
+}
+
+// offers reports whether the part's tools are offered on this turn.
+func (b *SystemPromptBuilder) offers(part promptPart) bool {
+	if b.availableChatTools == nil {
+		return true
+	}
+	for _, name := range part.requires {
+		if !b.availableChatTools[name] {
+			return false
+		}
+	}
+	return len(part.anyOf) == 0 || slices.ContainsFunc(part.anyOf, func(name string) bool { return b.availableChatTools[name] })
+}
+
+// render joins the parts whose tools are offered.
+func (b *SystemPromptBuilder) render(parts []promptPart) string {
+	var sb strings.Builder
+	for _, part := range parts {
+		if b.offers(part) {
+			sb.WriteString(part.text)
+		}
+	}
+	return sb.String()
+}
+
+// renderNumbered joins the parts whose tools are offered as a list numbered
+// from 1, so leaving a part out leaves no gap. label gives each item's prefix
+// and sep goes between items.
+func (b *SystemPromptBuilder) renderNumbered(parts []promptPart, label func(int) string, sep string) string {
+	var items []string
+	for _, part := range parts {
+		if b.offers(part) {
+			items = append(items, label(len(items)+1)+part.text)
+		}
+	}
+	return strings.Join(items, sep)
+}
+
+// promptSections returns every guidance part list, for tests that check the
+// declared requirements.
+func promptSections() map[string][]promptPart {
+	return map[string][]promptPart{
+		"behavior": behaviorParts(), "tool_call_style": toolCallStyleParts(), "task_types": taskTypeParts(),
+		"validation": validationParts(), "coordination": coordinationParts(), "coordination fallback": coordinationFallbackParts(),
+		"scheduling": schedulingParts(), "rules": ruleParts(), "examples": exampleParts(),
+	}
+}
+
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
 func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string) (string, error) {
 	agentsSection, toolsSection, providersSection, skillsSection, err := b.buildDynamicContext(ctx)
@@ -55,13 +143,20 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	var sb strings.Builder
 
 	sb.WriteString(buildIdentitySection())
-	sb.WriteString(buildCapabilitiesSection())
-	sb.WriteString(buildBehaviorSection())
-	sb.WriteString(buildToolCallStyleSection())
-	sb.WriteString(buildTaskTypesSection())
-	sb.WriteString(buildValidationSection())
-	sb.WriteString(buildCoordinationSection())
-	sb.WriteString(buildSchedulingSection())
+	if b.availableChatTools == nil {
+		// Restricted callers get the available_chat_tools section instead,
+		// which states what they can do.
+		sb.WriteString(buildCapabilitiesSection())
+	}
+	sb.WriteString(b.behaviorSection())
+	sb.WriteString(b.render(toolCallStyleParts()))
+	sb.WriteString(b.taskTypesSection())
+	sb.WriteString(b.render(validationParts()))
+	sb.WriteString(b.coordinationSection())
+	sb.WriteString(b.render(schedulingParts()))
+	if b.availableChatTools != nil {
+		sb.WriteString(b.availableChatToolsSection())
+	}
 
 	// Dynamic context
 	sb.WriteString("<available_agents>\n")
@@ -81,8 +176,8 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString("</available_skills>\n\n")
 	}
 
-	sb.WriteString(buildRulesSection())
-	sb.WriteString(buildExamplesSection())
+	sb.WriteString(b.rulesSection())
+	sb.WriteString(b.examplesSection())
 
 	if userSystemPrompt != "" {
 		sb.WriteString("\n<user_instructions>\n")
@@ -91,6 +186,19 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	}
 
 	return sb.String(), nil
+}
+
+func (b *SystemPromptBuilder) availableChatToolsSection() string {
+	names := make([]string, 0, len(b.availableChatTools))
+	for name := range b.availableChatTools {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	if len(names) == 0 {
+		return "<available_chat_tools>\nThis conversation cannot use Orka tools. Answer directly.\n</available_chat_tools>\n\n"
+	}
+	return "<available_chat_tools>\nThis conversation can use only these Orka tools: " + strings.Join(names, ", ") +
+		". Answer other requests directly, or explain that the tool they need is not available.\n</available_chat_tools>\n\n"
 }
 
 func buildIdentitySection() string {
@@ -113,64 +221,94 @@ wait for results, and report back.
 `
 }
 
-func buildBehaviorSection() string {
-	return `<behavior>
-CRITICAL RULE: When the user asks you to run, create, or execute something,
+// behaviorParts splits the behavior guidance so the instruction to call tools
+// in the same response survives when the polling tools are not offered, and
+// the rule to call a tool for run and create requests applies only when a task
+// creation tool is offered.
+func behaviorParts() []promptPart {
+	return []promptPart{
+		{text: `<behavior>
+`},
+		{text: `CRITICAL RULE: When the user asks you to run, create, or execute something,
 you MUST call the appropriate tool in your response. NEVER respond with only text
 like "I'll create that task" or "Let me run that" — you MUST include the tool
-call in the SAME response. If you need to create a task AND fetch its result,
+call in the SAME response. `, anyOf: promptTaskCreators},
+		{text: `If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
-without stopping to narrate between steps. Act first, summarize after.
+without stopping to narrate between steps. `, requires: []string{promptToolWait, promptToolFetch}, anyOf: promptTaskCreators},
+		{text: `Act first, summarize after.
 
-LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex, OpenCode) typically run for 5-20 minutes.
+`},
+		{text: `LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex, OpenCode) typically run for 5-20 minutes.
 You MUST keep calling wait_for_task in a loop until the task reaches a terminal state
 (Succeeded or Failed). Do NOT give up after a few polls — keep waiting. If wait_for_task
 returns "still running", immediately call wait_for_task again. Only stop when the task
 has completed or failed. After completion, call fetch_task_output to get the result.
-</behavior>
+`, requires: []string{promptToolWait, promptToolFetch}},
+		{text: `</behavior>
 
-`
+`},
+	}
 }
 
-func buildToolCallStyleSection() string {
-	return `<tool_call_style>
+func buildBehaviorSection() string {
+	return (&SystemPromptBuilder{}).behaviorSection()
+}
+
+// behaviorSection keeps the behavior guidance whose tools are offered.
+func (b *SystemPromptBuilder) behaviorSection() string {
+	return b.render(behaviorParts())
+}
+
+func toolCallStyleParts() []promptPart {
+	return []promptPart{
+		{text: `<tool_call_style>
 Default: do not narrate routine, low-risk tool calls — just call the tool.
 Narrate only when it helps: multi-step work, complex problems, sensitive actions, or when asked.
 Keep narration brief and value-dense; avoid repeating obvious steps.
 </tool_call_style>
 
-`
+`},
+	}
 }
 
-func buildTaskTypesSection() string {
-	var sb strings.Builder
-	sb.WriteString(`<task_types>
-- container: Run a command in a container. Use create_container_task.
+func buildToolCallStyleSection() string {
+	return (&SystemPromptBuilder{}).render(toolCallStyleParts())
+}
+
+// taskTypeParts describes each task type separately, and splits out sentences
+// that point to another task tool, so a caller offered only some task tools
+// still gets guidance for the ones it has.
+func taskTypeParts() []promptPart {
+	return []promptPart{
+		{text: `- container: Run a command in a container. Use create_container_task.
   PREFERRED for: shell commands, CLI tools, scripts, data processing.
-`)
-	sb.WriteString(`  Common images (Chainguard, hardened, non-root):
+  Common images (Chainguard, hardened, non-root):
     • bash/shell: "cgr.dev/chainguard/bash:latest"
     • python: "cgr.dev/chainguard/python:latest-dev" (includes pip)
     • node: "cgr.dev/chainguard/node:latest-dev" (includes npm)
     • go: "cgr.dev/chainguard/go:latest"
     • curl: "cgr.dev/chainguard/curl:latest"
     • git: "cgr.dev/chainguard/git:latest-dev"
-`)
-	sb.WriteString(`  All containers run as non-root with read-only root filesystem.
+  All containers run as non-root with read-only root filesystem.
   Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
-- ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
+`, requires: []string{promptToolContainerTask}},
+		{text: `- ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
   Use for: reasoning, analysis, content generation, code review, summarization,
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
   Do NOT use for infrastructure commands.
-- agent: Run an external CLI runtime (Copilot, Claude Code, Codex, OpenCode).
+`, requires: []string{chatCreateAITaskTool}},
+		{text: `- agent: Run an external CLI runtime (Copilot, Claude Code, Codex, OpenCode).
   Use create_agent_task only for Agents that have runtime listed in available_agents.
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
   runtime configured, ALWAYS use create_agent_task with that agent name.
-  If the specified Agent has no runtime listed, including coordinator Agents backed
+`, requires: []string{promptToolAgentTask}},
+		{text: `  If the specified Agent has no runtime listed, including coordinator Agents backed
   by providerRef/model only, use create_ai_task with agentRef and providerRef instead.
-  When the task involves a git repository, ALWAYS include the gitRepo URL in the
+`, requires: []string{chatCreateAITaskTool}},
+		{text: `  When the task involves a git repository, ALWAYS include the gitRepo URL in the
   workspace config so credentials are automatically mounted:
     create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
   When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
@@ -179,18 +317,35 @@ func buildTaskTypesSection() string {
   and does not use runtime.secretRef. When omitted, OpenCode defaults defaultAllowedTools to Read, Write, Edit, Bash, Glob,
   and Grep, with defaultAllowBash=true; only override these when the user asks.
   Use whichever runtime is available. If multiple runtimes are available, prefer codex, then copilot.
-  If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
-  Agent tasks need more time than AI tasks. Set timeout to at least 15m.
-  Do NOT use create_container_task or create_ai_task for runtime agents.
-  Do NOT use create_agent_task for non-runtime agents.
-</task_types>
-
-`)
-	return sb.String()
+`, requires: []string{promptToolAgentTask}},
+		{text: `  If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
+`, requires: []string{chatCreateAITaskTool}},
+		{text: `  Agent tasks need more time than AI tasks. Set timeout to at least 15m.
+`, requires: []string{promptToolAgentTask}},
+		{text: `  Do NOT use create_container_task or create_ai_task for runtime agents.
+`, requires: []string{promptToolContainerTask, chatCreateAITaskTool}},
+		{text: `  Do NOT use create_agent_task for non-runtime agents.
+`, requires: []string{promptToolAgentTask}},
+	}
 }
 
-func buildValidationSection() string {
-	return `<validation>
+func buildTaskTypesSection() string {
+	return (&SystemPromptBuilder{}).taskTypesSection()
+}
+
+// taskTypesSection describes the task types whose tools are offered.
+func (b *SystemPromptBuilder) taskTypesSection() string {
+	parts := b.render(taskTypeParts())
+	if parts == "" {
+		return ""
+	}
+	return "<task_types>\n" + parts + "</task_types>\n\n"
+}
+
+// validationParts guides validation container tasks.
+func validationParts() []promptPart {
+	return []promptPart{
+		{text: `<validation>
 When validating code changes, determine the validation environment from repository evidence rather than demo- or scenario-specific defaults.
 Every validation or discovery container task that inspects repository files MUST include a workspace with workspace.gitRepo, workspace.readCredentialRef when clone credentials are needed, and the exact branch/ref under test. Prefer workspace.ref = the implementation headSHA; otherwise use workspace.branch = the pushed branch. Do not validate repo changes from an empty container filesystem.
 Before running full validation, inspect the workspace or run a read-only discovery container task with that workspace when needed. Prefer evidence in this order: CI workflow files, language/toolchain files (go.mod, package.json, pyproject.toml, Cargo.toml, etc.), Dockerfile/devcontainer files, Makefile targets, and project documentation.
@@ -203,12 +358,19 @@ For other ecosystems, choose the image and command that match the repo's declare
 Report the selected validation image, command, workspace ref/branch, and evidence. If validation fails because the container is missing the repo, a tool is not on PATH, caches are unwritable, or the validation environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED or retry validation with corrected configuration instead of treating it as a code failure.
 </validation>
 
-`
+`, requires: []string{promptToolContainerTask}},
+	}
 }
 
-func buildCoordinationSection() string {
-	return `<coordination>
-For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
+func buildValidationSection() string {
+	return (&SystemPromptBuilder{}).render(validationParts())
+}
+
+// coordinationParts splits the coordination guidance by the chat tools each
+// part relies on, so a caller offered only some of them keeps the rest.
+func coordinationParts() []promptPart {
+	return []promptPart{
+		{text: `For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
 
 PREFERRED (one-shot): Create a coordinator agent with initialPrompt to instantly start:
   create_agent(name="coordinator", coordination={enabled: true}, 
@@ -224,7 +386,8 @@ The coordinator agent will then:
 4. Synthesize results and iterate if needed
 5. Specialist agents are auto-cleaned up when the coordinator task is deleted
 
-INTER-AGENT MESSAGING: Child tasks delegated by a coordinator can communicate with
+`, requires: []string{promptToolCreateAgent}},
+		{text: `INTER-AGENT MESSAGING: Child tasks delegated by a coordinator can communicate with
 each other using send_message and check_messages. This is useful when:
 - One task produces results that a sibling task needs before it can start
 - Tasks need to coordinate or exchange intermediate findings
@@ -234,28 +397,60 @@ The coordinator should instruct child tasks to use send_message (with to_task="*
 broadcast to all siblings) and check_messages in their prompts. For reliable delivery,
 delegate the sender first, wait for it to complete, then delegate the receiver.
 
-CANCEL: The coordinator can use cancel_task to cancel running child tasks. This is
+`},
+		{text: `CANCEL: The coordinator can use cancel_task to cancel running child tasks. This is
 useful for race patterns (start multiple tasks, keep the first result, cancel the rest)
 or when a child task's result makes other tasks unnecessary.
 
-MANUAL (multi-step): For more control, create agents separately:
+`, requires: []string{promptToolCancel}},
+		{text: `MANUAL (multi-step): For more control, create agents separately:
 1. Create specialist agents with create_agent
 2. Create a coordinator agent with coordination.enabled=true
 3. Create a task referencing the coordinator: use create_agent_task only when the
    coordinator has runtime listed; otherwise use create_ai_task with agentRef and providerRef.
 
-When no agents exist and the user needs complex work done:
-- For simple commands (e.g., "list pods", "check disk"): use create_container_task
-  with an appropriate image. No LLM needed.
-- For questions needing reasoning (e.g., "explain this error"): use create_ai_task.
-- For complex workflows: use the one-shot coordinator pattern above.
-</coordination>
-
-`
+`, requires: []string{promptToolCreateAgent, promptToolAgentTask, chatCreateAITaskTool}},
+	}
 }
 
-func buildSchedulingSection() string {
-	return `<scheduling>
+const coordinationFallbackHeader = `When no agents exist and the user needs complex work done:
+`
+
+// coordinationFallbackParts says what to use when no agents exist. The last
+// item points to the one-shot pattern, which needs create_agent.
+func coordinationFallbackParts() []promptPart {
+	return []promptPart{
+		{text: `- For simple commands (e.g., "list pods", "check disk"): use create_container_task
+  with an appropriate image. No LLM needed.
+`, requires: []string{promptToolContainerTask}},
+		{text: `- For questions needing reasoning (e.g., "explain this error"): use create_ai_task.
+`, requires: []string{chatCreateAITaskTool}},
+		{text: `- For complex workflows: use the one-shot coordinator pattern above.
+`, requires: []string{promptToolCreateAgent}},
+	}
+}
+
+func buildCoordinationSection() string {
+	return (&SystemPromptBuilder{}).coordinationSection()
+}
+
+// coordinationSection keeps the coordination guidance whose tools are offered.
+func (b *SystemPromptBuilder) coordinationSection() string {
+	parts := b.render(coordinationParts())
+	if fallback := b.render(coordinationFallbackParts()); fallback != "" {
+		parts += coordinationFallbackHeader + fallback
+	}
+	if parts == "" {
+		return ""
+	}
+	return "<coordination>\n" + parts + "</coordination>\n\n"
+}
+
+// schedulingParts explains recurring tasks, which any task creation tool can
+// make.
+func schedulingParts() []promptPart {
+	return []promptPart{
+		{text: `<scheduling>
 Any task type can be made recurring by setting the schedule parameter with a cron expression.
 Common patterns:
 - Every hour: "0 * * * *"
@@ -266,32 +461,49 @@ When the user says "every", "recurring", "daily", "weekly", "hourly", or similar
 set the schedule parameter on the task.
 </scheduling>
 
-`
+`, anyOf: promptTaskCreators},
+	}
 }
 
-func buildRulesSection() string {
-	return `<rules>
-1. PREFER create_container_task for shell commands, CLI tools, scripts.
+func buildSchedulingSection() string {
+	return (&SystemPromptBuilder{}).render(schedulingParts())
+}
+
+// ruleParts lists the orchestration rules. General rules have no
+// requirements, so a caller missing a tool keeps them.
+func ruleParts() []promptPart {
+	return []promptPart{
+		{text: `PREFER create_container_task for shell commands, CLI tools, scripts.
    Container tasks are fast, reliable, and run the exact command the user wants.
-2. Use create_ai_task ONLY for work that requires a SEPARATE long-running LLM job
+`, requires: []string{promptToolContainerTask}},
+		{text: `Use create_ai_task ONLY for work that requires a SEPARATE long-running LLM job
    (e.g., code generation, detailed code review, multi-file analysis). Do NOT
    create an AI task just to answer a question — answer it yourself directly.
-3. When creating an ai task, always set providerRef to an available provider name.
+`, requires: []string{chatCreateAITaskTool}},
+		{text: `When creating an ai task, always set providerRef to an available provider name.
    Use this chat session's provider (chat_provider in the Runtime line) unless the user asks for another.
-4. After creating a task, IMMEDIATELY call wait_for_task then fetch_task_output
+`, requires: []string{chatCreateAITaskTool}},
+		{text: `After creating a task, IMMEDIATELY call wait_for_task then fetch_task_output
    in the SAME turn — do not stop to narrate between tool calls.
-5. Use the current namespace (namespace in the Runtime line) unless the user names another.
+`, requires: []string{promptToolWait, promptToolFetch}, anyOf: promptTaskCreators},
+		{text: `Use the current namespace (namespace in the Runtime line) unless the user names another.
    Tool calls that omit namespace run there, so do not ask which namespace to use.
-6. Provide clear summaries of what you did, what succeeded, and what failed.
-7. If a task fails, check the error and try a different approach before giving up.
-8. Do not create more tasks than necessary.
-9. If no agents exist and user needs an agent task, create the agent first with create_agent.
-10. When the user specifies an agent (agentRef) that has a "runtime" listed in the
+`},
+		{text: `Provide clear summaries of what you did, what succeeded, and what failed.
+`},
+		{text: `If a task fails, check the error and try a different approach before giving up.
+`},
+		{text: `Do not create more tasks than necessary.
+`},
+		{text: `If no agents exist and user needs an agent task, create the agent first with create_agent.
+`, requires: []string{promptToolCreateAgent}},
+		{text: `When the user specifies an agent (agentRef) that has a "runtime" listed in the
    available_agents section, ALWAYS use create_agent_task — never create_container_task
    or create_ai_task. Runtime agents have their own CLI environment with full tool access.
    When an agent has no "runtime" listed, including coordinator agents, use create_ai_task
    with agentRef and providerRef — never create_agent_task.
-11. For multi-step workflows involving coding + review + PR creation:
+`, requires: []string{promptToolAgentTask, promptToolContainerTask, chatCreateAITaskTool}},
+		{text: `For multi-step workflows involving coding + review + PR creation:
     - Prefer available coordinator candidates: agents whose names contain "coordinator";
       if "dev-coordinator" exists, prefer it.
     - If the chosen coordinator has "runtime" listed in available_agents, start it with create_agent_task.
@@ -312,54 +524,82 @@ func buildRulesSection() string {
       * report REVIEW_BLOCKED or CI_BLOCKED when the review or CI repair bound is exhausted;
       * avoid merge tools unless the user explicitly asks to merge.
     - Do NOT bundle all steps into a single agent task prompt.
-12. Agent tasks run for 5-20 minutes. NEVER stop polling wait_for_task while a task
+`, requires: []string{promptToolAgentTask, chatCreateAITaskTool}},
+		{text: `Agent tasks run for 5-20 minutes. NEVER stop polling wait_for_task while a task
     is still running. Keep calling wait_for_task until the task reaches Succeeded or Failed.
-</rules>
-
-`
+`, requires: []string{promptToolWait}},
+	}
 }
 
-func buildExamplesSection() string {
-	return `<examples>
-Example 1: "list all pods in the cluster"
+func buildRulesSection() string {
+	return (&SystemPromptBuilder{}).rulesSection()
+}
+
+// rulesSection numbers the rules whose tools are offered.
+func (b *SystemPromptBuilder) rulesSection() string {
+	rules := b.renderNumbered(ruleParts(), func(n int) string { return fmt.Sprintf("%d. ", n) }, "")
+	if rules == "" {
+		return ""
+	}
+	return "<rules>\n" + rules + "</rules>\n\n"
+}
+
+// exampleParts lists worked examples. The coordinator examples apply when the
+// caller can create a coordinator or start one with a task.
+func exampleParts() []promptPart {
+	return []promptPart{
+		{text: `"list all pods in the cluster"
 → create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["kubectl","get","pods","-A","-o","wide"])
 → wait_for_task → fetch_task_output → show results
-
-Example 2: "what are the top 5 largest images in the cluster?"
+`, requires: []string{promptToolContainerTask, promptToolWait, promptToolFetch}},
+		{text: `"what are the top 5 largest images in the cluster?"
 → create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["sh","-c","kubectl get pods -A -o jsonpath='{...}' | sort | uniq -c | sort -rn | head -5"])
 → wait_for_task → fetch_task_output → summarize
-
-Example 3: "process this CSV with Python"
+`, requires: []string{promptToolContainerTask, promptToolWait, promptToolFetch}},
+		{text: `"process this CSV with Python"
 → create_container_task (image: "cgr.dev/chainguard/python:latest-dev", command: ["python3","-c","import csv; ..."])
 → wait_for_task → fetch_task_output
-
-Example 4: "review this code for security issues"
+`, requires: []string{promptToolContainerTask, promptToolWait, promptToolFetch}},
+		{text: `"review this code for security issues"
 → create_ai_task (prompt: "Review for security vulnerabilities: ...", providerRef: "openai")
 → wait_for_task → fetch_task_output → summarize findings
-
-Example 5: "refactor the auth module" (with runtime agent available)
+`, requires: []string{chatCreateAITaskTool, promptToolWait, promptToolFetch}},
+		{text: `"refactor the auth module" (with runtime agent available)
 → create_agent_task (agent: "coder", prompt: "Refactor the auth module...", gitRepo: "https://github.com/org/repo")
 → wait_for_task → fetch_task_output
-
-Example 6: User specifies --agent my-agent (which has runtime: copilot)
+`, requires: []string{promptToolAgentTask, promptToolWait, promptToolFetch}},
+		{text: `User specifies --agent my-agent (which has runtime: copilot)
 → create_agent_task (agent: "my-agent", prompt: "...", gitRepo: "https://github.com/org/repo")
   (Use create_agent_task because the agent has a runtime; include gitRepo for credentials)
 → wait_for_task → fetch_task_output
-
-Example 7: "Research X and then write a guide based on findings" (multi-step pipeline)
+`, requires: []string{promptToolAgentTask, promptToolWait, promptToolFetch}},
+		{text: `"Research X and then write a guide based on findings" (multi-step pipeline)
 → Use the coordinator pattern. The coordinator should:
   1. delegate_task to a researcher agent with prompt to research X and use send_message to broadcast findings
   2. wait_for_tasks for the researcher to complete
   3. delegate_task to a writer agent with prompt to check_messages for research findings and write the guide
   4. wait_for_tasks and synthesize the final result
-
-Example 8: "Get me an answer as fast as possible" (race pattern)
+`, anyOf: []string{promptToolCreateAgent, chatCreateAITaskTool, promptToolAgentTask}},
+		{text: `"Get me an answer as fast as possible" (race pattern)
 → Use the coordinator pattern. The coordinator should:
   1. delegate_task multiple agents with the same prompt in parallel
   2. wait_for_tasks — as soon as one completes, use cancel_task on the others
   3. Return the winning result
-</examples>
-`
+`, requires: []string{promptToolCancel}, anyOf: []string{promptToolCreateAgent, chatCreateAITaskTool, promptToolAgentTask}},
+	}
+}
+
+func buildExamplesSection() string {
+	return (&SystemPromptBuilder{}).examplesSection()
+}
+
+// examplesSection numbers the examples whose tools are offered.
+func (b *SystemPromptBuilder) examplesSection() string {
+	examples := b.renderNumbered(exampleParts(), func(n int) string { return fmt.Sprintf("Example %d: ", n) }, "\n")
+	if examples == "" {
+		return ""
+	}
+	return "<examples>\n" + examples + "</examples>\n"
 }
 
 // buildDynamicContext fetches agents, tools, and providers from the cluster and formats them.

@@ -402,6 +402,17 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
 	promptBuilder.SetChatProvider(providerInfo.Name)
+	// The tool list itself is built later; filter the names the same way now
+	// so the prompt only describes tools this caller is offered.
+	chatToolNames := chattools.ChatToolNames()
+	chatToolStubs := make([]llm.Tool, 0, len(chatToolNames))
+	for _, name := range chatToolNames {
+		chatToolStubs = append(chatToolStubs, llm.Tool{Name: name})
+	}
+	offeredChatTools := completionToolNames(filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, chatToolStubs))
+	if len(offeredChatTools) < len(chatToolNames) {
+		promptBuilder.SetAvailableChatTools(offeredChatTools)
+	}
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
@@ -426,12 +437,18 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	if req.AgentRef != "" {
 		agentObj := &corev1alpha1.Agent{}
 		if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agentObj); err == nil {
-			if agentObj.Spec.Runtime != nil {
+			switch {
+			case agentObj.Spec.Runtime != nil && slices.Contains(offeredChatTools, "create_agent_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has runtime %q — use create_agent_task with agent=%q for this request.]\n\n%s",
 					req.AgentRef, agentObj.Spec.Runtime.Type, req.AgentRef, req.Message)
-			} else {
+			case agentObj.Spec.Runtime == nil && slices.Contains(offeredChatTools, "create_ai_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
 					req.AgentRef, req.AgentRef, req.Message)
+			default:
+				// The tool that runs this agent is not offered; keep the selection
+				// visible without telling the model to call it.
+				userContent = fmt.Sprintf("[Using agent %q. The tool that runs it is not available in this conversation.]\n\n%s",
+					req.AgentRef, req.Message)
 			}
 		}
 	}
