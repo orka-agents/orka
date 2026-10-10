@@ -12,9 +12,12 @@ kubectl() {
       if [[ "${wrong_context:-false}" == true ]]; then printf '%s\n' production;
       else printf '%s\n' "kind-${kind_cluster}"; fi
       ;;
-    '--request-timeout=10s exec -n')
-      [[ "$*" == *'deployment/aikit -- sh -c'* ]]
-      printf '%s\n' '/sys/fs/cgroup/cpu.stat' 'usage_usec 1234' '/sys/fs/cgroup/memory.current' '3000000000'
+    '--request-timeout=5s get pods')
+      printf '%s\n' '{"items":[{"metadata":{"uid":"model-pod"},"spec":{"nodeName":"e2e-node"},"status":{"phase":"Running"}}]}'
+      ;;
+    '--request-timeout=10s get --raw')
+      [[ "$*" == *'/api/v1/nodes/e2e-node/proxy/stats/summary' ]]
+      printf '%s\n' '{"pods":[{"podRef":{"uid":"foreign-pod","namespace":"private"},"cpu":{"usageNanoCores":99},"memory":{"rssBytes":99}},{"podRef":{"uid":"model-pod","namespace":"aikit-system"},"cpu":{"usageNanoCores":1234},"memory":{"rssBytes":3000000000}}]}'
       ;;
     'get deployment orka-provider-auth-proxy')
       if [[ "${missing_flag:-false}" == true ]]; then
@@ -80,7 +83,8 @@ jq -e '.spec.template.spec.containers[0] | .name == "manager" and
 printf '%s\n' 'ok - local upstream keeps auth flags and restricted DNS/model egress'
 printf '%s\n' 'ok - CI server work ends before the unchanged 180s client deadline'
 sample_model_resources >"${work}/model-resources.log"
-grep -q '^usage_usec 1234$' "${work}/model-resources.log"
+jq -e '.cpu.usageNanoCores == 1234 and .memory.rssBytes == 3000000000 and
+  (has("podRef") | not) and (tostring | contains("private") | not)' "${work}/model-resources.log" >/dev/null
 if (wrong_context=true sample_model_resources) >/dev/null 2>&1; then
   echo 'resource sampling accepted a non-E2E context' >&2; exit 1
 fi

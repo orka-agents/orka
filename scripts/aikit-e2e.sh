@@ -43,19 +43,26 @@ cleanup_port_forward() {
   fi
 }
 
-# Capture only resource counters, never prompts, responses, headers, or process
-# arguments. CPU deltas distinguish slow prompt evaluation from idle/stuck work.
+# Kubelet counters work with AIKit's distroless container. Project only this
+# Pod's CPU/memory measurements; do not expose node-wide workload metadata.
 sample_model_resources() {
   require_kind_context
-  # The counter variable expands inside the model container, not on the runner.
-  # shellcheck disable=SC2016
-  kubectl --request-timeout=10s exec -n "${aikit_namespace}" deployment/"${aikit_service}" -- sh -c '
-    for counter in /sys/fs/cgroup/cpu.stat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events /proc/pressure/cpu /proc/pressure/memory; do
-      if [ -r "$counter" ]; then
-        printf "%s\n" "$counter"
-        cat "$counter"
-      fi
-    done'
+  local pod identity node uid
+  pod="$(kubectl --request-timeout=5s get pods -n "${aikit_namespace}"     -l "app.kubernetes.io/name=${aikit_service}" -o json)" || return 1
+  identity="$(printf '%s' "${pod}" | jq -cer '
+    [.items[] | select(.status.phase == "Running")] |
+    if length == 1 then .[0] | {node:.spec.nodeName,uid:.metadata.uid}
+    else error("expected one running model Pod") end')" || return 1
+  node="$(printf '%s' "${identity}" | jq -r .node)"
+  uid="$(printf '%s' "${identity}" | jq -r .uid)"
+  [[ "${node}" =~ ^[a-z0-9][a-z0-9.-]*$ && -n "${uid}" ]] || return 1
+  kubectl --request-timeout=10s get --raw "/api/v1/nodes/${node}/proxy/stats/summary" |
+    jq -ce --arg uid "${uid}" --arg namespace "${aikit_namespace}" '
+      [.pods[] | select(.podRef.uid == $uid and .podRef.namespace == $namespace) |
+        {cpu:{time:.cpu.time,usageNanoCores:.cpu.usageNanoCores,usageCoreNanoSeconds:.cpu.usageCoreNanoSeconds},
+         memory:{time:.memory.time,usageBytes:.memory.usageBytes,workingSetBytes:.memory.workingSetBytes,
+                 rssBytes:.memory.rssBytes,pageFaults:.memory.pageFaults,majorPageFaults:.memory.majorPageFaults}}] |
+      if length == 1 then .[0] else error("model Pod stats unavailable") end'
 }
 
 start_model_monitor() {
@@ -337,6 +344,7 @@ warm_model() {
   fi
   log "Qwen chat and multi-turn Responses preflight passed"
   qualify_responses_tools "${url}"
+  AIKIT_PROBE_URL="${url}" AIKIT_PROBE_MODEL="${aikit_model}"     AIKIT_PROBE_REPORT="${cleanup_report_dir}/full-prompt-probe.json"     go test -tags=e2e ./internal/api -run '^TestAIKitFullPromptProbe$' -v -count=1 -timeout=10m
   cleanup_port_forward "${proxy_pf_pid}"
   proxy_pf_pid=""
 }
@@ -359,8 +367,8 @@ main() {
   make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
   log "Deploying digest-pinned AIKit Qwen CPU model"
   deploy_aikit
-  warm_model
   start_model_monitor
+  warm_model
 
   log "Running real model and runtime E2E specs without Vekil"
   e2e_started=true

@@ -253,7 +253,9 @@ func cancelLiveChatSession(apiBaseURL, token, sessionID string) error {
 		return fmt.Errorf("canceling failed chat: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
+	// The server can already have released a failed, newly created Session.
+	// The original inference error remains reportable either way.
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("failed-chat cancellation returned HTTP %d", resp.StatusCode)
 	}
 	return nil

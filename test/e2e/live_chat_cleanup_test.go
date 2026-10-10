@@ -24,6 +24,8 @@ func TestPostLiveChatSSECancelsFailedSession(t *testing.T) {
 		{name: "timeout", waitForClose: true, cancelStatus: http.StatusNoContent, wantErr: "context deadline exceeded", wantCancelled: true},
 		{name: "incomplete stream", stream: "", cancelStatus: http.StatusNoContent, wantErr: "did not emit a done event", wantCancelled: true},
 		{name: "server error", stream: "event: error\ndata: inference failed\n\n", cancelStatus: http.StatusNoContent, wantErr: "received SSE error event", wantCancelled: true},
+		{name: "already absent session", cancelStatus: http.StatusNotFound,
+			wantErr: "did not emit a done event", wantCancelled: true},
 		{name: "cancellation failure is preserved", cancelStatus: http.StatusServiceUnavailable, wantErr: "cancellation returned HTTP 503", wantCancelled: true},
 		{name: "completed stream", stream: "event: message\ndata: {\"content\":\"OK\"}\n\nevent: done\ndata: {\"usage\":{\"llmCalls\":1}}\n\n", wantCancelled: false},
 	} {
