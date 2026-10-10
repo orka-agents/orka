@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/hyperlight"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -124,8 +125,8 @@ func TestJobBuilderDropsTaskHyperlightSettingsWhenPinned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if _, ok := codeExecEnv(job.Spec.Template.Spec.Containers[0])["ORKA_HYPERLIGHT_BINARY"]; ok {
-		t.Fatal("a Task chose the hluk binary of a pinned Hyperlight worker")
+	if got := codeExecEnv(job.Spec.Template.Spec.Containers[0])[hyperlight.EnvBinary]; got != hyperlightDir+"/bin/hluk" {
+		t.Fatalf("pinned hluk binary = %q, want the standard image path", got)
 	}
 }
 
@@ -160,5 +161,62 @@ func TestJobBuilderCodeExecBackendLeavesOtherWorkersAlone(t *testing.T) {
 	}
 	if env := codeExecEnv(job.Spec.Template.Spec.Containers[0]); env[workerenv.CodeExecBackendEnforced] == "true" {
 		t.Fatalf("no pinned backend, yet the worker is enforced: %v", env)
+	}
+}
+
+func TestJobBuilderPinsHyperlightSettingsOverAgentSecretEnvFrom(t *testing.T) {
+	for _, bundle := range []string{"", "example.com/hyperlight-bundle:test"} {
+		t.Run(bundle, func(t *testing.T) {
+			builder := setupJobBuilder()
+			builder.CodeExecBackend = "hyperlight"
+			builder.Hyperlight = HyperlightPodConfig{BundleImage: bundle}
+			task := codeExecTestTask(corev1alpha1.TaskTypeAI)
+			task.Spec.Env = append(task.Spec.Env,
+				corev1.EnvVar{Name: hyperlight.EnvBinary, Value: "/tmp/untrusted"},
+				corev1.EnvVar{Name: hyperlight.EnvRootfsDir, Value: "/tmp/untrusted-images"},
+				corev1.EnvVar{Name: hyperlight.EnvScratchMB, Value: "99999"},
+				corev1.EnvVar{Name: hyperlight.EnvBinary, ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "test-secret"}, Key: "binary",
+				}}},
+				corev1.EnvVar{Name: hyperlight.EnvRootfsDir, ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "test-config"}, Key: "rootfs",
+				}}},
+			)
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{SecretRef: &corev1.LocalObjectReference{Name: "test-agent-secret"}}}
+			job, err := builder.Build(context.Background(), task, agent, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			container := job.Spec.Template.Spec.Containers[0]
+			if len(container.EnvFrom) != 1 || container.EnvFrom[0].SecretRef.Name != agent.Spec.SecretRef.Name {
+				t.Fatalf("legitimate Agent Secret envFrom was lost: %+v", container.EnvFrom)
+			}
+			// Kubernetes explicit Env overrides envFrom, including empty values.
+			env := codeExecEnv(container)
+			for name, want := range map[string]string{
+				hyperlight.EnvBinary:    hyperlightDir + "/bin/hluk",
+				hyperlight.EnvRootfsDir: hyperlightDir + "/rootfs",
+				hyperlight.EnvCacheDir:  hyperlightCacheDir + "/c",
+				hyperlight.EnvScratchMB: "",
+				hyperlightDeviceGIDEnv:  "0",
+			} {
+				got, reserved := env[name]
+				if !reserved || got != want {
+					t.Errorf("%s = %q, present=%t, want explicit %q", name, got, reserved, want)
+				}
+				count := 0
+				for _, value := range container.Env {
+					if value.Name == name {
+						count++
+						if value.ValueFrom != nil {
+							t.Errorf("%s retained workload ValueFrom", name)
+						}
+					}
+				}
+				if count != 1 {
+					t.Errorf("%s has %d explicit values, want one", name, count)
+				}
+			}
+		})
 	}
 }

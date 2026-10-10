@@ -28,11 +28,21 @@ case "$1 $2" in
 "snapshot key") echo "k0123abcd-c4"; exit 0 ;;
 "snapshot save")
 	[ -f "$HOME/fail-save" ] && exit 1
-	while [ $# -gt 0 ]; do [ "$1" = "--output" ] && out="$2"; shift; done
-	mkdir "$out" && touch "$out/index.json"
-	exit 0 ;;
-"snapshot run") script="$4" ;;
-*) script="$6" ;;
+	if [ -f "$HOME/block-save" ]; then
+		touch "$HOME/save-started"
+		while [ ! -f "$HOME/release-save" ]; do sleep 0.01; done
+	fi
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		"--initrd") image="$2" ;;
+		"--output") out="$2" ;;
+		esac
+		shift
+	done
+	mkdir "$out" && cp "$image" "$out/rootfs" && touch "$out/index.json"
+	exit $? ;;
+"snapshot run") image="$3/rootfs"; script="$4" ;;
+*) image="$3"; script="$6" ;;
 esac
 . "$script"
 `
@@ -132,6 +142,233 @@ func TestRunSavesOneWarmSnapshotPerRuntime(t *testing.T) {
 	}
 	if saves != 1 || runs != 2 {
 		t.Fatalf("saves=%d runs=%d, want 1 save and 2 restores; calls: %q", saves, runs, f.calls(t))
+	}
+}
+
+func TestRunSnapshotUsesRootfsContents(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*testing.T, fixture) *Runner
+	}{
+		{"shared cache with different rootfs", func(t *testing.T, f fixture) *Runner {
+			t.Helper()
+			cfg := f.runner.cfg
+			cfg.RootfsDir = t.TempDir()
+			if err := os.WriteFile(filepath.Join(cfg.RootfsDir, "bash.cpio"), []byte("next"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return NewRunner(cfg)
+		}},
+		{"changed image with unchanged size and mtime", func(t *testing.T, f fixture) *Runner {
+			t.Helper()
+			image := filepath.Join(f.rootfs, "bash.cpio")
+			info, err := os.Stat(image)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(image, []byte("next"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(image, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			return f.runner
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			req := Request{Script: `cat "$image"`}
+			result, stdout, _, err := run(t, f.runner, context.Background(), req)
+			if err != nil || !result.Warm || stdout != "cpio" {
+				t.Fatalf("initial run: result=%+v stdout=%q err=%v", result, stdout, err)
+			}
+			runner := tc.change(t, f)
+			for i := range 2 {
+				result, stdout, _, err = run(t, runner, context.Background(), req)
+				if err != nil || !result.Warm || stdout != "next" {
+					t.Fatalf("changed rootfs run %d: result=%+v stdout=%q err=%v, want the new image", i, result, stdout, err)
+				}
+			}
+			var saves int
+			var snapshots []string
+			for _, call := range f.calls(t) {
+				switch {
+				case strings.HasPrefix(call, "snapshot save"):
+					saves++
+				case strings.HasPrefix(call, "snapshot run"):
+					snapshots = append(snapshots, strings.Fields(call)[2])
+				}
+			}
+			if saves != 2 || len(snapshots) != 3 || snapshots[0] == snapshots[1] || snapshots[1] != snapshots[2] {
+				t.Fatalf("saves=%d snapshots=%q, want distinct images and reuse of the unchanged image", saves, snapshots)
+			}
+		})
+	}
+}
+
+type snapshotRunCompletion struct {
+	result Result
+	stdout string
+	err    error
+}
+
+func startSnapshotRun(runner *Runner, ctx context.Context) <-chan snapshotRunCompletion {
+	done := make(chan snapshotRunCompletion, 1)
+	go func() {
+		defer close(done)
+		var stdout bytes.Buffer
+		result, err := runner.Run(ctx, Request{Runtime: "bash", Script: "echo hi", Stdout: &stdout})
+		done <- snapshotRunCompletion{result: result, stdout: stdout.String(), err: err}
+	}()
+	return done
+}
+
+func waitForSnapshotRun(t *testing.T, description string, ready func() bool) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(5 * time.Second)
+	for !ready() {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", description)
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestRunSnapshotSaveWaitRespectsContext(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		name := "cancellation"
+		if deadline {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			if err := os.WriteFile(filepath.Join(f.cache, "block-save"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			leaderCtx, stopLeader := context.WithTimeout(context.Background(), 10*time.Second)
+			leader := startSnapshotRun(f.runner, leaderCtx)
+			t.Cleanup(func() {
+				stopLeader()
+				<-leader
+			})
+			waitForSnapshotRun(t, "snapshot save to start", func() bool {
+				_, err := os.Stat(filepath.Join(f.cache, "save-started"))
+				return err == nil
+			})
+
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if deadline {
+				ctx, cancel = context.WithTimeout(leaderCtx, 200*time.Millisecond)
+			} else {
+				ctx, cancel = context.WithCancel(leaderCtx)
+			}
+			waiter := startSnapshotRun(NewRunner(f.runner.cfg), ctx)
+			t.Cleanup(func() {
+				cancel()
+				stopLeader()
+				<-waiter
+			})
+			if !deadline {
+				waitForSnapshotRun(t, "the waiting request's script", func() bool {
+					entries, err := os.ReadDir(filepath.Join(f.cache, "scripts"))
+					return err == nil && len(entries) == 2
+				})
+				cancel()
+			}
+			select {
+			case got := <-waiter:
+				if got.result.ExitCode != -1 || got.stdout != "" || got.result.Warm {
+					t.Fatalf("waiting request: %+v, want no guest run", got)
+				}
+				if deadline {
+					if got.err != nil || !got.result.TimedOut {
+						t.Fatalf("waiting request: %+v, want a timeout", got)
+					}
+				} else if !errors.Is(got.err, context.Canceled) || got.result.TimedOut {
+					t.Fatalf("waiting request: %+v, want cancellation", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting request did not stop promptly while another request was saving its snapshot")
+			}
+			select {
+			case got := <-leader:
+				t.Fatalf("the waiting context stopped the snapshot creator: %+v", got)
+			default:
+			}
+			if err := os.WriteFile(filepath.Join(f.cache, "release-save"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := <-leader
+			if got.err != nil || !got.result.Warm || got.result.ExitCode != 0 || got.stdout != "hi\n" {
+				t.Fatalf("snapshot creator: %+v, want a successful warm run", got)
+			}
+			result, stdout, _, err := run(t, NewRunner(f.runner.cfg), context.Background(), Request{Script: "echo hi"})
+			if err != nil || !result.Warm || stdout != "hi\n" {
+				t.Fatalf("later reuse: result=%+v stdout=%q err=%v", result, stdout, err)
+			}
+			var saves int
+			for _, call := range f.calls(t) {
+				if strings.HasPrefix(call, "snapshot save") {
+					saves++
+				}
+			}
+			if saves != 1 {
+				t.Fatalf("saves=%d, want one save unaffected by the waiting context", saves)
+			}
+		})
+	}
+}
+
+func TestRunConcurrentRunnersReuseOneWarmSnapshot(t *testing.T) {
+	f := newFixture(t)
+	if err := os.WriteFile(filepath.Join(f.cache, "block-save"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	done := make([]<-chan snapshotRunCompletion, 0, 4)
+	done = append(done, startSnapshotRun(f.runner, ctx))
+	t.Cleanup(func() {
+		cancel()
+		for _, completion := range done {
+			<-completion
+		}
+	})
+	waitForSnapshotRun(t, "snapshot save to start", func() bool {
+		_, err := os.Stat(filepath.Join(f.cache, "save-started"))
+		return err == nil
+	})
+	for range 3 {
+		done = append(done, startSnapshotRun(NewRunner(f.runner.cfg), ctx))
+	}
+	waitForSnapshotRun(t, "all concurrent requests' scripts", func() bool {
+		entries, err := os.ReadDir(filepath.Join(f.cache, "scripts"))
+		return err == nil && len(entries) == len(done)
+	})
+	if err := os.WriteFile(filepath.Join(f.cache, "release-save"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i, completion := range done {
+		got := <-completion
+		if got.err != nil || !got.result.Warm || got.result.ExitCode != 0 || got.stdout != "hi\n" {
+			t.Fatalf("concurrent run %d: %+v, want a successful warm run", i, got)
+		}
+	}
+	var saves, runs int
+	for _, call := range f.calls(t) {
+		switch {
+		case strings.HasPrefix(call, "snapshot save"):
+			saves++
+		case strings.HasPrefix(call, "snapshot run"):
+			runs++
+		}
+	}
+	if saves != 1 || runs != len(done) {
+		t.Fatalf("saves=%d runs=%d, want one save and %d warm runs", saves, runs, len(done))
 	}
 }
 
@@ -342,7 +579,11 @@ func TestRunOpensItsDirectoriesWhateverTheUmask(t *testing.T) {
 	if !strings.HasPrefix(stdout, "drwx--x--x") {
 		t.Fatalf("scripts directory = %q, want rwx--x--x", stdout)
 	}
-	for _, dir := range []string{cache, filepath.Join(cache, "snapshots"), filepath.Join(cache, "snapshots", "bash-128mb-k0123abcd-c4")} {
+	snapshots, err := filepath.Glob(filepath.Join(cache, "snapshots", "bash-128mb-k0123abcd-c4-*"))
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("snapshots=%q err=%v, want one image-keyed snapshot", snapshots, err)
+	}
+	for _, dir := range []string{cache, filepath.Join(cache, "snapshots"), snapshots[0]} {
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)

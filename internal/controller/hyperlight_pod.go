@@ -66,6 +66,13 @@ func (c HyperlightPodConfig) apply(spec *corev1.PodSpec, container *corev1.Conta
 	resources.Requests[resourceName] = resource.MustParse("1")
 	container.Resources = *resources
 
+	// Explicit values also reserve these keys against Agent Secret envFrom
+	// and image ENV, including when the image supplies its own bundle.
+	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvBinary, hyperlightDir+"/bin/hluk")
+	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvRootfsDir, hyperlightDir+"/rootfs")
+	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvScratchMB, "")
+	container.Env = setControllerEnvValue(container.Env, hyperlightDeviceGIDEnv, "0")
+
 	if c.DeviceGID > 0 {
 		if spec.SecurityContext == nil {
 			spec.SecurityContext = &corev1.PodSecurityContext{}
@@ -119,6 +126,4 @@ func (c HyperlightPodConfig) apply(spec *corev1.PodSpec, container *corev1.Conta
 	})
 	// Read-only: no process in the Pod can replace hluk or its images.
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: hyperlightVolume, MountPath: hyperlightDir, ReadOnly: true})
-	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvBinary, hyperlightDir+"/bin/hluk")
-	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvRootfsDir, hyperlightDir+"/rootfs")
 }

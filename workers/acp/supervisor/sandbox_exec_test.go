@@ -130,7 +130,7 @@ func TestSandboxExecRunsInThePodForTheSession(t *testing.T) {
 	text, isError := sandboxToolResult(t, decodeMCPResponse(t, doMCPRequest(t, server, "credential",
 		sandboxCall("run", `{"language":"python","code":"print('hi')","timeout":3}`))))
 	call := <-runner.calls
-	if call.request.Runtime != "python" || call.request.Timeout != 3*time.Second || !strings.HasSuffix(call.request.Script, "print('hi')") {
+	if call.request.Runtime != "python" || call.request.Timeout != 3*time.Second || !strings.Contains(call.request.Script, "print('hi')") {
 		t.Fatalf("runner got %+v", call.request)
 	}
 	if call.workspace != (sandboxWorkspace{dir: "/sessions/session-a/workspace", uid: 20001, gid: 20002}) {

@@ -53,7 +53,7 @@ const SandboxExecInputSchema = `{"type":"object","properties":{` +
 type SandboxExecRequest struct {
 	// Runtime is the micro-VM image: bash, python or node.
 	Runtime string
-	// Script is the code, prefixed to start in the workspace.
+	// Script starts the interpreter in the workspace, then evaluates the original code.
 	Script  string
 	Timeout time.Duration
 }
@@ -110,10 +110,35 @@ func ParseSandboxExecArguments(raw json.RawMessage) (SandboxExecRequest, error) 
 		request.Script = "cd " + SandboxExecWorkspacePath + " || exit 125\n" + code
 	case "python", "python3":
 		request.Runtime = "python"
-		request.Script = "import os as _orka_os; _orka_os.chdir(" + strconv.Quote(SandboxExecWorkspacePath) + "); del _orka_os\n" + code
+		// Compile the unchanged source separately so future imports and the
+		// module docstring keep their meaning.
+		request.Script = "import os as _orka_os; _orka_os.chdir(" + strconv.Quote(SandboxExecWorkspacePath) + "); del _orka_os\n" +
+			"exec(compile(" + strconv.Quote(code) + ", '<sandbox_exec>', 'exec', dont_inherit=True), globals())"
 	case "javascript", "node", "js":
 		request.Runtime = "node"
-		request.Script = "process.chdir(" + strconv.Quote(SandboxExecWorkspacePath) + ");\n" + code
+		// The guest driver supplies CommonJS globals from its /tmp bootstrap.
+		// Rebase both require and module.require, then evaluate the unchanged
+		// source in its own unit. Return its value so the driver observes a
+		// returned promise just as it does for an unwrapped script.
+		quoted, _ := json.Marshal(code) // a string always marshals
+		workspace := strconv.Quote(SandboxExecWorkspacePath)
+		request.Script = "(() => {\n" +
+			"const Module = require('module');\n" +
+			"process.chdir(" + workspace + ");\n" +
+			"const directory = process.cwd();\n" +
+			"const filename = directory + '/sandbox_exec.js';\n" +
+			"const workspaceRequire = Module.createRequire(filename);\n" +
+			"const workspaceModule = new Module(filename);\n" +
+			"workspaceModule.filename = filename;\n" +
+			"workspaceModule.paths = workspaceRequire.resolve.paths('sandbox_exec');\n" +
+			"workspaceRequire.main = workspaceModule;\n" +
+			"process.mainModule = workspaceModule;\n" +
+			"globalThis.require = workspaceRequire;\n" +
+			"globalThis.module = workspaceModule;\n" +
+			"globalThis.__filename = filename;\n" +
+			"globalThis.__dirname = directory;\n" +
+			"return (0, eval)(" + string(quoted) + ");\n" +
+			"})()"
 	default:
 		return SandboxExecRequest{}, fmt.Errorf("sandbox_exec language must be bash, python or javascript, not %q", language)
 	}

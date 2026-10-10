@@ -13,6 +13,7 @@ package hyperlight
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -380,14 +381,34 @@ var snapshotLocks sync.Map
 // warmSnapshot returns the warm snapshot of runtime, saving it first when the
 // cache has none. Without a cache, or when the save fails, the run boots cold.
 func (r *Runner) warmSnapshot(ctx context.Context, runtime, rootfs string) (string, bool) {
-	if r.cfg.CacheDir == "" {
+	if r.cfg.CacheDir == "" || ctx.Err() != nil {
 		return "", false
 	}
-	dir := filepath.Join(r.cfg.CacheDir, "snapshots", runtime+"-"+strconv.Itoa(r.ScratchMB(runtime))+"mb-"+r.snapshotKey(ctx))
-	lockValue, _ := snapshotLocks.LoadOrStore(dir, &sync.Mutex{})
-	lock := lockValue.(*sync.Mutex)
-	lock.Lock()
-	defer lock.Unlock()
+	// Hash the image on every request: paths, sizes and timestamps can stay
+	// the same when its contents change, including in a shared cache.
+	image, err := os.Open(rootfs)
+	if err != nil {
+		return "", false
+	}
+	digest := sha256.New()
+	_, readErr := io.Copy(digest, image)
+	closeErr := image.Close()
+	if readErr != nil || closeErr != nil || ctx.Err() != nil {
+		return "", false
+	}
+	dir := filepath.Join(r.cfg.CacheDir, "snapshots",
+		runtime+"-"+strconv.Itoa(r.ScratchMB(runtime))+"mb-"+r.snapshotKey(ctx)+"-"+fmt.Sprintf("%x", digest.Sum(nil)))
+	lockValue, _ := snapshotLocks.LoadOrStore(dir, make(chan struct{}, 1))
+	lock := lockValue.(chan struct{})
+	select {
+	case lock <- struct{}{}:
+		defer func() { <-lock }()
+	case <-ctx.Done():
+		return "", false
+	}
+	if ctx.Err() != nil {
+		return "", false
+	}
 
 	if info, err := os.Stat(dir); err == nil && info.IsDir() {
 		return dir, true

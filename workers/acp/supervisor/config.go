@@ -162,6 +162,13 @@ func (c Config) Validate() error {
 	if c.UIDAllocator == nil {
 		return fmt.Errorf("UID allocator is required")
 	}
+	if c.SandboxExec != nil && c.SandboxExec.DeviceGID != 0 {
+		_, _, firstGID, lastGID := c.UIDAllocator.Range()
+		gid := uint64(c.SandboxExec.DeviceGID)
+		if gid >= uint64(firstGID) && gid <= uint64(lastGID) {
+			return fmt.Errorf("hyperlight device GID %d overlaps session primary GID range %d-%d", gid, firstGID, lastGID)
+		}
+	}
 	requiredIdentityCapacity := uint64(c.Capabilities.Limits.MaxResidentSessions) + sessionIdentityExhaustionReserve
 	if uint64(c.UIDAllocator.Capacity()) < requiredIdentityCapacity {
 		return fmt.Errorf("UID allocator capacity must provide at least %d resident identities plus the exhaustion reserve", c.Capabilities.Limits.MaxResidentSessions)
