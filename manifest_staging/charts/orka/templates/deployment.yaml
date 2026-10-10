@@ -161,6 +161,9 @@ spec:
             {{- if not $value }}
             {{- fail (printf "controller.acpRuntime.toolboxes.nodeSelector[%q] must have a non-empty value" $key) }}
             {{- end }}
+            {{- if and (eq $key "kubernetes.io/os") (ne $value "linux") }}
+            {{- fail (printf "controller.acpRuntime.toolboxes.nodeSelector[%q]=%q conflicts with the Linux-only runtime Pods" $key $value) }}
+            {{- end }}
             {{- $selector = append $selector (printf "%s=%s" $key $value) }}
             {{- end }}
             - {{ printf "--acp-toolbox-node-selector=%s" (join "," $selector) | quote }}

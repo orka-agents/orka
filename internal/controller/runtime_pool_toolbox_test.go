@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -79,7 +80,7 @@ func TestRuntimePoolPodTemplateCopyModeWiresToolboxes(t *testing.T) {
 	pool := runtimePoolToolboxTestObject(toolboxes...)
 	policy := acpTestToolboxPolicy()
 	policy.ImagePullSecrets = []string{"toolbox-pull", " ", "second-pull"}
-	policy.NodeSelector = map[string]string{"kubernetes.io/arch": "amd64"}
+	policy.NodeSelector = map[string]string{"kubernetes.io/arch": "amd64", "kubernetes.io/os": "windows"}
 	r, template := renderToolboxTemplate(t, pool, policy)
 	assertRuntimePoolEnvironment(t, r, pool, template.Spec.Containers[0].Env)
 
@@ -97,7 +98,13 @@ func TestRuntimePoolPodTemplateCopyModeWiresToolboxes(t *testing.T) {
 		t.Fatalf("image pull secrets %#v", template.Spec.ImagePullSecrets)
 	}
 	if template.Spec.NodeSelector["kubernetes.io/arch"] != "amd64" || template.Spec.NodeSelector["kubernetes.io/os"] != "linux" {
-		t.Fatalf("node selector %#v", template.Spec.NodeSelector)
+		t.Fatalf("node selector %#v (the Linux selector must never be overridden)", template.Spec.NodeSelector)
+	}
+	if err := ValidateACPToolboxNodeSelector(map[string]string{"kubernetes.io/os": "windows"}); err == nil {
+		t.Fatal("a non-linux OS selector must be rejected at startup")
+	}
+	if err := ValidateACPToolboxNodeSelector(map[string]string{"kubernetes.io/os": "linux", "zone": "a"}); err != nil {
+		t.Fatalf("linux OS selector must be accepted: %v", err)
 	}
 	// Pull secrets are Pod-level references, never container mounts or env.
 	for _, container := range append(append([]corev1.Container(nil), template.Spec.InitContainers...), template.Spec.Containers...) {
@@ -329,7 +336,19 @@ func TestRuntimePoolToolboxAdmissionFailsClosed(t *testing.T) {
 func TestRuntimePoolReconcileReportsToolboxUnavailableWhenDisabled(t *testing.T) {
 	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
 	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
+	// Admit the pool first so a Deployment exists, then disable toolboxes.
+	r.ToolboxPolicy = acpTestToolboxPolicy()
 	runtimePoolReconcile(t, r, pool)
+	deployment := runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
+	if ptr.Deref(deployment.Spec.Replicas, 0) != 1 {
+		t.Fatalf("admitted pool Deployment replicas = %d, want 1", ptr.Deref(deployment.Spec.Replicas, 0))
+	}
+	r.ToolboxPolicy = ACPToolboxPolicy{}
+	runtimePoolReconcile(t, r, pool)
+	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
+	if ptr.Deref(deployment.Spec.Replicas, 0) != 0 {
+		t.Fatalf("Deployment of a pool whose toolboxes are no longer admitted must scale to zero, got %d replicas", ptr.Deref(deployment.Spec.Replicas, 0))
+	}
 	var current corev1alpha1.RuntimePool
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
 		t.Fatal(err)
@@ -371,6 +390,15 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 				}}
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_ARCH_MISMATCH: toolbox-copy-0: /opt/yq-jq/bin/yq is built for arm64", ok: true,
+		},
+		"handoff image pull is a runtime-image failure, not a toolbox failure": {
+			pods: pod(func(p *corev1.Pod) {
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name:  runtimePoolToolboxHandoffContainer,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: "Back-off pulling image"}},
+				}}
+			}),
+			toolboxes: toolboxes, ok: false,
 		},
 		"copy init container image pull": {
 			pods: pod(func(p *corev1.Pod) {

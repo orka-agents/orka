@@ -3,7 +3,6 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strconv"
 	"strings"
 
@@ -162,7 +161,27 @@ func applyRuntimePoolToolboxTemplate(template *corev1.PodTemplateSpec, toolboxes
 		if template.Spec.NodeSelector == nil {
 			template.Spec.NodeSelector = map[string]string{}
 		}
-		maps.Copy(template.Spec.NodeSelector, policy.NodeSelector)
+		for key, value := range policy.NodeSelector {
+			if key == runtimePoolNodeOSLabel {
+				// Runtime images and toolbox helpers are Linux-only; the fixed
+				// selector is never overridden.
+				continue
+			}
+			template.Spec.NodeSelector[key] = value
+		}
+	}
+	return nil
+}
+
+// runtimePoolNodeOSLabel is the fixed Linux node selector every runtime Pod
+// template carries.
+const runtimePoolNodeOSLabel = "kubernetes.io/os"
+
+// ValidateACPToolboxNodeSelector rejects a toolbox node selector that would
+// move Linux-only runtime Pods to another OS.
+func ValidateACPToolboxNodeSelector(selector map[string]string) error {
+	if value, ok := selector[runtimePoolNodeOSLabel]; ok && value != "linux" {
+		return fmt.Errorf("toolbox node selector %s=%q conflicts with the Linux-only runtime Pods", runtimePoolNodeOSLabel, value)
 	}
 	return nil
 }
@@ -263,6 +282,12 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 			if waiting := status.State.Waiting; waiting != nil {
 				switch waiting.Reason {
 				case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonInvalidImageName:
+					// The handoff container runs the trusted runtime image; a
+					// pull failure there is an ordinary rollout failure that
+					// keeps the usual retry behavior, not a toolbox failure.
+					if !strings.HasPrefix(status.Name, runtimePoolToolboxCopyPrefix) {
+						continue
+					}
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonImagePull, status.Name+": "+waiting.Reason+" "+waiting.Message), true
 				case podWaitingReasonCreateContainer, podWaitingReasonCreateContainerConfig, podWaitingReasonRunContainer:

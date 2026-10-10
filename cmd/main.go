@@ -2574,6 +2574,9 @@ func resolveACPToolboxPolicy(
 		if err != nil {
 			return controller.ACPToolboxPolicy{}, fmt.Errorf("--acp-toolbox-node-selector: %w", err)
 		}
+		if err := controller.ValidateACPToolboxNodeSelector(selector); err != nil {
+			return controller.ACPToolboxPolicy{}, fmt.Errorf("--acp-toolbox-node-selector: %w", err)
+		}
 		policy.NodeSelector = selector
 	}
 	if !enabled || method != controller.ACPToolboxMountImageVolume {

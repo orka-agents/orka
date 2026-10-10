@@ -2748,6 +2748,12 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxAdmission(pool *corev1alpha1.R
 	return nil
 }
 
+// finishRuntimePoolToolboxFailure closes admission and, once no controller
+// work, resident session, or running prompt remains, scales the existing
+// workload to zero so a pool whose toolboxes are no longer admitted (feature
+// disabled, registry removed, mounting unavailable) stops running or pulling
+// an image the current policy rejects instead of being recreated by the
+// Deployment controller after a Pod loss.
 func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -2760,6 +2766,25 @@ func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	status.ActiveInstance = nil
 	status.Message = sanitizeStatusMessage(err.Error())
+	if pool.Spec.ExecutionWorkspace == nil {
+		deployment := &appsv1.Deployment{}
+		getErr := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: cfg.baseName}, deployment)
+		switch {
+		case apierrors.IsNotFound(getErr):
+		case getErr != nil:
+			return ctrl.Result{}, getErr
+		case ptr.Deref(deployment.Spec.Replicas, 0) > 0:
+			capacity := pool.Status.Capacity
+			if runtimePoolRolloutControllerWorkIsQuiescent(capacity) && capacity.ResidentSessions == 0 && capacity.RunningPrompts == 0 {
+				if stopErr := r.stopRuntimePoolDeployment(ctx, deployment); stopErr != nil {
+					return ctrl.Result{}, stopErr
+				}
+				status.Message = sanitizeStatusMessage(err.Error() + "; runtime workload scaled to zero")
+			} else {
+				status.Message = sanitizeStatusMessage(err.Error() + "; admission is closed and the runtime workload is scaled to zero once its sessions and prompts finish")
+			}
+		}
+	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonToolboxUnavailable, status.Message)
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
