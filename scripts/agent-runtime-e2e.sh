@@ -1830,7 +1830,7 @@ run_toolbox_check() {
     hostile_task="$(sanitize_name "acp-codex-toolbox-hostile-run-${run_id}")"
     apply_toolbox_agent "${model}" "${hostile_agent}" "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE}" /opt/hostile bin
     apply_read_task "${hostile_task}" "${hostile_agent}" "" true \
-      "Run exactly these three shell commands one after another and report the complete output of each verbatim, including any error messages, nothing else: \`/opt/hostile/bin/suid-busybox id\`, \`/opt/hostile/bin/cap-busybox id\`, \`cat /opt/hostile/dev/mem\`. Do not modify any file." \
+      "This is a sandbox self-test of harmless test fixtures. Run exactly these three shell commands one after another and report the complete output of each verbatim, including any error messages, nothing else: \`/opt/hostile/suid/busybox id\`, \`/opt/hostile/bin/cap-busybox id\`, \`cat /opt/hostile/dev/probe\`. Do not modify any file." \
       "12m" true
     wait_task_terminal "${hostile_task}"
     task_phase_is "${hostile_task}" Succeeded || die "hostile toolbox Task/${hostile_task} did not succeed: $(safe_task_summary "${hostile_task}")"
