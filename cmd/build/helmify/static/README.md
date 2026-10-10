@@ -7,7 +7,16 @@ complete Helm installation. Published charts are available from
 [GitHub Releases](https://github.com/orka-agents/orka/releases) and the Helm
 repository at `https://orka-agents.github.io/orka/charts`.
 
-For development, use `manifest_staging/charts/orka` from a source checkout.
+For development, use `manifest_staging/charts/orka`. It selects `0.0.0-dev`, the
+latest validated `main` image set published by the Development Images workflow.
+Tagged controller, publisher, and native worker images pull on each Pod start;
+republishing a tag does not restart existing Pods. Coding-runtime tags resolve
+to digests at controller startup.
+
+For a feature branch or older checkout, override every image with a matching
+commit-specific tag or digest. The workflow publishes `sha-<full-commit>` tags
+and a `development-images-<full-commit>` artifact containing `images.json` and
+`values.json`. Pass the latter with `--values` to pin all nine images together.
 See [Build from source](https://orka-agents.github.io/orka/docs/build-from-source).
 
 ## Values
@@ -15,13 +24,13 @@ See [Build from source](https://orka-agents.github.io/orka/docs/build-from-sourc
 [values.yaml](values.yaml) contains the chart defaults. Pass your settings to
 Helm with `--values <file>` or `--set-string`.
 
-A new installation needs no values. The chart generates its own encryption key
+A published release chart needs no image overrides. The chart generates its own encryption key
 and webhook certificate. The settings you are most likely to change later:
 
 | Setting | Notes |
 | --- | --- |
-| `controller.image`, `publisher.image`, `workers.*.image` | Use the release tag by default. Set `tag` to choose another tag, or `digest` to pin an image. A digest takes precedence over the tag. |
-| `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
+| `controller.image`, `publisher.image`, `workers.*.image` | Published charts default to the release tag; development charts use `0.0.0-dev`. Set `tag` or `digest`; a digest takes precedence. |
+| `controller.acpRuntime.*Image` | Published charts default to release tags; development charts use `0.0.0-dev`. Set a full tagged or digest reference, or an empty string to disable a provider. |
 | `controller.agentExecutionSnapshot.existingSecret` | Empty by default; the chart generates the snapshot encryption Secret once and keeps it on uninstall. Set only to bring your own key. Immutable after install. |
 | `webhooks.tls.existingSecret`, `.caBundle`, `.caInjectionAnnotations` | Empty by default; the controller issues and renews a self-signed webhook certificate. Set to bring your own certificate or use cert-manager. |
 | `providerProxy.enabled`, `.upstreamBaseURL` | Off by default. Enable and name your model gateway's in-cluster Service to connect built-in coding agents; the chart derives the egress rule from that Service. Set `.egress` yourself for anything else. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |

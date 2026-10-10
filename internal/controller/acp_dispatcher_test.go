@@ -1324,7 +1324,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	if err := dispatcher.handlePromptStreamError(
 		ctx, nil, runtimeClient, "runtime-session-1", task.DeepCopy(), attempt.ID, fence, runtimeFence,
 		nil, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(errors.New("event store unavailable"), nil),
+		acpUpdatePersistenceError(errors.New("event store unavailable"), nil), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1523,6 +1523,49 @@ func (f *promptStreamLifecycleFixture) assertTerminalLifecycle(
 	}
 }
 
+func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
+	for _, persistenceFailure := range []bool{false, true} {
+		name := "cancelled stream"
+		if persistenceFailure {
+			name = "plan persistence failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
+			})
+			cancellation := requestACPPromptCancellation(fixture.ctx, fixture.runtimeClient, "runtime-session-1",
+				fixture.task.DeepCopy(), fixture.runtimeFence, harnessv2.CancelReasonControllerShutdown)
+			if cancellation.err != nil {
+				t.Fatal(cancellation.err)
+			}
+			var streamErr = context.Canceled
+			wantState := corev1alpha1.TaskExecutionStateCancelled
+			if persistenceFailure {
+				streamErr = acpUpdatePersistenceError(nil, errors.New("plan store unavailable"))
+				wantState = corev1alpha1.TaskExecutionStateFailed
+			}
+			if err := fixture.dispatcher.handlePromptStreamError(
+				fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
+				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{},
+				context.Canceled, streamErr, cancellation,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if len(fixture.cancelRequests) != 1 {
+				t.Fatalf("cancellation requests = %d, want exactly one sealed operation", len(fixture.cancelRequests))
+			}
+			completed := &corev1alpha1.Task{}
+			if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
+				t.Fatal(err)
+			}
+			if completed.Status.Execution == nil || completed.Status.Execution.State != wantState {
+				t.Fatalf("cached cancellation execution = %v, want %s", completed.Status.Execution, wantState)
+			}
+		})
+	}
+}
+
 func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *testing.T) {
 	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
 		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
@@ -1531,7 +1574,7 @@ func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *tes
 	if err := fixture.dispatcher.handlePromptStreamError(
 		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")),
+		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1558,7 +1601,7 @@ func TestPromptStreamFailureClosesLifecycleBeforeOutcomeUnknown(t *testing.T) {
 	if err := fixture.dispatcher.handlePromptStreamError(
 		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		errors.New("stream disconnected"),
+		errors.New("stream disconnected"), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1612,7 +1655,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 			if err := fixture.dispatcher.handlePromptStreamError(
 				fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{},
-				context.DeadlineExceeded, context.DeadlineExceeded,
+				context.DeadlineExceeded, context.DeadlineExceeded, nil,
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -3840,6 +3883,8 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 }
 
 type dispatcherRuntimeServerOptions struct {
+	beforeTerminal                   func(harnessv2.StartPromptRequest, harnessv2.Event)
+	onCancel                         func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
 	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
@@ -4007,6 +4052,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			t.Errorf("unsupported deterministic terminal event %q", terminalType)
 			return
 		}
+		if options.beforeTerminal != nil {
+			w.(http.Flusher).Flush()
+			options.beforeTerminal(request, terminal)
+		}
 		if err := encoder.Encode(terminal); err != nil {
 			t.Errorf("encode terminal event: %v", err)
 			return
@@ -4014,6 +4063,19 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		if err := encoder.Close(); err != nil {
 			t.Errorf("close encoder: %v", err)
 		}
+	})
+	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if options.onCancel == nil {
+			http.NotFound(w, r)
+			return
+		}
+		var request harnessv2.CancelPromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode cancellation: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writeDispatcherJSON(w, options.onCancel(request))
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.CreateWorkspaceDeltaRequest

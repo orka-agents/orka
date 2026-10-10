@@ -45,6 +45,9 @@ var (
 	harnessV2FixtureImage        = "ghcr.io/orka-agents/orka/harness-v2-e2e-fixture:e2e"
 	gatewayE2EEnvVar             = "E2E_GATEWAY"
 	managerRef                   string
+	aiWorkerRef                  string
+	generalWorkerRef             string
+	gatewayNativeWorkerRef       string
 	acpCodexRuntimeRef           string
 	acpClaudeRuntimeRef          string
 	acpCopilotRuntimeRef         string
@@ -125,12 +128,22 @@ var _ = BeforeSuite(func() {
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))
 	}
 
-	By("publishing digest-pinned ACP and publisher images to a Kind-local registry")
+	By("publishing digest-pinned platform images to a Kind-local registry")
 	registry, registryContainer, err := prepareKindLocalRegistry()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to prepare Kind-local registry")
 	e2eRegistryContainerName = registryContainer
 	managerRef, err = pushImageToLocalRegistry(registry, managerImage, "orka/controller:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish controller image")
+	aiWorkerRef, err = pushImageToLocalRegistry(registry, aiWorkerImage, "orka/ai-worker:e2e")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish AI worker image")
+	generalWorkerRef, err = pushImageToLocalRegistry(registry, generalWorkerImage, "orka/general-worker:e2e")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish general worker image")
+	if gatewayE2EEnabled() {
+		gatewayNativeWorkerRef, err = pushImageToLocalRegistry(
+			registry, gatewayNativeWorkerImage, "orka/gateway-e2e-worker:e2e",
+		)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish Gateway native worker fixture image")
+	}
 	acpCodexRuntimeRef, err = pushImageToLocalRegistry(registry, acpCodexRuntimeImage, "orka/acp-codex-runtime:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish Codex ACP runtime image")
 	acpClaudeRuntimeRef, err = pushImageToLocalRegistry(registry, acpClaudeRuntimeImage, "orka/acp-claude-runtime:e2e")
@@ -243,6 +256,8 @@ var _ = BeforeSuite(func() {
 	By("deploying the controller-manager")
 	cmd = exec.Command("make", "deploy",
 		fmt.Sprintf("IMG=%s", managerRef),
+		fmt.Sprintf("AI_WORKER_IMG=%s", aiWorkerRef),
+		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerRef),
 		fmt.Sprintf("ACP_CODEX_RUNTIME_IMG=%s", acpCodexRuntimeRef),
 		fmt.Sprintf("ACP_CLAUDE_RUNTIME_IMG=%s", acpClaudeRuntimeRef),
 		fmt.Sprintf("ACP_COPILOT_RUNTIME_IMG=%s", acpCopilotRuntimeRef),

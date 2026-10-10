@@ -8,8 +8,11 @@ package controller
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/workspace"
@@ -226,8 +229,29 @@ func (c SubstrateConfig) ValidateMCPTools() error {
 	if cfg.ClaimTimeout <= 0 {
 		return fmt.Errorf("substrate claim timeout must be greater than zero")
 	}
-	if _, err := substrateRouteHTTPTransport(cfg.RouterURL, cfg.ActorDNSSuffix); err != nil {
-		return err
+	return validateSubstrateRouting(cfg.RouterURL, cfg.ActorDNSSuffix)
+}
+
+// validateSubstrateRouting checks the router URL and actor DNS suffix that MCP
+// actor requests are routed with.
+func validateSubstrateRouting(routerURL, actorDNSSuffix string) error {
+	trimmed := strings.TrimSpace(routerURL)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
+		return fmt.Errorf("substrate router URL is invalid")
+	}
+	// Tool.status.endpoint republishes the router URL to Tool readers, and the
+	// MCP path is appended to it as text.
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.Contains(trimmed, "#") {
+		return fmt.Errorf("substrate router URL must not contain credentials, a query, or a fragment")
+	}
+	suffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
+	if suffix == "" {
+		return fmt.Errorf("substrate actor DNS suffix is required")
+	}
+	if problems := validation.IsDNS1123Subdomain(suffix); len(problems) > 0 {
+		return fmt.Errorf("substrate actor DNS suffix is invalid: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }

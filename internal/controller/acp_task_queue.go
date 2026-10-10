@@ -1596,6 +1596,9 @@ func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, r
 	if err != nil {
 		return nil, err
 	}
+	if provider.Status.PinnedParametersUID != string(config.GetUID()) {
+		return nil, fmt.Errorf("provider parameters do not match its protected UID pin")
+	}
 	parameters, err := resolveExternalWorkspaceParameters(ctx, reader, r.RESTMapper(), class.Namespace, class.Spec.ParametersRef, meta.RESTScopeNameNamespace)
 	if err != nil {
 		return nil, err

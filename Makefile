@@ -1,7 +1,6 @@
-# Current application release version. Chart.yaml has its own version and may
-# advance independently for chart-only changes. Release preparation aligns both
-# versions for a tagged application release.
-VERSION := v0.1.1
+# Source checkouts are development builds. Release preparation stamps the
+# requested application and chart versions on the release branch.
+VERSION ?= v0.0.0-dev
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
