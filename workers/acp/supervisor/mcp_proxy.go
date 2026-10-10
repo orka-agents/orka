@@ -268,7 +268,14 @@ func (s *mcpProxySession) resetLeaseTimerLocked(now time.Time) {
 func (s *mcpProxySession) expire(promptID harnessv2.PromptID, version uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.authorization == nil || s.authorization.PromptID != promptID || s.leaseVersion != version {
+	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID || s.leaseVersion != version {
+		return
+	}
+	// Relative timers can fire before an absolute wire deadline following a
+	// backward wall-clock step. Recheck both bounds and rearm the earlier one.
+	now := time.Now()
+	if now.Before(s.authorization.ExpiresAt) && now.Before(s.lease.ExpiresAt) {
+		s.resetLeaseTimerLocked(now)
 		return
 	}
 	slog.Warn("ACP MCP proxy prompt authorization expired without renewal; revoking tool access",
