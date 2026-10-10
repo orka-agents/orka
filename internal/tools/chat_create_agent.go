@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/executionmode"
@@ -185,6 +186,13 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	if result, ok := authorizeAgentCreate(ctx, tc, agent); !ok {
 		return result, nil
 	}
+	// Check existence only after authorization, so a scoped caller cannot use
+	// this error to probe Provider names it may not reference.
+	if agent.Spec.ProviderRef != nil {
+		if result, ok := requireExistingProvider(ctx, tc, namespace, agent.Spec.ProviderRef.Name); !ok {
+			return result, nil
+		}
+	}
 	if err := tc.Client.Create(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)
 	}
@@ -195,6 +203,25 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created"})
+}
+
+// requireExistingProvider rejects a providerRef that names no Provider, so the
+// model can correct it in the same turn instead of a later Task failing. The
+// error names no other Providers: this lookup uses controller credentials, and
+// the authorization-aware Providers API is the enumeration surface.
+func requireExistingProvider(ctx context.Context, tc *ToolContext, namespace, name string) (string, bool) {
+	err := toolPolicyReader(ctx, tc.Client).Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &corev1alpha1.Provider{})
+	if err == nil {
+		return "", true
+	}
+	if !apierrors.IsNotFound(err) {
+		result, _ := classifyChatK8sErr(err)
+		return result, false
+	}
+	result, _ := ChatToolErrorResult(invalidArgumentsErrorType,
+		fmt.Sprintf("provider %q not found in namespace %q", name, namespace),
+		"Use an existing Provider in this namespace, or omit providerRef")
+	return result, false
 }
 
 func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolContext, agent *corev1alpha1.Agent, namespace, initialPrompt string) (string, error) {

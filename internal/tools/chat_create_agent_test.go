@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -29,6 +30,57 @@ func TestChatCreateAgentTool_ParametersDescribeOpenCodeACP(t *testing.T) {
 		if !strings.Contains(params, want) {
 			t.Errorf("Parameters() missing %q", want)
 		}
+	}
+}
+
+func TestChatCreateAgentTool_Execute_RejectsMissingProviderRef(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProviderOpenAI, Namespace: defaultNamespace}})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:        fc,
+		Namespace:     defaultNamespace,
+		ExecutionMode: executionmode.HarnessV2,
+	})
+
+	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"planner","providerRef":"copilot"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if r.Success || r.ErrorType != errTypeInvalidArgs || !strings.Contains(r.Error, `"copilot"`) {
+		t.Fatalf("result = %#v, want invalid arguments naming the missing Provider", r)
+	}
+	if strings.Contains(r.Error+r.Suggestion, testProviderOpenAI) {
+		t.Fatalf("result = %#v, must not enumerate other Providers", r)
+	}
+	err = fc.Get(context.Background(), client.ObjectKey{Name: "planner", Namespace: defaultNamespace}, &corev1alpha1.Agent{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("Agent lookup error = %v, want NotFound", err)
+	}
+}
+
+func TestChatCreateAgentTool_Execute_AuthorizesBeforeProviderLookup(t *testing.T) {
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:        newFakeClient(),
+		Namespace:     defaultNamespace,
+		ExecutionMode: executionmode.HarnessV2,
+		AuthorizeAgentCreate: func(context.Context, *corev1alpha1.Agent) *ChatToolError {
+			return &ChatToolError{Type: "permission_denied", Message: "provider not permitted"}
+		},
+	})
+
+	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"planner","providerRef":"copilot"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if r.Success || r.ErrorType != "permission_denied" {
+		t.Fatalf("result = %#v, want the authorization error, not a Provider existence result", r)
 	}
 }
 

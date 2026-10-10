@@ -2009,7 +2009,7 @@ func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 }
 
 func TestHandleInitialPrompt_WithProviderRef(t *testing.T) {
-	e := newTestExecutor()
+	e := newTestExecutor(&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "my-provider", Namespace: testDefaultNamespace}})
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{
 		"name":          "ai-agent",
 		"providerRef":   "my-provider",

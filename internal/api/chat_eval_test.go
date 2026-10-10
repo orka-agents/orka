@@ -176,22 +176,19 @@ func TestChatEvalRequestContextReachesModel(t *testing.T) {
 			variant: ChatRequest{Message: message, AgentRef: "coder"},
 		},
 		{
-			name:        "non-runtime agent selection",
-			base:        ChatRequest{Message: message},
-			variant:     ChatRequest{Message: message, AgentRef: "reviewer"},
-			knownDefect: "HandleChat only tells the model about a selected agent when it has a runtime, but the prompt says to use create_ai_task with agentRef for non-runtime agents",
+			name:    "non-runtime agent selection",
+			base:    ChatRequest{Message: message},
+			variant: ChatRequest{Message: message, AgentRef: "reviewer"},
 		},
 		{
-			name:        "request namespace",
-			base:        ChatRequest{Message: message, Namespace: defaultNamespace},
-			variant:     ChatRequest{Message: message, Namespace: chatEvalNamespace},
-			knownDefect: `the model is never told the request namespace, yet the prompt says "use the namespace from the request or ask the user"; tools silently default to it`,
+			name:    "request namespace",
+			base:    ChatRequest{Message: message, Namespace: defaultNamespace},
+			variant: ChatRequest{Message: message, Namespace: chatEvalNamespace},
 		},
 		{
-			name:        "session provider",
-			base:        ChatRequest{Message: message, Provider: "openai"},
-			variant:     ChatRequest{Message: message, Provider: "secondary"},
-			knownDefect: `the prompt says "Use the same provider that this chat session is using" but lists providers without marking the session's`,
+			name:    "session provider",
+			base:    ChatRequest{Message: message, Provider: "openai"},
+			variant: ChatRequest{Message: message, Provider: "secondary"},
 		},
 	}
 	for _, tt := range tests {
@@ -237,21 +234,27 @@ func TestChatEvalProviderRefExtraction(t *testing.T) {
 
 // TestChatEvalInjectedDirectivesReferenceExistingProviders checks text that
 // HandleChat adds to the user's message. Those directives are mandatory for the
-// model, so every Provider they name must exist in the namespace.
+// model, so every Provider they name must exist in the namespace. Without a
+// selected agent, the message must reach the model unchanged.
 func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 	tests := []struct {
-		name        string
-		req         ChatRequest
-		knownDefect string
+		name          string
+		req           ChatRequest
+		wantDirective bool
 	}{
 		{
-			name: "runtime agent hint",
-			req:  ChatRequest{Message: "refactor the auth middleware in https://github.com/acme/api", AgentRef: "coder"},
+			name:          "runtime agent hint",
+			req:           ChatRequest{Message: "refactor the auth middleware in https://github.com/acme/api", AgentRef: "coder"},
+			wantDirective: true,
 		},
 		{
-			name:        "issue workflow",
-			req:         ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
-			knownDefect: `the issue-workflow directive hard-codes providerRef="copilot" instead of an available Provider`,
+			name:          "non-runtime agent hint",
+			req:           ChatRequest{Message: "review the design doc at https://example.com/design.md", AgentRef: "reviewer"},
+			wantDirective: true,
+		},
+		{
+			name: "issue request without an agent",
+			req:  ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
 		},
 	}
 	for _, tt := range tests {
@@ -263,6 +266,10 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 			content := messages[len(messages)-1].Content
 			require.True(t, strings.HasSuffix(content, tt.req.Message), "user message was not preserved: %q", content)
 			injected := strings.TrimSuffix(content, tt.req.Message)
+			if !tt.wantDirective {
+				require.Empty(t, injected, "HandleChat rewrote a message that selects no agent")
+				return
+			}
 			require.NotEmpty(t, strings.TrimSpace(injected), "expected HandleChat to inject a directive")
 
 			var providers corev1alpha1.ProviderList
@@ -277,7 +284,7 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 					missing = append(missing, ref)
 				}
 			}
-			expectChatEvalCheck(t, len(missing) == 0, "injected directive names missing Providers "+strings.Join(missing, ","), tt.knownDefect)
+			require.Empty(t, missing, "injected directive names Providers that do not exist")
 		})
 	}
 }
@@ -349,11 +356,10 @@ func TestChatEvalModelDecisionsFailFast(t *testing.T) {
 			args: `{"name":"planner","providerRef":"openai","coordination":{"enabled":true}}`,
 		},
 		{
-			name:        "create agent with a missing provider",
-			tool:        "create_agent",
-			args:        `{"name":"planner","providerRef":"copilot","coordination":{"enabled":true}}`,
-			wantReject:  true,
-			knownDefect: "create_agent accepts a providerRef that names no Provider; tasks using the Agent fail later",
+			name:       "create agent with a missing provider",
+			tool:       "create_agent",
+			args:       `{"name":"planner","providerRef":"copilot","coordination":{"enabled":true}}`,
+			wantReject: true,
 		},
 		{
 			name:       "create an agent that already exists",
@@ -367,11 +373,10 @@ func TestChatEvalModelDecisionsFailFast(t *testing.T) {
 			args: `{"name":"refactor-auth","agentRef":"coder","prompt":"refactor the auth middleware","timeout":"20m"}`,
 		},
 		{
-			name:        "agent task for a non-runtime agent",
-			tool:        "create_agent_task",
-			args:        `{"name":"review-doc","agentRef":"reviewer","prompt":"review the design doc","timeout":"20m"}`,
-			wantReject:  true,
-			knownDefect: "create_agent_task accepts an Agent without a runtime; the controller fails the Task later",
+			name:       "agent task for a non-runtime agent",
+			tool:       "create_agent_task",
+			args:       `{"name":"review-doc","agentRef":"reviewer","prompt":"review the design doc","timeout":"20m"}`,
+			wantReject: true,
 		},
 	}
 	for _, tt := range tests {

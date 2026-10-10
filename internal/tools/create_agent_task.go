@@ -96,6 +96,11 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
 		return result, nil
 	}
+	if agent != nil && agent.Spec.Runtime == nil {
+		return ChatToolErrorResult(invalidArgumentsErrorType,
+			fmt.Sprintf("agent %q has no runtime; create_agent_task only runs Agents with a runtime", agentRef),
+			fmt.Sprintf("Use create_ai_task with agentRef=%q instead", agentRef))
+	}
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
