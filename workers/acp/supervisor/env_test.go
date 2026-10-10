@@ -122,6 +122,21 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 	}
 }
 
+func TestCodexProviderSessionProjectionNoReasoning(t *testing.T) {
+	request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "none", nil, nil, true)
+	projection, err := codexSessionProjection(request, acp.SessionPaths{Home: "/sessions/private/home"}, ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session"}, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["model_reasoning_effort"] != "none" {
+		t.Fatalf("Codex reasoning effort = %v, want none", config["model_reasoning_effort"])
+	}
+}
+
 func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}

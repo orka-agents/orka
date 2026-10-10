@@ -9,6 +9,12 @@ description: Move supported native Codex conversation state between local homes 
 It supports the `codex/paginated@0.160.0` profile on Linux and macOS. Legacy
 rollouts and encrypted reasoning context are outside this delivery.
 
+Use a model that supports non-reasoning turns and set the destination Codex Agent's
+`spec.runtime.defaultReasoningEffort: none`. Set `model_reasoning_effort = "none"`
+in the source and return homes too. This selects Codex's non-reasoning mode; it
+does not bypass capture validation. A rollout with encrypted reasoning is still
+rejected, even if the configured effort is `none`.
+
 Orka transports at most 512 KiB of encoded bundle data. This is a consumer
 transport limit, separate from SessionKit's native storage limits. A bundle
 contains the verified manifest and rollout. Authentication files, native SQLite

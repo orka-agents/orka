@@ -200,7 +200,7 @@ func validateAgentExecutionControls(providerKind string, maxTurns int32, reasoni
 		return err
 	}
 	switch reasoningEffort {
-	case "", reasoningEffortLow, reasoningEffortMedium, reasoningEffortHigh, reasoningEffortXHigh, reasoningEffortMax:
+	case "", "none", reasoningEffortLow, reasoningEffortMedium, reasoningEffortHigh, reasoningEffortXHigh, reasoningEffortMax:
 	default:
 		return fmt.Errorf("unsupported reasoning effort %q", reasoningEffort)
 	}
@@ -210,6 +210,9 @@ func validateAgentExecutionControls(providerKind string, maxTurns int32, reasoni
 			return fmt.Errorf("codex provider does not support reasoning effort %q", reasoningEffort)
 		}
 	case providerKindClaude:
+		if reasoningEffort == "none" {
+			return fmt.Errorf("claude provider does not support reasoning effort %q", reasoningEffort)
+		}
 	case providerKindCopilot:
 		if reasoningEffort != "" {
 			return fmt.Errorf("copilot provider does not support reasoning effort")
