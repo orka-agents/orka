@@ -230,7 +230,7 @@ spec:
               memory: 2Gi
             limits:
               cpu: "4"
-              memory: 6Gi
+              memory: 8Gi
           startupProbe:
             httpGet:
               path: /readyz

@@ -19,7 +19,7 @@
     use_tokenizer_template: true
     system_messages_after_first: merge
   options:
-    # Bound cached recurrent states within the existing 6-GiB model limit.
+    # Bound cached recurrent states within the 8-GiB model limit.
     - "n_ctx_checkpoints:16"
     - "checkpoint_min_step:1024"
     - "cache_ram:2048"

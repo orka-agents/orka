@@ -201,7 +201,8 @@ missing or mismatched artifacts staying not ready.
   for recurrent prefix checkpoints. The correction restores template message
   boundaries and permits bounded mid-prompt checkpoints for changing cluster
   context. Checkpoint count/spacing and host cache memory are bounded within
-  the unchanged model resource limit. Its source/build recipe is in
+  an 8-GiB model memory limit on the same free runner. CPU remains limited
+  to four cores. Its source/build recipe is in
   `scripts/fixtures/aikit/backend/`.
   It requires no cloud credentials and routes through Orka's auth/session proxies
   directly to AIKit, without Vekil. DNS/model NetworkPolicy rules are checked

@@ -130,7 +130,7 @@ assert 'mountPath: /etc/orka-aikit' in manifest
 assert 'readOnly: true' in manifest
 for name,value in [('LOCALAI_THREADS','"4"'),('LOCALAI_CONTEXT_SIZE','"32768"'),('LOCALAI_LOAD_TO_MEMORY','qwen-3.5-4b')]:
     assert re.search(r'name: '+name+r'\s+value: '+re.escape(value),manifest)
-assert 'limits:\n              cpu: "4"\n              memory: 6Gi' in manifest
+assert 'limits:\n              cpu: "4"\n              memory: 8Gi' in manifest
 assert 'policyTypes: [Ingress]' in manifest
 assert 'kubernetes.io/metadata.name: orka-system' in manifest
 assert 'namespace: vekil' not in manifest
