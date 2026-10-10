@@ -1592,10 +1592,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if (task.Spec.Type == corev1alpha1.TaskTypeAI || latest.Spec.Type == corev1alpha1.TaskTypeAI) &&
-		((agent != nil && agent.Spec.Soul != nil) || latest.Status.SoulBinding != nil) &&
-		(task.UID != latest.UID || task.Generation != latest.Generation) {
-		// Do not prepare a soul using Agent/provider inputs resolved for a
-		// different Task generation. Preserve no-soul Job recovery behavior.
+		!existingGatewayJob && (task.UID != latest.UID || task.Generation != latest.Generation) {
+		// Agent/provider inputs belong to the caller's Task revision, even
+		// when its resolved Agent had no soul. Reconcile the complete tuple.
 		return ctrl.Result{}, aiSoulTaskChanged(task)
 	}
 

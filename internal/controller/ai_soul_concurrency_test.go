@@ -126,3 +126,27 @@ func TestAISoulJobPreparationUsesFreshAttemptStatus(t *testing.T) {
 		t.Fatalf("Job launch did not preserve fresh binding and attempt status: phase=%s attempts=%d", task.Status.Phase, task.Status.Attempts)
 	}
 }
+
+func TestAISoulPendingAgentRefChangeDoesNotUsePreviousAgent(t *testing.T) {
+	oldAgent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "default", UID: "old-uid", Generation: 1}}
+	newAgent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "new", Namespace: "default", UID: "new-uid", Generation: 1}, Spec: corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{Inline: "persona"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: oldAgent.Name}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}}
+	latest := task.DeepCopy()
+	latest.Generation++
+	latest.Spec.AgentRef.Name = newAgent.Name
+	r := newUnitReconciler(newTestScheme(), latest, oldAgent, newAgent)
+	_, err := r.createTaskJob(t.Context(), task, oldAgent, nil)
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("stale Agent resolution must defer dispatch: %v", err)
+	}
+	var jobs batchv1.JobList
+	if err := r.List(t.Context(), &jobs); err != nil || len(jobs.Items) != 0 {
+		t.Fatal("an edited Agent reference launched a Job using the previous Agent")
+	}
+	if err := r.Get(t.Context(), client.ObjectKeyFromObject(latest), latest); err != nil {
+		t.Fatal(err)
+	}
+	if latest.Status.Phase != corev1alpha1.TaskPhasePending || latest.Status.SoulBinding != nil || latest.Status.Attempts != 0 {
+		t.Fatal("stale resolution consumed the edited Task")
+	}
+}

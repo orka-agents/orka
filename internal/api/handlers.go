@@ -1470,6 +1470,12 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 
 		patchBase := current.DeepCopy()
 		current.Spec = req.Spec
+		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		if err := agentcontext.ValidateSoulRuntime(current); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
 		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
 			return err
 		}
