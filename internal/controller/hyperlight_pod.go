@@ -84,7 +84,9 @@ func (c HyperlightPodConfig) apply(spec *corev1.PodSpec, container *corev1.Conta
 		Name:            hyperlightBundleInit,
 		Image:           c.BundleImage,
 		ImagePullPolicy: platformImagePullPolicy(c.BundleImage),
-		Command:         []string{"cp", "-a", hyperlightDir + "/.", hyperlightBundleStaging + "/"},
+		// Copy the contents, not the attributes: the volume's root belongs
+		// to root, which a non-root Pod cannot set times on.
+		Command: []string{"cp", "-R", hyperlightDir + "/bin", hyperlightDir + "/rootfs", hyperlightBundleStaging + "/"},
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: new(false),
 			ReadOnlyRootFilesystem:   new(true),

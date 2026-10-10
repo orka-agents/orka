@@ -184,10 +184,14 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{ExitCode: -1}, fmt.Errorf("write script: %w", err)
 	}
 	if req.Credential != nil {
-		for _, path := range []string{scriptDir, script} {
-			if err := os.Chown(path, int(req.Credential.UID), int(req.Credential.GID)); err != nil {
-				return Result{ExitCode: -1}, fmt.Errorf("hand the script to uid %d: %w", req.Credential.UID, err)
-			}
+		// The directory stays the caller's, so a caller without
+		// DAC_OVERRIDE can still remove it; the user only traverses it to
+		// the script, which it owns.
+		if err := os.Chmod(scriptDir, 0o711); err != nil {
+			return Result{ExitCode: -1}, fmt.Errorf("open the script directory: %w", err)
+		}
+		if err := os.Chown(script, int(req.Credential.UID), int(req.Credential.GID)); err != nil {
+			return Result{ExitCode: -1}, fmt.Errorf("hand the script to uid %d: %w", req.Credential.UID, err)
 		}
 	}
 
