@@ -257,3 +257,79 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatalf("node ScratchMB = %d, want its default 512", mb)
 	}
 }
+
+func TestRunStopsAGuestThatPrintsPastItsBudget(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	result, stdout, _, err := run(t, f.runner, ctx, Request{
+		Script:       "while :; do echo 0123456789012345678901234567890123456789; done",
+		OutputBudget: 64 << 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OutputExceeded || result.ExitCode != -1 || result.TimedOut {
+		t.Fatalf("result = %+v, want the guest stopped for its output", result)
+	}
+	if len(stdout) > 64<<10 {
+		t.Fatalf("passed on %d bytes, past the 64 KiB budget", len(stdout))
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("stopping took %s", elapsed)
+	}
+}
+
+func TestRunKeepsScriptsInThePrivateCache(t *testing.T) {
+	f := newFixture(t)
+	_, stdout, _, err := run(t, f.runner, context.Background(), Request{Script: `dirname "$script"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(stdout, filepath.Join(f.cache, "scripts")+"/") {
+		t.Fatalf("script ran from %q, want the private cache", stdout)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(f.cache, "scripts")); len(entries) != 0 {
+		t.Fatalf("the run left %d script directories behind", len(entries))
+	}
+}
+
+func TestRunBootsColdFromACacheOthersCanWrite(t *testing.T) {
+	f := newFixture(t)
+	if err := os.Chmod(f.cache, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	result, stdout, _, err := run(t, f.runner, context.Background(), Request{Script: `dirname "$script"`})
+	if err != nil || result.Warm {
+		t.Fatalf("result=%+v err=%v, want a cold run", result, err)
+	}
+	if strings.HasPrefix(stdout, f.cache) {
+		t.Fatalf("script ran from %q, inside a cache others can write", stdout)
+	}
+
+	// In a shared Pod the cache's parent must be closed to others as well.
+	f = newFixture(t)
+	f.runner.cfg.SharedPod = true
+	if err := os.Chmod(filepath.Dir(f.cache), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	result, _, _, err = run(t, f.runner, context.Background(), Request{Script: "true"})
+	if err != nil || result.Warm {
+		t.Fatalf("shared Pod: result=%+v err=%v, want a cold run under an open parent", result, err)
+	}
+	if err := os.Chmod(filepath.Dir(f.cache), 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	if result, _, _, err = run(t, f.runner, context.Background(), Request{Script: "true"}); err != nil || !result.Warm {
+		t.Fatalf("shared Pod: result=%+v err=%v, want a warm run under a sticky parent", result, err)
+	}
+}
+
+func TestRunRefusesABinaryByName(t *testing.T) {
+	f := newFixture(t)
+	f.runner.cfg.Binary = "hluk"
+	if _, _, _, err := run(t, f.runner, context.Background(), Request{Script: "true"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable for a binary looked up on PATH", err)
+	}
+}

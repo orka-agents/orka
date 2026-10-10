@@ -22,9 +22,12 @@ const DefaultHyperlightDeviceResource = "hyperlight.dev/hypervisor"
 
 const (
 	hyperlightVolume        = "hyperlight"
+	hyperlightCacheVolume   = "hyperlight-cache"
 	hyperlightBundleInit    = "hyperlight-bundle"
 	hyperlightDir           = "/opt/orka/hyperlight"
+	hyperlightCacheDir      = "/var/cache/orka-hyperlight"
 	hyperlightBundleStaging = "/mnt/hyperlight"
+	hyperlightCacheStaging  = "/mnt/hyperlight-cache"
 	// hyperlightDeviceGIDEnv names the device's group for a process that
 	// hands it to the users it runs micro-VMs as (the ACP supervisor).
 	hyperlightDeviceGIDEnv = "ORKA_HYPERLIGHT_DEVICE_GID"
@@ -73,20 +76,32 @@ func (c HyperlightPodConfig) apply(spec *corev1.PodSpec, container *corev1.Conta
 		container.Env = setControllerEnvValue(container.Env, hyperlightDeviceGIDEnv, strconv.FormatInt(c.DeviceGID, 10))
 	}
 
+	// The warm snapshots and run scripts get a volume of their own, apart
+	// from the bundle; hluk uses it only while no one else can write it.
+	spec.Volumes = append(spec.Volumes, corev1.Volume{
+		Name:         hyperlightCacheVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("4Gi"))}},
+	})
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: hyperlightCacheVolume, MountPath: hyperlightCacheDir})
+	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvCacheDir, hyperlightCacheDir+"/c")
+
 	if c.BundleImage == "" {
 		return
 	}
 	spec.Volumes = append(spec.Volumes, corev1.Volume{
 		Name:         hyperlightVolume,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("4Gi"))}},
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("1Gi"))}},
 	})
 	spec.InitContainers = append(spec.InitContainers, corev1.Container{
 		Name:            hyperlightBundleInit,
 		Image:           c.BundleImage,
 		ImagePullPolicy: platformImagePullPolicy(c.BundleImage),
-		// Copy the contents, not the attributes: the volume's root belongs
-		// to root, which a non-root Pod cannot set times on.
-		Command: []string{"cp", "-R", hyperlightDir + "/bin", hyperlightDir + "/rootfs", hyperlightBundleStaging + "/"},
+		// Copy the contents, not the attributes: a volume's root belongs to
+		// root, which a non-root Pod cannot set times on. Then close the
+		// cache volume's root to other users where this Pod owns it (a root
+		// Pod, whose sessions run as other users).
+		Command: []string{"sh", "-c", "cp -R " + hyperlightDir + "/bin " + hyperlightDir + "/rootfs " + hyperlightBundleStaging + "/ && " +
+			"{ chmod 0755 " + hyperlightCacheStaging + " 2>/dev/null || true; }"},
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: new(false),
 			ReadOnlyRootFilesystem:   new(true),
@@ -97,10 +112,13 @@ func (c HyperlightPodConfig) apply(spec *corev1.PodSpec, container *corev1.Conta
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("32Mi")},
 			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
 		},
-		VolumeMounts: []corev1.VolumeMount{{Name: hyperlightVolume, MountPath: hyperlightBundleStaging}},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: hyperlightVolume, MountPath: hyperlightBundleStaging},
+			{Name: hyperlightCacheVolume, MountPath: hyperlightCacheStaging},
+		},
 	})
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: hyperlightVolume, MountPath: hyperlightDir})
+	// Read-only: no process in the Pod can replace hluk or its images.
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: hyperlightVolume, MountPath: hyperlightDir, ReadOnly: true})
 	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvBinary, hyperlightDir+"/bin/hluk")
 	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvRootfsDir, hyperlightDir+"/rootfs")
-	container.Env = setControllerEnvValue(container.Env, hyperlight.EnvCacheDir, hyperlightDir+"/cache")
 }

@@ -113,6 +113,8 @@ func (e *HyperlightCodeExecutor) Execute(ctx context.Context, req CodeExecutionR
 		result.Error = appendCodeExecError(result.Error, fmt.Sprintf("hyperlight backend unavailable: %v", err))
 	case err != nil:
 		result.Error = appendCodeExecError(result.Error, err.Error())
+	case run.OutputExceeded:
+		result.Error = appendCodeExecError(result.Error, fmt.Sprintf("execution stopped: output passed %d bytes", hyperlight.DefaultOutputBudget))
 	case run.TimedOut:
 		result.TimedOut = true
 		result.Error = appendCodeExecError(result.Error, "execution timed out")

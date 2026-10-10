@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Environment variables that configure a Runner (see ConfigFromEnv).
@@ -34,7 +35,7 @@ const (
 )
 
 const (
-	defaultBinary    = "hluk"
+	defaultBinary    = "/opt/orka/hyperlight/bin/hluk"
 	defaultRootfsDir = "/opt/orka/hyperlight/rootfs"
 	defaultScratchMB = 256
 	safePath         = "/usr/local/bin:/usr/bin:/bin"
@@ -73,6 +74,10 @@ type Config struct {
 	ScratchMB int
 	// DevicePaths are the hypervisor devices of which one must exist.
 	DevicePaths []string
+	// SharedPod is set where other users run in the Pod (the ACP
+	// supervisor's sessions): the cache's parent must then be closed to
+	// them too.
+	SharedPod bool
 }
 
 // ConfigFromEnv reads a Config from the ORKA_HYPERLIGHT_* variables, with the
@@ -123,6 +128,9 @@ type Request struct {
 	Stderr io.Writer
 	// Credential runs hluk as another user, which then owns the script.
 	Credential *Credential
+	// OutputBudget is how many bytes of output stop the guest; 0 is
+	// DefaultOutputBudget.
+	OutputBudget int64
 }
 
 // Credential is a user to run hluk as: the owner of the files the guest is
@@ -139,6 +147,8 @@ type Result struct {
 	TimedOut bool
 	// Warm reports a run restored from a warm snapshot rather than booted.
 	Warm bool
+	// OutputExceeded reports a guest stopped for printing past its budget.
+	OutputExceeded bool
 }
 
 // Runner runs requests with one Config.
@@ -173,8 +183,18 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return Result{ExitCode: -1}, err
 	}
+	private := r.privateCache()
 
-	scriptDir, err := os.MkdirTemp("", "orka-hyperlight-*")
+	// A run's script lives in the private cache when there is one: a world-
+	// writable temporary directory would let another user swap it.
+	scriptParent := ""
+	if private {
+		scriptParent = filepath.Join(r.cfg.CacheDir, "scripts")
+		if err := os.MkdirAll(scriptParent, 0o711); err != nil {
+			return Result{ExitCode: -1}, fmt.Errorf("create script dir: %w", err)
+		}
+	}
+	scriptDir, err := os.MkdirTemp(scriptParent, "run-*")
 	if err != nil {
 		return Result{ExitCode: -1}, fmt.Errorf("create script dir: %w", err)
 	}
@@ -196,7 +216,10 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	var args []string
-	snapshot, warm := r.warmSnapshot(ctx, req.Runtime, rootfs)
+	snapshot, warm := "", false
+	if private {
+		snapshot, warm = r.warmSnapshot(ctx, req.Runtime, rootfs)
+	}
 	if warm {
 		args = []string{"snapshot", "run", snapshot, script}
 	} else {
@@ -204,10 +227,18 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	args = append(args, capabilityArgs(req)...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.Binary, args...)
-	cmd.Env = r.env()
-	cmd.Stdout = writerOrDiscard(req.Stdout)
-	cmd.Stderr = &nulFilter{w: writerOrDiscard(req.Stderr)}
+	// hluk keeps a copy of everything the guest prints: past the budget, the
+	// guest is stopped rather than allowed to grow it.
+	runCtx, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+	budget := &outputBudget{limit: req.OutputBudget, stop: stopRun}
+	if budget.limit <= 0 {
+		budget.limit = DefaultOutputBudget
+	}
+	cmd := exec.CommandContext(runCtx, r.cfg.Binary, args...)
+	cmd.Env = r.env(private)
+	cmd.Stdout = &budgetWriter{budget: budget, w: writerOrDiscard(req.Stdout)}
+	cmd.Stderr = &budgetWriter{budget: budget, w: &nulFilter{w: writerOrDiscard(req.Stderr)}}
 	killProcessGroupOnCancel(cmd)
 	if err := runAs(cmd, req.Credential); err != nil {
 		return Result{ExitCode: -1}, err
@@ -215,6 +246,11 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 
 	runErr := cmd.Run()
 	result := Result{Warm: warm}
+	if budget.exceeded.Load() {
+		result.OutputExceeded = true
+		result.ExitCode = -1
+		return result, nil
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true
 		result.ExitCode = -1
@@ -242,8 +278,13 @@ func (r *Runner) preflight(req Request) (string, error) {
 	if !r.hasDevice() {
 		return "", fmt.Errorf("%w: no hypervisor device (%s) in this pod", ErrUnavailable, strings.Join(r.cfg.DevicePaths, " or "))
 	}
-	if _, err := exec.LookPath(r.cfg.Binary); err != nil {
-		return "", fmt.Errorf("%w: hluk binary %q: %v", ErrUnavailable, r.cfg.Binary, err)
+	// An absolute path only: a name would be looked up on the caller's PATH,
+	// which is not the operator's to pin.
+	if !filepath.IsAbs(r.cfg.Binary) {
+		return "", fmt.Errorf("%w: hluk binary %q is not an absolute path", ErrUnavailable, r.cfg.Binary)
+	}
+	if info, err := os.Stat(r.cfg.Binary); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("%w: hluk binary %q is not an executable file", ErrUnavailable, r.cfg.Binary)
 	}
 	rootfs := filepath.Join(r.cfg.RootfsDir, req.Runtime+".cpio")
 	if _, err := os.Stat(rootfs); err != nil {
@@ -267,15 +308,69 @@ func (r *Runner) hasDevice() bool {
 }
 
 // env is hluk's own environment: nothing of the caller's reaches it, and its
-// cache is the Runner's.
-func (r *Runner) env() []string {
+// cache is the Runner's when that is private.
+func (r *Runner) env(private bool) []string {
 	env := []string{"PATH=" + safePath}
-	if r.cfg.CacheDir != "" {
+	if private {
 		env = append(env, "HOME="+r.cfg.CacheDir, "HLUK_CACHE_DIR="+filepath.Join(r.cfg.CacheDir, "hluk"))
 	} else {
 		env = append(env, "HOME="+os.TempDir())
 	}
 	return env
+}
+
+// privateCache reports whether the cache directory exists, or could be made,
+// as this process's own: owned by it, and writable by no one else. Snapshots
+// and scripts kept anywhere else could be swapped by another user, so
+// without it every run boots cold from a temporary directory.
+func (r *Runner) privateCache() bool {
+	if r.cfg.CacheDir == "" || !filepath.IsAbs(r.cfg.CacheDir) {
+		return false
+	}
+	if err := os.MkdirAll(r.cfg.CacheDir, 0o755); err != nil {
+		return false
+	}
+	info, err := os.Lstat(r.cfg.CacheDir)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || !ownedBySelf(info) {
+		return false
+	}
+	if !r.cfg.SharedPod {
+		return true
+	}
+	// Others could rename the cache away from a parent open to them.
+	parent, err := os.Lstat(filepath.Dir(r.cfg.CacheDir))
+	return err == nil && parent.IsDir() && (parent.Mode().Perm()&0o002 == 0 || parent.Mode()&os.ModeSticky != 0)
+}
+
+// DefaultOutputBudget is how much output a run may produce before its guest
+// is stopped: hluk keeps a copy of all of it in memory.
+const DefaultOutputBudget = 64 << 20
+
+type outputBudget struct {
+	limit    int64
+	used     atomic.Int64
+	exceeded atomic.Bool
+	stop     context.CancelFunc
+}
+
+// budgetWriter counts a stream against the run's budget and stops the run
+// once the budget is spent; it never blocks hluk on a full pipe.
+type budgetWriter struct {
+	budget *outputBudget
+	w      io.Writer
+}
+
+func (b *budgetWriter) Write(p []byte) (int, error) {
+	if b.budget.used.Add(int64(len(p))) > b.budget.limit {
+		if !b.budget.exceeded.Swap(true) {
+			b.budget.stop()
+		}
+		return len(p), nil
+	}
+	if _, err := b.w.Write(p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // snapshotLocks serializes the save of each snapshot directory across the
@@ -313,7 +408,7 @@ func (r *Runner) warmSnapshot(ctx context.Context, runtime, rootfs string) (stri
 	}
 	cmd := exec.CommandContext(ctx, r.cfg.Binary, "snapshot", "save",
 		"--initrd", rootfs, "--scratch-mb", strconv.Itoa(r.ScratchMB(runtime)), "--output", partial)
-	cmd.Env = r.env()
+	cmd.Env = r.env(true)
 	killProcessGroupOnCancel(cmd)
 	if err := cmd.Run(); err != nil {
 		return "", false
@@ -350,7 +445,7 @@ func (r *Runner) snapshotKey(ctx context.Context) string {
 		return key.(string)
 	}
 	cmd := exec.CommandContext(ctx, r.cfg.Binary, "snapshot", "key")
-	cmd.Env = r.env()
+	cmd.Env = r.env(true)
 	out, err := cmd.Output()
 	key := strings.TrimSpace(string(out))
 	if err != nil || !runtimeNamePattern.MatchString(key) {

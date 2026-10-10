@@ -9,6 +9,7 @@ MIT License - see LICENSE file for details.
 package hyperlight
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -33,6 +34,12 @@ func killProcessGroupOnCancel(cmd *exec.Cmd) {
 		return nil
 	}
 	cmd.WaitDelay = waitDelay
+}
+
+// ownedBySelf reports a file this process's effective user owns.
+func ownedBySelf(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == os.Geteuid()
 }
 
 // runAs runs hluk as the credential's user, groups included.

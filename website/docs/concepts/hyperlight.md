@@ -34,7 +34,9 @@ Two tools use it:
 - **The Hyperlight bundle**: `make docker-build-hyperlight-bundle` builds `hluk`
   and the `python`, `node` and `bash` guest images into one image. Pass it with
   `--hyperlight-bundle-image`; an init container copies it into each Pod that
-  runs micro-VMs, along with a writable directory for the warm snapshots.
+  runs micro-VMs, where it is mounted read-only, next to a separate volume for
+  the warm snapshots. `hluk` uses that cache only while no other user can write
+  to it; otherwise every run boots cold.
 
 ## `code_exec` for AI Tasks
 
@@ -103,4 +105,5 @@ programs:
 There is no `fork()`, so a program that forks fails, and scheduling is
 cooperative, so a busy thread holds the vCPU. Guest memory is fixed per runtime
 (`python` 256 MiB, `node` 512 MiB, `bash` 128 MiB; `ORKA_HYPERLIGHT_SCRATCH_MB`
-overrides it), and exceeding it ends the run.
+overrides it), and exceeding it ends the run. A run that prints more than
+64 MiB is stopped, since `hluk` keeps a copy of everything the guest prints.

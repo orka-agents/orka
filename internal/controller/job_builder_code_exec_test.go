@@ -101,11 +101,16 @@ func TestJobBuilderPinsTheHyperlightCodeExecBackend(t *testing.T) {
 		t.Fatalf("last init container = %s (%s), want the Hyperlight bundle", bundle.Name, bundle.Image)
 	}
 	if !slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
-		return m.Name == hyperlightVolume && m.MountPath == hyperlightDir
+		return m.Name == hyperlightVolume && m.MountPath == hyperlightDir && m.ReadOnly
 	}) {
-		t.Fatalf("worker mounts = %v, want the Hyperlight volume at %s", container.VolumeMounts, hyperlightDir)
+		t.Fatalf("worker mounts = %v, want the Hyperlight bundle read-only at %s", container.VolumeMounts, hyperlightDir)
 	}
-	if env["ORKA_HYPERLIGHT_BINARY"] != hyperlightDir+"/bin/hluk" || env["ORKA_HYPERLIGHT_CACHE_DIR"] != hyperlightDir+"/cache" {
+	if !slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
+		return m.Name == hyperlightCacheVolume && m.MountPath == hyperlightCacheDir && !m.ReadOnly
+	}) {
+		t.Fatalf("worker mounts = %v, want a writable snapshot cache at %s", container.VolumeMounts, hyperlightCacheDir)
+	}
+	if env["ORKA_HYPERLIGHT_BINARY"] != hyperlightDir+"/bin/hluk" || env["ORKA_HYPERLIGHT_CACHE_DIR"] != hyperlightCacheDir+"/c" {
 		t.Fatalf("Hyperlight env = %v", env)
 	}
 }

@@ -41,6 +41,8 @@ func sandboxExecConfigFromEnv() (*SandboxExecConfig, error) {
 		return nil, nil
 	}
 	cfg := &SandboxExecConfig{Hyperlight: hyperlight.ConfigFromEnv()}
+	// Session users share this Pod: the snapshot cache must be closed to them.
+	cfg.Hyperlight.SharedPod = true
 	if value := strings.TrimSpace(os.Getenv(EnvHyperlightDeviceGID)); value != "" {
 		gid, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
@@ -101,7 +103,11 @@ func (e *sandboxExecutor) run(ctx context.Context, request acp.SandboxExecReques
 		Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: run.ExitCode, TimedOut: run.TimedOut,
 		StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated,
 	}
-	if run.TimedOut {
+	switch {
+	case run.OutputExceeded:
+		result.ExitCode = -1
+		result.Stderr = appendSandboxNote(result.Stderr, fmt.Sprintf("execution stopped: output passed %d bytes", hyperlight.DefaultOutputBudget))
+	case run.TimedOut:
 		result.Stderr = appendSandboxNote(result.Stderr, "execution timed out")
 	}
 	return result, err

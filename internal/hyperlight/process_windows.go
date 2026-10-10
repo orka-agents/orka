@@ -10,8 +10,12 @@ package hyperlight
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 )
+
+// ownedBySelf has no owner to compare on Windows; ACLs guard the cache.
+func ownedBySelf(os.FileInfo) bool { return true }
 
 func runAs(_ *exec.Cmd, credential *Credential) error {
 	if credential != nil {
