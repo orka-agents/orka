@@ -19,13 +19,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
@@ -201,6 +204,86 @@ func TestChatEvalRequestContextReachesModel(t *testing.T) {
 			variant, _ := runChatEvalTurn(t, c, tt.variant, &llm.CompletionResponse{Content: "ok"})
 			differs := chatEvalModelInput(base.requests[0]) != chatEvalModelInput(variant.requests[0])
 			expectChatEvalCheck(t, differs, "model input is identical for both requests", tt.knownDefect)
+		})
+	}
+}
+
+// TestChatEvalScopedCallerPromptMatchesTools checks that a caller whose token
+// limits the tools it may use is not told to call the tools it lost. Chat tool
+// names in the model input must be among the tools offered on the turn, and a
+// selected agent must stay visible even when its tool is not offered.
+func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
+	tests := []struct {
+		name         string
+		allowedTools []string
+		agentRef     string
+		knownDefect  string
+	}{
+		{name: "all chat tools allowed", allowedTools: chattools.ChatToolNames()},
+		{
+			name:         "read-only tools allowed",
+			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
+			knownDefect:  "the system prompt is static, so a token's allowedTools removes tools the prompt still tells the model to call",
+		},
+		{
+			name:         "selected runtime agent without its task tool",
+			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
+			agentRef:     "coder",
+			knownDefect:  "the prompt and the selected-agent hint name task tools that a token's allowedTools removed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oidc := newTestOIDCProvider(t)
+			token := issueTestContextToken(t, oidc, nil, map[string]any{
+				"scope": strings.Join([]string{ContextTokenScopeToolsUse, ContextTokenScopeProvidersUse, ContextTokenScopeAgentsRead, ContextTokenScopeSessionsRead, ContextTokenScopeSessionsWrite}, " "),
+				"tctx":  map[string]any{"allowedTools": tt.allowedTools},
+			})
+			authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+			require.NoError(t, err)
+
+			provider := &evalRecordingProvider{chatMockProvider: chatMockProvider{name: chatEvalProviderType, responses: []*llm.CompletionResponse{{Content: "ok"}}}}
+			llm.RegisterProvider(chatEvalProviderType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
+			c := chatEvalCluster(t, defaultNamespace)
+			cfg := DefaultChatConfig()
+			cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
+			ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
+			ch.contextTokenAuthorization = authz
+			app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+			app.Use(NewAuthMiddleware(c, AuthConfig{ContextTokens: testContextTokenConfig(t, oidc, "")}))
+			app.Post("/api/v1/chat", ch.HandleChat)
+
+			body, err := json.Marshal(ChatRequest{SessionID: "chat-eval", Message: "list the pods in kube-system", Provider: "openai", AgentRef: tt.agentRef})
+			require.NoError(t, err)
+			httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Accept", "application/json")
+			httpReq.Header.Set(TransactionTokenHeaderName, token)
+			resp, err := app.Test(httpReq, fiber.TestConfig{Timeout: 10 * time.Second})
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+			data, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "%s", data)
+			require.NotEmpty(t, provider.requests, "chat turn made no model call")
+
+			req := provider.requests[0]
+			offered := map[string]bool{}
+			for _, tool := range req.Tools {
+				offered[tool.Name] = true
+			}
+			require.Equal(t, slices.Sorted(slices.Values(tt.allowedTools)), slices.Sorted(maps.Keys(offered)),
+				"offered chat tools must match the token's allowedTools")
+			var unavailable []string
+			for _, name := range chattools.ChatToolNames() {
+				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(chatEvalModelInput(req)) {
+					unavailable = append(unavailable, name)
+				}
+			}
+			expectChatEvalCheck(t, len(unavailable) == 0, "model input names tools the caller cannot use: "+strings.Join(unavailable, ","), tt.knownDefect)
+			if tt.agentRef != "" {
+				require.Contains(t, req.Messages[len(req.Messages)-1].Content, fmt.Sprintf("%q", tt.agentRef), "the selected agent must stay visible to the model")
+			}
 		})
 	}
 }
