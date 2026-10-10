@@ -36,6 +36,7 @@ const sidebars = {
         'concepts/agent-runtimes',
         'concepts/agent-sandbox',
         'concepts/substrate',
+        'concepts/hyperlight',
         'concepts/memory',
         'concepts/transaction-tokens',
         'concepts/outbound-access',
