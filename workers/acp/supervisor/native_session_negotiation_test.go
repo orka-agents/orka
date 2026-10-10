@@ -27,8 +27,27 @@ type legacyNativeProtocolLimits struct {
 	MaxWorkspaceDeltaBytes   int64  `json:"maxWorkspaceDeltaBytes"`
 }
 
+// Freeze the old top-level wire shape as well as its nested limits. Embedding
+// the current response would accidentally accept newly added capability fields.
+type legacyNativeCapabilities struct {
+	Protocol                          string                                    `json:"protocol"`
+	Transport                         string                                    `json:"transport"`
+	ACPVersion                        string                                    `json:"acpVersion"`
+	RuntimeProfileDigest              harnessv2.ProfileDigest                   `json:"runtimeProfileDigest"`
+	ProfileDigestSchemaVersion        uint32                                    `json:"profileDigestSchemaVersion"`
+	AdapterDigests                    map[string]string                         `json:"adapterDigests"`
+	Limits                            legacyNativeProtocolLimits                `json:"limits"`
+	Provider                          harnessv2.ProviderCapabilities            `json:"provider"`
+	WorkspaceGovernance               harnessv2.WorkspaceGovernanceCapabilities `json:"workspaceGovernance"`
+	SupportsDrain                     bool                                      `json:"supportsDrain"`
+	SupportsPublicationFinalization   bool                                      `json:"supportsPublicationFinalization"`
+	SupportsAgentSessionConfiguration bool                                      `json:"supportsAgentSessionConfiguration,omitempty"`
+	SupportsFoundryRecovery           bool                                      `json:"supportsFoundryRecovery,omitempty"`
+}
+
 func TestNativeSessionCapabilitiesNegotiatedForStrictOlderClients(t *testing.T) {
 	server, _, _ := newTestServer(t, "immediate")
+	server.cfg.Capabilities.SupportsNativeSessions = true
 	for _, header := range []string{"", "unsupported", "1"} {
 		t.Run("header="+header, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, harnessv2.CapabilitiesPath, nil)
@@ -39,10 +58,7 @@ func TestNativeSessionCapabilitiesNegotiatedForStrictOlderClients(t *testing.T) 
 			server.Handler().ServeHTTP(response, request)
 			require.Equal(t, http.StatusOK, response.Code)
 			require.Equal(t, harnessv2.NativeSessionLimitsHeader, response.Header().Get("Vary"))
-			var old struct {
-				harnessv2.CapabilitiesResponse
-				Limits legacyNativeProtocolLimits `json:"limits"`
-			}
+			var old legacyNativeCapabilities
 			decoder := json.NewDecoder(bytes.NewReader(response.Body.Bytes()))
 			decoder.DisallowUnknownFields()
 			err := decoder.Decode(&old)
@@ -51,10 +67,12 @@ func TestNativeSessionCapabilitiesNegotiatedForStrictOlderClients(t *testing.T) 
 			} else {
 				require.NoError(t, err, "older controller must retain strict capability decoding")
 				require.NotContains(t, response.Body.String(), "maxNativeSessionBytes")
+				require.NotContains(t, response.Body.String(), "supportsNativeSessions")
 			}
 			var current harnessv2.CapabilitiesResponse
 			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &current))
 			if header == "1" {
+				require.True(t, current.SupportsNativeSessions)
 				require.Equal(t, harnessv2.DefaultMaxNativeSessionBytes, current.Limits.EffectiveMaxNativeSessionBytes())
 			} else {
 				require.Equal(t, harnessv2.LegacyMaxNativeSessionBytes, current.Limits.EffectiveMaxNativeSessionBytes())
@@ -68,6 +86,8 @@ func TestNativeSessionCapabilitiesNegotiatedForStrictOlderClients(t *testing.T) 
 	capabilities, err := client.Capabilities(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, harnessv2.DefaultMaxNativeSessionBytes, capabilities.Limits.EffectiveMaxNativeSessionBytes(), "new client must request negotiated capability")
+	require.True(t, capabilities.SupportsNativeSessions)
+	require.True(t, server.cfg.Capabilities.SupportsNativeSessions, "legacy reads must not mutate the configured capability")
 }
 
 func TestNativeCaptureReplayPreservesReceiptAcrossCallerLimits(t *testing.T) {

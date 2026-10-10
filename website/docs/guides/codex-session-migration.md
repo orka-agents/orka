@@ -157,8 +157,9 @@ Migration does not copy source authentication or source policy into authority.
 Retain the journal and repeat the same command after an uncertain response. The
 CLI reuses its saved bundle and operation ID. Export also reuses the same frozen
 SessionKit install plan and receipt. Changing the target, bundle, or cwd with
-that journal is rejected. Automatic port-forward retries use the Kubernetes
-cluster and Service identity rather than the local port. Recreating the Service
+that journal is rejected. Automatic connections use authenticated Kubernetes
+streams without opening a local port or invoking `kubectl`. Retries retain the
+cluster and Service identity. Recreating the Service
 requires a new journal; an explicit server URL must stay unchanged. Invalid or
 unavailable Kubernetes configuration and missing service discovery fail closed.
 Use `--server` to select an explicit endpoint, including a development server.

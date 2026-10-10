@@ -6,16 +6,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/orka-agents/orka/internal/codexstate"
 	"github.com/orka-agents/orka/internal/store/storetest"
@@ -113,23 +108,7 @@ func TestMigrateImportRetriesFrozenRequest(t *testing.T) {
 	}
 }
 
-// A subprocess supplies the real kubectl transport boundary while the command
-// still performs normal service discovery and journal reconciliation.
-func TestMigratePortForwardHelper(t *testing.T) {
-	if os.Getenv("ORKA_MIGRATION_TEST_FORWARD") == "" {
-		return
-	}
-	target, err := url.Parse(os.Getenv("ORKA_MIGRATION_TEST_FORWARD"))
-	require.NoError(t, err)
-	port, _, found := strings.Cut(os.Args[len(os.Args)-1], ":")
-	require.True(t, found)
-	listener, err := net.Listen("tcp4", "127.0.0.1:"+port)
-	require.NoError(t, err)
-	server := http.Server{Handler: httputil.NewSingleHostReverseProxy(target), ReadHeaderTimeout: 5 * time.Second}
-	require.NoError(t, server.Serve(listener))
-}
-
-func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
+func TestMigrateImportRetriesAcrossAutomaticTunnels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const thread = "01a10020-1222-76e3-977d-d5165792ae72"
 	const name = "rollout-2026-10-02T21-57-44-" + thread + ".jsonl"
@@ -141,7 +120,7 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(rollout, fixture, 0o600))
 	var first []byte
-	var operation, firstHost, retryHost string
+	var operation string
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sessions/new/native" {
@@ -160,11 +139,10 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 		}
 		calls++
 		if calls == 1 {
-			first, operation, firstHost = bytes.Clone(request.Data), request.OperationID, r.Host
+			first, operation = bytes.Clone(request.Data), request.OperationID
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		retryHost = r.Host
 		if !bytes.Equal(first, request.Data) || operation != request.OperationID {
 			t.Error("uncertain retry changed native request")
 			http.Error(w, "changed request", http.StatusConflict)
@@ -175,30 +153,18 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	t.Setenv("ORKA_MIGRATION_TEST_FORWARD", server.URL)
-	executable, err := os.Executable()
-	require.NoError(t, err)
-	t.Setenv("ORKA_MIGRATION_TEST_BINARY", executable)
+	// Automatic migration must not invoke an attacker-controlled kubectl.
 	bin := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(bin, "kubectl"), []byte("#!/bin/sh\nexec \"$ORKA_MIGRATION_TEST_BINARY\" -test.run=^TestMigratePortForwardHelper$ -- \"$@\"\n"), 0o700))
+	marker := filepath.Join(bin, "invoked")
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "kubectl"), []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	serviceUID := "stable-service-uid"
-	kubeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/namespaces/test/services/orka-api" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"namespace": "test", "name": "orka-api", "uid": serviceUID}}); err != nil {
-			t.Error(err)
-		}
-	})
-	kube := httptest.NewServer(kubeHandler)
+	kubeFixture := newMigrationKubeFixture(t, server.URL)
+	kube := httptest.NewTLSServer(kubeFixture)
 	defer kube.Close()
 	kubeconfig := filepath.Join(t.TempDir(), "config")
 	writeKubeconfig := func(cluster string) {
 		t.Helper()
-		require.NoError(t, os.WriteFile(kubeconfig, []byte(fmt.Sprintf("apiVersion: v1\nkind: Config\ncurrent-context: test\ncontexts:\n- name: test\n  context:\n    cluster: test\nclusters:\n- name: test\n  cluster:\n    server: %s\n", cluster)), 0o600))
+		require.NoError(t, os.WriteFile(kubeconfig, []byte(fmt.Sprintf("apiVersion: v1\nkind: Config\ncurrent-context: test\ncontexts:\n- name: test\n  context:\n    cluster: test\n    user: test\nclusters:\n- name: test\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\nusers:\n- name: test\n  user:\n    token: test-kube-only\n", cluster)), 0o600))
 	}
 	writeKubeconfig(kube.URL)
 	// A cached tunnel is deliberately unrelated to the selected cluster.
@@ -221,19 +187,11 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 	require.Error(t, run())
 	require.Equal(t, 1, calls)
 	require.NoError(t, os.Remove(rollout))
-	_, firstPort, err := net.SplitHostPort(firstHost)
-	require.NoError(t, err)
-	var occupied net.Listener
-	require.Eventually(t, func() bool {
-		occupied, err = net.Listen("tcp4", "127.0.0.1:"+firstPort)
-		return err == nil
-	}, time.Second, 10*time.Millisecond)
-	defer func() { _ = occupied.Close() }()
-	serviceUID = "replacement-service-uid"
+	kubeFixture.setServiceUID("replacement-service-uid")
 	require.ErrorContains(t, run(), "another operation or target")
 	require.Equal(t, 1, calls)
-	serviceUID = "stable-service-uid"
-	otherCluster := httptest.NewServer(kubeHandler)
+	kubeFixture.setServiceUID("stable-service-uid")
+	otherCluster := httptest.NewTLSServer(kubeFixture)
 	defer otherCluster.Close()
 	writeKubeconfig(otherCluster.URL)
 	require.ErrorContains(t, run(), "another operation or target")
@@ -241,7 +199,8 @@ func TestMigrateImportRetriesAcrossAutomaticPortChanges(t *testing.T) {
 	writeKubeconfig(kube.URL)
 	require.NoError(t, run())
 	require.Equal(t, 2, calls)
-	require.NotEqual(t, firstHost, retryHost)
+	require.Equal(t, 2, kubeFixture.tunnelCount())
+	require.NoFileExists(t, marker)
 }
 
 func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {

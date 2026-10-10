@@ -38,8 +38,8 @@ type migrationState struct {
 	Data        []byte `json:"data"`
 }
 
-// Automatic migrations use a dedicated tunnel, since the general port-forward
-// cache does not record its cluster. Its local port is transport, not identity.
+// Automatic migrations use authenticated Kubernetes streams without a local
+// listener. The cluster and Service UID, not the transport, identify the target.
 func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), error) {
 	server, _ := cmd.Flags().GetString("server")
 	if server == "" {
@@ -76,11 +76,9 @@ func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), err
 	if err != nil {
 		return nil, "", nil, err
 	}
-	port, _, cleanup, err := startPortForward(kubeconfigPath, serviceNamespace, serviceName)
-	if err != nil {
-		return nil, "", nil, errors.New("connect native migration service")
-	}
-	c.BaseURL = fmt.Sprintf("http://localhost:%d", port)
+	httpClient, cleanup := newMigrationHTTPClient(cmd.Context(), restConfig, kube, service)
+	c.HTTPClient = httpClient
+	c.BaseURL = "http://" + migrationTunnelHost
 	return c, "kubernetes:" + codexstate.DataDigest(identity), cleanup, nil
 }
 

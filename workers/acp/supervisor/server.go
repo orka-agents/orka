@@ -509,6 +509,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get(harnessv2.NativeSessionLimitsHeader) != "1" {
 		// Preserve strict old-client decoding during controller/runtime upgrades.
 		capabilities.Limits.MaxNativeSessionBytes = 0
+		capabilities.SupportsNativeSessions = false
 	}
 	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader)
 	writeJSON(w, http.StatusOK, capabilities)
