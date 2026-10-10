@@ -28,6 +28,53 @@ data. Retain that key with the SQLite backup.
 Deploy this schema on a new installation. Existing Orka databases are not
 upgraded in place; see [Upgrading](../operations/upgrading.md).
 
+## Current limitations
+
+### Returning to an existing Codex home
+
+Export cannot merge a returned thread into a populated `~/.codex` or replace its
+older local copy. The original UUID is preserved, so a return can collide with
+that copy. Existing paginated SQLite state can also shadow a newly copied
+rollout. SessionKit does not modify those databases or reconcile divergent
+local and cluster histories.
+
+Use a separate fresh `CODEX_HOME` on return and resume the UUID explicitly.
+Keep `CODEX_SQLITE_HOME` unset or point it at that home's private database
+directory. Your original home remains unchanged and can still be an import
+source. Safe per-thread replacement in an existing home is not implemented.
+
+### Encrypted native reasoning
+
+A non-null `encrypted_content` field anywhere in the selected rollout,
+including reasoning items or compaction history, rejects the migration. This
+is provider-issued opaque native context, not Orka's checkpoint encryption at
+rest. Preserving its bytes has not established a supported reload contract with
+destination provider settings and credentials. Migration neither decrypts nor
+strips it to make the thread acceptable.
+
+Setting reasoning effort to `none` before creating and continuing a thread can
+avoid reasoning items on a model that supports that mode. It does not remove
+existing encrypted content, and some models do not support `none`. Supported
+non-encrypted compaction records remain byte-identical. This is not general
+migration support for reasoning-enabled Codex sessions.
+
+### Bundle size
+
+The 512 KiB limit is 524,288 bytes for the complete Orka bundle, not that many
+bytes of raw transcript or a model token limit. The JSON bundle base64-encodes
+both the rollout and manifest, leaving approximately 384 KiB for their combined
+raw bytes, slightly less after JSON overhead. The HTTP envelope adds another
+encoding layer; that envelope has a separate bound and does not reduce the
+advertised bundle cap.
+
+The cap applies to import and every runtime checkpoint, including growth after
+continuation. It counts the full saved rollout, including tool outputs and
+historical records retained after compaction. Orka does not compress or truncate
+the bundle. Oversized native data is rejected; an established native-continuity
+Session does not silently fall back to transcript-only continuation. This is an
+Orka transport restriction, not SessionKit's native storage limit, and can
+exclude long or tool-heavy coding sessions.
+
 ## Import a local thread
 
 Stop every Codex process using the source home before capture. `--source-stopped`
