@@ -195,7 +195,7 @@ func (s *copyState) copyTree(srcFd, dstFd int, display string, depth int) error 
 		if err := s.account(1, 0); err != nil {
 			return err
 		}
-		switch uint32(st.Mode) & unix.S_IFMT {
+		switch statMode(&st) & unix.S_IFMT {
 		case unix.S_IFDIR:
 			if err := s.copyDirectory(srcFd, dstFd, name, entryDisplay, depth); err != nil {
 				return err
@@ -250,11 +250,11 @@ func (s *copyState) copyRegular(srcFd, dstFd int, name, display string, expected
 	if err := unix.Fstat(fd, &opened); err != nil {
 		return failf(ReasonCopyFailed, "stat opened %s: %v", display, err)
 	}
-	if uint32(opened.Mode)&unix.S_IFMT != unix.S_IFREG || opened.Ino != expected.Ino || uint64(opened.Dev) != uint64(expected.Dev) {
+	if statMode(&opened)&unix.S_IFMT != unix.S_IFREG || opened.Ino != expected.Ino || statDev(&opened) != statDev(expected) {
 		return failf(ReasonSourceChanged, "%s changed while it was being copied", display)
 	}
 	mode := uint32(0o444)
-	if uint32(expected.Mode)&0o111 != 0 {
+	if statMode(expected)&0o111 != 0 {
 		mode = 0o555
 	}
 	out, err := unix.Openat(dstFd, name, createFlags, mode)
@@ -419,7 +419,7 @@ func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		switch uint32(st.Mode) & unix.S_IFMT {
+		switch statMode(&st) & unix.S_IFMT {
 		case unix.S_IFREG:
 			return current, true
 		case unix.S_IFLNK:
@@ -491,7 +491,7 @@ func elfArchAt(rootFd int, relative string) (string, bool, error) {
 	if err := unix.Fstat(fd, &st); err != nil {
 		return "", false, err
 	}
-	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFREG {
+	if statMode(&st)&unix.S_IFMT != unix.S_IFREG {
 		return "", false, fmt.Errorf("%s is not a regular file", relative)
 	}
 	return elfArch(file)
