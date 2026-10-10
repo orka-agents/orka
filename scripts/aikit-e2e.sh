@@ -344,6 +344,7 @@ warm_model() {
   fi
   log "Qwen chat and multi-turn Responses preflight passed"
   qualify_responses_tools "${url}"
+  make ensure-ui-embed
   AIKIT_PROBE_URL="${url}" AIKIT_PROBE_MODEL="${aikit_model}"     AIKIT_PROBE_REPORT="${cleanup_report_dir}/full-prompt-probe.json"     go test -tags=e2e ./internal/api -run '^TestAIKitFullPromptProbe$' -v -count=1 -timeout=10m
   cleanup_port_forward "${proxy_pf_pid}"
   proxy_pf_pid=""

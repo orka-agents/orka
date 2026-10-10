@@ -141,6 +141,12 @@ if grep -Eq 'secrets\.|COPILOT_GITHUB_TOKEN|retrying' "${root}/.github/workflows
   echo 'AIKit CI still depends on cloud credentials or whole-suite retries' >&2; exit 1
 fi
 printf '%s\n' 'ok - CI requires immutable images and no cloud credentials or retries'
+python3 - "${root}/scripts/aikit-e2e.sh" <<'PYEMBED'
+import sys
+script = open(sys.argv[1]).read()
+assert script.index("make ensure-ui-embed") < script.index("AIKIT_PROBE_URL=")
+PYEMBED
+printf '%s\n' 'ok - fresh checkouts initialize UI embed before the full-prompt Go probe'
 
 work_dir="${work}"
 curl() {
