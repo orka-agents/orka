@@ -3525,11 +3525,6 @@ func runtimePoolInstanceEndpoint(pool *corev1alpha1.RuntimePool, pod *corev1.Pod
 	return runtimePoolPodEndpoint(pod)
 }
 
-// substrateRouteHTTPTransport dials the Substrate router for every host under
-// the actor DNS suffix while preserving the logical route host as the HTTP
-// Host header, exactly like the verified MCP actor routing. Hosts outside the
-// suffix are refused: this transport exists only for actor-routed requests.
-
 func (r *RuntimePoolReconciler) randomSecret(size int) (string, error) {
 	reader := r.Rand
 	if reader == nil {

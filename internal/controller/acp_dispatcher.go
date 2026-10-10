@@ -116,10 +116,6 @@ type ACPDispatcher struct {
 	ACPRuntimeImages         ACPRuntimeImages
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
-	// SubstrateRouterURL and SubstrateActorDNSSuffix route Substrate-backed
-	// RuntimePool instances through the provider router while preserving the
-	// exact actor route host. Empty values fail closed for substrate pools.
-
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
 	sem             chan struct{}
