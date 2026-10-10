@@ -450,6 +450,8 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
+	AISoul *resolvedAISoul
+
 	// GatewayReplyEligible is resolved from an exact durable event/TaskUID binding.
 	GatewayReplyEligible        bool
 	ResolvedApprovalsJSON       string
@@ -490,7 +492,16 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
-	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent); err != nil {
+	if task.Spec.Type == corev1alpha1.TaskTypeAI {
+		if err := validatePreparedAISoul(task, agent, opts.AISoul); err != nil {
+			return nil, err
+		}
+	}
+	var promptOverride []string
+	if opts.AISoul != nil {
+		promptOverride = []string{literalKubernetesPrompt(opts.AISoul.Prompt)}
+	}
+	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent, promptOverride...); err != nil {
 		return nil, err
 	}
 
@@ -874,6 +885,10 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 			return nil, err
 		}
 		envVars = aiEnvVars
+		if opts.AISoul != nil {
+			envVars = setControllerEnvValue(envVars, workerenv.AISystemPrompt, literalKubernetesPrompt(opts.AISoul.Prompt))
+			envVars = setControllerEnvValue(envVars, workerenv.AIPrompt, literalKubernetesPrompt(opts.AISoul.UserPrompt))
+		}
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
@@ -1175,6 +1190,9 @@ var ErrConnectorToolResolution = errors.New("connector tool resolution failed")
 func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider, opts JobBuildOptions) ([]corev1.EnvVar, error) {
 	cfg := resolveAIConfig(task, agent, providerCRD)
+	if opts.AISoul != nil {
+		cfg.systemPrompt = opts.AISoul.Prompt
+	}
 
 	// Resolve system prompt from ConfigMapRef if not already set inline
 	if cfg.systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.ConfigMapRef != nil {
@@ -2563,7 +2581,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 // message instead of a dead container.
 const maxContainerDeliveredPromptBytes = 110 * 1024
 
-func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, promptOverride ...string) error {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
 		// Only AI worker Jobs export prompts through the process
 		// environment; a container Task's unused optional prompt fields must
@@ -2584,6 +2602,9 @@ func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, t
 	systemPrompt := ""
 	if task.Spec.AI != nil {
 		systemPrompt = task.Spec.AI.SystemPrompt
+	}
+	if len(promptOverride) > 0 {
+		systemPrompt = promptOverride[0]
 	}
 	if systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil {
 		systemPrompt = agent.Spec.SystemPrompt.Inline

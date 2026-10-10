@@ -262,6 +262,7 @@ func (a *nativeTemplateTestAPI) DeleteActorTemplate(_ context.Context, req *atea
 func TestNativeSubstrateTemplateBindingRecoversLostCreateAndKeepsRevisions(t *testing.T) {
 	r, pool := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
 	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).Build()
+	r.APIReader = r.Client
 	r.ControllerNamespace = "orka-system"
 	api := &nativeTemplateTestAPI{templates: map[string]*ateapipb.ActorTemplate{}, failAfterCreate: true}
 	r.SubstrateNativeClientFactory = func(SubstrateConfig) (*workspace.SubstrateNativeClient, error) {
@@ -308,6 +309,7 @@ func TestNativeSubstrateTemplateBindingRecoversLostCreateAndKeepsRevisions(t *te
 func TestNativeSubstrateTemplateBindingRejectsReplacementAndCleansPendingCreate(t *testing.T) {
 	r, pool := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
 	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orka-system"}}).Build()
+	r.APIReader = r.Client
 	r.ControllerNamespace = "orka-system"
 	api := &nativeTemplateTestAPI{templates: map[string]*ateapipb.ActorTemplate{}, failAfterCreate: true}
 	r.SubstrateNativeClientFactory = func(SubstrateConfig) (*workspace.SubstrateNativeClient, error) {

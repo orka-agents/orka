@@ -434,8 +434,12 @@ func TestProviderSessionProjectionFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "unsupported", "", nil, nil, true), paths, proxy); err == nil || !strings.Contains(err.Error(), "systemPrompt") {
-		t.Fatalf("Copilot system prompt error = %v", err)
+	projection, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "native instructions", "", nil, nil, true), paths, proxy)
+	if err != nil || projection.Instructions == nil || projection.Instructions.Content != "native instructions" {
+		t.Fatalf("Copilot native instruction projection failed: %v", err)
+	}
+	if _, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "@mutable.md", "", nil, nil, true), paths, proxy); err == nil {
+		t.Fatal("Copilot admitted native imports outside the frozen configuration")
 	}
 	if _, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", []string{providerToolWebSearch}, nil, true), paths, proxy); err == nil || !strings.Contains(err.Error(), providerToolWebSearch) {
 		t.Fatalf("Copilot WebSearch policy error = %v", err)

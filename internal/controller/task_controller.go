@@ -834,6 +834,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		// Admission allows an omitted built-in contract. Use the same effective
+		// Agent for routing, SOUL validation and binding before its reconciler
+		// has had a chance to persist the namespace-mode default.
+		agent = withEffectiveBuiltInContract(agent, r.Mode)
 		plan := r.planAgentExecution(ctx, task, agent)
 		if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
 			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
@@ -1485,6 +1489,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
 			return ctrl.Result{}, err
 		}
+		if latest.Spec.Type == corev1alpha1.TaskTypeAI {
+			job := &batchv1.Job{}
+			err := reader.Get(ctx, client.ObjectKey{Namespace: latest.Namespace, Name: latest.Status.JobName}, job)
+			if err == nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
 	}
 	// Recheck the persisted deadline after the uncached read so an older
@@ -1512,9 +1526,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	jobTask := task
-	if validationTask {
-		// Render from the same fresh object whose immutable binding was just
-		// verified. This closes the gap between the reconcile read and Job build.
+	if validationTask || latest.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Validation tasks use the verified immutable binding. AI tasks use
+		// fresh status as well as spec so soul preparation cannot miss an
+		// existing binding or execution attempt from a stale cache snapshot.
 		jobTask = latest
 	}
 
@@ -1576,6 +1591,33 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	if (task.Spec.Type == corev1alpha1.TaskTypeAI || latest.Spec.Type == corev1alpha1.TaskTypeAI) &&
+		!existingGatewayJob && (task.UID != latest.UID || task.Generation != latest.Generation) {
+		// Agent/provider inputs belong to the caller's Task revision, even
+		// when its resolved Agent had no soul. Reconcile the complete tuple.
+		return ctrl.Result{}, aiSoulTaskChanged(task)
+	}
+
+	aiSoul, err := r.prepareAISoul(ctx, jobTask, agent)
+	if err != nil {
+		if isPermanentAISoulConfigurationError(err) {
+			message := fmt.Sprintf("AI soul configuration: %v", err)
+			retired, retirementErr := r.retireAISoulTaskJob(ctx, jobTask, message)
+			if retirementErr != nil {
+				return ctrl.Result{}, retirementErr
+			}
+			if retired {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, message)
+		}
+		return ctrl.Result{}, err
+	}
+	if jobTask.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Keep the launch attempt count consistent with the fresh Job inputs.
+		task.Status = jobTask.Status
+	}
+
 	// Freeze the requester's Connections before anything is created, so a
 	// transient read failure retries dispatch instead of starting a worker
 	// whose connector-backed tools could never bind. The freeze reads the
@@ -1595,6 +1637,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		AISoul:                      aiSoul,
 		RepositoryMonitorValidation: validationTask,
 		ConnectionBindings:          connectionBindings,
 		ConnectionBindingsFrozen:    true,
@@ -3288,6 +3331,10 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 	agent *corev1alpha1.Agent,
 	plan agentExecutionPlan,
 ) error {
+	// Soul compatibility applies to every new Agent Task path, not only runtimeRef.
+	if err := validateSoulRuntime(agent); err != nil {
+		return err
+	}
 	// planAgentExecution resolves runtimeRef before selecting the external path,
 	// so these v2-only checks cannot change harness v1 compatibility.
 	if plan.path != agentExecutionPathExternal {

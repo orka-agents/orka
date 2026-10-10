@@ -486,8 +486,9 @@ spec:
       - Bash
 ```
 
-OpenCode Agents must omit `spec.systemPrompt` because the runtime cannot enforce
-Agent-level prompts; put instructions in each Task's `spec.prompt` instead. OpenCode
+All four built-in harness v2 runtimes support `spec.systemPrompt` and the optional
+[`spec.soul`](../concepts/soul.md) persona source. Copilot and OpenCode receive
+protected native instruction files outside the repository workspace. OpenCode
 model IDs use provider/model form, for example `openai/gpt-5.4`, and require reviewed
 `contextWindow` and `maxTokens` values.
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -247,6 +248,12 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 			Content:   response,
 			Timestamp: now,
 		})
+	}
+
+	if digest := agentcontext.SessionDigest(task.Status.SoulBinding); digest != "" {
+		for i := range messages {
+			messages[i].Metadata = map[string]string{store.SessionSoulDigestMetadata: digest}
+		}
 	}
 
 	if len(messages) == 0 {

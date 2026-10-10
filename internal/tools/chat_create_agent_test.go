@@ -25,7 +25,7 @@ const testProviderOpenAI = "openai"
 
 func TestChatCreateAgentTool_ParametersDescribeOpenCodeACP(t *testing.T) {
 	params := string((&ChatCreateAgentTool{}).Parameters())
-	for _, want := range []string{"copilot, claude, codex, or opencode", "OpenCode defaults to Read, Write, Edit, Bash, Glob, and Grep", "OpenCode defaults to true", "Omit for OpenCode runtime Agents"} {
+	for _, want := range []string{"copilot, claude, codex, or opencode", "OpenCode defaults to Read, Write, Edit, Bash, Glob, and Grep", "OpenCode defaults to true", "native instruction mechanism"} {
 		if !strings.Contains(params, want) {
 			t.Errorf("Parameters() missing %q", want)
 		}
@@ -73,7 +73,7 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	}
 }
 
-func TestChatCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
+func TestChatCreateAgentTool_Execute_AcceptsOpenCodeSystemPrompt(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
@@ -89,12 +89,15 @@ func TestChatCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &response); err != nil {
 		t.Fatalf("failed to parse result: %v", err)
 	}
-	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "does not support systemPrompt") {
-		t.Fatalf("response = %#v, want OpenCode systemPrompt rejection", response)
+	if !response.Success {
+		t.Fatalf("native OpenCode prompt was rejected: %s", response.Error)
 	}
 	var created corev1alpha1.Agent
-	if err := fc.Get(context.Background(), client.ObjectKey{Name: "opencode-prompt-agent", Namespace: defaultNamespace}, &created); !apierrors.IsNotFound(err) {
-		t.Fatalf("invalid OpenCode Agent should not be created, get err=%v", err)
+	if err := fc.Get(context.Background(), client.ObjectKey{Name: "opencode-prompt-agent", Namespace: defaultNamespace}, &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Spec.SystemPrompt == nil || created.Spec.SystemPrompt.Inline != "You write code" {
+		t.Fatal("native prompt was not preserved")
 	}
 }
 

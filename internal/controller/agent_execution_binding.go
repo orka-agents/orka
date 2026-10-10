@@ -316,6 +316,8 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		}
 		return r.resolveExternalAgentExecutionCandidate(ctx, task, agent)
 	}
+	agent = withEffectiveBuiltInContract(agent, r.Mode)
+
 	var err error
 	task, err = r.projectACPReplyPolicy(ctx, task, agent, false)
 	if err != nil {
@@ -333,7 +335,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
-	plan, err := PlanACPRuntimeWithConfiguration(task, withEffectiveBuiltInContract(agent, r.Mode), r.ACPRuntimeImages, configuration)
+	plan, err := PlanACPRuntimeWithConfiguration(task, agent, r.ACPRuntimeImages, configuration)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}

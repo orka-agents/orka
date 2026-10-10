@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -1415,6 +1416,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := executionmode.DefaultBuiltInAgentContract(agent, h.executionMode); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
+	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
 		return err
 	}
@@ -1466,6 +1470,12 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 
 		patchBase := current.DeepCopy()
 		current.Spec = req.Spec
+		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		if err := agentcontext.ValidateSoulRuntime(current); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
 		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
 			return err
 		}

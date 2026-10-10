@@ -1922,6 +1922,14 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if projection := nativeInstructionProjection(state.agentConfiguration.ProviderKind, state.agentConfiguration.SystemPrompt); projection != nil {
+		if err := acp.RestoreInstructions(paths, *projection, gid); err != nil {
+			s.poisonSession(state, "instruction protection restore failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "instruction protection restore failed", nil, false)
+			return
+		}
+	}
+
 	if buildErr != nil {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
 		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {
