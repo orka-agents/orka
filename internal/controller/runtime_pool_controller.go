@@ -482,7 +482,7 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime ancillary-resource prerequisite failed", err)
 	}
 	if err := r.runtimePoolToolboxAdmission(pool, cfg); err != nil {
-		return r.finishRuntimePoolToolboxFailure(ctx, pool, cfg, err)
+		return r.finishRuntimePoolToolboxFailure(ctx, pool, cfg, authSecret, err)
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
 		return r.reconcileWorkspaceBackedRuntimePool(ctx, pool, cfg, authSecret, providerSecret)
@@ -2758,6 +2758,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
+	authSecret *corev1.Secret,
 	err error,
 ) (ctrl.Result, error) {
 	status := r.baseRuntimePoolStatus(pool, 0)
@@ -2774,8 +2775,11 @@ func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 		case getErr != nil:
 			return ctrl.Result{}, getErr
 		case ptr.Deref(deployment.Spec.Replicas, 0) > 0:
-			capacity := pool.Status.Capacity
-			if runtimePoolRolloutControllerWorkIsQuiescent(capacity) && capacity.ResidentSessions == 0 && capacity.RunningPrompts == 0 {
+			idle, idleErr := r.runtimePoolToolboxWorkloadIdle(ctx, pool, cfg, authSecret)
+			if idleErr != nil {
+				return ctrl.Result{}, idleErr
+			}
+			if idle {
 				if stopErr := r.stopRuntimePoolDeployment(ctx, deployment); stopErr != nil {
 					return ctrl.Result{}, stopErr
 				}
@@ -3479,6 +3483,46 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+}
+
+// runtimePoolToolboxWorkloadIdle reports whether the pool's workload can be
+// stopped without interrupting work. Toolbox admission returns before the
+// normal rollout probe refreshes the pool's capacity counters, so this path
+// asks the live supervisor itself: no Ready Pod means nothing can be running;
+// otherwise the authenticated status probe must show no resident session,
+// prompt, queued admission, or pending permission, and the controller must
+// hold no reservation or finalization work. An unreachable supervisor is
+// never assumed idle.
+func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	authSecret *corev1.Secret,
+) (bool, error) {
+	if !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
+		return false, nil
+	}
+	pods, err := r.listRuntimePoolPods(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	readyPods := readyRuntimePoolPods(pods)
+	if len(readyPods) == 0 {
+		return true, nil
+	}
+	if authSecret == nil {
+		return false, nil
+	}
+	probe, err := r.supervisorClientForPool(pool).Probe(
+		ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]),
+		string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey],
+	)
+	if err != nil {
+		return false, nil
+	}
+	pressure := probe.Status.Pressure
+	return pressure.ResidentSessions == 0 && pressure.ActivePrompts == 0 && pressure.QueuedAdmissions == 0 &&
+		pressure.PendingPermissions == 0 && len(probe.Status.Sessions) == 0 && len(probe.Status.ActivePrompts) == 0, nil
 }
 
 // runtimePoolConflictRequeue is how soon a reconcile that lost the status

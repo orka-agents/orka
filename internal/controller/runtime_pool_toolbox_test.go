@@ -366,6 +366,48 @@ func TestRuntimePoolReconcileReportsToolboxUnavailableWhenDisabled(t *testing.T)
 	}
 }
 
+// A pool that loses toolbox admission while its supervisor still serves a
+// session keeps its workload until the live probe reports it idle; the probe
+// is consulted directly because the toolbox gate runs before the rollout
+// path that refreshes the pool's capacity counters.
+func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "codex-pod", "pod-uid-1", "10.0.0.21")
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "boot-1", false)}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+	runtimePoolReconcile(t, r, pool)
+	name := runtimePoolResourceName(pool.Namespace, pool.Name)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("admitted pool must run one replica")
+	}
+
+	// The supervisor is busy: toolboxes get disabled, admission closes, but
+	// the workload stays up.
+	supervisor.probe.Status.Pressure.ActivePrompts = 1
+	r.ToolboxPolicy = ACPToolboxPolicy{}
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("a busy supervisor must not be scaled away")
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || !strings.Contains(current.Status.Message, "once its sessions and prompts finish") {
+		t.Fatalf("status = %#v", current.Status)
+	}
+
+	// The prompt finishes: the next reconcile observes the live idle probe
+	// and scales the workload to zero.
+	supervisor.probe.Status.Pressure.ActivePrompts = 0
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 0 {
+		t.Fatal("an idle supervisor must be scaled to zero")
+	}
+	if current := runtimePoolTestGetPool(t, r, pool); !strings.Contains(current.Status.Message, "scaled to zero") {
+		t.Fatalf("status = %#v", current.Status)
+	}
+}
+
 func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 	toolboxes := runtimePoolTestToolboxes()
 	pod := func(mutate func(*corev1.Pod)) []corev1.Pod {
