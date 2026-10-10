@@ -110,6 +110,17 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is not usable")
 	}
 	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil && acpRuntimePoolImageRequiresHistoricalRecovery(pool, r.AllowedImages) {
+		if historicalConfig, historicalErr := r.runtimePoolConfigForDrain(pool); historicalErr == nil {
+			authorized, authorizationErr := r.historicalRuntimePoolImageAuthorized(ctx, pool, historicalConfig)
+			if authorizationErr != nil {
+				return ctrl.Result{}, authorizationErr
+			}
+			if authorized {
+				cfg, err = historicalConfig, nil
+			}
+		}
+	}
 	if err != nil {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime configuration is not admitted")
 	}
@@ -668,7 +679,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		return r.externalPoolStopped(ctx, pool)
 	}
 	if w.Spec.Retirement == nil {
-		if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
+		// Queued demand needs the replacement boot, not the retiring instance.
+		// Terminal deletion and scale-down still wait for queued Tasks to settle.
+		replacing := !deleting && pool.Spec.DesiredReplicas > 0 &&
+			w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			pool.Annotations["orka.ai/external-runtime-retirement-requested"] == booleanTrueValue
+		queuedWorkSettled := replacing || pool.Status.Capacity.QueuedTasks == 0
+		if !queuedWorkSettled || !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for controller reservations and settlement before retirement")
 		}
 		if pool.Status.ActiveInstance != nil {
@@ -706,7 +723,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 					}
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for authenticated drain settlement")
 				}
-				if !runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
+				if !queuedWorkSettled || !runtimePoolRolloutProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for runtime drain settlement")
 				}
 				if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {

@@ -197,10 +197,9 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, 
 	}
 	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
-		if errors.Is(err, errACPWorkspacePlanningTransient) {
-			// A brief API-server or control-store outage must requeue, not
-			// permanently reject new capped-Suspend Tasks. Actual quota
-			// exhaustion and validation failures stay rejections.
+		if errors.Is(err, errACPWorkspacePlanningTransient) || isRetryableACPWorkspaceClassResolutionError(err) {
+			// API, provider-authorization and control-store outages requeue.
+			// Actual quota exhaustion and validation failures stay rejections.
 			return agentExecutionPlan{path: agentExecutionPathRejected, transientError: err}, true
 		}
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true

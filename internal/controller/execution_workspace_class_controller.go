@@ -283,6 +283,9 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 			return providerName, reasonRequiredFeatures, "ACP workloads require direct class provisioning", nil
 		}
 		if err := validateExternalACPProvider(ctx, r.Client, provider); err != nil {
+			if isRetryableACPWorkspaceClassResolutionError(err) {
+				return "", "", "", err
+			}
 			return providerName, string(workspacev1alpha1.ReasonAuthorizationDenied), err.Error(), nil
 		}
 		profile, err := resolveExternalWorkspaceParameters(ctx, r.classPolicyReader(), r.RESTMapper,
