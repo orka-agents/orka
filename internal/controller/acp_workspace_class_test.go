@@ -1970,6 +1970,59 @@ func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T
 	}
 }
 
+// RuntimePool creation repeats the resolver's protected pin check. The config
+// object and its hash can stay unchanged while the provider reports that it
+// now operates against a different configuration.
+func TestACPWorkspacePoolRequiresProtectedProviderConfigPin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		f.provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: "fixture-v1"}
+		for _, conditionType := range []workspacev1alpha1.ExecutionWorkspaceConditionType{
+			workspacev1alpha1.ConditionProviderHeartbeat, workspacev1alpha1.ConditionProviderCompatible,
+		} {
+			f.provider.Status.Conditions = append(f.provider.Status.Conditions, metav1.Condition{
+				Type: string(conditionType), Status: metav1.ConditionTrue,
+				Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: 1,
+			})
+		}
+	})
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: acpClassWorkspaceName(task, binding)}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if _, err := r.acpWorkspacePoolRequiredFeatures(ctx, r.Client, plan, workspace); err != nil {
+		t.Fatalf("pool requirements with the frozen pin: %v", err)
+	}
+
+	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := r.Get(ctx, types.NamespacedName{Name: fixture.provider.Name}, provider); err != nil {
+		t.Fatalf("read provider: %v", err)
+	}
+	provider.Status.PinnedParametersUID = "rotated-config-uid"
+	if err := r.Status().Update(ctx, provider); err != nil {
+		t.Fatalf("rotate provider pin: %v", err)
+	}
+	if _, err := r.acpWorkspacePoolRequiredFeatures(ctx, r.Client, plan, workspace); err == nil ||
+		!strings.Contains(err.Error(), "protected UID pin") {
+		t.Fatalf("error = %v, want the rotated protected-pin rejection", err)
+	}
+}
+
 // A terminally Failed workspace still held by its predecessor keeps the
 // continuation queued: the predecessor's settlement removes this incarnation
 // and the deterministic name is recreated fresh, so a permanent
