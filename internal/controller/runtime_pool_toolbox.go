@@ -326,37 +326,55 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 	return "", "", false
 }
 
-func runtimePoolToolboxTerminationFailure(status corev1.ContainerStatus) (string, bool) {
-	for _, terminated := range []*corev1.ContainerStateTerminated{status.State.Terminated, status.LastTerminationState.Terminated} {
-		if terminated == nil || terminated.ExitCode == 0 {
-			continue
+// runtimePoolToolboxFailedTermination returns the termination that currently
+// describes a failed container: its current terminated state with a non-zero
+// exit, or, while it waits to restart after a failure, its last termination.
+// A container that has since restarted successfully (running, or terminated
+// with exit 0) is never classified by an older failure, so the copier's
+// retry and recovery behavior is preserved.
+func runtimePoolToolboxFailedTermination(status corev1.ContainerStatus) *corev1.ContainerStateTerminated {
+	if terminated := status.State.Terminated; terminated != nil {
+		if terminated.ExitCode != 0 {
+			return terminated
 		}
-		failure, ok := toolbox.ParseFailureLine(terminated.Message)
-		if !ok {
-			continue
-		}
-		return acpToolboxUnavailableMessage(failure.Reason, status.Name+": "+failure.Message), true
+		return nil
 	}
-	return "", false
+	if status.State.Waiting == nil {
+		return nil
+	}
+	if terminated := status.LastTerminationState.Terminated; terminated != nil && terminated.ExitCode != 0 {
+		return terminated
+	}
+	return nil
+}
+
+func runtimePoolToolboxTerminationFailure(status corev1.ContainerStatus) (string, bool) {
+	terminated := runtimePoolToolboxFailedTermination(status)
+	if terminated == nil {
+		return "", false
+	}
+	failure, ok := toolbox.ParseFailureLine(terminated.Message)
+	if !ok {
+		return "", false
+	}
+	return acpToolboxUnavailableMessage(failure.Reason, status.Name+": "+failure.Message), true
 }
 
 // runtimePoolToolboxUnexplainedTermination classifies a toolbox init container
 // that ended unsuccessfully without a stable FAIL line.
 func runtimePoolToolboxUnexplainedTermination(status corev1.ContainerStatus) (string, bool) {
-	for _, terminated := range []*corev1.ContainerStateTerminated{status.State.Terminated, status.LastTerminationState.Terminated} {
-		if terminated == nil || terminated.ExitCode == 0 {
-			continue
-		}
-		detail := fmt.Sprintf("%s: exited %d", status.Name, terminated.ExitCode)
-		if reason := strings.TrimSpace(terminated.Reason); reason != "" && reason != "Error" {
-			detail += " (" + reason + ")"
-		}
-		if message := strings.TrimSpace(terminated.Message); message != "" {
-			detail += ": " + message
-		}
-		return acpToolboxUnavailableMessage(toolbox.ReasonCopyFailed, detail), true
+	terminated := runtimePoolToolboxFailedTermination(status)
+	if terminated == nil {
+		return "", false
 	}
-	return "", false
+	detail := fmt.Sprintf("%s: exited %d", status.Name, terminated.ExitCode)
+	if reason := strings.TrimSpace(terminated.Reason); reason != "" && reason != "Error" {
+		detail += " (" + reason + ")"
+	}
+	if message := strings.TrimSpace(terminated.Message); message != "" {
+		detail += ": " + message
+	}
+	return acpToolboxUnavailableMessage(toolbox.ReasonCopyFailed, detail), true
 }
 
 func runtimePoolToolboxMessageMentionsToolbox(message string, toolboxes []harnessv2.RuntimeToolbox) bool {

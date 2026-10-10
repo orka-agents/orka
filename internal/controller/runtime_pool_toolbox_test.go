@@ -425,6 +425,7 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 						ExitCode: 1, Message: "FAIL reason=TOOLBOX_MISSING_PATH_ENTRY msg=toolbox /opt/yq-jq path entry bin: not a folder",
 					}},
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
 				}}
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_MISSING_PATH_ENTRY: runtime:", ok: true,
@@ -465,6 +466,26 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 				}}
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_MOUNT_FAILED: toolbox-copy-0: CreateContainerError mount /handoff", ok: true,
+		},
+		"copy init container recovered after an earlier failure": {
+			pods: pod(func(p *corev1.Pod) {
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name:                 runtimePoolToolboxCopyContainerName(0),
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: "FAIL reason=TOOLBOX_COPY_FAILED msg=interrupted"}},
+					State:                corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+				}}
+			}),
+			toolboxes: toolboxes, ok: false,
+		},
+		"runtime container running after an earlier toolbox failure": {
+			pods: pod(func(p *corev1.Pod) {
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:                 runtimeField,
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: "FAIL reason=TOOLBOX_MISSING_MOUNT msg=old"}},
+					State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}
+			}),
+			toolboxes: toolboxes, ok: false,
 		},
 		"runtime image pull is not a toolbox failure": {
 			pods: pod(func(p *corev1.Pod) {
