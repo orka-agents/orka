@@ -94,6 +94,17 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	}
 	switch n := v.(type) {
 	case float64:
+		// Saturate rather than convert out of range, which wraps, so a huge
+		// value still meets the caller's clamp: wait_for_task turned a huge
+		// timeout into a negative one that had already expired.
+		switch {
+		case math.IsNaN(n):
+			return defaultVal
+		case n >= math.MaxInt:
+			return math.MaxInt
+		case n <= math.MinInt:
+			return math.MinInt
+		}
 		return int(n)
 	case int:
 		return n
@@ -102,6 +113,23 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	default:
 		return defaultVal
 	}
+}
+
+// chatPriorityArg reads the optional priority argument. It returns an error
+// result and false for a value that is not a whole number from 0 to 1000; a
+// larger value would wrap when narrowed to int32, possibly into that range.
+func chatPriorityArg(a map[string]any) (*int32, string, bool) {
+	value := a[priorityField]
+	if value == nil {
+		return nil, "", true
+	}
+	number, ok := value.(float64)
+	if !ok || number != math.Trunc(number) || number < 0 || number > 1000 {
+		result, _ := ChatToolErrorResult(invalidArgumentsErrorType, "priority must be a whole number from 0 to 1000", "Use a priority from 0 to 1000; the default is 500")
+		return nil, result, false
+	}
+	p := int32(number)
+	return &p, "", true
 }
 
 // chatParseBoolArg parses a bool tool argument that may arrive as a JSON

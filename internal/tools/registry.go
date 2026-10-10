@@ -413,14 +413,22 @@ func (r *Registry) Names() []string {
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	tool, ok := r.Get(name)
-	if ok {
-		args = decodeStringifiedObjectArgs(tool, args)
+	// call checks argument types inside the instrumented path, so a rejected
+	// call is recorded like any other tool error. The check runs on the
+	// arguments as sent, before decoding stringified objects collapses
+	// duplicate keys.
+	call := func(ctx context.Context) (string, error) {
+		normalized, err := normalizeArgTypes(tool, args)
+		if err != nil {
+			return "", err
+		}
+		return tool.Execute(ctx, decodeStringifiedObjectArgs(tool, normalized))
 	}
 	if telemetryDisabled() {
 		if !ok {
-			return "", fmt.Errorf("tool %q not found", name)
+			return "", &ToolNotFoundError{Name: name}
 		}
-		return tool.Execute(ctx, args)
+		return call(ctx)
 	}
 
 	toolTelemetryName := name
@@ -454,16 +462,16 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	if !spanRecording && !meterActive {
 		if !ok {
 			span.End()
-			return "", fmt.Errorf("tool %q not found", name)
+			return "", &ToolNotFoundError{Name: name}
 		}
-		result, err := tool.Execute(ctx, args)
+		result, err := call(ctx)
 		span.End()
 		return result, err
 	}
 	defer span.End()
 
 	if !ok {
-		err := fmt.Errorf("tool %q not found", name)
+		err := &ToolNotFoundError{Name: name}
 		if spanRecording {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -475,7 +483,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		return "", err
 	}
 
-	result, err := tool.Execute(ctx, args)
+	result, err := call(ctx)
 	duration := time.Since(start).Seconds()
 	if spanRecording {
 		span.SetAttributes(attribute.Int(tracing.AttrToolResultSizeBytes, len(result)))

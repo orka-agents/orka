@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -249,10 +250,10 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 // non-object JSON, missing required fields (all at once and each on its own),
 // wrong JSON types, and nested
 // objects encoded as strings. A tool must never panic, must never report
-// success for a call missing required fields or for an object sent as a
-// string, and must always explain a failure. Chat tools must return a
-// structured result instead of a Go error, which the chat executor reports to
-// the model as an unknown tool.
+// success for a call missing required fields or with a wrong-typed value, must
+// not drop an object sent as a string, and must always explain a failure. Chat
+// tools must return a structured result, or a ToolArgumentError that the chat
+// executor turns into one, instead of another Go error.
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
 	// Worker tools resolve their parent Task from the environment; the seeded
@@ -277,6 +278,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			properties, _ := schema["properties"].(map[string]any)
 
 			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "empty object": `{}`}
+			wrongTypeAllowed := map[string]bool{}
 			// Omit each required field on its own, so a field the tool checks
 			// cannot hide one it ignores. The call with every required field is
 			// the baseline: where it fails too, a failure proves nothing.
@@ -292,7 +294,10 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 				propSchema, _ := raw.(map[string]any)
 				typ, _ := propSchema["type"].(string)
 				if value, ok := wrongValue[typ]; ok {
-					inputs[fmt.Sprintf("%s as wrong type", prop)] = fmt.Sprintf(`{%q:%s}`, prop, value)
+					input := fmt.Sprintf("%s as wrong type", prop)
+					inputs[input] = fmt.Sprintf(`{%q:%s}`, prop, value)
+					// An object sent as a JSON string is decoded and honored.
+					wrongTypeAllowed[input] = typ == "object"
 				}
 				if typ == "object" {
 					key := fmt.Sprintf("%s/%s: %s as JSON string", label, name, prop)
@@ -323,12 +328,14 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 					switch {
 					case panicked != nil:
 						fatal = append(fatal, fmt.Sprintf("%s: panicked: %v", key, panicked))
-					case label == "chat" && err != nil:
-						fatal = append(fatal, fmt.Sprintf("%s: returned Go error %q, which the chat executor reports as an unknown tool", key, err))
+					case label == "chat" && err != nil && !errors.As(err, new(*ToolArgumentError)):
+						fatal = append(fatal, fmt.Sprintf("%s: returned Go error %q instead of a structured result", key, err))
 					case failed && strings.TrimSpace(message) == "":
 						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
+					case strings.HasSuffix(input, "as wrong type") && !wrongTypeAllowed[input] && !failed:
+						violations[key] = fmt.Sprintf("reported success with a wrong-typed value in the %s cluster", cluster)
 					case input == "all required" && failed:
 						baselineFailed[cluster] = true
 					case strings.HasPrefix(input, "missing ") && !failed:
@@ -380,8 +387,8 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 			if panicked != nil {
 				return true, evalPanicked + fmt.Sprintf(": %v", panicked)
 			}
-			if label == "chat" && err != nil {
-				return true, evalGoError + fmt.Sprintf(" %q, which the chat executor reports as an unknown tool", err)
+			if label == "chat" && err != nil && !errors.As(err, new(*ToolArgumentError)) {
+				return true, evalGoError + fmt.Sprintf(" %q instead of a structured result", err)
 			}
 			failed, _ := evalToolFailure(result, err)
 			return failed, evalClusterSnapshot(fc)
@@ -867,6 +874,35 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 						return evalRejectsChange(call, pr("prBody", 32768), pr("prBody", 32769), "prBody")
 					},
 				)
+			},
+		},
+		{
+			name: "task priority",
+			limits: []string{
+				"chat/create_ai_task.priority maximum=1000", "chat/create_ai_task.priority minimum=0",
+				"chat/create_container_task.priority maximum=1000", "chat/create_container_task.priority minimum=0",
+				"worker/create_container_task.priority maximum=1000", "worker/create_container_task.priority minimum=0",
+			},
+			check: func(t *testing.T) (bool, string) {
+				t.Setenv(envOrkaTaskName, "parent")
+				ai := func() (Tool, context.Context) { return chatTool("create_ai_task", newFakeClient()) }
+				chatContainer := func() (Tool, context.Context) { return chatTool("create_container_task", newFakeClient()) }
+				workerContainer := func() (Tool, context.Context) { return workerTool("create_container_task", evalParentTaskCluster()) }
+				aiTask := func(p int) string { return fmt.Sprintf(`{"prompt":"p","priority":%d}`, p) }
+				containerTask := func(p int) string {
+					return fmt.Sprintf(`{"image":"cgr.dev/chainguard/bash:latest","command":["echo","hi"],"priority":%d}`, p)
+				}
+				checks := make([]func() (bool, string), 0, 6)
+				for _, c := range []struct {
+					call evalCall
+					args func(int) string
+				}{{ai, aiTask}, {chatContainer, containerTask}, {workerContainer, containerTask}} {
+					checks = append(checks,
+						func() (bool, string) { return evalRejectsChange(c.call, c.args(1000), c.args(1001), "priority") },
+						func() (bool, string) { return evalRejectsChange(c.call, c.args(0), c.args(-1), "priority") },
+					)
+				}
+				return evalAll(checks...)
 			},
 		},
 		{

@@ -632,6 +632,7 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 		namespace    any
 		sessionRef   string
 		schedule     any
+		nullFields   []string
 		isolation    bool
 		watchNS      string
 		wantError    string
@@ -644,6 +645,8 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 		{name: "stringified namespace permits same name", namespace: 789, sessionRef: "sess-12345678", wantTaskNS: "789"},
 		{name: "same namespace permits other session", sessionRef: "child-session", wantTaskNS: "default"},
 		{name: "empty schedule rejects active session", sessionRef: "sess-12345678", schedule: "", wantError: "invalid_arguments"},
+		{name: "null schedule rejects active session", sessionRef: "sess-12345678", nullFields: []string{"schedule"}, wantError: "invalid_arguments"},
+		{name: "null namespace rejects active session", sessionRef: "sess-12345678", nullFields: []string{"namespace"}, wantError: "invalid_arguments"},
 		{name: "scheduled parent permits active session", sessionRef: "sess-12345678", schedule: "0 */6 * * *", wantTaskNS: "default", wantSchedule: "0 */6 * * *"},
 		{name: "stringified schedule permits active session", sessionRef: "sess-12345678", schedule: 123, wantTaskNS: "default", wantSchedule: "123"},
 		{name: "namespace isolation remains enforced", namespace: "other", sessionRef: "sess-12345678", isolation: true, wantError: "permission_denied"},
@@ -659,6 +662,9 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 			}
 			if tt.namespace != nil {
 				args["namespace"] = tt.namespace
+			}
+			for _, field := range tt.nullFields {
+				args[field] = nil
 			}
 			result, err := e.Execute(context.Background(), llm.ToolCall{
 				ID: "child-call", Name: "create_ai_task", Arguments: mustJSON(args),
@@ -2240,5 +2246,80 @@ func TestExecuteListTasks_WithLimit(t *testing.T) {
 	data := r.Data.([]any)
 	if len(data) != 2 {
 		t.Errorf("expected 2 tasks (limit), got %d", len(data))
+	}
+}
+
+func TestExecuteReportsWrongArgumentTypesAsInvalidArguments(t *testing.T) {
+	e := newTestExecutor()
+	out, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":{"k":"v"}}`)})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var r ToolResult
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Success || r.ErrorType != "invalid_arguments" || !strings.Contains(r.Error, "prompt must be a string, got an object") {
+		t.Fatalf("result = %#v, want invalid_arguments naming prompt", r)
+	}
+}
+
+func TestExecuteHonorsNumericStringsForNumberFields(t *testing.T) {
+	e := newTestExecutor()
+	if _, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":"p","priority":"10"}`)}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := e.client.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Spec.Priority == nil || *tasks.Items[0].Spec.Priority != 10 {
+		t.Fatalf("tasks = %#v, want one Task with priority 10", tasks.Items)
+	}
+}
+
+// A numeric string the registry converts must still be range-checked before it
+// is narrowed to int32, where 4294967296 would wrap to priority 0.
+func TestExecuteRejectsPriorityThatWouldWrap(t *testing.T) {
+	e := newTestExecutor()
+	result, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":"p","priority":"4294967296"}`)})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(result, "priority must be a whole number from 0 to 1000") {
+		t.Fatalf("Execute() = %s, want the priority range error", result)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := e.client.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks, want none", len(tasks.Items))
+	}
+}
+
+type recordingChatTool struct{ args json.RawMessage }
+
+func (r *recordingChatTool) Name() string        { return "record_args" }
+func (r *recordingChatTool) Description() string { return "records its arguments" }
+func (r *recordingChatTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"pr_number":{"type":"integer"}}}`)
+}
+func (r *recordingChatTool) Execute(_ context.Context, args json.RawMessage) (string, error) {
+	r.args = args
+	return tools.ChatToolSuccess(map[string]any{})
+}
+
+// The chat executor passes arguments to the registry as sent, so an integer
+// beyond float64 precision is not rounded on the way.
+func TestExecutePreservesPreciseIntegers(t *testing.T) {
+	e := newTestExecutor()
+	recorder := &recordingChatTool{}
+	e.registry.Register(recorder)
+	if _, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "record_args", Arguments: json.RawMessage(`{"pr_number":9007199254740993}`)}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(string(recorder.args), "9007199254740993") {
+		t.Fatalf("tool received %s, want pr_number 9007199254740993", recorder.args)
 	}
 }

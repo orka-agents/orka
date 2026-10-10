@@ -915,7 +915,9 @@ func handleExplicitRequestApprovalBatch(
 		}
 		result, err := executeRequestApprovalToolCall(ctx, call, customTools, eventRecorder, baseToolCtx)
 		if err != nil {
-			if _, ok := errors.AsType[*tools.RequestApprovalValidationError](err); ok {
+			_, invalidRequest := errors.AsType[*tools.RequestApprovalValidationError](err)
+			_, invalidArgument := errors.AsType[*tools.ToolArgumentError](err)
+			if invalidRequest || invalidArgument {
 				return &approvalBatchDecision{
 					continueLLM: true,
 					toolResults: approvalValidationBatchToolResults(calls, call.ID, err),

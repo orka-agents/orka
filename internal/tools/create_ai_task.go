@@ -27,7 +27,7 @@ func (t *CreateAITaskTool) Description() string {
 }
 
 func (t *CreateAITaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the AI task"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Agent name to use"}, providerRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Provider CRD reference name. Omit to let the controller resolve the task from the referenced Agent or model settings."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, "sessionRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Session name for conversation continuity; creates the session if missing and appends the transcript on completion. For immediate tasks created from chat, do not reuse the active chat session in the same target namespace: use a different session or omit sessionRef. Scheduled tasks may reuse the chat session."}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription}}, jsonSchemaRequiredField: []string{promptField}})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the AI task"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Agent name to use"}, providerRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Provider CRD reference name. Omit to let the controller resolve the task from the referenced Agent or model settings."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000", jsonSchemaMinimumField: 0, jsonSchemaMaximumField: 1000}, "sessionRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Session name for conversation continuity; creates the session if missing and appends the transcript on completion. For immediate tasks created from chat, do not reuse the active chat session in the same target namespace: use a different session or omit sessionRef. Scheduled tasks may reuse the chat session."}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription}}, jsonSchemaRequiredField: []string{promptField}})
 }
 
 func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
@@ -84,9 +84,10 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		task.Spec.Timeout = &metav1.Duration{Duration: d}
 	}
 
-	if _, ok := a[priorityField]; ok {
-		p := int32(chatGetIntArg(a, priorityField, 500))
-		task.Spec.Priority = &p
+	if p, errResult, ok := chatPriorityArg(a); !ok {
+		return errResult, nil
+	} else if p != nil {
+		task.Spec.Priority = p
 	}
 
 	if sessionRef := chatGetStringArg(a, "sessionRef"); sessionRef != "" {

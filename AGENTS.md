@@ -72,6 +72,7 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - Structured logging: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Put model-readable tool constraints in JSON Schema (`maximum`, `minimum`, `enum`, `default`), then validate and enforce them again in `Execute`; schema is guidance, not a runtime trust boundary
+- `Registry.Execute` checks top-level argument types against the tool schema before `Execute` runs: `null` for a declared field counts as omitted, numeric and boolean strings are converted (integers to plain int64 spelling), and contradicting types are rejected. Limits and enums still belong in `Execute`, before any narrowing such as `int32(...)`
 - Memory features are governance-first: `remember` and `propose_memory` create review proposals, not durable memories
 
 ## Gotchas

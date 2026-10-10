@@ -20,6 +20,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const mcpUpstreamPrivateDiagnostic = "private-upstream-diagnostic-must-not-reach-agent"
@@ -319,4 +320,17 @@ func newMCPExecutionErrorTestBroker(
 		Effects: effects,
 	}
 	return broker, request
+}
+
+// A registry argument rejection happens before the tool runs, so the broker
+// returns it as a tool result the agent can correct, not a failed call.
+func TestACPMCPToolExecutionResultReportsArgumentErrors(t *testing.T) {
+	descriptor := harnessv2.MCPToolDescriptor{Name: "wait_for_tasks", Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly}
+	result, err := acpMCPToolExecutionResult(context.Background(), descriptor, "", &tools.ToolArgumentError{Field: "timeout", Want: "a whole number", Got: "a non-numeric string"})
+	if err != nil {
+		t.Fatalf("acpMCPToolExecutionResult() error = %v, want a tool result", err)
+	}
+	if string(result) != `{"isError":true,"code":"invalid_arguments","error":"invalid arguments: timeout must be a whole number, got a non-numeric string"}` {
+		t.Fatalf("acpMCPToolExecutionResult() = %s", result)
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -180,19 +181,22 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		recordRejectedToolCall(ctx, toolCall, resultStr)
 		return resultStr, marshalErr
 	}
-	// Match the effective string values used by the tools when constructing Tasks.
+	// Match the effective string values used by the tools when constructing
+	// Tasks. Registry.Execute treats a null declared field as omitted, so these
+	// checks do too, or a null schedule would read as "<nil>" and skip the
+	// session guard.
 	targetNamespace := e.namespace
-	if value, present := args[toolNamespaceArg]; present && fmt.Sprint(value) != "" {
+	if value := args[toolNamespaceArg]; value != nil && fmt.Sprint(value) != "" {
 		targetNamespace = fmt.Sprint(value)
 	}
 	var sessionRef string
-	if value, present := args["sessionRef"]; present {
+	if value := args["sessionRef"]; value != nil {
 		sessionRef = fmt.Sprint(value)
 	}
 	// Scheduled parents do not acquire the session lock, and their future runs
 	// are not part of this chat turn's wait set.
 	var schedule string
-	if value, present := args["schedule"]; present {
+	if value := args["schedule"]; value != nil {
 		schedule = fmt.Sprint(value)
 	}
 	if toolCall.Name == chatCreateAITaskTool && schedule == "" &&
@@ -271,17 +275,20 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	toolCtx = tools.WithToolContext(toolCtx, tc)
 
 	// Marshal args to JSON for the Tool interface
-	argsJSON, err := json.Marshal(args)
+	// Execute via registry with the arguments as sent. Re-encoding the decoded
+	// map would round integers beyond float64 precision.
+	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, toolCall.Arguments)
 	if err != nil {
-		result := toolError("internal_error", fmt.Sprintf("failed to marshal arguments: %v", err), "")
-		return marshalResult(result)
-	}
-
-	// Execute via registry
-	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, argsJSON)
-	if err != nil {
-		result := toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools")
-		return marshalResult(result)
+		var argErr *tools.ToolArgumentError
+		var notFound *tools.ToolNotFoundError
+		switch {
+		case errors.As(err, &argErr):
+			return marshalResult(toolError("invalid_arguments", argErr.Error(), "Resend the call with "+argErr.Field+" as "+argErr.Want))
+		case errors.As(err, &notFound):
+			return marshalResult(toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools"))
+		default:
+			return marshalResult(toolError("tool_error", err.Error(), ""))
+		}
 	}
 
 	// Registry tools return JSON-marshaled ChatToolResult strings. Validate

@@ -52,7 +52,7 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 			"subPath":                  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo to run from"},
 			"pushBranch":               map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name. Omit for read-only validation. Requires publicationCredentialRef and the default worker image; not supported with a custom image."},
 		},
-		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command. If workspace is omitted, Orka copies the workspace from this prior task when available."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
+		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command. If workspace is omitted, Orka copies the workspace from this prior task when available."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000", jsonSchemaMinimumField: 0, jsonSchemaMaximumField: 1000}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 	},
 	})
 }
@@ -102,9 +102,10 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		task.Spec.Timeout = &metav1.Duration{Duration: d}
 	}
 
-	if _, ok := a[priorityField]; ok {
-		p := int32(chatGetIntArg(a, priorityField, 500))
-		task.Spec.Priority = &p
+	if p, errResult, ok := chatPriorityArg(a); !ok {
+		return errResult, nil
+	} else if p != nil {
+		task.Spec.Priority = p
 	}
 
 	schedule := chatGetStringArg(a, scheduleField)
@@ -175,9 +176,10 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		task.Spec.Priority = parentTask.Spec.Priority
 	}
 	inheritTaskProvenance(task, parentTask)
-	if _, ok := a[priorityField]; ok {
-		p := int32(chatGetIntArg(a, priorityField, 500))
-		task.Spec.Priority = &p
+	if p, errResult, ok := chatPriorityArg(a); !ok {
+		return errResult, nil
+	} else if p != nil {
+		task.Spec.Priority = p
 	}
 	if d, errResult, ok := parseTimeoutArg(a); !ok {
 		return errResult, nil
