@@ -312,22 +312,35 @@ func (s *copyState) copyRegular(srcFd, dstFd int, name, display string, expected
 	return s.account(0, written)
 }
 
-func readDirectoryNames(dirFd int) ([]string, error) {
+// checkArchEntryLimit bounds how many entries one PATH folder may hold during
+// the architecture check; tests lower it.
+var checkArchEntryLimit = DefaultMaxEntries
+
+// readDirectoryNamesBounded reads a directory in fixed-size batches and fails
+// with TOOLBOX_TOO_MANY_ENTRIES once more than limit names were seen.
+func readDirectoryNamesBounded(dirFd int, limit int64) ([]string, error) {
 	dup, err := unix.Dup(dirFd)
 	if err != nil {
-		return nil, err
+		return nil, failf(ReasonCopyFailed, "read folder: %v", err)
 	}
 	dir := os.NewFile(uintptr(dup), "")
 	defer dir.Close() //nolint:errcheck
-	entries, err := dir.ReadDir(-1)
-	if err != nil {
-		return nil, err
+	var names []string
+	for {
+		entries, err := dir.ReadDir(directoryBatch)
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if int64(len(names)) > limit {
+			return nil, failf(ReasonTooManyEntries, "folder has more than %d entries", limit)
+		}
+		if errors.Is(err, io.EOF) {
+			return names, nil
+		}
+		if err != nil {
+			return nil, failf(ReasonCopyFailed, "read folder: %v", err)
+		}
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	return names, nil
 }
 
 func readLinkAt(dirFd int, name string) (string, error) {
@@ -413,10 +426,13 @@ func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch st
 		if err != nil {
 			return failf(ReasonMissingPathEntry, "path entry %s is not a folder in %s: %v", entry, mountPath, err)
 		}
-		names, err := readDirectoryNames(dirFd)
+		// Image volumes have no copier in front of them, so the folder is
+		// read in bounded batches and capped; a folder with millions of
+		// entries fails instead of exhausting the supervisor's memory.
+		names, err := readDirectoryNamesBounded(dirFd, checkArchEntryLimit)
 		_ = unix.Close(dirFd)
 		if err != nil {
-			return failf(ReasonCopyFailed, "read path entry %s: %v", entry, err)
+			return err
 		}
 		for _, name := range names {
 			relative := path.Join(entry, name)

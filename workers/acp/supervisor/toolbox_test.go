@@ -134,11 +134,20 @@ func TestVerifyToolboxesChecksMountsWithLstatOnly(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(mount, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Toolboxes: []harnessv2.RuntimeToolbox{{
+	cfg := Config{ToolboxMountMethod: "copy", Toolboxes: []harnessv2.RuntimeToolbox{{
 		Image: "registry.example.com/tools/yq@" + supervisorTestToolboxDigest, MountPath: mount, PathEntries: []string{"bin"},
 	}}}
 	if err := VerifyToolboxes(cfg); err != nil {
 		t.Fatalf("mounted toolbox: %v", err)
+	}
+	for _, method := range []string{"", "hostPath", "ImageVolume"} {
+		unknown := cfg
+		unknown.ToolboxMountMethod = method
+		err := VerifyToolboxes(unknown)
+		var failure *toolbox.Failure
+		if !errors.As(err, &failure) || failure.Reason != toolbox.ReasonInvalidArguments {
+			t.Fatalf("mount method %q must fail closed, got %v", method, err)
+		}
 	}
 	if err := VerifyToolboxes(Config{}); err != nil {
 		t.Fatalf("no toolboxes: %v", err)

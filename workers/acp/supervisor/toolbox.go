@@ -22,6 +22,7 @@ const (
 	toolboxCheckUID               = 64022
 	toolboxCheckTimeout           = 2 * time.Minute
 	toolboxMountMethodImageVolume = "imageVolume"
+	toolboxMountMethodCopy        = "copy"
 )
 
 // toolboxCheckCommand is replaced in tests so the unprivileged child can run
@@ -41,10 +42,17 @@ func VerifyToolboxes(cfg Config) error {
 			return err
 		}
 	}
-	if strings.TrimSpace(cfg.ToolboxMountMethod) != toolboxMountMethodImageVolume {
+	// This is a trust boundary: only the two documented methods are known,
+	// and anything else fails closed instead of skipping the unprivileged
+	// check that unsanitized image-volume contents require.
+	switch method := strings.TrimSpace(cfg.ToolboxMountMethod); method {
+	case toolboxMountMethodCopy:
 		return nil
+	case toolboxMountMethodImageVolume:
+		return runUnprivilegedToolboxCheck(cfg)
+	default:
+		return &toolbox.Failure{Reason: toolbox.ReasonInvalidArguments, Message: fmt.Sprintf("unknown toolbox mount method %q; want %s or %s", method, toolboxMountMethodCopy, toolboxMountMethodImageVolume)}
 	}
-	return runUnprivilegedToolboxCheck(cfg)
 }
 
 func runUnprivilegedToolboxCheck(cfg Config) error {

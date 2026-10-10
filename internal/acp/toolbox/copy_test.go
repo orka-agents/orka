@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -454,6 +455,24 @@ func TestCheckMountedAndVerifyMounted(t *testing.T) {
 	}
 	if err := CheckMounted(link, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonMissingMount {
 		t.Fatal("check must not follow a symlinked mount path")
+	}
+}
+
+func TestCheckMountedBoundsDirectoryEntries(t *testing.T) {
+	root := realTempDir(t)
+	mount := filepath.Join(root, "opt", "tools")
+	for i := range 5 {
+		mustWrite(t, filepath.Join(mount, "bin", "tool"+strconv.Itoa(i)), []byte("#!/bin/sh\n"), 0o755)
+	}
+	previous := checkArchEntryLimit
+	checkArchEntryLimit = 3
+	t.Cleanup(func() { checkArchEntryLimit = previous })
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonTooManyEntries {
+		t.Fatalf("expected %s, got %v", ReasonTooManyEntries, err)
+	}
+	checkArchEntryLimit = previous
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); err != nil {
+		t.Fatal(err)
 	}
 }
 
