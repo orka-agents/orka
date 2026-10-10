@@ -40,9 +40,16 @@ func (t *substrateRouteRoundTripper) RoundTrip(request *http.Request) (*http.Res
 }
 
 func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (http.RoundTripper, error) {
-	parsed, err := url.Parse(strings.TrimSpace(routerURL))
+	trimmed := strings.TrimSpace(routerURL)
+	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
 		return nil, fmt.Errorf("substrate router URL is invalid")
+	}
+	// Tool.status.endpoint republishes the router URL to Tool readers, and the
+	// MCP path is appended to it as text.
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.Contains(trimmed, "#") {
+		return nil, fmt.Errorf("substrate router URL must not contain credentials, a query, or a fragment")
 	}
 	routerAddress := parsed.Host
 	if parsed.Port() == "" {
