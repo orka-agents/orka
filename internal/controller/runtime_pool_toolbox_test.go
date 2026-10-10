@@ -540,21 +540,24 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_IMAGE_PULL:", ok: true,
 		},
-		"copy init container OOM killed without stable line": {
+		"copy init container OOM killed without stable line after bounded retries": {
 			pods: pod(func(p *corev1.Pod) {
 				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
 					Name:                 runtimePoolToolboxCopyContainerName(0),
+					RestartCount:         runtimePoolToolboxUnexplainedRestartLimit,
 					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
 					State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
 				}}
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_COPY_FAILED: toolbox-copy-0: exited 137 (OOMKilled)", ok: true,
 		},
-		"handoff container setup error is a runtime failure, not a toolbox failure": {
+		"copy init container interrupted once still gets its idempotent retry": {
 			pods: pod(func(p *corev1.Pod) {
 				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
-					Name:  runtimePoolToolboxHandoffContainer,
-					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerError", Message: "node setup failed"}},
+					Name:                 runtimePoolToolboxCopyContainerName(0),
+					RestartCount:         1,
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+					State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
 				}}
 			}),
 			toolboxes: toolboxes, ok: false,
