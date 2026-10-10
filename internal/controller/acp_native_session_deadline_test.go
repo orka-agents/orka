@@ -35,7 +35,8 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 	snapshot := storetest.NativeSessionSnapshot(t, "native checkpoint before a deadline-cancelled Task")
 	accepted := make(chan struct{})
 	streamCancelled := make(chan struct{})
-	var acceptedOnce, cancelledOnce sync.Once
+	stopPrompt := make(chan struct{})
+	var acceptedOnce, cancelledOnce, stopOnce sync.Once
 	var mu sync.Mutex
 	var held []harnessv2.StartPromptRequest
 	var cancellations []harnessv2.CancelPromptRequest
@@ -61,6 +62,9 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 					mu.Lock()
 					cancellations = append(cancellations, request)
 					mu.Unlock()
+					// Cancellation stops the simulated provider directly. Requiring TCP
+					// disconnect first makes settlement depend on HTTP transport timing.
+					stopOnce.Do(func() { close(stopPrompt) })
 					select {
 					case <-streamCancelled:
 					case <-r.Context().Done():
@@ -122,7 +126,10 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 				}
 				w.(http.Flusher).Flush()
 				acceptedOnce.Do(func() { close(accepted) })
-				<-r.Context().Done()
+				select {
+				case <-stopPrompt:
+				case <-r.Context().Done():
+				}
 				cancelledOnce.Do(func() { close(streamCancelled) })
 			})
 		})
