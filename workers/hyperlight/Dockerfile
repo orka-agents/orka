@@ -9,11 +9,15 @@
 FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS hluk
 ARG HLUK_REPO=https://github.com/sozercan/hyperlight-unikraft.git
 ARG HLUK_COMMIT=b588756661c42c102a2183a0d0daaef1c42c8d40
+# The default build drives KVM (/dev/kvm). Nodes with only the Microsoft
+# Hypervisor (/dev/mshv) need HLUK_FEATURES=mshv, which hluk leaves off by
+# default because it gives up KVM's fast snapshot restore.
+ARG HLUK_FEATURES=
 WORKDIR /src
 # The embedded kernel is committed, so the kernel submodules are not needed.
 RUN git init -q . && git remote add origin "$HLUK_REPO" && \
     git fetch -q --depth 1 origin "$HLUK_COMMIT" && git checkout -q FETCH_HEAD
-RUN cargo build --release --locked --bin hluk && \
+RUN cargo build --release --locked --bin hluk ${HLUK_FEATURES:+--features "$HLUK_FEATURES"} && \
     install -D -m 0755 target/release/hluk /out/bin/hluk
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587

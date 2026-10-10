@@ -23,7 +23,9 @@ Two tools use it:
 ## Requirements
 
 - **Nodes with a hypervisor device**: `/dev/kvm` (KVM, which on a cloud VM needs
-  nested virtualization) or `/dev/mshv`.
+  nested virtualization) or `/dev/mshv`. The bundle drives KVM by default; for
+  nodes with only `/dev/mshv`, build it with
+  `make docker-build-hyperlight-bundle HYPERLIGHT_BUNDLE_FEATURES=mshv`.
 - **The Hyperlight device plugin**: [hyperlight-on-kubernetes](https://github.com/hyperlight-dev/hyperlight-on-kubernetes)
   advertises `hyperlight.dev/hypervisor` and injects the device with CDI, so
   Pods need no privileges. CDI is on by default in containerd 2.x; containerd
