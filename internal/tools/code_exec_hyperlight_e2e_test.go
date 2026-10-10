@@ -54,10 +54,18 @@ func TestHyperlightE2ECodeExec(t *testing.T) {
 		})
 	}
 
-	t.Run("streams and guest exit", func(t *testing.T) {
-		got := hyperlightE2ECodeExec(t, tool, "bash", "echo stdout; echo stderr >&2; exit 7", 30)
-		if got.ExitCode != 7 || got.Output != "stdout\n" || got.Error != "stderr\n" || got.TimedOut {
-			t.Fatalf("guest streams and exit: %+v", got)
+	t.Run("streams", func(t *testing.T) {
+		got := hyperlightE2ECodeExec(t, tool, "bash", "echo stdout; echo stderr >&2", 30)
+		if got.ExitCode != 0 || got.Output != "stdout\n" || got.Error != "stderr\n" || got.TimedOut {
+			t.Fatalf("guest streams: %+v", got)
+		}
+	})
+	t.Run("guest exit", func(t *testing.T) {
+		// The pinned driver may append a dispatch-failure diagnostic to
+		// stderr for a nonzero guest exit. The guest status still survives.
+		got := hyperlightE2ECodeExec(t, tool, "bash", "exit 7", 30)
+		if got.ExitCode != 7 || got.Output != "" || got.TimedOut {
+			t.Fatalf("guest exit: %+v", got)
 		}
 	})
 	t.Run("output limit", func(t *testing.T) {
