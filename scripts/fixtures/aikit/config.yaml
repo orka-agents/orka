@@ -19,6 +19,8 @@
     use_tokenizer_template: true
     system_messages_after_first: merge
   options:
+    # Keep the 512-token logical batch; use smaller physical CPU microbatches.
+    - "n_ubatch:128"
     - "use_jinja:true"
     - "--chat-template-file:/etc/orka-aikit/chat-template.jinja"
   function:

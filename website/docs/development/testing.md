@@ -195,8 +195,9 @@ missing or mismatched artifacts staying not ready.
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
 - `AIKit Qwen E2E` uses a digest-pinned Qwen 3.5 4B image as local CPU model
   infrastructure for native Provider, compatibility API, and runtime checks.
-  The lane uses the standard free `ubuntu-24.04-arm` runner with the matching
-  ARM64 image digest and records only allowlisted CPU capabilities.
+  The lane uses the standard free `ubuntu-latest` runner and records only
+  allowlisted CPU capabilities. Physical CPU microbatches use 128 tokens; the
+  model context, logical batch and request/test limits remain unchanged.
   It requires no cloud credentials and routes through Orka's auth/session proxies
   directly to AIKit, without Vekil. Its Qwen template merges system/developer
   instructions into a leading system block so multi-turn Responses requests
