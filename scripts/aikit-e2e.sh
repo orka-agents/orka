@@ -82,7 +82,7 @@ dump_diagnostics() {
 on_exit() {
   local status="$1"
   trap - EXIT
-  cleanup_port_forward "${monitor_pid}"
+  cleanup_port_forward "${monitor_pid:-}"
   cleanup_port_forward "${proxy_pf_pid}"
   if ! is_expected_kind_context; then
     log "Refusing diagnostics or teardown against an unverified cluster context"
