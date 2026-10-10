@@ -233,11 +233,13 @@ func acpToolboxPromptNote(toolboxes []harnessv2.RuntimeToolbox, newProcess bool)
 	builder.WriteString(acpToolboxPromptNoteHeader)
 	listed := 0
 	for i := range toolboxes {
-		dirs := toolboxes[i].PathDirs()
-		if len(dirs) == 0 {
-			dirs = []string{toolboxes[i].MountPath}
+		lines := toolboxes[i].PathDirs()
+		if len(lines) == 0 {
+			// A toolbox without pathEntries is mounted but contributes nothing
+			// to PATH; say so instead of implying its tools are on PATH.
+			lines = []string{toolboxes[i].MountPath + " (mounted, not on PATH)"}
 		}
-		for _, dir := range dirs {
+		for _, dir := range lines {
 			line := "- " + dir + "\n"
 			const omitted = "- (more folders omitted)\n"
 			if builder.Len()+len(line)+len(omitted)+len(acpToolboxPromptNoteFooter) > acpToolboxPromptNoteMaxBytes {

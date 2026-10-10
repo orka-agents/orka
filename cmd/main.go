@@ -2579,17 +2579,28 @@ func resolveACPToolboxPolicy(
 	if !enabled || method != controller.ACPToolboxMountImageVolume {
 		return policy, nil
 	}
+	// Only imageVolume toolboxes depend on this capability check, so a failed
+	// discovery read must not take the whole controller down: fail closed by
+	// marking toolbox mounting unavailable and keep every other workload
+	// running. Toolbox Agents then get the stable ToolboxUnavailable result.
+	unavailable := func(err error) controller.ACPToolboxPolicy {
+		policy.UnavailableReason = fmt.Sprintf(
+			"could not verify image-volume support from the API server version (%v); restart the controller with registry access or use --acp-toolbox-mount-method=copy", err,
+		)
+		setupLog.Error(err, "toolbox image volumes are unavailable; Agents with toolboxes are rejected until the controller restarts")
+		return policy
+	}
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
-		return controller.ACPToolboxPolicy{}, fmt.Errorf("create discovery client for toolbox image-volume support: %w", err)
+		return unavailable(fmt.Errorf("create discovery client: %w", err)), nil
 	}
 	serverVersion, err := discoveryClient.ServerVersion()
 	if err != nil {
-		return controller.ACPToolboxPolicy{}, fmt.Errorf("read API server version for toolbox image-volume support: %w", err)
+		return unavailable(fmt.Errorf("read API server version: %w", err)), nil
 	}
 	parsed, err := version.ParseGeneric(serverVersion.GitVersion)
 	if err != nil {
-		return controller.ACPToolboxPolicy{}, fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err)
+		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err)), nil
 	}
 	if parsed.LessThan(version.MustParseGeneric(controller.ACPToolboxImageVolumeMinimumServerVersion)) {
 		policy.UnavailableReason = fmt.Sprintf(

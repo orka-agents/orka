@@ -1503,7 +1503,7 @@ spec:
                           items:
                             maxLength: 256
                             minLength: 1
-                            pattern: ^[^/:\s][^:\s]*$
+                            pattern: ^[^/:,\s][^:,\s]*$
                             type: string
                           maxItems: 8
                           type: array

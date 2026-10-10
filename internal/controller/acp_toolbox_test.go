@@ -354,7 +354,7 @@ func TestACPToolboxPromptNote(t *testing.T) {
 		{Image: "registry.example.com/tools/brew@" + acpTestToolboxDigest, MountPath: harnessv2.RuntimeToolboxHomebrewMountPath, PathEntries: []string{"bin"}},
 		{Image: "registry.example.com/tools/none@" + acpTestToolboxDigest, MountPath: "/opt/none"},
 	}
-	want := "Extra command-line tools are installed for this task:\n- /opt/yq-jq/bin\n- /home/linuxbrew/.linuxbrew/bin\n- /opt/none\n" +
+	want := "Extra command-line tools are installed for this task:\n- /opt/yq-jq/bin\n- /home/linuxbrew/.linuxbrew/bin\n- /opt/none (mounted, not on PATH)\n" +
 		"These folders are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
 	if got := acpToolboxPromptNote(toolboxes, true); got != want {
 		t.Fatalf("note = %q, want %q", got, want)

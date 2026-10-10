@@ -53,6 +53,8 @@ func TestValidateRuntimeToolboxImage(t *testing.T) {
 		"too long":              "registry.example.com/" + strings.Repeat("a", 600) + "@" + testToolboxDigest,
 		"sha512":                "registry.example.com/tools/yq@sha512:" + strings.Repeat("a", 128),
 		"trailing slash before": "registry.example.com/tools/@" + testToolboxDigest,
+		"repeated periods":      "registry.example.com/tools/a..b@" + testToolboxDigest,
+		"double hyphen host":    "registry..example.com/tools/yq@" + testToolboxDigest,
 	}
 	for name, image := range invalid {
 		if err := ValidateRuntimeToolboxImage(image); err == nil {
@@ -92,7 +94,7 @@ func TestRuntimeToolboxValidatePathEntries(t *testing.T) {
 		}
 	}
 	invalid := [][]string{
-		{"/bin"}, {"../bin"}, {"bin/../sbin"}, {"."}, {""}, {"bin/"}, {"bin//sbin"}, {"./bin"}, {"bi:n"}, {"bin", "bin"},
+		{"/bin"}, {"../bin"}, {"bin/../sbin"}, {"."}, {""}, {"bin/"}, {"bin//sbin"}, {"./bin"}, {"bi:n"}, {"bin,legacy"}, {"bin", "bin"},
 		{"a", "b", "c", "d", "e", "f", "g", "h", "i"}, {strings.Repeat("a", 257)}, {"bi\x00n"},
 	}
 	for _, entries := range invalid {

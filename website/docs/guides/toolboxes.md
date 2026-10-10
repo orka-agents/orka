@@ -104,7 +104,7 @@ and again inside the runtime Pod:
 - Two toolboxes may not share, contain, or sit inside each other's
   `mountPath`.
 - `pathEntries` are clean relative paths inside `mountPath` with no `..`.
-- No path may contain `:`, NUL, or control characters.
+- No path may contain `:`, `,`, NUL, or control characters.
 - At most 4 toolboxes, 8 `pathEntries` per toolbox, and 256 bytes per path.
 
 Order matters: toolboxes and their `pathEntries` are appended to `PATH` in the

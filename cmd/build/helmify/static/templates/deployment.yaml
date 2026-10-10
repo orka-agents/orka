@@ -158,6 +158,9 @@ spec:
             {{- if .nodeSelector }}
             {{- $selector := list }}
             {{- range $key, $value := .nodeSelector }}
+            {{- if not $value }}
+            {{- fail (printf "controller.acpRuntime.toolboxes.nodeSelector[%q] must have a non-empty value" $key) }}
+            {{- end }}
             {{- $selector = append $selector (printf "%s=%s" $key $value) }}
             {{- end }}
             - {{ printf "--acp-toolbox-node-selector=%s" (join "," $selector) | quote }}

@@ -6,6 +6,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/distribution/reference"
+	"github.com/opencontainers/go-digest"
 )
 
 // Toolbox limits are part of the immutable runtime profile contract: every
@@ -29,16 +32,7 @@ var RuntimeToolboxReservedOptNames = []string{
 	"codex", "codex-acp", "claude", "claude-agent-acp", "copilot", "opencode", "ripgrep", "yarn-v1.22.22",
 }
 
-var (
-	// runtimeToolboxImagePattern accepts only fully qualified, digest-pinned
-	// references: an explicit registry host (with an optional port), at least
-	// one repository path component, no tag, and a sha256 digest.
-	runtimeToolboxImagePattern = regexp.MustCompile(
-		`^(?:localhost|[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z0-9]+(?:[.-][a-z0-9]+)*)(?::[0-9]{1,5})?` +
-			`(?:/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)+@sha256:[a-f0-9]{64}$`,
-	)
-	runtimeToolboxOptNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-)
+var runtimeToolboxOptNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // RuntimeToolbox is one read-only tool image bound into a runtime Pod. The
 // declared order is significant: it decides PATH precedence between toolboxes
@@ -103,7 +97,9 @@ func ValidateRuntimeToolboxes(toolboxes []RuntimeToolbox) error {
 	return nil
 }
 
-// ValidateRuntimeToolboxImage requires a fully qualified digest-pinned image.
+// ValidateRuntimeToolboxImage requires a fully qualified digest-pinned image
+// in the canonical form Kubernetes' container-image parser accepts: an
+// explicit registry host, a lowercase repository, no tag, and a sha256 digest.
 func ValidateRuntimeToolboxImage(image string) error {
 	if image == "" {
 		return fmt.Errorf("toolbox image is required")
@@ -111,8 +107,23 @@ func ValidateRuntimeToolboxImage(image string) error {
 	if len(image) > MaxRuntimeToolboxImageBytes {
 		return fmt.Errorf("toolbox image exceeds %d bytes", MaxRuntimeToolboxImageBytes)
 	}
-	if !runtimeToolboxImagePattern.MatchString(image) {
-		return fmt.Errorf("toolbox image %q must be a fully qualified registry reference pinned by digest (<registry>/<repository>@sha256:<64 hex>) without a tag", image)
+	shape := fmt.Errorf("toolbox image %q must be a fully qualified registry reference pinned by digest (<registry>/<repository>@sha256:<64 hex>) without a tag", image)
+	// ParseNamed accepts only the canonical form, so docker.io shorthand such
+	// as "yq@sha256:..." or "library/yq@sha256:..." is rejected.
+	named, err := reference.ParseNamed(image)
+	if err != nil {
+		return shape
+	}
+	if _, tagged := named.(reference.NamedTagged); tagged {
+		return shape
+	}
+	canonical, ok := named.(reference.Canonical)
+	if !ok || canonical.Digest().Algorithm() != digest.SHA256 || canonical.String() != image {
+		return shape
+	}
+	domain := reference.Domain(named)
+	if domain != "localhost" && !strings.ContainsAny(domain, ".:") {
+		return shape
 	}
 	return nil
 }
@@ -169,8 +180,10 @@ func validateRuntimeToolboxPathText(field, value string) error {
 	if strings.Contains(value, "//") || (len(value) > 1 && strings.HasSuffix(value, "/")) {
 		return fmt.Errorf("toolbox %s %q must be a clean path without empty components or a trailing slash", field, value)
 	}
+	// ':' would split PATH and ',' would split the copier's --path-entries
+	// list, so neither may appear anywhere in a toolbox path.
 	for _, r := range value {
-		if r == ':' || r == 0 || r < 0x20 || r == 0x7f {
+		if r == ':' || r == ',' || r == 0 || r < 0x20 || r == 0x7f {
 			return fmt.Errorf("toolbox %s %q contains a character that is not allowed in PATH", field, value)
 		}
 	}

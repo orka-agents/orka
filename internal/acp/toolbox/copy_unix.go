@@ -178,15 +178,43 @@ func (s *copyState) account(entries, bytes int64) error {
 	return nil
 }
 
+// directoryBatch bounds how many untrusted directory entries are held in
+// memory at once; limits are enforced while streaming, so a folder with
+// millions of entries fails with TOOLBOX_TOO_MANY_ENTRIES instead of
+// exhausting the copier's memory.
+const directoryBatch = 1024
+
 func (s *copyState) copyTree(srcFd, dstFd int, display string, depth int) error {
 	if depth > s.limits.MaxDepth {
 		return failf(ReasonTooDeep, "%s is deeper than %d folders", display, s.limits.MaxDepth)
 	}
-	names, err := readDirectoryNames(srcFd)
+	dup, err := unix.Dup(srcFd)
 	if err != nil {
 		return failf(ReasonCopyFailed, "read %s: %v", display, err)
 	}
-	for _, name := range names {
+	dir := os.NewFile(uintptr(dup), display)
+	defer dir.Close() //nolint:errcheck
+	for {
+		entries, err := dir.ReadDir(directoryBatch)
+		if len(entries) == 0 && errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return failf(ReasonCopyFailed, "read %s: %v", display, err)
+		}
+		for _, entry := range entries {
+			if err := s.copyEntry(srcFd, dstFd, display, entry.Name(), depth); err != nil {
+				return err
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func (s *copyState) copyEntry(srcFd, dstFd int, display, name string, depth int) error {
+	{
 		entryDisplay := path.Join(display, name)
 		var st unix.Stat_t
 		if err := unix.Fstatat(srcFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {

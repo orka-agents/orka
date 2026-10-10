@@ -16,6 +16,17 @@ func TestStaticChartRendersToolboxFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects an empty node selector value", func(t *testing.T) {
+		output, err := helmTemplateStaticChart(t,
+			"--set", "controller.acpRuntime.toolboxes.enabled=true",
+			"--set-string", "controller.acpRuntime.toolboxes.nodeSelector.zone=",
+			"--show-only", "templates/deployment.yaml",
+		)
+		if err == nil || !strings.Contains(output, "nodeSelector[\"zone\"] must have a non-empty value") {
+			t.Fatalf("helm render error = %v, want empty-value rejection:\n%s", err, output)
+		}
+	})
+
 	t.Run("enabled with registries, pull secrets, node selector and mount method", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t,
 			"--set", "controller.acpRuntime.toolboxes.enabled=true",

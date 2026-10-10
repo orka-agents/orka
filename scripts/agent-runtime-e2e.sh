@@ -55,6 +55,7 @@ Common environment:
   ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE   Optional wrong-architecture toolbox (expects TOOLBOX_ARCH_MISMATCH)
   ACP_E2E_TOOLBOX_FIFO_IMAGE         Optional toolbox with a FIFO (expects TOOLBOX_UNSUPPORTED_FILE_TYPE)
   ACP_E2E_TOOLBOX_MISSING_IMAGE      Optional toolbox without /opt/missing-tool (expects TOOLBOX_SOURCE_OPEN)
+  ACP_E2E_TOOLBOX_HOSTILE_IMAGE      Optional hostile toolbox (setuid, file caps, device node): fails the copy, stays harmless as an image volume
 
 RELEASE_GATE=1 requires ACP_E2E_REPO, ACP_E2E_REF, and read-only GitHub API access.
   ACP_E2E_BASE_BRANCH                Candidate branch (default: main)
@@ -1770,7 +1771,7 @@ run_toolbox_check() {
   # The copy-mode runtime Pod must carry hardened toolbox init containers; the
   # image-volume mode mounts the image directly and has none.
   if [[ "${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}" == "copy" ]]; then
-    k -n "${runtime_namespace}" get pod -l "orka.ai/runtime-pool-key" -o json | jq -e '
+    k -n "${runtime_namespace}" get pod -l "orka.ai/runtime-pool-namespace=${namespace}" -o json | jq -e '
       [.items[] | select(.spec.initContainers != null) | .spec.initContainers[] | select(.name == "toolbox-copy-0")
         | select(.securityContext.runAsNonRoot == true and .securityContext.allowPrivilegeEscalation == false
           and .securityContext.readOnlyRootFilesystem == true and (.securityContext.capabilities.drop // []) == ["ALL"])] | length >= 1
@@ -1782,16 +1783,23 @@ run_toolbox_check() {
   # files as they are (a FIFO is harmless and the Task succeeds) and a missing
   # subPath fails inside the container runtime.
   local mount_method="${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}"
+  # A syntactically valid digest that no registry serves: the pull must fail
+  # with TOOLBOX_IMAGE_PULL in both modes.
+  local unknown_image
+  unknown_image="${image%@sha256:*}@sha256:$(printf 'orka-toolbox-unknown-digest-%s' "${run_id}" | sha256sum | cut -c1-64)"
   local case_name case_image case_reason case_mount case_entry negative_agent negative_task
-  for case_name in wrong-arch fifo missing; do
+  for case_name in wrong-arch fifo missing unknown hostile; do
     case "${case_name}" in
       wrong-arch) case_image="${ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE:-}"; case_reason=TOOLBOX_ARCH_MISMATCH; case_mount=/opt/yq-jq; case_entry=bin ;;
       fifo) case_image="${ACP_E2E_TOOLBOX_FIFO_IMAGE:-}"; case_reason=TOOLBOX_UNSUPPORTED_FILE_TYPE; case_mount=/opt/fifo-tool; case_entry=bin ;;
       missing) case_image="${ACP_E2E_TOOLBOX_MISSING_IMAGE:-}"; case_reason=TOOLBOX_SOURCE_OPEN; case_mount=/opt/missing-tool; case_entry="" ;;
+      unknown) case_image="${unknown_image}"; case_reason=TOOLBOX_IMAGE_PULL; case_mount=/opt/yq-jq; case_entry=bin ;;
+      hostile) case_image="${ACP_E2E_TOOLBOX_HOSTILE_IMAGE:-}"; case_reason=TOOLBOX_UNSUPPORTED_FILE_TYPE; case_mount=/opt/hostile; case_entry=bin ;;
     esac
     if [[ "${mount_method}" == "imageVolume" ]]; then
       case "${case_name}" in
         fifo) log "Skipping toolbox fifo negative case: image volumes mount special files as they are"; continue ;;
+        hostile) continue ;;
         missing) case_reason=TOOLBOX_MOUNT_FAILED ;;
       esac
     fi
@@ -1811,6 +1819,27 @@ run_toolbox_check() {
     ' < <(task_json "${negative_task}") >/dev/null || \
       die "toolbox ${case_name} Task/${negative_task} did not fail with ToolboxUnavailable ${case_reason}: $(safe_task_summary "${negative_task}")"
   done
+
+  # Image volumes mount files unsanitized, so the hostile fixture must stay
+  # harmless under the real node runtime: the setuid-root binary runs with the
+  # agent's own identity, the file-capability binary cannot execute, and the
+  # 0666 device node cannot be opened.
+  if [[ "${mount_method}" == "imageVolume" && -n "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE:-}" ]]; then
+    local hostile_agent hostile_task hostile_result
+    hostile_agent="$(sanitize_name "acp-codex-toolbox-hostile-${run_id}")"
+    hostile_task="$(sanitize_name "acp-codex-toolbox-hostile-run-${run_id}")"
+    apply_toolbox_agent "${model}" "${hostile_agent}" "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE}" /opt/hostile bin
+    apply_read_task "${hostile_task}" "${hostile_agent}" "" true \
+      "Run exactly these three shell commands one after another and report the complete output of each verbatim, including any error messages, nothing else: \`/opt/hostile/bin/suid-busybox id\`, \`/opt/hostile/bin/cap-busybox id\`, \`cat /opt/hostile/dev/mem\`. Do not modify any file." \
+      "12m" true
+    wait_task_terminal "${hostile_task}"
+    task_phase_is "${hostile_task}" Succeeded || die "hostile toolbox Task/${hostile_task} did not succeed: $(safe_task_summary "${hostile_task}")"
+    hostile_result="$(api_task_result "${hostile_task}")"
+    grep -Eq 'uid=[1-9][0-9]*' <<<"${hostile_result}" || die "hostile toolbox result does not show the setuid binary running as the agent identity"
+    grep -Eq 'uid=0\(|euid=0' <<<"${hostile_result}" && die "hostile toolbox result shows the setuid-root binary gaining root"
+    [[ "$(grep -o 'Operation not permitted' <<<"${hostile_result}" | wc -l | tr -d ' ')" -ge 2 ]] || \
+      die "hostile toolbox result does not show the file-capability binary and the device node being refused"
+  fi
 }
 
 # Read tasks without Bash carry the restricted {Read,Glob,Grep} tool policy for

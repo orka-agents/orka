@@ -181,16 +181,18 @@ live_acp_kind_build_and_publish_images() {
 live_acp_kind_build_and_publish_toolbox_fixtures() {
   local fixtures="${LIVE_ACP_REPO_ROOT}/test/e2e/fixtures/toolboxes"
   local name
-  for name in yq wrong-arch fifo missing; do
+  [[ -n "${ORKA_KIND_REGISTRY_ADDR:-}" ]] || live_acp_kind_die "ORKA_KIND_REGISTRY_ADDR is not set; the run registry must be started before toolbox fixtures are published" || return 1
+  for name in yq wrong-arch fifo missing hostile; do
     live_acp_kind_run docker build -t "orka-e2e-toolbox-${name}:e2e" "${fixtures}/${name}"
   done
   ACP_E2E_TOOLBOX_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-yq:e2e orka/e2e-toolbox-yq)"
   ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-wrong-arch:e2e orka/e2e-toolbox-wrong-arch)"
   ACP_E2E_TOOLBOX_FIFO_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-fifo:e2e orka/e2e-toolbox-fifo)"
   ACP_E2E_TOOLBOX_MISSING_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-missing:e2e orka/e2e-toolbox-missing)"
+  ACP_E2E_TOOLBOX_HOSTILE_IMAGE="$(orka_kind_registry_push orka-e2e-toolbox-hostile:e2e orka/e2e-toolbox-hostile)"
   ACP_E2E_TOOLBOX_REGISTRY="${ORKA_KIND_REGISTRY_ADDR}"
   export ACP_E2E_TOOLBOX_IMAGE ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE ACP_E2E_TOOLBOX_FIFO_IMAGE
-  export ACP_E2E_TOOLBOX_MISSING_IMAGE ACP_E2E_TOOLBOX_REGISTRY
+  export ACP_E2E_TOOLBOX_MISSING_IMAGE ACP_E2E_TOOLBOX_HOSTILE_IMAGE ACP_E2E_TOOLBOX_REGISTRY
   acp_report_update '.builtImages.toolboxFixture = $toolbox' --arg toolbox "${ACP_E2E_TOOLBOX_IMAGE}"
 }
 

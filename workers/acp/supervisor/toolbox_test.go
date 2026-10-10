@@ -170,6 +170,11 @@ func TestVerifyToolboxesRunsUnprivilegedArchCheckForImageVolumes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix only")
 	}
+	if os.Geteuid() == 0 {
+		// As root, the check drops to toolboxCheckUID, which cannot reach the
+		// private temporary folders that hold the helper and fake toolbox.
+		t.Skip("requires a non-root test runner")
+	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

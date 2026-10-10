@@ -165,7 +165,7 @@ type AgentToolbox struct {
 	// +kubebuilder:validation:MaxItems=8
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=256
-	// +kubebuilder:validation:items:Pattern=`^[^/:\s][^:\s]*$`
+	// +kubebuilder:validation:items:Pattern=`^[^/:,\s][^:,\s]*$`
 	// +optional
 	PathEntries []string `json:"pathEntries,omitempty"`
 }
