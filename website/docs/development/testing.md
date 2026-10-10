@@ -203,8 +203,10 @@ missing or mismatched artifacts staying not ready.
   client deadline; failed Chat streams explicitly cancel their observed Session.
   Model Pod CPU and memory counters from kubelet statistics are saved with the
   cleanup evidence without requiring a shell in the distroless AIKit container.
-  Full Chat and compatibility prompt probes run before the stack build, using
-  the real prompt builders and tool schemas. The AIKit and ordinary E2E workflows use the public Docker Hub cache
+  Startup can prefill the full Chat and compatibility instruction/tool prefixes
+  within a shared ten-minute preparation budget. Subsequent prompt qualification
+  still requires the exact markers within 170 seconds before the stack build,
+  using the real prompt builders and tool schemas. The AIKit and ordinary E2E workflows use the public Docker Hub cache
   at `mirror.gcr.io` without registry credentials; uncached images can still fall
   back to Docker Hub.
   `Agent Runtime E2E` retains real-provider

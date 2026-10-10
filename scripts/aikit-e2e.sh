@@ -345,7 +345,12 @@ warm_model() {
   log "Qwen chat and multi-turn Responses preflight passed"
   qualify_responses_tools "${url}"
   make ensure-ui-embed
-  AIKIT_PROBE_URL="${url}" AIKIT_PROBE_MODEL="${aikit_model}"     AIKIT_PROBE_REPORT="${cleanup_report_dir}/full-prompt-probe.json"     go test -tags=e2e ./internal/api -run '^TestAIKitFullPromptProbe$' -v -count=1 -timeout=10m
+  # Prefix preparation is startup work, not an extension of live request
+  # budgets. Qualification immediately afterward still has a 170s deadline.
+  AIKIT_PROBE_URL="${url}" AIKIT_PROBE_MODEL="${aikit_model}" \
+    AIKIT_PROBE_REPORT="${cleanup_report_dir}/full-prompt-probe.json" \
+    AIKIT_PROBE_PRELOAD_PREFIXES=true \
+    go test -tags=e2e ./internal/api -run '^TestAIKitFullPromptProbe$' -v -count=1 -timeout=20m
   cleanup_port_forward "${proxy_pf_pid}"
   proxy_pf_pid=""
 }

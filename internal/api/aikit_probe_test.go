@@ -70,7 +70,10 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 		DurationMS   int64  `json:"durationMs"`
 		Passed       bool   `json:"passed"`
 	}
-	results := make([]probeResult, 0, 3)
+	results := make([]probeResult, 0, 5)
+	startupCtx, stopStartup := context.WithTimeout(t.Context(), 10*time.Minute)
+	defer stopStartup()
+	preload := os.Getenv("AIKIT_PROBE_PRELOAD_PREFIXES") == "true"
 	defer func() {
 		if report := os.Getenv("AIKIT_PROBE_REPORT"); report != "" {
 			data, marshalErr := json.MarshalIndent(results, "", "  ")
@@ -87,8 +90,14 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 		expected    string
 		maxTokens   int
 		temperature bool
+		startup     bool
 	}{
-		{name: "chat cold", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
+		{name: "chat prefix preload", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
+			message: "Reply with exactly ORKA_LIVE_CHAT_OK and nothing else.", expected: "ORKA_LIVE_CHAT_OK", maxTokens: 16, temperature: true, startup: true},
+		{name: "compatibility prefix preload", prompt: coordinatorSystemPrompt("orka-system"), tools: compat.Tools,
+			message:  "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly <ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK and nothing else. Do not use any tools.",
+			expected: "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK", maxTokens: 128, startup: true},
+		{name: "chat prefilled", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
 			message: "Reply with exactly ORKA_LIVE_CHAT_OK and nothing else.", expected: "ORKA_LIVE_CHAT_OK", maxTokens: 16, temperature: true},
 		{name: "chat warm", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
 			message: "Reply with exactly ORKA_LIVE_CHAT_OK and nothing else.", expected: "ORKA_LIVE_CHAT_OK", maxTokens: 16, temperature: true},
@@ -96,7 +105,16 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 			message:  "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly <ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK and nothing else. Do not use any tools.",
 			expected: "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK", maxTokens: 128},
 	} {
-		ctx, cancel := context.WithTimeout(t.Context(), 170*time.Second)
+		if probe.startup && !preload {
+			continue
+		}
+		parent, timeout := t.Context(), 170*time.Second
+		if probe.startup {
+			// Startup prefix preparation is separate from qualification. The
+			// subsequent identical requests retain their 170-second budget.
+			parent, timeout = startupCtx, 10*time.Minute
+		}
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		start := time.Now()
 		response, callErr := provider.Complete(ctx, &llm.CompletionRequest{
 			Model: model, SystemPrompt: probe.prompt,
@@ -143,12 +161,12 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		number := calls.Add(1)
+		calls.Add(1)
 		if body.Model != "test-model" {
 			t.Error("configured model was not preserved")
 		}
 		expected := "ORKA_LIVE_CHAT_OK"
-		if number <= 2 {
+		if body.MaxOutputTokens == 16 {
 			if len(body.Instructions) < 15000 || len(body.Tools) != len(tools.ChatToolNames()) || body.MaxOutputTokens != 16 || body.Temperature == nil || *body.Temperature != 0 {
 				t.Errorf("Chat probe dropped prompt/schema/limits: bytes=%d tools=%d cap=%d", len(body.Instructions), len(body.Tools), body.MaxOutputTokens)
 			}
@@ -169,9 +187,16 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 	t.Setenv("AIKIT_PROBE_URL", server.URL)
 	t.Setenv("AIKIT_PROBE_MODEL", "test-model")
 	t.Setenv("AIKIT_PROBE_REPORT", report)
+	t.Setenv("AIKIT_PROBE_PRELOAD_PREFIXES", "false")
 	t.Run("configured endpoint", TestAIKitFullPromptProbe)
 	if calls.Load() != 3 {
 		t.Fatalf("probe calls = %d, want 3", calls.Load())
+	}
+	calls.Store(0)
+	t.Setenv("AIKIT_PROBE_PRELOAD_PREFIXES", "true")
+	t.Run("startup prefix preparation", TestAIKitFullPromptProbe)
+	if calls.Load() != 5 {
+		t.Fatalf("prefilled probe calls = %d, want 5", calls.Load())
 	}
 	data, err := os.ReadFile(report)
 	if err != nil {
@@ -183,7 +208,7 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 		InputTokens  int    `json:"inputTokens"`
 		OutputTokens int    `json:"outputTokens"`
 	}
-	if err := json.Unmarshal(data, &results); err != nil || len(results) != 3 {
+	if err := json.Unmarshal(data, &results); err != nil || len(results) != 5 {
 		t.Fatalf("invalid probe counter report: %v", err)
 	}
 	for _, r := range results {
