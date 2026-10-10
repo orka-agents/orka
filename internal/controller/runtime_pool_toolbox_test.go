@@ -120,7 +120,8 @@ func TestRuntimePoolPodTemplateCopyModeWiresToolboxes(t *testing.T) {
 func assertToolboxHandoffContainer(t *testing.T, pool *corev1alpha1.RuntimePool, handoff corev1.Container) {
 	t.Helper()
 	if handoff.Name != runtimePoolToolboxHandoffContainer || handoff.Image != pool.Spec.Runtime.Image ||
-		strings.Join(handoff.Command, " ") != toolbox.SupervisorBinaryPath+" "+toolbox.HandoffSubcommand+" --dst /handoff" ||
+		strings.Join(handoff.Command, " ") != toolbox.SupervisorBinaryPath || len(handoff.Args) == 0 ||
+		strings.Join(handoff.Args, " ") != toolbox.HandoffSubcommand+" --dst /handoff" ||
 		len(handoff.VolumeMounts) != 1 || handoff.VolumeMounts[0].Name != runtimePoolToolboxHandoffVolume || handoff.VolumeMounts[0].ReadOnly {
 		t.Fatalf("unexpected handoff container %#v", handoff)
 	}
@@ -133,10 +134,13 @@ func assertToolboxCopyContainer(t *testing.T, template corev1.PodTemplateSpec, i
 		copier.ImagePullPolicy != corev1.PullIfNotPresent || copier.TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
 		t.Fatalf("unexpected copy container %#v", copier)
 	}
-	wantCommand := "/handoff/" + toolbox.HandoffBinaryName + " " + toolbox.CopySubcommand + " --src " + toolboxSpec.MountPath +
+	wantArgs := toolbox.CopySubcommand + " --src " + toolboxSpec.MountPath +
 		" --dst /out --path-entries " + strings.Join(toolboxSpec.PathEntries, ",")
-	if strings.Join(copier.Command, " ") != wantCommand {
-		t.Fatalf("copy command = %q, want %q", strings.Join(copier.Command, " "), wantCommand)
+	if strings.Join(copier.Command, " ") != "/handoff/"+toolbox.HandoffBinaryName || strings.Join(copier.Args, " ") != wantArgs {
+		t.Fatalf("copy invocation = %q %q, want command %q args %q", copier.Command, copier.Args, "/handoff/"+toolbox.HandoffBinaryName, wantArgs)
+	}
+	if len(copier.Args) == 0 {
+		t.Fatal("copy container must set non-empty Args so the image CMD cannot reach the copier")
 	}
 	if len(copier.VolumeMounts) != 2 || copier.VolumeMounts[0].Name != runtimePoolToolboxHandoffVolume || !copier.VolumeMounts[0].ReadOnly ||
 		copier.VolumeMounts[1].Name != runtimePoolToolboxVolumeName(i) || copier.VolumeMounts[1].MountPath != "/out" || copier.VolumeMounts[1].ReadOnly {
@@ -187,9 +191,20 @@ func assertToolboxCopyVolumes(t *testing.T, template corev1.PodTemplateSpec, cou
 	}
 	for i := range count {
 		volume := volumes[runtimePoolToolboxVolumeName(i)]
-		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit.Value() <= toolbox.DefaultMaxTotalBytes {
-			t.Fatalf("toolbox volume %d = %#v", i, volume)
+		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit.Value() < toolbox.DefaultMaxTotalBytes+toolbox.DefaultMaxEntries*runtimePoolToolboxBlockBytes {
+			t.Fatalf("toolbox volume %d = %#v (must reserve a block per permitted entry)", i, volume)
 		}
+	}
+	// The Pod's ephemeral-storage budget grows by the handoff volume plus one
+	// full toolbox volume per toolbox, so kubelet never evicts a filling Pod.
+	base := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	want := base.Limits.StorageEphemeral().Value() + runtimePoolToolboxHandoffBytes + int64(count)*runtimePoolToolboxVolumeBytes
+	if got := template.Spec.Containers[0].Resources.Limits.StorageEphemeral().Value(); got != want {
+		t.Fatalf("runtime ephemeral-storage limit = %d, want %d", got, want)
+	}
+	wantRequest := base.Requests.StorageEphemeral().Value() + runtimePoolToolboxHandoffBytes + int64(count)*runtimePoolToolboxVolumeBytes
+	if got := template.Spec.Containers[0].Resources.Requests.StorageEphemeral().Value(); got != wantRequest {
+		t.Fatalf("runtime ephemeral-storage request = %d, want %d", got, wantRequest)
 	}
 }
 

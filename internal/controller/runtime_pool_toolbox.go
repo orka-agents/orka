@@ -43,13 +43,20 @@ const (
 )
 
 // runtimePoolToolboxVolumeHeadroomBytes covers directory metadata and the
-// copier's completion marker on top of the accepted content bytes, so a
-// toolbox at the documented limit still fits a size-enforced emptyDir.
-const runtimePoolToolboxVolumeHeadroomBytes int64 = 64 << 20
+// copier's completion marker on top of the accepted content bytes, and
+// runtimePoolToolboxBlockBytes reserves one filesystem block per permitted
+// entry, so a toolbox at the documented limits (including many tiny files)
+// still fits a size-enforced emptyDir.
+const (
+	runtimePoolToolboxVolumeHeadroomBytes int64 = 64 << 20
+	runtimePoolToolboxBlockBytes          int64 = 4096
+	runtimePoolToolboxVolumeBytes               = toolbox.DefaultMaxTotalBytes + toolbox.DefaultMaxEntries*runtimePoolToolboxBlockBytes + runtimePoolToolboxVolumeHeadroomBytes
+	runtimePoolToolboxHandoffBytes        int64 = 64 << 20
+)
 
 var (
 	runtimePoolToolboxHandoffSizeLimit = resource.MustParse("64Mi")
-	runtimePoolToolboxVolumeSizeLimit  = resource.MustParse(strconv.FormatInt(toolbox.DefaultMaxTotalBytes+runtimePoolToolboxVolumeHeadroomBytes, 10))
+	runtimePoolToolboxVolumeSizeLimit  = resource.MustParse(strconv.FormatInt(runtimePoolToolboxVolumeBytes, 10))
 )
 
 func runtimePoolToolboxVolumeName(index int) string {
@@ -193,10 +200,13 @@ func applyRuntimePoolToolboxCopyTemplate(template *corev1.PodTemplateSpec, runti
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &handoffSize}},
 	})
 	template.Spec.InitContainers = append(template.Spec.InitContainers, corev1.Container{
-		Name:                     runtimePoolToolboxHandoffContainer,
-		Image:                    runtime.Image,
-		ImagePullPolicy:          corev1.PullIfNotPresent,
-		Command:                  []string{toolbox.SupervisorBinaryPath, toolbox.HandoffSubcommand, "--dst", runtimePoolToolboxHandoffMountPath},
+		Name:            runtimePoolToolboxHandoffContainer,
+		Image:           runtime.Image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		// Command and a non-empty Args together replace both the image's
+		// entrypoint and its CMD, so no image default can reach the binary.
+		Command:                  []string{toolbox.SupervisorBinaryPath},
+		Args:                     []string{toolbox.HandoffSubcommand, "--dst", runtimePoolToolboxHandoffMountPath},
 		WorkingDir:               "/",
 		SecurityContext:          runtimePoolToolboxInitSecurityContext(runtimePoolToolboxHandoffUID),
 		Resources:                runtimePoolToolboxInitResources(),
@@ -212,19 +222,23 @@ func applyRuntimePoolToolboxCopyTemplate(template *corev1.PodTemplateSpec, runti
 			Name:         volumeName,
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &volumeSize}},
 		})
-		command := []string{
-			runtimePoolToolboxHandoffMountPath + "/" + toolbox.HandoffBinaryName, toolbox.CopySubcommand,
+		args := []string{
+			toolbox.CopySubcommand,
 			"--src", toolboxes[i].MountPath,
 			"--dst", runtimePoolToolboxOutputMountPath,
 		}
 		if len(toolboxes[i].PathEntries) > 0 {
-			command = append(command, "--path-entries", strings.Join(toolboxes[i].PathEntries, ","))
+			args = append(args, "--path-entries", strings.Join(toolboxes[i].PathEntries, ","))
 		}
 		template.Spec.InitContainers = append(template.Spec.InitContainers, corev1.Container{
-			Name:                     runtimePoolToolboxCopyContainerName(i),
-			Image:                    toolboxes[i].Image,
-			ImagePullPolicy:          corev1.PullIfNotPresent,
-			Command:                  command,
+			Name:            runtimePoolToolboxCopyContainerName(i),
+			Image:           toolboxes[i].Image,
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			// The toolbox image's ENTRYPOINT and CMD are both replaced: Command
+			// names Orka's copier and the non-empty Args carry every option, so
+			// an image CMD such as ["--help"] can never reach the invocation.
+			Command:                  []string{runtimePoolToolboxHandoffMountPath + "/" + toolbox.HandoffBinaryName},
+			Args:                     args,
 			WorkingDir:               "/",
 			SecurityContext:          runtimePoolToolboxInitSecurityContext(runtimePoolToolboxCopyUID),
 			Resources:                runtimePoolToolboxInitResources(),
@@ -237,6 +251,24 @@ func applyRuntimePoolToolboxCopyTemplate(template *corev1.PodTemplateSpec, runti
 		runtime.VolumeMounts = append(runtime.VolumeMounts, corev1.VolumeMount{
 			Name: volumeName, MountPath: toolboxes[i].MountPath, SubPath: toolbox.OutputRootName, ReadOnly: true,
 		})
+	}
+	// Kubelet charges emptyDir usage against the Pod's summed container
+	// ephemeral-storage limit, so budget the copied toolboxes on top of the
+	// resource class defaults or the Pod is evicted while it fills them.
+	extra := runtimePoolToolboxHandoffBytes + int64(len(toolboxes))*runtimePoolToolboxVolumeBytes
+	addEphemeralStorage(&runtime.Resources, extra)
+}
+
+// addEphemeralStorage raises the container's ephemeral-storage request and
+// limit by bytes, leaving absent values absent.
+func addEphemeralStorage(resources *corev1.ResourceRequirements, bytes int64) {
+	for _, list := range []corev1.ResourceList{resources.Requests, resources.Limits} {
+		quantity, ok := list[corev1.ResourceEphemeralStorage]
+		if !ok {
+			continue
+		}
+		quantity.Add(*resource.NewQuantity(bytes, resource.BinarySI))
+		list[corev1.ResourceEphemeralStorage] = quantity
 	}
 }
 

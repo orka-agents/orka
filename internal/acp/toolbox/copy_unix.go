@@ -436,7 +436,10 @@ func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch st
 		}
 		for _, name := range names {
 			relative := path.Join(entry, name)
-			resolved, ok := resolveInsideTree(rootFd, mountPath, relative)
+			resolved, ok, err := resolveInsideTree(rootFd, mountPath, relative)
+			if err != nil {
+				return err
+			}
 			if !ok {
 				continue
 			}
@@ -462,29 +465,40 @@ func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch st
 }
 
 // resolveInsideTree follows symlink text relative to the toolbox tree. It
-// returns the relative path of a regular file, or ok=false when the entry is
-// not a regular file, escapes the tree, or cannot be inspected.
-func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool) {
+// returns the relative path of a regular file, ok=false when the entry is not
+// a regular file, escapes the tree, or cannot be inspected, and an error for
+// an in-tree chain longer than maxLinkHops.
+func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, error) {
 	current := relative
+	visited := map[string]struct{}{}
 	for hop := 0; hop <= maxLinkHops; hop++ {
+		if _, seen := visited[current]; seen {
+			// A symlink loop never reaches a file; Linux fails it with ELOOP,
+			// so there is nothing to check.
+			return "", false, nil
+		}
+		visited[current] = struct{}{}
 		st, err := lstatRelative(rootFd, current)
 		if err != nil {
-			return "", false
+			return "", false, nil
 		}
 		switch statMode(&st) & unix.S_IFMT {
 		case unix.S_IFREG:
-			return current, true
+			return current, true, nil
 		case unix.S_IFLNK:
 			next, ok := nextLinkHop(rootFd, mountPath, current)
 			if !ok {
-				return "", false
+				return "", false, nil
 			}
 			current = next
 		default:
-			return "", false
+			return "", false, nil
 		}
 	}
-	return "", false
+	// The chain is still inside the tree after the bound: Linux would keep
+	// following it (up to 40 links), so skipping it would let an unchecked
+	// tool through. Reject it as part of the toolbox contract instead.
+	return "", false, failf(ReasonUnsupportedFileType, "%s is a symlink chain longer than %d links", path.Join(mountPath, relative), maxLinkHops)
 }
 
 // nextLinkHop reads one symlink and maps its text back into the tree.

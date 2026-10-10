@@ -375,6 +375,28 @@ func TestCopyChecksArchitecture(t *testing.T) {
 			t.Fatalf("relative in-tree symlink: reason = %s, want %s", got, ReasonArchMismatch)
 		}
 	})
+	t.Run("in-tree symlink chains beyond the bound are rejected", func(t *testing.T) {
+		source, destination := newLayout(t)
+		mustWrite(t, filepath.Join(source, "libexec", "real"), elfFor(otherArch()), 0o755)
+		if err := os.Mkdir(filepath.Join(source, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		previous := "../libexec/real"
+		for i := range maxLinkHops + 1 {
+			name := filepath.Join(source, "libexec", "hop"+strconv.Itoa(i))
+			if err := os.Symlink(previous, name); err != nil {
+				t.Fatal(err)
+			}
+			previous = "../libexec/hop" + strconv.Itoa(i)
+		}
+		if err := os.Symlink(previous, filepath.Join(source, "bin", "tool")); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Copy(copyOptions(source, destination, "bin"))
+		if got := failureReason(t, err); got != ReasonUnsupportedFileType {
+			t.Fatalf("reason = %s, want %s", got, ReasonUnsupportedFileType)
+		}
+	})
 	t.Run("symlinks leaving the tree are skipped", func(t *testing.T) {
 		source, destination := newLayout(t)
 		if err := os.Mkdir(filepath.Join(source, "bin"), 0o755); err != nil {
