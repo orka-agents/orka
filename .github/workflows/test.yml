@@ -69,6 +69,7 @@ jobs:
           bash scripts/tests/aikit-e2e-test.sh
           bash scripts/tests/e2e-cleanup-test.sh
           bash .github/actions/docker-hub-mirror/configure_test.sh
+          make ensure-ui-embed
           go test -tags=e2e ./internal/api -run '^TestAIKitFullPromptProbeContract$' -race -count=1
           go test -tags=e2e ./test/e2e -run '^(TestPostLiveChatSSECancelsFailedSession|TestParseLiveChatSSEKeepsSessionIdentityOnFailure)$' -race -count=1
 
