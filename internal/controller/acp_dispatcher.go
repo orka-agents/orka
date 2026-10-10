@@ -5115,7 +5115,12 @@ func validateExternalRuntimeCapabilities(
 		observed.AdapterDigest != registered.Profile.AdapterDigest {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime adapter capability drifted after conformance")
 	}
-	if capabilities.Limits != limits || observedLimits != limits {
+	registeredLiveLimits := capabilities.Limits
+	// Native bundle policy is an additive negotiated capability, not a field
+	// in the AgentRuntime registration. The complete capability envelope is
+	// still frozen and revalidated before each mutation.
+	registeredLiveLimits.MaxNativeSessionBytes = limits.MaxNativeSessionBytes
+	if registeredLiveLimits != limits || observedLimits != limits {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime protocol limits drifted after conformance")
 	}
 	if capabilities.WorkspaceGovernance != governance || observedGovernance != governance || !governance.Strict() {
@@ -5143,7 +5148,7 @@ func validateExternalRuntimeCapabilities(
 	if profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite && !capabilities.SupportsPublicationFinalization {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime does not support controller-owned RuntimeSession publication finalization required for write workspaces")
 	}
-	return profile, limits, nil
+	return profile, capabilities.Limits, nil
 }
 
 func validateExternalRuntimeStatus(

@@ -329,6 +329,9 @@ type RuntimePoolReconciler struct {
 	// WorkspaceArtifactMaxBytes is the Publisher-advertised maximum inbound
 	// workspace artifact size propagated to every built-in runtime.
 	WorkspaceArtifactMaxBytes int64
+	// NativeSessionMaxBytes bounds encoded native session bundles in every built-in runtime.
+	// Zero selects the default 8 MiB policy.
+	NativeSessionMaxBytes int
 	// ProviderProxy is the authenticated, NetworkPolicy-confined provider boundary.
 	ProviderProxy RuntimePoolProviderProxyConfig
 	// ControllerEpoch is a test/static override. Production uses Epochs.
@@ -572,15 +575,16 @@ func (r *RuntimePoolReconciler) reconcileDeletingWorkspaceRuntimePool(
 }
 
 type runtimePoolConfig struct {
-	namespace           string
-	baseName            string
-	labels              map[string]string
-	controllerEpoch     int64
-	maxResidentSessions int32
-	maxRunningPrompts   int32
-	protocol            corev1alpha1.RuntimePoolProtocolVersion
-	profile             harnessv2.RuntimeProfile
-	providerProxy       runtimePoolProviderProxyConfig
+	namespace             string
+	baseName              string
+	labels                map[string]string
+	controllerEpoch       int64
+	maxResidentSessions   int32
+	maxRunningPrompts     int32
+	nativeSessionMaxBytes int
+	protocol              corev1alpha1.RuntimePoolProtocolVersion
+	profile               harnessv2.RuntimeProfile
+	providerProxy         runtimePoolProviderProxyConfig
 }
 
 type runtimePoolBootstrapInstanceBinding struct {
@@ -840,6 +844,10 @@ func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
 	pool *corev1alpha1.RuntimePool,
 	enforceApprovedImage bool,
 ) (runtimePoolConfig, error) {
+	nativeSessionMaxBytes, err := harnessv2.NormalizeNativeSessionMaxBytes(r.NativeSessionMaxBytes)
+	if err != nil {
+		return runtimePoolConfig{}, err
+	}
 	if err := validateRuntimePoolObject(pool); err != nil {
 		return runtimePoolConfig{}, err
 	}
@@ -892,7 +900,7 @@ func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
 	}
 	return runtimePoolConfig{
 		namespace: namespace, baseName: baseName, labels: labels, controllerEpoch: epoch,
-		maxResidentSessions: maxSessions, maxRunningPrompts: maxPrompts, protocol: protocol, profile: profile,
+		maxResidentSessions: maxSessions, maxRunningPrompts: maxPrompts, nativeSessionMaxBytes: nativeSessionMaxBytes, protocol: protocol, profile: profile,
 		providerProxy: providerProxy,
 	}, nil
 }
@@ -2587,13 +2595,6 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 	zero := int64(0)
 	mode := int32(0o400)
 	terminationGrace := int64(120)
-	adapterDigestsJSON, _ := json.Marshal(cfg.profile.AdapterDigests)
-	modelContextLimit := ""
-	modelOutputLimit := ""
-	if cfg.profile.ModelLimits != nil {
-		modelContextLimit = strconv.FormatInt(cfg.profile.ModelLimits.Context, 10)
-		modelOutputLimit = strconv.FormatInt(cfg.profile.ModelLimits.Output, 10)
-	}
 	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
 		Spec: corev1.PodSpec{
@@ -2611,41 +2612,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 				Image:           pool.Spec.Runtime.Image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Ports:           []corev1.ContainerPort{{Name: "control", ContainerPort: runtimePoolPort, Protocol: corev1.ProtocolTCP}},
-				Env: []corev1.EnvVar{
-					{Name: "ORKA_ACP_LISTEN_ADDRESS", Value: ":8080"},
-					{Name: "ORKA_ACP_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
-					{Name: "ORKA_ACP_POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-					{Name: "ORKA_ACP_POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
-					{Name: "ORKA_ACP_CONTROLLER_EPOCH", Value: strconv.FormatInt(cfg.controllerEpoch, 10)},
-					{Name: "ORKA_ACP_RUNTIME_POOL_UID", Value: string(pool.UID)},
-					{Name: "ORKA_ACP_RUNTIME_POOL_GENERATION", Value: strconv.FormatInt(pool.Generation, 10)},
-					{Name: "ORKA_ACP_RUNTIME_PROFILE_DIGEST", Value: pool.Spec.Runtime.Profile.Digest},
-					{Name: "ORKA_ACP_PROFILE_DIGEST_SCHEMA_VERSION", Value: pool.Spec.Runtime.Profile.DigestSchemaVersion},
-					{Name: "ORKA_ACP_ACP_PROFILE", Value: cfg.profile.ACPProfile},
-					{Name: "ORKA_ACP_ADAPTER_DIGESTS_JSON", Value: string(adapterDigestsJSON)},
-					{Name: "ORKA_ACP_PROVIDER", Value: cfg.profile.ProviderKind},
-					{Name: "ORKA_ACP_PROVIDER_PROXY_BASE_URL", Value: cfg.providerProxy.baseURL},
-					{Name: "ORKA_ACP_MODEL", Value: cfg.profile.Model},
-					{Name: "ORKA_ACP_MODEL_CONTEXT_LIMIT", Value: modelContextLimit},
-					{Name: "ORKA_ACP_MODEL_OUTPUT_LIMIT", Value: modelOutputLimit},
-					{Name: "ORKA_ACP_WORKSPACE_INTENT", Value: string(cfg.profile.WorkspaceIntent)},
-					{Name: "ORKA_ACP_AGENT_CONFIGURATION_DIGEST", Value: cfg.profile.AgentConfigurationDigest},
-					{Name: "ORKA_ACP_TOOL_POLICY_DIGEST", Value: cfg.profile.ToolPolicyDigest},
-					{Name: "ORKA_ACP_APPROVAL_POLICY_DIGEST", Value: cfg.profile.ApprovalPolicyDigest},
-					{Name: "ORKA_ACP_MCP_CONFIGURATION_DIGEST", Value: cfg.profile.MCPConfigurationDigest},
-					{Name: "ORKA_ACP_PROXY_CREDENTIAL_ROLE", Value: cfg.profile.ProxyCredentialRole},
-					{Name: "ORKA_ACP_PROXY_CREDENTIAL_SCOPE", Value: cfg.profile.ProxyCredentialScope},
-					{Name: "ORKA_ACP_RESOURCE_CLASS", Value: cfg.profile.ResourceClass},
-					{Name: runtimePoolControllerTokenFileEnv, Value: runtimePoolControllerTokenPath},
-					{Name: runtimePoolCapabilitySecretFileEnv, Value: runtimePoolCapabilitySecretPath},
-					{Name: runtimePoolProviderTokenFileEnv, Value: runtimePoolProviderTokenPath},
-					{Name: "ORKA_ACP_PROVIDER_TOKEN_GENERATION", Value: cfg.providerProxy.tokenGeneration},
-					{Name: "ORKA_ACP_ARTIFACT_API_URL", Value: strings.TrimRight(r.ControllerAPIURL, "/")},
-					{Name: "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES", Value: strconv.FormatInt(r.WorkspaceArtifactMaxBytes, 10)},
-					{Name: "ORKA_ACP_MCP_BROKER_URL", Value: strings.TrimRight(r.ControllerAPIURL, "/")},
-					{Name: "ORKA_ACP_TRUST_NAMESPACE", Value: pool.Spec.TrustDomain.Namespace},
-					{Name: "ORKA_ACP_SESSION_BASE_DIR", Value: "/sessions"},
-				},
+				Env:             r.runtimePoolEnvironment(pool, cfg),
 				SecurityContext: &corev1.SecurityContext{
 					RunAsUser:                &zero,
 					RunAsGroup:               &zero,

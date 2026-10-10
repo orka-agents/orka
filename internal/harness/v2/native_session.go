@@ -10,9 +10,35 @@ import (
 	"github.com/google/uuid"
 )
 
-// MaxNativeSessionBytes bounds the encoded SessionKit bundle transported by
-// the controller. Native provider storage may be larger than this bundle.
-const MaxNativeSessionBytes = 512 << 10
+// NativeSessionLimitsHeader opts into the additive capability limit. Older
+// clients strictly decode capabilities and must not receive unknown fields.
+const NativeSessionLimitsHeader = "X-Orka-Native-Session-Limits"
+
+const (
+	// DefaultMaxNativeSessionBytes is the default encoded bundle policy.
+	DefaultMaxNativeSessionBytes = 8 << 20
+	// MaxNativeSessionBytes is the absolute supported encoded bundle ceiling.
+	MaxNativeSessionBytes = 64 << 20
+	// LegacyMaxNativeSessionBytes applies when an older runtime advertises no cap.
+	LegacyMaxNativeSessionBytes = 512 << 10
+)
+
+// NormalizeNativeSessionMaxBytes resolves an omitted policy and rejects unsafe limits.
+func NormalizeNativeSessionMaxBytes(limit int) (int, error) {
+	if limit == 0 {
+		return DefaultMaxNativeSessionBytes, nil
+	}
+	if limit < 1 || limit > MaxNativeSessionBytes {
+		return 0, fmt.Errorf("native session max bytes must be in range 1..%d", MaxNativeSessionBytes)
+	}
+	return limit, nil
+}
+
+// NativeSessionJSONLimit allows base64 bundle encoding plus bounded control metadata.
+// This exemption is only for native restore and capture, not ordinary control JSON.
+func NativeSessionJSONLimit(limit int) int {
+	return 2*limit + MaxCanonicalJSONBytes
+}
 
 // NativeSessionSnapshot contains private provider conversation state. It must
 // never be included in Task status, events, or diagnostic logging.

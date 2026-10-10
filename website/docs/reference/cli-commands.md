@@ -4113,7 +4113,8 @@ Available Commands:
   import      Stage a stopped local Codex thread for its first Orka Task
 
 Flags:
-  -h, --help   help for migrate
+  -h, --help                   help for migrate
+      --max-bundle-bytes int   Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4143,6 +4144,7 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
+      --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
@@ -4167,6 +4169,7 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
+      --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication

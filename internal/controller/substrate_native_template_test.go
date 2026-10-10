@@ -73,6 +73,12 @@ func TestNativeSubstrateDataTemplateUsesStableWorkspaceKey(t *testing.T) {
 	if _, present := env[substrateNativePodNamespaceEnv]; present {
 		t.Fatal("unused Kubernetes Pod namespace consumed a native environment slot")
 	}
+	if _, present := env[substrateNativePodNameEnv]; present {
+		t.Fatal("unused Kubernetes Pod name consumed a native environment slot")
+	}
+	if env["ORKA_NATIVE_SESSION_MAX_BYTES"] != "8388608" {
+		t.Fatal("native size policy was not retained within the upstream environment-entry limit")
+	}
 }
 
 func TestNativeSubstrateCompilerPreservesSupervisorContract(t *testing.T) {

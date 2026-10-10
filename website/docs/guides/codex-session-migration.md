@@ -15,7 +15,8 @@ in the source and return homes too. This selects Codex's non-reasoning mode; it
 does not bypass capture validation. A rollout with encrypted reasoning is still
 rejected, even if the configured effort is `none`.
 
-Orka transports at most 512 KiB of encoded bundle data. This is a consumer
+Orka defaults to 8 MiB of encoded bundle data, configurable up to 64 MiB.
+This is a consumer
 transport limit, separate from SessionKit's native storage limits. A bundle
 contains the verified manifest and rollout. Authentication files, native SQLite
 databases, provider configuration, and process memory are excluded.
@@ -60,20 +61,41 @@ migration support for reasoning-enabled Codex sessions.
 
 ### Bundle size
 
-The 512 KiB limit is 524,288 bytes for the complete Orka bundle, not that many
-bytes of raw transcript or a model token limit. The JSON bundle base64-encodes
-both the rollout and manifest, leaving approximately 384 KiB for their combined
-raw bytes, slightly less after JSON overhead. The HTTP envelope adds another
-encoding layer; that envelope has a separate bound and does not reduce the
-advertised bundle cap.
+The default limit is 8 MiB, or 8,388,608 bytes, for the complete encoded bundle.
+Operators can select a limit from 1 byte through the 64 MiB hard ceiling with
+`--native-session-max-bytes` or `ORKA_NATIVE_SESSION_MAX_BYTES` on the
+controller. The controller propagates that policy to built-in runtime pools,
+including workspace-backed pools. Independent runtimes must set the same
+environment variable; their advertised capability limit is also enforced.
+Changing the built-in runtime policy uses the existing pool replacement and
+drain path.
+
+The local CLI has a separate matching limit. Use
+`orka session migrate --max-bundle-bytes 16777216 import ...` or the same flag
+with `export` for a 16 MiB bundle. `ORKA_NATIVE_SESSION_MAX_BYTES` supplies the
+CLI default when the flag is omitted. Raising only the local CLI limit cannot
+raise the cluster limit. New clients request the additive native-size capability
+with `X-Orka-Native-Session-Limits: 1`; older clients receive the original capability
+shape without the new field. An older runtime that does not advertise its limit
+retains the previous 512 KiB bound and rejects larger native restores before
+request delivery. Capture requests use the same opt-in header; older callers
+retain the 512 KiB capture limit and its structured rejection behavior.
+
+This is a byte limit, not a model token limit. The JSON bundle base64-encodes
+both the rollout and manifest, leaving approximately 6 MiB of combined raw
+bytes under the 8 MiB default, slightly less after JSON overhead. The HTTP
+envelope adds another encoding layer with its own bounded allowance. Ordinary
+API, prompt, and ACP message limits are unchanged.
 
 The cap applies to import and every runtime checkpoint, including growth after
 continuation. It counts the full saved rollout, including tool outputs and
 historical records retained after compaction. Orka does not compress or truncate
 the bundle. Oversized native data is rejected; an established native-continuity
-Session does not silently fall back to transcript-only continuation. This is an
-Orka transport restriction, not SessionKit's native storage limit, and can
-exclude long or tool-heavy coding sessions.
+Session does not silently fall back to transcript-only continuation. Lowering
+the policy preserves stored checkpoints but can block export, restore, or new
+capture until the limit is raised again. This is an Orka transport restriction,
+not SessionKit's native storage limit. Larger limits increase memory, temporary
+storage, and encrypted database usage; choose them for the expected workload.
 
 ## Import a local thread
 

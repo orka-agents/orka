@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -15,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-const maxNativeSessionBundleBytes = harnessv2.MaxNativeSessionBytes
+const maxNativeSessionBundleBytes = harnessv2.DefaultMaxNativeSessionBytes
 
 // isNativeSessionImportPath identifies only the bounded native import route.
 func isNativeSessionImportPath(path string) bool {
@@ -52,20 +53,23 @@ func (h *Handlers) ImportNativeSession(c fiber.Ctx) error {
 	if err := h.authorizeCoreResourceAction(c, "get", "sessions", namespace, name); err != nil {
 		return err
 	}
+	if h.nativeSessionConfigErr != nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "native session size policy is invalid")
+	}
 	if h.nativeSessionStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "native session migration is unavailable")
 	}
 	if len(validation.IsDNS1123Subdomain(name)) != 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "session name must be a DNS subdomain")
 	}
-	const maxRequestBytes = 2 * maxNativeSessionBundleBytes
+	maxRequestBytes := harnessv2.NativeSessionJSONLimit(h.nativeSessionMaxBytes)
 	if c.Request().Header.ContentLength() > maxRequestBytes {
 		c.RequestCtx().SetConnectionClose()
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "native session request is too large")
 	}
 	var body []byte
 	if stream := c.Request().BodyStream(); stream != nil {
-		body, err = io.ReadAll(io.LimitReader(stream, maxRequestBytes+1))
+		body, err = io.ReadAll(io.LimitReader(stream, int64(maxRequestBytes)+1))
 		if err != nil {
 			c.RequestCtx().SetConnectionClose()
 			return fiber.NewError(fiber.StatusBadRequest, "invalid native session request")
@@ -89,10 +93,10 @@ func (h *Handlers) ImportNativeSession(c fiber.Ctx) error {
 	if err := store.ValidateControlIdentifier("native operation ID", request.OperationID); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "valid operationID is required")
 	}
-	if len(request.Data) == 0 || len(request.Data) > maxNativeSessionBundleBytes {
-		return fiber.NewError(fiber.StatusBadRequest, "native session bundle must contain 1 through 524288 bytes")
+	if len(request.Data) == 0 || len(request.Data) > h.nativeSessionMaxBytes {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("native session bundle must contain 1 through %d bytes", h.nativeSessionMaxBytes))
 	}
-	summary, err := codexstate.Inspect(c.Context(), request.Data)
+	summary, err := codexstate.Inspect(c.Context(), request.Data, h.nativeSessionMaxBytes)
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid native session bundle")
 	}
@@ -124,6 +128,9 @@ func (h *Handlers) ExportNativeSession(c fiber.Ctx) error {
 	if err := h.authorizeCoreResourceAction(c, "get", "sessions", namespace, name); err != nil {
 		return err
 	}
+	if h.nativeSessionConfigErr != nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "native session size policy is invalid")
+	}
 	if h.nativeSessionStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "native session migration is unavailable")
 	}
@@ -140,6 +147,9 @@ func (h *Handlers) ExportNativeSession(c fiber.Ctx) error {
 	record, err := h.nativeSessionStore.GetNativeSession(c.Context(), namespace, name, uid)
 	if err != nil {
 		return nativeSessionAPIError(err)
+	}
+	if len(record.Snapshot.Data) > h.nativeSessionMaxBytes {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("native session bundle exceeds configured export limit of %d bytes", h.nativeSessionMaxBytes))
 	}
 	return c.JSON(nativeSessionExportResponse{
 		Data: record.Snapshot.Data, DataDigest: record.Snapshot.DataDigest, ProviderSessionID: record.Snapshot.ProviderSessionID,

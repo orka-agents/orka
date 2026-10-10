@@ -17,8 +17,19 @@ import (
 
 var _ store.NativeSessionImportStore = (*Store)(nil)
 
-// maxNativeSessionBytes is the single transport cap shared with the API and runtime.
+// maxNativeSessionBytes is the absolute ceiling for authenticated stored state.
 const maxNativeSessionBytes = harnessv2.MaxNativeSessionBytes
+
+// SetNativeSessionMaxBytes configures the new-bundle policy before serving requests.
+// Lowering it does not make existing authenticated checkpoints unreadable.
+func (s *Store) SetNativeSessionMaxBytes(limit int) error {
+	normalized, err := harnessv2.NormalizeNativeSessionMaxBytes(limit)
+	if err != nil {
+		return err
+	}
+	s.nativeSessionMaxBytes = normalized
+	return nil
+}
 
 func nativeSessionAAD(namespace, name, uid, digest string) []byte {
 	return fmt.Appendf(nil, "orka.native-session.v1\x00%s\x00%s\x00%s\x00%s", namespace, name, uid, digest)
@@ -26,8 +37,9 @@ func nativeSessionAAD(namespace, name, uid, digest string) []byte {
 
 // validateNativeRecord checks a record's shape. inspect additionally parses the
 // bundle, which writes require; authenticated reads already proved the bytes
-// are the ones inspected when they were written.
-func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord, staged, inspect bool) error {
+// are the ones inspected when they were written. Their limit is the absolute
+// ceiling, while new captures and imports use the configured write policy.
+func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord, staged, inspect bool, maxBytes int) error {
 	for field, value := range map[string]string{sessionControlFieldNamespace: record.Namespace, sessionControlFieldName: record.SessionName, "native operation ID": record.SourceOperationID} {
 		if err := store.ValidateControlIdentifier(field, value); err != nil {
 			return err
@@ -54,13 +66,13 @@ func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord,
 	if record.MessageCount < 0 || (record.MessageCount == 0) != (record.ThroughMessageID == "") {
 		return store.ValidationErrorf("native snapshot transcript boundary is incomplete")
 	}
-	if len(record.Snapshot.Data) == 0 || len(record.Snapshot.Data) > maxNativeSessionBytes {
-		return store.ValidationErrorf("native session bundle must contain 1 through %d bytes", maxNativeSessionBytes)
+	if len(record.Snapshot.Data) == 0 || len(record.Snapshot.Data) > maxBytes {
+		return store.ValidationErrorf("native session bundle must contain 1 through %d bytes", maxBytes)
 	}
 	if !inspect {
 		return nil
 	}
-	summary, err := codexstate.Inspect(ctx, record.Snapshot.Data)
+	summary, err := codexstate.Inspect(ctx, record.Snapshot.Data, maxBytes)
 	if err != nil {
 		return store.ValidationErrorf("invalid native session bundle")
 	}
@@ -123,7 +135,7 @@ func (s *Store) readNativeRecordTx(ctx context.Context, tx *sql.Tx, namespace, n
 	if record.Namespace != namespace || record.SessionName != name || record.SessionUID != uid || record.Snapshot.DataDigest != dataDigest || record.SourceOperationID != operationID || record.RuntimeSessionGeneration != generation || record.MessageCount != count || record.ThroughMessageID != throughID {
 		return nil, fmt.Errorf("native session metadata integrity failed")
 	}
-	if err = validateNativeRecord(ctx, record, uid == "", false); err != nil {
+	if err = validateNativeRecord(ctx, record, uid == "", false, maxNativeSessionBytes); err != nil {
 		return nil, err
 	}
 	return &record, nil
@@ -217,7 +229,7 @@ func (s *Store) saveNativeSessionTx(ctx context.Context, tx *sql.Tx, record stor
 	if s.snapshotCipher == nil {
 		return errSnapshotCipherRequired
 	}
-	if err := validateNativeRecord(ctx, record, false, true); err != nil {
+	if err := validateNativeRecord(ctx, record, false, true, s.nativeSessionMaxBytes); err != nil {
 		return err
 	}
 	canonical := record
@@ -358,7 +370,7 @@ func (s *Store) StageNativeSessionImport(ctx context.Context, request store.Nati
 		return nil, errSnapshotCipherRequired
 	}
 	record := store.NativeSessionRecord{Namespace: request.Namespace, SessionName: request.SessionName, Snapshot: request.Snapshot, SourceOperationID: request.OperationID}
-	if err := validateNativeRecord(ctx, record, true, true); err != nil {
+	if err := validateNativeRecord(ctx, record, true, true, s.nativeSessionMaxBytes); err != nil {
 		return nil, err
 	}
 	if err := store.ValidateCanonicalDigest("native import request digest", request.RequestDigest); err != nil {

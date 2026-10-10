@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+
 	"github.com/gofiber/fiber/v3"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/storetest"
@@ -69,7 +71,7 @@ func TestNativeSessionProductionServerChunkedImport(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })
 	require.NoError(t, connection.SetDeadline(time.Now().Add(5*time.Second)))
-	const oversized = 2*maxNativeSessionBundleBytes + 1
+	oversized := harnessv2.NativeSessionJSONLimit(maxNativeSessionBundleBytes) + 1
 	_, err = fmt.Fprintf(connection, "POST /api/v1/sessions/chunked-too-large/native HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n", token, 2*oversized)
 	require.NoError(t, err)
 	_, err = connection.Write(bytes.Repeat([]byte{' '}, oversized))
@@ -101,7 +103,7 @@ func TestNativeSessionImportRequestConfig(t *testing.T) {
 		header.SetMethod(http.MethodPost)
 		header.SetRequestURI(target)
 		config := requestBodyConfig(header)
-		require.Equal(t, 2*maxNativeSessionBundleBytes, config.MaxRequestBodySize, target)
+		require.Equal(t, harnessv2.NativeSessionJSONLimit(maxNativeSessionBundleBytes), config.MaxRequestBodySize, target)
 		require.Equal(t, 30*time.Second, config.ReadTimeout, target)
 		header.SetMethod(http.MethodGet)
 		config = requestBodyConfig(header)

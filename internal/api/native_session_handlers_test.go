@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+
 	"github.com/gofiber/fiber/v3"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -260,7 +262,7 @@ func (r *nativeSessionCountingReader) Read(data []byte) (int, error) {
 }
 
 func TestNativeSessionMigrationAPIBoundsStreamedRequests(t *testing.T) {
-	const limit = 2 * maxNativeSessionBundleBytes
+	limit := harnessv2.NativeSessionJSONLimit(maxNativeSessionBundleBytes)
 	for _, chunked := range []bool{false, true} {
 		name := "content-length"
 		if chunked {
@@ -331,7 +333,7 @@ func TestNativeSessionMigrationAPIRejectsUnfinishedOversizedChunk(t *testing.T) 
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })
 	require.NoError(t, connection.SetDeadline(time.Now().Add(5*time.Second)))
-	const oversized = 2*maxNativeSessionBundleBytes + 1
+	oversized := harnessv2.NativeSessionJSONLimit(maxNativeSessionBundleBytes) + 1
 	_, err = fmt.Fprintf(connection, "POST /sessions/oversized/native HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n", 2*oversized)
 	require.NoError(t, err)
 	_, err = connection.Write(bytes.Repeat([]byte{' '}, oversized))

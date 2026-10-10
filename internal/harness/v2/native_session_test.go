@@ -35,10 +35,6 @@ func TestNativeRestoreRequiresCurrentFenceAndExcludesBootstrap(t *testing.T) {
 		func(r *CreateRuntimeSessionRequest) {
 			r.NativeRestore.Snapshot.ProviderSessionID = "provider-opaque-id"
 		},
-		func(r *CreateRuntimeSessionRequest) {
-			r.NativeRestore.Snapshot.Data = make([]byte, MaxNativeSessionBytes+1)
-			r.NativeRestore.Snapshot.DataDigest = testSHA256(string(r.NativeRestore.Snapshot.Data))
-		},
 		func(r *CreateRuntimeSessionRequest) { r.Bootstrap = &SessionBootstrap{} },
 	} {
 		changed := request
@@ -49,6 +45,16 @@ func TestNativeRestoreRequiresCurrentFenceAndExcludesBootstrap(t *testing.T) {
 		if err := changed.ValidateAt(testNow); err == nil {
 			t.Fatal("unsafe native restore validated")
 		}
+	}
+	oversized := testNativeSnapshot(request.Metadata.Fence)
+	oversized.Data = make([]byte, MaxNativeSessionBytes+1)
+	if err := oversized.Validate(); err == nil {
+		t.Fatal("oversized native restore validated")
+	}
+	oversizedRequest := request
+	oversizedRequest.NativeRestore = &NativeSessionRestore{Snapshot: oversized}
+	if _, err := CanonicalRequestDigest(oversizedRequest); err == nil {
+		t.Fatal("oversized native restore digest accepted")
 	}
 	changed := request
 	restore := *request.NativeRestore

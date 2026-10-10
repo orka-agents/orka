@@ -66,6 +66,7 @@ type ProtocolLimits struct {
 	MaxResidentSessions      uint32 `json:"maxResidentSessions"`
 	MaxConcurrentPrompts     uint32 `json:"maxConcurrentPrompts"`
 	MaxRequestBytes          int    `json:"maxRequestBytes"`
+	MaxNativeSessionBytes    int    `json:"maxNativeSessionBytes,omitempty"`
 	MaxEventLineBytes        int    `json:"maxEventLineBytes"`
 	MaxTerminalResultBytes   int    `json:"maxTerminalResultBytes"`
 	MaxBufferedEvents        int    `json:"maxBufferedEvents"`
@@ -82,6 +83,7 @@ func DefaultProtocolLimits() ProtocolLimits {
 		MaxResidentSessions:      DefaultMaxResidentSessions,
 		MaxConcurrentPrompts:     DefaultMaxConcurrentPrompts,
 		MaxRequestBytes:          1 << 20,
+		MaxNativeSessionBytes:    DefaultMaxNativeSessionBytes,
 		MaxEventLineBytes:        stream.MaxLineBytes,
 		MaxTerminalResultBytes:   stream.MaxTerminalResultBytes,
 		MaxBufferedEvents:        stream.MaxBufferedEvents,
@@ -93,7 +95,19 @@ func DefaultProtocolLimits() ProtocolLimits {
 	}
 }
 
+// EffectiveMaxNativeSessionBytes preserves the old 512 KiB contract for runtimes
+// that predate the explicit native-session capability limit.
+func (l ProtocolLimits) EffectiveMaxNativeSessionBytes() int {
+	if l.MaxNativeSessionBytes == 0 {
+		return LegacyMaxNativeSessionBytes
+	}
+	return l.MaxNativeSessionBytes
+}
+
 func (l ProtocolLimits) Validate() error {
+	if _, err := NormalizeNativeSessionMaxBytes(l.MaxNativeSessionBytes); err != nil {
+		return err
+	}
 	if l.MaxResidentSessions == 0 {
 		return fmt.Errorf("max resident sessions must be positive")
 	}

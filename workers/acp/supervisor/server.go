@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -387,6 +388,11 @@ func New(cfg Config) (*Server, error) {
 }
 
 func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) (io.Closer, error)) (*Server, error) {
+	nativeSessionMaxBytes, err := harnessv2.NormalizeNativeSessionMaxBytes(cfg.Capabilities.Limits.MaxNativeSessionBytes)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Capabilities.Limits.MaxNativeSessionBytes = nativeSessionMaxBytes
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -498,8 +504,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, harnessv2.HealthResponse{Protocol: harnessv2.ProtocolVersion, Status: status, Timestamp: time.Now().UTC()})
 }
 
-func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.cfg.Capabilities)
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	capabilities := s.cfg.Capabilities
+	if r.Header.Get(harnessv2.NativeSessionLimitsHeader) != "1" {
+		// Preserve strict old-client decoding during controller/runtime upgrades.
+		capabilities.Limits.MaxNativeSessionBytes = 0
+	}
+	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader)
+	writeJSON(w, http.StatusOK, capabilities)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -737,7 +749,7 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 //nolint:gocyclo // Session admission keeps authentication, request validation, and replay handling together.
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.CreateRuntimeSessionRequest
-	if !s.decodeAuthenticatedJSON(w, r, &request) {
+	if !s.decodeAuthenticatedCreateJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -946,6 +958,9 @@ func (s *Server) createSession(
 	resultBaseline *workspacedelta.Snapshot, resultProviderProxy *providerProxySession, resultMCPProxy *mcpProxySession,
 	resultDiagnosticFilter *AgentDiagnosticFilter, resultErr error,
 ) {
+	if err := s.validateNativeRestoreSize(request); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session size", err)
+	}
 	pathID := sessionPathID(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
 	paths, err := acp.PrepareSessionPaths(s.cfg.SessionBaseDir, pathID)
 	if err != nil {
@@ -1197,7 +1212,7 @@ func (s *Server) createSession(
 		if !s.cfg.Capabilities.SupportsNativeSessions || s.cfg.Provider.Kind != providerKindCodex || snapshot.ProviderVersion != acp.CodexCLIVersion {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session compatibility", fmt.Errorf("native session requires the pinned Codex provider"))
 		}
-		summary, inspectErr := codexstate.Inspect(ctx, snapshot.Data)
+		summary, inspectErr := codexstate.Inspect(ctx, snapshot.Data, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes())
 		if inspectErr != nil || summary.ThreadID != snapshot.ProviderSessionID || summary.DataDigest != snapshot.DataDigest {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session validation", fmt.Errorf("native bundle does not match restore metadata"))
 		}
@@ -1207,7 +1222,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session journal inspection", journalErr)
 		}
 		ownsNativeJournal = errors.Is(journalErr, os.ErrNotExist)
-		if _, installErr := codexstate.Install(ctx, snapshot.Data, filepath.Join(paths.Home, ".codex"), paths.Workspace, nativeJournalDir); installErr != nil {
+		if _, installErr := codexstate.Install(ctx, snapshot.Data, filepath.Join(paths.Home, ".codex"), paths.Workspace, nativeJournalDir, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes()); installErr != nil {
 			if isNativeInstallUnknown(installErr) {
 				cleanup = false
 				return nil, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
@@ -1377,6 +1392,53 @@ func (s *Server) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	return decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, target)
+}
+
+// Only the native bundle data receives the larger create-request allowance.
+// Whitespace, escaped padding, and all other fields still consume the ordinary
+// request budget, even when a native restore is present.
+func (s *Server) decodeAuthenticatedCreateJSON(w http.ResponseWriter, r *http.Request, target *harnessv2.CreateRuntimeSessionRequest) bool {
+	if !s.authorizeController(w, r) {
+		return false
+	}
+	limits := s.cfg.Capabilities.Limits
+	body := &createRequestBodyCounter{ReadCloser: r.Body}
+	r.Body = body
+	if !decodeJSON(w, r, harnessv2.NativeSessionJSONLimit(limits.EffectiveMaxNativeSessionBytes()), target) {
+		return false
+	}
+	if err := s.validateNativeRestoreSize(*target); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return false
+	}
+	ordinaryBytes := body.bytesRead
+	if target.NativeRestore != nil {
+		ordinaryBytes -= base64.StdEncoding.EncodedLen(len(target.NativeRestore.Snapshot.Data)) + 2
+	}
+	if ordinaryBytes > limits.MaxRequestBytes {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "non-native create request exceeds the ordinary request limit", nil, false)
+		return false
+	}
+	return true
+}
+
+func (s *Server) validateNativeRestoreSize(request harnessv2.CreateRuntimeSessionRequest) error {
+	limit := s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes()
+	if request.NativeRestore != nil && len(request.NativeRestore.Snapshot.Data) > limit {
+		return fmt.Errorf("native session data exceeds configured maximum of %d bytes", limit)
+	}
+	return nil
+}
+
+type createRequestBodyCounter struct {
+	io.ReadCloser
+	bytesRead int
+}
+
+func (b *createRequestBodyCounter) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.bytesRead += n
+	return n, err
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int, target any) bool {

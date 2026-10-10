@@ -55,6 +55,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
+	limit := s.nativeCaptureLimit(r)
 	now := time.Now().UTC()
 	if err := request.ValidateAt(now); err != nil {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
@@ -96,7 +97,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if request.OriginalOperationID != "" {
-		s.reconcileNativeCaptureLocked(w, state, request, classification, now)
+		s.reconcileNativeCaptureLocked(w, state, request, classification, now, limit)
 		return
 	}
 	retryReady := canRetryNativeCapture(state, classification)
@@ -111,7 +112,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		s.mu.Unlock()
 		select {
 		case <-done:
-			s.writeNativeCapture(w, capture, harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied})
+			s.writeNativeCapture(w, capture, harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied}, limit)
 		case <-r.Context().Done():
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, "native capture is in progress", nil, true)
 		}
@@ -152,7 +153,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 	// ambiguous half-capture. The result remains private until explicit delete.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)*2+15*time.Second)
 	defer cancel()
-	snapshot, captureErr := s.captureNativeSession(ctx, state)
+	snapshot, captureErr := s.captureNativeSession(ctx, state, limit)
 	s.mu.Lock()
 	capture.snapshot = snapshot
 	capture.descriptor = state.descriptor
@@ -171,11 +172,11 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", time.Now().UTC())
 	close(capture.done)
 	s.mu.Unlock()
-	s.writeNativeCapture(w, capture, harnessv2.Classification{Class: harnessv2.RequestClassificationFresh})
+	s.writeNativeCapture(w, capture, harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, limit)
 }
 
 // The caller transfers the held mutex; every reply path releases it first.
-func (s *Server) reconcileNativeCaptureLocked(w http.ResponseWriter, state *sessionState, request harnessv2.CaptureNativeSessionRequest, classification harnessv2.Classification, now time.Time) {
+func (s *Server) reconcileNativeCaptureLocked(w http.ResponseWriter, state *sessionState, request harnessv2.CaptureNativeSessionRequest, classification harnessv2.Classification, now time.Time, limit int) {
 	capture := nativeCaptureReceiptLocked(state, request.OriginalOperationID)
 	if capture == nil {
 		// The fence already proved this is the same supervisor boot. Captures are
@@ -205,7 +206,7 @@ func (s *Server) reconcileNativeCaptureLocked(w http.ResponseWriter, state *sess
 		recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	}
 	s.mu.Unlock()
-	s.writeNativeCapture(w, capture, classification)
+	s.writeNativeCapture(w, capture, classification, limit)
 }
 
 func canRetryNativeCapture(state *sessionState, classification harnessv2.Classification) bool {
@@ -312,7 +313,18 @@ func (s *Server) removeSessionPrivateFiles(state *sessionState) error {
 	return nil
 }
 
-func (s *Server) captureNativeSession(ctx context.Context, state *sessionState) (harnessv2.NativeSessionSnapshot, error) {
+// nativeCaptureLimit preserves the old caller's entire capture contract, not
+// merely the capabilities response shape. A replay may have a stricter reader
+// limit than its original operation; it must not alter that immutable receipt.
+func (s *Server) nativeCaptureLimit(r *http.Request) int {
+	limit := s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes()
+	if r.Header.Get(harnessv2.NativeSessionLimitsHeader) != "1" {
+		limit = min(limit, harnessv2.LegacyMaxNativeSessionBytes)
+	}
+	return limit
+}
+
+func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, limit int) (harnessv2.NativeSessionSnapshot, error) {
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}
@@ -329,14 +341,14 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState) 
 	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native capture could not reclaim stopped session ownership"}
 	}
-	data, err := codexstate.Capture(ctx, filepath.Join(state.paths.Home, ".codex"), state.descriptor.ProviderSessionID)
+	data, err := codexstate.Capture(ctx, filepath.Join(state.paths.Home, ".codex"), state.descriptor.ProviderSessionID, limit)
 	if err != nil {
 		if errors.Is(err, codexstate.ErrUnsupported) {
 			return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
 		}
 		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native Codex session capture failed; private home retained"}
 	}
-	summary, err := codexstate.Inspect(ctx, data)
+	summary, err := codexstate.Inspect(ctx, data, limit)
 	if err != nil || summary.ThreadID != state.descriptor.ProviderSessionID {
 		if errors.Is(err, codexstate.ErrUnsupported) {
 			return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
@@ -392,7 +404,7 @@ func persistNativeSnapshot(root string, body []byte) error {
 	return dir.Sync()
 }
 
-func (s *Server) writeNativeCapture(w http.ResponseWriter, capture *nativeSessionCapture, classification harnessv2.Classification) {
+func (s *Server) writeNativeCapture(w http.ResponseWriter, capture *nativeSessionCapture, classification harnessv2.Classification, limit int) {
 	s.mu.Lock()
 	failure, code, snapshot, descriptor, retryable := capture.failure, capture.failureCode, capture.snapshot, capture.descriptor, capture.retryable
 	s.mu.Unlock()
@@ -402,6 +414,10 @@ func (s *Server) writeNativeCapture(w http.ResponseWriter, capture *nativeSessio
 			status = http.StatusUnprocessableEntity
 		}
 		writeError(w, status, code, failure, nil, retryable)
+		return
+	}
+	if len(snapshot.Data) > limit {
+		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeNativeCaptureUnsupported, (&nativeCaptureUnsupportedError{}).Error(), nil, false)
 		return
 	}
 	writeJSON(w, http.StatusOK, harnessv2.CaptureNativeSessionResponse{

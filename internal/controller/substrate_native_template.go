@@ -114,8 +114,9 @@ func nativeSubstrateSupervisorContainer(container corev1.Container) (*ateapipb.C
 		}
 		seen[env.Name] = true
 		// Native Actor identity comes from the mounted SystemInfo volume.
-		// The supervisor does not consume the Kubernetes Pod namespace.
-		if env.Name == substrateNativePodNamespaceEnv {
+		// The supervisor does not consume the Kubernetes Pod name or namespace.
+		// Exclude both to retain upstream's bounded environment-entry budget.
+		if env.Name == substrateNativePodNamespaceEnv || env.Name == substrateNativePodNameEnv {
 			continue
 		}
 		compiled.Env = append(compiled.Env, &ateapipb.EnvVar{Name: env.Name, Value: env.Value})

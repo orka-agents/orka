@@ -24,7 +24,7 @@ import (
 )
 
 // MaxBundleBytes is an Orka transport limit, not SessionKit's storage limit.
-const MaxBundleBytes = harnessv2.MaxNativeSessionBytes
+const MaxBundleBytes = harnessv2.DefaultMaxNativeSessionBytes
 
 // ErrUnsupported identifies an otherwise stopped conversation outside this
 // consumer's supported format or transport bounds. I/O and uncertain outcomes
@@ -50,10 +50,21 @@ func DataDigest(data []byte) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func limits() sessionkit.Budget {
+func bundleLimit(values ...int) (int, error) {
+	if len(values) > 1 {
+		return 0, errors.New("one native bundle limit is required")
+	}
+	limit := 0
+	if len(values) == 1 {
+		limit = values[0]
+	}
+	return harnessv2.NormalizeNativeSessionMaxBytes(limit)
+}
+
+func limits(limit int) sessionkit.Budget {
 	return sessionkit.Budget{
-		MaxBytes: 8 * MaxBundleBytes, MaxTempBytes: MaxBundleBytes,
-		MaxLineBytes: MaxBundleBytes, Timeout: 30 * time.Second,
+		MaxBytes: 8 * int64(limit), MaxTempBytes: int64(limit),
+		MaxLineBytes: int64(limit), Timeout: 30 * time.Second,
 	}
 }
 
@@ -72,7 +83,11 @@ func privateTemp() (string, error) {
 
 // Capture requires a stopped source writer. It retains only manifest and
 // rollout bytes, never authentication, configuration, or native databases.
-func Capture(ctx context.Context, home, threadID string) ([]byte, error) {
+func Capture(ctx context.Context, home, threadID string, maxBytes ...int) ([]byte, error) {
+	limit, err := bundleLimit(maxBytes...)
+	if err != nil {
+		return nil, err
+	}
 	parent, err := privateTemp()
 	if err != nil {
 		return nil, err
@@ -80,7 +95,7 @@ func Capture(ctx context.Context, home, threadID string) ([]byte, error) {
 	defer func() { _ = os.RemoveAll(parent) }()
 	bundle, err := sessionkit.Capture(ctx, sessionkit.Source{
 		Harness: sessionkit.Codex, Root: home, ThreadID: threadID,
-	}, sessionkit.CaptureOptions{BundleDir: filepath.Join(parent, "bundle"), Budget: limits()})
+	}, sessionkit.CaptureOptions{BundleDir: filepath.Join(parent, "bundle"), Budget: limits(limit)})
 	if err != nil {
 		var exhausted *sessionkit.BudgetError
 		if errors.As(err, &exhausted) && exhausted.Limit != "timeout" {
@@ -91,11 +106,11 @@ func Capture(ctx context.Context, home, threadID string) ([]byte, error) {
 	if err := supported(bundle.Manifest); err != nil {
 		return nil, err
 	}
-	manifest, err := readBounded(filepath.Join(bundle.Dir, "manifest.json"))
+	manifest, err := readBounded(filepath.Join(bundle.Dir, "manifest.json"), limit)
 	if err != nil {
 		return nil, err
 	}
-	rollout, err := readBounded(filepath.Join(bundle.Dir, "components", "rollout.jsonl"))
+	rollout, err := readBounded(filepath.Join(bundle.Dir, "components", "rollout.jsonl"), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -103,8 +118,8 @@ func Capture(ctx context.Context, home, threadID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > MaxBundleBytes {
-		return nil, fmt.Errorf("%w: native bundle exceeds Orka's %d-byte transport limit", ErrUnsupported, MaxBundleBytes)
+	if len(data) > limit {
+		return nil, fmt.Errorf("%w: native bundle exceeds Orka's %d-byte transport limit", ErrUnsupported, limit)
 	}
 	return data, nil
 }
@@ -136,9 +151,13 @@ func supported(manifest sessionkit.Manifest) error {
 	return nil
 }
 
-func decode(data []byte) (wireBundle, error) {
+func decode(data []byte, maxBytes ...int) (wireBundle, error) {
 	var bundle wireBundle
-	if len(data) == 0 || len(data) > MaxBundleBytes || !utf8.Valid(data) {
+	limit, err := bundleLimit(maxBytes...)
+	if err != nil {
+		return bundle, err
+	}
+	if len(data) == 0 || len(data) > limit || !utf8.Valid(data) {
 		return bundle, errors.New("native bundle exceeds its encoding or size bounds")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -184,7 +203,11 @@ func decode(data []byte) (wireBundle, error) {
 	return bundle, nil
 }
 
-func readBounded(name string) ([]byte, error) {
+func readBounded(name string, maxBytes ...int) ([]byte, error) {
+	limit, err := bundleLimit(maxBytes...)
+	if err != nil {
+		return nil, err
+	}
 	file, err := os.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
@@ -194,11 +217,11 @@ func readBounded(name string) ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("native bundle component must be a regular file")
 	}
-	data, err := io.ReadAll(io.LimitReader(file, MaxBundleBytes+1))
+	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > MaxBundleBytes {
+	if len(data) > limit {
 		return nil, fmt.Errorf("%w: native bundle component exceeds transport bounds", ErrUnsupported)
 	}
 	return data, nil
@@ -224,8 +247,8 @@ func syncDir(name string) error {
 	return errors.Join(dir.Sync(), dir.Close())
 }
 
-func materialize(data []byte, dir string) error {
-	wire, err := decode(data)
+func materialize(data []byte, dir string, maxBytes ...int) error {
+	wire, err := decode(data, maxBytes...)
 	if err != nil {
 		return err
 	}
@@ -247,20 +270,20 @@ func materialize(data []byte, dir string) error {
 	return syncDir(dir)
 }
 
-func ensureBundle(data []byte, journalDir string) (string, error) {
+func ensureBundle(data []byte, journalDir string, maxBytes ...int) (string, error) {
 	dir := filepath.Join(journalDir, "bundle")
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
 			return "", errors.New("saved native bundle must be a directory")
 		}
-		wire, err := decode(data)
+		wire, err := decode(data, maxBytes...)
 		if err != nil {
 			return "", err
 		}
 		for name, expected := range map[string][]byte{
 			"manifest.json": wire.Manifest, "components/rollout.jsonl": wire.Rollout,
 		} {
-			actual, err := readBounded(filepath.Join(dir, name))
+			actual, err := readBounded(filepath.Join(dir, name), maxBytes...)
 			if err != nil || !bytes.Equal(actual, expected) {
 				return "", errors.New("saved native bundle differs from the requested operation")
 			}
@@ -275,7 +298,7 @@ func ensureBundle(data []byte, journalDir string) (string, error) {
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
 	ready := filepath.Join(stage, "bundle")
-	if err := materialize(data, ready); err != nil {
+	if err := materialize(data, ready, maxBytes...); err != nil {
 		return "", err
 	}
 	if err := os.Rename(ready, dir); err != nil {
@@ -288,17 +311,21 @@ func ensureBundle(data []byte, journalDir string) (string, error) {
 }
 
 // Inspect verifies the complete bundle without activating a native client.
-func Inspect(ctx context.Context, data []byte) (Summary, error) {
+func Inspect(ctx context.Context, data []byte, maxBytes ...int) (Summary, error) {
+	limit, err := bundleLimit(maxBytes...)
+	if err != nil {
+		return Summary{}, err
+	}
 	parent, err := privateTemp()
 	if err != nil {
 		return Summary{}, err
 	}
 	defer func() { _ = os.RemoveAll(parent) }()
 	dir := filepath.Join(parent, "bundle")
-	if err := materialize(data, dir); err != nil {
+	if err := materialize(data, dir, limit); err != nil {
 		return Summary{}, err
 	}
-	bundle, err := sessionkit.OpenBundle(ctx, dir, limits())
+	bundle, err := sessionkit.OpenBundle(ctx, dir, limits(limit))
 	if err != nil {
 		return Summary{}, classifyNativeFormatError(err)
 	}
@@ -361,8 +388,12 @@ func within(root, name string) bool {
 
 // Install records one immutable plan before publication and reconciles that
 // same plan on retries. journalDir must be private and outside the Codex home.
-func Install(ctx context.Context, data []byte, home, cwd, journalDir string) (sessionkit.Receipt, error) {
+func Install(ctx context.Context, data []byte, home, cwd, journalDir string, maxBytes ...int) (sessionkit.Receipt, error) {
 	var receipt sessionkit.Receipt
+	limit, err := bundleLimit(maxBytes...)
+	if err != nil {
+		return receipt, err
+	}
 	for _, name := range []string{home, cwd, journalDir} {
 		if !filepath.IsAbs(name) || filepath.Clean(name) != name {
 			return receipt, errors.New("native migration directories must be absolute and clean")
@@ -371,7 +402,7 @@ func Install(ctx context.Context, data []byte, home, cwd, journalDir string) (se
 	if within(home, journalDir) || within(journalDir, home) {
 		return receipt, errors.New("native journal and Codex home must not overlap")
 	}
-	summary, err := Inspect(ctx, data)
+	summary, err := Inspect(ctx, data, limit)
 	if err != nil {
 		return receipt, err
 	}
@@ -422,11 +453,11 @@ func Install(ctx context.Context, data []byte, home, cwd, journalDir string) (se
 				return receipt, errors.New("native migration requires a fresh isolated Codex home")
 			}
 		}
-		dir, err := ensureBundle(data, journalDir)
+		dir, err := ensureBundle(data, journalDir, limit)
 		if err != nil {
 			return receipt, err
 		}
-		bundle, err := sessionkit.OpenBundle(ctx, dir, limits())
+		bundle, err := sessionkit.OpenBundle(ctx, dir, limits(limit))
 		if err != nil {
 			return receipt, err
 		}

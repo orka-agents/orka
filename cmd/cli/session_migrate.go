@@ -13,7 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 
 	"github.com/orka-agents/orka/internal/cli/client"
 	"github.com/orka-agents/orka/internal/codexstate"
@@ -125,7 +128,16 @@ func privateMigrationJournal(name, home string) (string, error) {
 	return dir, nil
 }
 
-func readMigrationState(journal string, expected migrationState) (*migrationState, error) {
+func readMigrationState(journal string, expected migrationState, maxBytes ...int) (*migrationState, error) {
+	limit := harnessv2.DefaultMaxNativeSessionBytes
+	if len(maxBytes) > 0 {
+		var err error
+		limit, err = harnessv2.NormalizeNativeSessionMaxBytes(maxBytes[0])
+		if err != nil {
+			return nil, err
+		}
+	}
+	journalLimit := harnessv2.NativeSessionJSONLimit(limit)
 	file, err := os.OpenFile(filepath.Join(journal, "request.json"), os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -135,11 +147,11 @@ func readMigrationState(journal string, expected migrationState) (*migrationStat
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(journalLimit) {
 		return nil, errors.New("invalid migration journal")
 	}
 	var saved migrationState
-	decoder := json.NewDecoder(io.LimitReader(file, (1<<20)+1))
+	decoder := json.NewDecoder(io.LimitReader(file, int64(journalLimit)+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&saved); err != nil {
 		return nil, errors.New("invalid migration journal")
@@ -150,7 +162,7 @@ func readMigrationState(journal string, expected migrationState) (*migrationStat
 	if !bytes.Equal(identityJSON(saved), identityJSON(expected)) {
 		return nil, errors.New("migration journal belongs to another operation or target")
 	}
-	if saved.OperationID == "" || len(saved.Data) == 0 {
+	if saved.OperationID == "" || len(saved.Data) == 0 || len(saved.Data) > limit {
 		return nil, errors.New("incomplete migration journal")
 	}
 	return &saved, nil
@@ -214,8 +226,30 @@ func migrationOperationID() (string, error) {
 
 func newSessionMigrateCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "migrate", Short: "Move Codex 0.160.0 paginated conversation state"}
+	cmd.PersistentFlags().Int("max-bundle-bytes", harnessv2.DefaultMaxNativeSessionBytes, "Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default")
 	cmd.AddCommand(newSessionMigrateImportCmd(), newSessionMigrateExportCmd())
 	return cmd
+}
+
+func migrationMaxBundleBytes(cmd *cobra.Command) (int, error) {
+	limit := harnessv2.DefaultMaxNativeSessionBytes
+	if flag := cmd.Flags().Lookup("max-bundle-bytes"); flag != nil && flag.Changed {
+		value, err := cmd.Flags().GetInt("max-bundle-bytes")
+		if err != nil {
+			return 0, err
+		}
+		limit = value
+	} else if raw, present := os.LookupEnv("ORKA_NATIVE_SESSION_MAX_BYTES"); present && strings.TrimSpace(raw) != "" {
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return 0, errors.New("ORKA_NATIVE_SESSION_MAX_BYTES must be an integer")
+		}
+		limit = value
+	}
+	if limit < 1 {
+		return 0, errors.New("native bundle limit must be positive")
+	}
+	return harnessv2.NormalizeNativeSessionMaxBytes(limit)
 }
 
 func newSessionMigrateImportCmd() *cobra.Command {
@@ -224,6 +258,10 @@ func newSessionMigrateImportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "import <new-session-name>", Short: "Stage a stopped local Codex thread for its first Orka Task", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			limit, err := migrationMaxBundleBytes(cmd)
+			if err != nil {
+				return err
+			}
 			if !stopped {
 				return errors.New("stop all source Codex writers, then pass --source-stopped")
 			}
@@ -240,13 +278,14 @@ func newSessionMigrateImportCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
+			c.NativeSessionMaxBytes = limit
 			expected := migrationState{Direction: "import", Server: target, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, Thread: thread}
-			saved, err := readMigrationState(resolvedJournal, expected)
+			saved, err := readMigrationState(resolvedJournal, expected, limit)
 			if err != nil {
 				return err
 			}
 			if saved == nil {
-				expected.Data, err = codexstate.Capture(cmd.Context(), resolvedHome, thread)
+				expected.Data, err = codexstate.Capture(cmd.Context(), resolvedHome, thread, limit)
 				if err != nil {
 					return err
 				}
@@ -288,6 +327,10 @@ func newSessionMigrateExportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "export <session-name>", Short: "Install a saved Orka checkpoint into a fresh local Codex home", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			limit, err := migrationMaxBundleBytes(cmd)
+			if err != nil {
+				return err
+			}
 			version, err := exec.CommandContext(cmd.Context(), binary, "--version").Output()
 			if err != nil || strings.TrimSpace(string(version)) != "codex-cli 0.160.0" {
 				return errors.New("destination requires codex-cli 0.160.0 (--codex-bin)")
@@ -309,8 +352,9 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
+			c.NativeSessionMaxBytes = limit
 			expected := migrationState{Direction: "export", Server: target, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, CWD: resolvedCWD}
-			saved, err := readMigrationState(resolvedJournal, expected)
+			saved, err := readMigrationState(resolvedJournal, expected, limit)
 			if err != nil {
 				return err
 			}
@@ -319,7 +363,7 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				summary, err := codexstate.Inspect(cmd.Context(), response.Data)
+				summary, err := codexstate.Inspect(cmd.Context(), response.Data, limit)
 				if err != nil {
 					return err
 				}
@@ -336,11 +380,11 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				}
 				saved = &expected
 			}
-			receipt, err := codexstate.Install(cmd.Context(), saved.Data, resolvedHome, resolvedCWD, resolvedJournal)
+			receipt, err := codexstate.Install(cmd.Context(), saved.Data, resolvedHome, resolvedCWD, resolvedJournal, limit)
 			if err != nil {
 				return fmt.Errorf("install outcome %s: %w; retain the journal and retry it", receipt.Outcome, err)
 			}
-			summary, err := codexstate.Inspect(cmd.Context(), saved.Data)
+			summary, err := codexstate.Inspect(cmd.Context(), saved.Data, limit)
 			if err != nil {
 				return err
 			}

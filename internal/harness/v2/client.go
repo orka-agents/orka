@@ -305,6 +305,9 @@ func (c *Client) CaptureNativeSession(ctx context.Context, sessionID RuntimeSess
 	if err := response.ValidateFor(request); err != nil {
 		return nil, c.protocolError(operation, 0, err)
 	}
+	if len(response.Snapshot.Data) > c.protocolLimits().EffectiveMaxNativeSessionBytes() {
+		return nil, c.protocolError(operation, 0, fmt.Errorf("native capture exceeds runtime bundle limit"))
+	}
 	if response.Session.RuntimeSessionID != sessionID {
 		return nil, c.protocolError(operation, 0, fmt.Errorf("native capture response session ID does not match request path"))
 	}
@@ -470,6 +473,9 @@ func (c *Client) getJSONWithCapability(ctx context.Context, operation, relative 
 		return c.validationError(operation, err)
 	}
 	setCommonHeaders(req, "application/json")
+	if operation == "capabilities" {
+		req.Header.Set(NativeSessionLimitsHeader, "1")
+	}
 	if authenticated {
 		req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	}
@@ -519,8 +525,26 @@ func (c *Client) mutateJSON(
 		return c.validationError(operation, fmt.Errorf("encode request: %w", err))
 	}
 	limits := c.protocolLimits()
-	if len(payload) > limits.MaxRequestBytes {
-		return c.validationError(operation, fmt.Errorf("request body is %d bytes, limit %d", len(payload), limits.MaxRequestBytes))
+	requestLimit := limits.MaxRequestBytes
+	responseLimit := c.maxJSONResponseBytes
+	if create, ok := input.(CreateRuntimeSessionRequest); ok && create.NativeRestore != nil {
+		if len(create.NativeRestore.Snapshot.Data) > limits.EffectiveMaxNativeSessionBytes() {
+			return c.validationError(operation, fmt.Errorf("native restore exceeds runtime bundle limit %d", limits.EffectiveMaxNativeSessionBytes()))
+		}
+		// Only the bundle earns the larger body allowance. All other fields
+		// remain within the negotiated ordinary request limit.
+		create.NativeRestore = nil
+		ordinary, err := json.Marshal(create)
+		if err != nil || len(ordinary) > limits.MaxRequestBytes {
+			return c.validationError(operation, fmt.Errorf("native restore metadata exceeds ordinary request limit"))
+		}
+		requestLimit = NativeSessionJSONLimit(limits.EffectiveMaxNativeSessionBytes())
+	}
+	if operation == "capture_native_session" {
+		responseLimit = int64(NativeSessionJSONLimit(limits.EffectiveMaxNativeSessionBytes()))
+	}
+	if len(payload) > requestLimit {
+		return c.validationError(operation, fmt.Errorf("request body is %d bytes, limit %d", len(payload), requestLimit))
 	}
 	capability, err := SignOperationCapability(c.capabilitySecret, ClaimsForMutation(metadata))
 	if err != nil {
@@ -539,6 +563,9 @@ func (c *Client) mutateJSON(
 	}
 	setCommonHeaders(req, "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	if operation == "capture_native_session" {
+		req.Header.Set(NativeSessionLimitsHeader, "1")
+	}
 	req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	req.Header.Set(OperationCapabilityHeader, capability)
 	resp, err := c.httpClient.Do(req)
@@ -552,16 +579,16 @@ func (c *Client) mutateJSON(
 	if err := requireMediaType(resp.Header.Get("Content-Type"), "application/json"); err != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, err, tracker.evidence(), capability)
 	}
-	body, err := readBoundedResponseBody(resp, c.maxJSONResponseBytes)
+	body, err := readBoundedResponseBody(resp, responseLimit)
 	if err != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, err, tracker.evidence(), capability)
 	}
-	if envelope, ok, envelopeErr := decodeErrorEnvelope(body); envelopeErr != nil {
+	if envelope, ok, envelopeErr := decodeErrorEnvelopeWithLimit(body, int(responseLimit)); envelopeErr != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, envelopeErr, tracker.evidence(), capability)
 	} else if ok {
 		return c.httpError(operation, resp.StatusCode, envelope, tracker.evidence(), capability)
 	}
-	if err := decodeSuccessJSON(body, output); err != nil {
+	if err := decodeSuccessJSONWithLimit(body, output, int(responseLimit)); err != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, err, tracker.evidence(), capability)
 	}
 	return nil
@@ -861,10 +888,14 @@ func readBoundedResponseBody(response *http.Response, limit int64) ([]byte, erro
 }
 
 func decodeSuccessJSON(body []byte, output any) error {
+	return decodeSuccessJSONWithLimit(body, output, MaxCanonicalJSONBytes)
+}
+
+func decodeSuccessJSONWithLimit(body []byte, output any, limit int) error {
 	if output == nil {
 		return fmt.Errorf("response target is required")
 	}
-	if _, err := parseCanonicalJSON(body); err != nil {
+	if _, err := parseCanonicalJSONWithLimit(body, limit); err != nil {
 		return fmt.Errorf("invalid JSON response: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -879,7 +910,11 @@ func decodeSuccessJSON(body []byte, output any) error {
 }
 
 func decodeErrorEnvelope(body []byte) (ErrorResponse, bool, error) {
-	if _, err := parseCanonicalJSON(body); err != nil {
+	return decodeErrorEnvelopeWithLimit(body, MaxCanonicalJSONBytes)
+}
+
+func decodeErrorEnvelopeWithLimit(body []byte, limit int) (ErrorResponse, bool, error) {
+	if _, err := parseCanonicalJSONWithLimit(body, limit); err != nil {
 		return ErrorResponse{}, false, fmt.Errorf("invalid JSON error response: %w", err)
 	}
 	var discriminator struct {

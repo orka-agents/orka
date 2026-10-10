@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 type NativeSessionExport struct {
@@ -26,6 +28,13 @@ type NativeSessionImportReceipt struct {
 }
 
 func (c *Client) nativeSessionRequest(ctx context.Context, method, name string, body []byte, response any) error {
+	limit, err := harnessv2.NormalizeNativeSessionMaxBytes(c.NativeSessionMaxBytes)
+	if err != nil {
+		return err
+	}
+	if len(body) > harnessv2.NativeSessionJSONLimit(limit) {
+		return fmt.Errorf("native session request exceeds transport bounds")
+	}
 	u, err := c.resourceURL("/api/v1/sessions/"+url.PathEscape(name)+"/native", nil)
 	if err != nil {
 		return err
@@ -44,11 +53,11 @@ func (c *Client) nativeSessionRequest(ctx context.Context, method, name string, 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("native session request failed (HTTP %d)", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(harnessv2.NativeSessionJSONLimit(limit))+1))
 	if err != nil {
 		return err
 	}
-	if len(data) > 1<<20 {
+	if len(data) > harnessv2.NativeSessionJSONLimit(limit) {
 		return fmt.Errorf("native session response exceeds transport bounds")
 	}
 	if err := json.Unmarshal(data, response); err != nil {
@@ -62,10 +71,21 @@ func (c *Client) ExportNativeSession(ctx context.Context, name string) (*NativeS
 	if err := c.nativeSessionRequest(ctx, http.MethodGet, name, nil, &response); err != nil {
 		return nil, err
 	}
+	limit, err := harnessv2.NormalizeNativeSessionMaxBytes(c.NativeSessionMaxBytes)
+	if err != nil || len(response.Data) == 0 || len(response.Data) > limit {
+		return nil, fmt.Errorf("native session bundle exceeds configured bounds")
+	}
 	return &response, nil
 }
 
 func (c *Client) ImportNativeSession(ctx context.Context, name, operationID string, data []byte) (*NativeSessionImportReceipt, error) {
+	limit, err := harnessv2.NormalizeNativeSessionMaxBytes(c.NativeSessionMaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > limit {
+		return nil, fmt.Errorf("native session bundle must contain 1 through %d bytes", limit)
+	}
 	body, err := json.Marshal(struct {
 		OperationID string `json:"operationID"`
 		Data        []byte `json:"data"`
