@@ -546,6 +546,15 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 			}),
 			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_MOUNT_FAILED:", ok: true,
 		},
+		"image volume subPath reported as a config error": {
+			pods: pod(func(p *corev1.Pod) {
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:  runtimeField,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError", Message: "failed to prepare subPath for volumeMount \"toolbox-0\""}},
+				}}
+			}),
+			toolboxes: toolboxes, want: "ToolboxUnavailable: TOOLBOX_MOUNT_FAILED:", ok: true,
+		},
 		"image volume pull failed": {
 			pods: pod(func(p *corev1.Pod) {
 				p.Status.ContainerStatuses = []corev1.ContainerStatus{{

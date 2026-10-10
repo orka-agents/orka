@@ -560,17 +560,13 @@ func elfArchAt(rootFd int, relative string) (string, bool, error) {
 	if statMode(&st)&unix.S_IFMT != unix.S_IFREG {
 		return "", false, fmt.Errorf("%s is not a regular file", relative)
 	}
-	arch, isELF, err := elfArch(file)
-	if err != nil || !isELF {
-		return arch, isELF, err
-	}
-	// A tool on PATH that is not world readable and executable fails every
-	// agent identity; the check runs as one fixed UID, so the bits are tested
-	// independently of ownership.
-	if statMode(&st)&uint32(worldAccessBits) != uint32(worldAccessBits) {
+	// Any executable tool on PATH (ELF or script) that is not world readable
+	// and executable fails every agent identity; the check runs as one fixed
+	// UID, so the bits are tested independently of ownership.
+	if statMode(&st)&0o111 != 0 && statMode(&st)&uint32(worldAccessBits) != uint32(worldAccessBits) {
 		return "", false, failf(ReasonPermissionDenied, "%s (mode %04o) is not readable and executable by every agent identity; it needs o+rx", relative, statMode(&st)&0o7777)
 	}
-	return arch, isELF, nil
+	return elfArch(file)
 }
 
 // CheckMounted verifies a toolbox that is already mounted at mountPath: every

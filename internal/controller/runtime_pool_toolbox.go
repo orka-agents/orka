@@ -345,7 +345,10 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 				continue
 			}
 			switch waiting.Reason {
-			case podWaitingReasonCreateContainer:
+			case podWaitingReasonCreateContainer, podWaitingReasonCreateContainerConfig, podWaitingReasonRunContainer:
+				// Kubelet reports a missing or invalid image-volume subPath as
+				// a container config error on some runtimes and as a create
+				// error on others; both are permanent toolbox mount failures.
 				if strings.Contains(waiting.Message, "ImageVolumeMountFailed") || runtimePoolToolboxMessageMentionsToolbox(waiting.Message, toolboxes) {
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonMountFailed, waiting.Message), true

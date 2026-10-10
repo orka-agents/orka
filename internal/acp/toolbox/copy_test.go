@@ -526,6 +526,18 @@ func TestMountedToolboxMustBeWorldAccessible(t *testing.T) {
 	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); err != nil {
 		t.Fatal(err)
 	}
+	// Executable scripts need the same bits; plain data files do not.
+	mustWrite(t, filepath.Join(mount, "bin", "script"), []byte("#!/bin/sh\n"), 0o744)
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonPermissionDenied {
+		t.Fatalf("a 0744 script must fail: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(mount, "bin", "script"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(mount, "bin", "notes.txt"), []byte("data"), 0o640)
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); err != nil {
+		t.Fatalf("a non-executable data file must not be checked: %v", err)
+	}
 	if err := os.Chmod(mount, 0o750); err != nil {
 		t.Fatal(err)
 	}
