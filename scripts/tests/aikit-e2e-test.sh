@@ -128,9 +128,10 @@ for key,value in [('temperature','0.7'),('top_p','0.8'),('top_k','20'),('min_p',
     assert re.search(r'^    '+key+r': '+re.escape(value)+r'$',configuration,re.M)
 assert 'enable_thinking: false' in configuration
 assert re.search(r'^  reasoning:\n    disable: true$',configuration,re.M)
-assert re.search(r'^    runs-on: ubuntu-latest$',workflow,re.M)
+assert re.search(r'^    runs-on: ubuntu-24\.04-arm$',workflow,re.M)
+assert re.search(r'^    timeout-minutes: 120$',workflow,re.M)
 assert 'AIKIT_MODEL: qwen-3.5-4b' in workflow
-assert 'AIKIT_IMAGE: ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:525dfb8b5ccc1c180f0eab633bcf459d2a574c14bfab01c03535191c810d121d' in workflow
+assert 'AIKIT_IMAGE: ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:a19568225838a6e38b17706b75ec884f887f65930c898900f822c575004ffc63' in workflow
 PYCONFIG
 printf '%s\n' 'ok - 4B image, model config, sampling, and free Actions runner agree'
 require_cmd() { :; }
