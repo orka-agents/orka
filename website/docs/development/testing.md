@@ -200,7 +200,9 @@ missing or mismatched artifacts staying not ready.
   Its prebuilt image keeps AIKit's Qwen weights and adds a CPU backend correction
   for recurrent prefix checkpoints. The correction restores template message
   boundaries and permits bounded mid-prompt checkpoints for changing cluster
-  context. Its source/build recipe is in `scripts/fixtures/aikit/backend/`.
+  context. Checkpoint count/spacing and host cache memory are bounded within
+  the unchanged model resource limit. Its source/build recipe is in
+  `scripts/fixtures/aikit/backend/`.
   It requires no cloud credentials and routes through Orka's auth/session proxies
   directly to AIKit, without Vekil. DNS/model NetworkPolicy rules are checked
   structurally; Kind's default CNI does not enforce them, so this lane does not
@@ -209,7 +211,8 @@ missing or mismatched artifacts staying not ready.
   remain compatible without dropping instructions or changing tool permissions.
   CI-only API work is bounded to 170 seconds, below the unchanged 180-second
   client deadline; failed Chat streams explicitly cancel their observed Session.
-  Model Pod CPU and memory counters from kubelet statistics are saved with the
+  Model Pod CPU/memory counters and allowlisted container restart/termination
+  metadata are saved with the
   cleanup evidence without requiring a shell in the distroless AIKit container.
   Startup can prefill the full Chat and compatibility instruction/tool prefixes
   within a shared thirty-minute preparation budget. Each API is qualified directly

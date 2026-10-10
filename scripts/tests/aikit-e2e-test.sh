@@ -13,7 +13,11 @@ kubectl() {
       else printf '%s\n' "kind-${kind_cluster}"; fi
       ;;
     '--request-timeout=5s get pods')
-      printf '%s\n' '{"items":[{"metadata":{"uid":"model-pod"},"spec":{"nodeName":"e2e-node"},"status":{"phase":"Running"}}]}'
+      if [[ "${model_oom:-false}" == true ]]; then
+        printf '%s\n' '{"items":[{"metadata":{"uid":"model-pod"},"spec":{"nodeName":"e2e-node"},"status":{"phase":"Running","containerStatuses":[{"name":"model","restartCount":1,"ready":true,"lastState":{"terminated":{"exitCode":137,"signal":9,"reason":"OOMKilled","message":"private-output"}}},{"name":"foreign","restartCount":99}]}}]}'
+      else
+        printf '%s\n' '{"items":[{"metadata":{"uid":"model-pod"},"spec":{"nodeName":"e2e-node"},"status":{"phase":"Running"}}]}'
+      fi
       ;;
     '--request-timeout=10s get --raw')
       [[ "$*" == *'/api/v1/nodes/e2e-node/proxy/stats/summary' ]]
@@ -88,6 +92,10 @@ jq -e '.cpu.usageNanoCores == 1234 and .memory.rssBytes == 3000000000 and
 if (wrong_context=true sample_model_resources) >/dev/null 2>&1; then
   echo 'resource sampling accepted a non-E2E context' >&2; exit 1
 fi
+(model_oom=true sample_model_resources) >"${work}/model-oom.json"
+jq -e '.container.restartCount == 1 and .container.lastTermination ==
+  {exitCode:137,signal:9,reason:"OOMKilled"} and
+  (tostring | contains("private-output") | not)' "${work}/model-oom.json" >/dev/null
 printf '%s\n' 'ok - model diagnostics capture only counters on the verified E2E context'
 
 if (E2E_LOCAL_MODEL=wrong configure_provider_proxy) >/dev/null 2>&1; then
@@ -127,6 +135,8 @@ assert 'model: Qwen3.5-4B-Q4_K_M.gguf' in configuration
 for key,value in [('temperature','0.7'),('top_p','0.8'),('top_k','20'),('min_p','0.0'),('presence_penalty','1.5'),('repeat_penalty','1.0')]:
     assert re.search(r'^    '+key+r': '+re.escape(value)+r'$',configuration,re.M)
 assert 'enable_thinking: false' in configuration
+for setting in ['n_ctx_checkpoints:16', 'checkpoint_min_step:1024', 'cache_ram:1024']:
+    assert '"' + setting + '"' in configuration
 assert re.search(r'^  reasoning:\n    disable: true$',configuration,re.M)
 assert re.search(r'^    runs-on: ubuntu-latest$',workflow,re.M)
 assert re.search(r'^    timeout-minutes: 120$',workflow,re.M)

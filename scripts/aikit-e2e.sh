@@ -47,19 +47,26 @@ cleanup_port_forward() {
 # Pod's CPU/memory measurements; do not expose node-wide workload metadata.
 sample_model_resources() {
   require_kind_context
-  local pod identity node uid
+  local pod identity node uid container_status
   pod="$(kubectl --request-timeout=5s get pods -n "${aikit_namespace}"     -l "app.kubernetes.io/name=${aikit_service}" -o json)" || return 1
   identity="$(printf '%s' "${pod}" | jq -cer '
     [.items[] | select(.status.phase == "Running")] |
-    if length == 1 then .[0] | {node:.spec.nodeName,uid:.metadata.uid}
+    if length == 1 then .[0] | {node:.spec.nodeName,uid:.metadata.uid,
+      container:([.status.containerStatuses[]? | select(.name == "model") |
+        {restartCount:(.restartCount // 0),ready:(.ready // false),
+         lastTermination:(if .lastState.terminated then
+           {exitCode:.lastState.terminated.exitCode,signal:.lastState.terminated.signal,
+            reason:(.lastState.terminated.reason | select(. == "OOMKilled" or . == "Error" or . == "Completed") // "other")}
+          else null end)}] | .[0] // {restartCount:0,ready:false,lastTermination:null})}
     else error("expected one running model Pod") end')" || return 1
   node="$(printf '%s' "${identity}" | jq -r .node)"
   uid="$(printf '%s' "${identity}" | jq -r .uid)"
+  container_status="$(printf '%s' "${identity}" | jq -c .container)"
   [[ "${node}" =~ ^[a-z0-9][a-z0-9.-]*$ && -n "${uid}" ]] || return 1
   kubectl --request-timeout=10s get --raw "/api/v1/nodes/${node}/proxy/stats/summary" |
-    jq -ce --arg uid "${uid}" --arg namespace "${aikit_namespace}" '
+    jq -ce --arg uid "${uid}" --arg namespace "${aikit_namespace}" --argjson container "${container_status}" '
       [.pods[] | select(.podRef.uid == $uid and .podRef.namespace == $namespace) |
-        {cpu:{time:.cpu.time,usageNanoCores:.cpu.usageNanoCores,usageCoreNanoSeconds:.cpu.usageCoreNanoSeconds},
+        {container:$container,cpu:{time:.cpu.time,usageNanoCores:.cpu.usageNanoCores,usageCoreNanoSeconds:.cpu.usageCoreNanoSeconds},
          memory:{time:.memory.time,usageBytes:.memory.usageBytes,workingSetBytes:.memory.workingSetBytes,
                  rssBytes:.memory.rssBytes,pageFaults:.memory.pageFaults,majorPageFaults:.memory.majorPageFaults}}] |
       if length == 1 then .[0] else error("model Pod stats unavailable") end'
