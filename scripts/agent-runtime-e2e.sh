@@ -1777,6 +1777,11 @@ run_toolbox_check() {
     ' >/dev/null || die "no runtime Pod in ${runtime_namespace} carries a hardened toolbox-copy-0 init container"
   fi
 
+  # Expected reasons differ by mount method: the copier rejects special files
+  # and reports a missing source folder itself, while an image volume mounts
+  # files as they are (a FIFO is harmless and the Task succeeds) and a missing
+  # subPath fails inside the container runtime.
+  local mount_method="${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}"
   local case_name case_image case_reason case_mount case_entry negative_agent negative_task
   for case_name in wrong-arch fifo missing; do
     case "${case_name}" in
@@ -1784,6 +1789,12 @@ run_toolbox_check() {
       fifo) case_image="${ACP_E2E_TOOLBOX_FIFO_IMAGE:-}"; case_reason=TOOLBOX_UNSUPPORTED_FILE_TYPE; case_mount=/opt/fifo-tool; case_entry=bin ;;
       missing) case_image="${ACP_E2E_TOOLBOX_MISSING_IMAGE:-}"; case_reason=TOOLBOX_SOURCE_OPEN; case_mount=/opt/missing-tool; case_entry="" ;;
     esac
+    if [[ "${mount_method}" == "imageVolume" ]]; then
+      case "${case_name}" in
+        fifo) log "Skipping toolbox fifo negative case: image volumes mount special files as they are"; continue ;;
+        missing) case_reason=TOOLBOX_MOUNT_FAILED ;;
+      esac
+    fi
     if [[ -z "${case_image}" ]]; then
       log "Skipping toolbox ${case_name} negative case: fixture image not provided"
       continue

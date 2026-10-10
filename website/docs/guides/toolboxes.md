@@ -212,10 +212,10 @@ reason. The message carries one stable code:
 | Reason | Meaning | Fix |
 | --- | --- | --- |
 | `TOOLBOX_IMAGE_PULL` | The toolbox image could not be pulled. | Check the digest, registry access, and `imagePullSecrets`. |
-| `TOOLBOX_SOURCE_OPEN` | `mountPath` does not exist in the image, or a symlink sits somewhere in its path. | Build the image so the folder exists as a real directory at exactly `mountPath`. |
+| `TOOLBOX_SOURCE_OPEN` | `mountPath` does not exist in the image, or a symlink sits somewhere in its path (`copy` mode; image volumes report `TOOLBOX_MOUNT_FAILED` instead). | Build the image so the folder exists as a real directory at exactly `mountPath`. |
 | `TOOLBOX_MISSING_PATH_ENTRY` | A `pathEntries` folder is missing or is not a real directory. | Fix the entry or the image layout. |
 | `TOOLBOX_ARCH_MISMATCH` | An ELF file in a `pathEntries` folder is built for another CPU architecture. | Publish a multi-architecture image or pin toolbox Pods to matching nodes with `nodeSelector`. |
-| `TOOLBOX_UNSUPPORTED_FILE_TYPE` | The toolbox contains a FIFO, socket, or device file. | Remove it; only folders, regular files, and symlinks are copied. |
+| `TOOLBOX_UNSUPPORTED_FILE_TYPE` | The toolbox contains a FIFO, socket, or device file (`copy` mode; image volumes mount such files as they are, where the Pod's device rules keep them harmless). | Remove it; only folders, regular files, and symlinks are copied. |
 | `TOOLBOX_TOO_DEEP`, `TOOLBOX_TOO_LARGE`, `TOOLBOX_FILE_TOO_LARGE`, `TOOLBOX_TOO_MANY_ENTRIES` | A copy limit was exceeded (48 folders deep, 2 GiB total, 512 MiB per file, 200,000 entries). | Trim the image; keep only the tools' folder. |
 | `TOOLBOX_SOURCE_CHANGED` | A file changed while it was being copied. | Rebuild the image; a toolbox must be immutable. |
 | `TOOLBOX_MOUNT_FAILED` | With `imageVolume`, the `subPath` does not exist in the image or the node runtime cannot mount image volumes. | Check the image layout and the containerd or CRI-O version on the selected nodes. |
