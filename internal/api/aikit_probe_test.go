@@ -69,6 +69,7 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 		OutputTokens int    `json:"outputTokens"`
 		DurationMS   int64  `json:"durationMs"`
 		Passed       bool   `json:"passed"`
+		Startup      bool   `json:"startup"`
 	}
 	results := make([]probeResult, 0, 5)
 	startupCtx, stopStartup := context.WithTimeout(t.Context(), 10*time.Minute)
@@ -122,10 +123,13 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 			MaxTokens: probe.maxTokens, Tools: probe.tools, TemperatureSet: probe.temperature,
 		})
 		cancel()
-		result := probeResult{Name: probe.name, PromptBytes: len(probe.prompt), ToolCount: len(probe.tools), DurationMS: time.Since(start).Milliseconds()}
+		result := probeResult{Name: probe.name, PromptBytes: len(probe.prompt), ToolCount: len(probe.tools), DurationMS: time.Since(start).Milliseconds(), Startup: probe.startup}
 		if response != nil {
 			result.InputTokens, result.OutputTokens = response.InputTokens, response.OutputTokens
-			result.Passed = callErr == nil && strings.TrimSpace(response.Content) == probe.expected && len(response.ToolCalls) == 0
+			result.Passed = callErr == nil && response.InputTokens > 0 && response.OutputTokens > 0
+			if !probe.startup {
+				result.Passed = result.Passed && aikitProbeMatchesResponse(response, probe.expected, probe.maxTokens == 128)
+			}
 		}
 		results = append(results, result)
 		t.Logf("%s: promptBytes=%d tools=%d inputTokens=%d outputTokens=%d durationMs=%d passed=%t",
@@ -136,9 +140,22 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 			if callErr != nil {
 				t.Fatalf("%s full-prompt inference failed; provider error omitted", probe.name)
 			}
-			t.Fatalf("%s did not return the exact marker without tool calls; output omitted", probe.name)
+			t.Fatalf("%s did not satisfy its completion contract; output omitted", probe.name)
 		}
 	}
+}
+
+// Startup proves completed inference, not test correctness. Qualification keeps
+// Chat's exact text and the compatibility test's final-marker containment.
+func aikitProbeMatchesResponse(response *llm.CompletionResponse, expected string, compatibility bool) bool {
+	if response == nil || len(response.ToolCalls) != 0 {
+		return false
+	}
+	if !compatibility {
+		return strings.TrimSpace(response.Content) == expected
+	}
+	return response.StopReason == "stop" && hasGoalStateSentinelPrefix(response.Content) &&
+		strings.Contains(response.Content, "ORKA_LIVE_ANTHROPIC_OK")
 }
 
 func TestAIKitFullPromptProbeContract(t *testing.T) {
@@ -223,10 +240,41 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 	for _, row := range fields {
 		for key := range row {
 			switch key {
-			case "name", "promptBytes", "toolCount", "inputTokens", "outputTokens", "durationMs", "passed":
+			case "name", "promptBytes", "toolCount", "inputTokens", "outputTokens", "durationMs", "passed", "startup":
 			default:
 				t.Fatalf("unexpected potentially sensitive report field %q", key)
 			}
 		}
+	}
+}
+
+func TestAIKitProbeResponseContract(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		text          string
+		stopReason    string
+		compatibility bool
+		toolCall      bool
+		want          bool
+	}{
+		{name: "exact chat", text: "ORKA_LIVE_CHAT_OK", want: true},
+		{name: "chat prose rejected", text: "Result: ORKA_LIVE_CHAT_OK"},
+		{name: "compat final marker", text: goalStateSentinel + "\nORKA_LIVE_ANTHROPIC_OK", stopReason: "stop", compatibility: true, want: true},
+		{name: "compat formatting", text: goalStateSentinel + "\n**ORKA_LIVE_ANTHROPIC_OK**", stopReason: "stop", compatibility: true, want: true},
+		{name: "missing final sentinel", text: "ORKA_LIVE_ANTHROPIC_OK", stopReason: "stop", compatibility: true},
+		{name: "quoted final sentinel", text: "Example: " + goalStateSentinel + "\nORKA_LIVE_ANTHROPIC_OK", stopReason: "stop", compatibility: true},
+		{name: "missing connectivity marker", text: goalStateSentinel + "\nwrong", stopReason: "stop", compatibility: true},
+		{name: "incomplete compat", text: goalStateSentinel + "\nORKA_LIVE_ANTHROPIC_OK", stopReason: "length", compatibility: true},
+		{name: "tool call rejected", text: "ORKA_LIVE_CHAT_OK", toolCall: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := &llm.CompletionResponse{Content: tc.text, StopReason: tc.stopReason}
+			if tc.toolCall {
+				response.ToolCalls = []llm.ToolCall{{Name: "noop"}}
+			}
+			if got := aikitProbeMatchesResponse(response, "ORKA_LIVE_CHAT_OK", tc.compatibility); got != tc.want {
+				t.Fatalf("completion contract = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }
