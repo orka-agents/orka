@@ -217,6 +217,7 @@ make docker-build-ai-worker AI_WORKER_IMG="${worker_image}"
 docker build -f test/fixtures/connectors/Dockerfile -t "${fixture_image}" .
 kind load docker-image "${manager_image}" "${worker_image}" "${fixture_image}" --name "${cluster}"
 manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
+worker_ref="$(orka_kind_registry_push "${worker_image}" "orka/ai-worker")"
 # The canonical deploy path waits for the workspace publisher to roll out
 # (apply-acp-production.sh wait_for_workload_dependencies), so an inert
 # reference cannot stand in for it: the real image is built like the manager's.
@@ -228,7 +229,7 @@ log "Bootstrapping test-only admission TLS (task provenance webhook)"
 orka_e2e_bootstrap_admission_tls
 make deploy \
   IMG="${manager_ref}" \
-  AI_WORKER_IMG="${worker_image}" \
+  AI_WORKER_IMG="${worker_ref}" \
   WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
   ACP_CODEX_RUNTIME_IMG="example.invalid/orka/acp-codex@${placeholder_digest}" \
   ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \

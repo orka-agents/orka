@@ -18,7 +18,18 @@ existing non-CRD Helm templates remain static inputs under `static/templates`;
 full manifest-to-template conversion would require Orka-specific Helm
 substitutions and is intentionally outside this change.
 
-Release preparation promotes the reviewed `manifest_staging/deploy` and
-`manifest_staging/charts` trees into the root `deploy` and `charts` snapshots.
+Source chart inputs identify development builds as `0.0.0-dev` and select the
+latest validated `main` images under that rolling tag. The Development Images
+workflow builds the complete release image inventory by digest, then publishes
+commit-specific tags and advances development aliases only after validating the
+whole set. Its digest-pinned `values.json` artifact selects one exact build.
+Override images for feature branches or older checkouts; the rolling tag need
+not match those sources. Retagging images does not roll out existing Pods.
+
+`make release-manifest NEWVERSION=vX.Y.Z` stamps the application version, chart
+metadata, and all nine release images before generation. Release preparation
+then promotes the reviewed `manifest_staging/deploy` and `manifest_staging/charts`
+trees into the root `deploy` and `charts` snapshots. Generation never guesses a
+version from mutable registry tags.
 
 The upstream Apache-2.0 license and notice are retained in this directory.

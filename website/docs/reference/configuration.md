@@ -703,7 +703,9 @@ spec:
 
 ## Helm chart
 
-Key configuration values for the Helm chart:
+Key configuration values for the Helm chart. Published charts use release image
+tags; development charts use the rolling `0.0.0-dev` tag. See
+[Image overrides](#image-overrides) for exact source image selection.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -768,6 +770,17 @@ Released charts include matching version tags for the controller, workers,
 Publisher, and coding-agent runtimes. For controller, worker, and Publisher
 images, set `image.tag` to choose another version or `image.digest` to pin a
 SHA256 digest. A digest takes precedence over the tag.
+
+The development chart uses version and image tag `0.0.0-dev`, selecting the latest
+validated `main` build. For an exact checkout, use its `sha-<full-commit>` tags or
+the digest-pinned `values.json` from the Development Images workflow artifact.
+The workflow validates all nine images before updating rolling aliases; use
+pinned values to avoid mixing images during those individual tag updates.
+
+Tagged controller, Publisher, and native worker images use `Always` pull policy.
+Digest-pinned native workers and RuntimePools remain cacheable with `IfNotPresent`.
+New image publication does not restart existing Pods. When testing source upgrades,
+`--reuse-values` retains prior references, so replace them and clear unused runtimes.
 
 Runtime fields such as `controller.acpRuntime.codexImage` accept a full image
 reference with a tag or digest. The controller resolves tags to digests once at
