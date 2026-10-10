@@ -29,7 +29,7 @@ jobs:
     env:
       KIND_CLUSTER: orka-aikit-e2e
       E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/aikit
-      AIKIT_IMAGE: ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:525dfb8b5ccc1c180f0eab633bcf459d2a574c14bfab01c03535191c810d121d
+      AIKIT_IMAGE: docker.io/sozercan/orka-aikit:qwen35-4b-recurrent-20261010@sha256:c6fa99fdd740c930c18e407c553dd28d06bf32bb2d3db59b71bc6137f17d5516
       AIKIT_MODEL: qwen-3.5-4b
     steps:
       - name: Clone Orka

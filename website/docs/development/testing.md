@@ -197,6 +197,10 @@ missing or mismatched artifacts staying not ready.
   infrastructure for native Provider, compatibility API, and runtime checks.
   The lane uses the standard free `ubuntu-latest` runner and records only
   allowlisted CPU capabilities.
+  Its prebuilt image keeps AIKit's Qwen weights and adds a CPU backend correction
+  for recurrent prefix checkpoints. The correction restores template message
+  boundaries and permits bounded mid-prompt checkpoints for changing cluster
+  context. Its source/build recipe is in `scripts/fixtures/aikit/backend/`.
   It requires no cloud credentials and routes through Orka's auth/session proxies
   directly to AIKit, without Vekil. DNS/model NetworkPolicy rules are checked
   structurally; Kind's default CNI does not enforce them, so this lane does not
@@ -211,7 +215,8 @@ missing or mismatched artifacts staying not ready.
   within a shared thirty-minute preparation budget. Each API is qualified directly
   after its prefix is prepared so warm performance is observable even when a
   later cold request exhausts startup. Qualification still uses the existing
-  contracts within 170 seconds before the stack build:
+  contracts within 170 seconds before the stack build, including changed Chat
+  context to exercise partial-prefix reuse:
   exact Chat text and the compatibility final sentinel plus connectivity marker.
   It uses the real prompt builders and tool schemas. The AIKit and ordinary E2E
   workflows use the public Docker Hub cache

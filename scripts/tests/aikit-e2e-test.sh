@@ -104,7 +104,7 @@ deploy_aikit
 python3 - "${work}/aikit.yaml" <<'PY'
 import sys,re
 manifest=open(sys.argv[1]).read()
-assert 'image: ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:525dfb8b5ccc1c180f0eab633bcf459d2a574c14bfab01c03535191c810d121d' in manifest
+assert 'image: docker.io/sozercan/orka-aikit:qwen35-4b-recurrent-20261010@sha256:c6fa99fdd740c930c18e407c553dd28d06bf32bb2d3db59b71bc6137f17d5516' in manifest
 assert 'automountServiceAccountToken: false' in manifest
 assert 'args: ["--config-file=/etc/orka-aikit/config.yaml"]' in manifest
 assert 'mountPath: /etc/orka-aikit' in manifest
@@ -131,7 +131,7 @@ assert re.search(r'^  reasoning:\n    disable: true$',configuration,re.M)
 assert re.search(r'^    runs-on: ubuntu-latest$',workflow,re.M)
 assert re.search(r'^    timeout-minutes: 120$',workflow,re.M)
 assert 'AIKIT_MODEL: qwen-3.5-4b' in workflow
-assert 'AIKIT_IMAGE: ghcr.io/kaito-project/aikit/qwen3.5:4b@sha256:525dfb8b5ccc1c180f0eab633bcf459d2a574c14bfab01c03535191c810d121d' in workflow
+assert 'AIKIT_IMAGE: docker.io/sozercan/orka-aikit:qwen35-4b-recurrent-20261010@sha256:c6fa99fdd740c930c18e407c553dd28d06bf32bb2d3db59b71bc6137f17d5516' in workflow
 PYCONFIG
 printf '%s\n' 'ok - 4B image, model config, sampling, and free Actions runner agree'
 require_cmd() { :; }
