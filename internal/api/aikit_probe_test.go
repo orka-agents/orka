@@ -149,7 +149,7 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 		}
 		expected := "ORKA_LIVE_CHAT_OK"
 		if number <= 2 {
-			if len(body.Instructions) < 15000 || len(body.Tools) != 17 || body.MaxOutputTokens != 16 || body.Temperature == nil || *body.Temperature != 0 {
+			if len(body.Instructions) < 15000 || len(body.Tools) != len(tools.ChatToolNames()) || body.MaxOutputTokens != 16 || body.Temperature == nil || *body.Temperature != 0 {
 				t.Errorf("Chat probe dropped prompt/schema/limits: bytes=%d tools=%d cap=%d", len(body.Instructions), len(body.Tools), body.MaxOutputTokens)
 			}
 		} else {

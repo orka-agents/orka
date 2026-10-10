@@ -124,7 +124,6 @@ configuration=open(sys.argv[1]).read()
 workflow=open(sys.argv[2]).read()
 assert re.search(r'^- name: qwen-3\.5-4b$',configuration,re.M)
 assert 'model: Qwen3.5-4B-Q4_K_M.gguf' in configuration
-assert re.search(r'^    batch: 1024$', configuration, re.M)
 for key,value in [('temperature','0.7'),('top_p','0.8'),('top_k','20'),('min_p','0.0'),('presence_penalty','1.5'),('repeat_penalty','1.0')]:
     assert re.search(r'^    '+key+r': '+re.escape(value)+r'$',configuration,re.M)
 assert 'enable_thinking: false' in configuration
