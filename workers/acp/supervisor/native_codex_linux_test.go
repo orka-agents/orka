@@ -176,10 +176,8 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 		t.Fatal(err)
 	}
 	if intent == harnessv2.WorkspaceIntentWrite {
-		content, err := os.ReadFile(filepath.Join(state.paths.Workspace, "native-write.txt"))
-		if err != nil || string(content) != reply+"\n" {
-			t.Fatal("native write-intent continuation did not write the exact workspace file")
-		}
+		// Verify bytes through the uploaded delta below. The supervisor has no
+		// DAC_OVERRIDE and cannot directly read this child-owned private tree.
 		if deltaResponse.Delta.State != harnessv2.WorkspaceDeltaPrepared || deltaResponse.Delta.ChangedFileCount != 1 || deltaResponse.Delta.EntryCount != 1 {
 			t.Fatalf("native write-intent continuation did not prepare its publishable delta: %+v", deltaResponse.Delta)
 		}

@@ -46,6 +46,21 @@ make lint-fix
 make ui-lint
 ```
 
+### Native Codex handoff gate
+
+The `Native Codex handoff` job in `.github/workflows/test.yml` compiles the
+supervisor test from the current checkout and runs it inside the pinned production
+Codex 0.160.0 / codex-acp 2.1.1 image. Docker networking is disabled; inference uses
+a local scripted Responses server and disposable test credentials. The container
+uses only the production supervisor's CHOWN, KILL, SETGID, and SETUID capabilities.
+
+The gate restores the original thread UUID through `session/resume`, continues
+across fresh homes with rotated credentials, checks current destination policy,
+and verifies read and write intents, a publishable workspace delta, native capture,
+return history, unchanged source bytes, and runtime cleanup. It explicitly enables
+`ORKA_NATIVE_CODEX_TEST=1` and requires the named test to pass, so a skipped test
+cannot satisfy the job. This verifies the native integration, not live-model recall.
+
 ### Local environment notes
 
 - **Script test suites need bash >= 4.** The suites under `scripts/tests/`

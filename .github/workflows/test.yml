@@ -84,6 +84,45 @@ jobs:
             cover.out
             coverage-functions.txt
 
+  native-codex:
+    name: Native Codex handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Compile the native supervisor test
+        run: |
+          make ensure-ui-embed
+          mkdir -p bin/native-codex
+          CGO_ENABLED=0 go test -c -o bin/native-codex/supervisor.test ./workers/acp/supervisor
+
+      - name: Build the pinned production Codex runtime
+        run: docker build --platform linux/amd64 -f workers/acp/images/codex/Dockerfile -t orka-native-codex-test .
+
+      - name: Verify native restore, continuation, publication, capture, and return
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network none --user 0:0 \
+            --cap-drop ALL --cap-add CHOWN --cap-add KILL --cap-add SETGID --cap-add SETUID \
+            --security-opt no-new-privileges \
+            --env ORKA_NATIVE_CODEX_TEST=1 \
+            --mount "type=bind,source=${PWD},target=/src,readonly" \
+            --workdir /src/workers/acp/supervisor \
+            --entrypoint /src/bin/native-codex/supervisor.test \
+            orka-native-codex-test \
+            -test.run '^TestPinnedNativeCodexACPRoundTrip$' -test.count=1 -test.timeout=5m -test.v \
+            | tee bin/native-codex/results.log
+          grep -q '^--- PASS: TestPinnedNativeCodexACPRoundTrip ' bin/native-codex/results.log
+
   ui-test:
     name: UI Tests
     runs-on: ubuntu-latest
