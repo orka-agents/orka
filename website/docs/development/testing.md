@@ -111,8 +111,9 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
 | `test/e2e/live_copilot_proxy_test.go` | Native `type: ai` Provider compatibility against the separately deployed copilot-proxy service; this is separate from built-in Copilot ACP RuntimePool coverage |
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
-| `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
-| `test/e2e/live_agent_runtime_matrix_test.go` | Historical live Codex/Claude provider execution plus a digest-pinned Copilot image smoke assertion; it is not the canonical ACP release gate |
+| `test/e2e/anthropic_compat_test.go` | Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior, on aimock or the live proxy |
+| `test/e2e/coordination_memory_tools_test.go` | Coordination memory tool auto-injection and execution (`search_transcript`, `recall_memory`, `propose_memory`, `remember`) and proposal review without durable writes, on aimock or the live proxy |
+| `test/e2e/agent_runtime_matrix_test.go` | Codex against a pinned read workspace, OpenCode read-intent enforcement, and Claude session wiring through the provider proxy (aimock as Vekil, or the live proxy), plus a digest-pinned Copilot image smoke assertion; it is not the canonical ACP release gate |
 | `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
 | `.github/workflows/gateway-e2e.yml` | Focused, model-free, secret-free Gateway live E2E in Kind using generated bearer tokens, an ephemeral CA, the TLS reference adapter, and the deterministic echo runtime |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
@@ -197,7 +198,10 @@ missing or mismatched artifacts staying not ready.
   in the test namespace and backs that provider with scripted fixtures from
   `test/e2e/testdata/aimock`, so those specs run on every PR without credentials.
   Set `E2E_DISABLE_MOCK_LLM=1` to skip them instead. Fixture conventions are in
-  `test/e2e/testdata/aimock/README.md`.
+  `test/e2e/testdata/aimock/README.md`. The Anthropic-compatible API,
+  coordination memory tool, and agent runtime matrix specs also run on aimock
+  by default; with `E2E_LIVE_COPILOT_PROXY_BASE_URL` set they use the live
+  proxy instead.
 - The suite enables Task provenance trust after verifying the `orka-admission`
   provenance webhook that `make deploy` installs, so coordination messaging and
   `cancel_task` run in the default lane.
