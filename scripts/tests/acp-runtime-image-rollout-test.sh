@@ -703,15 +703,32 @@ fi
   exit 2
 }
 
+if jq -e '
+  if .kind == "List" then
+    ([.items[] | "\(.kind)/\(.metadata.name)"] | sort) == [
+      "ValidatingAdmissionPolicy/orka-acp-workspace-lease-protection",
+      "ValidatingAdmissionPolicyBinding/orka-acp-workspace-lease-protection"
+    ]
+  else false end
+' "$3" >/dev/null; then
+  : >"${FAKE_KUBE_STATE}/lease-policy"
+  printf 'lease-policy:orka-acp-workspace-lease-protection\n' >>"${FAKE_KUBE_LOG}"
+  exit 0
+fi
+
 if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") else false end' "$3" >/dev/null; then
+  [[ -e "${FAKE_KUBE_STATE}/lease-policy" ]] || {
+    echo 'admission webhooks applied before the ACP workspace Lease policy' >&2
+    exit 61
+  }
   [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
-  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 9 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
+  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 8 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
   jq -e '
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 8 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 8 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and .sideEffects == "None" and
        .clientConfig.service.name == "orka-admission" and
@@ -738,11 +755,6 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
              .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
              .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
              .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "acpsuspendquotalease.core.orka.ai" and
-             .clientConfig.service.path == "/validate-coordination-k8s-io-v1-acp-suspend-quota-lease" and
-             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":["coordination.k8s.io"],"apiVersions":["v1"],"resources":["leases"],"scope":"Namespaced"}] and
-             .matchConditions == [{"name":"reserved-acp-workspace-lease-name","expression":"request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027) || (request.operation == \u0027CREATE\u0027 && (object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027)))"}])] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "sessionresolution.core.orka.ai" or
              .name == "agentexecutionadjudication.core.orka.ai" or
@@ -962,6 +974,7 @@ assert_converged() {
   [[ -s "${state_dir}/snapshot-key" ]]
   [[ -e "${state_dir}/admission-runtime" ]]
   [[ -e "${state_dir}/admission-endpoints" ]]
+  [[ -e "${state_dir}/lease-policy" ]]
   [[ -e "${state_dir}/admission-webhooks" ]]
   [[ -e "${state_dir}/dependency-workload" ]]
   for dependency in orka-provider-auth-proxy orka-scm-egress-proxy orka-workspace-publisher; do
@@ -973,7 +986,7 @@ assert_converged() {
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
+  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "8" ]]
   grep -Fxq 'smoke:/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use' "${state_dir}/apply.log"
   [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   # Recovery scenarios run the apply script twice into one shared log, so

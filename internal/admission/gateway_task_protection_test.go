@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apimachinery/pkg/util/managedfields/managedfieldstest"
 	apiserveradmission "k8s.io/apiserver/pkg/admission"
@@ -302,26 +303,30 @@ func TestGatewayTaskProtectionPreservesIdentityRestrictions(t *testing.T) {
 	})
 }
 
-type gatewayTaskPolicyEvaluator struct {
+type admissionPolicyEvaluator struct {
 	compiler    *admissioncel.CompositedCompiler
 	conditions  admissioncel.ConditionEvaluator
 	validations admissioncel.ConditionEvaluator
 }
 
-// Compile the shipped policy with the same CEL compiler and object conversion
-// used by kube-apiserver, including its lazy policy variables.
-func compileGatewayTaskProtection(t *testing.T) gatewayTaskPolicyEvaluator {
+func compileGatewayTaskProtection(t *testing.T) admissionPolicyEvaluator {
 	t.Helper()
-	documents, err := splitYAMLDocuments(filepath.Join("..", "..", "config", "admission", "gateway_task_protection.yaml"))
-	require.NoError(t, err)
-	require.Len(t, documents, 2)
-	replacements := strings.NewReplacer(
+	return compileAdmissionPolicy(t, "gateway_task_protection.yaml", strings.NewReplacer(
 		"ORKA_NAMESPACE", "orka-system",
 		"CONTROLLER_SA", "orka-controller-manager",
 		"AI_WORKER_SA", "orka-ai-worker",
 		"VENDOR_WORKER_SA", "orka-vendor-worker",
 		"CONTAINER_WORKER_SA", "orka-container-worker",
-	)
+	))
+}
+
+// Compile a shipped config/admission policy with the same CEL compiler and
+// object conversion used by kube-apiserver, including its lazy policy variables.
+func compileAdmissionPolicy(t *testing.T, file string, replacements *strings.Replacer) admissionPolicyEvaluator {
+	t.Helper()
+	documents, err := splitYAMLDocuments(filepath.Join("..", "..", "config", "admission", file))
+	require.NoError(t, err)
+	require.Len(t, documents, 2)
 	var policy admissionregistrationv1.ValidatingAdmissionPolicy
 	require.NoError(t, yaml.UnmarshalStrict([]byte(replacements.Replace(string(documents[0]))), &policy))
 	require.Equal(t, admissionregistrationv1.Fail, *policy.Spec.FailurePolicy)
@@ -347,7 +352,7 @@ func compileGatewayTaskProtection(t *testing.T) gatewayTaskPolicyEvaluator {
 	for _, validation := range policy.Spec.Validations {
 		validations = append(validations, &validating.ValidationCondition{Expression: validation.Expression})
 	}
-	evaluator := gatewayTaskPolicyEvaluator{
+	evaluator := admissionPolicyEvaluator{
 		compiler:    compiler,
 		conditions:  compiler.CompileCondition(conditions, options, environment.NewExpressions),
 		validations: compiler.CompileCondition(validations, options, environment.NewExpressions),
@@ -357,10 +362,22 @@ func compileGatewayTaskProtection(t *testing.T) gatewayTaskPolicyEvaluator {
 	return evaluator
 }
 
-func (p gatewayTaskPolicyEvaluator) allows(t *testing.T, operation apiserveradmission.Operation, username, subresource string, object, oldObject *unstructured.Unstructured) bool {
+func (p admissionPolicyEvaluator) allows(t *testing.T, operation apiserveradmission.Operation, username, subresource string, object, oldObject *unstructured.Unstructured) bool {
 	t.Helper()
-	kind := corev1alpha1.GroupVersion.WithKind("Task")
-	resource := corev1alpha1.GroupVersion.WithResource("tasks")
+	return p.admits(t, corev1alpha1.GroupVersion.WithKind("Task"), corev1alpha1.GroupVersion.WithResource("tasks"),
+		admissionTestTaskName, operation, username, subresource, object, oldObject)
+}
+
+func (p admissionPolicyEvaluator) admits(
+	t *testing.T,
+	kind schema.GroupVersionKind,
+	resource schema.GroupVersionResource,
+	name string,
+	operation apiserveradmission.Operation,
+	username, subresource string,
+	object, oldObject *unstructured.Unstructured,
+) bool {
+	t.Helper()
 	var newRuntimeObject, oldRuntimeObject runtime.Object
 	if object != nil {
 		newRuntimeObject = object
@@ -368,7 +385,7 @@ func (p gatewayTaskPolicyEvaluator) allows(t *testing.T, operation apiserveradmi
 	if oldObject != nil {
 		oldRuntimeObject = oldObject
 	}
-	attributes := apiserveradmission.NewAttributesRecord(newRuntimeObject, oldRuntimeObject, kind, admissionTestNamespace, admissionTestTaskName,
+	attributes := apiserveradmission.NewAttributesRecord(newRuntimeObject, oldRuntimeObject, kind, admissionTestNamespace, name,
 		resource, subresource, operation, nil, false, &user.DefaultInfo{Name: username})
 	versioned := &apiserveradmission.VersionedAttributes{
 		Attributes: attributes, VersionedKind: kind,

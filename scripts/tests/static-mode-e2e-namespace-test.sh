@@ -56,8 +56,8 @@ if [[ ! "${admission_endpoints_line}" =~ ^[0-9]+$ || ! "${admission_smoke_line}"
   exit 1
 fi
 
-if [[ "$(grep -c '^/validate-' <<<"${admission_deploy}")" -ne 9 ]]; then
-  echo 'E2E admission smoke must cover all nine checked-in handlers' >&2
+if [[ "$(grep -c '^/validate-' <<<"${admission_deploy}")" -ne 8 ]]; then
+  echo 'E2E admission smoke must cover all eight checked-in handlers' >&2
   exit 1
 fi
 
@@ -86,11 +86,6 @@ webhooks:
       name: orka-admission
       namespace: orka-system
       path: /validate-v1-secret-workspace-attachment
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -200,7 +195,6 @@ while IFS= read -r handler; do
   grep -Fxq "smoke:${handler}" "${admission_test_log}"
 done <<'EOF_EXPECTED_HANDLERS'
 validate-v1-secret-workspace-attachment
-validate-coordination-k8s-io-v1-acp-suspend-quota-lease
 validate-core-orka-ai-v1alpha1-task-provenance
 validate-core-orka-ai-v1alpha1-task-workspace-class-use
 validate-core-orka-ai-v1alpha1-tool-workspace-class-use
@@ -212,7 +206,7 @@ EOF_EXPECTED_HANDLERS
 
 last_smoke_line="$(grep -n '^smoke:' "${admission_test_log}" | tail -1 | cut -d: -f1)"
 webhooks_applied_line="$(grep -n '^webhooks-applied$' "${admission_test_log}" | cut -d: -f1)"
-if [[ "$(grep -c '^smoke:' "${admission_test_log}")" -ne 9 ]] ||
+if [[ "$(grep -c '^smoke:' "${admission_test_log}")" -ne 8 ]] ||
   ((last_smoke_line >= webhooks_applied_line)); then
   echo 'E2E admission deployment did not smoke all handlers before applying webhooks' >&2
   exit 1

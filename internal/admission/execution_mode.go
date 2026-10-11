@@ -58,7 +58,8 @@ func (c ExecutionModeConfig) controller(username string) bool {
 }
 
 // RegisterExecutionModeWebhooks registers the static execution-mode boundary
-// for Orka resources. Namespace claim immutability is a ValidatingAdmissionPolicy.
+// for Orka resources. Namespace claim immutability and ACP workspace
+// coordination Lease ownership are ValidatingAdmissionPolicies.
 func RegisterExecutionModeWebhooks(
 	server webhook.Server,
 	scheme *runtime.Scheme,
@@ -78,9 +79,6 @@ func RegisterExecutionModeWebhooks(
 	}})
 	server.Register(WorkspaceAttachmentSecretWebhookPath, &ctrladmission.Webhook{Handler: &WorkspaceAttachmentSecretValidator{
 		decoder: decoder, config: config,
-	}})
-	server.Register(ACPSuspendQuotaLeaseWebhookPath, &ctrladmission.Webhook{Handler: &ACPSuspendQuotaLeaseValidator{
-		config: config,
 	}})
 }
 
