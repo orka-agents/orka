@@ -205,7 +205,11 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 				used[request.Surface] = append(used[request.Surface], request.Role)
 			}
 		}
-		Expect(used[fakeforge.SurfaceGitFetch]).To(ContainElements(fakeforge.RoleRead, fakeforge.RolePublicationRead))
+		// The source clone transfers objects; preflight and verification only
+		// need to read the target, which may be a ref listing.
+		Expect(used[fakeforge.SurfaceGitFetch]).To(ContainElement(fakeforge.RoleRead))
+		Expect(append(used[fakeforge.SurfaceGitRefs], used[fakeforge.SurfaceGitFetch]...)).
+			To(ContainElement(fakeforge.RolePublicationRead))
 		Expect(used[fakeforge.SurfaceGitPush]).To(ContainElement(fakeforge.RolePush))
 		Expect(used[fakeforge.SurfaceAPI]).To(ContainElement(fakeforge.RoleForge))
 	})
