@@ -1083,3 +1083,31 @@ func TestToolboxRejectsOutsideAbsoluteDirectoryWithInTreeSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestMountedToolboxChecksEveryPATHDirectoryComponent(t *testing.T) {
+	source, _ := newLayout(t)
+	mustWrite(t, filepath.Join(source, "private", "bin", "tool"), elfFor(runtime.GOARCH), 0o755)
+	if err := os.Chmod(filepath.Join(source, "private"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []func() error{
+		func() error { return VerifyMounted(source, []string{"private/bin"}) },
+		func() error { return CheckMounted(source, []string{"private/bin"}, runtime.GOARCH) },
+	} {
+		if err := check(); failureReason(t, err) != ReasonPermissionDenied {
+			t.Fatalf("checker-owned private parent must reject arbitrary session identities: %v", err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(source, "private"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMounted(source, []string{"private/bin"}, runtime.GOARCH); err != nil {
+		t.Fatalf("world-accessible nested path rejected: %v", err)
+	}
+	if err := os.Symlink("private", filepath.Join(source, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyMounted(source, []string{"alias/bin"}); failureReason(t, err) != ReasonMissingPathEntry {
+		t.Fatalf("root metadata walk must reject an intermediate path-entry symlink: %v", err)
+	}
+}

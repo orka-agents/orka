@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Handoff copies the running binary into dst as HandoffBinaryName with mode
@@ -67,6 +68,9 @@ const worldAccessBits = os.FileMode(0o005)
 // follows anything inside a toolbox, so the root supervisor can call it
 // safely.
 func VerifyMounted(mountPath string, pathEntries []string) error {
+	if !filepath.IsAbs(mountPath) || filepath.Clean(mountPath) != mountPath || mountPath == "/" {
+		return failf(ReasonInvalidArguments, "mount path must be a clean absolute path below /")
+	}
 	if err := requireRealDirectory(mountPath); err != nil {
 		return failf(ReasonMissingMount, "toolbox %s is not mounted: %v", mountPath, err)
 	}
@@ -74,27 +78,40 @@ func VerifyMounted(mountPath string, pathEntries []string) error {
 		return failf(ReasonPermissionDenied, "toolbox %s: %v", mountPath, err)
 	}
 	for _, entry := range pathEntries {
-		dir := filepath.Join(mountPath, entry)
-		if err := requireRealDirectory(dir); err != nil {
-			return failf(ReasonMissingPathEntry, "toolbox %s path entry %s: %v", mountPath, entry, err)
+		if entry == "" || filepath.IsAbs(entry) || filepath.Clean(entry) != entry || entry == "." || entry == ".." || strings.HasPrefix(entry, "../") {
+			return failf(ReasonInvalidArguments, "path entry %q must be a clean relative path", entry)
 		}
-		if err := requireWorldAccessible(dir); err != nil {
-			return failf(ReasonPermissionDenied, "toolbox %s path entry %s: %v", mountPath, entry, err)
+		dir := mountPath
+		for component := range strings.SplitSeq(entry, string(filepath.Separator)) {
+			dir = filepath.Join(dir, component)
+			if err := requireRealDirectory(dir); err != nil {
+				return failf(ReasonMissingPathEntry, "toolbox %s path entry %s: %v", mountPath, entry, err)
+			}
+			if err := requireWorldAccessible(dir); err != nil {
+				return failf(ReasonPermissionDenied, "toolbox %s path entry %s: %v", mountPath, entry, err)
+			}
 		}
 	}
 	return nil
 }
 
 func requireRealDirectory(dir string) error {
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink", dir)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a folder", dir)
+	// Check ancestors in order so Lstat never follows a symlink in an earlier
+	// component. Root verification remains metadata-only and does not open
+	// or parse any untrusted toolbox contents.
+	current := string(filepath.Separator)
+	for component := range strings.SplitSeq(strings.TrimPrefix(dir, current), current) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a folder", current)
+		}
 	}
 	return nil
 }

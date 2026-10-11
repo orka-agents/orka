@@ -520,18 +520,9 @@ func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, er
 			if !slices.ContainsFunc(pending, func(component string) bool { return component != "" && component != "." }) {
 				return "", false, nil
 			}
-			nextFd, err := unix.Openat(dirFd, component, openDirFlags, 0)
+			nextFd, err := openVerifiedToolboxDirectory(dirFd, component, &st, path.Join(mountPath, relative))
 			if err != nil {
 				return "", false, err
-			}
-			var opened unix.Stat_t
-			statErr := unix.Fstat(nextFd, &opened)
-			if statErr != nil || opened.Ino != st.Ino || statDev(&opened) != statDev(&st) || statMode(&opened)&unix.S_IFMT != unix.S_IFDIR {
-				_ = unix.Close(nextFd)
-				if statErr != nil {
-					return "", false, statErr
-				}
-				return "", false, failf(ReasonSourceChanged, "%s changed while it was being inspected", path.Join(mountPath, relative))
 			}
 			_ = unix.Close(dirFd)
 			dirFd = nextFd
@@ -583,6 +574,25 @@ func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, er
 		}
 	}
 	return "", false, nil
+}
+
+// openVerifiedToolboxDirectory binds a no-follow directory open to the
+// metadata observed before opening it. The caller owns the returned descriptor.
+func openVerifiedToolboxDirectory(parent int, name string, expected *unix.Stat_t, display string) (int, error) {
+	fd, err := unix.Openat(parent, name, openDirFlags, 0)
+	if err != nil {
+		return -1, err
+	}
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	if opened.Ino != expected.Ino || statDev(&opened) != statDev(expected) || statMode(&opened)&unix.S_IFMT != unix.S_IFDIR {
+		_ = unix.Close(fd)
+		return -1, failf(ReasonSourceChanged, "%s changed while it was being inspected", display)
+	}
+	return fd, nil
 }
 
 // absoluteLinkInsideTree matches a clean mount path against absolute link

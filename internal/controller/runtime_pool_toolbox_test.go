@@ -1139,3 +1139,17 @@ func TestRuntimePoolToolboxRestartRecycleRetriesAfterScaleToZero(t *testing.T) {
 		t.Fatal("successful retry retained retired instance fence")
 	}
 }
+
+func TestValidateACPToolboxNodeSelectorRejectsInvalidLabels(t *testing.T) {
+	for _, selector := range []map[string]string{
+		{"zone": "bad/value"}, {"bad key": "a"}, {"example.com/": "a"},
+		{"zone": strings.Repeat("a", 64)}, {"BadPrefix.example/key": "a"},
+	} {
+		if err := ValidateACPToolboxNodeSelector(selector); err == nil {
+			t.Fatalf("invalid selector was accepted: %#v", selector)
+		}
+	}
+	if err := ValidateACPToolboxNodeSelector(map[string]string{"example.com/zone": "us-west-1", "kubernetes.io/os": "linux"}); err != nil {
+		t.Fatalf("valid node selector rejected: %v", err)
+	}
+}

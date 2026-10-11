@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -189,8 +190,16 @@ func applyRuntimePoolToolboxTemplate(template *corev1.PodTemplateSpec, toolboxes
 const runtimePoolNodeOSLabel = "kubernetes.io/os"
 
 // ValidateACPToolboxNodeSelector rejects a toolbox node selector that would
-// move Linux-only runtime Pods to another OS.
+// move Linux-only runtime Pods to another OS or contain invalid Pod labels.
 func ValidateACPToolboxNodeSelector(selector map[string]string) error {
+	for key, value := range selector {
+		if errors := validation.IsQualifiedName(key); len(errors) != 0 {
+			return fmt.Errorf("toolbox node selector key %q is invalid: %s", key, strings.Join(errors, "; "))
+		}
+		if errors := validation.IsValidLabelValue(value); len(errors) != 0 {
+			return fmt.Errorf("toolbox node selector value %s=%q is invalid: %s", key, value, strings.Join(errors, "; "))
+		}
+	}
 	if value, ok := selector[runtimePoolNodeOSLabel]; ok && value != "linux" {
 		return fmt.Errorf("toolbox node selector %s=%q conflicts with the Linux-only runtime Pods", runtimePoolNodeOSLabel, value)
 	}
