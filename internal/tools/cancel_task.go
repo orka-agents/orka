@@ -12,7 +12,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"unicode/utf8"
 )
+
+// MaxCancelReasonLength bounds the cancel_task reason in characters; the
+// reason becomes part of the child's terminal message.
+const MaxCancelReasonLength = 512
 
 // CancelTaskTool implements task cancellation for coordination workflows.
 // Workers cannot write Task status, so the controller performs the
@@ -44,9 +49,9 @@ func (t *CancelTaskTool) Name() string {
 
 // Description returns the tool description
 func (t *CancelTaskTool) Description() string {
-	return "Cancel a running child task. The task's Job will be terminated and the task will be marked as Cancelled. " +
+	return "Cancel a pending or running child task. The controller then terminates its Job and marks it Cancelled. " +
 		"Use this to stop a task that is going down the wrong path, taking too long, or is no longer needed. " +
-		"You can only cancel tasks that are children of the current task."
+		"You can only cancel tasks that are children of the current task, and not tasks running on an agent runtime."
 }
 
 // Parameters returns the JSON Schema for the tool parameters
@@ -64,7 +69,8 @@ func (t *CancelTaskTool) Parameters() json.RawMessage {
 			},
 			"reason": {
 				"type": "string",
-				"description": "Reason for cancellation (optional, included in task status message)"
+				"description": "Reason for cancellation (optional, included in task status message)",
+				"maxLength": 512
 			}
 		},
 		"required": ["task_name"]
@@ -80,6 +86,9 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 
 	if a.TaskName == "" {
 		return "", fmt.Errorf("task_name is required")
+	}
+	if utf8.RuneCountInString(a.Reason) > MaxCancelReasonLength {
+		return "", fmt.Errorf("reason must be at most %d characters", MaxCancelReasonLength)
 	}
 
 	cfg, err := loadInternalControllerConfig()

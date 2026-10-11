@@ -27,7 +27,7 @@
       "response": {"content": "E2E-SLEEPER-DONE: the sleeper finished without being cancelled."}
     },
     {
-      "match": {"userMessage": "[e2e:coord-adv-cancel]", "toolResultContains": "\"status\":\"cancelled\""},
+      "match": {"userMessage": "[e2e:coord-adv-cancel]", "toolResultContains": "\"status\":\"cancellation requested\""},
       "response": {"content": "Cancellation succeeded: the delegated task was cancelled."}
     },
     {

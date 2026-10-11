@@ -8891,3 +8891,41 @@ func TestHandleDeletionWaitsForHarnessV1AttemptReclamation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRequestedTaskCancellation(t *testing.T) {
+	running := func(mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationCancelRequested: "stop"}},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+		}
+		mutate(task)
+		return task
+	}
+	for _, tc := range []struct {
+		name    string
+		task    *corev1alpha1.Task
+		message string
+		ok      bool
+	}{
+		{name: "running", task: running(func(*corev1alpha1.Task) {}), message: "stop", ok: true},
+		{name: "pending", task: running(func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhasePending }), message: "stop", ok: true},
+		{name: "empty message", task: running(func(t *corev1alpha1.Task) {
+			t.Annotations[labels.AnnotationCancelRequested] = " "
+		}), message: "cancelled by parent task", ok: true},
+		{name: "no request", task: running(func(t *corev1alpha1.Task) { t.Annotations = nil })},
+		{name: "finalizing", task: running(func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseFinalizing })},
+		{name: "succeeded", task: running(func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded })},
+		{name: "agent", task: running(func(t *corev1alpha1.Task) { t.Spec.Type = corev1alpha1.TaskTypeAgent })},
+		{name: "ACP execution", task: running(func(t *corev1alpha1.Task) {
+			t.Status.Execution = &corev1alpha1.TaskExecutionStatus{ControllerEpoch: 1}
+		})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message, ok := requestedTaskCancellation(tc.task)
+			if message != tc.message || ok != tc.ok {
+				t.Fatalf("requestedTaskCancellation() = %q, %v; want %q, %v", message, ok, tc.message, tc.ok)
+			}
+		})
+	}
+}

@@ -8,7 +8,9 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,9 +29,9 @@ import (
 )
 
 // setupCancelChildHandlers serves the cancel endpoint to my-task's worker Pod.
-// my-task has a running child with a worker Job, a finished child, a child
-// with ACP execution, and a child whose parent label lacks the controller
-// owner reference; worker-a is its sibling.
+// my-task has a running child with a worker Job, a finished child, an agent
+// child, a child with ACP execution, and a child whose parent label lacks the
+// controller owner reference; worker-a is its sibling.
 func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string, body any) *http.Response) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -37,7 +39,7 @@ func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string
 	require.NoError(t, batchv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 
-	objects := make([]client.Object, 0, 10)
+	objects := make([]client.Object, 0, 12)
 	objects = append(objects, internalCallerAuthTaskObject("coordinator", "coordinator-uid", "", "", ""))
 	for _, name := range []string{"my-task", "worker-a"} {
 		task := internalCallerAuthTaskObject(name, name+"-uid", name+"-job", "coordinator", "")
@@ -46,16 +48,16 @@ func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string
 	}
 	done := internalCallerAuthTaskObject("done-child", "done-child-uid", "", "my-task", "")
 	done.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	agent := internalCallerAuthTaskObject("agent-child", "agent-child-uid", "", "my-task", "")
+	agent.Spec.Type = corev1alpha1.TaskTypeAgent
+	acp := internalCallerAuthTaskObject("acp-child", "acp-child-uid", "", "my-task", "")
+	acp.Status.Execution = &corev1alpha1.TaskExecutionStatus{ControllerEpoch: 1}
 	forged := internalCallerAuthTaskObject("forged-child", "forged-child-uid", "", "", "")
 	forged.Labels[labels.LabelParentTask] = labels.SelectorValue("my-task")
 	forged.Annotations[labels.AnnotationParentTaskName] = "my-task"
-	acp := internalCallerAuthTaskObject("acp-child", "acp-child-uid", "", "my-task", "")
-	acp.Status.Execution = &corev1alpha1.TaskExecutionStatus{ControllerEpoch: 1}
 	objects = append(objects, internalCallerAuthTaskObject("my-child", "my-child-uid", "my-child-job", "my-task", ""),
-		done, acp, forged)
+		done, agent, acp, forged)
 
-	// Register the status subresource so Status().Update behaves like the
-	// API server.
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
 		WithStatusSubresource(&corev1alpha1.Task{}).Build()
 	db, err := sqlite.NewDB(":memory:")
@@ -72,38 +74,45 @@ func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string
 	}
 }
 
-func cancelChildTaskStatus(t *testing.T, h *InternalHandlers, name string) corev1alpha1.TaskStatus {
+func cancelChildTask(t *testing.T, h *InternalHandlers, name string) *corev1alpha1.Task {
 	t.Helper()
 	task := &corev1alpha1.Task{}
 	require.NoError(t, h.k8sClient.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: name}, task))
-	return task.Status
+	return task
 }
 
-func TestCancelChildTaskCancelsRunningChild(t *testing.T) {
+// requireNoCancelRequest checks that the endpoint left the Task untouched.
+func requireNoCancelRequest(t *testing.T, h *InternalHandlers, name string, phase corev1alpha1.TaskPhase) {
+	t.Helper()
+	task := cancelChildTask(t, h, name)
+	require.Equal(t, phase, task.Status.Phase)
+	require.NotContains(t, task.Annotations, labels.AnnotationCancelRequested)
+}
+
+func decodeCancelResult(t *testing.T, resp *http.Response) tools.CancelTaskResult {
+	t.Helper()
+	var result tools.CancelTaskResult
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	return result
+}
+
+func TestCancelChildTaskRecordsTheRequestForTheController(t *testing.T) {
 	h, post := setupCancelChildHandlers(t)
 
 	resp := post("/internal/v1/tasks/default/my-task/children/my-child/cancel", map[string]string{"reason": "wrong approach"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var result tools.CancelTaskResult
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-	require.Equal(t, tools.CancelTaskResult{TaskName: "my-child", Status: "cancelled"}, result)
+	require.Equal(t, tools.CancelTaskResult{TaskName: "my-child", Status: "cancellation requested"}, decodeCancelResult(t, resp))
+	child := cancelChildTask(t, h, "my-child")
+	require.Equal(t, "cancelled by parent task: wrong approach", child.Annotations[labels.AnnotationCancelRequested])
+	// The Task controller, not the API, writes the terminal status.
+	require.Equal(t, corev1alpha1.TaskPhaseRunning, child.Status.Phase)
 
-	status := cancelChildTaskStatus(t, h, "my-child")
-	require.Equal(t, corev1alpha1.TaskPhaseCancelled, status.Phase)
-	require.Equal(t, "cancelled by parent task: wrong approach", status.Message)
-	require.NotNil(t, status.CompletionTime)
-	err := h.resultStore.(store.TaskJobAuthorityStore).CheckTaskJobAuthority(t.Context(), store.TaskJobIdentity{
-		Namespace: "default", TaskUID: "my-child-uid", JobUID: "my-child-job-uid",
-	})
-	require.ErrorIs(t, err, store.ErrTaskJobRevoked)
-}
-
-func TestCancelChildTaskRefusesACPExecution(t *testing.T) {
-	h, post := setupCancelChildHandlers(t)
-
-	resp := post("/internal/v1/tasks/default/my-task/children/acp-child/cancel", nil)
-	require.Equal(t, http.StatusConflict, resp.StatusCode)
-	require.Equal(t, corev1alpha1.TaskPhaseRunning, cancelChildTaskStatus(t, h, "acp-child").Phase)
+	// A repeated request keeps the first message.
+	resp = post("/internal/v1/tasks/default/my-task/children/my-child/cancel", map[string]string{"reason": "again"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "cancellation requested", decodeCancelResult(t, resp).Status)
+	require.Equal(t, "cancelled by parent task: wrong approach",
+		cancelChildTask(t, h, "my-child").Annotations[labels.AnnotationCancelRequested])
 }
 
 func TestCancelChildTaskLeavesTerminalChildUnchanged(t *testing.T) {
@@ -111,10 +120,19 @@ func TestCancelChildTaskLeavesTerminalChildUnchanged(t *testing.T) {
 
 	resp := post("/internal/v1/tasks/default/my-task/children/done-child/cancel", nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var result tools.CancelTaskResult
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-	require.Equal(t, "task is already in Succeeded phase, cannot cancel", result.Status)
-	require.Equal(t, corev1alpha1.TaskPhaseSucceeded, cancelChildTaskStatus(t, h, "done-child").Phase)
+	require.Equal(t, "task is already in Succeeded phase, cannot cancel", decodeCancelResult(t, resp).Status)
+	requireNoCancelRequest(t, h, "done-child", corev1alpha1.TaskPhaseSucceeded)
+}
+
+func TestCancelChildTaskRefusesAgentRuntimeChildren(t *testing.T) {
+	for _, child := range []string{"agent-child", "acp-child"} {
+		t.Run(child, func(t *testing.T) {
+			h, post := setupCancelChildHandlers(t)
+			resp := post("/internal/v1/tasks/default/my-task/children/"+child+"/cancel", nil)
+			require.Equal(t, http.StatusConflict, resp.StatusCode)
+			requireNoCancelRequest(t, h, child, corev1alpha1.TaskPhaseRunning)
+		})
+	}
 }
 
 func TestCancelChildTaskRejectsTasksOutsideCallerScope(t *testing.T) {
@@ -132,10 +150,33 @@ func TestCancelChildTaskRejectsTasksOutsideCallerScope(t *testing.T) {
 			resp := post(tc.path, nil)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode)
 			if tc.unchanged != "" {
-				require.Equal(t, corev1alpha1.TaskPhaseRunning, cancelChildTaskStatus(t, h, tc.unchanged).Phase)
+				requireNoCancelRequest(t, h, tc.unchanged, corev1alpha1.TaskPhaseRunning)
 			}
 		})
 	}
+}
+
+func TestCancelChildTaskRejectsRevokedParentJob(t *testing.T) {
+	h, post := setupCancelChildHandlers(t)
+	require.NoError(t, h.resultStore.(store.TaskJobAuthorityStore).RevokeTaskJob(t.Context(), store.TaskJobIdentity{
+		Namespace: "default", TaskUID: "my-task-uid", JobUID: "my-task-job-uid",
+	}))
+
+	resp := post("/internal/v1/tasks/default/my-task/children/my-child/cancel", nil)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "task Job is no longer active")
+	requireNoCancelRequest(t, h, "my-child", corev1alpha1.TaskPhaseRunning)
+}
+
+func TestCancelChildTaskRejectsLongReason(t *testing.T) {
+	h, post := setupCancelChildHandlers(t)
+
+	resp := post("/internal/v1/tasks/default/my-task/children/my-child/cancel",
+		map[string]string{"reason": strings.Repeat("x", tools.MaxCancelReasonLength+1)})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	requireNoCancelRequest(t, h, "my-child", corev1alpha1.TaskPhaseRunning)
 }
 
 func TestCancelChildTaskRequiresProvenanceAdmission(t *testing.T) {
@@ -144,5 +185,5 @@ func TestCancelChildTaskRequiresProvenanceAdmission(t *testing.T) {
 
 	resp := post("/internal/v1/tasks/default/my-task/children/my-child/cancel", nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	require.Equal(t, corev1alpha1.TaskPhaseRunning, cancelChildTaskStatus(t, h, "my-child").Phase)
+	requireNoCancelRequest(t, h, "my-child", corev1alpha1.TaskPhaseRunning)
 }

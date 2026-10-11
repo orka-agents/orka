@@ -92,7 +92,7 @@ func startCancelTaskController(t *testing.T, status int, body string) *[]cancelT
 }
 
 func TestCancelTaskTool_ExecuteAsksControllerToCancelChild(t *testing.T) {
-	const result = `{"taskName":"child-task-1","status":"cancelled"}`
+	const result = `{"taskName":"child-task-1","status":"cancellation requested"}`
 	requests := startCancelTaskController(t, http.StatusOK, result)
 
 	got, err := NewCancelTaskTool().Execute(context.Background(),
@@ -131,6 +131,11 @@ func TestCancelTaskTool_ExecuteRejectsInvalidRequestsLocally(t *testing.T) {
 		{name: "missing task name", args: `{}`, want: "task_name is required"},
 		{name: "other namespace", args: `{"task_name":"child-task-1","namespace":"elsewhere"}`, want: "is not a child of the current task"},
 		{name: "malformed", args: `{`, want: "failed to parse arguments"},
+		{
+			name: "long reason",
+			args: `{"task_name":"child-task-1","reason":"` + strings.Repeat("x", MaxCancelReasonLength+1) + `"}`,
+			want: "reason must be at most 512 characters",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests := startCancelTaskController(t, http.StatusOK, `{}`)

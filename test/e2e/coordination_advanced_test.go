@@ -181,7 +181,7 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 			By("verifying cancel_task cancelled the running child")
 			Expect(phase).To(Equal("Succeeded"))
 			waitForTaskPhase(sleeper, "Cancelled", time.Minute)
-			expectCoordinationToolResult(marker, "cancel_task", `"status":"cancelled"`, time.Minute)
+			expectCoordinationToolResult(marker, "cancel_task", `"status":"cancellation requested"`, time.Minute)
 		}
 	})
 
