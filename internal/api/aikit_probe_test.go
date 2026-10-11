@@ -71,7 +71,7 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 		Passed       bool   `json:"passed"`
 		Startup      bool   `json:"startup"`
 	}
-	results := make([]probeResult, 0, 7)
+	results := make([]probeResult, 0, 8)
 	startupCtx, stopStartup := context.WithTimeout(t.Context(), 30*time.Minute)
 	defer stopStartup()
 	preload := os.Getenv("AIKIT_PROBE_PRELOAD_PREFIXES") == "true"
@@ -109,6 +109,9 @@ func TestAIKitFullPromptProbe(t *testing.T) {
 			expected: "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK", maxTokens: 128},
 		{name: "chat after compatibility", prompt: prompt, tools: registry.ToLLMTools(tools.ChatToolNames()),
 			message: "Reply with exactly ORKA_LIVE_CHAT_OK and nothing else.", expected: "ORKA_LIVE_CHAT_OK", maxTokens: 16, temperature: true},
+		{name: "compatibility after chat", prompt: coordinatorSystemPrompt("orka-system"), tools: compat.Tools,
+			message:  "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly <ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK and nothing else. Do not use any tools.",
+			expected: "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK", maxTokens: 128},
 	} {
 		if probe.startup && !preload {
 			continue
@@ -210,14 +213,14 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 	t.Setenv("AIKIT_PROBE_REPORT", report)
 	t.Setenv("AIKIT_PROBE_PRELOAD_PREFIXES", "false")
 	t.Run("configured endpoint", TestAIKitFullPromptProbe)
-	if calls.Load() != 5 {
-		t.Fatalf("probe calls = %d, want 5", calls.Load())
+	if calls.Load() != 6 {
+		t.Fatalf("probe calls = %d, want 6", calls.Load())
 	}
 	calls.Store(0)
 	t.Setenv("AIKIT_PROBE_PRELOAD_PREFIXES", "true")
 	t.Run("startup prefix preparation", TestAIKitFullPromptProbe)
-	if calls.Load() != 7 {
-		t.Fatalf("prefilled probe calls = %d, want 7", calls.Load())
+	if calls.Load() != 8 {
+		t.Fatalf("prefilled probe calls = %d, want 8", calls.Load())
 	}
 	data, err := os.ReadFile(report)
 	if err != nil {
@@ -230,10 +233,10 @@ func TestAIKitFullPromptProbeContract(t *testing.T) {
 		OutputTokens int    `json:"outputTokens"`
 		Startup      bool   `json:"startup"`
 	}
-	if err := json.Unmarshal(data, &results); err != nil || len(results) != 7 {
+	if err := json.Unmarshal(data, &results); err != nil || len(results) != 8 {
 		t.Fatalf("invalid probe counter report: %v", err)
 	}
-	wantNames := []string{"chat prefix preload", "chat prefilled", "chat warm", "chat changed context", "compatibility prefix preload", "compatibility", "chat after compatibility"}
+	wantNames := []string{"chat prefix preload", "chat prefilled", "chat warm", "chat changed context", "compatibility prefix preload", "compatibility", "chat after compatibility", "compatibility after chat"}
 	for i, r := range results {
 		if !r.Passed || r.InputTokens != 9000 || r.OutputTokens != 16 {
 			t.Fatalf("probe result missing verified token usage: %+v", r)
