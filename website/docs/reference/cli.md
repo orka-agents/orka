@@ -409,6 +409,12 @@ orka secret list -o json
 
 Sessions and durable memory are store-backed workflows rather than Kubernetes CRDs.
 
+`orka session migrate import` stages a stopped Codex thread for a fresh Orka
+Session. `orka session migrate export` installs a saved checkpoint in a fresh
+local home. Both require a private journal for retries and support Codex 0.160.0
+paginated sessions on Linux and macOS. See
+[Codex session migration](../guides/codex-session-migration.md).
+
 ```bash
 orka session list -o json
 orka session get SESSION_ID -o json

@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/uiembed"
 )
@@ -77,6 +78,7 @@ type ServerConfig struct {
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	NativeSessionMaxBytes     int
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
@@ -158,6 +160,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
+		NativeSessionMaxBytes:     config.NativeSessionMaxBytes,
 		SessionManager:            sessionManager,
 		PlanStore:                 config.PlanStore,
 		KubeClient:                config.Clientset,
@@ -191,6 +194,10 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 }
 
 func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	return requestBodyConfigWithNativeSessionLimit(header, harnessv2.DefaultMaxNativeSessionBytes)
+}
+
+func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nativeSessionMaxBytes int) fasthttp.RequestConfig {
 	if string(header.Method()) != fiber.MethodPost {
 		return fasthttp.RequestConfig{}
 	}
@@ -201,6 +208,13 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	}
 	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
+	}
+	// Use Fiber's fasthttp path semantics for the streaming exemption, including
+	// fragment handling. net/url would retain a literal '#' in the path and
+	// leave a routed native import without its bounded read deadline.
+	var nativeURI fasthttp.URI
+	if nativeURI.Parse(header.Host(), header.RequestURI()) == nil && isNativeSessionImportPath(string(nativeURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: harnessv2.NativeSessionJSONLimit(nativeSessionMaxBytes), ReadTimeout: 30 * time.Second}
 	}
 	// Internal broker endpoints authorize against per-pool secrets that are
 	// only resolvable from the request body, so unauthenticated peers cannot
@@ -217,7 +231,7 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
-	config := requestBodyConfig(header)
+	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
 	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
 	// net/url's request-target parsing differs for a literal '#' character.
 	var uri fasthttp.URI
@@ -344,6 +358,8 @@ func (s *Server) setupRoutes() {
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
 	api.Get("/sessions/:id", s.handlers.GetSession)
+	api.Get("/sessions/:id/native", s.handlers.ExportNativeSession)
+	api.Post("/sessions/:id/native", s.handlers.ImportNativeSession)
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)

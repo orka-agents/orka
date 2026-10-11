@@ -26,6 +26,9 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := ensureNativeSessionNameAvailableTx(ctx, tx, session.Namespace, session.Name); err != nil {
+		return err
+	}
 	// Non-Gateway transcript-only completions permit deliberate name reuse.
 	// Kubernetes identities and Gateway continuation chains remain reserved.
 	if _, err := tx.ExecContext(ctx,
@@ -274,6 +277,9 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
 		return err
 	}
+	if err := deleteNativeSessionTx(ctx, tx, namespace, name); err != nil {
+		return err
+	}
 	deleteResult, err := tx.ExecContext(ctx,
 		`DELETE FROM sessions WHERE namespace = ? AND name = ? AND session_type <> ?`,
 		namespace, name, store.SessionTypeGateway,
@@ -373,7 +379,24 @@ func (s *Store) AcquireLockUntil(ctx context.Context, namespace, name, ownerName
 	return s.acquireLock(ctx, namespace, name, ownerName, ownerUID, &expiresAt)
 }
 
+// Legacy locks and transcript writes cannot update native checkpoint boundaries.
+func rejectLegacyNativeSession(ctx context.Context, q controlQueryRower, namespace, name string) error {
+	var count int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM native_session_snapshots WHERE namespace=? AND session_name=?`, namespace, name).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return store.ValidationErrorf("native Session requires a Codex runtime with native continuity; legacy locks and transcript writes are unsupported")
+	}
+	return nil
+}
+
 func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, taskUID string, expiresAt *time.Time) error {
+	if expiresAt == nil {
+		if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
+			return err
+		}
+	}
 	// Check if session exists
 	var count int
 	err := s.db.QueryRowContext(ctx,
@@ -439,8 +462,8 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		   AND NOT EXISTS (
 		     SELECT 1 FROM session_cleanup_intents
 		     WHERE namespace = ? AND session_name = ?
-		   )`,
-		taskName, taskUID, expiresValue, namespace, name, now, taskName, taskUID, now, namespace, name,
+		   ) AND (? OR NOT EXISTS (SELECT 1 FROM native_session_snapshots WHERE namespace=? AND session_name=?))`,
+		taskName, taskUID, expiresValue, namespace, name, now, taskName, taskUID, now, namespace, name, expiresAt != nil, namespace, name,
 	)
 	if err != nil {
 		return err
@@ -451,6 +474,11 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		return err
 	}
 	if rows == 0 {
+		if expiresAt == nil {
+			if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
+				return err
+			}
+		}
 		if pending, pendingErr := s.HasSessionCleanupIntent(ctx, namespace, name); pendingErr != nil {
 			return pendingErr
 		} else if pending {
@@ -491,6 +519,19 @@ func (s *Store) AcquireChatTurn(
 		return false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := ensureNativeSessionNameAvailableTx(ctx, tx, session.Namespace, session.Name); err != nil {
+		return false, err
+	}
+	var nativeSnapshot bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM native_session_snapshots WHERE namespace = ? AND session_name = ?)`,
+		session.Namespace, session.Name,
+	).Scan(&nativeSnapshot); err != nil {
+		return false, err
+	}
+	if nativeSnapshot {
+		return false, store.ConflictErrorf("native Session must continue through an agent Task")
+	}
 
 	if err := ensureNoSessionCleanupIntentTx(ctx, tx, session.Namespace, session.Name); err != nil {
 		return false, err
@@ -808,6 +849,10 @@ func (s *Store) appendMessages(
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	if err := rejectLegacyNativeSession(ctx, tx, namespace, name); err != nil {
+		return err
+	}
 
 	var ownerType string
 	if err := tx.QueryRowContext(ctx, `SELECT owner_type FROM sessions WHERE namespace = ? AND name = ?`,

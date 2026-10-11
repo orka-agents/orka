@@ -188,6 +188,20 @@ func newTaskScopedCreateConflictFixture(
 	name string,
 	taskUID types.UID,
 	serverFactory func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, kubeClient *client.Client) *httptest.Server,
+	taskOptions ...func(*corev1alpha1.Task),
+) *taskScopedCreateConflictFixture {
+	t.Helper()
+	return newTaskScopedCreateConflictFixtureForRuntime(t, ctx, name, taskUID, corev1alpha1.AgentRuntimeCodex, serverFactory, taskOptions...)
+}
+
+func newTaskScopedCreateConflictFixtureForRuntime(
+	t *testing.T,
+	ctx context.Context,
+	name string,
+	taskUID types.UID,
+	runtimeType corev1alpha1.AgentRuntimeType,
+	serverFactory func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, kubeClient *client.Client) *httptest.Server,
+	taskOptions ...func(*corev1alpha1.Task),
 ) *taskScopedCreateConflictFixture {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -209,16 +223,20 @@ func newTaskScopedCreateConflictFixture(
 			RequestDigest: testControlDigestForDispatcher(name + "-request"), ControllerEpoch: 1,
 		}},
 	}
+	for _, option := range taskOptions {
+		option(task)
+	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
 			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+				Type: runtimeType, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
-	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
+	image := "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)
+	images := ACPRuntimeImages{Codex: image, Claude: image}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
 	task.Status.Execution.RuntimePoolName = plan.PoolName
@@ -254,7 +272,7 @@ func newTaskScopedCreateConflictFixture(
 	}
 	kubeClient = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).
-		WithObjects(task, pool, secret, agent).Build()
+		WithObjects(task, pool, secret, agent, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "default-namespace-uid"}}).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), name+".db"))
 	if err != nil {
 		t.Fatal(err)

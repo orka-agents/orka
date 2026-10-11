@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -965,6 +966,7 @@ func currentSchemaStatements() []string {
 	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
 	statements = append(statements, usageSchema()...)
 	statements = append(statements, agentExecutionSchemaStatements()...)
+	statements = append(statements, nativeSessionSchemaStatements()...)
 	return append(statements, connectorSchemaStatements()...)
 }
 
@@ -985,6 +987,9 @@ type Store struct {
 	// rest. Snapshot persistence fails closed while it is nil.
 	snapshotCipher *AgentExecutionSnapshotCipher
 
+	// nativeSessionMaxBytes limits new bundles, not authenticated stored reads.
+	nativeSessionMaxBytes int
+
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
 	applyMemoryProposalAfterAcceptedRead func()
@@ -997,7 +1002,7 @@ type Store struct {
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	s := &Store{db: db, dbPath: dbPath}
+	s := &Store{db: db, dbPath: dbPath, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	s.pendingWALTruncate.Store(true)
 	return s
 }
@@ -1016,7 +1021,7 @@ func OpenLockedStore(path string) (*Store, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	store := &Store{db: db, dbPath: path, processLock: lock}
+	store := &Store{db: db, dbPath: path, processLock: lock, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	store.pendingWALTruncate.Store(true)
 	return store, nil
 }

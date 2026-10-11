@@ -25,6 +25,7 @@ func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 		ExecutionEventTypeModelContextUpdated,
 		ExecutionEventTypeModelMessage,
 		ExecutionEventTypeContextTruncated,
+		ExecutionEventTypeNativeSessionCaptureSkipped,
 		ExecutionEventTypeToolCallStarted,
 		ExecutionEventTypeToolCallCompleted,
 		ExecutionEventTypeToolCallFailed,

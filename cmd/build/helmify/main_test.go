@@ -230,7 +230,7 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 		clientRole = clientRole[:end]
 	}
 	const wantClient = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n" +
-		"    verbs: [\"get\", \"list\", \"update\", \"delete\"]"
+		"    verbs: [\"get\", \"list\", \"create\", \"update\", \"delete\"]"
 	if !strings.Contains(clientRole, wantClient) {
 		t.Fatalf("client Role is missing the Session API rule %q:\n%s", wantClient, clientRole)
 	}
@@ -273,7 +273,7 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 			for resource, verbs := range map[string][]string{
 				"tasks":                           {"get", "list", "create", "delete", "patch"},
 				"tasks/approvals":                 {"update"},
-				"sessions":                        {"get", "list", "update", "delete"},
+				"sessions":                        {"get", "list", "create", "update", "delete"},
 				"chats":                           {"create"},
 				"chats/config":                    {"get"},
 				"memories":                        {"get", "list"},

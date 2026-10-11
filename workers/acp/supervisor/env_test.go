@@ -27,7 +27,7 @@ func TestProviderProfilesDisableUpdatesAndUsePrivateHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if codexEnv["NO_BROWSER"] != "1" || codexEnv["CODEX_HOME"] != "/sessions/private/home/.codex" || !strings.Contains(codexEnv["CODEX_CONFIG"], proxy.BaseURL) || codexEnv["CODEX_API_KEY"] != proxy.Credential {
+	if codexEnv["NO_BROWSER"] != "1" || codexEnv["CODEX_HOME"] != "/sessions/private/home/.codex" || !strings.Contains(codexEnv["CODEX_CONFIG"], proxy.BaseURL) || codexEnv["CODEX_API_KEY"] != proxy.Credential || codexEnv["MODEL_PROVIDER"] != codexProviderID {
 		t.Fatalf("unexpected Codex environment: %#v", codexEnv)
 	}
 	var codexConfig map[string]any
@@ -119,6 +119,21 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 	assertCodexWebSocketTransportsDisabled(t, config)
 	if strings.Contains(strings.Join(codex.Args, " "), "npx") {
 		t.Fatalf("Codex runtime uses a download-on-start command: %v", codex.Args)
+	}
+}
+
+func TestCodexProviderSessionProjectionNoReasoning(t *testing.T) {
+	request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "none", nil, nil, true)
+	projection, err := codexSessionProjection(request, acp.SessionPaths{Home: "/sessions/private/home"}, ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session"}, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["model_reasoning_effort"] != "none" {
+		t.Fatalf("Codex reasoning effort = %v, want none", config["model_reasoning_effort"])
 	}
 }
 

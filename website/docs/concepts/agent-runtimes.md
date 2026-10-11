@@ -407,7 +407,13 @@ spec:
     gitRepo: https://github.com/example/project.git
 ```
 
-A RuntimeSession is ephemeral. If its Pod is replaced, Orka may create a fresh provider session from the verified workspace baseline and canonical transcript. Orka harness v2 intentionally does not provide prompt replay, stream reconnect, provider-session load, or workspace checkpoint endpoints.
+A RuntimeSession is ephemeral. If its Pod is replaced, Orka creates a fresh
+provider process from the verified workspace baseline. Codex runtimes advertising
+native Session support can restore a private SessionKit checkpoint into an
+isolated home, then load its original UUID with current credentials and policy.
+Other sessions use the canonical transcript. Neither path replays an accepted
+prompt. See [Codex session migration](../guides/codex-session-migration.md) for
+the supported format and import/export commands.
 
 ## Runtime and credential boundaries
 

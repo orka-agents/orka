@@ -251,6 +251,7 @@ func newSessionCmd() *cobra.Command {
 	})
 	cmd.AddCommand(newSessionEventsCmd())
 	cmd.AddCommand(newSessionFollowCmd())
+	cmd.AddCommand(newSessionMigrateCmd())
 	return cmd
 }
 

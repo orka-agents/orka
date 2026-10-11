@@ -30,6 +30,7 @@ import (
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
@@ -103,6 +104,9 @@ type Handlers struct {
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
+	nativeSessionStore        store.NativeSessionImportStore
+	nativeSessionMaxBytes     int
+	nativeSessionConfigErr    error
 	sessionManager            *controller.SessionManager
 	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
@@ -132,6 +136,7 @@ type HandlersConfig struct {
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	NativeSessionMaxBytes     int
 	SessionManager            *controller.SessionManager
 	PlanStore                 store.PlanStore
 	KubeClient                kubernetes.Interface
@@ -150,6 +155,8 @@ type HandlersConfig struct {
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(cfg HandlersConfig) *Handlers {
+	nativeSessions, _ := cfg.SessionStore.(store.NativeSessionImportStore)
+	nativeSessionMaxBytes, nativeSessionConfigErr := harnessv2.NormalizeNativeSessionMaxBytes(cfg.NativeSessionMaxBytes)
 	return &Handlers{
 		client:                    cfg.Client,
 		apiReader:                 cfg.APIReader,
@@ -160,6 +167,9 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		contextTokenAuthorization: cfg.ContextTokenAuthorization,
 		resultStore:               cfg.ResultStore,
 		sessionStore:              cfg.SessionStore,
+		nativeSessionStore:        nativeSessions,
+		nativeSessionMaxBytes:     nativeSessionMaxBytes,
+		nativeSessionConfigErr:    nativeSessionConfigErr,
 		sessionManager:            cfg.SessionManager,
 		planStore:                 cfg.PlanStore,
 		healthChecker:             cfg.HealthChecker,

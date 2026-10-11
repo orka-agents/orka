@@ -1,0 +1,1 @@
+This sanitized Codex 0.160.0 paginated rollout comes from the MIT-licensed SessionKit repository at commit a3cef22a951149fa994afae3f34e5428f8c2c229, harness/codex/testdata/basic. It contains a stopped conversation with a completed tool call/result pair. No credentials are included.

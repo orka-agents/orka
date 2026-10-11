@@ -280,6 +280,7 @@ func testPrepareTaskSessionCompositeStoreOpensTurn(
 		acpSessionLineageIdentity{
 			NamespaceUID: namespaceUID, RuntimeIdentity: "claude", ConfigDigest: string(profileDigest),
 		},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -5,6 +5,7 @@
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS upstream-artifacts
 ARG TARGETARCH
 COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
+COPY NOTICE.md /artifacts/orka-NOTICE.md
 RUN go build -buildvcs=false -trimpath -ldflags='-s -w' -o /usr/local/bin/artifact-tool /tmp/artifact-tool.go
 RUN set -eu; \
     mkdir -p /artifacts; \
@@ -34,11 +35,7 @@ RUN set -eu; \
     artifact-tool download \
       "https://raw.githubusercontent.com/orka-agents/orka/d03acb995b6014a6e855181c50b922b65ea8e7ff/LICENSE" \
       "7df20dcdf9197e9945c14858d41c60f11b52b93e5b69e2b63416b874d598d322" \
-      /artifacts/orka-LICENSE 65536; \
-    artifact-tool download \
-      "https://raw.githubusercontent.com/orka-agents/orka/d03acb995b6014a6e855181c50b922b65ea8e7ff/NOTICE.md" \
-      "f0e9fca2012cfb65dd9532e0fe693c405de5006d23e54b99b78154060f7dbf75" \
-      /artifacts/orka-NOTICE.md 65536
+      /artifacts/orka-LICENSE 65536
 
 FROM --platform=$BUILDPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS adapter-builder
 ENV NPM_CONFIG_AUDIT=false \

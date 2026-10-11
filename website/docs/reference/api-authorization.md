@@ -172,6 +172,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/events` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/stream` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | Private native bundle export; excludes Gateway Sessions |
+| `POST` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `create` | empty | `Q` | `get` on the named Session; creates a fresh non-Gateway Session only |
 | `DELETE` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `delete` | `:id` | `Q` | none |
 | `GET` | `/api/v1/gatewayclasses` | `gateway.orka.ai` | `gatewayclasses` | `list` | empty | `cluster` | none |
 | `GET` | `/api/v1/gatewayclasses/:name` | `gateway.orka.ai` | `gatewayclasses` | `get` | `:name` | `cluster` | none |

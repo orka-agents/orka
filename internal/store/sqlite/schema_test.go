@@ -109,6 +109,49 @@ func TestNewDBAcceptsCurrentSchemaFormatting(t *testing.T) {
 	require.Equal(t, before, storedSchemaSQL(t, reopened))
 }
 
+// Version upgrades are unsupported: an installation predating native Session
+// storage must be rejected intact rather than silently converted at startup.
+func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-native.db")
+	legacy, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = legacy.Close() })
+	statements := currentSchemaStatements()
+	preNative := append(statements[:len(statements)-len(nativeSessionSchemaStatements())-len(connectorSchemaStatements())], connectorSchemaStatements()...)
+	for _, statement := range preNative {
+		_, err := legacy.Exec(statement)
+		require.NoError(t, err)
+	}
+	store := NewStore(legacy, path)
+	require.NoError(t, store.SaveResult(t.Context(), "ns", "task", []byte("retained result")))
+	_, err = legacy.Exec(`INSERT INTO sessions(namespace,name,session_type,message_count) VALUES('ns','retained-session','task',1)`)
+	require.NoError(t, err)
+	_, err = legacy.Exec(`INSERT INTO session_messages(namespace,session_name,message_id,sort_order,role,content) VALUES('ns','retained-session','stable-message',1,'assistant','retained conversation')`)
+	require.NoError(t, err)
+	before := storedSchemaSQL(t, legacy)
+	require.NoError(t, legacy.Close())
+
+	for range 2 {
+		reopened, err := NewDB(path)
+		require.Nil(t, reopened)
+		require.ErrorContains(t, err, "native_session_deleted_names is missing or incompatible")
+		raw, err := sql.Open("sqlite", path)
+		require.NoError(t, err)
+		require.Equal(t, before, storedSchemaSQL(t, raw))
+		preserved := NewStore(raw, path)
+		result, err := preserved.GetResult(t.Context(), "ns", "task")
+		require.NoError(t, err)
+		require.Equal(t, "retained result", string(result))
+		session, err := preserved.GetSession(t.Context(), "ns", "retained-session")
+		require.NoError(t, err)
+		require.Equal(t, 1, session.MessageCount)
+		require.Len(t, session.Messages, 1)
+		require.Equal(t, "stable-message", session.Messages[0].ID)
+		require.Equal(t, "retained conversation", session.Messages[0].Content)
+		require.NoError(t, raw.Close())
+	}
+}
+
 func TestInitializeCurrentSchemaDoesNotWrite(t *testing.T) {
 	s := setupDiskStore(t)
 	require.NoError(t, s.SaveResult(context.Background(), "ns", "task", []byte("saved result")))

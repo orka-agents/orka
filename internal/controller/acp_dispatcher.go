@@ -1063,11 +1063,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetryRuntimeClient, authErr)
 	}
+	nativeSessionsSupported := false
 	if target.pool != nil {
 		capabilities, capabilityErr := runtimeClient.Capabilities(runtimeCtx)
 		if capabilityErr != nil {
 			return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, capabilityErr)
 		}
+		nativeSessionsSupported = capabilities.SupportsNativeSessions && profile.ProviderKind == runtimePoolProviderCodex && d.nativeSessionStore() != nil
 		if !capabilities.SupportsAgentSessionConfiguration {
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
@@ -1077,6 +1079,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryProfile, errors.New("runtime profile does not match the immutable execution snapshot"))
 	}
 	profile = bound.plan.Profile
+	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
+		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		}
+		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, nativeErr)
+	}
 	promptLimits := harnessv2.DefaultProtocolLimits()
 	if bound.body.ExternalRuntime != nil {
 		promptLimits = bound.body.ExternalRuntime.Limits
@@ -1121,10 +1129,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	defer func() { endSessionTrace(retErr) }()
 	sessionExecution, err = d.prepareTaskSession(
 		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
-		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage,
+		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage, nativeSessionsSupported,
 	)
 	if err != nil {
 		endSessionTrace(err)
+		if errors.Is(err, errNativeSessionRuntimeUnsupported) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		}
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
 			if cleanupErr != nil {
@@ -1405,19 +1416,30 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		Profile:          profile, AgentConfiguration: agentConfigurationRef, MCPConfiguration: mcpConfiguration,
 		Workspace: workspace, WorkspaceArtifactAuthorization: workspaceAuthorization,
 	}
+	nativeRestore, nativeRestoreErr := nativeRestoreForTask(sessionExecution, createRequest, nativeSessionsSupported)
+	if nativeRestoreErr != nil {
+		return nativeRestoreErr
+	}
+	createRequest.NativeRestore = nativeRestore
 	if err := sealMutation(&createRequest.Metadata.RequestDigest, createRequest); err != nil {
 		return err
 	}
 	if err := d.recordKubernetesRuntimeExposure(ctx, task, target.external, runtimeFence, fence); err != nil {
 		return fmt.Errorf("persist pre-admission Kubernetes runtime witness: %w", err)
 	}
-	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite
+	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported
 	runtimeSessionCleanupPending := taskScopedRuntimeSessionReused ||
-		sessionExecution != nil && workspace.Intent == harnessv2.WorkspaceIntentWrite
+		sessionExecution != nil && (workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported)
 	runtimeSessionSettlementRequired := false
 	runtimePublicationFinalizationRequired := false
 	runtimePublicationFinalized := false
 	var runtimePublicationFinalization *runtimeSessionPublicationFinalization
+	captureSuccessfulRuntimeSession := func() error {
+		if !nativeCaptureEligible(sessionExecution, nativeSessionsSupported) {
+			return nil
+		}
+		return d.captureTaskNativeSession(context.WithoutCancel(ctx), runtimeClient, task, runtimeFence, sessionExecution)
+	}
 	finalizePreparedRuntimeSession := func() error {
 		if !runtimePublicationFinalizationRequired || runtimePublicationFinalized {
 			return nil
@@ -1434,14 +1456,32 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return nil
 	}
 	cleanupRuntimeSession := func(reason string) error {
+		if task.Annotations[nativeInstallUnresolvedAnnotation] != "" || errors.Is(retErr, errNativeSessionInstallUnresolved) {
+			return errNativeSessionInstallUnresolved
+		}
 		if !runtimeSessionCleanupPending {
 			return nil
+		}
+		if err := d.guardNativeSessionSettlement(context.WithoutCancel(ctx), task, sessionExecution, nil); err != nil {
+			return err
 		}
 		if err := finalizePreparedRuntimeSession(); err != nil {
 			return err
 		}
+		if task.Annotations[nativeCaptureIntentAnnotation] != "" && sessionExecution != nil && !sessionExecution.finalized {
+			return fmt.Errorf("%w: native Session capture and canonical result must commit before runtime deletion", store.ErrNotReady)
+		}
 		if runtimeSessionSettlementRequired && sessionExecution != nil && sessionExecution.Turn != nil && !sessionExecution.finalized {
 			return fmt.Errorf("%w: RuntimeSession deletion requires durable Session terminal settlement", store.ErrNotReady)
+		}
+		if nativeSessionsSupported && sessionExecution != nil && !task.Status.Execution.RuntimeSessionRecreationPending {
+			sessionExecution.Binding.RecreationRequired = true
+			d.setRuntimeSessionBinding(sessionExecution.Binding)
+			if err := d.patchExecution(context.WithoutCancel(ctx), task, func(execution *corev1alpha1.TaskExecutionStatus) {
+				execution.RuntimeSessionRecreationPending = true
+			}); err != nil {
+				return err
+			}
 		}
 		cleanupErr := d.deleteRuntimeSession(
 			context.WithoutCancel(ctx), runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, reason,
@@ -1487,6 +1527,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		created := false
 		if _, err := runtimeClient.CreateRuntimeSession(sessionCtx, createRequest); err != nil {
+			if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && createRequest.NativeRestore != nil && clientErr.Code == harnessv2.ErrorCodeCleanupUnproven {
+				retainErr := d.retainNativeSessionInstall(context.WithoutCancel(ctx), task, createRequest.Metadata)
+				return errors.Join(errNativeSessionInstallUnresolved, err, retainErr)
+			}
 			if runtimeSessionRetirementRequired && runtimeSessionCreationMayHaveApplied(err) {
 				runtimeSessionCleanupPending = true
 			}
@@ -1647,6 +1691,18 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 		}
 	}
+	if sessionExecution != nil && sessionExecution.NativeSession != nil {
+		_, observed, observeErr := runtimeSessionStatusForUID(sessionCtx, runtimeClient, runtimeFence.RuntimeSessionUID)
+		if observeErr != nil {
+			return observeErr
+		}
+		if observed == nil || observed.Generation != runtimeFence.RuntimeSessionGeneration || observed.RuntimeSessionID != createRequest.RuntimeSessionID {
+			return fmt.Errorf("%w: native Session restoration lost its exact runtime", store.ErrConflict)
+		}
+		if err := verifyTaskNativeRestoration(sessionExecution, observed.NativeRestoration); err != nil {
+			return err
+		}
+	}
 	if sessionExecution == nil {
 		if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 			status.RuntimeSessionSupervisorBootID = string(runtimeFence.SupervisorBootID)
@@ -1756,6 +1812,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 		status.State = corev1alpha1.TaskExecutionStateSubmitting
+		if nativeSessionsSupported && sessionExecution != nil {
+			status.RuntimeSessionRecreationPending = true
+		}
 		status.LastTransitionTime = nowMeta()
 	}); err != nil {
 		return err
@@ -1830,8 +1889,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						return err
 					}
 					accepted = true
+					if nativeSessionsSupported && sessionExecution != nil {
+						sessionExecution.Binding.RecreationRequired = true
+						d.setRuntimeSessionBinding(sessionExecution.Binding)
+					}
 					if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 						status.State = corev1alpha1.TaskExecutionStateRunning
+						if nativeSessionsSupported && sessionExecution != nil {
+							status.RuntimeSessionRecreationPending = true
+						}
 						status.Reason = ""
 						status.Message = ""
 						status.LastTransitionTime = nowMeta()
@@ -1984,10 +2050,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			streamErr = acpUpdatePersistenceError(persistErr, nil)
 		}
 		cancel()
-		return d.handlePromptStreamError(
+		settlementErr := d.handlePromptStreamError(
 			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence, journalState,
 			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextErr, streamErr, cancellation,
 		)
+		if runtimeContextErr == nil {
+			return settlementErr
+		}
+		// A proven cancellation can settle the PromptAttempt without the
+		// in-memory SessionTurn. Commit its marker and carried checkpoint before
+		// the runtime cleanup defer runs; the earlier Session finalization defer
+		// otherwise executes only after cleanup has already failed closed.
+		settlementCtx, cancelSettlement := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
+		defer cancelSettlement()
+		if finalizeErr := d.reconcileUnfinalizedTaskSession(settlementCtx, task, fence, sessionExecution, settlementErr); finalizeErr != nil {
+			return errors.Join(settlementErr, finalizeErr)
+		}
+		return settlementErr
 	}
 	if terminal == nil {
 		if err := flushInterruptedOutput(ctx); err != nil {
@@ -2162,6 +2241,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			Reason: "WorkspaceValidationFailed", Message: validationMessage, LastTransitionTime: nowMeta(),
 		}
 		_ = d.patchDeliveryStatus(ctx, task, status)
+		if err := d.guardNativeSessionSettlement(ctx, task, sessionExecution, nil); err != nil {
+			return err
+		}
 		_ = cleanupRuntimeSession("workspace_validation_failed")
 		if sessionExecution != nil {
 			d.forgetRuntimeSessionBinding(sessionExecution.Binding.SessionUID)
@@ -2271,6 +2353,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if err := finalizePreparedRuntimeSession(); err != nil {
 				return err
 			}
+			if err := captureSuccessfulRuntimeSession(); err != nil {
+				return err
+			}
 			if err := d.finalizeTaskSessionResult(
 				ctx, task, fence, sessionExecution, resultText, publicationID, projectionPhase, deliveryStatus,
 			); err != nil {
@@ -2309,12 +2394,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := finalizePreparedRuntimeSession(); err != nil {
 		return err
 	}
+	if err := captureSuccessfulRuntimeSession(); err != nil {
+		return err
+	}
 	if err := d.finalizeTaskSessionResult(
 		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,
 	); err != nil {
 		return err
 	}
-	if sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite {
+	if runtimeSessionRetirementRequired {
 		if cleanupErr := cleanupRuntimeSession("task_finalized"); cleanupErr != nil {
 			return cleanupErr
 		}
@@ -2771,6 +2859,9 @@ func waitForRuntimeSessionAdmissionState(
 		} else if observed == nil && absentIsFinal {
 			return false, nil
 		} else if observed != nil {
+			if observed.NativeInstallUnresolved {
+				return false, errNativeSessionInstallUnresolved
+			}
 			if observed.RuntimeSessionID != sessionID || observed.Generation != generation {
 				return false, fmt.Errorf("%w: RuntimeSession status resolved to a different generation", store.ErrConflict)
 			}
@@ -2850,6 +2941,9 @@ func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 		}
 		session.requeued = true
 		return true, nil
+	}
+	if observed != nil && observed.NativeInstallUnresolved {
+		return false, errNativeSessionInstallUnresolved
 	}
 	expectedID := harnessv2.RuntimeSessionID(runtimeSessionID(*runtimeFence))
 	if observed == nil {
@@ -2990,6 +3084,9 @@ func (d *ACPDispatcher) reconcilePlannedTaskScopedRuntimeSession(
 	if observed == nil {
 		return false, false, nil
 	}
+	if observed.NativeInstallUnresolved {
+		return false, false, errNativeSessionInstallUnresolved
+	}
 	expectedID := harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence))
 	if observed.RuntimeSessionID == expectedID && observed.Generation == runtimeFence.RuntimeSessionGeneration {
 		if observed.State.CanAdmitPrompt() {
@@ -3096,6 +3193,9 @@ func (d *ACPDispatcher) deleteRuntimeSessionReconciled(
 	}
 	if observed == nil || observed.RuntimeSessionID != sessionID || observed.Generation != runtimeFence.RuntimeSessionGeneration {
 		return nil
+	}
+	if observed.NativeInstallUnresolved {
+		return errNativeSessionInstallUnresolved
 	}
 	if observed.State != harnessv2.RuntimeSessionStateDeleting {
 		if err := d.deleteRuntimeSession(ctx, runtimeClient, sessionID, task, runtimeFence, reason); err == nil {
@@ -5023,7 +5123,12 @@ func validateExternalRuntimeCapabilities(
 		observed.AdapterDigest != registered.Profile.AdapterDigest {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime adapter capability drifted after conformance")
 	}
-	if capabilities.Limits != limits || observedLimits != limits {
+	registeredLiveLimits := capabilities.Limits
+	// Native bundle policy is an additive negotiated capability, not a field
+	// in the AgentRuntime registration. The complete capability envelope is
+	// still frozen and revalidated before each mutation.
+	registeredLiveLimits.MaxNativeSessionBytes = limits.MaxNativeSessionBytes
+	if registeredLiveLimits != limits || observedLimits != limits {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime protocol limits drifted after conformance")
 	}
 	if capabilities.WorkspaceGovernance != governance || observedGovernance != governance || !governance.Strict() {
@@ -5051,7 +5156,7 @@ func validateExternalRuntimeCapabilities(
 	if profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite && !capabilities.SupportsPublicationFinalization {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime does not support controller-owned RuntimeSession publication finalization required for write workspaces")
 	}
-	return profile, limits, nil
+	return profile, capabilities.Limits, nil
 }
 
 func validateExternalRuntimeStatus(

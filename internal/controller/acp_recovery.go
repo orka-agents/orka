@@ -698,6 +698,9 @@ func (d *ACPDispatcher) readRecoverableTask(
 }
 
 func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
+	if task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
+		return errNativeSessionInstallUnresolved
+	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
 		return err
@@ -711,6 +714,29 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		return err
 	}
 	continuitySession := task.Spec.SessionRef != nil && sessionBound
+	// If the unknown-create marker could not be persisted, authenticated
+	// resident status still fences a native installation before stale-epoch
+	// pre-submission recovery can re-admit or rotate this exact Task.
+	if continuitySession && task.Status.Execution != nil && task.Status.Execution.RuntimeSessionRecreationPending &&
+		(attempt.ExecutionState == store.PromptExecutionSessionStarting || attempt.ExecutionState == store.PromptExecutionPlanned) {
+		control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+		if err != nil {
+			return err
+		}
+		native, err := d.loadTaskNativeSession(ctx, task, control)
+		if err != nil {
+			return err
+		}
+		if native != nil {
+			ready, err := d.reconcileRecoveredRuntimeSession(ctx, task, acpTaskControlUID(task), false, nil)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				return fmt.Errorf("%w: native RuntimeSession creation has not reconciled", store.ErrNotReady)
+			}
+		}
+	}
 	if store.IsTerminalPromptExecutionState(attempt.ExecutionState) && store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		if continuitySession {
 			if archived, err := d.recoverArchivedTerminalSession(ctx, task, attempt, fence); err != nil || archived {
@@ -1213,7 +1239,8 @@ func taskScopedRuntimeSessionCleanupCompleteForUID(task *corev1alpha1.Task, task
 		return true
 	}
 	if task.DeletionTimestamp.IsZero() && task.Spec.SessionRef != nil &&
-		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) {
+		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
+		task.Annotations[nativeCaptureIntentAnnotation] == "" && !task.Status.Execution.RuntimeSessionRecreationPending {
 		// A live read Session retains its conversation process between Tasks.
 		// Deleting Tasks must keep their frozen authority until Session cleanup
 		// has recorded an exact runtime cleanup receipt.
@@ -1658,7 +1685,9 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	deleteAfterSettlement bool,
 ) (bool, error) {
 	if task != nil && task.Spec.SessionRef != nil &&
-		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) {
+		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
+		task.Annotations[nativeCaptureIntentAnnotation] == "" &&
+		(task.Status.Execution == nil || !task.Status.Execution.RuntimeSessionRecreationPending) {
 		return true, nil
 	}
 	return d.reconcileRecoveredRuntimeSession(ctx, task, taskUID, deleteAfterSettlement, nil)
@@ -1883,6 +1912,9 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		}
 		return true, nil
 	}
+	if observed.NativeInstallUnresolved {
+		return false, errNativeSessionInstallUnresolved
+	}
 	switch observed.State {
 	case harnessv2.RuntimeSessionStatePublicationPrepared:
 		if task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
@@ -1908,6 +1940,26 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		return false, nil
 	default:
 		return false, nil
+	}
+	if deleteAfterSettlement && !sessionDeletion && task.Annotations[nativeCaptureIntentAnnotation] != "" {
+		attemptID, err := promptAttemptIDFromTaskUID(task, taskUID)
+		if err != nil {
+			return false, err
+		}
+		attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+		if err != nil {
+			return false, err
+		}
+		turnID, err := (store.SessionTurnKey{SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration, TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID}).CanonicalID()
+		if err != nil {
+			return false, err
+		}
+		turn, err := d.Store.GetSessionTurn(ctx, turnID)
+		var nativeIntent nativeCaptureIntent
+		intentErr := json.Unmarshal([]byte(task.Annotations[nativeCaptureIntentAnnotation]), &nativeIntent)
+		if err != nil || turn.State != store.SessionTurnFinalized || intentErr != nil || (turn.NativeSessionDigest == "" && !nativeIntent.Unsupported) {
+			return false, fmt.Errorf("%w: native runtime deletion awaits atomic canonical checkpoint commit", store.ErrNotReady)
+		}
 	}
 	if !deleteAfterSettlement {
 		return true, nil
@@ -2250,6 +2302,11 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 			d.retireRecoveredRuntimeSessionBinding(task, attempt, session.Binding)
 		}
 		return err
+	}
+	if attempt.ExecutionState == store.PromptExecutionSucceeded {
+		if err := d.recoverTaskNativeCapture(ctx, task, session); err != nil {
+			return err
+		}
 	}
 	var finalizeErr error
 	switch attempt.ExecutionState {
