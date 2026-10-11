@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/test/fixtures/fakeforge"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -39,12 +41,9 @@ import (
 // without github.com. The ACP runtime's model is the aimock stand-in for
 // Vekil behind the production provider proxy.
 const (
-	fakeForgeName       = "e2e-fakeforge"
-	fakeForgeImage      = "ghcr.io/orka-agents/orka/e2e-fakeforge:e2e"
-	fakeForgeRepository = "e2e/source"
-	// Fixture credential accepted only by the fake forge.
-	fakeForgeToken         = "e2e-fakeforge-token-0123456789"
-	fakeForgeCredential    = "e2e-fakeforge-credential"
+	fakeForgeName          = "e2e-fakeforge"
+	fakeForgeImage         = "ghcr.io/orka-agents/orka/e2e-fakeforge:e2e"
+	fakeForgeRepository    = "e2e/source"
 	fakeForgeCABundle      = "e2e-fakeforge-ca-bundle"
 	fakeForgeNetworkPolicy = "e2e-fakeforge-publisher-egress"
 	publisherDeployment    = "orka-workspace-publisher"
@@ -53,6 +52,17 @@ const (
 
 func fakeForgeHost() string {
 	return fakeForgeName + "." + namespace + ".svc.cluster.local"
+}
+
+// fakeForgeToken is the fixture token the fake forge accepts for one
+// credential role, only on the surfaces that role may use.
+func fakeForgeToken(role string) string {
+	return "e2e-fakeforge-" + role + "-token-0123456789"
+}
+
+// fakeForgeCredential names the Secret holding one role's token.
+func fakeForgeCredential(role string) string {
+	return "e2e-fakeforge-" + role
 }
 
 var _ = Describe("Clean-room publication against a fake forge", Ordered, func() {
@@ -120,13 +130,17 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 
 	It("clones with a read credential, publishes the scripted change, and opens a pull request", func() {
 		repoURL := "https://" + fakeForgeHost() + "/" + fakeForgeRepository + ".git"
-		DeferCleanup(deleteE2EObjects, "secret", fakeForgeCredential)
-		Expect(createK8sSecret(fakeForgeCredential, namespace, map[string]string{"token": fakeForgeToken})).To(Succeed())
+		credentials := map[string]any{}
+		for _, role := range fakeforge.Roles {
+			DeferCleanup(deleteE2EObjects, "secret", fakeForgeCredential(role))
+			Expect(createK8sSecret(fakeForgeCredential(role), namespace,
+				map[string]string{"token": fakeForgeToken(role)})).To(Succeed())
+			credentials[role] = map[string]any{"name": fakeForgeCredential(role), "key": "token"}
+		}
 
 		By("creating a Codex agent and a write Task against the fake forge")
 		DeferCleanup(func() { cleanupLiveRuntimeTask(apiBaseURL, token, taskName, agentName) })
 		Expect(applyManifestJSON(runtimeAgentManifest(agentName, "codex", codexModel, 6, nil))).To(Succeed())
-		credential := map[string]any{"name": fakeForgeCredential, "key": "token"}
 		task := runtimeAgentTaskManifest(taskName, agentName,
 			"Create "+writtenFile+" containing one line, then report what you wrote. "+marker, 4, nil, nil, "", nil, nil)
 		spec := task["spec"].(map[string]any)
@@ -135,11 +149,11 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 			"intent":                       "write",
 			"gitRepo":                      repoURL,
 			"branch":                       "main",
-			"readCredentialRef":            credential,
+			"readCredentialRef":            credentials[fakeforge.RoleRead],
 			"publicationGitRepo":           repoURL,
-			"publicationReadCredentialRef": credential,
-			"publicationCredentialRef":     credential,
-			"forgeCredentialRef":           credential,
+			"publicationReadCredentialRef": credentials[fakeforge.RolePublicationRead],
+			"publicationCredentialRef":     credentials[fakeforge.RolePush],
+			"forgeCredentialRef":           credentials[fakeforge.RoleForge],
 			"pushBranch":                   pushBranch,
 			"prBaseBranch":                 "main",
 			"prTitle":                      "E2E fake forge publication",
@@ -183,19 +197,17 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 		Expect(fakeForgeFile(pushBranch, writtenFile)).To(Equal(writtenLine + "\n"))
 
 		By("verifying each credential reached only its own forge surface")
-		gitRequests, apiRequests := 0, 0
+		// The forge refuses a role's token on another surface with 403.
+		used := map[string][]string{}
 		for _, request := range state.Requests {
-			switch {
-			case strings.HasPrefix(request.Path, "/"+fakeForgeRepository+".git/"):
-				Expect(request.Auth).To(Equal("basic"), "git request %+v", request)
-				gitRequests++
-			case strings.HasPrefix(request.Path, "/api/v3/"):
-				Expect(request.Auth).To(Equal("bearer"), "REST request %+v", request)
-				apiRequests++
+			Expect(request.Status).NotTo(Equal(http.StatusForbidden), "credential on the wrong surface: %+v", request)
+			if request.Role != "" {
+				used[request.Surface] = append(used[request.Surface], request.Role)
 			}
 		}
-		Expect(gitRequests).To(BeNumerically(">", 0))
-		Expect(apiRequests).To(BeNumerically(">", 0))
+		Expect(used[fakeforge.SurfaceGitFetch]).To(ContainElements(fakeforge.RoleRead, fakeforge.RolePublicationRead))
+		Expect(used[fakeforge.SurfaceGitPush]).To(ContainElement(fakeforge.RolePush))
+		Expect(used[fakeforge.SurfaceAPI]).To(ContainElement(fakeforge.RoleForge))
 	})
 })
 
@@ -209,9 +221,11 @@ func deleteE2EObjects(kinds, name string) {
 // certificate from a fresh test CA, and returns that CA.
 func deployFakeForge() []byte {
 	caPEM, certPEM, keyPEM := newFakeForgeTLS(fakeForgeHost())
-	ExpectWithOffset(1, createK8sSecret(fakeForgeName, namespace, map[string]string{
-		"tls.crt": string(certPEM), "tls.key": string(keyPEM), "token": fakeForgeToken,
-	})).To(Succeed())
+	config := map[string]string{"tls.crt": string(certPEM), "tls.key": string(keyPEM)}
+	for _, role := range fakeforge.Roles {
+		config["token-"+role] = fakeForgeToken(role)
+	}
+	ExpectWithOffset(1, createK8sSecret(fakeForgeName, namespace, config)).To(Succeed())
 	manifest := fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -242,7 +256,7 @@ spec:
             - {name: FAKEFORGE_HOST, value: %[4]s}
             - {name: FAKEFORGE_ROOT, value: /data/repos}
             - {name: FAKEFORGE_REPOSITORIES, value: %[5]s}
-            - {name: FAKEFORGE_TOKEN_FILE, value: /etc/fakeforge/token}
+            - {name: FAKEFORGE_TOKEN_DIR, value: /etc/fakeforge}
             - {name: FAKEFORGE_TLS_CERT, value: /etc/fakeforge/tls.crt}
             - {name: FAKEFORGE_TLS_KEY, value: /etc/fakeforge/tls.key}
           ports:
@@ -307,6 +321,7 @@ func trustFakeForgeInPublisher(caPEM []byte) {
 	cmd.Stdin = strings.NewReader(configMap)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	DeferCleanup(deleteE2EObjects, "configmap", fakeForgeCABundle)
 
 	policy := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -332,6 +347,20 @@ spec:
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
+	// Cleanups run last in, first out: the publisher returns to its own
+	// template before the CA bundle it mounts is deleted.
+	output, err := exec.Command("kubectl", "get", "deployment", publisherDeployment, "-n", namespace,
+		"-o", "json").Output()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to read the publisher Deployment")
+	var deployment struct {
+		Spec struct {
+			Template json.RawMessage `json:"template"`
+		} `json:"spec"`
+	}
+	ExpectWithOffset(1, json.Unmarshal(output, &deployment)).To(Succeed())
+	ExpectWithOffset(1, deployment.Spec.Template).NotTo(BeEmpty())
+	DeferCleanup(restorePublisherTemplate, deployment.Spec.Template)
+
 	patch := fmt.Sprintf(`{"spec":{"template":{"spec":{
   "containers":[{"name":"publisher",
     "env":[{"name":"ORKA_PUBLISHER_ALLOWED_SCM_HOSTS","value":"github.com,%[1]s"},
@@ -345,6 +374,18 @@ spec:
 	_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+publisherDeployment,
 		"-n", namespace, "--timeout=3m"))
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "publisher did not roll out with the fake forge trust")
+}
+
+// restorePublisherTemplate puts back the publisher's pod template from before
+// trustFakeForgeInPublisher patched it.
+func restorePublisherTemplate(template json.RawMessage) {
+	patch := `[{"op":"replace","path":"/spec/template","value":` + string(template) + `}]`
+	_, err := utils.Run(exec.Command("kubectl", "patch", "deployment", publisherDeployment, "-n", namespace,
+		"--type=json", "-p", patch))
+	Expect(err).NotTo(HaveOccurred(), "Failed to restore the publisher Deployment")
+	_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+publisherDeployment,
+		"-n", namespace, "--timeout=3m"))
+	Expect(err).NotTo(HaveOccurred(), "publisher did not roll out its restored template")
 }
 
 // newFakeForgeTLS returns a test CA and a serving certificate for host.
@@ -384,12 +425,7 @@ type fakeForgeObservedState struct {
 		BaseBranch string `json:"baseBranch"`
 		HeadBranch string `json:"headBranch"`
 	} `json:"pulls"`
-	Requests []struct {
-		Method string `json:"method"`
-		Path   string `json:"path"`
-		Auth   string `json:"auth"`
-		Status int    `json:"status"`
-	} `json:"requests"`
+	Requests []fakeforge.RequestRecord `json:"requests"`
 }
 
 func fakeForgeProxyPath(suffix string) string {

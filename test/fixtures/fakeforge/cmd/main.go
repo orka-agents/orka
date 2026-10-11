@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,14 +19,20 @@ import (
 )
 
 func main() {
-	token, err := os.ReadFile(requiredEnv("FAKEFORGE_TOKEN_FILE"))
-	if err != nil {
-		log.Fatalf("read token: %v", err)
+	// FAKEFORGE_TOKEN_DIR holds one token-<role> file per credential role.
+	tokenDir := requiredEnv("FAKEFORGE_TOKEN_DIR")
+	tokens := map[string]string{}
+	for _, role := range fakeforge.Roles {
+		token, err := os.ReadFile(filepath.Join(tokenDir, "token-"+role))
+		if err != nil {
+			log.Fatalf("read %s token: %v", role, err)
+		}
+		tokens[role] = strings.TrimSpace(string(token))
 	}
 	forge, err := fakeforge.New(context.Background(), fakeforge.Config{
 		Host:         requiredEnv("FAKEFORGE_HOST"),
 		Root:         requiredEnv("FAKEFORGE_ROOT"),
-		Token:        strings.TrimSpace(string(token)),
+		Tokens:       tokens,
 		Repositories: strings.Split(requiredEnv("FAKEFORGE_REPOSITORIES"), ","),
 	})
 	if err != nil {

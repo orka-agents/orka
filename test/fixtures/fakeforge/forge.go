@@ -14,7 +14,6 @@ MIT License - see LICENSE file for details.
 package fakeforge
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
@@ -28,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +38,36 @@ const (
 	apiPrefix     = "/api/v3"
 	defaultBranch = "main"
 )
+
+// Credential roles, one per Task workspace credential. Each role has its own
+// token, which the forge accepts only on the surfaces that role may use.
+const (
+	// RoleRead clones the source (readCredentialRef).
+	RoleRead = "read"
+	// RolePublicationRead reads the publication target for preflight and
+	// post-push verification (publicationReadCredentialRef).
+	RolePublicationRead = "publication-read"
+	// RolePush pushes the publication branch (publicationCredentialRef).
+	RolePush = "push"
+	// RoleForge calls the REST API (forgeCredentialRef).
+	RoleForge = "forge"
+)
+
+// Roles lists every credential role.
+var Roles = []string{RoleRead, RolePublicationRead, RolePush, RoleForge}
+
+// Surfaces a credentialed request can reach.
+const (
+	SurfaceGitFetch = "git-fetch"
+	SurfaceGitPush  = "git-push"
+	SurfaceAPI      = "api"
+)
+
+var surfaceRoles = map[string][]string{
+	SurfaceGitFetch: {RoleRead, RolePublicationRead},
+	SurfaceGitPush:  {RolePush},
+	SurfaceAPI:      {RoleForge},
+}
 
 var (
 	repositoryPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*$`)
@@ -50,9 +80,9 @@ type Config struct {
 	Host string
 	// Root holds the bare repositories as <owner>/<name>.git.
 	Root string
-	// Token is the only accepted credential, for Git (Basic password or
-	// Bearer) and the REST API (Bearer).
-	Token string
+	// Tokens maps each of Roles to its own token, accepted for Git as a Basic
+	// password or Bearer token and for the REST API as a Bearer token.
+	Tokens map[string]string
 	// Repositories are seeded as <owner>/<name> with one commit on main.
 	Repositories []string
 	// Git is the git binary; defaults to "git" on PATH.
@@ -70,12 +100,14 @@ type Server struct {
 	requests []RequestRecord
 }
 
-// RequestRecord is one request the forge accepted or rejected.
+// RequestRecord is one request the forge accepted or rejected, with the role
+// whose token it presented ("" for none).
 type RequestRecord struct {
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Auth   string `json:"auth"`
-	Status int    `json:"status"`
+	Method  string `json:"method"`
+	Path    string `json:"path"`
+	Surface string `json:"surface"`
+	Role    string `json:"role"`
+	Status  int    `json:"status"`
 }
 
 type pullRequest struct {
@@ -90,8 +122,16 @@ type pullRequest struct {
 
 // New seeds the configured repositories and returns the forge.
 func New(ctx context.Context, config Config) (*Server, error) {
-	if config.Host == "" || config.Root == "" || len(config.Token) < 8 {
-		return nil, errors.New("fake forge requires a host, a root, and a token of at least 8 bytes")
+	if config.Host == "" || config.Root == "" {
+		return nil, errors.New("fake forge requires a host and a root")
+	}
+	seen := map[string]bool{}
+	for _, role := range Roles {
+		token := config.Tokens[role]
+		if len(token) < 8 || seen[token] {
+			return nil, fmt.Errorf("fake forge requires a distinct %s token of at least 8 bytes", role)
+		}
+		seen[token] = true
 	}
 	git := config.Git
 	if git == "" {
@@ -171,12 +211,29 @@ func (s *Server) Handler() http.Handler {
 			s.serveFile(recorder, r)
 			return
 		case strings.HasPrefix(r.URL.Path, apiPrefix+"/"):
-			s.serveAPI(recorder, r)
+			role, ok := s.authorize(recorder, r, SurfaceAPI)
+			if ok {
+				s.serveAPI(recorder, r)
+			}
+			s.record(r, SurfaceAPI, role, recorder.status)
 		default:
-			s.serveGit(recorder, r)
+			surface := gitSurface(r)
+			role, ok := s.authorize(recorder, r, surface)
+			if ok {
+				s.serveGit(recorder, r)
+			}
+			s.record(r, surface, role, recorder.status)
 		}
-		s.record(r, recorder.status)
 	})
+}
+
+// gitSurface classifies a smart HTTP request as a push (receive-pack) or a
+// fetch (everything else http-backend serves).
+func gitSurface(r *http.Request) string {
+	if r.URL.Query().Get("service") == "git-receive-pack" || strings.HasSuffix(r.URL.Path, "/git-receive-pack") {
+		return SurfaceGitPush
+	}
+	return SurfaceGitFetch
 }
 
 type statusRecorder struct {
@@ -189,43 +246,66 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
-func (s *Server) record(r *http.Request, status int) {
-	scheme, _, _ := strings.Cut(r.Header.Get("Authorization"), " ")
-	record := RequestRecord{Method: r.Method, Path: r.URL.Path, Auth: strings.ToLower(scheme), Status: status}
-	log.Printf("%s %s auth=%q status=%d", record.Method, record.Path, record.Auth, record.Status)
+func (s *Server) record(r *http.Request, surface, role string, status int) {
+	record := RequestRecord{Method: r.Method, Path: r.URL.Path, Surface: surface, Role: role, Status: status}
+	log.Printf("%s %s surface=%s role=%q status=%d", record.Method, record.Path, surface, role, status)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = append(s.requests, record)
 }
 
-func (s *Server) authorized(r *http.Request, allowBasic bool) bool {
+// authorize answers 401 when the request presents no known token and 403
+// when its role may not use the surface. It returns the presented role either
+// way so the request log shows a credential reaching the wrong surface.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, surface string) (string, bool) {
+	role := s.credentialRole(r, surface != SurfaceAPI)
+	switch {
+	case role == "" && surface == SurfaceAPI:
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "Bad credentials"})
+	case role == "":
+		w.Header().Set("WWW-Authenticate", `Basic realm="fakeforge"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	case !slices.Contains(surfaceRoles[surface], role):
+		writeJSON(w, http.StatusForbidden, map[string]string{"message": "Resource not accessible by integration"})
+	default:
+		return role, true
+	}
+	return role, false
+}
+
+// credentialRole returns the role whose token the request presents, or "".
+func (s *Server) credentialRole(r *http.Request, allowBasic bool) string {
 	scheme, value, ok := strings.Cut(r.Header.Get("Authorization"), " ")
 	if !ok {
-		return false
+		return ""
 	}
 	switch strings.ToLower(scheme) {
 	case "bearer":
-		return subtle.ConstantTimeCompare([]byte(value), []byte(s.config.Token)) == 1
 	case "basic":
 		decoded, err := base64.StdEncoding.DecodeString(value)
 		if !allowBasic || err != nil {
-			return false
+			return ""
 		}
 		_, password, found := strings.Cut(string(decoded), ":")
-		return found && subtle.ConstantTimeCompare([]byte(password), []byte(s.config.Token)) == 1
+		if !found {
+			return ""
+		}
+		value = password
+	default:
+		return ""
 	}
-	return false
+	for _, role := range Roles {
+		if subtle.ConstantTimeCompare([]byte(value), []byte(s.config.Tokens[role])) == 1 {
+			return role
+		}
+	}
+	return ""
 }
 
 func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 	match := gitPathPattern.FindStringSubmatch(r.URL.Path)
 	if match == nil || !s.known(match[1]) {
 		http.NotFound(w, r)
-		return
-	}
-	if !s.authorized(r, true) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="fakeforge"`)
-		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	handler := &cgi.Handler{
@@ -253,10 +333,6 @@ func (s *Server) known(repository string) bool {
 }
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(r, false) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "Bad credentials"})
-		return
-	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, apiPrefix+"/"), "/")
 	if len(parts) < 3 || parts[0] != "repos" || !s.known(parts[1]+"/"+parts[2]) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Not Found"})
@@ -462,9 +538,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
-	var body bytes.Buffer
-	_ = json.NewEncoder(&body).Encode(value)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = w.Write(body.Bytes())
+	_ = json.NewEncoder(w).Encode(value)
 }
