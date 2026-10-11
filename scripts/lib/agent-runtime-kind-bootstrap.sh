@@ -201,12 +201,14 @@ live_acp_kind_build_and_publish_toolbox_fixtures() {
 # only, after the regular rollout, without changing the shipped manifests.
 live_acp_kind_enable_toolboxes() {
   [[ -n "${ACP_E2E_TOOLBOX_REGISTRY:-}" ]] || return 0
+  local namespace="${ORKA_NAMESPACE:-orka-system}"
+  local deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
   live_acp_kind_log "Enabling toolboxes for the run registry ${ACP_E2E_TOOLBOX_REGISTRY}"
-  live_acp_kind_run kubectl -n orka-system set env deployment/orka-controller-manager \
+  live_acp_kind_run kubectl -n "${namespace}" set env "deployment/${deployment}" \
     ORKA_ACP_TOOLBOXES_ENABLED=true \
     "ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES=${ACP_E2E_TOOLBOX_REGISTRY}" \
     "ORKA_ACP_TOOLBOX_MOUNT_METHOD=${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}"
-  live_acp_kind_run kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout="${LIVE_ACP_ROLLOUT_TIMEOUT}"
+  live_acp_kind_run kubectl -n "${namespace}" rollout status "deployment/${deployment}" --timeout="${LIVE_ACP_ROLLOUT_TIMEOUT}"
 }
 
 # Release candidates use the already built GHCR digests. Rebuilding here would

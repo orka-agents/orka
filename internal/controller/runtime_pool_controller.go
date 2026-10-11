@@ -482,7 +482,7 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.finishWorkspacePoolPrerequisiteFailure(ctx, pool, cfg, "runtime ancillary-resource prerequisite failed", err)
 	}
 	if err := r.runtimePoolToolboxAdmission(pool, cfg); err != nil {
-		return r.finishRuntimePoolToolboxFailure(ctx, pool, cfg, authSecret, err)
+		return r.finishRuntimePoolToolboxFailure(ctx, pool, cfg, err)
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
 		return r.reconcileWorkspaceBackedRuntimePool(ctx, pool, cfg, authSecret, providerSecret)
@@ -1067,6 +1067,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 	status corev1alpha1.RuntimePoolStatus,
 	postProbeFence runtimePoolPostProbeFence,
 ) (ctrl.Result, error) {
+	if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, cfg.profile.Toolboxes); err != nil {
+		return ctrl.Result{}, err
+	}
 	if len(readyPods) == 0 {
 		if runtimePoolActiveInstancePodPresent(status.ActiveInstance, pods) {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
@@ -1076,7 +1079,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 			// A restarted active Pod that fails its toolbox checks must still
 			// surface ToolboxUnavailable so waiting Tasks fail instead of
 			// retrying against a fence that can never serve again.
-			if reason, message, ok := runtimePoolToolboxFailure(pods, cfg.profile.Toolboxes); ok {
+			if reason, message, ok := runtimePoolToolboxFailure(pods, cfg.profile.Toolboxes, r.now()); ok {
 				rolloutReason = reason
 				status.Message = message
 			}
@@ -1090,7 +1093,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "waiting for one Ready runtime Pod"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-		if reason, message, ok := runtimePoolToolboxFailure(pods, cfg.profile.Toolboxes); ok {
+		if reason, message, ok := runtimePoolToolboxFailure(pods, cfg.profile.Toolboxes, r.now()); ok {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.Message = message
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, reason, message)
@@ -2762,7 +2765,6 @@ func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
-	authSecret *corev1.Secret,
 	err error,
 ) (ctrl.Result, error) {
 	status := r.baseRuntimePoolStatus(pool, 0)
@@ -2781,8 +2783,8 @@ func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
 			status.ActiveInstance = nil
 		case getErr != nil:
 			return ctrl.Result{}, getErr
-		case ptr.Deref(deployment.Spec.Replicas, 0) > 0:
-			idle, idleErr := r.runtimePoolToolboxWorkloadIdle(ctx, pool, cfg, authSecret)
+		case ptr.Deref(deployment.Spec.Replicas, 0) > 0 || pool.Status.ActiveInstance != nil:
+			idle, idleErr := r.runtimePoolToolboxWorkloadIdle(ctx, pool, cfg, deployment)
 			if idleErr != nil {
 				return ctrl.Result{}, idleErr
 			}
@@ -3520,21 +3522,18 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
-	authSecret *corev1.Secret,
+	deployment *appsv1.Deployment,
 ) (bool, error) {
-	if !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
-		return false, nil
-	}
 	pods, err := r.listRuntimePoolPods(ctx, cfg)
 	if err != nil {
 		return false, err
 	}
 	active := pool.Status.ActiveInstance
 	if active == nil {
-		return len(readyRuntimePoolPods(pods)) == 0, nil
+		return runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) && len(readyRuntimePoolPods(pods)) == 0, nil
 	}
 	if !runtimePoolActiveInstancePodPresent(active, pods) {
-		return true, nil
+		return runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity), nil
 	}
 	var activePod *corev1.Pod
 	readyPods := readyRuntimePoolPods(pods)
@@ -3544,8 +3543,18 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 			break
 		}
 	}
-	if activePod == nil || authSecret == nil {
+	if activePod == nil {
 		return false, nil
+	}
+	// Admission may change across a controller epoch. Authenticate the exact
+	// deployed instance, not the credentials rendered for its replacement.
+	validationPool, validationConfig, err := runtimePoolDeploymentValidationTarget(pool, deployment)
+	if err != nil {
+		return false, err
+	}
+	authSecret, err := r.runtimePoolDeploymentAuthSecret(ctx, deployment)
+	if err != nil {
+		return false, err
 	}
 	supervisor := r.supervisorClientForPool(pool)
 	endpoint := runtimePoolInstanceEndpoint(pool, activePod)
@@ -3553,6 +3562,28 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 	capability := authSecret.Data[runtimePoolCapabilitySecretKey]
 	probe, err := supervisor.Probe(ctx, endpoint, token, capability)
 	if err != nil {
+		return false, nil
+	}
+	observed, err := validateRuntimePoolProbeForRollout(validationPool, validationConfig, activePod, probe, r.now())
+	if err != nil {
+		return false, err
+	}
+	if runtimePoolSupervisorRestartedInPlace(active, observed) {
+		// The old session tree is no longer trustworthy. Admission was closed
+		// in an earlier reconcile; use the existing UID-fenced recycle path
+		// rather than repeatedly comparing the old boot against the new one.
+		if err := r.stopRuntimePoolDeployment(ctx, deployment); err != nil {
+			return false, err
+		}
+		if err := r.recycleRuntimePoolInstance(ctx, pool, activePod); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if !runtimePoolRolloutActiveInstanceMatches(active, observed) {
+		return false, fmt.Errorf("authenticated runtime identity changed before toolbox drain")
+	}
+	if !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
 		return false, nil
 	}
 	// Same two-step barrier as the rollout drain: the supervisor must stop
@@ -3565,7 +3596,15 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 		}
 		return false, nil
 	}
-	return runtimePoolRolloutProbeIsQuiescent(pool.Status.Capacity, probe.Status), nil
+	if !runtimePoolRolloutProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
+		return false, nil
+	}
+	// Preserve task-scoped receipts while the authenticated retirement fence
+	// still exists. A failed write must prevent scale-down and fence removal.
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, observed, probe.Status); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // runtimePoolConflictRequeue is how soon a reconcile that lost the status

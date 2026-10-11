@@ -1,17 +1,24 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp/toolbox"
@@ -409,6 +416,9 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 	// Toolboxes get disabled while the supervisor is busy. The first reconcile
 	// persists only the admission-closed barrier and keeps the exact fence.
 	supervisor.probe.Status.Pressure.ActivePrompts = 1
+	supervisor.probe.Status.Pressure.ResidentSessions = 1
+	supervisor.probe.Status.Sessions = []harnessv2.RuntimeSessionStatus{{RuntimeSessionID: "busy-session", RuntimeSessionUID: "busy-session-uid", Generation: 1, State: harnessv2.RuntimeSessionStatePromptRunning, ActivePromptID: "busy-prompt", LastTransitionAt: runtimePoolTestNow}}
+	supervisor.probe.Status.ActivePrompts = []harnessv2.ActivePromptStatus{{RuntimeSessionUID: "busy-session-uid", SessionGeneration: 1, TaskUID: "busy-task", TaskAttempt: 1, PromptID: "busy-prompt", LeaseExpiresAt: runtimePoolTestNow.Add(time.Minute), FrameSequence: 1, StartedAt: runtimePoolTestNow}}
 	r.ToolboxPolicy = ACPToolboxPolicy{}
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
@@ -433,6 +443,9 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 
 	// A live descendant alone also keeps it; the idle invariant is complete.
 	supervisor.probe.Status.Pressure.ActivePrompts = 0
+	supervisor.probe.Status.Pressure.ResidentSessions = 0
+	supervisor.probe.Status.Sessions = nil
+	supervisor.probe.Status.ActivePrompts = nil
 	supervisor.probe.Status.Pressure.LiveDescendants = 1
 	runtimePoolReconcile(t, r, pool)
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
@@ -462,6 +475,9 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 	// The supervisor confirms the drain and reports the complete quiescence
 	// invariant: the workload is scaled to zero and the fence cleared only now.
 	supervisor.probe.Status.Drain.Requested = true
+	supervisor.probe.Status.Drain.RequestedAt = runtimePoolTestNow
+	supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
+	supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleDraining
 	supervisor.probe.Status.Drain.AcceptingNewSessions = false
 	runtimePoolReconcile(t, r, pool)
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 0 {
@@ -478,6 +494,7 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 	pod := func(mutate func(*corev1.Pod)) []corev1.Pod {
 		p := corev1.Pod{}
 		mutate(&p)
+		setToolboxPullObservation(t, &p, runtimePoolTestNow.Add(-runtimePoolToolboxPullRetryWindow))
 		return []corev1.Pod{p}
 	}
 	cases := map[string]struct {
@@ -645,7 +662,7 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			reason, message, ok := runtimePoolToolboxFailure(tc.pods, tc.toolboxes)
+			reason, message, ok := runtimePoolToolboxFailure(tc.pods, tc.toolboxes, runtimePoolTestNow)
 			if ok != tc.ok {
 				t.Fatalf("ok = %v (%q), want %v", ok, message, tc.ok)
 			}
@@ -654,6 +671,128 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 			}
 			if reason != corev1alpha1.RuntimePoolReasonToolboxUnavailable || !strings.HasPrefix(message, tc.want) {
 				t.Fatalf("reason=%s message=%q, want prefix %q", reason, message, tc.want)
+			}
+		})
+	}
+}
+
+func TestRuntimePoolToolboxImagePullRecoveryWindow(t *testing.T) {
+	for _, copyMode := range []bool{true, false} {
+		for _, reason := range []string{podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonRegistryUnavailable, podWaitingReasonInvalidImageName} {
+			t.Run(fmt.Sprintf("copy=%t/%s", copyMode, reason), func(t *testing.T) {
+				toolboxes := runtimePoolTestToolboxes()
+				status := corev1.ContainerStatus{Name: runtimeField, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: "registry timeout pulling " + toolboxes[0].Image}}}
+				pod := corev1.Pod{Status: corev1.PodStatus{StartTime: new(metav1.NewTime(runtimePoolTestNow))}}
+				if copyMode {
+					status.Name = runtimePoolToolboxCopyContainerName(0)
+					pod.Status.InitContainerStatuses = []corev1.ContainerStatus{status}
+				} else {
+					pod.Status.ContainerStatuses = []corev1.ContainerStatus{status}
+				}
+				setToolboxPullObservation(t, &pod, runtimePoolTestNow)
+				_, _, immediate := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow)
+				if immediate != (reason == podWaitingReasonInvalidImageName) {
+					t.Fatalf("immediate failure = %t", immediate)
+				}
+				if reason != podWaitingReasonInvalidImageName {
+					if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow-time.Nanosecond)); failed {
+						t.Fatal("failed before retry window expired")
+					}
+				}
+				if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow)); !failed {
+					t.Fatal("persistent pull failure was not bounded")
+				}
+				if copyMode {
+					pod.Status.InitContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}
+				} else {
+					pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+				}
+				if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow.Add(2*runtimePoolToolboxPullRetryWindow)); failed {
+					t.Fatal("recovered pull retained a terminal failure")
+				}
+			})
+		}
+	}
+}
+
+func setToolboxPullObservation(t *testing.T, pod *corev1.Pod, first time.Time) {
+	t.Helper()
+	observations := map[string]runtimePoolToolboxPullFailure{}
+	for _, status := range append(append([]corev1.ContainerStatus(nil), pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...) {
+		observations[status.Name] = runtimePoolToolboxPullFailure{FirstObserved: first, RestartCount: status.RestartCount}
+	}
+	data, err := json.Marshal(observations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[runtimePoolToolboxPullFailuresAnnotation] = string(data)
+}
+
+func TestRuntimePoolToolboxPullObservationsSurviveControllerRestart(t *testing.T) {
+	for _, copyMode := range []bool{true, false} {
+		t.Run(fmt.Sprintf("copy=%t", copyMode), func(t *testing.T) {
+			ctx := context.Background()
+			pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+			pod := runtimePoolPendingPod(pool, pool.Namespace, "delayed-pull-pod", "delayed-pull-uid")
+			pod.CreationTimestamp = metav1.NewTime(runtimePoolTestNow.Add(-time.Hour))
+			pod.Status.StartTime = new(metav1.NewTime(runtimePoolTestNow.Add(-time.Hour)))
+			status := corev1.ContainerStatus{Name: runtimeField, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: podWaitingReasonErrImagePull, Message: "timeout pulling " + runtimePoolTestToolboxes()[0].Image}}}
+			setStatus := func(p *corev1.Pod, status corev1.ContainerStatus) {
+				if copyMode {
+					status.Name = runtimePoolToolboxCopyContainerName(0)
+					p.Status.InitContainerStatuses = []corev1.ContainerStatus{status}
+				} else {
+					p.Status.ContainerStatuses = []corev1.ContainerStatus{status}
+				}
+			}
+			setStatus(&pod, status)
+			r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool, &pod)
+			pods := []corev1.Pod{pod}
+			if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), runtimePoolTestNow); failed {
+				t.Fatal("first pull failure inherited unrelated startup delay")
+			}
+			restarted := &RuntimePoolReconciler{Client: r.Client, ControllerEpoch: r.ControllerEpoch + 1,
+				Now: func() time.Time { return runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow) }}
+			fresh := &corev1.Pod{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(&pod), fresh); err != nil {
+				t.Fatal(err)
+			}
+			pods = []corev1.Pod{*fresh}
+			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), restarted.now()); !failed {
+				t.Fatal("persistent pull was not bounded across controller restart")
+			}
+			fresh = &pods[0]
+			status.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+			setStatus(fresh, status)
+			if err := r.Status().Update(ctx, fresh); err != nil {
+				t.Fatal(err)
+			}
+			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+				t.Fatal(err)
+			}
+			if pods[0].Annotations[runtimePoolToolboxPullFailuresAnnotation] != "" {
+				t.Fatal("recovered pull retained its failure episode")
+			}
+			status.RestartCount++
+			status.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: podWaitingReasonImagePullBackOff, Message: "timeout pulling " + runtimePoolTestToolboxes()[0].Image}}
+			setStatus(fresh, status)
+			if err := r.Status().Update(ctx, fresh); err != nil {
+				t.Fatal(err)
+			}
+			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), restarted.now()); failed {
+				t.Fatal("new failure episode inherited an expired retry window")
 			}
 		})
 	}
@@ -733,5 +872,270 @@ func TestRuntimePoolReconcileReportsToolboxUnavailableForRestartedActivePod(t *t
 	}
 	if _, ok := runtimePoolToolboxUnavailableMessage(&current); !ok {
 		t.Fatal("dispatcher settlement must see the ToolboxUnavailable condition")
+	}
+}
+
+type toolboxDeployedAuthSupervisor struct {
+	*fakeRuntimePoolSupervisorClient
+	token      []byte
+	capability []byte
+	rejected   int
+}
+
+func (s *toolboxDeployedAuthSupervisor) Probe(ctx context.Context, endpoint, token string, capability []byte) (RuntimePoolProbeResult, error) {
+	if !bytes.Equal([]byte(token), s.token) || !bytes.Equal(capability, s.capability) {
+		s.rejected++
+		return RuntimePoolProbeResult{}, errors.New("credentials do not match deployed instance")
+	}
+	return s.fakeRuntimePoolSupervisorClient.Probe(ctx, endpoint, token, capability)
+}
+
+func TestRuntimePoolToolboxPolicyRemovalDrainsAcrossEpochChange(t *testing.T) {
+	for _, disabled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("disabled=%t", disabled), func(t *testing.T) {
+			pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool)
+			r.ToolboxPolicy = acpTestToolboxPolicy()
+			deployment, _ := runtimePoolTestStartServing(t, r, pool, supervisor, "epoch-pod", "epoch-pod-uid", "10.0.0.82", "epoch-boot")
+			auth, err := r.runtimePoolDeploymentAuthSecret(context.Background(), deployment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checked := &toolboxDeployedAuthSupervisor{fakeRuntimePoolSupervisorClient: supervisor, token: auth.Data[runtimePoolControllerTokenKey], capability: auth.Data[runtimePoolCapabilitySecretKey]}
+			r.SupervisorClient = checked
+			r.ControllerEpoch++
+			if disabled {
+				r.ToolboxPolicy = ACPToolboxPolicy{}
+			} else {
+				r.ToolboxPolicy.AllowedRegistries = []string{"registry.example.com/other"}
+			}
+			runtimePoolReconcile(t, r, pool)
+			runtimePoolReconcile(t, r, pool)
+			if checked.rejected != 0 || supervisor.drainCalls != 1 {
+				t.Fatalf("deployed authentication rejected=%d drain calls=%d", checked.rejected, supervisor.drainCalls)
+			}
+			supervisor.probe.Status.Drain.Requested = true
+			supervisor.probe.Status.Drain.RequestedAt = runtimePoolTestNow
+			supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
+			supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleDraining
+			supervisor.probe.Status.Drain.AcceptingNewSessions = false
+			runtimePoolReconcile(t, r, pool)
+			if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 0 {
+				t.Fatal("policy-rejected deployed instance did not retire")
+			}
+		})
+	}
+}
+
+func TestRuntimePoolToolboxRetirementPreservesTaskCleanupReceipt(t *testing.T) {
+	ctx := context.Background()
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+	deployment, _ := runtimePoolTestStartServing(t, r, pool, supervisor, "receipt-pod", "receipt-pod-uid", "10.0.0.83", "receipt-boot")
+	current := runtimePoolTestGetPool(t, r, pool)
+	task := runtimePoolRetirementTask(t, &current, "toolbox-retirement-task")
+	if err := r.Create(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	r.ToolboxPolicy = ACPToolboxPolicy{}
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe.Status.Drain.Requested = true
+	supervisor.probe.Status.Drain.RequestedAt = runtimePoolTestNow
+	supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
+	supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleDraining
+	supervisor.probe.Status.Drain.AcceptingNewSessions = false
+	// A lost receipt write must retain the authenticated instance for retry.
+	failReceipt := true
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, isTask := obj.(*corev1alpha1.Task); isTask && failReceipt {
+				failReceipt = false
+				return errors.New("injected retirement receipt write failure")
+			}
+			return c.SubResource(subresource).Update(ctx, obj, opts...)
+		},
+	})
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+	if err == nil || !strings.Contains(err.Error(), "injected retirement receipt") {
+		t.Fatalf("receipt write failure = %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil || ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 1 {
+		t.Fatal("lost receipt write discarded the runtime retirement fence")
+	}
+	runtimePoolReconcile(t, r, pool)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeSessionCleanupCompleteForUID(task, task.UID) {
+		t.Fatal("toolbox retirement lost exactly bound Session Task cleanup proof")
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance != nil || ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 0 {
+		t.Fatal("quiescent instance was not retired after its receipt persisted")
+	}
+}
+
+func TestRuntimePoolToolboxDrainRejectsMismatchedProbeFence(t *testing.T) {
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+	deployment, _ := runtimePoolTestStartServing(t, r, pool, supervisor, "fence-pod", "fence-pod-uid", "10.0.0.84", "fence-boot")
+	r.ToolboxPolicy = ACPToolboxPolicy{}
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe.Status.Fence.SupervisorBootID = "different-boot"
+	supervisor.probe.Status.Drain.Requested = true
+	supervisor.probe.Status.Drain.RequestedAt = runtimePoolTestNow
+	supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
+	supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleDraining
+	supervisor.probe.Status.Drain.AcceptingNewSessions = false
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err == nil {
+		t.Fatal("toolbox retirement accepted a mismatched authenticated probe")
+	}
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 1 {
+		t.Fatal("mismatched probe scaled away the active instance")
+	}
+}
+
+func TestRuntimePoolRecoversFromTransientToolboxImagePull(t *testing.T) {
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "recovering-toolbox-pod", "recovering-toolbox-pod-uid", "10.0.0.85")
+	pod.Status.StartTime = new(metav1.NewTime(runtimePoolTestNow))
+	pod.Status.Conditions[0].Status = corev1.ConditionFalse
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: runtimePoolToolboxCopyContainerName(0), State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: podWaitingReasonErrImagePull, Message: "registry request timed out"}}}}
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "recovering-boot", false)}
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool, &pod)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if _, unavailable := runtimePoolToolboxUnavailableMessage(&current); unavailable {
+		t.Fatal("transient pull failure would terminalize waiting Tasks")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.InitContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}
+	pod.Status.Conditions[0].Status = corev1.ConditionTrue
+	if err := r.Status().Update(context.Background(), &pod); err != nil {
+		t.Fatal(err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("recovered pool = %s/%s", current.Status.Lifecycle, current.Status.AdmissionState)
+	}
+}
+
+func TestRuntimePoolToolboxPolicyRemovalRecyclesInPlaceSupervisorRestart(t *testing.T) {
+	ctx := context.Background()
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+	deployment, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "restarted-toolbox-pod", "restarted-toolbox-pod-uid", "10.0.0.86", "old-toolbox-boot")
+	r.ToolboxPolicy = ACPToolboxPolicy{}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "new-toolbox-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 1 {
+		t.Fatal("first reconcile skipped the durable toolbox admission barrier")
+	}
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 0 {
+		t.Fatal("legitimate in-place restart stranded a rejected workload")
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("exact restarted Pod was not recycled: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance != nil {
+		t.Fatal("recycled instance retained stale fence")
+	}
+}
+
+func TestRuntimePoolToolboxPullDeadlineSurvivesWaitingReasonChanges(t *testing.T) {
+	for _, copyMode := range []bool{true, false} {
+		t.Run(fmt.Sprintf("copy=%t", copyMode), func(t *testing.T) {
+			ctx := context.Background()
+			pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+			pod := runtimePoolPendingPod(pool, pool.Namespace, "registry-pull-pod", "registry-pull-uid")
+			status := corev1.ContainerStatus{Name: runtimeField, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: podWaitingReasonImagePullBackOff, Message: "pull " + runtimePoolTestToolboxes()[0].Image}}}
+			if copyMode {
+				status.Name = runtimePoolToolboxCopyContainerName(0)
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{status}
+			} else {
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{status}
+			}
+			r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool, &pod)
+			pods := []corev1.Pod{pod}
+			if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+				t.Fatal(err)
+			}
+			first := pods[0].Annotations[runtimePoolToolboxPullFailuresAnnotation]
+			r.Now = func() time.Time { return runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow) }
+			for _, reason := range []string{podWaitingReasonRegistryUnavailable, "ContainerCreating", "RuntimeSpecificPullFailure", podWaitingReasonImagePullBackOff, podWaitingReasonRegistryUnavailable} {
+				current := &pods[0]
+				if copyMode {
+					current.Status.InitContainerStatuses[0].State.Waiting.Reason = reason
+				} else {
+					current.Status.ContainerStatuses[0].State.Waiting.Reason = reason
+				}
+				if err := r.Status().Update(ctx, current); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+					t.Fatal(err)
+				}
+				if current.Annotations[runtimePoolToolboxPullFailuresAnnotation] != first {
+					t.Fatalf("%s reset the same failure episode", reason)
+				}
+				if reason == podWaitingReasonImagePullBackOff || reason == podWaitingReasonRegistryUnavailable {
+					if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), r.now()); !failed {
+						t.Fatalf("%s hid the expired pull deadline", reason)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimePoolToolboxRestartRecycleRetriesAfterScaleToZero(t *testing.T) {
+	ctx := context.Background()
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+	deployment, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "retry-toolbox-pod", "retry-toolbox-pod-uid", "10.0.0.87", "old-retry-boot")
+	r.ToolboxPolicy = ACPToolboxPolicy{}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "new-retry-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	failedDelete := true
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod && failedDelete {
+				failedDelete = false
+				return errors.New("injected exact-Pod deletion failure")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err == nil || !strings.Contains(err.Error(), "injected exact-Pod") {
+		t.Fatalf("exact Pod deletion failure = %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance == nil || ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 0 {
+		t.Fatal("failed Pod removal did not preserve fence after scale-to-zero")
+	}
+	runtimePoolReconcile(t, r, pool)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("zero-replica Deployment skipped exact Pod recycle retry: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance != nil {
+		t.Fatal("successful retry retained retired instance fence")
 	}
 }

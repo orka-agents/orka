@@ -1,13 +1,16 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp/toolbox"
@@ -36,6 +39,7 @@ const (
 
 	podWaitingReasonErrImagePull          = "ErrImagePull"
 	podWaitingReasonImagePullBackOff      = "ImagePullBackOff"
+	podWaitingReasonRegistryUnavailable   = "RegistryUnavailable"
 	podWaitingReasonInvalidImageName      = "InvalidImageName"
 	podWaitingReasonCreateContainer       = "CreateContainerError"
 	podWaitingReasonCreateContainerConfig = "CreateContainerConfigError"
@@ -293,7 +297,7 @@ func applyRuntimePoolToolboxImageVolumeTemplate(template *corev1.PodTemplateSpec
 // stable ToolboxUnavailable reason. It inspects toolbox init containers (copy
 // mode), the runtime container's own toolbox startup check, and image-volume
 // mount or pull failures. Messages are sanitized before they reach status.
-func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeToolbox) (string, string, bool) {
+func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeToolbox, now time.Time) (string, string, bool) {
 	if len(toolboxes) == 0 {
 		return "", "", false
 	}
@@ -322,7 +326,10 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 			}
 			{
 				switch waiting.Reason {
-				case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonInvalidImageName:
+				case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonRegistryUnavailable, podWaitingReasonInvalidImageName:
+					if !runtimePoolToolboxPullRetryExpired(&pods[i], status, now) {
+						continue
+					}
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonImagePull, status.Name+": "+waiting.Reason+" "+waiting.Message), true
 				case podWaitingReasonCreateContainer, podWaitingReasonCreateContainerConfig, podWaitingReasonRunContainer:
@@ -353,8 +360,9 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonMountFailed, waiting.Message), true
 				}
-			case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonInvalidImageName:
-				if runtimePoolToolboxMessageMentionsToolbox(waiting.Message, toolboxes) {
+			case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonRegistryUnavailable, podWaitingReasonInvalidImageName:
+				if runtimePoolToolboxMessageMentionsToolbox(waiting.Message, toolboxes) &&
+					runtimePoolToolboxPullRetryExpired(&pods[i], status, now) {
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonImagePull, waiting.Reason+" "+waiting.Message), true
 				}
@@ -362,6 +370,94 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 		}
 	}
 	return "", "", false
+}
+
+// runtimePoolToolboxPullRetryWindow allows kubelet to recover from transient
+// registry failures before waiting Tasks receive a terminal toolbox failure.
+const runtimePoolToolboxPullRetryWindow = 5 * time.Minute
+
+const runtimePoolToolboxPullFailuresAnnotation = "orka.ai/toolbox-pull-failures"
+
+type runtimePoolToolboxPullFailure struct {
+	FirstObserved time.Time `json:"firstObserved"`
+	RestartCount  int32     `json:"restartCount"`
+}
+
+// Observe failure episodes durably on the exact Pod. Pod creation/start time
+// includes scheduling and sandbox delays and is not evidence of a failed pull.
+// Preserve episodes across runtime-specific waiting reasons and missing status;
+// only an observed start/termination or a different restart count retires one.
+func (r *RuntimePoolReconciler) observeRuntimePoolToolboxPullFailures(ctx context.Context, pods []corev1.Pod, toolboxes []harnessv2.RuntimeToolbox) error {
+	if len(toolboxes) == 0 {
+		return nil
+	}
+	for i := range pods {
+		pod := &pods[i]
+		previous := map[string]runtimePoolToolboxPullFailure{}
+		if raw := pod.Annotations[runtimePoolToolboxPullFailuresAnnotation]; raw != "" {
+			if err := json.Unmarshal([]byte(raw), &previous); err != nil {
+				return fmt.Errorf("decode toolbox pull observations for Pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
+		}
+		current := previous
+		statuses := append(append([]corev1.ContainerStatus(nil), pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+		for _, status := range statuses {
+			failure, exists := current[status.Name]
+			if exists && (failure.RestartCount != status.RestartCount || status.State.Running != nil || status.State.Terminated != nil) {
+				delete(current, status.Name)
+				exists = false
+			}
+			waiting := status.State.Waiting
+			if waiting == nil || (waiting.Reason != podWaitingReasonErrImagePull && waiting.Reason != podWaitingReasonImagePullBackOff && waiting.Reason != podWaitingReasonRegistryUnavailable) {
+				continue
+			}
+			if !strings.HasPrefix(status.Name, runtimePoolToolboxCopyPrefix) &&
+				(status.Name != runtimeField || !runtimePoolToolboxMessageMentionsToolbox(waiting.Message, toolboxes)) {
+				continue
+			}
+			if !exists || failure.FirstObserved.IsZero() {
+				failure = runtimePoolToolboxPullFailure{FirstObserved: r.now(), RestartCount: status.RestartCount}
+			}
+			current[status.Name] = failure
+		}
+		encoded := ""
+		if len(current) != 0 {
+			data, err := json.Marshal(current)
+			if err != nil {
+				return err
+			}
+			encoded = string(data)
+		}
+		if encoded == pod.Annotations[runtimePoolToolboxPullFailuresAnnotation] {
+			continue
+		}
+		base := pod.DeepCopy()
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		if encoded == "" {
+			delete(pod.Annotations, runtimePoolToolboxPullFailuresAnnotation)
+		} else {
+			pod.Annotations[runtimePoolToolboxPullFailuresAnnotation] = encoded
+		}
+		if err := r.Patch(ctx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return fmt.Errorf("persist toolbox pull observation for Pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+	}
+	return nil
+}
+
+func runtimePoolToolboxPullRetryExpired(pod *corev1.Pod, status corev1.ContainerStatus, now time.Time) bool {
+	if status.State.Waiting != nil && status.State.Waiting.Reason == podWaitingReasonInvalidImageName {
+		return true
+	}
+	var observations map[string]runtimePoolToolboxPullFailure
+	if json.Unmarshal([]byte(pod.Annotations[runtimePoolToolboxPullFailuresAnnotation]), &observations) != nil {
+		return false
+	}
+	observed, exists := observations[status.Name]
+	return exists && observed.RestartCount == status.RestartCount && !observed.FirstObserved.IsZero() &&
+		!now.Before(observed.FirstObserved.Add(runtimePoolToolboxPullRetryWindow))
 }
 
 // runtimePoolToolboxFailedTermination returns the termination that currently

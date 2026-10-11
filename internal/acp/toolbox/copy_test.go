@@ -6,11 +6,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -106,12 +109,12 @@ func TestCopySanitizesModesLinksAndSpecialBits(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, target := range map[string]string{
-		"bin/relative": "tool",
-		"bin/absolute": "/opt/tools/bin/tool",
-		"bin/escape":   "../../../etc/passwd",
-		"bin/loop-a":   "loop-b",
-		"bin/loop-b":   "loop-a",
-		"bin/outside":  "/usr/bin/env",
+		"bin/relative":  "tool",
+		"bin/absolute":  source + "/bin/tool",
+		"share/escape":  "../../outside/passwd",
+		"bin/loop-a":    "loop-b",
+		"bin/loop-b":    "loop-a",
+		"share/outside": "/usr/bin/env",
 	} {
 		if err := os.Symlink(target, filepath.Join(source, name)); err != nil {
 			t.Fatal(err)
@@ -146,8 +149,8 @@ func TestCopySanitizesModesLinksAndSpecialBits(t *testing.T) {
 		}
 	}
 	for name, target := range map[string]string{
-		"bin/relative": "tool", "bin/absolute": "/opt/tools/bin/tool", "bin/escape": "../../../etc/passwd",
-		"bin/loop-a": "loop-b", "bin/loop-b": "loop-a", "bin/outside": "/usr/bin/env",
+		"bin/relative": "tool", "bin/absolute": source + "/bin/tool", "share/escape": "../../outside/passwd",
+		"bin/loop-a": "loop-b", "bin/loop-b": "loop-a", "share/outside": "/usr/bin/env",
 	} {
 		got, err := os.Readlink(filepath.Join(root, name))
 		if err != nil {
@@ -397,18 +400,18 @@ func TestCopyChecksArchitecture(t *testing.T) {
 			t.Fatalf("reason = %s, want %s", got, ReasonUnsupportedFileType)
 		}
 	})
-	t.Run("symlinks leaving the tree are skipped", func(t *testing.T) {
-		source, destination := newLayout(t)
-		if err := os.Mkdir(filepath.Join(source, "bin"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		for name, target := range map[string]string{"escape": "../../../bin/sh", "outside": "/usr/bin/env", "loop": "loop"} {
-			if err := os.Symlink(target, filepath.Join(source, "bin", name)); err != nil {
+	t.Run("symlinks leaving the tree fail closed", func(t *testing.T) {
+		for _, target := range []string{"../../outside/bin/sh", "/usr/bin/env"} {
+			source, destination := newLayout(t)
+			if err := os.Mkdir(filepath.Join(source, "bin"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if _, err := Copy(copyOptions(source, destination, "bin")); err != nil {
-			t.Fatal(err)
+			if err := os.Symlink(target, filepath.Join(source, "bin", "outside")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Copy(copyOptions(source, destination, "bin")); failureReason(t, err) != ReasonUnsupportedFileType {
+				t.Fatalf("outside PATH link must fail closed: %v", err)
+			}
 		}
 	})
 	t.Run("missing path entry", func(t *testing.T) {
@@ -425,6 +428,284 @@ func TestCopyChecksArchitecture(t *testing.T) {
 			t.Fatalf("file path entry: reason = %s, want %s", got, ReasonMissingPathEntry)
 		}
 	})
+}
+
+func TestToolboxChecksIntermediateSymlinks(t *testing.T) {
+	layouts := []struct {
+		name            string
+		tool            string
+		links           map[string]string
+		parentTraversal bool
+	}{
+		{
+			name: "release directory", tool: "releases/v1/bin/tool",
+			links: map[string]string{"bin/tool": "../current/bin/tool", "current": "releases/v1"},
+		},
+		{
+			name: "absolute directory", tool: "releases/v1/bin/tool",
+			links: map[string]string{"bin/tool": "../current/bin/tool", "current": "$MOUNT/releases/v1"},
+		},
+		{
+			name: "absolute tool", tool: "releases/v1/bin/tool",
+			links: map[string]string{"bin/tool": "$MOUNT/current/bin/tool", "current": "releases/v1"},
+		},
+		{
+			name: "absolute repeated slash prefix", tool: "releases/v1/bin/tool",
+			links: map[string]string{"bin/tool": "$SLASH_MOUNT/current/bin/tool", "current": "releases/v1"},
+		},
+		{
+			name: "absolute dot prefix", tool: "releases/v1/bin/tool",
+			links: map[string]string{"bin/tool": "$DOT_MOUNT/current/bin/tool", "current": "releases/v1"},
+		},
+		{
+			name: "absolute directory repeated slash prefix", tool: "releases/v1/bin/tool",
+			links: map[string]string{"bin/tool": "../current/bin/tool", "current": "$SLASH_MOUNT/releases/v1"},
+		},
+		{
+			name: "absolute directory dot prefix", tool: "releases/v1/bin/tool",
+			links: map[string]string{"bin/tool": "../current/bin/tool", "current": "$DOT_MOUNT/releases/v1"},
+		},
+		{
+			name: "linuxbrew opt", tool: "Cellar/tool/1.0/bin/tool",
+			links: map[string]string{"bin/tool": "../opt/tool/bin/tool", "opt/tool": "../Cellar/tool/1.0"},
+		},
+		{
+			name: "directory then file link", tool: "libexec/tool",
+			links: map[string]string{
+				"bin/tool": "../current/bin/tool", "current": "releases/v1",
+				"releases/v1/bin/tool": "../../../libexec/tool",
+			},
+		},
+		{
+			name: "dotdot after directory link", tool: "releases/libexec/tool", parentTraversal: true,
+			links: map[string]string{"bin/tool": "../current/../libexec/tool", "current": "releases/v1"},
+		},
+		{
+			name: "absolute slash alias with dotdot", tool: "releases/libexec/tool", parentTraversal: true,
+			links: map[string]string{"bin/tool": "$SLASH_MOUNT/current/../libexec/tool", "current": "releases/v1"},
+		},
+		{
+			name: "absolute dot alias with dot and dotdot", tool: "releases/libexec/tool", parentTraversal: true,
+			links: map[string]string{"bin/tool": "$DOT_MOUNT/current/./../libexec/tool", "current": "releases/v1"},
+		},
+	}
+	for _, checker := range []string{"Copy", "CheckMounted"} {
+		t.Run(checker, func(t *testing.T) {
+			for _, layout := range layouts {
+				t.Run(layout.name, func(t *testing.T) {
+					for _, arch := range []string{runtime.GOARCH, otherArch()} {
+						t.Run(arch, func(t *testing.T) {
+							source, destination := newLayout(t)
+							mustWrite(t, filepath.Join(source, layout.tool), elfFor(arch), 0o755)
+							if layout.parentTraversal {
+								if err := os.MkdirAll(filepath.Join(source, "releases", "v1"), 0o755); err != nil {
+									t.Fatal(err)
+								}
+								decoyArch := runtime.GOARCH
+								if arch == runtime.GOARCH {
+									decoyArch = otherArch()
+								}
+								mustWrite(t, filepath.Join(source, "libexec", "tool"), elfFor(decoyArch), 0o755)
+							}
+							for name, target := range layout.links {
+								link := filepath.Join(source, name)
+								if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+									t.Fatal(err)
+								}
+								target = strings.NewReplacer(
+									"$MOUNT", source,
+									"$SLASH_MOUNT", strings.ReplaceAll(source, "/", "//"),
+									"$DOT_MOUNT", strings.ReplaceAll(source, "/", "/./"),
+								).Replace(target)
+								if err := os.Symlink(target, link); err != nil {
+									t.Fatal(err)
+								}
+							}
+							if data, err := os.ReadFile(filepath.Join(source, "bin", "tool")); err != nil || !bytes.Equal(data, elfFor(arch)) {
+								t.Fatalf("fixture does not resolve to the intended executable: %v", err)
+							}
+							var err error
+							if checker == "Copy" {
+								_, err = Copy(copyOptions(source, destination, "bin"))
+							} else {
+								err = CheckMounted(source, []string{"bin"}, runtime.GOARCH)
+							}
+							if arch == runtime.GOARCH {
+								if err != nil {
+									t.Fatalf("valid architecture: %v", err)
+								}
+							} else if got := failureReason(t, err); got != ReasonArchMismatch {
+								t.Fatalf("reason = %s, want %s", got, ReasonArchMismatch)
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestToolboxBoundsIntermediateSymlinks(t *testing.T) {
+	for _, checker := range []string{"Copy", "CheckMounted"} {
+		t.Run(checker, func(t *testing.T) {
+			for _, test := range []struct {
+				name   string
+				links  int
+				target string
+				want   string
+			}{
+				{name: "at hop limit", links: maxLinkHops},
+				{name: "over hop limit", links: maxLinkHops + 1, want: ReasonUnsupportedFileType},
+				{name: "loop", target: "current"},
+				{name: "growing loop", target: "current/extra", want: ReasonUnsupportedFileType},
+				{name: "relative escape", target: "../outside", want: ReasonUnsupportedFileType},
+				{name: "ambiguous relative parent alias", target: "../outside/../tools/releases/v1", want: ReasonUnsupportedFileType},
+				{name: "relative re-entry", target: "../tools/releases/v1", want: ReasonUnsupportedFileType},
+				{name: "absolute re-entry", target: "$MOUNT/../tools/releases/v1", want: ReasonUnsupportedFileType},
+				{name: "absolute escape", target: "$OUTSIDE", want: ReasonUnsupportedFileType},
+				{name: "mount prefix escape", target: "$MOUNT-outside", want: ReasonUnsupportedFileType},
+				{name: "repeated slash prefix escape", target: "$SLASH_MOUNT-outside", want: ReasonUnsupportedFileType},
+				{name: "dot prefix escape", target: "$DOT_MOUNT-outside", want: ReasonUnsupportedFileType},
+				{name: "absolute root escape with dotdot", target: "$DOT_MOUNT/../outside", want: ReasonUnsupportedFileType},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					source, destination := newLayout(t)
+					mustWrite(t, filepath.Join(source, "releases", "v1", "bin", "tool"), elfFor(runtime.GOARCH), 0o755)
+					outside := filepath.Join(filepath.Dir(source), "outside")
+					mustWrite(t, filepath.Join(outside, "bin", "tool"), elfFor(otherArch()), 0o755)
+					mustWrite(t, filepath.Join(source+"-outside", "bin", "tool"), elfFor(otherArch()), 0o755)
+					if err := os.Mkdir(filepath.Join(source, "bin"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink("../current/bin/tool", filepath.Join(source, "bin", "tool")); err != nil {
+						t.Fatal(err)
+					}
+					if test.links != 0 {
+						for i := range test.links - 1 {
+							name, target := "current", "releases/v1"
+							if i != 0 {
+								name += strconv.Itoa(i)
+							}
+							if i < test.links-2 {
+								target = "current" + strconv.Itoa(i+1)
+							}
+							if err := os.Symlink(target, filepath.Join(source, name)); err != nil {
+								t.Fatal(err)
+							}
+						}
+					} else {
+						target := strings.NewReplacer(
+							"$OUTSIDE", outside, "$MOUNT", source,
+							"$SLASH_MOUNT", strings.ReplaceAll(source, "/", "//"),
+							"$DOT_MOUNT", strings.ReplaceAll(source, "/", "/./"),
+						).Replace(test.target)
+						if err := os.Symlink(target, filepath.Join(source, "current")); err != nil {
+							t.Fatal(err)
+						}
+					}
+					var err error
+					if checker == "Copy" {
+						_, err = Copy(copyOptions(source, destination, "bin"))
+					} else {
+						err = CheckMounted(source, []string{"bin"}, runtime.GOARCH)
+					}
+					if test.want == "" {
+						if err != nil {
+							t.Fatal(err)
+						}
+					} else if got := failureReason(t, err); got != test.want {
+						t.Fatalf("reason = %s, want %s", got, test.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestToolboxSkipsNonExecutablePATHData(t *testing.T) {
+	if runToolboxDataCheckUnprivileged(t) {
+		return
+	}
+
+	source, destination := newLayout(t)
+	mustWrite(t, filepath.Join(source, "bin", "tool"), elfFor(runtime.GOARCH), 0o755)
+	mustWrite(t, filepath.Join(source, "bin", "script"), []byte("#!/bin/sh\n"), 0o755)
+	mustWrite(t, filepath.Join(source, "bin", "notes.txt"), []byte("data"), 0o600)
+	mustWrite(t, filepath.Join(source, "bin", "foreign-data"), elfFor(otherArch()), 0o600)
+	if err := os.Symlink("notes.txt", filepath.Join(source, "bin", "notes-link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"bin/data", "libexec/data"} {
+		if err := os.MkdirAll(filepath.Join(source, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{
+		"data-link": "data", "data-link-dot": "data/.", "data-link-slash": "data//./",
+		"private-data-link": "../libexec/data", "private-data-link-dot": "../libexec/data/./",
+	} {
+		if err := os.Symlink(target, filepath.Join(source, "bin", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Copy(copyOptions(source, destination, "bin")); err != nil {
+		t.Fatalf("copy must ignore non-executable data during architecture verification: %v", err)
+	}
+	mount := filepath.Join(destination, OutputRootName)
+	for _, name := range []string{"notes.txt", "foreign-data"} {
+		file := filepath.Join(mount, "bin", name)
+		if err := os.Chmod(file, 0); err != nil {
+			t.Fatal(err)
+		}
+		if f, err := os.Open(file); err == nil {
+			_ = f.Close()
+			t.Fatalf("unprivileged verifier can unexpectedly read %s", name)
+		} else if !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("expected read denial for %s: %v", name, err)
+		}
+	}
+	for _, dir := range []string{"bin/data", "libexec/data"} {
+		folder := filepath.Join(mount, dir)
+		t.Cleanup(func() { _ = os.Chmod(folder, 0o755) })
+		if err := os.Chmod(folder, 0); err != nil {
+			t.Fatal(err)
+		}
+		if fd, err := unix.Open(folder, openDirFlags, 0); err == nil {
+			_ = unix.Close(fd)
+			t.Fatalf("unprivileged verifier can unexpectedly open %s", dir)
+		} else if !errors.Is(err, unix.EACCES) {
+			t.Fatalf("expected directory open denial for %s: %v", dir, err)
+		}
+	}
+	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); err != nil {
+		t.Fatalf("unreadable non-executable PATH data must be skipped: %v", err)
+	}
+	// Dot-only suffixes still name a directory and need no content check.
+	// A child or ".." suffix must traverse it, so read denial stays fatal.
+	for _, target := range []string{"data/./tool", "data/../tool", "data/./../tool"} {
+		link := filepath.Join(mount, "bin", "needs-traversal")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonCopyFailed {
+			t.Fatalf("an unreadable intermediate directory in %s must fail: %v", target, err)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"tool", "script"} {
+		file := filepath.Join(mount, "bin", name)
+		if err := os.Chmod(file, 0o111); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonPermissionDenied {
+			t.Fatalf("an unreadable executable %s must fail: %v", name, err)
+		}
+		if err := os.Chmod(file, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestCopyRecoversFromInterruptedRun(t *testing.T) {
@@ -711,4 +992,94 @@ func FuzzCopyTree(f *testing.F) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func runToolboxDataCheckUnprivileged(t *testing.T) bool {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		return false
+	}
+	// Exercise real read denial even when the package suite runs as root.
+	dir, err := os.MkdirTemp("/tmp", "toolbox-unprivileged-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	self, err := Handoff(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(dir, "scratch")
+	if err := os.Mkdir(scratch, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(scratch, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestToolboxSkipsNonExecutablePATHData$", "-test.v")
+	cmd.Env = append(os.Environ(), "TMPDIR="+scratch)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unprivileged verification: %v\n%s", err, output)
+	}
+	return true
+}
+
+func TestToolboxRejectsAmbiguousAbsoluteParentPrefix(t *testing.T) {
+	for _, mounted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mounted=%t", mounted), func(t *testing.T) {
+			source, destination := newLayout(t)
+			mustWrite(t, filepath.Join(source, "releases", "v1", "bin", "tool"), elfFor(otherArch()), 0o755)
+			if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("../current/bin/tool", filepath.Join(source, "bin", "tool")); err != nil {
+				t.Fatal(err)
+			}
+			// The prefix leaves a real ancestor and comes back into the same
+			// toolbox. It cannot safely be treated as a proven outside target.
+			parent := filepath.Dir(source)
+			target := parent + "/../" + filepath.Base(parent) + "/" + filepath.Base(source) + "/releases/v1"
+			if err := os.Symlink(target, filepath.Join(source, "current")); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if mounted {
+				err = CheckMounted(source, []string{"bin"}, runtime.GOARCH)
+			} else {
+				_, err = Copy(copyOptions(source, destination, "bin"))
+			}
+			if failureReason(t, err) != ReasonUnsupportedFileType {
+				t.Fatalf("ambiguous absolute parent prefix must fail closed: %v", err)
+			}
+		})
+	}
+}
+
+func TestToolboxRejectsOutsideAbsoluteDirectoryWithInTreeSuffix(t *testing.T) {
+	for _, mounted := range []bool{false, true} {
+		source, destination := newLayout(t)
+		mustWrite(t, filepath.Join(source, "libexec", "tool"), elfFor(otherArch()), 0o755)
+		if err := os.Mkdir(filepath.Join(source, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../current/"+filepath.Base(source)+"/libexec/tool", filepath.Join(source, "bin", "tool")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Dir(source), filepath.Join(source, "current")); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if mounted {
+			err = CheckMounted(source, []string{"bin"}, runtime.GOARCH)
+		} else {
+			_, err = Copy(copyOptions(source, destination, "bin"))
+		}
+		if failureReason(t, err) != ReasonUnsupportedFileType {
+			t.Fatalf("outside absolute directory plus in-tree suffix must fail closed: %v", err)
+		}
+	}
 }

@@ -205,6 +205,17 @@ for command in kubectl jq awk sed grep cut tr sort date mktemp curl; do
   require_cmd "${command}"
 done
 
+toolbox_checksum_command=()
+if [[ -n "${ACP_E2E_TOOLBOX_IMAGE:-}" ]]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    toolbox_checksum_command=(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    toolbox_checksum_command=(shasum -a 256)
+  else
+    die "toolbox checks require sha256sum or shasum"
+  fi
+fi
+
 release_gate=0
 if bool_env "${RELEASE_GATE:-0}"; then
   release_gate=1
@@ -1786,7 +1797,7 @@ run_toolbox_check() {
   # A syntactically valid digest that no registry serves: the pull must fail
   # with TOOLBOX_IMAGE_PULL in both modes.
   local unknown_image
-  unknown_image="${image%@sha256:*}@sha256:$(printf 'orka-toolbox-unknown-digest-%s' "${run_id}" | sha256sum | cut -c1-64)"
+  unknown_image="${image%@sha256:*}@sha256:$(printf 'orka-toolbox-unknown-digest-%s' "${run_id}" | "${toolbox_checksum_command[@]}" | cut -c1-64)"
   local case_name case_image case_reason case_mount case_entry negative_agent negative_task
   for case_name in wrong-arch fifo missing unknown hostile; do
     case "${case_name}" in

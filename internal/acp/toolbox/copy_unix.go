@@ -5,7 +5,6 @@ package toolbox
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path"
@@ -415,11 +414,11 @@ func hasDotDot(relative string) bool {
 	return slices.Contains(strings.Split(relative, "/"), "..")
 }
 
-// checkArchInTree verifies that every ELF file directly inside each path
-// entry folder matches arch. Symlinks are resolved only while they stay inside
+// checkArchInTree verifies that every executable ELF file directly inside each
+// path entry folder matches arch. Symlinks are resolved only while they stay inside
 // the toolbox tree (rootFd is the tree root and mountPath its runtime path);
-// anything that leaves the tree is skipped because it can never be a toolbox
-// tool. The walk never follows a symlink at the kernel level.
+// paths that leave the root fail closed because an external alias may re-enter
+// the mount. The walk never follows a symlink at the kernel level.
 func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch string) error {
 	for _, entry := range pathEntries {
 		dirFd, err := openRelativeDirectory(rootFd, entry)
@@ -438,7 +437,10 @@ func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch st
 			relative := path.Join(entry, name)
 			resolved, ok, err := resolveInsideTree(rootFd, mountPath, relative)
 			if err != nil {
-				return err
+				if _, ok := errors.AsType[*Failure](err); ok {
+					return err
+				}
+				return failf(ReasonCopyFailed, "resolve %s: %v", path.Join(mountPath, relative), err)
 			}
 			if !ok {
 				continue
@@ -464,81 +466,139 @@ func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch st
 	return nil
 }
 
-// resolveInsideTree follows symlink text relative to the toolbox tree. It
-// returns the relative path of a regular file, ok=false when the entry is not
-// a regular file, escapes the tree, or cannot be inspected, and an error for
-// an in-tree chain longer than maxLinkHops.
+// resolveInsideTree resolves both directory and file links without letting the
+// kernel follow either. Relative link targets retain their component order:
+// cleaning away ".." before resolving an earlier directory link checks a
+// different file. Only dangling paths, loops and non-files are skipped; paths leaving the root,
+// inspection failures and chains beyond maxLinkHops fail closed.
 func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, error) {
-	current := relative
-	visited := map[string]struct{}{}
-	for hop := 0; hop <= maxLinkHops; hop++ {
-		if _, seen := visited[current]; seen {
-			// A symlink loop never reaches a file; Linux fails it with ELOOP,
-			// so there is nothing to check.
-			return "", false, nil
+	dirFd, err := unix.Dup(rootFd)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+	pending := strings.Split(relative, "/")
+	var resolved []string
+	visited := map[string]struct{}{relative: {}}
+	hops := 0
+	for len(pending) > 0 {
+		component := pending[0]
+		pending = pending[1:]
+		switch component {
+		case "", ".":
+			continue
+		case "..":
+			if len(resolved) == 0 {
+				return "", false, failf(ReasonUnsupportedFileType, "symlink parent traversal leaves toolbox %s", mountPath)
+			}
+			resolved = resolved[:len(resolved)-1]
+			nextFd, err := openRelativeDirectory(rootFd, strings.Join(resolved, "/"))
+			if err != nil {
+				return "", false, err
+			}
+			_ = unix.Close(dirFd)
+			dirFd = nextFd
+			continue
 		}
-		visited[current] = struct{}{}
-		st, err := lstatRelative(rootFd, current)
-		if err != nil {
-			return "", false, nil
+		var st unix.Stat_t
+		if err := unix.Fstatat(dirFd, component, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
+				return "", false, nil
+			}
+			return "", false, err
 		}
 		switch statMode(&st) & unix.S_IFMT {
 		case unix.S_IFREG:
-			return current, true, nil
-		case unix.S_IFLNK:
-			next, ok := nextLinkHop(rootFd, mountPath, current)
-			if !ok {
+			if len(pending) != 0 {
 				return "", false, nil
 			}
-			current = next
+			return path.Join(strings.Join(resolved, "/"), component), true, nil
+		case unix.S_IFDIR:
+			// A terminal directory is not a tool, even if its link target
+			// ends in slashes or dots. Do not demand read access to data
+			// folders; children and ".." still require real traversal.
+			if !slices.ContainsFunc(pending, func(component string) bool { return component != "" && component != "." }) {
+				return "", false, nil
+			}
+			nextFd, err := unix.Openat(dirFd, component, openDirFlags, 0)
+			if err != nil {
+				return "", false, err
+			}
+			var opened unix.Stat_t
+			statErr := unix.Fstat(nextFd, &opened)
+			if statErr != nil || opened.Ino != st.Ino || statDev(&opened) != statDev(&st) || statMode(&opened)&unix.S_IFMT != unix.S_IFDIR {
+				_ = unix.Close(nextFd)
+				if statErr != nil {
+					return "", false, statErr
+				}
+				return "", false, failf(ReasonSourceChanged, "%s changed while it was being inspected", path.Join(mountPath, relative))
+			}
+			_ = unix.Close(dirFd)
+			dirFd = nextFd
+			resolved = append(resolved, component)
+		case unix.S_IFLNK:
+			if hops == maxLinkHops {
+				return "", false, failf(ReasonUnsupportedFileType, "%s is a symlink chain longer than %d links", path.Join(mountPath, relative), maxLinkHops)
+			}
+			target, err := readLinkAt(dirFd, component)
+			if err != nil {
+				return "", false, err
+			}
+			var after unix.Stat_t
+			if err := unix.Fstatat(dirFd, component, &after, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return "", false, err
+			}
+			if after.Ino != st.Ino || statDev(&after) != statDev(&st) || statMode(&after)&unix.S_IFMT != unix.S_IFLNK {
+				return "", false, failf(ReasonSourceChanged, "%s changed while it was being inspected", path.Join(mountPath, relative))
+			}
+			targetComponents := strings.Split(target, "/")
+			if path.IsAbs(target) {
+				var err error
+				targetComponents, err = absoluteLinkInsideTree(mountPath, targetComponents)
+				if err != nil {
+					return "", false, err
+				}
+				resolved = nil
+			}
+			// Restart from the pinned root with the real parent components,
+			// raw target components and unconsumed suffix, in that order.
+			next := append([]string(nil), resolved...)
+			next = append(next, targetComponents...)
+			pending = append(next, pending...)
+			key := strings.Join(pending, "/")
+			if _, seen := visited[key]; seen {
+				return "", false, nil
+			}
+			visited[key] = struct{}{}
+			hops++
+			nextFd, err := unix.Dup(rootFd)
+			if err != nil {
+				return "", false, err
+			}
+			_ = unix.Close(dirFd)
+			dirFd = nextFd
+			resolved = nil
 		default:
 			return "", false, nil
 		}
 	}
-	// The chain is still inside the tree after the bound: Linux would keep
-	// following it (up to 40 links), so skipping it would let an unchecked
-	// tool through. Reject it as part of the toolbox contract instead.
-	return "", false, failf(ReasonUnsupportedFileType, "%s is a symlink chain longer than %d links", path.Join(mountPath, relative), maxLinkHops)
+	return "", false, nil
 }
 
-// nextLinkHop reads one symlink and maps its text back into the tree.
-func nextLinkHop(rootFd int, mountPath, current string) (string, bool) {
-	dirFd, err := openRelativeDirectory(rootFd, path.Dir(current))
-	if err != nil {
-		return "", false
-	}
-	target, err := readLinkAt(dirFd, path.Base(current))
-	_ = unix.Close(dirFd)
-	if err != nil {
-		return "", false
-	}
-	var next string
-	if path.IsAbs(target) {
-		if target != mountPath && !strings.HasPrefix(target, mountPath+"/") {
-			return "", false
+// absoluteLinkInsideTree matches a clean mount path against absolute link
+// components, accepting repeated slashes and dots in its prefix. Never clean
+// "..": suffix components must be resolved in order against the pinned root.
+func absoluteLinkInsideTree(mountPath string, components []string) ([]string, error) {
+	for component := range strings.SplitSeq(strings.TrimPrefix(mountPath, "/"), "/") {
+		for len(components) > 0 && (components[0] == "" || components[0] == ".") {
+			components = components[1:]
 		}
-		next = strings.TrimPrefix(strings.TrimPrefix(target, mountPath), "/")
-	} else {
-		next = path.Join(path.Dir(current), target)
+		if len(components) == 0 || components[0] != component {
+			return nil, failf(ReasonUnsupportedFileType, "absolute symlink target leaves toolbox %s", mountPath)
+		}
+		components = components[1:]
 	}
-	next = path.Clean(next)
-	if next == "" || next == "." || path.IsAbs(next) || hasDotDot(next) {
-		return "", false
-	}
-	return next, true
-}
-
-func lstatRelative(rootFd int, relative string) (unix.Stat_t, error) {
-	var st unix.Stat_t
-	dirFd, err := openRelativeDirectory(rootFd, path.Dir(relative))
-	if err != nil {
-		return st, err
-	}
-	defer unix.Close(dirFd) //nolint:errcheck
-	if err := unix.Fstatat(dirFd, path.Base(relative), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return st, err
-	}
-	return st, nil
+	return components, nil
 }
 
 func elfArchAt(rootFd int, relative string) (string, bool, error) {
@@ -547,31 +607,42 @@ func elfArchAt(rootFd int, relative string) (string, bool, error) {
 		return "", false, err
 	}
 	defer unix.Close(dirFd) //nolint:errcheck
+	var expected unix.Stat_t
+	if err := unix.Fstatat(dirFd, path.Base(relative), &expected, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return "", false, err
+	}
+	if statMode(&expected)&unix.S_IFMT != unix.S_IFREG {
+		return "", false, failf(ReasonSourceChanged, "%s is no longer a regular file", relative)
+	}
+	// Non-executable PATH data needs no content check and may be unreadable
+	// to this verifier. Decide from no-follow metadata before O_RDONLY.
+	if statMode(&expected)&0o111 == 0 {
+		return "", false, nil
+	}
+	// Both ELF tools and scripts must work for arbitrary agent identities,
+	// independently of this verifier's UID or the image's ownership.
+	if statMode(&expected)&uint32(worldAccessBits) != uint32(worldAccessBits) {
+		return "", false, failf(ReasonPermissionDenied, "%s (mode %04o) is not readable and executable by every agent identity; it needs o+rx", relative, statMode(&expected)&0o7777)
+	}
 	fd, err := unix.Openat(dirFd, path.Base(relative), openFileFlags, 0)
 	if err != nil {
 		return "", false, err
 	}
 	file := os.NewFile(uintptr(fd), relative)
 	defer file.Close() //nolint:errcheck
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
 		return "", false, err
 	}
-	if statMode(&st)&unix.S_IFMT != unix.S_IFREG {
-		return "", false, fmt.Errorf("%s is not a regular file", relative)
-	}
-	// Any executable tool on PATH (ELF or script) that is not world readable
-	// and executable fails every agent identity; the check runs as one fixed
-	// UID, so the bits are tested independently of ownership.
-	if statMode(&st)&0o111 != 0 && statMode(&st)&uint32(worldAccessBits) != uint32(worldAccessBits) {
-		return "", false, failf(ReasonPermissionDenied, "%s (mode %04o) is not readable and executable by every agent identity; it needs o+rx", relative, statMode(&st)&0o7777)
+	if opened.Ino != expected.Ino || statDev(&opened) != statDev(&expected) || statMode(&opened) != statMode(&expected) {
+		return "", false, failf(ReasonSourceChanged, "%s changed while it was being inspected", relative)
 	}
 	return elfArch(file)
 }
 
 // CheckMounted verifies a toolbox that is already mounted at mountPath: every
-// ELF file in its path entry folders must match arch. It opens the mount path
-// component by component with O_NOFOLLOW and never follows a symlink out of
+// executable ELF file in its path entry folders must match arch. It opens the
+// mount path component by component with O_NOFOLLOW and never follows a symlink out of
 // the toolbox tree. It runs as an unprivileged user.
 func CheckMounted(mountPath string, pathEntries []string, arch string) error {
 	arch, err := NormalizeArch(arch)
