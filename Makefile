@@ -289,9 +289,8 @@ ui-test-coverage: ## Run UI unit tests with coverage.
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ui-build ## Build manager and admission binaries.
+build: manifests generate fmt vet ui-build ## Build manager binary.
 	go build -o bin/manager ./cmd
-	go build -o bin/orka-admission ./cmd/orka-admission
 
 .PHONY: docs-cli
 docs-cli: build-cli ## Generate CLI command reference docs.

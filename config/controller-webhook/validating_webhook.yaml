@@ -1,0 +1,132 @@
+# Fail-closed admission served by the orka-system controller. Like the Helm
+# chart's release-local webhooks, every hook is scoped to the controller's own
+# harness-v2 namespace. The controller's certificate rotator injects caBundle.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: orka-admission
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: kustomize
+webhooks:
+  - name: workspaceattachmentsecret.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-v1-secret-workspace-attachment, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [""], apiVersions: [v1], resources: [secrets], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+    objectSelector:
+      matchExpressions:
+        - key: workspace.orka.ai/attachment-for
+          operator: Exists
+  - name: acpsuspendquotalease.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [coordination.k8s.io], apiVersions: [v1], resources: [leases], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+    matchConditions:
+      - name: reserved-acp-workspace-lease-name
+        expression: >-
+          request.?name.orValue('').startsWith('acp-suspend-quota-') ||
+          request.?name.orValue('').startsWith('acp-retention-fence-') ||
+          (request.operation == 'CREATE' &&
+          (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
+          object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
+  - name: taskprovenance.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-task-provenance, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks, tasks/status], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+  - name: taskworkspaceclassuse.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-task-workspace-class-use, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+  - name: toolworkspaceclassuse.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-tool-workspace-class-use, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tools], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+  - name: checkpointsourceuse.workspace.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-workspace-orka-ai-v1alpha1-checkpoint-source-use, port: 443}
+    rules:
+      - {operations: [CREATE], apiGroups: [workspace.orka.ai], apiVersions: [v1alpha1], resources: [executionworkspacecheckpoints], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+  - name: agentcontract.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-agent-contract, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [agents], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+  - name: agentruntimecontract.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-agentruntime-contract, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [agentruntimes], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}
+  - name: taskexecutionauthority.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-webhook, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-task-execution-authority, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks, tasks/status], scope: Namespaced}
+    namespaceSelector:
+      matchLabels: {orka.ai/controller-mode: harness-v2, kubernetes.io/metadata.name: orka-system}

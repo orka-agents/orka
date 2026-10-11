@@ -15,12 +15,11 @@ Use the bundled script for the standard local deploy path instead of retyping th
    - Named cluster: `scripts/deploy_orka_kind.sh --cluster codex`
    - Explicit repo or cluster: `scripts/deploy_orka_kind.sh --repo /path/to/repo --cluster codex`
 4. Let the script:
-   - validate the existing admission TLS Secret type, keypair, and certificate chain before starting the registry or building images
    - build `controller:kind` plus all worker images
    - load them into the target kind cluster with `make test-e2e-setup-only`
    - use `scripts/lib/kind-local-registry.sh` from the repository to start the cluster-local registry and push the controller, publisher, AI/general workers, and four ACP runtimes, resolving their immutable digests just like CI
-   - install CRDs, bootstrap seven-day test-only admission TLS if absent, ensure the `vekil-system` namespace exists for the bundled ingress policy (without installing Vekil), and run `make deploy` with all six gated image variables digest-pinned (plus the AI/general worker references)
-   - wait for the controller, publisher, provider-auth proxy, SCM egress proxy, and admission Deployments in `orka-system`; current main does not deploy the legacy harness wrapper
+   - install CRDs, ensure the `vekil-system` namespace exists for the bundled ingress policy (without installing Vekil), and run `make deploy` with all six gated image variables digest-pinned (plus the AI/general worker references)
+   - wait for the controller, publisher, provider-auth proxy, and SCM egress proxy Deployments in `orka-system`; the controller serves the admission webhooks and issues their certificate, and current main does not deploy the legacy harness wrapper
    - restore `config/manager/kustomization.yaml` after the deploy so the worktree stays clean
 5. Summarize the resulting `pods`, `services`, and `deployments` in `orka-system`.
 
@@ -28,5 +27,4 @@ Use the bundled script for the standard local deploy path instead of retyping th
 
 - Use this skill for local kind-based Orka deployments. For remote or shared clusters, inspect the intended registry and tag flow before deploying.
 - If the explicit context does not target the named kind cluster, stop and explain the mismatch instead of guessing.
-- Expired or invalid admission TLS stops the script before image builds. Use a fresh kindctl cluster for a disposable environment. For retained clusters, coordinate renewal under `config/orka-admission-webhooks/README.md` in the repository. Automatic renewal is outside this skill's scope because deleting the shared webhooks requires first disabling admission trust on every affected controller and completing their rollouts.
 - If rollout fails, inspect `kubectl --context <context> -n orka-system describe deployment/orka-controller-manager`, `kubectl --context <context> -n orka-system get pods`, and `kubectl --context <context> -n orka-system logs deployment/orka-controller-manager`, using the same scoped `KUBECONFIG`.

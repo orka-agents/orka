@@ -1169,14 +1169,14 @@ below happens until you turn them on.
 | `--substrate-direct-egress-enabled` | `ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED` | Required for native Substrate ACP admission. Acknowledges ateapi's `--egress-gateway-address=` configuration so worker NetworkPolicies see actual destinations. Defaults to `false`; suspension and cleanup still work. |
 | `--enable-fake-workspace-provider` | `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER` | Development only — see below. |
 
-The source Helm chart enables both admission gates for `harness-v2`. It does not expose
-values for the provider API, workspace dispatch, or backend gates.
+The source Helm chart and `make deploy` enable both admission gates for `harness-v2`. Neither
+exposes settings for the provider API, workspace dispatch, or backend gates.
 
 Task provenance protection is required because Orka stores workspace settlement state
 under reserved `acp.workspace.orka.ai/` Task metadata. The provenance webhook prevents
-clients from forging that metadata. Use `--task-provenance-admission-enabled` for the
-controller-served webhook. With the dedicated admission runtime, install and verify the
-fail-closed webhook configuration before enabling `--task-provenance-admission-external`.
+clients from forging that metadata. Both installation methods use the controller-served
+webhook (`--task-provenance-admission-enabled`). `--task-provenance-admission-external`
+remains for a separately deployed webhook.
 
 :::warning[Upgrades need the CRDs applied by hand]
 Helm installs a chart's `crds/` on first install and never updates them. Before enabling
@@ -1240,10 +1240,10 @@ on how you installed Orka:
 
 | Install | Webhooks | What you do |
 | --- | --- | --- |
-| Helm, `harness-v2` | `task-workspace-class.harness-v2.orka.ai`, `tool-workspace-class.harness-v2.orka.ai` | Nothing — the chart renders them against the release's own webhook Service and sets the flag. Requires `webhooks.tls.existingSecret` plus either `webhooks.caBundle` or `webhooks.caInjectionAnnotations`. |
-| Kustomize | `taskworkspaceclassuse.core.orka.ai`, `toolworkspaceclassuse.core.orka.ai` | Apply `config/orka-admission` first, then `config/orka-admission-webhooks` once its README's readiness and TLS prerequisites are met. |
+| Helm, `harness-v2` | `task-workspace-class.harness-v2.orka.ai`, `tool-workspace-class.harness-v2.orka.ai` | Nothing — the chart renders them against the release's own webhook Service and sets the flag. The controller issues their certificate unless you set `webhooks.tls.existingSecret`, which then also needs `webhooks.caBundle` or `webhooks.caInjectionAnnotations`. |
+| `make deploy` (Kustomize) | `taskworkspaceclassuse.core.orka.ai`, `toolworkspaceclassuse.core.orka.ai` | Nothing — the `config/controller-webhook` component renders them against the controller's `orka-webhook` Service, sets the flag, and lets the controller issue and renew their certificate. |
 
-:::danger[Do not apply the Kustomize admission packages to a Helm release]
+:::danger[Do not apply the Kustomize admission component to a Helm release]
 You get two independent sets of validating webhooks for the same resources.
 :::
 
@@ -1415,9 +1415,9 @@ Enabling either flag asserts that all retained Task ancestry was created under t
 
 Internal transcript search applies `sessionRef.maxMessages` and `sessionRef.throughMessageId` before matching messages or limiting results. When multiple Tasks reference the same session, search uses the intersection of their permitted history windows. An unbounded reference cannot widen a bounded one, and a missing cutoff message yields no matches for that session.
 
-How admission is deployed depends on the installation method. Helm releases install and enable Task-provenance admission automatically: the chart renders `task-provenance.<mode>.orka.ai` with `failurePolicy: Fail` against the release-local controller webhook Service and runs the controller with `--task-provenance-admission-enabled=true`, trusting the release controller identity. For Kustomize installations, admission deployment is opt-in and served by the dedicated admission runtime, not the controller manager: install `config/orka-admission` (Deployment, Service, NetworkPolicy, and RBAC for the admission runtime), then apply `config/orka-admission-webhooks` — which includes `taskprovenance.core.orka.ai` with `failurePolicy: Fail` — only after the readiness, TLS Secret, and CA-injection prerequisites in `config/orka-admission-webhooks/README.md` are met and the trusted identities embedded in `validating_webhook.yaml` match the admission-runtime arguments.
+How admission is deployed depends on the installation method. Helm releases install and enable Task-provenance admission automatically: the chart renders `task-provenance.<mode>.orka.ai` with `failurePolicy: Fail` against the release-local controller webhook Service and runs the controller with `--task-provenance-admission-enabled=true`, trusting the release controller identity. `make deploy` does the same through the `config/controller-webhook` component: the controller serves `taskprovenance.core.orka.ai` with `failurePolicy: Fail`, scoped to `orka-system`, runs with `--task-provenance-admission-enabled=true`, trusts `orka-system/orka-controller-manager`, and issues the webhook certificate itself.
 
-The first `config/acp-production` workload wave leaves ancestry trust disabled. Enable `--task-provenance-admission-external=true` in the controller's post-admission configuration only after the separate webhook is installed and rejects unauthorized Task provenance changes. The flag enables ancestry trust for both internal worker API and brokered MCP coordination policy. Keep it disabled if the webhook wave is omitted, and disable it and complete the controller rollout before removing the webhook.
+Earlier Kustomize installations served admission from a standalone `orka-admission` Deployment and left ancestry trust disabled unless `--task-provenance-admission-external=true` was set. `make deploy` now enables ancestry trust, so complete the Task cleanup below before upgrading such an installation. The deploy removes the standalone runtime once the controller serves the webhooks; the old `orka-admission-tls` Secret is no longer used and can be deleted.
 
 ### Upgrading internal worker authorization
 

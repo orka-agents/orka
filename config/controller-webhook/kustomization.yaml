@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Controller-served, fail-closed admission for the canonical production
+# overlay. The controller's cert-controller rotator fills the empty
+# orka-webhook-tls Secret, renews it before expiry, and injects its CA into the
+# orka-admission ValidatingWebhookConfiguration, so no operator-supplied
+# certificate is required. This mirrors the Helm chart's generated-certificate
+# mode.
+resources:
+  - service.yaml
+  - tls_secret.yaml
+  - rbac.yaml
+  - validating_webhook.yaml
+patches:
+  - path: manager_webhook_patch.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: orka-controller-manager

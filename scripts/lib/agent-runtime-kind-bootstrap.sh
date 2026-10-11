@@ -8,8 +8,6 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 fi
 
 live_acp_kind_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/e2e-admission-tls.sh
-. "${live_acp_kind_lib_dir}/e2e-admission-tls.sh"
 # shellcheck source=scripts/lib/release-qualification-report.sh
 . "${live_acp_kind_lib_dir}/release-qualification-report.sh"
 # shellcheck source=scripts/lib/release-chart-acceptance.sh
@@ -500,9 +498,6 @@ live_acp_kind_deploy_orka() {
     crd/runtimesessioncontrols.core.orka.ai crd/branchclaims.core.orka.ai \
     crd/publications.core.orka.ai crd/controllerepochs.core.orka.ai \
     crd/externaleffects.core.orka.ai --timeout="${LIVE_ACP_ROLLOUT_TIMEOUT}"
-
-  live_acp_kind_log "Bootstrapping test-only admission TLS"
-  orka_e2e_bootstrap_admission_tls
 
   live_acp_kind_log "Deploying digest-pinned Orka ACP workloads"
   live_acp_kind_run make -C "${LIVE_ACP_REPO_ROOT}" deploy \

@@ -23,7 +23,7 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/apply-acp-production.sh"
-      - "scripts/lib/e2e-admission-tls.sh"
+      - "config/controller-webhook/**"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/lib/kind-local-registry.sh"
       - "scripts/lib/agent-runtime-kind-bootstrap.sh"

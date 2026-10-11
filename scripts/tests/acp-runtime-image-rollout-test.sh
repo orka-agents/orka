@@ -13,7 +13,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 renderer="${root}/scripts/render-acp-runtime-images.sh"
 kustomize="${KUSTOMIZE:-${root}/bin/kustomize}"
 
-for command in "${renderer}" "${kustomize}" jq openssl ruby; do
+for command in "${renderer}" "${kustomize}" jq ruby; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "required command not found: ${command}" >&2
     exit 1
@@ -160,19 +160,24 @@ jq -e '
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(. == "--task-provenance-admission-enabled=true" or
-           . == "--workspace-class-use-admission-enabled=true")] | length) == 0 and
+           . == "--workspace-class-use-admission-enabled=true")] | length) == 2 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--webhook-cert-rotation-secret=orka-webhook-tls" or
+           . == "--webhook-cert-rotation-webhook=orka-admission" or
+           . == "--webhook-cert-rotation-dns-name=orka-webhook.orka-system.svc")] | length) == 3 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(startswith("--harness-v1-"))] | length) == 0 and
-  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission" and
-    .metadata.namespace == "orka-system" and .spec.replicas == 2 and
-    .spec.strategy.type == "RollingUpdate" and .spec.strategy.rollingUpdate.maxUnavailable == 0 and
-    (.spec.template.spec.containers | any(.name == "admission" and
-      (.image | test("@sha256:[a-f0-9]{64}$")) and
-      .lifecycle.preStop.exec.command == ["/orka-admission", "--pre-stop-delay=5s"])))] | length) == 1 and
-  ([.[] | select(.kind == "Service" and .metadata.name == "orka-admission")] | length) == 1 and
-  ([.[] | select(.kind == "PodDisruptionBudget" and .metadata.name == "orka-admission" and .spec.minAvailable == 1)] | length) == 1 and
-  ([.[] | select(.kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission")] | length) == 0
+  ([.[] | select(.metadata.name == "orka-admission" and .kind != "ValidatingWebhookConfiguration")] | length) == 0 and
+  ([.[] | select(.kind == "Service" and .metadata.name == "orka-webhook" and .metadata.namespace == "orka-system" and
+    .spec.publishNotReadyAddresses == true)] | length) == 1 and
+  ([.[] | select(.kind == "Secret" and .metadata.name == "orka-webhook-tls" and .metadata.namespace == "orka-system" and
+    .data == null)] | length) == 1 and
+  ([.[] | select(.kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") | .webhooks[] |
+    select(.failurePolicy == "Fail" and .clientConfig.service.name == "orka-webhook" and
+      .clientConfig.caBundle == null and
+      .namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "orka-system")] | length) == 9
 ' "${rendered_inventory}" >/dev/null
 
 canonical_controller_username="$(jq -er '
@@ -188,31 +193,10 @@ canonical_controller_username="$(jq -er '
 ' "${rendered_inventory}")"
 
 jq -e --arg username "${canonical_controller_username}" '
-  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission") |
-    .spec.template.spec.containers[] | select(.name == "admission") | .args[] |
-    select(startswith("--controller-usernames=")) |
-    ltrimstr("--controller-usernames=") | split(",")]) as $controller_users |
-  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission") |
-    .spec.template.spec.containers[] | select(.name == "admission") | .args[] |
-    select(startswith("--task-provenance-trusted-users=")) |
-    ltrimstr("--task-provenance-trusted-users=") | split(",")]) as $provenance_users |
-  ($controller_users | length) == 1 and
-  ($provenance_users | length) == 1 and
-  ($controller_users[0] | index($username) != null) and
-  ($provenance_users[0] | index($username) != null)
+  [.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--task-provenance-admission-trusted-users=" + $username)] | length == 1
 ' "${rendered_inventory}" >/dev/null
-
-shared_webhooks_inventory="${test_root}/shared-webhooks-inventory.json"
-"${kustomize}" build "${test_root}/config/orka-admission-webhooks" \
-  | yaml_to_json \
-  | jq -sc '[.[] | if .kind == "List" then .items[] else . end]' >"${shared_webhooks_inventory}"
-jq -e --arg username "${canonical_controller_username}" '
-  ([.[] | select(.kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") |
-    .webhooks[].matchConditions[]? |
-    select(.name == "route-unless-controller-cleanup-safe") | .expression]) as $conditions |
-  ($conditions | length) == 3 and
-  ([$conditions[] | contains("\u0027" + $username + "\u0027")] | all)
-' "${shared_webhooks_inventory}" >/dev/null
 grep -F 'scripts/render-acp-runtime-images.sh' "${root}/Makefile" >/dev/null
 grep -F 'controller=${IMG}' "${root}/Makefile" >/dev/null
 grep -F 'docker-build-acp-copilot-runtime' "${root}/Makefile" >/dev/null
@@ -250,83 +234,6 @@ if "${renderer}" "${overlay}" "${codex_b}" "${claude_b}" "${copilot_b}" "not-dig
 fi
 
 apply_script="${root}/scripts/apply-acp-production.sh"
-tls_fixture_dir="${test_root}/admission-tls"
-mkdir -p "${tls_fixture_dir}"
-ruby -ropenssl - "${tls_fixture_dir}" <<'RUBY_TLS_FIXTURES'
-directory = ARGV.fetch(0)
-now = Time.now
-
-def issue_ca(common_name, key, not_before, not_after, serial)
-  certificate = OpenSSL::X509::Certificate.new
-  certificate.version = 2
-  certificate.serial = serial
-  certificate.subject = OpenSSL::X509::Name.parse("/CN=#{common_name}")
-  certificate.issuer = certificate.subject
-  certificate.public_key = key.public_key
-  certificate.not_before = not_before
-  certificate.not_after = not_after
-  extensions = OpenSSL::X509::ExtensionFactory.new
-  extensions.subject_certificate = certificate
-  extensions.issuer_certificate = certificate
-  certificate.add_extension(extensions.create_extension("basicConstraints", "CA:TRUE", true))
-  certificate.add_extension(extensions.create_extension("keyUsage", "keyCertSign,cRLSign", true))
-  certificate.add_extension(extensions.create_extension("subjectKeyIdentifier", "hash", false))
-  certificate.add_extension(extensions.create_extension("authorityKeyIdentifier", "keyid:always", false))
-  certificate.sign(key, OpenSSL::Digest::SHA256.new)
-  certificate
-end
-
-def issue_server(ca_certificate, ca_key, server_key, dns_name, not_before, not_after, serial)
-  certificate = OpenSSL::X509::Certificate.new
-  certificate.version = 2
-  certificate.serial = serial
-  certificate.subject = OpenSSL::X509::Name.parse("/CN=#{dns_name}")
-  certificate.issuer = ca_certificate.subject
-  certificate.public_key = server_key.public_key
-  certificate.not_before = not_before
-  certificate.not_after = not_after
-  extensions = OpenSSL::X509::ExtensionFactory.new
-  extensions.subject_certificate = certificate
-  extensions.issuer_certificate = ca_certificate
-  certificate.add_extension(extensions.create_extension("basicConstraints", "CA:FALSE", true))
-  certificate.add_extension(extensions.create_extension("keyUsage", "digitalSignature,keyEncipherment", true))
-  certificate.add_extension(extensions.create_extension("extendedKeyUsage", "serverAuth", false))
-  certificate.add_extension(extensions.create_extension("subjectAltName", "DNS:#{dns_name}", false))
-  certificate.add_extension(extensions.create_extension("subjectKeyIdentifier", "hash", false))
-  certificate.add_extension(extensions.create_extension("authorityKeyIdentifier", "keyid:always", false))
-  certificate.sign(ca_key, OpenSSL::Digest::SHA256.new)
-  certificate
-end
-
-ca_key = OpenSSL::PKey::RSA.new(2048)
-ca_certificate = issue_ca("Orka Admission Test CA", ca_key, now - 3600, now + 86_400, 1)
-other_ca_key = OpenSSL::PKey::RSA.new(2048)
-other_ca_certificate = issue_ca("Untrusted Test CA", other_ca_key, now - 3600, now + 86_400, 2)
-server_key = OpenSSL::PKey::RSA.new(2048)
-mismatched_key = OpenSSL::PKey::RSA.new(2048)
-service_dns = "orka-admission.orka-system.svc"
-
-File.binwrite(File.join(directory, "ca.crt"), ca_certificate.to_pem)
-File.binwrite(File.join(directory, "other-ca.crt"), other_ca_certificate.to_pem)
-File.binwrite(File.join(directory, "tls.key"), server_key.to_pem)
-File.binwrite(File.join(directory, "mismatched.key"), mismatched_key.to_pem)
-File.binwrite(File.join(directory, "tls.crt"), issue_server(
-  ca_certificate, ca_key, server_key, service_dns, now - 3600, now + 86_400, 3
-).to_pem)
-File.binwrite(File.join(directory, "wrong-san.crt"), issue_server(
-  ca_certificate, ca_key, server_key, "not-orka-admission.orka-system.svc", now - 3600, now + 86_400, 4
-).to_pem)
-File.binwrite(File.join(directory, "expired.crt"), issue_server(
-  ca_certificate, ca_key, server_key, service_dns, now - 7200, now - 3600, 5
-).to_pem)
-File.binwrite(File.join(directory, "future.crt"), issue_server(
-  ca_certificate, ca_key, server_key, service_dns, now + 3600, now + 7200, 6
-).to_pem)
-File.binwrite(File.join(directory, "invalid.crt"), "not a certificate\n")
-File.binwrite(File.join(directory, "invalid.key"), "not a private key\n")
-RUBY_TLS_FIXTURES
-export FAKE_TLS_FIXTURE_DIR="${tls_fixture_dir}"
-
 fake_bin="${test_root}/fake-bin"
 mkdir -p "${fake_bin}"
 cat >"${fake_bin}/kubectl" <<'EOF_FAKE_KUBECTL'
@@ -386,24 +293,6 @@ manifest_json() {
     | .[]
   '
 }
-
-if [[ "$1" == "proxy" ]]; then
-  [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'handler smoke ran before ready endpoints' >&2; exit 34; }
-  [[ " $* " == *" --address=127.0.0.1 "* && " $* " == *" --port=0 "* ]] || {
-    echo "invalid admission proxy invocation: $*" >&2
-    exit 2
-  }
-  printf 'proxy-start\n' >>"${FAKE_KUBE_LOG}"
-  stop_proxy() {
-    printf 'proxy-stop\n' >>"${FAKE_KUBE_LOG}"
-    exit 0
-  }
-  trap stop_proxy INT TERM
-  printf 'Starting to serve on 127.0.0.1:43210\n'
-  while true; do
-    sleep 1
-  done
-fi
 
 if [[ "$1" == "get" && "$2" == "namespace" && "$3" == "orka-system" ]]; then
   namespace_mode="${FAKE_EXISTING_NAMESPACE_MODE:-}"
@@ -563,36 +452,6 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "secret"
   exit 0
 fi
 
-if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "secret" && "$5" == "orka-admission-tls" ]]; then
-  tls_mode="${FAKE_TLS_MODE:-valid}"
-  [[ "${tls_mode}" != "missing" ]] || exit 1
-  tls_directory="${FAKE_TLS_FIXTURE_DIR:?}"
-  cert_path="${tls_directory}/tls.crt"
-  key_path="${tls_directory}/tls.key"
-  ca_path="${tls_directory}/ca.crt"
-  case "${tls_mode}" in
-    valid|missing-ca) ;;
-    invalid-cert) cert_path="${tls_directory}/invalid.crt" ;;
-    invalid-key) key_path="${tls_directory}/invalid.key" ;;
-    invalid-ca) ca_path="${tls_directory}/invalid.crt" ;;
-    mismatched-key) key_path="${tls_directory}/mismatched.key" ;;
-    expired) cert_path="${tls_directory}/expired.crt" ;;
-    future) cert_path="${tls_directory}/future.crt" ;;
-    wrong-san) cert_path="${tls_directory}/wrong-san.crt" ;;
-    wrong-ca) ca_path="${tls_directory}/other-ca.crt" ;;
-    *) echo "unknown FAKE_TLS_MODE: ${tls_mode}" >&2; exit 2 ;;
-  esac
-  cert="$(base64 <"${cert_path}" | tr -d '\r\n')"
-  key="$(base64 <"${key_path}" | tr -d '\r\n')"
-  ca="$(base64 <"${ca_path}" | tr -d '\r\n')"
-  if [[ "${tls_mode}" == "missing-ca" ]]; then
-    jq -n --arg cert "${cert}" --arg key "${key}" '{apiVersion:"v1",kind:"Secret",type:"kubernetes.io/tls",metadata:{name:"orka-admission-tls",namespace:"orka-system"},data:{"tls.crt":$cert,"tls.key":$key}}'
-  else
-    jq -n --arg cert "${cert}" --arg key "${key}" --arg ca "${ca}" '{apiVersion:"v1",kind:"Secret",type:"kubernetes.io/tls",metadata:{name:"orka-admission-tls",namespace:"orka-system"},data:{"tls.crt":$cert,"tls.key":$key,"ca.crt":$ca}}'
-  fi
-  exit 0
-fi
-
 if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "create" && "$4" == "secret" && "$5" == "generic" && "$6" == "agent-execution-snapshot-key" ]]; then
   [[ -e "${FAKE_KUBE_STATE}/namespace" ]] || {
     echo 'snapshot Secret created before namespace' >&2
@@ -615,17 +474,6 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "create" && "$4" == "secr
   }
   cp "${key_path}" "${FAKE_KUBE_STATE}/snapshot-key"
   printf 'secret:agent-execution-snapshot-key\n' >>"${FAKE_KUBE_LOG}"
-  exit 0
-fi
-
-if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "rollout" && "$4" == "status" && "$5" == "deployment/orka-admission" ]]; then
-  [[ -e "${FAKE_KUBE_STATE}/admission-runtime" ]] || { echo 'admission rollout waited before runtime apply' >&2; exit 36; }
-  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "rollout" && ! -e "${FAKE_KUBE_STATE}/failed-rollout" ]]; then
-    : >"${FAKE_KUBE_STATE}/failed-rollout"
-    printf 'fail-rollout:orka-admission\n' >>"${FAKE_KUBE_LOG}"
-    exit 37
-  fi
-  printf 'rollout:orka-admission\n' >>"${FAKE_KUBE_LOG}"
   exit 0
 fi
 
@@ -685,16 +533,26 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "endpoin
   fi
 fi
 
-if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "endpoints" && "$5" == "orka-admission" ]]; then
-  [[ -e "${FAKE_KUBE_STATE}/admission-runtime" ]] || exit 1
-  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "endpoints" && ! -e "${FAKE_KUBE_STATE}/failed-endpoints" ]]; then
-    : >"${FAKE_KUBE_STATE}/failed-endpoints"
-    printf 'fail-endpoints:orka-admission\n' >>"${FAKE_KUBE_LOG}"
-    printf '%s\n' '{"apiVersion":"v1","kind":"Endpoints","subsets":[{"addresses":[{"ip":"10.0.0.1"}]}]}'
-    exit 0
+if [[ "$1" == "get" && "$2" == "validatingwebhookconfiguration" && "$3" == "orka-admission" ]]; then
+  [[ -e "${FAKE_KUBE_STATE}/controller-ready" ]] || { echo 'webhook CA inspected before controller readiness' >&2; exit 60; }
+  ca_bundle="Y2EtYnVuZGxl"
+  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "ca-injection" && ! -e "${FAKE_KUBE_STATE}/failed-ca-injection" ]]; then
+    : >"${FAKE_KUBE_STATE}/failed-ca-injection"
+    printf 'fail-ca:orka-admission\n' >>"${FAKE_KUBE_LOG}"
+    ca_bundle=""
+  else
+    : >"${FAKE_KUBE_STATE}/ca-injected"
+    printf 'ca:orka-admission\n' >>"${FAKE_KUBE_LOG}"
   fi
-  : >"${FAKE_KUBE_STATE}/admission-endpoints"
-  printf '%s\n' '{"apiVersion":"v1","kind":"Endpoints","subsets":[{"addresses":[{"ip":"10.0.0.1"},{"ip":"10.0.0.2"}]}]}'
+  jq -n --arg ca "${ca_bundle}" '{apiVersion:"admissionregistration.k8s.io/v1",kind:"ValidatingWebhookConfiguration",
+    metadata:{name:"orka-admission"},webhooks:[range(9) | {name:"hook-\(.)",clientConfig:{caBundle:$ca}}]}'
+  exit 0
+fi
+
+if [[ " $* " == *" delete "* && " $* " == *" orka-admission --ignore-not-found "* ]]; then
+  [[ -e "${FAKE_KUBE_STATE}/ca-injected" ]] || { echo 'legacy admission runtime retired before CA injection' >&2; exit 61; }
+  : >"${FAKE_KUBE_STATE}/legacy-retired"
+  printf 'retire:%s\n' "${*}" >>"${FAKE_KUBE_LOG}"
   exit 0
 fi
 
@@ -702,61 +560,6 @@ fi
   echo "unexpected fake kubectl invocation: $*" >&2
   exit 2
 }
-
-if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") else false end' "$3" >/dev/null; then
-  [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
-  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 9 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
-  jq -e '
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      (.failurePolicy == "Fail" and .sideEffects == "None" and
-       .clientConfig.service.name == "orka-admission" and
-       .clientConfig.service.namespace == "orka-system" and
-       (.clientConfig.caBundle | length > 0))] | all) and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") |
-      .metadata.annotations["cert-manager.io/inject-ca-from-secret"]] | all(. == null))
-    and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "checkpointsourceuse.workspace.orka.ai" and
-             .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
-             .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "taskexecutionauthority.core.orka.ai") | .matchConditions[] |
-      select(.name == "route-unless-controller-cleanup-safe") | .expression |
-      select(contains("orka.ai/cleanup") and
-        contains("oldObject.metadata.?finalizers.orValue([]).filter") and
-        contains("object.spec == oldObject.spec") and
-        contains("object.?status.orValue({}) == oldObject.?status.orValue({})"))] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "namespaceexecutionmode.core.orka.ai")] | length) == 0 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "workspaceattachmentsecret.core.orka.ai" and
-             .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
-             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
-             .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "acpsuspendquotalease.core.orka.ai" and
-             .clientConfig.service.path == "/validate-coordination-k8s-io-v1-acp-suspend-quota-lease" and
-             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":["coordination.k8s.io"],"apiVersions":["v1"],"resources":["leases"],"scope":"Namespaced"}] and
-             .matchConditions == [{"name":"reserved-acp-workspace-lease-name","expression":"request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027) || (request.operation == \u0027CREATE\u0027 && (object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027)))"}])] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "sessionresolution.core.orka.ai" or
-             .name == "agentexecutionadjudication.core.orka.ai" or
-             .name == "agentexecutioncontrolpolicy.core.orka.ai")] | length) == 0
-  ' "$3" >/dev/null || { echo 'admission webhook wave was not static, fail-closed, and CA-pinned' >&2; exit 40; }
-  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "webhooks" && ! -e "${FAKE_KUBE_STATE}/failed-webhooks" ]]; then
-    : >"${FAKE_KUBE_STATE}/failed-webhooks"
-    printf 'fail-webhooks:orka-admission\n' >>"${FAKE_KUBE_LOG}"
-    exit 41
-  fi
-  : >"${FAKE_KUBE_STATE}/admission-webhooks"
-  printf 'webhooks:orka-admission\n' >>"${FAKE_KUBE_LOG}"
-  exit 0
-fi
 
 payload="$(manifest_json "$3")"
 summary="$(printf '%s\n' "${payload}" | jq -sc '
@@ -771,16 +574,16 @@ summary="$(printf '%s\n' "${payload}" | jq -sc '
        .metadata.name == "orka-scm-egress-proxy" or
        .metadata.name == "orka-workspace-publisher")
     ) | .metadata.name) | sort),
-    admissionDeployments: ($items | map(select(.kind == "Deployment" and .metadata.name == "orka-admission")) | length),
-    admissionServices: ($items | map(select(.kind == "Service" and .metadata.name == "orka-admission")) | length)
+    admissionWebhooks: ([$items[] | select(.kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") |
+      .webhooks[] | select(.failurePolicy == "Fail" and .clientConfig.service.name == "orka-webhook" and
+        .clientConfig.caBundle == null)] | length)
   }
 ')"
 namespace_name="$(jq -r .namespace <<<"${summary}")"
 config_name="$(jq -r .runtimeConfig <<<"${summary}")"
 deployment_ref="$(jq -r .deploymentRef <<<"${summary}")"
 dependency_deployments="$(jq -c .dependencyDeployments <<<"${summary}")"
-admission_deployments="$(jq -r .admissionDeployments <<<"${summary}")"
-admission_services="$(jq -r .admissionServices <<<"${summary}")"
+admission_webhooks="$(jq -r .admissionWebhooks <<<"${summary}")"
 if [[ -n "${namespace_name}" && -z "${config_name}" && -z "${deployment_ref}" ]]; then
   if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "namespace" && ! -e "${FAKE_KUBE_STATE}/failed-namespace" ]]; then
     : >"${FAKE_KUBE_STATE}/failed-namespace"
@@ -789,29 +592,6 @@ if [[ -n "${namespace_name}" && -z "${config_name}" && -z "${deployment_ref}" ]]
   fi
   : >"${FAKE_KUBE_STATE}/namespace"
   printf 'namespace:%s\n' "${namespace_name}" >>"${FAKE_KUBE_LOG}"
-  exit 0
-fi
-
-if [[ "${admission_deployments}" != "0" || "${admission_services}" != "0" ]]; then
-  [[ "${admission_deployments}" == "1" && "${admission_services}" == "1" ]] || {
-    echo 'admission runtime wave was incomplete' >&2
-    exit 42
-  }
-  [[ -z "${deployment_ref}" ]] || {
-    echo 'admission runtime wave included the harness-v2 controller' >&2
-    exit 43
-  }
-  [[ -e "${FAKE_KUBE_STATE}/namespace" ]] || {
-    echo 'admission runtime applied before namespace' >&2
-    exit 44
-  }
-  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "admission" && ! -e "${FAKE_KUBE_STATE}/failed-admission" ]]; then
-    : >"${FAKE_KUBE_STATE}/failed-admission"
-    printf 'fail-admission:orka-admission\n' >>"${FAKE_KUBE_LOG}"
-    exit 45
-  fi
-  : >"${FAKE_KUBE_STATE}/admission-runtime"
-  printf 'admission-runtime:orka-admission\n' >>"${FAKE_KUBE_LOG}"
   exit 0
 fi
 
@@ -826,8 +606,8 @@ if [[ "${dependency_deployments}" != "[]" ]]; then
   }
   [[ -e "${FAKE_KUBE_STATE}/namespace" ]] || { echo 'dependency workloads applied before namespace' >&2; exit 55; }
   [[ -s "${FAKE_KUBE_STATE}/snapshot-key" ]] || { echo 'dependency workloads applied before snapshot Secret' >&2; exit 56; }
-  [[ -e "${FAKE_KUBE_STATE}/admission-webhooks" ]] || {
-    echo 'dependency workloads applied before fail-closed admission webhooks' >&2
+  [[ "${admission_webhooks}" == "9" ]] || {
+    echo 'dependency wave must carry the nine fail-closed, controller-served admission webhooks without a pinned CA' >&2
     exit 57
   }
   if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "dependencies" && ! -e "${FAKE_KUBE_STATE}/failed-dependencies" ]]; then
@@ -836,6 +616,7 @@ if [[ "${dependency_deployments}" != "[]" ]]; then
     exit 58
   fi
   : >"${FAKE_KUBE_STATE}/dependency-workload"
+  : >"${FAKE_KUBE_STATE}/admission-webhooks"
   printf 'dependencies:%s\n' "${dependency_deployments}" >>"${FAKE_KUBE_LOG}"
   exit 0
 fi
@@ -870,10 +651,6 @@ fi
   echo 'Deployment applied before snapshot Secret' >&2
   exit 23
 }
-[[ -e "${FAKE_KUBE_STATE}/admission-runtime" ]] || {
-  echo 'harness-v2 controller applied before the admission runtime' >&2
-  exit 46
-}
 [[ -e "${FAKE_KUBE_STATE}/admission-webhooks" ]] || {
   echo 'harness-v2 controller applied before fail-closed admission webhooks' >&2
   exit 47
@@ -889,79 +666,18 @@ printf '%s\n' "${deployment_ref}" >"${FAKE_KUBE_STATE}/deployment-ref"
 printf 'full:%s\n' "${deployment_ref}" >>"${FAKE_KUBE_LOG}"
 EOF_FAKE_KUBECTL
 chmod +x "${fake_bin}/kubectl"
-cat >"${fake_bin}/curl" <<'EOF_FAKE_CURL'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-content_type=""
-request_file=""
-url=""
-while (( $# > 0 )); do
-  case "$1" in
-    --fail|--silent|--show-error)
-      shift
-      ;;
-    --noproxy|--max-time)
-      [[ $# -ge 2 ]] || { echo "missing curl argument for $1" >&2; exit 2; }
-      shift 2
-      ;;
-    --header)
-      [[ $# -ge 2 ]] || { echo 'missing curl header' >&2; exit 2; }
-      content_type="$2"
-      shift 2
-      ;;
-    --data-binary)
-      [[ $# -ge 2 && "$2" == @* ]] || { echo 'invalid curl data argument' >&2; exit 2; }
-      request_file="${2#@}"
-      shift 2
-      ;;
-    http://*)
-      url="$1"
-      shift
-      ;;
-    *)
-      echo "unexpected fake curl argument: $1" >&2
-      exit 2
-      ;;
-  esac
-done
-
-[[ "${content_type}" == "Content-Type: application/json" ]] || {
-  echo 'admission smoke did not send application/json' >&2
-  exit 43
-}
-[[ -f "${request_file}" ]] || { echo 'admission smoke request file missing' >&2; exit 2; }
-if [[ ! "${url}" =~ ^http://127\.0\.0\.1:[0-9]+/api/v1/namespaces/orka-system/services/https:orka-admission:443/proxy(/.*)$ ]]; then
-  echo "invalid admission smoke URL: ${url}" >&2
-  exit 2
-fi
-handler="${BASH_REMATCH[1]}"
-[[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'handler smoke ran before ready endpoints' >&2; exit 34; }
-if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "smoke" && ! -e "${FAKE_KUBE_STATE}/failed-smoke" ]]; then
-  : >"${FAKE_KUBE_STATE}/failed-smoke"
-  printf 'fail-smoke:%s\n' "${handler}" >>"${FAKE_KUBE_LOG}"
-  exit 35
-fi
-uid="$(jq -r '.request.uid' "${request_file}")"
-jq -n --arg uid "${uid}" '{apiVersion:"admission.k8s.io/v1",kind:"AdmissionReview",response:{uid:$uid,allowed:false,status:{message:"smoke reached handler"}}}'
-printf 'smoke:%s\n' "${handler}" >>"${FAKE_KUBE_LOG}"
-EOF_FAKE_CURL
-chmod +x "${fake_bin}/curl"
 export PATH="${fake_bin}:${PATH}"
 
 assert_converged() {
   local state_dir="$1"
-  local admission_line admission_rollout_line smoke_line webhooks_line dependency_line
-  local dependency_first_rollout_line dependency_last_rollout_line
+  local dependency_line dependency_first_rollout_line dependency_last_rollout_line
   local dependency_first_endpoint_line dependency_last_endpoint_line
-  local controller_line controller_rollout_line reference dependency
+  local controller_line controller_rollout_line ca_line retire_line reference dependency
   local converged_start converged_log
   reference="$(cat "${state_dir}/deployment-ref")"
   [[ -e "${state_dir}/namespace" ]]
   [[ -e "${state_dir}/configmaps/${reference}" ]]
   [[ -s "${state_dir}/snapshot-key" ]]
-  [[ -e "${state_dir}/admission-runtime" ]]
-  [[ -e "${state_dir}/admission-endpoints" ]]
   [[ -e "${state_dir}/admission-webhooks" ]]
   [[ -e "${state_dir}/dependency-workload" ]]
   for dependency in orka-provider-auth-proxy orka-scm-egress-proxy orka-workspace-publisher; do
@@ -970,12 +686,9 @@ assert_converged() {
   done
   [[ -e "${state_dir}/controller-workload" ]]
   [[ -e "${state_dir}/controller-ready" ]]
-  [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
-  [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
+  [[ -e "${state_dir}/ca-injected" ]]
+  [[ -e "${state_dir}/legacy-retired" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
-  grep -Fxq 'smoke:/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use' "${state_dir}/apply.log"
-  [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   # Recovery scenarios run the apply script twice into one shared log, so
   # phase ordering is asserted on the final converged invocation, which always
   # starts at its namespace claim. The aborted invocation's partial ordering is
@@ -984,10 +697,6 @@ assert_converged() {
   [[ -n "${converged_start}" ]]
   converged_log="${state_dir}/apply-converged.log"
   tail -n "+${converged_start}" "${state_dir}/apply.log" >"${converged_log}"
-  admission_line="$(grep -n '^admission-runtime:orka-admission$' "${converged_log}" | head -1 | cut -d: -f1)"
-  admission_rollout_line="$(grep -n '^rollout:orka-admission$' "${converged_log}" | head -1 | cut -d: -f1)"
-  smoke_line="$(grep -n '^smoke:' "${converged_log}" | head -1 | cut -d: -f1)"
-  webhooks_line="$(grep -n '^webhooks:orka-admission$' "${converged_log}" | head -1 | cut -d: -f1)"
   dependency_line="$(grep -n '^dependencies:' "${converged_log}" | head -1 | cut -d: -f1)"
   dependency_first_rollout_line="$(grep -nE '^rollout:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${converged_log}" | head -1 | cut -d: -f1)"
   dependency_last_rollout_line="$(grep -nE '^rollout:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${converged_log}" | tail -1 | cut -d: -f1)"
@@ -995,14 +704,14 @@ assert_converged() {
   dependency_last_endpoint_line="$(grep -nE '^endpoint:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${converged_log}" | tail -1 | cut -d: -f1)"
   controller_line="$(grep -n '^full:' "${converged_log}" | head -1 | cut -d: -f1)"
   controller_rollout_line="$(grep -n '^rollout:orka-controller-manager$' "${converged_log}" | head -1 | cut -d: -f1)"
-  (( admission_line < admission_rollout_line ))
-  (( admission_rollout_line < smoke_line ))
-  (( smoke_line < webhooks_line ))
-  (( webhooks_line < dependency_line ))
+  ca_line="$(grep -n '^ca:orka-admission$' "${converged_log}" | head -1 | cut -d: -f1)"
+  retire_line="$(grep -n '^retire:' "${converged_log}" | head -1 | cut -d: -f1)"
   (( dependency_line < dependency_first_rollout_line ))
   (( dependency_last_rollout_line < dependency_first_endpoint_line ))
   (( dependency_last_endpoint_line < controller_line ))
   (( controller_line < controller_rollout_line ))
+  (( controller_rollout_line < ca_line ))
+  (( ca_line < retire_line ))
 }
 
 run_apply_scenario() {
@@ -1027,16 +736,12 @@ run_apply_scenario() {
 run_apply_scenario ""
 run_apply_scenario namespace
 run_apply_scenario config
-run_apply_scenario admission
 run_apply_scenario dependencies
 run_apply_scenario dependency-rollout
 run_apply_scenario dependency-endpoints
 run_apply_scenario full
-run_apply_scenario rollout
 run_apply_scenario controller-rollout
-run_apply_scenario endpoints
-run_apply_scenario smoke
-run_apply_scenario webhooks
+run_apply_scenario ca-injection
 
 expected_existing_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 existing_state="${test_root}/state-existing-key"
@@ -1121,22 +826,6 @@ FAKE_KUBE_STATE="${raw_whitespace_key_state}" FAKE_KUBE_LOG="${raw_whitespace_ke
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 cmp -s "${raw_whitespace_key_state}/snapshot-key.before" "${raw_whitespace_key_state}/snapshot-key"
 
-for tls_mode in missing missing-ca invalid-cert invalid-key invalid-ca mismatched-key expired future wrong-san wrong-ca; do
-  tls_state="${test_root}/state-tls-${tls_mode}"
-  mkdir -p "${tls_state}"
-  : >"${tls_state}/apply.log"
-  if tls_output="$(FAKE_KUBE_STATE="${tls_state}" FAKE_KUBE_LOG="${tls_state}/apply.log" FAKE_KUBE_FAIL_MODE="" FAKE_TLS_MODE="${tls_mode}" \
-    "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1)"; then
-    echo "${tls_mode} admission TLS Secret unexpectedly passed deployment preflight" >&2
-    exit 1
-  fi
-  grep -F 'orka-admission-tls' <<<"${tls_output}" >/dev/null
-  if grep -Eq '^(config|admission-runtime|dependencies|full|smoke|webhooks):' "${tls_state}/apply.log"; then
-    echo 'workloads or admission webhooks were applied after TLS validation failed' >&2
-    exit 1
-  fi
-done
-
 malformed_sentinel='malformed-snapshot-key-SENTINEL'
 malformed_state="${test_root}/state-malformed-key"
 mkdir -p "${malformed_state}"
@@ -1152,7 +841,7 @@ if grep -F "${malformed_sentinel}" <<<"${malformed_output}" >/dev/null; then
   echo 'snapshot key material leaked in deployment output' >&2
   exit 1
 fi
-if grep -Eq '^(config|admission-runtime|dependencies|full):' "${malformed_state}/apply.log"; then
+if grep -Eq '^(config|dependencies|full):' "${malformed_state}/apply.log"; then
   echo 'workload prerequisites were applied after snapshot-key validation failed' >&2
   exit 1
 fi
@@ -1181,4 +870,4 @@ done
 
 grep -F 'scripts/apply-acp-production.sh' "${root}/Makefile" >/dev/null
 
-printf '%s\n' 'ok - ACP deployment activates admission, waits for publisher/proxy readiness, and only then rolls one static harness-v2 controller'
+printf '%s\n' 'ok - ACP deployment applies controller-served admission with its prerequisites, waits for publisher/proxy readiness, rolls one static harness-v2 controller, and confirms its CA injection'

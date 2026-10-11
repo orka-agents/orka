@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: orka-webhook
+  namespace: orka-system
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  # Task status admission must remain available while controller readiness is
+  # false during the preStop drain.
+  publishNotReadyAddresses: true
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: orka
+    control-plane: controller-manager

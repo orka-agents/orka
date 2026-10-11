@@ -1,0 +1,45 @@
+# Serve the fail-closed admission webhooks from the controller and let it
+# manage their certificate, matching the Helm chart's generated-certificate
+# mode.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-path=/var/run/orka/webhook/tls
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-rotation-secret=orka-webhook-tls
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-rotation-webhook=orka-admission
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-rotation-dns-name=orka-webhook.orka-system.svc
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --task-provenance-admission-enabled=true
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --task-provenance-admission-trusted-users=system:serviceaccount:orka-system:orka-controller-manager
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --workspace-class-use-admission-enabled=true
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    name: webhook
+    containerPort: 9443
+    protocol: TCP
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: webhook-tls
+    mountPath: /var/run/orka/webhook/tls
+    readOnly: true
+# The controller writes the generated certificate into this Secret and the
+# kubelet projects it here; the rotator waits for the files.
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: webhook-tls
+    secret:
+      secretName: orka-webhook-tls
+      defaultMode: 0400
