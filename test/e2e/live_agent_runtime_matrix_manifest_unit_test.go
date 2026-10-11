@@ -10,6 +10,8 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -90,4 +92,39 @@ func manifestNestedMap(t *testing.T, manifest map[string]any, keys ...string) ma
 		current = next
 	}
 	return current
+}
+
+func TestLiveCodexReadPrompt(t *testing.T) {
+	t.Run("cloud prompt is unchanged", func(t *testing.T) {
+		t.Setenv("E2E_LOCAL_MODEL", "")
+		want := "Use a tool to read README in the repository root. " +
+			"Wait for the read to succeed, then reply with the exact file contents and nothing else."
+		if got := liveCodexReadPrompt(); got != want {
+			t.Fatalf("cloud prompt = %q, want %q", got, want)
+		}
+	})
+	t.Run("local prompt requires the real read, not a canned answer", func(t *testing.T) {
+		t.Setenv("E2E_LOCAL_MODEL", "qwen-3.5-2b")
+		prompt := liveCodexReadPrompt()
+		for _, required := range []string{"README, NOT README.md", "Use exec_command", "Wait for the command to succeed", "only its stdout text"} {
+			if !strings.Contains(prompt, required) {
+				t.Fatalf("local prompt omits %q", required)
+			}
+		}
+		if strings.Contains(prompt, liveRuntimeRepoSentinel) {
+			t.Fatal("local prompt must not contain the expected file contents")
+		}
+		var arguments map[string]any
+		start, end := strings.Index(prompt, "{"), strings.Index(prompt, "}")
+		if start < 0 || end < start {
+			t.Fatal("local prompt lacks tool arguments")
+		}
+		if err := json.Unmarshal([]byte(prompt[start:end+1]), &arguments); err != nil {
+			t.Fatal(err)
+		}
+		if len(arguments) != 3 || arguments["cmd"] != "cat README" ||
+			arguments["yield_time_ms"] != float64(1000) || arguments["max_output_tokens"] != float64(2048) {
+			t.Fatalf("local read arguments = %#v", arguments)
+		}
+	})
 }

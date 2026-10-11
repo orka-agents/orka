@@ -39,7 +39,7 @@ func TestLiveCopilotProxyClaudeModelPreferences(t *testing.T) {
 }
 
 func TestFirstUsableProxyAnthropicMessagesModel(t *testing.T) {
-	t.Parallel()
+	t.Setenv("E2E_LOCAL_MODEL", "")
 
 	var requestedModels []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -99,7 +99,7 @@ func TestFirstUsableProxyAnthropicMessagesModel(t *testing.T) {
 }
 
 func TestFirstUsableProxyAnthropicMessagesModelReportsRejectedCandidates(t *testing.T) {
-	t.Parallel()
+	t.Setenv("E2E_LOCAL_MODEL", "")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "model retired", http.StatusBadRequest)

@@ -1,0 +1,30 @@
+- name: qwen-3.5-4b
+  backend: llama-cpp
+  parameters:
+    model: Qwen3.5-4B-Q4_K_M.gguf
+    temperature: 0.7
+    top_p: 0.8
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repeat_penalty: 1.0
+  f16: true
+  mmap: true
+  reasoning_effort: none
+  reasoning:
+    disable: true
+  chat_template_kwargs:
+    enable_thinking: false
+  template:
+    use_tokenizer_template: true
+    system_messages_after_first: merge
+  options:
+    # Bound cached recurrent states within the 8-GiB model limit.
+    - "n_ctx_checkpoints:16"
+    - "checkpoint_min_step:1024"
+    - "cache_ram:3072"
+    - "use_jinja:true"
+    - "--chat-template-file:/etc/orka-aikit/chat-template.jinja"
+  function:
+    grammar:
+      disable: true

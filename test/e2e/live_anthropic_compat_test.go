@@ -42,9 +42,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		if strings.TrimSpace(e2eLiveCopilotProxyBaseURL) == "" {
-			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set")
-		}
+		requireLiveCopilotProxyConfigured()
 
 		var err error
 
@@ -70,7 +68,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(ready.Status).To(Equal("ready"))
 		Expect(ready.Error).To(BeEmpty())
 
-		By("discovering a live Claude-family model from the proxy catalog")
+		By("discovering a live model for the Anthropic compatibility API from the proxy catalog")
 		liveClaudeModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
@@ -78,7 +76,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 			liveCopilotProxyClaudeModelPreferences,
 			liveCopilotProxyClaudeModelPrefixes...,
 		)
-		Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose an allowed Claude-family model")
+		Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose the selected compatibility model")
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveAnthropicSecretName, namespace, map[string]string{

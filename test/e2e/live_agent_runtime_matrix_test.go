@@ -45,8 +45,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		cancelControllerPF      context.CancelFunc
 		controllerPFCmd         *exec.Cmd
 		token                   string
-		gptModel                string
-		gptModelSkipReason      string
+		codexModel              string
+		codexModelSkipReason    string
 		opencodeModel           string
 		opencodeModelSkipReason string
 		claudeModel             string
@@ -54,9 +54,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		if strings.TrimSpace(e2eLiveCopilotProxyBaseURL) == "" {
-			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set")
-		}
+		requireLiveCopilotProxyConfigured()
 
 		var err error
 
@@ -78,58 +76,19 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(ready.Status).To(Equal("ready"))
 		Expect(ready.Error).To(BeEmpty())
 
-		By("discovering live runtime models by family")
+		By("discovering live runtime models from the catalog")
 		runtimeCatalog, err := fetchProxyModelCatalogViaServiceProxy(
 			liveACPProviderProxyServiceNamespace(),
 			liveACPProviderProxyServiceName(),
 			liveACPProviderProxyServicePort(),
 		)
 		Expect(err).NotTo(HaveOccurred())
-		gptModel = strings.TrimSpace(os.Getenv("E2E_LIVE_CODEX_RUNTIME_MODEL"))
-		if gptModel != "" {
-			if !runtimeCatalog.modelSupportsEndpoint(gptModel, "/responses") {
-				gptModelSkipReason = "configured E2E_LIVE_CODEX_RUNTIME_MODEL does not advertise /responses support"
-				gptModel = ""
-			}
-		} else {
-			gptModel = firstPreferredProxyCodexModelSupportingEndpoint(
-				runtimeCatalog,
-				"/responses",
-				liveCopilotProxyCodexModelPreferences,
-				liveCopilotProxyCodexModelPrefixes...,
-			)
-			if gptModel == "" {
-				gptModelSkipReason = "no Codex-family GPT model with /responses support exposed"
-			}
-		}
-		opencodeModel = strings.TrimSpace(os.Getenv("E2E_LIVE_OPENCODE_RUNTIME_MODEL"))
-		if opencodeModel != "" {
-			if !openCodeModelSupportsEndpoint(runtimeCatalog, opencodeModel, "/chat/completions") {
-				opencodeModelSkipReason = "configured E2E_LIVE_OPENCODE_RUNTIME_MODEL does not advertise /chat/completions support"
-				opencodeModel = ""
-			}
-		} else {
-			opencodeModel = firstPreferredProxyModelSupportingEndpoint(
-				runtimeCatalog,
-				"/chat/completions",
-				liveCopilotProxyChatGPTModelPreferences,
-				liveCopilotProxyGPTModelPrefixes...,
-			)
-			if opencodeModel == "" {
-				opencodeModelSkipReason = "no GPT-family model with /chat/completions support exposed"
-			}
-		}
-
-		if opencodeModel != "" && !strings.Contains(opencodeModel, "/") {
-			opencodeModel = "openai/" + opencodeModel
-		}
-
-		claudeModel = firstPreferredProxyModel(
-			runtimeCatalog,
-			liveCopilotProxyClaudeModelPreferences,
-			liveCopilotProxyClaudeModelPrefixes...,
-		)
-		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a Claude-family model")
+		models, err := selectLiveRuntimeModels(runtimeCatalog)
+		Expect(err).NotTo(HaveOccurred())
+		codexModel, codexModelSkipReason = models.codex, models.codexSkipReason
+		opencodeModel, opencodeModelSkipReason = models.opencode, models.opencodeSkipReason
+		claudeModel = models.claude
+		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a model for Claude")
 
 		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
 	})
@@ -148,24 +107,24 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	})
 
 	It("should run Codex through Orka harness v2 against a pinned read workspace", func() {
-		if gptModel == "" {
-			Skip("Skipping Codex runtime live proxy check: " + gptModelSkipReason)
+		if codexModel == "" && localE2EModel() == "" {
+			Skip("Skipping Codex runtime live proxy check: " + codexModelSkipReason)
 		}
 
 		DeferCleanup(func() {
 			cleanupLiveRuntimeTask(apiBaseURL, token, codexTaskReadName, codexAgentName)
 		})
 
-		By("creating a Codex agent backed by the discovered GPT-family model")
-		err := applyManifestJSON(runtimeAgentManifest(codexAgentName, "codex", gptModel, 5, nil))
+		Expect(codexModel).NotTo(BeEmpty())
+		By("creating a Codex agent backed by the selected model")
+		err := applyManifestJSON(runtimeAgentManifest(codexAgentName, "codex", codexModel, 5, nil))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a Codex task against a pinned public repo/ref")
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			"Use a tool to read README in the repository root. "+
-				"Wait for the read to succeed, then reply with the exact file contents and nothing else.",
+			liveCodexReadPrompt(),
 			4,
 			nil,
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -180,7 +139,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		// mutation tools, then asserts the derived deny policy and ReadValidated.
 		verifyACPTaskRuntimeForTask(codexTaskReadName, acpTaskExpectation{
 			ProviderKind:    "codex",
-			Model:           gptModel,
+			Model:           codexModel,
 			WorkspaceIntent: "read",
 			MaxTurns:        acpInt32(4),
 			Workspace: &acpWorkspaceExpectation{
@@ -197,7 +156,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	})
 
 	It("should run OpenCode through Orka harness v2 and enforce read intent", func() {
-		if opencodeModel == "" {
+		if opencodeModel == "" && localE2EModel() == "" {
 			Skip("Skipping OpenCode runtime live proxy check: " + opencodeModelSkipReason)
 		}
 
@@ -205,6 +164,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			cleanupLiveRuntimeTask(apiBaseURL, token, opencodeTaskReadName, opencodeAgentName)
 		})
 
+		Expect(opencodeModel).NotTo(BeEmpty())
 		By("creating an OpenCode agent with native mutation and shell tools requested")
 		err := applyManifestJSON(runtimeAgentManifest(opencodeAgentName, "opencode", opencodeModel, 5, new(true)))
 		Expect(err).NotTo(HaveOccurred())
@@ -258,7 +218,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			cleanupLiveRuntimeTask(apiBaseURL, token, claudeTaskName, claudeAgentName)
 		})
 
-		By("creating a Claude agent backed by the discovered Claude-family model")
+		By("creating a Claude agent backed by the selected model")
 		err := applyManifestJSON(runtimeAgentManifest(claudeAgentName, "claude", claudeModel, 5, new(false)))
 		Expect(err).NotTo(HaveOccurred())
 
@@ -297,6 +257,94 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	})
 })
 
+type liveRuntimeModels struct {
+	codex              string
+	codexSkipReason    string
+	opencode           string
+	opencodeSkipReason string
+	claude             string
+}
+
+func selectLiveRuntimeModels(catalog proxyModelCatalog) (liveRuntimeModels, error) {
+	var models liveRuntimeModels
+	if localModel := localE2EModel(); localModel != "" {
+		if _, err := exactProxyModel(catalog, localModel); err != nil {
+			return models, err
+		}
+		for _, selection := range []struct {
+			envVar string
+			model  *string
+		}{
+			{"E2E_LIVE_CODEX_RUNTIME_MODEL", &models.codex},
+			{"E2E_LIVE_OPENCODE_RUNTIME_MODEL", &models.opencode},
+			{"E2E_LIVE_CLAUDE_RUNTIME_MODEL", &models.claude},
+		} {
+			modelID := strings.TrimSpace(os.Getenv(selection.envVar))
+			if modelID == "" {
+				modelID = localModel
+			} else if selection.envVar == "E2E_LIVE_OPENCODE_RUNTIME_MODEL" {
+				// OpenCode accepts a provider-qualified override, but the catalog
+				// lists the actual model ID without the OpenCode provider prefix.
+				if _, err := exactProxyModel(catalog, modelID); err != nil {
+					modelID = strings.TrimPrefix(modelID, "openai/")
+				}
+			}
+			selected, err := exactProxyModel(catalog, modelID)
+			if err != nil {
+				return liveRuntimeModels{}, fmt.Errorf("%s: %w", selection.envVar, err)
+			}
+			*selection.model = selected
+		}
+		models.opencode = "openai/" + models.opencode
+		return models, nil
+	}
+
+	// Cloud selection keeps the existing family and endpoint requirements.
+	models.codex = strings.TrimSpace(os.Getenv("E2E_LIVE_CODEX_RUNTIME_MODEL"))
+	if models.codex != "" {
+		if !catalog.modelSupportsEndpoint(models.codex, "/responses") {
+			models.codexSkipReason = "configured E2E_LIVE_CODEX_RUNTIME_MODEL does not advertise /responses support"
+			models.codex = ""
+		}
+	} else {
+		models.codex = firstPreferredProxyCodexModelSupportingEndpoint(
+			catalog,
+			"/responses",
+			liveCopilotProxyCodexModelPreferences,
+			liveCopilotProxyCodexModelPrefixes...,
+		)
+		if models.codex == "" {
+			models.codexSkipReason = "no Codex-family GPT model with /responses support exposed"
+		}
+	}
+	models.opencode = strings.TrimSpace(os.Getenv("E2E_LIVE_OPENCODE_RUNTIME_MODEL"))
+	if models.opencode != "" {
+		if !openCodeModelSupportsEndpoint(catalog, models.opencode, "/chat/completions") {
+			models.opencodeSkipReason = "configured E2E_LIVE_OPENCODE_RUNTIME_MODEL does not advertise /chat/completions support"
+			models.opencode = ""
+		}
+	} else {
+		models.opencode = firstPreferredProxyModelSupportingEndpoint(
+			catalog,
+			"/chat/completions",
+			liveCopilotProxyChatGPTModelPreferences,
+			liveCopilotProxyGPTModelPrefixes...,
+		)
+		if models.opencode == "" {
+			models.opencodeSkipReason = "no GPT-family model with /chat/completions support exposed"
+		}
+	}
+	if models.opencode != "" && !strings.Contains(models.opencode, "/") {
+		models.opencode = "openai/" + models.opencode
+	}
+	models.claude = firstPreferredProxyModel(
+		catalog,
+		liveCopilotProxyClaudeModelPreferences,
+		liveCopilotProxyClaudeModelPrefixes...,
+	)
+	return models, nil
+}
+
 func cleanupLiveRuntimeTask(apiBaseURL, token, taskName, agentName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -321,6 +369,16 @@ func openCodeModelSupportsEndpoint(catalog proxyModelCatalog, model, endpoint st
 type runtimeWorkspaceConfig struct {
 	GitRepo string
 	Ref     string
+}
+
+func liveCodexReadPrompt() string {
+	if localE2EModel() != "" {
+		// Small local models need an unambiguous filename and tool shape. This
+		// still requires a real read; the result and frozen turn budget are unchanged.
+		return `Read the file named README, NOT README.md. Use exec_command with exactly these arguments: {"cmd":"cat README","yield_time_ms":1000,"max_output_tokens":2048}. Do not add other argument keys. Wait for the command to succeed, then return only its stdout text, with no prose, quotes or Markdown fences.`
+	}
+	return "Use a tool to read README in the repository root. " +
+		"Wait for the read to succeed, then reply with the exact file contents and nothing else."
 }
 
 func runtimeAgentManifest(name, runtimeType, modelName string, defaultMaxTurns int, defaultAllowBash *bool) map[string]any {

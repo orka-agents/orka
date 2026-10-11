@@ -43,9 +43,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		if e2eLiveCopilotProxyBaseURL == "" {
-			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set")
-		}
+		requireLiveCopilotProxyConfigured()
 
 		By("setting up port-forward to controller API")
 		var err error
@@ -97,7 +95,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
 
-		By("discovering a GPT-family model that works through the OpenAI provider path")
+		By("discovering a model that works through the OpenAI provider path")
 		discoveredModel, err = firstUsableProxyOpenAIModel(
 			proxyBaseURL,
 			catalog,
@@ -105,7 +103,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			liveCopilotProxyGPTModelPrefixes...,
 		)
 		Expect(err).NotTo(HaveOccurred())
-		if discoveredModel == "" {
+		if discoveredModel == "" && localE2EModel() == "" {
 			Skip("Skipping live Copilot proxy OpenAI provider checks: no usable GPT OpenAI model exposed")
 		}
 		Expect(discoveredModel).To(BeElementOf(catalog.AllModelIDs))
@@ -126,9 +124,10 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			)
 			Expect(err).NotTo(HaveOccurred())
 		}
-		if model == "" {
+		if model == "" && localE2EModel() == "" {
 			Skip("Skipping live Copilot proxy OpenAI provider check: no usable GPT OpenAI model exposed")
 		}
+		Expect(model).NotTo(BeEmpty())
 
 		By("creating a dummy secret for provider validation")
 		DeferCleanup(func() {
@@ -195,7 +194,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 
 		By("waiting for the AI task to complete")
 		phase := waitForTaskCompletion(liveProxyTaskName, 5*time.Minute)
-		if phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyTaskName) {
+		if localE2EModel() == "" && phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyTaskName) {
 			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + model)
 		}
 		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy AI task should succeed")
@@ -240,9 +239,10 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			"claude-",
 		)
 		Expect(err).NotTo(HaveOccurred())
-		if model == "" {
+		if model == "" && localE2EModel() == "" {
 			Skip("Skipping: " + skipReason)
 		}
+		Expect(model).NotTo(BeEmpty())
 
 		By("creating a dummy secret for provider validation")
 		DeferCleanup(func() {
@@ -386,7 +386,7 @@ After the tools have been called, reply with exactly %[3]s and nothing else.`, p
 
 		By("waiting for the coordination AI task to complete")
 		phase := waitForTaskCompletion(liveProxyCoordTask, 8*time.Minute)
-		if phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyCoordTask) {
+		if localE2EModel() == "" && phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyCoordTask) {
 			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + model)
 		}
 		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy coordination AI task should succeed")

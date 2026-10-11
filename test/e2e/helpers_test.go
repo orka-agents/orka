@@ -531,7 +531,46 @@ func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model
 	}, 30*time.Second, time.Second).Should(Succeed())
 }
 
-// discoverProxyModel queries an OpenAI-compatible /v1/models endpoint and returns the first model ID.
+func localE2EModel() string {
+	return strings.TrimSpace(os.Getenv("E2E_LOCAL_MODEL"))
+}
+
+func requireLiveCopilotProxyConfigured() {
+	if strings.TrimSpace(e2eLiveCopilotProxyBaseURL) != "" {
+		return
+	}
+	if localE2EModel() != "" {
+		Fail("E2E_LIVE_COPILOT_PROXY_BASE_URL must be set when E2E_LOCAL_MODEL is set")
+	}
+	Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set")
+}
+
+// exactProxyModel never substitutes another catalog model for a configured ID.
+func exactProxyModel(catalog proxyModelCatalog, modelID string) (string, error) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return "", fmt.Errorf("configured proxy model ID is empty")
+	}
+	for _, advertisedID := range catalog.AllModelIDs {
+		if strings.TrimSpace(advertisedID) == modelID {
+			return modelID, nil
+		}
+	}
+	return "", fmt.Errorf("configured proxy model %q is missing from the model catalog", modelID)
+}
+
+func liveProxyModelCandidates(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) ([]string, error) {
+	if modelID := localE2EModel(); modelID != "" {
+		modelID, err := exactProxyModel(catalog, modelID)
+		if err != nil {
+			return nil, err
+		}
+		return []string{modelID}, nil
+	}
+	return preferredProxyModelCandidates(catalog, preferredIDs, prefixes...), nil
+}
+
+// discoverProxyModel queries /v1/models and returns the exact local model or first cloud model.
 func discoverProxyModel(baseURL string) string {
 	var modelID string
 	Eventually(func(g Gomega) {
@@ -571,6 +610,9 @@ func fetchProxyModel(baseURL string) (string, error) {
 		return "", err
 	}
 
+	if modelID := localE2EModel(); modelID != "" {
+		return exactProxyModel(allModelsFromPayload(payload), modelID)
+	}
 	if model := firstModelFromPayload(payload); model != "" {
 		return model, nil
 	}
@@ -726,8 +768,26 @@ func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *
 	return startHTTPPortForwardAndWait(namespace, controllerAPIService, localPort, 8080, "/healthz")
 }
 
+func proxyReadinessPath() string {
+	if localE2EModel() != "" {
+		return "/healthz"
+	}
+	return "/readyz"
+}
+
+func normalizeProxyReadyBody(body string) (proxyReadyResponse, error) {
+	if localE2EModel() != "" {
+		// LocalAI health endpoints report readiness with HTTP success, not
+		// Vekil's JSON status. The caller must check the transport error first.
+		return proxyReadyResponse{Status: "ready"}, nil
+	}
+	var ready proxyReadyResponse
+	err := json.Unmarshal([]byte(body), &ready)
+	return ready, err
+}
+
 func startServicePortForward(serviceNamespace, serviceName string, localPort, remotePort int) (string, context.CancelFunc, *exec.Cmd, error) {
-	return startHTTPPortForwardAndWait(serviceNamespace, serviceName, localPort, remotePort, "/readyz")
+	return startHTTPPortForwardAndWait(serviceNamespace, serviceName, localPort, remotePort, proxyReadinessPath())
 }
 
 func startHTTPPortForwardAndWait(serviceNamespace, serviceName string, localPort, remotePort int, readyPath string) (string, context.CancelFunc, *exec.Cmd, error) {
@@ -853,9 +913,10 @@ func fetchServiceProxyBody(serviceNamespace, serviceName string, servicePort int
 func waitForProxyReadyViaServiceProxy(serviceNamespace, serviceName string, servicePort int) proxyReadyResponse {
 	var ready proxyReadyResponse
 	Eventually(func(g Gomega) {
-		body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/readyz")
+		body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, proxyReadinessPath())
 		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(json.Unmarshal([]byte(body), &ready)).To(Succeed())
+		ready, err = normalizeProxyReadyBody(body)
+		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(ready.Status).To(Equal("ready"))
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	return ready
@@ -868,6 +929,10 @@ func discoverProxyModelViaServiceProxy(serviceNamespace, serviceName string, ser
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(catalog.FirstModelID).NotTo(BeEmpty(), "proxy service should return at least one model")
 		modelID = catalog.FirstModelID
+		if localE2EModel() != "" {
+			modelID, err = exactProxyModel(catalog, localE2EModel())
+			g.Expect(err).NotTo(HaveOccurred())
+		}
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	return modelID
 }
@@ -901,7 +966,11 @@ func discoverProxyModelByFamilyViaServiceProxy(serviceNamespace, serviceName str
 	Eventually(func(g Gomega) {
 		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
 		g.Expect(err).NotTo(HaveOccurred())
-		modelID = firstProxyModelMatchingPrefixes(catalog, prefixes...)
+		candidates, err := liveProxyModelCandidates(catalog, nil, prefixes...)
+		g.Expect(err).NotTo(HaveOccurred())
+		if len(candidates) > 0 {
+			modelID = candidates[0]
+		}
 		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a model matching %v", prefixes)
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	return modelID
@@ -912,7 +981,11 @@ func discoverPreferredProxyModelViaServiceProxy(serviceNamespace, serviceName st
 	Eventually(func(g Gomega) {
 		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
 		g.Expect(err).NotTo(HaveOccurred())
-		modelID = firstPreferredProxyModel(catalog, preferredIDs, prefixes...)
+		candidates, err := liveProxyModelCandidates(catalog, preferredIDs, prefixes...)
+		g.Expect(err).NotTo(HaveOccurred())
+		if len(candidates) > 0 {
+			modelID = candidates[0]
+		}
 		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a model from %v or matching %v", preferredIDs, prefixes)
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	return modelID
@@ -935,14 +1008,17 @@ func discoverUsableProxyOpenAIModelViaServiceProxy(serviceNamespace, serviceName
 			return
 		}
 		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a usable GPT-family OpenAI model")
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a usable OpenAI model")
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 	return modelID, nil
 }
 
 func firstUsableProxyAnthropicMessagesModel(proxyBaseURL string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, error) {
-	candidates := orderedProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	candidates, err := liveProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	if err != nil {
+		return "", err
+	}
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("proxy catalog has no Anthropic Messages model from %v or matching %v", preferredIDs, prefixes)
 	}
@@ -1012,7 +1088,10 @@ func probeProxyAnthropicMessagesModel(proxyBaseURL, modelID string) (int, string
 }
 
 func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL, proxyAuthToken string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, string, error) {
-	candidates := orderedProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	candidates, err := liveProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	if err != nil {
+		return "", "", err
+	}
 	if len(candidates) == 0 {
 		return "", fmt.Sprintf("proxy catalog has no model from %v or matching %v", preferredIDs, prefixes), nil
 	}
@@ -1026,7 +1105,7 @@ func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL, proxyAuthToken strin
 		if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 			return modelID, "", nil
 		}
-		if statusCode >= http.StatusInternalServerError {
+		if localE2EModel() != "" || statusCode >= http.StatusInternalServerError {
 			return "", "", fmt.Errorf("live Copilot proxy chat completion probe for %q returned %d: %s", modelID, statusCode, truncateForLog(body, 256))
 		}
 		skipped = append(skipped, fmt.Sprintf("%s=%d", modelID, statusCode))
@@ -1223,21 +1302,28 @@ func preferredProxyModelCandidates(catalog proxyModelCatalog, preferredIDs []str
 }
 
 func firstUsableProxyOpenAIModel(baseURL string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, error) {
+	candidates, err := liveProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	if err != nil {
+		return "", err
+	}
 	var probeFailures []string
 
-	for _, modelID := range preferredProxyModelCandidates(catalog, preferredIDs, prefixes...) {
-		if !isProxyOpenAIProviderCandidate(modelID) {
+	for _, modelID := range candidates {
+		if localE2EModel() == "" && !isProxyOpenAIProviderCandidate(modelID) {
 			continue
 		}
 		hasEndpointMetadata := catalog.modelHasEndpointMetadata(modelID)
 		supportsOpenAIProvider := catalog.modelSupportsEndpoint(modelID, "/responses") ||
 			catalog.modelSupportsEndpoint(modelID, "/chat/completions")
-		if hasEndpointMetadata && !supportsOpenAIProvider {
+		if localE2EModel() == "" && hasEndpointMetadata && !supportsOpenAIProvider {
 			continue
 		}
 		if err := probeProxyOpenAIProviderModel(baseURL, modelID); err == nil {
 			return modelID, nil
 		} else {
+			if localE2EModel() != "" {
+				return "", fmt.Errorf("configured local OpenAI model %q failed: %w", modelID, err)
+			}
 			_, _ = fmt.Fprintf(GinkgoWriter, "\nOpenAI provider probe for model %q failed: %v\n", modelID, err)
 			probeFailures = append(probeFailures, fmt.Sprintf("%s: %v", modelID, err))
 		}
@@ -1262,12 +1348,22 @@ func isProxyOpenAIProviderCandidate(modelID string) bool {
 		!strings.HasPrefix(modelID, "gpt-5.4")
 }
 
+func liveProxyOpenAIProbeTimeout() time.Duration {
+	if localE2EModel() != "" {
+		// Match the AIKit Responses preflight budget for CPU inference.
+		return 3 * time.Minute
+	}
+	return 30 * time.Second
+}
+
 func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
+	timeout := liveProxyOpenAIProbeTimeout()
 	if _, err := probeProxyOpenAIProviderCompletion(
 		baseURL,
 		modelID,
 		"Reply with exactly OK and nothing else.",
 		nil,
+		timeout,
 	); err != nil {
 		return fmt.Errorf("completion probe failed: %w", err)
 	}
@@ -1284,6 +1380,7 @@ func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
 		modelID,
 		"Call noop_tool exactly once before answering.",
 		tools,
+		timeout,
 	)
 	if err != nil {
 		return fmt.Errorf("tool completion probe failed: %w", err)
@@ -1298,7 +1395,7 @@ func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
 	return nil
 }
 
-func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools []llm.Tool) (*llm.CompletionResponse, error) {
+func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools []llm.Tool, timeout time.Duration) (*llm.CompletionResponse, error) {
 	provider, err := openaiprovider.NewProvider(llm.ProviderConfig{
 		ProviderType: "openai",
 		APIKey:       liveProxyProbeAPIKey,
@@ -1308,7 +1405,7 @@ func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools [
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return provider.Complete(ctx, &llm.CompletionRequest{
@@ -1954,8 +2051,8 @@ func dumpLiveCopilotProxyDebugInfo(providerNames ...string) {
 		}
 	}
 
-	if body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/readyz"); err == nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== copilot-proxy /readyz ===\n%s\n", body)
+	if body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, proxyReadinessPath()); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== copilot-proxy %s ===\n%s\n", proxyReadinessPath(), body)
 	}
 
 	if body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/v1/models"); err == nil {

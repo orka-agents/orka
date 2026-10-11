@@ -193,10 +193,42 @@ missing or mismatched artifacts staying not ready.
   mode also exercises Task forks.
 - `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
-- `COPILOT_GITHUB_TOKEN` also remains the credential for
-  `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
-  Provider test infrastructure. `Agent Runtime E2E` provides the
-  provider-execution evidence for the built-in RuntimePool profiles.
+- `AIKit Qwen E2E` uses a digest-pinned Qwen 3.5 4B image as local CPU model
+  infrastructure for native Provider, compatibility API, and runtime checks.
+  The lane uses the standard free `ubuntu-latest` runner and records only
+  allowlisted CPU capabilities.
+  Its prebuilt image keeps AIKit's Qwen weights and adds a CPU backend correction
+  for recurrent prefix checkpoints. The correction restores template message
+  boundaries and permits bounded mid-prompt checkpoints for changing cluster
+  context. Checkpoint count/spacing and host cache memory are bounded within
+  an 8-GiB model memory limit on the same free runner. CPU remains limited
+  to four cores. Its source/build recipe is in
+  `scripts/fixtures/aikit/backend/`.
+  It requires no cloud credentials and routes through Orka's auth/session proxies
+  directly to AIKit, without Vekil. DNS/model NetworkPolicy rules are checked
+  structurally; Kind's default CNI does not enforce them, so this lane does not
+  validate denied egress. Its Qwen template merges system/developer
+  instructions into a leading system block so multi-turn Responses requests
+  remain compatible without dropping instructions or changing tool permissions.
+  CI-only API work is bounded to 170 seconds, below the unchanged 180-second
+  client deadline; failed Chat streams explicitly cancel their observed Session.
+  Model Pod CPU/memory counters and allowlisted container restart/termination
+  metadata are saved with the cleanup evidence without requiring a shell in the
+  distroless AIKit container. Backend log sampling projects only numeric timing
+  and cache-eviction events; raw backend text is never preserved.
+  Startup can prefill the full Chat and compatibility instruction/tool prefixes
+  within a shared thirty-minute preparation budget. Each API is qualified directly
+  after its prefix is prepared so warm performance is observable even when a
+  later cold request exhausts startup. Qualification still uses the existing
+  contracts within 170 seconds before the stack build, including changed Chat
+  context and returning to Chat after compatibility to check cache retention:
+  exact Chat text and the compatibility final sentinel plus connectivity marker.
+  It uses the real prompt builders and tool schemas. The AIKit and ordinary E2E
+  workflows use the public Docker Hub cache
+  at `mirror.gcr.io` without registry credentials; uncached images can still fall
+  back to Docker Hub.
+  `Agent Runtime E2E` retains real-provider
+  execution coverage for the built-in RuntimePool profiles.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:

@@ -60,6 +60,20 @@ jobs:
           go-version: '1.27'
           check-latest: true
 
+      - name: Test AIKit E2E setup and cleanup contracts
+        run: |
+          make kustomize
+          python3 -m venv "${RUNNER_TEMP}/aikit-template-test"
+          "${RUNNER_TEMP}/aikit-template-test/bin/pip" install --disable-pip-version-check Jinja2==3.1.6
+          "${RUNNER_TEMP}/aikit-template-test/bin/python" scripts/tests/aikit-template-test.py
+          bash scripts/tests/aikit-e2e-test.sh
+          python3 scripts/fixtures/aikit/backend/patch_test.py
+          bash scripts/tests/e2e-cleanup-test.sh
+          bash .github/actions/docker-hub-mirror/configure_test.sh
+          make ensure-ui-embed
+          go test -tags=e2e ./internal/api -run '^(TestAIKitFullPromptProbeContract|TestAIKitProbeResponseContract)$' -race -count=1
+          go test -tags=e2e ./test/e2e -run '^(TestPostLiveChatSSECancelsFailedSession|TestParseLiveChatSSEKeepsSessionIdentityOnFailure)$' -race -count=1
+
       - name: Check Go coverage reporting
         run: bash scripts/tests/go-coverage-summary-test.sh
 

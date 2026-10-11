@@ -11,7 +11,6 @@ package e2e
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -77,7 +76,9 @@ func TestE2E(t *testing.T) {
 var _ = BeforeSuite(func() {
 	By("loading e2e environment file")
 	earlyEnvProjectDir, _ := utils.GetProjectDir()
-	loadEnvFile(filepath.Join(earlyEnvProjectDir, "test", "e2e", ".env"))
+	if os.Getenv("E2E_LOCAL_MODEL") == "" {
+		loadEnvFile(filepath.Join(earlyEnvProjectDir, "test", "e2e", ".env"))
+	}
 
 	By("building all Docker images")
 	cmd := exec.Command("make", "docker-build-all",
@@ -157,7 +158,9 @@ var _ = BeforeSuite(func() {
 
 	By("loading e2e environment configuration")
 	projectDir, _ := utils.GetProjectDir()
-	loadEnvFile(filepath.Join(projectDir, "test", "e2e", ".env"))
+	if os.Getenv("E2E_LOCAL_MODEL") == "" {
+		loadEnvFile(filepath.Join(projectDir, "test", "e2e", ".env"))
+	}
 	e2eOpenAIAPIKey = os.Getenv("E2E_OPENAI_API_KEY")
 	e2eOpenAIBaseURL = os.Getenv("E2E_OPENAI_BASE_URL")
 	e2eOpenAIModel = os.Getenv("E2E_OPENAI_MODEL")
@@ -267,6 +270,13 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
+	if os.Getenv("E2E_LOCAL_MODEL") != "" {
+		By("routing the authenticated provider proxy directly to the local AIKit model")
+		cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "aikit-e2e.sh"), "configure-provider-proxy")
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to configure the local model upstream")
+	}
+
 	By("granting the E2E caller access to the external API")
 	cmd = exec.Command("kubectl", "create", "rolebinding", "e2e-api-editor",
 		"-n", namespace, "--clusterrole=orka-api-editor-role",
@@ -315,12 +325,13 @@ var _ = AfterSuite(func() {
 		report.FinishedAt = time.Now().UTC()
 		Expect(saveE2ESuiteCleanup(report)).To(Succeed(), "Failed to preserve suite cleanup evidence")
 	}()
-	step := func(name string, cleanup func() error) {
+	step := func(name string, cleanup func() error) error {
 		By(name)
 		report.Stage = name
 		Expect(saveE2ESuiteCleanup(report)).To(Succeed())
 		ExpectWithOffset(1, cleanup()).To(Succeed(), "Normal E2E cleanup must complete before cluster teardown")
 		report.Completed = append(report.Completed, name)
+		return nil
 	}
 	step("cleaning up the curl pod for metrics", func() error {
 		return runBoundedE2ECleanup(30*time.Second, "kubectl", "delete", "pod", "curl-metrics",
@@ -363,16 +374,10 @@ var _ = AfterSuite(func() {
 				"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s")
 		})
 	}
-	step("undeploying the controller-manager", func() error {
-		return runBoundedE2ECleanup(2*time.Minute, "make", "undeploy", "ignore-not-found=true")
-	})
-	step("uninstalling CRDs", func() error {
-		return runBoundedE2ECleanup(2*time.Minute, "make", "uninstall", "ignore-not-found=true")
-	})
-	step("removing manager namespace", func() error {
-		return runBoundedE2ECleanup(60*time.Second, "kubectl", "delete", "ns", namespace,
-			"--ignore-not-found", "--wait=true", "--timeout=45s")
-	})
+	projectDir, err := utils.GetProjectDir()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to resolve teardown manifest directory")
+	err = teardownE2EDeployment(projectDir, namespace, step, runE2ETeardownCommand, GinkgoWriter)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Normal E2E deployment cleanup must complete before cluster teardown")
 	if e2eRegistryContainerName != "" {
 		step("removing the Kind-local image registry", func() error {
 			return runBoundedE2ECleanup(30*time.Second, "docker", "rm", "-f", e2eRegistryContainerName)
@@ -389,24 +394,6 @@ func deleteAllE2EResources(resource string, namespaced bool, timeout time.Durati
 		args = append(args, "-n", namespace)
 	}
 	return runBoundedE2ECleanup(timeout+10*time.Second, "kubectl", args...)
-}
-
-func runBoundedE2ECleanup(timeout time.Duration, name string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, name, args...)
-	// CommandContext kills only the direct process. A timed-out make recipe
-	// can leave kubectl holding the output pipes open, so Wait would otherwise
-	// outlive this helper's deadline and eventually trip the suite timeout.
-	cmd.WaitDelay = time.Second
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("cleanup command %s exceeded %s: %w", name, timeout, ctx.Err())
-		}
-		return fmt.Errorf("cleanup command %s failed; output omitted", name)
-	}
-	return nil
 }
 
 // loadEnvFile reads a .env file and sets environment variables that are not already set.
