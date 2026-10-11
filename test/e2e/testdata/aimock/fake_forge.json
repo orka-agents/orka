@@ -1,0 +1,19 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:forge-write]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {"cmd": "printf 'Published by the scripted model.\\n' > E2E_FORGE.md && cat E2E_FORGE.md"}
+          }
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:forge-write]", "hasToolResult": true},
+      "response": {"content": "E2E-FORGE-WRITE-DONE: wrote E2E_FORGE.md."}
+    }
+  ]
+}

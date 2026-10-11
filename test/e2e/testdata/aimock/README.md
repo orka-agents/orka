@@ -23,5 +23,10 @@ Conventions:
 - In mock mode (`e2eMockOpenAI`), specs assert on what reached the model with
   `expectMockLLMToolResult` and `expectMockLLMServed` from `mock_llm_test.go`.
 
+The fake forge publication spec deploys a second aimock with these same
+fixtures as `vekil-system/vekil`, the upstream of the ACP provider proxy, so
+built-in runtimes such as Codex follow the scripts too (`fake_forge.json`).
+Read its requests with `providerProxyMockLLM.requestsFor`.
+
 The fixture format is documented in aimock's
 [write-fixtures skill](https://github.com/CopilotKit/aimock/blob/v1.43.0/skills/write-fixtures/SKILL.md).

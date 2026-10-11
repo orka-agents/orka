@@ -201,6 +201,12 @@ missing or mismatched artifacts staying not ready.
 - The suite enables Task provenance trust after verifying the `orka-admission`
   provenance webhook that `make deploy` installs, so coordination messaging and
   `cancel_task` run in the default lane.
+- The default lane also runs one clean-room publication end to end without
+  github.com: a scripted Codex RuntimePool talks to a second aimock deployed as
+  `vekil-system/vekil` behind the production provider proxy, and the publisher
+  clones from, pushes to, and opens a pull request on an in-cluster fake forge
+  (`test/fixtures/fakeforge`: real Git smart HTTP plus the GitHub REST endpoints
+  the publisher calls).
 - `COPILOT_GITHUB_TOKEN` also remains the credential for
   `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
   Provider test infrastructure. `Agent Runtime E2E` provides the

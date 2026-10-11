@@ -54,6 +54,22 @@ func e2eMockLLMEnabled() bool {
 	return e2eMockOpenAI || e2eMockAnthropic
 }
 
+// mockLLMInstance locates one deployed aimock. Its Pods and Service carry
+// app.kubernetes.io/name=<name>.
+type mockLLMInstance struct {
+	namespace string
+	name      string
+	port      int
+}
+
+var (
+	// suiteMockLLM backs the native Providers.
+	suiteMockLLM = mockLLMInstance{namespace: namespace, name: mockLLMName, port: mockLLMPort}
+	// providerProxyMockLLM stands in for Vekil behind the ACP provider proxy,
+	// whose NetworkPolicy admits only vekil-system Pods named vekil on 1337.
+	providerProxyMockLLM = mockLLMInstance{namespace: "vekil-system", name: "vekil", port: 1337}
+)
+
 func mockLLMServiceURL() string {
 	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", mockLLMName, namespace, mockLLMPort)
 }
@@ -90,16 +106,16 @@ func mockLLMFixtureFiles(projectDir string) ([]string, error) {
 	return files, nil
 }
 
-// deployMockLLM installs aimock with every fixture file in mockLLMFixtureDir.
-func deployMockLLM(projectDir string) {
+// deploy installs aimock with every fixture file in mockLLMFixtureDir.
+func (m mockLLMInstance) deploy(projectDir string) {
 	files, err := mockLLMFixtureFiles(projectDir)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
-	configMapArgs := []string{"create", "configmap", mockLLMName + "-fixtures", "-n", namespace,
+	configMapArgs := []string{"create", "configmap", m.name + "-fixtures", "-n", m.namespace,
 		"--dry-run=client", "-o", "yaml"}
 	args := []string{
 		"--host", "0.0.0.0",
-		"--port", fmt.Sprint(mockLLMPort),
+		"--port", fmt.Sprint(m.port),
 		"--journal-max", "0",
 		"--validate-on-load",
 	}
@@ -197,19 +213,19 @@ spec:
     - name: http
       port: %[5]d
       targetPort: http
-`, mockLLMName, namespace, mockLLMImage, string(encodedArgs), mockLLMPort, mockLLMFixtureVolume,
+`, m.name, m.namespace, mockLLMImage, string(encodedArgs), m.port, mockLLMFixtureVolume,
 		mockLLMFixturesRevision(files), mockLLMFixtureMountAt)
 	cmd = exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy aimock")
 
-	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+mockLLMName,
-		"-n", namespace, "--timeout=3m")
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+m.name,
+		"-n", m.namespace, "--timeout=3m")
 	if _, err = utils.Run(cmd); err != nil {
 		for _, diag := range [][]string{
-			{"describe", "pods", "-l", "app.kubernetes.io/name=" + mockLLMName, "-n", namespace},
-			{"logs", "deployment/" + mockLLMName, "-n", namespace, "--tail=200"},
+			{"describe", "pods", "-l", "app.kubernetes.io/name=" + m.name, "-n", m.namespace},
+			{"logs", "deployment/" + m.name, "-n", m.namespace, "--tail=200"},
 		} {
 			output, _ := utils.Run(exec.Command("kubectl", diag...))
 			_, _ = fmt.Fprintf(GinkgoWriter, "aimock diagnostics: kubectl %s\n%s\n", strings.Join(diag, " "), output)
@@ -326,11 +342,11 @@ func mockLLMControlPath(route string) string {
 		namespace, mockLLMName, mockLLMPort, route)
 }
 
-func deleteMockLLM() error {
+func (m mockLLMInstance) delete() error {
 	for _, args := range [][]string{
-		{"delete", "deployment", mockLLMName, "-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=30s"},
-		{"delete", "service", mockLLMName, "-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s"},
-		{"delete", "configmap", mockLLMName + "-fixtures", "-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s"},
+		{"delete", "deployment", m.name, "-n", m.namespace, "--ignore-not-found", "--wait=true", "--timeout=30s"},
+		{"delete", "service", m.name, "-n", m.namespace, "--ignore-not-found", "--wait=true", "--timeout=20s"},
+		{"delete", "configmap", m.name + "-fixtures", "-n", m.namespace, "--ignore-not-found", "--wait=true", "--timeout=20s"},
 	} {
 		if err := runBoundedE2ECleanup(45*time.Second, "kubectl", args...); err != nil {
 			return err
@@ -429,23 +445,32 @@ func (r mockLLMRequest) ToolResults(toolName string) []string {
 	return results
 }
 
-// mockLLMJournal reads every request aimock has served through the API
-// server's Service proxy, so no port-forward is needed.
-func mockLLMJournal() ([]mockLLMRequest, error) {
-	output, err := utils.Run(exec.Command("kubectl", "get", "--raw", mockLLMControlPath("journal")))
+// journal reads every request aimock has served from inside its Pod, which
+// works behind ingress NetworkPolicies such as the one guarding Vekil.
+func (m mockLLMInstance) journal() ([]mockLLMRequest, error) {
+	cmd := exec.Command("kubectl", "exec", "-n", m.namespace, "deployment/"+m.name, "--", "node", "-e",
+		fmt.Sprintf(`fetch("http://127.0.0.1:%d/__aimock/journal").then(r => r.text()).then(t => process.stdout.write(t))`, m.port))
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s/%s journal: %w: %s", m.namespace, m.name, err, stderr.String())
 	}
 	var requests []mockLLMRequest
-	if err := json.Unmarshal([]byte(output), &requests); err != nil {
+	if err := json.Unmarshal(output, &requests); err != nil {
 		return nil, fmt.Errorf("decode aimock journal: %w", err)
 	}
 	return requests, nil
 }
 
-// mockLLMRequestsFor returns the journal entries whose conversation carries marker.
+// mockLLMRequestsFor returns the suite aimock's requests that carry marker.
 func mockLLMRequestsFor(marker string) ([]mockLLMRequest, error) {
-	requests, err := mockLLMJournal()
+	return suiteMockLLM.requestsFor(marker)
+}
+
+// requestsFor returns the journal entries whose conversation carries marker.
+func (m mockLLMInstance) requestsFor(marker string) ([]mockLLMRequest, error) {
+	requests, err := m.journal()
 	if err != nil {
 		return nil, err
 	}
@@ -512,7 +537,7 @@ var _ = AfterEach(func() {
 	if !e2eMockLLMEnabled() || !CurrentSpecReport().Failed() {
 		return
 	}
-	requests, err := mockLLMJournal()
+	requests, err := suiteMockLLM.journal()
 	if err != nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "aimock journal unavailable: %v\n", err)
 		return

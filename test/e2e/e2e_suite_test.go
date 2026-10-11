@@ -99,6 +99,11 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build harness-v2 E2E fixture image")
 
+	By("building the fake forge E2E fixture image")
+	cmd = exec.Command("docker", "build", "-t", fakeForgeImage, "-f", "test/fixtures/fakeforge/Dockerfile", ".")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build fake forge E2E fixture image")
+
 	if gatewayE2EEnabled() {
 		By("building the Gateway reference adapter Docker image")
 		cmd = exec.Command("docker", "build", "-t", gatewayReferenceAdapterImage,
@@ -119,6 +124,7 @@ var _ = BeforeSuite(func() {
 		aiWorkerImage,
 		generalWorkerImage,
 		harnessV2FixtureImage,
+		fakeForgeImage,
 	}
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
@@ -195,7 +201,7 @@ var _ = BeforeSuite(func() {
 
 	if e2eMockLLMEnabled() {
 		By("deploying the aimock mock LLM for providers without a live key")
-		deployMockLLM(projectDir)
+		suiteMockLLM.deploy(projectDir)
 	}
 
 	By("creating e2e K8s secrets from environment variables")
@@ -383,7 +389,7 @@ var _ = AfterSuite(func() {
 		})
 	}
 	if e2eMockLLMEnabled() {
-		step("deleting the aimock mock LLM", deleteMockLLM)
+		step("deleting the aimock mock LLM", suiteMockLLM.delete)
 	}
 	step("undeploying the controller-manager", func() error {
 		return runBoundedE2ECleanup(2*time.Minute, "make", "undeploy", "ignore-not-found=true")
