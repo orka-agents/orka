@@ -1466,6 +1466,53 @@ spec:
                     required:
                     - name
                     type: object
+                  toolboxes:
+                    description: |-
+                      Toolboxes lists extra command-line tool images for built-in runtimes.
+                      Each toolbox folder is bound read-only into the runtime Pod at the same
+                      path and its pathEntries are appended, in order, to the agent's PATH.
+                      Nothing from a toolbox runs with elevated permissions. The feature is
+                      off by default and the controller restricts images to allowed registries.
+                    items:
+                      description: |-
+                        AgentToolbox is a container image whose files are added, read-only, to the
+                        runtime Pod so the agent can run the tools inside it.
+                      properties:
+                        image:
+                          description: |-
+                            Image must be a fully qualified reference pinned by digest:
+                            <registry>/<repository>@sha256:<64 hex>.
+                          maxLength: 512
+                          minLength: 1
+                          pattern: ^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$
+                          type: string
+                        mountPath:
+                          description: |-
+                            MountPath is the absolute folder inside the toolbox image that holds the
+                            tools. Orka makes it appear at the same path in the runtime container.
+                            It must be exactly /home/linuxbrew/.linuxbrew or /opt/<name>, where
+                            <name> is not one the runtime images already use.
+                          maxLength: 256
+                          minLength: 5
+                          pattern: ^(/opt/[A-Za-z0-9][A-Za-z0-9._-]{0,127}|/home/linuxbrew/\.linuxbrew)$
+                          type: string
+                        pathEntries:
+                          description: |-
+                            PathEntries are folders relative to MountPath that are appended, in
+                            order, to the agent's PATH. Example: ["bin"].
+                          items:
+                            maxLength: 256
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9._-][A-Za-z0-9._/-]*$
+                            type: string
+                          maxItems: 8
+                          type: array
+                      required:
+                      - image
+                      - mountPath
+                      type: object
+                    maxItems: 4
+                    type: array
                   type:
                     description: Type specifies which built-in CLI runtime to use.
                       Use runtimeRef for admin-registered custom runtimes.
@@ -1485,6 +1532,13 @@ spec:
                 - message: runtime.contractVersion applies only to built-in runtime
                     types; runtimeRef derives the protocol from the referenced AgentRuntime
                   rule: '!has(self.contractVersion) || has(self.type)'
+                - message: runtime.toolboxes are supported only on built-in runtime
+                    types; external runtimeRef runtimes cannot mount toolboxes
+                  rule: '!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)'
+                - message: runtime.toolboxes require the orka.harness.v2 contract;
+                    harness v1 runtimes cannot mount toolboxes
+                  rule: '!has(self.toolboxes) || self.toolboxes.size() == 0 || !has(self.contractVersion)
+                    || self.contractVersion == ''orka.harness.v2'''
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:

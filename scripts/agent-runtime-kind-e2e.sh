@@ -27,6 +27,8 @@ Environment:
   ACP_E2E_OPENCODE_CONTEXT_WINDOW reviewed OpenCode context capacity (required)
   ACP_E2E_OPENCODE_MAX_TOKENS reviewed OpenCode output limit (required)
   ACP_E2E_ROLLOUT_TIMEOUT rollout timeout (default: 10m)
+  ACP_E2E_TOOLBOX_MOUNT_METHOD toolbox mount method enabled on the deployed
+                          controller: copy (default) or imageVolume (1.36+ nodes)
   RELEASE_GATE=1          forwarded to the canonical validator
   ACP_E2E_REPO / ACP_E2E_REF candidate repository and full commit SHA
   ACP_E2E_BASE_BRANCH     candidate branch (default: main)

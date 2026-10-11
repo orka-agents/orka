@@ -722,6 +722,11 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.acpRuntime.copilotImage` | release image tag | GitHub Copilot ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.opencodeImage` | release image tag | OpenCode ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.upgradeDrain.*` | enabled | Two-phase planned-upgrade admission closure and RuntimePool drain settings. |
+| `controller.acpRuntime.toolboxes.enabled` | `false` | Let built-in Agents declare `runtime.toolboxes`, read-only tool images bound into runtime Pods. See [Toolboxes](../guides/toolboxes.md). |
+| `controller.acpRuntime.toolboxes.allowedRegistries` | `[]` | Registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing. |
+| `controller.acpRuntime.toolboxes.imagePullSecrets` | `[]` | Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound. Never mounted into containers. |
+| `controller.acpRuntime.toolboxes.nodeSelector` | `{}` | Node selector merged into runtime Pods that bind toolboxes. |
+| `controller.acpRuntime.toolboxes.mountMethod` | `copy` | `copy` (init-container copier, every Kubernetes version) or `imageVolume` (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+). |
 | `harnessV1.image.digest` | `""` | Required immutable wrapper image digest for a `harness-v1` release. |
 | `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer Secret, separate from its TLS Secret. Never share it with v2. |
 | `harnessV1.tls.existingSecret` | `""` | Dedicated v1 wrapper Secret containing `tls.crt`, `tls.key`, and `ca.crt`. |
@@ -1055,6 +1060,11 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Admit the agent-sandbox execution-workspace provider for agent Tasks that set `execution.workspace` |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
+| `--acp-toolboxes-enabled` | `ORKA_ACP_TOOLBOXES_ENABLED` env or `false` | Let built-in Agents declare `runtime.toolboxes`. Off by default; see [Toolboxes](../guides/toolboxes.md) |
+| `--acp-toolbox-allowed-registries` | `ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES` env or `""` | Comma-separated registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing |
+| `--acp-toolbox-image-pull-secrets` | `ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS` env or `""` | Comma-separated Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound |
+| `--acp-toolbox-node-selector` | `ORKA_ACP_TOOLBOX_NODE_SELECTOR` env or `""` | Comma-separated `key=value` node selector merged into runtime Pods that bind toolboxes |
+| `--acp-toolbox-mount-method` | `ORKA_ACP_TOOLBOX_MOUNT_METHOD` env or `copy` | `copy` or `imageVolume`. With `imageVolume` on an API server older than 1.36, toolbox Agents are rejected with `ToolboxUnavailable`; there is no silent fallback |
 | `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
 | `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v1 claims use `SandboxWarmPool` references |

@@ -146,6 +146,31 @@ spec:
             {{- if .Values.controller.acpRuntime.opencodeImage }}
             - {{ printf "--acp-opencode-runtime-image=%s" .Values.controller.acpRuntime.opencodeImage | quote }}
             {{- end }}
+            {{- with .Values.controller.acpRuntime.toolboxes }}
+            {{- if .enabled }}
+            - --acp-toolboxes-enabled=true
+            {{- if .allowedRegistries }}
+            - {{ printf "--acp-toolbox-allowed-registries=%s" (join "," .allowedRegistries) | quote }}
+            {{- end }}
+            {{- if .imagePullSecrets }}
+            - {{ printf "--acp-toolbox-image-pull-secrets=%s" (join "," .imagePullSecrets) | quote }}
+            {{- end }}
+            {{- if .nodeSelector }}
+            {{- $selector := list }}
+            {{- range $key, $value := .nodeSelector }}
+            {{- if not $value }}
+            {{- fail (printf "controller.acpRuntime.toolboxes.nodeSelector[%q] must have a non-empty value" $key) }}
+            {{- end }}
+            {{- if and (eq $key "kubernetes.io/os") (ne $value "linux") }}
+            {{- fail (printf "controller.acpRuntime.toolboxes.nodeSelector[%q]=%q conflicts with the Linux-only runtime Pods" $key $value) }}
+            {{- end }}
+            {{- $selector = append $selector (printf "%s=%s" $key $value) }}
+            {{- end }}
+            - {{ printf "--acp-toolbox-node-selector=%s" (join "," $selector) | quote }}
+            {{- end }}
+            - --acp-toolbox-mount-method={{ .mountMethod | default "copy" }}
+            {{- end }}
+            {{- end }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
             - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}

@@ -14,6 +14,7 @@ const sidebars = {
         'guides/chat',
         'guides/container-tasks',
         'guides/bring-your-own-agent-runtime',
+        'guides/toolboxes',
         'guides/autonomous-tasks',
         'guides/scheduled-tasks',
         'guides/transaction-token-migration',

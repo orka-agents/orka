@@ -103,6 +103,23 @@ controller:
       pollInterval: 1s
       triggerTimeout: 5m15s
       terminationGracePeriodSeconds: 360
+    # Toolboxes: read-only tool images bound into built-in runtime Pods
+    # (Agent spec.runtime.toolboxes). Off by default. Nothing from a toolbox
+    # runs as root; images must be digest-pinned and from allowedRegistries.
+    toolboxes:
+      enabled: false
+      # Registry hosts or host/path prefixes, for example
+      # ["registry.example.com", "ghcr.io/my-org/tools"]. Empty allows nothing.
+      allowedRegistries: []
+      # Secret names in the runtime namespace added to runtime Pod imagePullSecrets.
+      imagePullSecrets: []
+      # Node selector merged into runtime Pods that bind toolboxes.
+      nodeSelector: {}
+      # copy: an init-container copier sanitizes each toolbox into a scratch
+      #       volume; works on every supported Kubernetes version.
+      # imageVolume: mounts the toolbox image directly; needs Kubernetes 1.36+
+      #       with containerd 2.2+ or CRI-O 1.33+ on the selected nodes.
+      mountMethod: copy
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true

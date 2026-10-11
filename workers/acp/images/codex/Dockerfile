@@ -101,7 +101,7 @@ RUN set -eu; \
       go build -buildvcs=false -trimpath -ldflags='-s -w' \
       -o /out/orka-acp-exec-helper ./cmd/orka-acp-exec-helper
 
-FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
+FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e
 LABEL org.opencontainers.image.title="Orka ACP Codex runtime" \
       org.opencontainers.image.description="Orka harness v2 ACP supervisor with Codex ACP 2.1.1 and Codex CLI 0.160.0" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \

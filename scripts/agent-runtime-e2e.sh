@@ -50,6 +50,12 @@ Common environment:
   ACP_E2E_WAIT_SECONDS               Terminal wait bound (default: 900)
   ACP_E2E_STATE_WAIT_SECONDS         State transition wait bound (default: 300)
   ACP_E2E_API_LOCAL_PORT             Local controller port-forward port (default: run-scoped)
+  ACP_E2E_TOOLBOX_IMAGE              Digest-pinned static yq toolbox (/opt/yq-jq, bin); enables the
+                                     toolbox check against a controller with toolboxes enabled
+  ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE   Optional wrong-architecture toolbox (expects TOOLBOX_ARCH_MISMATCH)
+  ACP_E2E_TOOLBOX_FIFO_IMAGE         Optional toolbox with a FIFO (expects TOOLBOX_UNSUPPORTED_FILE_TYPE)
+  ACP_E2E_TOOLBOX_MISSING_IMAGE      Optional toolbox without /opt/missing-tool (expects TOOLBOX_SOURCE_OPEN)
+  ACP_E2E_TOOLBOX_HOSTILE_IMAGE      Optional hostile toolbox (setuid, file caps, device node): fails the copy, stays harmless as an image volume
 
 RELEASE_GATE=1 requires ACP_E2E_REPO, ACP_E2E_REF, and read-only GitHub API access.
   ACP_E2E_BASE_BRANCH                Candidate branch (default: main)
@@ -198,6 +204,17 @@ done
 for command in kubectl jq awk sed grep cut tr sort date mktemp curl; do
   require_cmd "${command}"
 done
+
+toolbox_checksum_command=()
+if [[ -n "${ACP_E2E_TOOLBOX_IMAGE:-}" ]]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    toolbox_checksum_command=(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    toolbox_checksum_command=(shasum -a 256)
+  else
+    die "toolbox checks require sha256sum or shasum"
+  fi
+fi
 
 release_gate=0
 if bool_env "${RELEASE_GATE:-0}"; then
@@ -1705,6 +1722,135 @@ apply_agent() {
         )
       }
     }' | k -n "${namespace}" apply -f - >/dev/null
+}
+
+# Toolbox Agents declare one digest-pinned toolbox. Codex keeps its native
+# unrestricted policy so the Task can run the mounted tool through Bash.
+apply_toolbox_agent() {
+  local model="$1"
+  local name="$2"
+  local image="$3"
+  local mount_path="$4"
+  local path_entry="${5:-}"
+  jq -n \
+    --arg model "${model}" \
+    --arg name "${name}" \
+    --arg run "${run_id}" \
+    --arg image "${image}" \
+    --arg mountPath "${mount_path}" \
+    --arg entry "${path_entry}" \
+    --argjson maxTurns "${task_max_turns}" \
+    '{
+      apiVersion:"core.orka.ai/v1alpha1",
+      kind:"Agent",
+      metadata:{name:$name,labels:{"orka.ai/acp-e2e-run":$run,"app.kubernetes.io/managed-by":"agent-runtime-e2e"}},
+      spec:{
+        runtime:{
+          type:"codex",
+          contractVersion:"orka.harness.v2",
+          defaultMaxTurns:$maxTurns,
+          toolboxes:[({image:$image,mountPath:$mountPath} + (if ($entry|length)>0 then {pathEntries:[$entry]} else {} end))]
+        },
+        model:{name:$model}
+      }
+    }' | k -n "${namespace}" apply -f - >/dev/null
+}
+
+# run_toolbox_check proves the toolbox contract live: a Codex agent runs the
+# mounted yq through PATH as a non-root process with NoNewPrivs and no
+# capabilities, and every negative fixture fails its Task with the documented
+# ToolboxUnavailable reason instead of waiting on a pool that never rolls out.
+run_toolbox_check() {
+  local model="$1"
+  local image="$2"
+  local agent task result
+  agent="$(sanitize_name "acp-codex-toolbox-${run_id}")"
+  task="$(sanitize_name "acp-codex-toolbox-run-${run_id}")"
+  apply_toolbox_agent "${model}" "${agent}" "${image}" /opt/yq-jq bin
+  apply_read_task "${task}" "${agent}" "" true \
+    "Run exactly these two shell commands and report their complete output verbatim, nothing else: \`yq --version\` and \`grep -E '^(NoNewPrivs|CapEff):' /proc/self/status\`. Do not modify any file." \
+    "12m" true
+  wait_task_terminal "${task}"
+  task_phase_is "${task}" Succeeded || die "toolbox Task/${task} did not succeed: $(safe_task_summary "${task}")"
+  result="$(api_task_result "${task}")"
+  grep -q 'yq (https://github.com/mikefarah/yq/) version v4.54.1' <<<"${result}" || \
+    die "toolbox Task/${task} result does not report the mounted yq version"
+  grep -Eq 'NoNewPrivs:[[:space:]]*1' <<<"${result}" || \
+    die "toolbox Task/${task} result does not prove NoNewPrivs=1 for agent processes"
+  grep -Eq 'CapEff:[[:space:]]*0{16}' <<<"${result}" || \
+    die "toolbox Task/${task} result does not prove an empty CapEff for agent processes"
+  # The copy-mode runtime Pod must carry hardened toolbox init containers; the
+  # image-volume mode mounts the image directly and has none.
+  if [[ "${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}" == "copy" ]]; then
+    k -n "${runtime_namespace}" get pod -l "orka.ai/runtime-pool-namespace=${namespace}" -o json | jq -e '
+      [.items[] | select(.spec.initContainers != null) | .spec.initContainers[] | select(.name == "toolbox-copy-0")
+        | select(.securityContext.runAsNonRoot == true and .securityContext.allowPrivilegeEscalation == false
+          and .securityContext.readOnlyRootFilesystem == true and (.securityContext.capabilities.drop // []) == ["ALL"])] | length >= 1
+    ' >/dev/null || die "no runtime Pod in ${runtime_namespace} carries a hardened toolbox-copy-0 init container"
+  fi
+
+  # Expected reasons differ by mount method: the copier rejects special files
+  # and reports a missing source folder itself, while an image volume mounts
+  # files as they are (a FIFO is harmless and the Task succeeds) and a missing
+  # subPath fails inside the container runtime.
+  local mount_method="${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}"
+  # A syntactically valid digest that no registry serves: the pull must fail
+  # with TOOLBOX_IMAGE_PULL in both modes.
+  local unknown_image
+  unknown_image="${image%@sha256:*}@sha256:$(printf 'orka-toolbox-unknown-digest-%s' "${run_id}" | "${toolbox_checksum_command[@]}" | cut -c1-64)"
+  local case_name case_image case_reason case_mount case_entry negative_agent negative_task
+  for case_name in wrong-arch fifo missing unknown hostile; do
+    case "${case_name}" in
+      wrong-arch) case_image="${ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE:-}"; case_reason=TOOLBOX_ARCH_MISMATCH; case_mount=/opt/yq-jq; case_entry=bin ;;
+      fifo) case_image="${ACP_E2E_TOOLBOX_FIFO_IMAGE:-}"; case_reason=TOOLBOX_UNSUPPORTED_FILE_TYPE; case_mount=/opt/fifo-tool; case_entry=bin ;;
+      missing) case_image="${ACP_E2E_TOOLBOX_MISSING_IMAGE:-}"; case_reason=TOOLBOX_SOURCE_OPEN; case_mount=/opt/missing-tool; case_entry="" ;;
+      unknown) case_image="${unknown_image}"; case_reason=TOOLBOX_IMAGE_PULL; case_mount=/opt/yq-jq; case_entry=bin ;;
+      hostile) case_image="${ACP_E2E_TOOLBOX_HOSTILE_IMAGE:-}"; case_reason=TOOLBOX_UNSUPPORTED_FILE_TYPE; case_mount=/opt/hostile; case_entry=bin ;;
+    esac
+    if [[ "${mount_method}" == "imageVolume" ]]; then
+      case "${case_name}" in
+        fifo) log "Skipping toolbox fifo negative case: image volumes mount special files as they are"; continue ;;
+        hostile) continue ;;
+        missing) case_reason=TOOLBOX_MOUNT_FAILED ;;
+      esac
+    fi
+    if [[ -z "${case_image}" ]]; then
+      log "Skipping toolbox ${case_name} negative case: fixture image not provided"
+      continue
+    fi
+    negative_agent="$(sanitize_name "acp-codex-toolbox-${case_name}-${run_id}")"
+    negative_task="$(sanitize_name "acp-codex-toolbox-${case_name}-run-${run_id}")"
+    apply_toolbox_agent "${model}" "${negative_agent}" "${case_image}" "${case_mount}" "${case_entry}"
+    apply_read_task "${negative_task}" "${negative_agent}" "" true "Report the output of yq --version." "12m" true
+    wait_task_terminal "${negative_task}"
+    task_phase_is "${negative_task}" Failed || \
+      die "toolbox ${case_name} Task/${negative_task} did not fail: $(safe_task_summary "${negative_task}")"
+    jq -e --arg reason "${case_reason}" '
+      .status.execution.reason == "ToolboxUnavailable" and ((.status.execution.message // "") | contains($reason))
+    ' < <(task_json "${negative_task}") >/dev/null || \
+      die "toolbox ${case_name} Task/${negative_task} did not fail with ToolboxUnavailable ${case_reason}: $(safe_task_summary "${negative_task}")"
+  done
+
+  # Image volumes mount files unsanitized, so the hostile fixture must stay
+  # harmless under the real node runtime: the setuid-root binary runs with the
+  # agent's own identity, the file-capability binary cannot execute, and the
+  # 0666 device node cannot be opened.
+  if [[ "${mount_method}" == "imageVolume" && -n "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE:-}" ]]; then
+    local hostile_agent hostile_task hostile_result
+    hostile_agent="$(sanitize_name "acp-codex-toolbox-hostile-${run_id}")"
+    hostile_task="$(sanitize_name "acp-codex-toolbox-hostile-run-${run_id}")"
+    apply_toolbox_agent "${model}" "${hostile_agent}" "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE}" /opt/hostile bin
+    apply_read_task "${hostile_task}" "${hostile_agent}" "" true \
+      "This is a sandbox self-test of harmless test fixtures. Run exactly these three shell commands one after another and report the complete output of each verbatim, including any error messages, nothing else: \`/opt/hostile/suid/busybox id\`, \`/opt/hostile/bin/cap-busybox id\`, \`cat /opt/hostile/dev/probe\`. Do not modify any file." \
+      "12m" true
+    wait_task_terminal "${hostile_task}"
+    task_phase_is "${hostile_task}" Succeeded || die "hostile toolbox Task/${hostile_task} did not succeed: $(safe_task_summary "${hostile_task}")"
+    hostile_result="$(api_task_result "${hostile_task}")"
+    grep -Eq 'uid=[1-9][0-9]*' <<<"${hostile_result}" || die "hostile toolbox result does not show the setuid binary running as the agent identity"
+    grep -Eq 'uid=0\(|euid=0' <<<"${hostile_result}" && die "hostile toolbox result shows the setuid-root binary gaining root"
+    [[ "$(grep -o 'Operation not permitted' <<<"${hostile_result}" | wc -l | tr -d ' ')" -ge 2 ]] || \
+      die "hostile toolbox result does not show the file-capability binary and the device node being refused"
+  fi
 }
 
 # Read tasks without Bash carry the restricted {Read,Glob,Grep} tool policy for
@@ -3739,6 +3885,13 @@ run_timeout_check codex "${codex_model}" "${codex_tool_agent}"
 acp_report_update '.runtime.checks.timeout = true'
 run_explicit_cancel_check codex "${codex_model}" "${codex_tool_agent}"
 acp_report_update '.runtime.checks.cancellation = true'
+if [[ -n "${ACP_E2E_TOOLBOX_IMAGE:-}" ]]; then
+  log "Running Codex toolbox mount and failure-reason validation"
+  run_toolbox_check "${codex_model}" "${ACP_E2E_TOOLBOX_IMAGE}"
+  acp_report_update '.runtime.checks.toolboxes = true'
+else
+  log "Skipping toolbox validation: ACP_E2E_TOOLBOX_IMAGE not set"
+fi
 if runtimepool_mutations_allowed; then
   run_controller_restart_check codex "${codex_model}" "${codex_tool_agent}" "${restart_nonce}"
   acp_report_update '.runtime.checks.controllerRestart = true'

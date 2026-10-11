@@ -29,6 +29,10 @@ service lifecycle and capacity.
 | Copilot | `copilot` | Immutable Copilot ACP image definition is included. Configure a digest-pinned image. |
 | OpenCode | `opencode` | Immutable OpenCode ACP image definition is included. Configure a digest-pinned image. |
 
+Built-in runtimes can mount extra command-line tools from read-only toolbox
+images declared in `Agent.spec.runtime.toolboxes`; see
+[Toolboxes](../guides/toolboxes.md).
+
 External runtimes use an `AgentRuntime` registration with `contractVersion: orka.harness.v2`. Current-generation conformance proves the exact instance, profile, cancellation, duplicate, and workspace-governance claims. Dispatch revalidates the frozen registration, authentication authority, and observed runtime identity before every mutation. See [Bring your own AgentRuntime](../guides/bring-your-own-agent-runtime.md) and the [adapter contract](../development/agent-runtime-adapter-contract.md).
 
 ## Architecture
