@@ -1432,6 +1432,41 @@ func liveACPProviderProxyServicePort() int {
 	return value
 }
 
+// expectProviderValidated checks that a Provider echoes its spec and that the
+// controller validated it: ready, with the validation message, time, and a
+// Ready condition.
+func expectProviderValidated(name, providerType, baseURL, model string) {
+	provider := fetchProviderSnapshot(name)
+	ExpectWithOffset(1, provider.Spec.Type).To(Equal(providerType))
+	ExpectWithOffset(1, provider.Spec.BaseURL).To(Equal(baseURL))
+	ExpectWithOffset(1, provider.Spec.DefaultModel).To(Equal(model))
+	ExpectWithOffset(1, provider.Status.Ready).To(BeTrue())
+	ExpectWithOffset(1, provider.Status.Message).To(Equal("Provider configuration is valid"))
+	ExpectWithOffset(1, provider.Status.LastValidated).NotTo(BeEmpty())
+	readyCondition := findStatusCondition(provider.Status.Conditions, "Ready")
+	ExpectWithOffset(1, readyCondition).NotTo(BeNil())
+	ExpectWithOffset(1, readyCondition.Status).To(Equal("True"))
+	ExpectWithOffset(1, readyCondition.Reason).To(Equal("ValidationSucceeded"))
+}
+
+// expectNativeAITaskSucceeded checks the status a native AI Task records when
+// its first attempt succeeds.
+func expectNativeAITaskSucceeded(taskName string) {
+	task := fetchTaskSnapshot(taskName)
+	ExpectWithOffset(1, task.Status.Phase).To(Equal("Succeeded"))
+	ExpectWithOffset(1, task.Status.JobName).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.Attempts).To(Equal(int32(1)))
+	ExpectWithOffset(1, task.Status.Message).To(Equal("task completed successfully"))
+	ExpectWithOffset(1, task.Status.StartTime).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.CompletionTime).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.ResultRef).NotTo(BeNil())
+	ExpectWithOffset(1, task.Status.ResultRef.Available).To(BeTrue())
+	completeCondition := findStatusCondition(task.Status.Conditions, "Complete")
+	ExpectWithOffset(1, completeCondition).NotTo(BeNil())
+	ExpectWithOffset(1, completeCondition.Status).To(Equal("True"))
+	ExpectWithOffset(1, completeCondition.Reason).To(Equal("TaskSucceeded"))
+}
+
 func fetchProviderSnapshot(name string) providerSnapshot {
 	var snapshot providerSnapshot
 	Eventually(func(g Gomega) {
