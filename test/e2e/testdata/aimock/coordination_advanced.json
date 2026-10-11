@@ -81,6 +81,20 @@
       "response": {"content": "Both delegated tasks completed: task A sent its message and task B checked messages."}
     },
     {
+      "match": {"userMessage": "[e2e:coord-adv-msg]", "toolResultContains": "E2E-SENDER-DONE"},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-coord-adv-worker",
+              "prompt": "[e2e:coord-adv-reader] Check for messages using the check_messages tool. Report any messages you received."
+            }
+          }
+        ]
+      }
+    },
+    {
       "match": {"userMessage": "[e2e:coord-adv-msg]", "toolResultContains": "\"status\":\"created\""},
       "response": {
         "toolCalls": [
@@ -97,13 +111,6 @@
             "arguments": {
               "agent": "e2e-coord-adv-worker",
               "prompt": "[e2e:coord-adv-sender] Send a message to all siblings saying hello from task A using the send_message tool with to_task set to *. Then report message sent."
-            }
-          },
-          {
-            "name": "delegate_task",
-            "arguments": {
-              "agent": "e2e-coord-adv-worker",
-              "prompt": "[e2e:coord-adv-reader] Check for messages using the check_messages tool. Report any messages you received."
             }
           }
         ]

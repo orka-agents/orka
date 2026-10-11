@@ -25,11 +25,6 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-// Coordination messaging fails closed without Task provenance admission, which
-// the default e2e deployment does not enable.
-const coordinationMessagingSkipReason = "coordination messaging requires Task provenance admission, " +
-	"which this deployment does not enable"
-
 var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 	const (
 		coordAdvProvider = "e2e-coord-adv-provider"
@@ -87,10 +82,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 
 	It("should cancel a delegated task using cancel_task", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
-		// cancel_task writes the child's status from the AI worker, which both
-		// RBAC (no tasks/status) and the admission webhook (controller-only
-		// status writes) reject, so the child is never cancelled.
-		Skip("cancel_task cannot cancel children: the AI worker may not update tasks/status")
 
 		const (
 			coordName = "e2e-coord-adv-cancel-coord"
@@ -198,7 +189,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 
 	It("should enable inter-agent messaging with send_message and check_messages", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
-		Skip(coordinationMessagingSkipReason)
 
 		const (
 			coordName = "e2e-coord-adv-msg-coord"
@@ -264,11 +254,15 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 
 		var sender, reader string
 		if e2eMockOpenAI {
-			By("scripting the coordinator to wait for both generated child Tasks")
+			// The script delegates the reader only after the sender finishes, so
+			// the reader's check_messages always sees the broadcast.
+			By("scripting the coordinator to wait for the sender, then the reader")
 			sender = waitForCoordinationChild(taskName, "[e2e:coord-adv-sender]", 3*time.Minute)
-			reader = waitForCoordinationChild(taskName, "[e2e:coord-adv-reader]", time.Minute)
 			injectMockLLMFixtures(coordinationMockToolCall(marker, "e2e-coord-adv-msg-hold",
-				"wait_for_tasks", map[string]any{"tasks": []string{sender, reader}, "timeout": "5m"}))
+				"wait_for_tasks", map[string]any{"tasks": []string{sender}, "timeout": "5m"}))
+			reader = waitForCoordinationChild(taskName, "[e2e:coord-adv-reader]", 5*time.Minute)
+			injectMockLLMFixtures(coordinationMockToolCall(marker, "e2e-coord-adv-msg-hold",
+				"wait_for_tasks", map[string]any{"tasks": []string{reader}, "timeout": "5m"}))
 		}
 
 		By("waiting for at least two child tasks to be created")
@@ -296,35 +290,11 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 			waitForTaskPhase(sender, "Succeeded", time.Minute)
 			waitForTaskPhase(reader, "Succeeded", time.Minute)
 			expectCoordinationToolResult("[e2e:coord-adv-sender]", "send_message", "Message sent to all siblings", time.Minute)
-			expectMockLLMToolResult("[e2e:coord-adv-reader]", "check_messages", time.Minute)
 			expectCoordinationToolResult(marker, "wait_for_tasks", "E2E-READER-DONE", time.Minute)
 
-			// The reader may check before the sender broadcasts, so read its
-			// inbox directly. It checked with mark_read=false, which leaves the
-			// broadcast unread until the Tasks are deleted.
-			By("verifying the broadcast reached the reader's inbox")
-			apiBaseURL, cancelPF, portForwardCmd, err := startControllerAPIPortForward(18089)
-			Expect(err).NotTo(HaveOccurred(), "Failed to start controller API port-forward")
-			defer stopPortForward(cancelPF, portForwardCmd)
-			token, err := serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred())
-			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/internal/v1/messages/%s/%s?parentTask=%s&markRead=false",
-				apiBaseURL, namespace, reader, taskName), nil)
-			Expect(err).NotTo(HaveOccurred())
-			req.Header.Set("Authorization", "Bearer "+token)
-			resp, err := http.DefaultClient.Do(req)
-			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			Expect(resp.StatusCode).To(Equal(http.StatusOK))
-			var inbox []struct {
-				FromTask string `json:"fromTask"`
-				Content  string `json:"content"`
-			}
-			Expect(json.NewDecoder(resp.Body).Decode(&inbox)).To(Succeed())
-			Expect(inbox).To(ContainElement(SatisfyAll(
-				HaveField("FromTask", sender),
-				HaveField("Content", ContainSubstring("E2E-HELLO-FROM-A")),
-			)))
+			By("verifying the reader received the sender's broadcast")
+			expectCoordinationToolResult("[e2e:coord-adv-reader]", "check_messages", "E2E-HELLO-FROM-A", time.Minute)
+			expectCoordinationToolResult("[e2e:coord-adv-reader]", "check_messages", `"fromTask":"`+sender+`"`, time.Minute)
 		}
 	})
 
@@ -574,7 +544,10 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 	// ── Test 5: Internal messaging API (structural – no LLM) ──
 
 	It("should send and receive messages via internal messaging API", func() {
-		Skip(coordinationMessagingSkipReason)
+		// The internal messaging API accepts only the calling Task's own worker
+		// Pod, so this controller-token call between nonexistent Tasks cannot
+		// pass. The send_message/check_messages spec covers it end to end.
+		Skip("internal messaging requires the calling Task's worker identity")
 		var (
 			apiBaseURL     string
 			portForwardCmd *exec.Cmd

@@ -295,12 +295,25 @@ var _ = BeforeSuite(func() {
 	}, 30*time.Second, time.Second).Should(Succeed())
 	_, _ = fmt.Fprintf(GinkgoWriter, "Resolved controller-manager deployment: %s\n", controllerManagerDeployment)
 
+	// make deploy installs the fail-closed orka-admission webhooks. Like a
+	// production rollout's second wave, the controller trusts Task provenance
+	// (and so enables coordination messaging and cancel_task) only after the
+	// provenance handler is in place.
+	By("verifying the Task provenance webhook is installed")
+	cmd = exec.Command("kubectl", "get", "validatingwebhookconfiguration", "orka-admission",
+		"-o", "jsonpath={.webhooks[*].clientConfig.service.path}")
+	webhookPaths, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to read the orka-admission webhooks")
+	ExpectWithOffset(1, webhookPaths).To(ContainSubstring("/validate-core-orka-ai-v1alpha1-task-provenance"))
+
 	By("patching the controller-manager deployment to use kind-loaded images")
 	// Profile checks can start many distinct runtime pools in a minute. Release
 	// idle workers promptly so they leave CPU for the following container tests.
 	cmd = exec.Command(
 		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
-		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"5s"}]}]}}}}`,
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[`+
+			`{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"5s"},`+
+			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"}]}]}}}}`,
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")

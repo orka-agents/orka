@@ -10,20 +10,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/labels"
+	"net/http"
+	"net/url"
 )
 
-// CancelTaskTool implements task cancellation for coordination workflows
-type CancelTaskTool struct {
-	k8sClient client.Client
-}
+// CancelTaskTool implements task cancellation for coordination workflows.
+// Workers cannot write Task status, so the controller performs the
+// cancellation after verifying that the target is a child of this Task.
+type CancelTaskTool struct{}
 
 // CancelTaskArgs are the arguments for the cancel_task tool
 type CancelTaskArgs struct {
@@ -39,10 +33,8 @@ type CancelTaskResult struct {
 }
 
 // NewCancelTaskTool creates a new cancel task tool
-func NewCancelTaskTool(k8sClient client.Client) *CancelTaskTool {
-	return &CancelTaskTool{
-		k8sClient: k8sClient,
-	}
+func NewCancelTaskTool() *CancelTaskTool {
+	return &CancelTaskTool{}
 }
 
 // Name returns the tool name
@@ -79,7 +71,7 @@ func (t *CancelTaskTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute cancels a running child task
+// Execute asks the controller to cancel a running child task
 func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a CancelTaskArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -90,61 +82,24 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", fmt.Errorf("task_name is required")
 	}
 
-	parentTaskName := os.Getenv(envOrkaTaskName)
-
-	namespace := a.Namespace
-	if namespace == "" {
-		namespace = os.Getenv(envOrkaTaskNamespace)
+	cfg, err := loadInternalControllerConfig()
+	if err != nil {
+		return "", err
 	}
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
-
-	// Get the target task
-	task := &corev1alpha1.Task{}
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{
-		Name:      a.TaskName,
-		Namespace: namespace,
-	}, task); err != nil {
-		return "", fmt.Errorf("failed to get task %q: %w", a.TaskName, err)
+	// Children live in their parent's namespace.
+	if a.Namespace != "" && a.Namespace != cfg.Namespace {
+		return "", fmt.Errorf("task %q is not a child of the current task %q", a.TaskName, cfg.TaskName)
 	}
 
-	// Verify this is a child of the current task (only when running inside a task context)
-	if parentTaskName != "" {
-		parentLabel := labels.ParentTaskName(task.Labels, task.Annotations)
-		if parentLabel != parentTaskName {
-			return "", fmt.Errorf("task %q is not a child of the current task %q", a.TaskName, parentTaskName)
-		}
+	payload, err := json.Marshal(map[string]string{"reason": a.Reason})
+	if err != nil {
+		return "", fmt.Errorf("failed to encode cancellation: %w", err)
 	}
-
-	// Can only cancel Pending or Running tasks
-	if task.Status.Phase != corev1alpha1.TaskPhasePending && task.Status.Phase != corev1alpha1.TaskPhaseRunning {
-		result := CancelTaskResult{
-			TaskName: a.TaskName,
-			Status:   fmt.Sprintf("task is already in %s phase, cannot cancel", task.Status.Phase),
-		}
-		data, _ := json.Marshal(result)
-		return string(data), nil
-	}
-
-	// Set the task phase to Cancelled
-	now := metav1.Now()
-	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
-	task.Status.CompletionTime = &now
-	message := "cancelled by parent task"
-	if a.Reason != "" {
-		message = fmt.Sprintf("cancelled by parent task: %s", a.Reason)
-	}
-	task.Status.Message = message
-
-	if err := t.k8sClient.Status().Update(ctx, task); err != nil {
+	endpoint := cfg.url(fmt.Sprintf("/internal/v1/tasks/%s/%s/children/%s/cancel",
+		url.PathEscape(cfg.Namespace), url.PathEscape(cfg.TaskName), url.PathEscape(a.TaskName)), nil)
+	body, err := doInternalControllerRequest(ctx, cfg, http.MethodPost, endpoint, payload)
+	if err != nil {
 		return "", fmt.Errorf("failed to cancel task %q: %w", a.TaskName, err)
 	}
-
-	result := CancelTaskResult{
-		TaskName: a.TaskName,
-		Status:   cancelledStatusString,
-	}
-	data, _ := json.Marshal(result)
-	return string(data), nil
+	return body, nil
 }

@@ -543,6 +543,7 @@ func (s *Server) setupRoutes() {
 		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
+		internal.Post("/tasks/:namespace/:taskName/children/:child/cancel", s.internalHandlers.CancelChildTask)
 		internal.Get("/tasks/:namespace/:taskName/gateway-messages/budget", s.internalHandlers.GetGatewayMessageBudget)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)

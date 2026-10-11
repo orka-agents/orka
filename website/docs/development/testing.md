@@ -198,6 +198,9 @@ missing or mismatched artifacts staying not ready.
   `test/e2e/testdata/aimock`, so those specs run on every PR without credentials.
   Set `E2E_DISABLE_MOCK_LLM=1` to skip them instead. Fixture conventions are in
   `test/e2e/testdata/aimock/README.md`.
+- The suite enables Task provenance trust after verifying the `orka-admission`
+  provenance webhook that `make deploy` installs, so coordination messaging and
+  `cancel_task` run in the default lane.
 - `COPILOT_GITHUB_TOKEN` also remains the credential for
   `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
   Provider test infrastructure. `Agent Runtime E2E` provides the
