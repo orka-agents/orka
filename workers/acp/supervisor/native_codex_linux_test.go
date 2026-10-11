@@ -3,10 +3,12 @@
 package supervisor
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/codexstate"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
@@ -55,10 +58,14 @@ func TestPinnedNativeCodexACPRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNativeBundleExcludesCredentials(t, data, revokedSourceCredential)
-	first := runPinnedNativeTurn(t, data, threadID, "first-current-test-credential", "NATIVE_ORka_REPLY_ONE", "")
-	second := runPinnedNativeTurn(t, first.Data, threadID, "second-current-test-credential", "NATIVE_ORka_REPLY_TWO", "NATIVE_ORka_REPLY_ONE")
+	first := runPinnedNativeTurn(t, data, threadID, "first-current-test-credential", "NATIVE_ORka_REPLY_ONE", "", harnessv2.WorkspaceIntentRead)
+	second := runPinnedNativeTurn(t, first.Data, threadID, "second-current-test-credential", "NATIVE_ORka_REPLY_TWO", "NATIVE_ORka_REPLY_ONE", harnessv2.WorkspaceIntentRead)
 	if second.ProviderSessionID != threadID || first.DataDigest == second.DataDigest {
 		t.Fatal("return transfer did not preserve native UUID and append the second turn")
+	}
+	written := runPinnedNativeTurn(t, second.Data, threadID, "write-current-test-credential", "NATIVE_ORka_WRITE", "NATIVE_ORka_REPLY_TWO", harnessv2.WorkspaceIntentWrite)
+	if written.ProviderSessionID != threadID || written.DataDigest == second.DataDigest {
+		t.Fatal("write continuation did not preserve native UUID and append its turn")
 	}
 	unchanged, err := os.ReadFile(rollout)
 	if err != nil || !bytes.Equal(unchanged, original) {
@@ -66,42 +73,19 @@ func TestPinnedNativeCodexACPRoundTrip(t *testing.T) {
 	}
 }
 
-func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, reply, previousReply string) harnessv2.NativeSessionSnapshot {
+func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, reply, previousReply string, intent harnessv2.WorkspaceIntent) harnessv2.NativeSessionSnapshot {
 	t.Helper()
-	var mu sync.Mutex
-	var providerRequests [][]byte
-	var wrongCredential bool
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
-			http.NotFound(w, r)
-			return
-		}
-		var body json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		wrongCredential = wrongCredential || r.Header.Get("Authorization") != "Bearer "+freshCredential
-		providerRequests = append(providerRequests, append([]byte(nil), body...))
-		mu.Unlock()
-		w.Header().Set("Content-Type", "text/event-stream")
-		write := func(event map[string]any) {
-			encoded, _ := json.Marshal(event)
-			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], encoded)
-		}
-		write(map[string]any{"type": "response.created", "response": map[string]any{"id": "native-test-response"}})
-		item := map[string]any{"type": "message", "role": "assistant", "id": "native-test-message", "content": []any{map[string]any{"type": "output_text", "text": reply}}}
-		write(map[string]any{"type": "response.output_item.added", "output_index": 0, "item": item})
-		write(map[string]any{"type": "response.output_text.delta", "item_id": "native-test-message", "output_index": 0, "content_index": 0, "delta": reply})
-		write(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
-		write(map[string]any{"type": "response.completed", "response": map[string]any{"id": "native-test-response", "usage": map[string]any{"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}}})
-	}))
+	upstream, capturedRequests := newPinnedNativeUpstream(t, freshCredential, reply, intent)
 	defer upstream.Close()
 	const model = "gpt-5.4"
 	cfg, _ := newTestConfigWithUpstream(t, "unused", upstream.URL+"/v1", freshCredential)
-	projection := testProviderProjectionRequest(t, "codex", model, "Use the current Orka runtime policy.", "high", []string{providerToolRead, providerToolGrep, providerToolGlob}, nil, false)
-	provider, err := providerProfile("codex", model, harnessv2.WorkspaceIntentRead)
+	allowed := []string{providerToolRead, providerToolGrep, providerToolGlob}
+	if intent == harnessv2.WorkspaceIntentWrite {
+		allowed = nil
+	}
+	projection := testProviderProjectionRequest(t, "codex", model, "Use the current Orka runtime policy.", "high", allowed, nil, intent == harnessv2.WorkspaceIntentWrite)
+	projection.Profile.WorkspaceIntent = intent
+	provider, err := providerProfile("codex", model, intent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +103,10 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	cfg.Capabilities.Provider.Models = []string{model}
 	cfg.Capabilities.SupportsNativeSessions = true
 	cfg.InitializeTimeout = time.Minute
+	var assertUploaded func(harnessv2.ArtifactReference)
+	if intent == harnessv2.WorkspaceIntentWrite {
+		cfg.ArtifactUploader, assertUploaded = pinnedNativeArtifactUploader(t, reply)
+	}
 	server, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -129,6 +117,7 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 		_ = server.Close(ctx)
 	})
 	create := testCreateSessionRequest(t, cfg, profile)
+	create.Workspace.Intent = intent
 	create.Metadata.ExpiresAt = time.Now().UTC().Add(3 * time.Minute)
 	create.AgentConfiguration = projection.AgentConfiguration
 	create.MCPConfiguration = projection.MCPConfiguration
@@ -179,6 +168,24 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	if validated.Code != http.StatusOK {
 		t.Fatalf("pinned native workspace validation failed: %d %s", validated.Code, validated.Body.String())
 	}
+	var deltaResponse harnessv2.CreateWorkspaceDeltaResponse
+	if err := json.Unmarshal(validated.Body.Bytes(), &deltaResponse); err != nil {
+		t.Fatal(err)
+	}
+	if err := deltaResponse.ValidateFor(delta); err != nil {
+		t.Fatal(err)
+	}
+	if intent == harnessv2.WorkspaceIntentWrite {
+		content, err := os.ReadFile(filepath.Join(state.paths.Workspace, "native-write.txt"))
+		if err != nil || string(content) != reply+"\n" {
+			t.Fatal("native write-intent continuation did not write the exact workspace file")
+		}
+		if deltaResponse.Delta.State != harnessv2.WorkspaceDeltaPrepared || deltaResponse.Delta.ChangedFileCount != 1 || deltaResponse.Delta.EntryCount != 1 {
+			t.Fatalf("native write-intent continuation did not prepare its publishable delta: %+v", deltaResponse.Delta)
+		}
+		assertUploaded(*deltaResponse.Delta.Artifact)
+		finalizePinnedNativePublication(t, server, cfg, prompt.Metadata, delta.DeltaID)
+	}
 	server.mu.Lock()
 	scheduled := state.drainCleanupScheduled
 	server.mu.Unlock()
@@ -197,13 +204,7 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	if err := response.ValidateFor(request); err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
-	requests := append([][]byte(nil), providerRequests...)
-	credentialFailed := wrongCredential
-	mu.Unlock()
-	if credentialFailed || len(requests) == 0 {
-		t.Fatal("resumed provider did not use the newly supplied credential")
-	}
+	requests := capturedRequests()
 	if !bytes.Contains(requests[0], []byte("Run the shell command to print the SessionKit nonce")) || previousReply != "" && !bytes.Contains(requests[0], []byte(previousReply)) {
 		t.Fatal("resumed provider did not receive the native source and prior continuation history")
 	}
@@ -217,6 +218,202 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	assertCurrentNativeSettings(t, bundle.Rollout, state.paths.Workspace)
 	assertSavedNativeFilesDeleted(t, server, cfg, create, state)
 	return response.Snapshot
+}
+
+func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent harnessv2.WorkspaceIntent) (*httptest.Server, func() [][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var providerRequests [][]byte
+	var wrongCredential bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		var body json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		wrongCredential = wrongCredential || r.Header.Get("Authorization") != "Bearer "+freshCredential
+		providerRequests = append(providerRequests, append([]byte(nil), body...))
+		requestNumber := len(providerRequests)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		write := func(event map[string]any) {
+			encoded, _ := json.Marshal(event)
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], encoded)
+		}
+		if intent == harnessv2.WorkspaceIntentWrite && requestNumber == 1 {
+			item, err := pinnedNativeWriteCall(body, reply)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			write(map[string]any{"type": "response.created", "response": map[string]any{"id": "native-write-response"}})
+			added := map[string]any{"type": "function_call", "id": item["id"], "call_id": item["call_id"], "name": item["name"], "arguments": "", "status": "in_progress"}
+			if namespace, ok := item["namespace"]; ok {
+				added["namespace"] = namespace
+			}
+			write(map[string]any{"type": "response.output_item.added", "output_index": 0, "item": added})
+			write(map[string]any{"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": item["id"], "delta": item["arguments"]})
+			write(map[string]any{"type": "response.function_call_arguments.done", "output_index": 0, "item_id": item["id"], "arguments": item["arguments"]})
+			write(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
+			write(map[string]any{"type": "response.completed", "response": map[string]any{"id": "native-write-response", "status": "completed", "output": []any{item}}})
+			return
+		}
+		if intent == harnessv2.WorkspaceIntentWrite && !bytes.Contains(body, []byte(reply+"_WRITTEN")) {
+			http.Error(w, "native write did not return the current shell marker", http.StatusUnprocessableEntity)
+			return
+		}
+		write(map[string]any{"type": "response.created", "response": map[string]any{"id": "native-test-response"}})
+		item := map[string]any{"type": "message", "role": "assistant", "id": "native-test-message", "content": []any{map[string]any{"type": "output_text", "text": reply}}}
+		write(map[string]any{"type": "response.output_item.added", "output_index": 0, "item": item})
+		write(map[string]any{"type": "response.output_text.delta", "item_id": "native-test-message", "output_index": 0, "content_index": 0, "delta": reply})
+		write(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
+		write(map[string]any{"type": "response.completed", "response": map[string]any{"id": "native-test-response", "usage": map[string]any{"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}}})
+	}))
+	return upstream, func() [][]byte {
+		t.Helper()
+		mu.Lock()
+		requests := append([][]byte(nil), providerRequests...)
+		credentialFailed := wrongCredential
+		mu.Unlock()
+		if credentialFailed || len(requests) == 0 {
+			t.Fatal("resumed provider did not use the newly supplied credential")
+		}
+		return requests
+	}
+}
+
+// This fixture stores the actual delta bytes and returns their content-addressed
+// receipt. It exercises the production uploader without a forge or live model.
+func pinnedNativeArtifactUploader(t *testing.T, marker string) (*RemoteArtifactUploader, func(harnessv2.ArtifactReference)) {
+	t.Helper()
+	var mu sync.Mutex
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+		if r.Method != http.MethodPut || err != nil || len(data) > 1<<20 {
+			http.Error(w, "invalid workspace delta upload", http.StatusBadRequest)
+			return
+		}
+		digest := artifactcap.DigestBytes(data)
+		artifactID, err := artifactcap.ArtifactIDForDigest(digest)
+		if err != nil {
+			http.Error(w, "invalid artifact digest", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		uploaded = append([]byte(nil), data...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"artifactID": artifactID, "digest": digest, "sizeBytes": len(data),
+			"mediaType": artifactcap.MediaTypeWorkspaceDelta, "createdAt": time.Now().UTC(),
+		})
+	}))
+	t.Cleanup(server.Close)
+	authorizer := ArtifactAuthorizationProviderFunc(func(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error) {
+		return artifactcap.Authorization{Capability: "native-test-artifact-capability", RequestDigest: testDigest("native-test-artifact-binding")}, nil
+	})
+	client, err := newDefaultArtifactClient(server.URL, server.Client(), authorizer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploader, err := NewRemoteArtifactUploader(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uploader, func(reference harnessv2.ArtifactReference) {
+		mu.Lock()
+		data := append([]byte(nil), uploaded...)
+		mu.Unlock()
+		if reference.Digest != artifactcap.DigestBytes(data) || reference.SizeBytes != int64(len(data)) {
+			t.Fatal("native write delta receipt does not match the persisted bytes")
+		}
+		archive := tar.NewReader(bytes.NewReader(data))
+		for {
+			header, err := archive.Next()
+			if err != nil {
+				t.Fatal("native write delta archive is invalid or lacks the written file")
+			}
+			if header.Name != "files/native-write.txt" {
+				continue
+			}
+			content, err := io.ReadAll(io.LimitReader(archive, 1024))
+			if err != nil || string(content) != marker+"\n" {
+				t.Fatal("persisted native write delta does not contain the exact written file")
+			}
+			return
+		}
+	}
+}
+
+func finalizePinnedNativePublication(t *testing.T, server *Server, cfg Config, metadata harnessv2.MutationMetadata, deltaID harnessv2.WorkspaceDeltaID) {
+	t.Helper()
+	metadata.OperationID = "native-write-publication-finalize"
+	metadata.ExpiresAt = time.Now().UTC().Add(time.Minute)
+	request := harnessv2.FinalizeRuntimeSessionPublicationRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: metadata, WorkspaceDeltaID: deltaID,
+		PublicationID: "native-write-publication", PublicationGeneration: 1, PublicationVersion: 1,
+		TerminalState: harnessv2.PublicationTerminalVerifiedExact, TerminalReceiptDigest: testDigest("native-write-publication-receipt"),
+	}
+	sealRequest(t, &request.Metadata.RequestDigest, request)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/publication-finalization", request, cfg)
+	if response.Code != http.StatusOK {
+		t.Fatalf("native write publication finalization failed: %d %s", response.Code, response.Body.String())
+	}
+	var finalized harnessv2.FinalizeRuntimeSessionPublicationResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &finalized); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalized.ValidateFor(request); err != nil || finalized.Session.State != harnessv2.RuntimeSessionStateFinalizing {
+		t.Fatal("native write publication did not finalize before capture")
+	}
+}
+
+func pinnedNativeWriteCall(body []byte, marker string) (map[string]any, error) {
+	type tool struct {
+		Type  string `json:"type"`
+		Name  string `json:"name"`
+		Tools []tool `json:"tools"`
+	}
+	var request struct {
+		Tools []tool `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
+	}
+	for _, advertised := range request.Tools {
+		candidates := []tool{advertised}
+		namespace := ""
+		if advertised.Type == "namespace" {
+			candidates, namespace = advertised.Tools, advertised.Name
+		}
+		for _, candidate := range candidates {
+			if candidate.Type != "function" || candidate.Name != "exec_command" {
+				continue
+			}
+			arguments, err := json.Marshal(map[string]any{
+				"cmd":           "printf '%s\\n' '" + marker + "' > native-write.txt && printf '%s\\n' '" + marker + "_WRITTEN'",
+				"yield_time_ms": 10000, "max_output_tokens": 1024,
+			})
+			if err != nil {
+				return nil, err
+			}
+			item := map[string]any{
+				"type": "function_call", "status": "completed", "id": "native-write-call", "call_id": "native-write-call-" + marker,
+				"name": candidate.Name, "arguments": string(arguments),
+			}
+			if namespace != "" {
+				item["namespace"] = namespace
+			}
+			return item, nil
+		}
+	}
+	return nil, fmt.Errorf("pinned Codex did not advertise exec_command for the write-intent continuation")
 }
 
 func assertNativeBundleExcludesCredentials(t *testing.T, data []byte, credentials ...string) {

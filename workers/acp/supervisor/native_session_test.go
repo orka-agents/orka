@@ -418,19 +418,35 @@ func TestSupervisorUnknownNativeInstallRetainsFrozenPublicationAndStopsAdmission
 }
 
 func TestCodexNativeRestoreUsesCurrentProviderAndPolicy(t *testing.T) {
-	request := testProviderProjectionRequest(t, "codex", "current-model", "current instructions", "high", nil, nil, true)
-	request.NativeRestore = &harnessv2.NativeSessionRestore{}
-	proxy := ProviderProxyBinding{BaseURL: "http://current-provider.example/v1"}
-	projection, err := codexSessionProjection(request, acp.SessionPaths{}, proxy, "current-model")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var config map[string]any
-	if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
-		t.Fatal(err)
-	}
-	if config["model_provider"] != codexProviderID || config["model"] != "current-model" || config["developer_instructions"] != "current instructions" || config["approval_policy"] != "on-request" || config["sandbox_mode"] != "read-only" {
-		t.Fatalf("native current config = %#v", config)
+	for _, intent := range []harnessv2.WorkspaceIntent{harnessv2.WorkspaceIntentRead, harnessv2.WorkspaceIntentWrite} {
+		t.Run(string(intent), func(t *testing.T) {
+			request := testProviderProjectionRequest(t, "codex", "current-model", "current instructions", "high", nil, nil, true)
+			request.Profile.WorkspaceIntent = intent
+			request.NativeRestore = &harnessv2.NativeSessionRestore{}
+			proxy := ProviderProxyBinding{BaseURL: "http://current-provider.example/v1"}
+			projection, err := codexSessionProjection(request, acp.SessionPaths{}, proxy, "current-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config map[string]any
+			if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
+				t.Fatal(err)
+			}
+			if config["model_provider"] != codexProviderID || config["model"] != "current-model" || config["developer_instructions"] != "current instructions" || config["approval_policy"] != "on-request" || config["sandbox_mode"] != "read-only" {
+				t.Fatalf("native current config = %#v", config)
+			}
+			provider, err := providerProfile("codex", "current-model", intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			environment, err := provider.EnvironmentForSession(request, acp.SessionPaths{}, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if environment["INITIAL_AGENT_MODE"] != codexAgentModeOrkaExternal {
+				t.Fatal("native restore must explicitly apply Orka's external sandbox on prompts for both workspace intents")
+			}
+		})
 	}
 }
 

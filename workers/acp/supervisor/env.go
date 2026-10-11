@@ -459,8 +459,10 @@ func codexSessionProjection(
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
 	if request.NativeRestore != nil {
-		// Resume supplies current policy explicitly instead of using the imported
-		// thread's persisted approval and sandbox settings.
+		// Do not inherit imported approval or sandbox settings during resume.
+		// This is a fail-closed fallback for both workspace intents. Every prompt
+		// explicitly applies the orka-external agent mode's externalSandbox;
+		// the RuntimeSession boundary, not this fallback, governs workspace writes.
 		config["approval_policy"] = "on-request"
 		config["sandbox_mode"] = "read-only"
 	}
