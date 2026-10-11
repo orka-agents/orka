@@ -101,6 +101,15 @@ func TestForgeAcceptsEachTokenOnlyOnItsSurface(t *testing.T) {
 			t.Fatalf("clone with the %s token succeeded", role)
 		}
 	}
+	// The publisher observes the target branch with the push credential
+	// before its CAS push, so the push token may list refs.
+	output, err := gitAs(t, basicAuth(RolePush), "-c", "protocol.version=2", "ls-remote", url, "refs/heads/main")
+	if err != nil {
+		t.Fatalf("ls-remote with the push token failed: %v: %s", err, output)
+	}
+	if _, err := gitAs(t, basicAuth(RoleForge), "ls-remote", url); err == nil {
+		t.Fatal("ls-remote with the forge token succeeded")
+	}
 	work := filepath.Join(t.TempDir(), "clone")
 	for _, role := range []string{RoleRead, RolePublicationRead} {
 		if output, err := gitAs(t, basicAuth(role), "clone", url, filepath.Join(t.TempDir(), role)); err != nil {
@@ -130,6 +139,8 @@ func TestForgeAcceptsEachTokenOnlyOnItsSurface(t *testing.T) {
 	}
 	for _, want := range []RequestRecord{
 		{Surface: SurfaceGitFetch, Role: RolePush, Status: http.StatusForbidden},
+		{Surface: SurfaceGitRefs, Role: RolePush, Status: http.StatusOK},
+		{Surface: SurfaceGitRefs, Role: RoleForge, Status: http.StatusForbidden},
 		{Surface: SurfaceGitPush, Role: RoleRead, Status: http.StatusForbidden},
 		{Surface: SurfaceGitPush, Role: RolePush, Status: http.StatusOK},
 		{Surface: SurfaceAPI, Role: RoleRead, Status: http.StatusForbidden},
@@ -139,6 +150,12 @@ func TestForgeAcceptsEachTokenOnlyOnItsSurface(t *testing.T) {
 		}) {
 			t.Fatalf("no request %+v in %+v", want, state.Requests)
 		}
+	}
+	// Protocol v2 ls-remote sends ls-refs over POST upload-pack.
+	lsRefs := RequestRecord{Method: http.MethodPost, Path: "/e2e/source.git/git-upload-pack",
+		Surface: SurfaceGitRefs, Role: RolePush, Status: http.StatusOK}
+	if !slices.Contains(state.Requests, lsRefs) {
+		t.Fatalf("no request %+v in %+v", lsRefs, state.Requests)
 	}
 }
 

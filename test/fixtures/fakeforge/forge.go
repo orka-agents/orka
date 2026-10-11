@@ -14,12 +14,15 @@ MIT License - see LICENSE file for details.
 package fakeforge
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/cgi"
@@ -58,16 +61,26 @@ var Roles = []string{RoleRead, RolePublicationRead, RolePush, RoleForge}
 
 // Surfaces a credentialed request can reach.
 const (
+	// SurfaceGitRefs lists refs: the ref advertisement and protocol v2
+	// ls-refs. Every Git role may list refs; the publisher observes the
+	// target branch with the push credential right before its CAS push.
+	SurfaceGitRefs = "git-refs"
+	// SurfaceGitFetch transfers objects, as clone and fetch do.
 	SurfaceGitFetch = "git-fetch"
 	SurfaceGitPush  = "git-push"
 	SurfaceAPI      = "api"
 )
 
 var surfaceRoles = map[string][]string{
+	SurfaceGitRefs:  {RoleRead, RolePublicationRead, RolePush},
 	SurfaceGitFetch: {RoleRead, RolePublicationRead},
 	SurfaceGitPush:  {RolePush},
 	SurfaceAPI:      {RoleForge},
 }
+
+// maxUploadPackRequest bounds the upload-pack request body the forge buffers
+// to classify it; negotiation requests are far smaller.
+const maxUploadPackRequest = 8 << 20
 
 var (
 	repositoryPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*$`)
@@ -217,7 +230,12 @@ func (s *Server) Handler() http.Handler {
 			}
 			s.record(r, SurfaceAPI, role, recorder.status)
 		default:
-			surface := gitSurface(r)
+			surface, err := gitSurface(r)
+			if err != nil {
+				http.Error(recorder, err.Error(), http.StatusBadRequest)
+				s.record(r, "", "", recorder.status)
+				return
+			}
 			role, ok := s.authorize(recorder, r, surface)
 			if ok {
 				s.serveGit(recorder, r)
@@ -227,13 +245,46 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// gitSurface classifies a smart HTTP request as a push (receive-pack) or a
-// fetch (everything else http-backend serves).
-func gitSurface(r *http.Request) string {
-	if r.URL.Query().Get("service") == "git-receive-pack" || strings.HasSuffix(r.URL.Path, "/git-receive-pack") {
-		return SurfaceGitPush
+// gitSurface classifies a Git HTTP request. receive-pack pushes; the ref
+// advertisement and a protocol v2 ls-refs command list refs; any other
+// upload-pack request, and every dumb-protocol file, transfers objects.
+func gitSurface(r *http.Request) (string, error) {
+	switch {
+	case r.URL.Query().Get("service") == "git-receive-pack" || strings.HasSuffix(r.URL.Path, "/git-receive-pack"):
+		return SurfaceGitPush, nil
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs"):
+		return SurfaceGitRefs, nil
+	case r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/git-upload-pack"):
+		return SurfaceGitFetch, nil
 	}
-	return SurfaceGitFetch
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxUploadPackRequest+1))
+	if err != nil {
+		return "", fmt.Errorf("read upload-pack request: %w", err)
+	}
+	if len(body) > maxUploadPackRequest {
+		return "", errors.New("upload-pack request is too large")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	command := body
+	switch r.Header.Get("Content-Encoding") {
+	case "":
+	case "gzip", "x-gzip":
+		// http-backend decompresses both, so classify what it will read.
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return "", fmt.Errorf("decompress upload-pack request: %w", err)
+		}
+		if command, err = io.ReadAll(io.LimitReader(reader, 64)); err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+			return "", fmt.Errorf("decompress upload-pack request: %w", err)
+		}
+	default:
+		return SurfaceGitFetch, nil
+	}
+	// A protocol v2 ls-refs request opens with exactly this pkt-line.
+	if bytes.HasPrefix(command, []byte("0014command=ls-refs\n")) {
+		return SurfaceGitRefs, nil
+	}
+	return SurfaceGitFetch, nil
 }
 
 type statusRecorder struct {
