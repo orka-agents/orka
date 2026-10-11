@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,17 +19,25 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
 const cancelledChildStatus = "cancelled"
 
-var errCancelledChildReplaced = errors.New("child task was replaced")
+var (
+	errCancelledChildReplaced = errors.New("child task was replaced")
+	errCancelChildACP         = errors.New("child task runs on an ACP runtime")
+)
 
 // CancelChildTask cancels a Pending or Running child of the calling Task for
 // the native worker's cancel_task tool. Workers cannot write Task status, so
 // the controller writes the Cancelled phase after verifying the caller's
-// worker identity and the provenance-protected parent link.
+// worker identity and the provenance-protected parent link. Like the
+// controller's own terminal writes, it first revokes the child's Job
+// authority. A child with ACP execution is refused: its terminal status
+// requires the controller epoch mutation guard, which this handler does not
+// hold.
 func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 	namespace := strings.TrimSpace(c.Params("namespace"))
 	taskName := strings.TrimSpace(c.Params("taskName"))
@@ -78,6 +87,12 @@ func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 			result.Status = fmt.Sprintf("task is already in %s phase, cannot cancel", child.Status.Phase)
 			return nil
 		}
+		if child.Status.Execution != nil && child.Status.Execution.ControllerEpoch > 0 {
+			return errCancelChildACP
+		}
+		if err := h.revokeChildJobAuthority(ctx, child); err != nil {
+			return err
+		}
 		now := metav1.Now()
 		child.Status.Phase = corev1alpha1.TaskPhaseCancelled
 		child.Status.CompletionTime = &now
@@ -93,9 +108,26 @@ func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 		return c.JSON(result)
 	case errors.Is(err, errCancelledChildReplaced), apierrors.IsNotFound(err):
 		return fiber.NewError(fiber.StatusForbidden, "task is outside caller coordination scope")
+	case errors.Is(err, errCancelChildACP):
+		return fiber.NewError(fiber.StatusConflict, "the child task runs on an ACP runtime; cancel_task cannot cancel it")
 	case apierrors.IsConflict(err):
 		return fiber.NewError(fiber.StatusConflict, "the child task kept changing while it was being cancelled; retry")
 	default:
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to cancel the child task")
 	}
+}
+
+// revokeChildJobAuthority stops the child's worker Job from writing results
+// before the Task turns terminal.
+func (h *InternalHandlers) revokeChildJobAuthority(ctx context.Context, child *corev1alpha1.Task) error {
+	if child.Status.JobUID == "" {
+		return nil
+	}
+	authority, ok := h.resultStore.(store.TaskJobAuthorityStore)
+	if !ok {
+		return errors.New("task Job authority store unavailable")
+	}
+	return authority.RevokeTaskJob(ctx, store.TaskJobIdentity{
+		Namespace: child.Namespace, TaskUID: string(child.UID), JobUID: child.Status.JobUID,
+	})
 }

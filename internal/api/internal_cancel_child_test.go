@@ -21,13 +21,15 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
 // setupCancelChildHandlers serves the cancel endpoint to my-task's worker Pod.
-// my-task has a running child, a finished child, and a child whose parent
-// label lacks the controller owner reference; worker-a is its sibling.
+// my-task has a running child with a worker Job, a finished child, a child
+// with ACP execution, and a child whose parent label lacks the controller
+// owner reference; worker-a is its sibling.
 func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string, body any) *http.Response) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -47,7 +49,10 @@ func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string
 	forged := internalCallerAuthTaskObject("forged-child", "forged-child-uid", "", "", "")
 	forged.Labels[labels.LabelParentTask] = labels.SelectorValue("my-task")
 	forged.Annotations[labels.AnnotationParentTaskName] = "my-task"
-	objects = append(objects, internalCallerAuthTaskObject("my-child", "my-child-uid", "", "my-task", ""), done, forged)
+	acp := internalCallerAuthTaskObject("acp-child", "acp-child-uid", "", "my-task", "")
+	acp.Status.Execution = &corev1alpha1.TaskExecutionStatus{ControllerEpoch: 1}
+	objects = append(objects, internalCallerAuthTaskObject("my-child", "my-child-uid", "my-child-job", "my-task", ""),
+		done, acp, forged)
 
 	// Register the status subresource so Status().Update behaves like the
 	// API server.
@@ -87,6 +92,18 @@ func TestCancelChildTaskCancelsRunningChild(t *testing.T) {
 	require.Equal(t, corev1alpha1.TaskPhaseCancelled, status.Phase)
 	require.Equal(t, "cancelled by parent task: wrong approach", status.Message)
 	require.NotNil(t, status.CompletionTime)
+	err := h.resultStore.(store.TaskJobAuthorityStore).CheckTaskJobAuthority(t.Context(), store.TaskJobIdentity{
+		Namespace: "default", TaskUID: "my-child-uid", JobUID: "my-child-job-uid",
+	})
+	require.ErrorIs(t, err, store.ErrTaskJobRevoked)
+}
+
+func TestCancelChildTaskRefusesACPExecution(t *testing.T) {
+	h, post := setupCancelChildHandlers(t)
+
+	resp := post("/internal/v1/tasks/default/my-task/children/acp-child/cancel", nil)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	require.Equal(t, corev1alpha1.TaskPhaseRunning, cancelChildTaskStatus(t, h, "acp-child").Phase)
 }
 
 func TestCancelChildTaskLeavesTerminalChildUnchanged(t *testing.T) {
