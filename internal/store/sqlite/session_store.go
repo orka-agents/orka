@@ -392,10 +392,8 @@ func rejectLegacyNativeSession(ctx context.Context, q controlQueryRower, namespa
 }
 
 func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, taskUID string, expiresAt *time.Time) error {
-	if expiresAt == nil {
-		if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
-			return err
-		}
+	if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
+		return err
 	}
 	// Check if session exists
 	var count int
@@ -462,8 +460,8 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		   AND NOT EXISTS (
 		     SELECT 1 FROM session_cleanup_intents
 		     WHERE namespace = ? AND session_name = ?
-		   ) AND (? OR NOT EXISTS (SELECT 1 FROM native_session_snapshots WHERE namespace=? AND session_name=?))`,
-		taskName, taskUID, expiresValue, namespace, name, now, taskName, taskUID, now, namespace, name, expiresAt != nil, namespace, name,
+		   ) AND NOT EXISTS (SELECT 1 FROM native_session_snapshots WHERE namespace=? AND session_name=?)`,
+		taskName, taskUID, expiresValue, namespace, name, now, taskName, taskUID, now, namespace, name, namespace, name,
 	)
 	if err != nil {
 		return err
@@ -474,10 +472,8 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		return err
 	}
 	if rows == 0 {
-		if expiresAt == nil {
-			if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
-				return err
-			}
+		if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
+			return err
 		}
 		if pending, pendingErr := s.HasSessionCleanupIntent(ctx, namespace, name); pendingErr != nil {
 			return pendingErr

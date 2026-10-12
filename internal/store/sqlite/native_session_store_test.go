@@ -145,11 +145,15 @@ func TestNativeSessionRejectsChatTurnWithoutChangingCheckpoint(t *testing.T) {
 			}, "unrelated-chat", time.Now().Add(time.Minute))
 			require.False(t, created)
 			require.ErrorIs(t, err, store.ErrConflict)
+			require.ErrorIs(t, s.AcquireLockUntil(t.Context(), request.Namespace, request.SessionName,
+				"timed-task", "timed-task-uid", time.Now().Add(time.Minute)), store.ErrValidation)
 			after, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
 			require.NoError(t, err)
 			require.Equal(t, before, after)
 			session, err := s.GetSession(t.Context(), request.Namespace, request.SessionName)
 			require.NoError(t, err)
+			require.Empty(t, session.ActiveTask)
+			require.Empty(t, session.ActiveTaskUID)
 			require.Zero(t, session.MessageCount)
 			require.Empty(t, session.Messages)
 			// Native Tasks use the ACP mutation lease, never a legacy Task lock.
