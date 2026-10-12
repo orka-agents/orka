@@ -123,7 +123,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
-| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
+| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation, cancellation/timeout, restart/replacement, publication/PR verification, immutable images, and cleanup |
 | `.github/workflows/agent-runtime-e2e.yml` / `scripts/agent-runtime-kind-e2e.sh` | Manual agent runtime smoke that calls real model providers, requires credentials, and bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
 | `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved chart and runtime acceptance, real local Git publication tests, GitHub API fixture tests, and cleanup; no stored Git publication credentials |
 
@@ -139,10 +139,11 @@ missing or mismatched artifacts staying not ready.
 ### E2E key requirements
 
 - `scripts/agent-runtime-e2e.sh --context <context>` is the canonical ACP
-  deployed-cluster validator. Its default mode is a smoke test; set
-  `RELEASE_GATE=1` for full runtime acceptance, including Task result/fork and
-  scale-to-zero scenarios. The Kind wrapper also requires uncached publication
-  tests. A smoke result cannot qualify a release. Live GitHub publication is
+  deployed-cluster validator. Its default mode is a smoke test of runtime
+  behavior against real models. `RELEASE_GATE=1` checks the shipped artifacts
+  instead: one workspace read with its API result per runtime, unsafe workspace
+  rejection, and image digests. The Kind wrapper also requires uncached
+  publication tests. A smoke result cannot qualify a release. Live GitHub publication is
   available only through an explicit local opt-in.
 - `scripts/agent-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
@@ -183,15 +184,13 @@ missing or mismatched artifacts staying not ready.
   `config/acp-production` Vekil ingress boundary; durable controller/Publisher
   PVCs; a distinct publication fork; and authenticated `gh` access for
   independent remote and PR verification/cleanup.
-- Canonical ACP acceptance runs all Codex scenarios, including publication,
-  before deleting the Codex pool and starting OpenCode. It validates OpenCode
-  native ACP read, continuation, and read-intent tool policy, deletes the
-  OpenCode pool, starts Claude, and then runs live Copilot read/continuation
-  after Claude cleanup. Every provider phase verifies exact Pod UID, image ID,
-  runtime instance/profile, and RuntimeSession identity. Codex additionally
-  covers cancellation and timeout settlement, controller restart, pool
-  replacement, drain/scale-to-zero, and publication/remote delivery; release
-  mode also exercises Task forks.
+- The validator runs Codex, then OpenCode, Claude, and Copilot, deleting each
+  provider's pools before starting the next. Every provider phase verifies exact
+  Pod UID, image ID, runtime instance/profile, and RuntimeSession identity. Smoke
+  mode also checks continuation, OpenCode's read-intent tool policy, and, for
+  Codex, concurrency, cancellation and timeout settlement, controller restart,
+  and pool replacement. Release mode runs only the reads and, with the local
+  opt-in, the live publication canary.
 - `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
   When either key is unset, the suite deploys [aimock](https://github.com/CopilotKit/aimock)

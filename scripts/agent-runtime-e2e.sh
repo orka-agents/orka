@@ -18,15 +18,17 @@ Validates an already deployed Orka harness v2 installation without printing Secr
 material. The kubectl context is required and is passed to every kubectl call.
 
 Modes:
-  Smoke (default)       Read/status/concurrency/cancel/restart/replacement checks.
-                        The final message explicitly reports incomplete release
-                        coverage when release-only scenarios are skipped.
-  RELEASE_GATE=1        In addition to smoke checks, requires API result/fork
-                        validation, drain/scale-to-zero/recovery, candidate-head
-                        checks, and immutable images for every ACP workload.
-                        The Kind wrapper also requires local Git publication
-                        and GitHub API fixture tests from the exact candidate.
-                        Live GitHub publication is an explicit local opt-in.
+  Smoke (default)       Read/continuation/concurrency/cancel/timeout/restart/
+                        replacement checks against real model providers.
+  RELEASE_GATE=1        Checks the shipped artifacts rather than runtime
+                        behavior: a workspace read with its API result for each
+                        runtime, unsafe workspace rejection, publisher authority,
+                        candidate-head checks, and immutable images for every
+                        ACP workload. The Go "Agent runtime lifecycle" e2e job
+                        covers runtime behavior on every PR. The Kind wrapper
+                        also requires local Git publication and GitHub API
+                        fixture tests from the exact candidate. Live GitHub
+                        publication is an explicit local opt-in.
 
 Common environment:
   ACP_E2E_NAMESPACE                  Unique test namespace
@@ -42,7 +44,7 @@ Common environment:
   ACP_E2E_OPENCODE_MAX_TOKENS        Reviewed OpenCode model output limit (required)
   ACP_E2E_COPILOT_MODEL              Copilot model (default: gpt-5.3-codex)
   ACP_E2E_CONCURRENCY_TASKS          Concurrent Codex task count (default: 6)
-  ACP_E2E_REQUIRE_PARALLEL=1         Require >=2 running prompts in smoke; release always requires it
+  ACP_E2E_REQUIRE_PARALLEL=1         Require >=2 running prompts in the smoke concurrency check
   ACP_E2E_BLOCKING_PROMPT            Prompt that remains Running long enough to cancel
   ACP_E2E_TASK_MAX_TURNS             Provider inference-request budget per Task (default 24)
   ACP_E2E_TIMEOUT_DURATION           Task timeout; Running must be observed before expiry (default: 90s)
@@ -265,6 +267,8 @@ api_local_port="${ACP_E2E_API_LOCAL_PORT:-$((20000 + ($$ % 20000)))}"
 
 [[ "${model_backend}" == "vekil" || "${model_backend}" == "aimock" ]] || \
   die "ACP_E2E_MODEL_BACKEND must be vekil or aimock"
+[[ "${model_backend}" == "vekil" || "${release_gate}" -eq 1 ]] || \
+  die "ACP_E2E_MODEL_BACKEND=aimock scripts only RELEASE_GATE=1; smoke checks need real models"
 is_uint "${opencode_context_window}" || die "ACP_E2E_OPENCODE_CONTEXT_WINDOW must be a positive integer"
 is_uint "${opencode_max_tokens}" || die "ACP_E2E_OPENCODE_MAX_TOKENS must be a positive integer"
 (( opencode_context_window > opencode_max_tokens )) || \
@@ -295,14 +299,9 @@ k() {
 }
 
 # load_aimock_fixtures replaces the aimock fixture set with one runtime's
-# script. The continuation and fork prompts are the same for every runtime, so
-# each runtime's checks run against its own set. A scripted model answers a
-# nonce only when the request carries the prior turn: rehydrated turns (Pod
-# replacement, scale to zero, controller restart) match the earlier answer, or
-# the JSON-quoted restart prompt, inside the canonical transcript. A
-# continuation or fork on the live session with no earlier assistant turn gets
-# a reply without the nonce. A runtime that drops history therefore fails the
-# nonce checks, as it would with a real model.
+# script. The read prompt is the same for every runtime, so each runtime's
+# read runs against its own set, which answers only after the runtime's file
+# tool returned the LICENSE line.
 load_aimock_fixtures() {
   [[ "${model_backend}" == "aimock" ]] || return 0
   local provider="$1" file loaded
@@ -321,63 +320,6 @@ process.stdin.on("data", (chunk) => { body += chunk; }).on("end", async () => {
   [[ "${loaded}" == "$(jq '.fixtures | length' "${file}")" ]] || \
     die "aimock loaded ${loaded} fixtures for ${provider}, not the full set"
   log "Loaded aimock fixtures for ${provider}"
-}
-
-# read_aimock_journal writes every model request aimock has answered.
-read_aimock_journal() {
-  # shellcheck disable=SC2016 # This is a Node program.
-  k -n vekil-system exec deployment/vekil -- node -e '
-fetch("http://127.0.0.1:1337/__aimock/journal").then((r) => r.text()).then((t) => process.stdout.write(t));'
-}
-
-# aimock_journal_mark prints the journal length so a history check can
-# consider only the requests made after it submits a Task.
-aimock_journal_mark() {
-  if [[ "${model_backend}" != "aimock" ]]; then
-    echo 0
-    return 0
-  fi
-  read_aimock_journal | jq -e 'length'
-}
-
-# assert_aimock_history checks that a model request made since mark carried
-# both the Task's prompt and evidence of the prior turn, which a single fixture
-# match cannot express. A dropped prompt, or lost or foreign history, cannot
-# return the scripted nonce. aimock does not journal bodies over 64 KB, so a
-# Task whose requests outgrow that cap fails rather than passing unchecked.
-assert_aimock_history() {
-  [[ "${model_backend}" == "aimock" ]] || return 0
-  local task="$1" mark="$2" prompt="$3" evidence="$4" journal
-  journal="${temp_root}/aimock-journal.json"
-  read_aimock_journal >"${journal}" || die "failed to read the aimock journal for Task/${task}"
-  if jq -e --argjson mark "${mark}" --arg prompt "${prompt}" --arg evidence "${evidence}" '
-      any(.[$mark:][]; .body.__aimock_truncated != true
-        and (.body | tostring | contains($prompt) and contains($evidence)))
-    ' "${journal}" >/dev/null; then
-    return 0
-  fi
-  if jq -e --argjson mark "${mark}" 'any(.[$mark:][]; .body.__aimock_truncated == true)' "${journal}" >/dev/null; then
-    die "Task/${task} model requests exceed the aimock 64 KB journal cap, so their history cannot be verified"
-  fi
-  die "no model request for Task/${task} carried both its prompt and ${evidence} from the prior turn"
-}
-
-# aimock_blocking_command_served succeeds once aimock has answered a request
-# made since mark with the scripted sleep 180 tool call.
-aimock_blocking_command_served() {
-  local mark="$1"
-  read_aimock_journal | jq -e --argjson mark "${mark}" '
-    any(.[$mark:][]; any(.response.fixture.response.toolCalls[]?; .arguments.cmd == "sleep 180"))' >/dev/null
-}
-
-# wait_blocking_command_started waits, with aimock, until the scripted model
-# has handed the runtime its sleep 180 command, so timeout, cancellation, and
-# controller restart act on a running workspace command.
-wait_blocking_command_started() {
-  [[ "${model_backend}" == "aimock" ]] || return 0
-  local task="$1" mark="$2"
-  wait_until "Task/${task} sleep 180 tool call" "${state_wait_seconds}" aimock_blocking_command_served "${mark}" || \
-    die "the scripted model never handed Task/${task} its sleep 180 command"
 }
 
 resource_exists() {
@@ -1451,18 +1393,6 @@ api_task_result() {
   api_request GET "/api/v1/tasks/${task}/result?namespace=${namespace}" | jq -r '.result'
 }
 
-api_fork_task() {
-  local source_task="$1"
-  local new_task="$2"
-  local prompt="$3"
-  local body_file="${temp_root}/fork-request.json"
-  jq -n \
-    --arg name "${new_task}" \
-    --arg prompt "${prompt}" \
-    '{newTaskName:$name,prompt:$prompt}' >"${body_file}"
-  api_request POST "/api/v1/tasks/${source_task}/fork?namespace=${namespace}" "${body_file}"
-}
-
 github_repo_slug() {
   local url="$1"
   local path
@@ -2033,25 +1963,6 @@ pool_lifecycle_is() {
 }
 
 
-pool_lifecycle_reached() {
-  local pool="$1"
-  local target="$2"
-  local payload state
-  payload="$(k -n "${namespace}" get runtimepool "${pool}" -o json 2>/dev/null)" || return 1
-  state="$(jq -r '(.status.lifecycle // "") + "/" + (.status.admissionState // "")' <<<"${payload}")"
-  case "${target}:${state}" in
-    Draining:Draining/Draining|Draining:Quiescent/Draining|Draining:Stopping/Closed|Draining:Stopped/Closed | \
-    Quiescent:Quiescent/Draining|Quiescent:Stopping/Closed|Quiescent:Stopped/Closed | \
-    Stopping:Stopping/Closed|Stopping:Stopped/Closed | \
-    Stopped:Stopped/Closed)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 pool_instance_changed_and_serving() {
   local pool="$1"
   local previous_instance="$2"
@@ -2565,7 +2476,7 @@ run_read_smoke() {
   local session="$5"
   local nonce="$6"
   local expected_line="$7"
-  local continuation fork_task pool snapshot continuation_snapshot fork_snapshot fork_response fork_after_seq journal_mark
+  local continuation pool snapshot continuation_snapshot
   apply_agent "${provider}" "${model}" "${agent}"
   apply_read_task "${task}" "${agent}" "${session}" true \
     "Read LICENSE. Remember the session nonce ${nonce}. Report the nonce and the first non-empty LICENSE line exactly. Do not modify any file." \
@@ -2575,10 +2486,16 @@ run_read_smoke() {
   snapshot="${temp_root}/${task}-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${snapshot}"
   assert_task_succeeded_read "${task}" "${snapshot}" "${read_repo_commit}" "${nonce}" "${expected_line}"
+  read_smoke_pool="${pool}"
+  if [[ "${release_gate}" -eq 1 ]]; then
+    # The release gate checks each shipped runtime image; continuation and
+    # forks run on every PR in the Go "Agent runtime lifecycle" e2e job.
+    acp_report_update '.runtime.providers[$provider] = {read:true,result:true}' --arg provider "${provider}"
+    return 0
+  fi
 
   continuation="$(sanitize_name "${task}-continue")"
   [[ "${continuation}" != "${task}" ]] || die "continuation Task name collided with source Task name"
-  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${continuation}"
   apply_read_task "${continuation}" "${agent}" "${session}" false \
     "Continue the existing session. Return the session nonce from the prior turn and no repository-derived replacement. Do not modify files." \
     "12m" false
@@ -2588,7 +2505,6 @@ run_read_smoke() {
   continuation_snapshot="${temp_root}/${continuation}-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${continuation_snapshot}"
   assert_task_succeeded_read "${continuation}" "${continuation_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${continuation}" "${journal_mark}" "Return the session nonce from the prior turn" "${nonce}"
 
   local first_uid first_generation continued_uid continued_generation
   first_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
@@ -2600,38 +2516,6 @@ run_read_smoke() {
   [[ "${first_generation}" == "${continued_generation}" ]] || \
     die "create:false continuation unexpectedly changed RuntimeSession generation without replacement"
 
-  if [[ "${release_gate}" -eq 1 ]]; then
-    fork_task="$(sanitize_name "${task}-fork")"
-    [[ "${fork_task}" != "${task}" && "${fork_task}" != "${continuation}" ]] || \
-      die "forked Task name collided with source or continuation Task name"
-    journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${fork_task}"
-    fork_response="$(api_fork_task "${continuation}" "${fork_task}" \
-      "Return the session nonce represented in the source task timeline. Do not modify files.")" || \
-      die "Task fork API request failed"
-    jq -e --arg source "${continuation}" --arg fork "${fork_task}" --arg ns "${namespace}" '
-      .namespace == $ns and .sourceTaskName == $source and .newTaskName == $fork and .afterSeq >= 1
-    ' <<<"${fork_response}" >/dev/null || die "Task fork API response did not identify the requested checkpoint fork"
-    fork_after_seq="$(jq -r '.afterSeq' <<<"${fork_response}")"
-    if ! k -n "${namespace}" patch task "${fork_task}" --type=merge \
-        -p "$(jq -cn --arg run "${run_id}" '{metadata:{labels:{"orka.ai/acp-e2e-run":$run}}}')" >/dev/null; then
-      die "failed to mark forked Task/${fork_task} as owned by this release-gate run"
-    fi
-    wait_until "forked Task/${fork_task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${fork_task}"
-    [[ "$(wait_task_pool_name_value "${fork_task}")" == "${pool}" ]] || \
-      die "forked Task/${fork_task} selected a different RuntimePool"
-    fork_snapshot="${temp_root}/${fork_task}-pool.json"
-    capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${fork_snapshot}"
-    assert_task_succeeded_read "${fork_task}" "${fork_snapshot}" "${read_repo_commit}" "${nonce}" ""
-    assert_aimock_history "${fork_task}" "${journal_mark}" "Return the session nonce represented in the source task timeline" "${nonce}"
-    jq -e --arg source "${continuation}" --arg seq "${fork_after_seq}" '
-      .metadata.annotations["orka.ai/fork-source-task"] == $source
-      and .metadata.annotations["orka.ai/fork-source-seq"] == $seq
-    ' < <(task_json "${fork_task}") >/dev/null || die "forked Task/${fork_task} does not bind to the API checkpoint sequence"
-    acp_report_update '.runtime.providers[$provider] = {read:true,continuation:true,result:true,fork:true}' \
-      --arg provider "${provider}"
-  fi
-
-  read_smoke_pool="${pool}"
   read_smoke_session_uid="${continued_uid}"
   read_smoke_session_generation="${continued_generation}"
 }
@@ -2840,10 +2724,7 @@ run_concurrency_check() {
   if (( concurrency_tasks > limit && queued_seen < 1 )); then
     die "capacity burst never exposed durable queued demand"
   fi
-  if [[ "${release_gate}" -eq 1 && "${max_seen}" -lt 2 ]]; then
-    die "release gate did not observe at least two concurrent running prompts"
-  fi
-  if [[ "${release_gate}" -eq 0 ]] && bool_env "${require_parallel}" && (( max_seen < 2 )); then
+  if bool_env "${require_parallel}" && (( max_seen < 2 )); then
     die "parallel prompt execution was not observed (max=${max_seen})"
   fi
 
@@ -2866,10 +2747,9 @@ run_timeout_check() {
   local provider="$1"
   local model="$2"
   local agent="$3"
-  local task pool snapshot start_seconds elapsed_seconds journal_mark
+  local task pool snapshot start_seconds elapsed_seconds
   task="$(sanitize_name "acp-timeout-${run_id}")"
   log "Validating Task timeout after first proving the prompt reached Running"
-  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   start_seconds="${SECONDS}"
   apply_read_task "${task}" "${agent}" "" false "${blocking_prompt}" "${timeout_duration}" true
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
@@ -2877,7 +2757,6 @@ run_timeout_check() {
   tool_profile_pool="${pool}"
   wait_pool_serving "${pool}"
   wait_until "Task/${task} active Running prompt" "${state_wait_seconds}" pool_running_for_task "${task}" "${pool}"
-  wait_blocking_command_started "${task}" "${journal_mark}"
   snapshot="${temp_root}/${task}-running-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${snapshot}"
   assert_cancelled_task "${task}" "${snapshot}" "TaskTimeout"
@@ -2891,10 +2770,9 @@ run_explicit_cancel_check() {
   local provider="$1"
   local model="$2"
   local agent="$3"
-  local task pool snapshot uid cancel_requested_at journal_mark
+  local task pool snapshot uid cancel_requested_at
   task="$(sanitize_name "acp-cancel-${run_id}")"
   log "Validating explicit cancellation after an active Running prompt"
-  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   apply_read_task "${task}" "${agent}" "" false "${blocking_prompt}" "1h" true
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
   pool="$(wait_task_pool_name_value "${task}")"
@@ -2902,7 +2780,6 @@ run_explicit_cancel_check() {
     die "explicit-cancel check selected RuntimePool/${pool}, want shared tool RuntimePool/${tool_profile_pool}"
   wait_pool_serving "${pool}"
   wait_until "Task/${task} active Running prompt" "${state_wait_seconds}" pool_running_for_task "${task}" "${pool}"
-  wait_blocking_command_started "${task}" "${journal_mark}"
   snapshot="${temp_root}/${task}-running-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${snapshot}"
   pool_running_for_task "${task}" "${pool}" || die "Task/${task} was no longer Running immediately before cancellation"
@@ -2933,12 +2810,11 @@ run_controller_restart_check() {
   local model="$2"
   local agent="$3"
   local nonce="$4"
-  local task continuation session pool old_snapshot new_snapshot old_instance old_epoch old_uid old_generation new_uid new_generation journal_mark
+  local task continuation session pool old_snapshot new_snapshot old_instance old_epoch old_uid old_generation new_uid new_generation
   task="$(sanitize_name "acp-restart-${run_id}")"
   continuation="$(sanitize_name "acp-post-restart-${run_id}")"
   session="$(sanitize_name "acp-restart-session-${run_id}")"
   log "Validating controller restart while an ACP prompt is actively Running"
-  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   apply_read_task "${task}" "${agent}" "${session}" true \
     "Remember restart nonce ${nonce}. ${blocking_prompt}" "1h" true
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
@@ -2947,7 +2823,6 @@ run_controller_restart_check() {
     die "controller-restart check selected RuntimePool/${pool}, want shared tool RuntimePool/${tool_profile_pool}"
   wait_pool_serving "${pool}"
   wait_until "Task/${task} active Running prompt" "${state_wait_seconds}" pool_running_for_task "${task}" "${pool}"
-  wait_blocking_command_started "${task}" "${journal_mark}"
   old_snapshot="${temp_root}/${task}-pre-restart-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${old_snapshot}"
   old_instance="$(jq -r '.runtimeInstanceID' "${old_snapshot}")"
@@ -2972,7 +2847,6 @@ run_controller_restart_check() {
   (( $(jq -r '.controllerEpoch' "${new_snapshot}") > old_epoch )) || \
     die "controller epoch did not advance across restart"
 
-  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${continuation}"
   apply_read_task "${continuation}" "${agent}" "${session}" false \
     "Continue the existing session after controller replacement. Return the restart nonce from the prior user turn. Do not modify files." \
     "12m" true
@@ -2980,7 +2854,6 @@ run_controller_restart_check() {
   [[ "$(wait_task_pool_name_value "${continuation}")" == "${pool}" ]] || \
     die "post-restart continuation selected a different RuntimePool"
   assert_task_succeeded_read "${continuation}" "${new_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${continuation}" "${journal_mark}" "Return the restart nonce from the prior user turn" "${nonce}"
   new_uid="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   new_generation="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ -n "${old_uid}" && "${new_uid}" == "${old_uid}" ]] || \
@@ -2989,8 +2862,6 @@ run_controller_restart_check() {
     die "controller restart continuation did not advance RuntimeSession generation"
 }
 
-replacement_session_uid=""
-replacement_session_generation=""
 run_pool_replacement_check() {
   require_runtimepool_mutation_scope || return 1
   local provider="$1"
@@ -2999,7 +2870,7 @@ run_pool_replacement_check() {
   local pool="$4"
   local session="$5"
   local nonce="$6"
-  local before_snapshot after_snapshot before_instance before_uid before_generation pod_ns pod_name task after_uid after_generation journal_mark
+  local before_snapshot after_snapshot before_instance before_uid before_generation pod_ns pod_name task after_uid after_generation
   log "Validating exact-Pod RuntimePool replacement and create:false recovery"
   before_snapshot="${temp_root}/pool-replacement-before.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${before_snapshot}"
@@ -3019,66 +2890,15 @@ run_pool_replacement_check() {
     die "RuntimePool/${pool} supervisor boot ID did not change"
 
   task="$(sanitize_name "acp-post-replacement-${run_id}")"
-  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   apply_read_task "${task}" "${agent}" "${session}" false \
     "Continue the existing session after exact Pod replacement. Return the original session nonce from the prior transcript. Do not modify files." \
     "12m" false
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
   assert_task_succeeded_read "${task}" "${after_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${task}" "${journal_mark}" "Return the original session nonce from the prior transcript" "${nonce}"
   after_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${after_uid}" == "${before_uid}" ]] || die "Pod replacement changed logical RuntimeSession UID"
   (( after_generation > before_generation )) || die "Pod replacement did not advance RuntimeSession generation"
-  replacement_session_uid="${after_uid}"
-  replacement_session_generation="${after_generation}"
-}
-
-run_scale_to_zero_recovery_check() {
-  require_runtimepool_mutation_scope || return 1
-  local provider="$1"
-  local model="$2"
-  local agent="$3"
-  local pool="$4"
-  local session="$5"
-  local nonce="$6"
-  local before_snapshot after_snapshot before_instance before_pool_uid task after_uid after_generation journal_mark
-  log "Validating authenticated drain: Serving -> Draining -> Quiescent -> Stopping -> Stopped"
-  before_snapshot="${temp_root}/scale-zero-before.json"
-  capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${before_snapshot}"
-  before_instance="$(jq -r '.runtimeInstanceID' "${before_snapshot}")"
-  before_pool_uid="$(jq -r '.poolUID' "${before_snapshot}")"
-
-  k -n "${namespace}" patch runtimepool "${pool}" --type=merge \
-    -p '{"spec":{"desiredReplicas":0}}' >/dev/null
-  wait_until_fast "RuntimePool/${pool} Draining or later" "${state_wait_seconds}" pool_lifecycle_reached "${pool}" Draining
-  wait_until_fast "RuntimePool/${pool} Quiescent or later" "${state_wait_seconds}" pool_lifecycle_reached "${pool}" Quiescent
-  wait_until_fast "RuntimePool/${pool} Stopping or later" "${state_wait_seconds}" pool_lifecycle_reached "${pool}" Stopping
-  wait_until "RuntimePool/${pool} Stopped with zero authenticated/controller counters" "${wait_seconds}" pool_stopped "${pool}"
-
-  log "Validating 0 -> 1 recovery of the same logical Session"
-  task="$(sanitize_name "acp-scale-zero-recovery-${run_id}")"
-  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
-  apply_read_task "${task}" "${agent}" "${session}" false \
-    "Continue the existing session after scale-to-zero. Return the original session nonce from the durable transcript. Do not modify files." \
-    "12m" false
-  wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
-  [[ "$(wait_task_pool_name_value "${task}")" == "${pool}" ]] || \
-    die "scale-to-zero recovery selected a different logical RuntimePool"
-  after_snapshot="${temp_root}/scale-zero-after.json"
-  capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${after_snapshot}"
-  [[ "$(jq -r '.poolUID' "${after_snapshot}")" == "${before_pool_uid}" ]] || \
-    die "0 -> 1 recovery replaced the logical RuntimePool object"
-  [[ "$(jq -r '.runtimeInstanceID' "${after_snapshot}")" != "${before_instance}" ]] || \
-    die "0 -> 1 recovery reused the stopped runtime instance"
-  assert_task_succeeded_read "${task}" "${after_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${task}" "${journal_mark}" "Return the original session nonce from the durable transcript" "${nonce}"
-  after_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
-  after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
-  [[ "${after_uid}" == "${replacement_session_uid}" ]] || \
-    die "scale-to-zero recovery changed the logical RuntimeSession UID"
-  (( after_generation > replacement_session_generation )) || \
-    die "scale-to-zero recovery did not advance RuntimeSession generation"
 }
 
 release_source_slug=""
@@ -3824,7 +3644,6 @@ session_nonce="nonce-${run_id}-${RANDOM}-${RANDOM}"
 restart_nonce="restart-${run_id}-${RANDOM}-${RANDOM}"
 if [[ "${model_backend}" == "aimock" ]]; then
   session_nonce="nonce-aimock-codex"
-  restart_nonce="restart-aimock"
 fi
 load_aimock_fixtures codex
 
@@ -3832,7 +3651,7 @@ codex_agent="$(sanitize_name "acp-codex-${run_id}")"
 codex_task="$(sanitize_name "acp-codex-read-${run_id}")"
 codex_session="$(sanitize_name "acp-codex-session-${run_id}")"
 if [[ "${release_gate}" -eq 1 ]]; then
-  log "Running Codex read, result, continuation, and Task-fork validation"
+  log "Running Codex read and result validation"
 else
   log "Running Codex read and continuation smoke validation"
 fi
@@ -3842,32 +3661,8 @@ codex_pool="${read_smoke_pool}"
 
 assert_unsafe_workspace_rejected "${codex_agent}"
 acp_report_update '.runtime.checks.unsafeWorkspace = true'
-run_concurrency_check "${codex_agent}" codex "${codex_model}" "${codex_pool}"
-acp_report_update '.runtime.checks.concurrency = true'
-if runtimepool_mutations_allowed; then
-  park_runtimepool "${codex_pool}"
-fi
 codex_tool_agent="$(sanitize_name "acp-codex-tools-${run_id}")"
-apply_agent codex "${codex_model}" "${codex_tool_agent}" 12 true
-run_timeout_check codex "${codex_model}" "${codex_tool_agent}"
-acp_report_update '.runtime.checks.timeout = true'
-run_explicit_cancel_check codex "${codex_model}" "${codex_tool_agent}"
-acp_report_update '.runtime.checks.cancellation = true'
-if runtimepool_mutations_allowed; then
-  run_controller_restart_check codex "${codex_model}" "${codex_tool_agent}" "${restart_nonce}"
-  acp_report_update '.runtime.checks.controllerRestart = true'
-  park_provider_runtimepools_except codex "${codex_pool}"
-  resume_runtimepool "${codex_pool}"
-  run_pool_replacement_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
-  acp_report_update '.runtime.checks.poolReplacement = true'
-else
-  shared_mutation_checks_skipped=1
-  log "Shared watch namespace: skipping controller restart and RuntimePool parking, resume, and replacement checks"
-fi
-
 if [[ "${release_gate}" -eq 1 ]]; then
-  run_scale_to_zero_recovery_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
-  acp_report_update '.runtime.checks.scaleToZeroRecovery = true'
   park_runtimepool "${codex_pool}"
   if acp_live_github_enabled; then
     run_write_release_gate "${codex_agent}"
@@ -3880,6 +3675,23 @@ if [[ "${release_gate}" -eq 1 ]]; then
       die "live GitHub canary cleanup did not complete safely"
     fi
     remote_cleanup_required=0
+  fi
+else
+  run_concurrency_check "${codex_agent}" codex "${codex_model}" "${codex_pool}"
+  if runtimepool_mutations_allowed; then
+    park_runtimepool "${codex_pool}"
+  fi
+  apply_agent codex "${codex_model}" "${codex_tool_agent}" 12 true
+  run_timeout_check codex "${codex_model}" "${codex_tool_agent}"
+  run_explicit_cancel_check codex "${codex_model}" "${codex_tool_agent}"
+  if runtimepool_mutations_allowed; then
+    run_controller_restart_check codex "${codex_model}" "${codex_tool_agent}" "${restart_nonce}"
+    park_provider_runtimepools_except codex "${codex_pool}"
+    resume_runtimepool "${codex_pool}"
+    run_pool_replacement_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
+  else
+    shared_mutation_checks_skipped=1
+    log "Shared watch namespace: skipping controller restart and RuntimePool parking, resume, and replacement checks"
   fi
 fi
 
@@ -3894,16 +3706,21 @@ if [[ "${model_backend}" == "aimock" ]]; then
   opencode_nonce="nonce-aimock-opencode"
 fi
 load_aimock_fixtures opencode
-log "Running OpenCode native ACP read, continuation, and read-policy validation"
+if [[ "${release_gate}" -eq 1 ]]; then
+  log "Running OpenCode native ACP read and result validation"
+else
+  log "Running OpenCode native ACP read, continuation, and read-policy validation"
+fi
 run_read_smoke opencode "${opencode_model}" "${opencode_agent}" "${opencode_task}" "${opencode_session}" \
   "${opencode_nonce}" "${expected_license_line}"
 if runtimepool_mutations_allowed; then
   park_runtimepool "${read_smoke_pool}"
 fi
 opencode_policy_agent="$(sanitize_name "acp-opencode-policy-agent-${run_id}")"
-apply_agent opencode "${opencode_model}" "${opencode_policy_agent}" 12 true
-run_opencode_read_policy_check "${opencode_policy_agent}" "${opencode_model}"
-acp_report_update '.runtime.checks.opencodeReadPolicy = true'
+if [[ "${release_gate}" -eq 0 ]]; then
+  apply_agent opencode "${opencode_model}" "${opencode_policy_agent}" 12 true
+  run_opencode_read_policy_check "${opencode_policy_agent}" "${opencode_model}"
+fi
 assert_all_tasks_validated
 remove_provider_resources opencode "${opencode_agent}" "${opencode_policy_agent}"
 [[ "${namespace_shared:-0}" -eq 1 ]] || wait_until "OpenCode runtime children removal" 300 runtime_children_absent
@@ -3955,6 +3772,6 @@ else
   if [[ "${shared_mutation_checks_skipped}" -eq 1 ]]; then
     log "Orka harness v2 shared-namespace smoke validation passed on context ${context}; controller restart and RuntimePool lifecycle/replacement checks were skipped. Use an isolated namespace for complete smoke acceptance."
   else
-    log "Orka harness v2 smoke validation passed on context ${context}; Task result/fork, scale-to-zero, and required publication tests were skipped. Use RELEASE_GATE=1 with the Kind wrapper for release acceptance."
+    log "Orka harness v2 smoke validation passed on context ${context}; API results, image digests, and required publication tests were skipped. Use RELEASE_GATE=1 with the Kind wrapper for release acceptance."
   fi
 fi

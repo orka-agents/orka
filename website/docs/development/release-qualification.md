@@ -135,16 +135,19 @@ Release qualification needs no stored GitHub repository token, custom GitHub
 App, or model-provider credential. Agent execution runs against aimock deployed
 as `vekil-system/vekil` behind the production provider proxy, scripted by
 `scripts/fixtures/agent-runtime-aimock` (`ACP_E2E_MODEL_BACKEND=aimock`), and the
-report records `coverage.modelBackend`. Real-model drift is not part of
-qualification. GitHub observations use the job's temporary `GITHUB_TOKEN` with read-only
+report records `coverage.modelBackend`. Qualification checks the shipped
+artifacts: each runtime image must start from the packaged chart and complete a
+workspace read. Runtime behavior (continuation, forks, concurrency,
+cancellation, timeout, restart, replacement, and scale to zero) runs on every PR
+in the `Agent runtime lifecycle` job of `test-e2e.yml`, and real-model drift is
+not part of qualification. GitHub observations use the job's temporary `GITHUB_TOKEN` with read-only
 access. Runtime Tasks clone the public candidate repository without a stored
 Git credential. Qualification creates no GitHub branch or PR.
 
 | Check | Required coverage |
 | --- | --- |
-| Codex, OpenCode, Claude, and Copilot | Live workspace reads with scripted models, API results, Session continuation, and Task forks |
-| Runtime lifecycle | Concurrency, cancellation, timeout, controller restart, pool replacement, and scale-to-zero recovery |
-| Isolation and deployment | Unsafe workspace rejection, read policy, publisher broker configuration, and exact deployed image digests |
+| Codex, OpenCode, Claude, and Copilot | A workspace read with a scripted model and its API result, on the digest-pinned runtime image |
+| Isolation and deployment | Unsafe workspace rejection, publisher broker configuration, and exact deployed image digests |
 | Branch publication | Publisher and service tests against real temporary Git repositories, including exact-head pushes, conflicts, retries, and cleanup |
 | PR reconciliation | Local GitHub API test servers exercise creation, reuse, head changes, ambiguous responses, Session ownership, and credential boundaries |
 | Release artifacts | The exact packaged chart and image digests, durable results after controller replacement, no Task replay, and opposite-mode rejection |

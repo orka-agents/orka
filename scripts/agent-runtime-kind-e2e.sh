@@ -10,9 +10,9 @@ Usage: scripts/agent-runtime-kind-e2e.sh [--namespace NAME] [--keep-cluster] [--
 Builds the Orka controller, worker, and agent runtime images, creates a
 repo-scoped Kind cluster, deploys a pinned Vekil proxy and Orka, then runs
 scripts/agent-runtime-e2e.sh against real model providers. With
-ACP_E2E_MODEL_BACKEND=aimock it deploys aimock as vekil-system/vekil instead,
-scripted by scripts/fixtures/agent-runtime-aimock, and needs no model
-credential.
+ACP_E2E_MODEL_BACKEND=aimock (RELEASE_GATE=1 only) it deploys aimock as
+vekil-system/vekil instead, scripted by scripts/fixtures/agent-runtime-aimock,
+and needs no model credential.
 
 With the Vekil backend this wrapper is intentionally noninteractive:
 COPILOT_GITHUB_TOKEN is required and is written only through the Vekil deploy
@@ -23,7 +23,7 @@ Environment:
   ACP_E2E_KIND_TAG        kindctl tag (default: run-scoped agent-runtime)
   ACP_E2E_KIND_CONFIG     optional Kind config path
   ACP_E2E_KEEP_CLUSTER=1  keep the cluster and local registry after the run
-  ACP_E2E_MODEL_BACKEND   vekil (default; real models) or aimock (scripted)
+  ACP_E2E_MODEL_BACKEND   vekil (default; real models) or aimock (scripted, release gate only)
   ACP_E2E_AIMOCK_IMAGE    digest-pinned aimock image override
   ACP_E2E_VEKIL_IMAGE     digest-pinned Vekil image override
   ACP_E2E_VEKIL_LOCAL_IMAGE local Docker image published through the run's
