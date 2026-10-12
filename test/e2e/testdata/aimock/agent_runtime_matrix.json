@@ -1,0 +1,40 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:runtime-codex-read]", "toolResultContains": "Hello World!"},
+      "response": {"content": "Hello World!"}
+    },
+    {
+      "match": {"userMessage": "[e2e:runtime-codex-read]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {"name": "exec_command", "arguments": {"cmd": "cat README"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:runtime-opencode-read]", "toolResultContains": "Hello World!"},
+      "response": {"content": "README contains: Hello World!"}
+    },
+    {
+      "match": {"userMessage": "[e2e:runtime-opencode-read]", "hasToolResult": true},
+      "response": {
+        "toolCalls": [
+          {"name": "read", "arguments": {"filePath": "README"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:runtime-opencode-read]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {"name": "bash", "arguments": {"command": "touch SHOULD_NOT_EXIST.txt", "description": "Attempt a forbidden mutation"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:runtime-claude]"},
+      "response": {"content": "ORKA_LIVE_CLAUDE_OK"}
+    }
+  ]
+}

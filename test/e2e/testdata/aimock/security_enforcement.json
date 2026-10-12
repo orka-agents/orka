@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:security-deny-pattern]", "hasToolResult": false},
+      "response": {"toolCalls": [{"name": "code_exec", "arguments": {"language": "bash", "code": "rm -rf /"}}]}
+    },
+    {
+      "match": {"userMessage": "[e2e:security-deny-pattern]", "hasToolResult": true},
+      "response": {"content": "The command was blocked by the code_exec safety guard, so nothing was deleted."}
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:fallback-provider]", "model": "gpt-4o-mini-e2e-fallback"},
+      "response": {"content": "10"}
+    },
+    {
+      "match": {"userMessage": "[e2e:fallback-provider]"},
+      "response": {
+        "error": {"message": "e2e primary provider rejected the request", "type": "authentication_error"},
+        "status": 401
+      }
+    }
+  ]
+}

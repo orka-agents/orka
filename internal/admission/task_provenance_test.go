@@ -258,6 +258,27 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			contains: labels.AnnotationParentTaskUID,
 		},
 		{
+			name:     "untrusted update adding cancel request denied",
+			user:     untrustedUsername,
+			oldTask:  oldTask,
+			newTask:  withCancelRequested(oldTask.DeepCopy()),
+			contains: labels.AnnotationCancelRequested,
+		},
+		{
+			name:     "trusted worker update adding cancel request denied",
+			user:     trustedWorkerUser,
+			oldTask:  oldTask,
+			newTask:  withCancelRequested(oldTask.DeepCopy()),
+			contains: labels.AnnotationCancelRequested,
+		},
+		{
+			name:    "trusted controller can record a cancel request",
+			user:    trustedControllerUser,
+			oldTask: oldTask,
+			newTask: withCancelRequested(oldTask.DeepCopy()),
+			allowed: true,
+		},
+		{
 			name:    "trusted controller can update provenance",
 			user:    trustedControllerUser,
 			oldTask: oldTask,
@@ -423,6 +444,14 @@ func withParentTaskUID(task *corev1alpha1.Task) *corev1alpha1.Task {
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[labels.AnnotationParentTaskUID] = admissionTestParentTaskUID
+	return task
+}
+
+func withCancelRequested(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationCancelRequested] = "cancelled by parent task"
 	return task
 }
 

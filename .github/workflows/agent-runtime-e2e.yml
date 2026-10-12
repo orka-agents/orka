@@ -1,37 +1,10 @@
 name: Agent Runtime E2E
 # Calls real model providers through Vekil and requires COPILOT_GITHUB_TOKEN.
 
+# Manual only: the lane depends on a live Vekil and the repository's Copilot
+# credential, so a broken credential would otherwise fail every main push.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "23 8 * * *"
-  push:
-    branches:
-      - main
-    paths:
-      - ".dockerignore"
-      - ".github/workflows/agent-runtime-e2e.yml"
-      - "Dockerfile"
-      - "Makefile"
-      - ".agents/skills/kindctl/**"
-      - ".agents/skills/vekil-reverse-proxy-deploy/**"
-      - "api/**"
-      - "cmd/**"
-      - "config/**"
-      - "go.mod"
-      - "go.sum"
-      - "internal/**"
-      - "pkg/**"
-      - "scripts/apply-acp-production.sh"
-      - "scripts/lib/e2e-admission-tls.sh"
-      - "scripts/lib/ensure-static-mode-namespace.sh"
-      - "scripts/lib/kind-local-registry.sh"
-      - "scripts/lib/agent-runtime-kind-bootstrap.sh"
-      - "scripts/agent-runtime-e2e.sh"
-      - "scripts/agent-runtime-kind-e2e.sh"
-      - "scripts/render-acp-runtime-images.sh"
-      - "scripts/render-worker-images.sh"
-      - "workers/**"
 
 permissions:
   contents: read
