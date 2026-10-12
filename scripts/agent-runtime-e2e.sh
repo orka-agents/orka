@@ -3595,6 +3595,8 @@ if [[ "${release_gate}" -eq 1 ]]; then
   # then reports as a failed gate.
   expected_license_line="$(gh_raw_file "${read_repo_slug}" LICENSE "${read_repo_commit}" | awk 'NF && !found { print; found = 1 }')"
   [[ -n "${expected_license_line}" ]] || die "could not independently read the first non-empty LICENSE line"
+  [[ "${model_backend}" == "vekil" || "${expected_license_line}" == "MIT License" ]] || \
+    die "the candidate LICENSE starts with '${expected_license_line}', but scripts/fixtures/agent-runtime-aimock scripts 'MIT License'; update the fixtures"
 fi
 
 if resource_exists get namespace "${namespace}"; then
