@@ -1,0 +1,16 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:controller-system-prompt]" },
+      "response": { "content": "E2E_PROMPT_VERIFIED: I am the e2e test assistant." }
+    },
+    {
+      "match": { "userMessage": "[e2e:controller-skills]" },
+      "response": { "content": "E2E_SKILL_ACTIVE: I am an assistant with the e2e research skill." }
+    },
+    {
+      "match": { "userMessage": "[e2e:controller-allow-bash]" },
+      "response": { "content": "Hello from the allowBash override task." }
+    }
+  ]
+}

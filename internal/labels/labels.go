@@ -70,6 +70,11 @@ const (
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
 	AnnotationParentTaskUID                 = "orka.ai/parent-task-uid"
+	// AnnotationCancelRequested records a verified parent's cancel_task
+	// request; its value is the Task's terminal message. Only controller
+	// identities may set it, and the Task controller completes the
+	// cancellation through its normal terminal path.
+	AnnotationCancelRequested = "orka.ai/cancel-requested"
 	// AnnotationRequestedBySource records that spec.requestedBy was stamped
 	// by the API server from a verified identity. Only controller identities
 	// may set it; child Tasks inherit trust through their coordination parent.
