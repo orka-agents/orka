@@ -22,8 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/codexstate"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 )
 
 type migrationState struct {
@@ -38,48 +36,21 @@ type migrationState struct {
 	Data        []byte `json:"data"`
 }
 
-// Automatic migrations use authenticated Kubernetes streams without a local
-// listener. The cluster and Service UID, not the transport, identify the target.
+// Native migration requires an explicitly selected API endpoint. Kubernetes
+// discovery identifies resources, not the application entrusted with history.
 func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), error) {
 	server, _ := cmd.Flags().GetString("server")
 	if server == "" {
 		server = loadConfig().Server
 	}
-	if server != "" {
-		return newClientFromCmdWithServer(cmd, server), server, func() {}, nil
+	if server == "" {
+		return nil, "", nil, errors.New("native migration requires an explicit --server or configured API endpoint; automatic Service discovery cannot establish Orka identity")
 	}
-	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
-	restConfig, err := buildRESTConfig(kubeconfigPath)
-	if err != nil {
-		return nil, "", nil, errors.New("resolve native migration target: invalid or unavailable kubeconfig; use --server for an explicit endpoint")
+	c := newClientFromCmdWithServer(cmd, server)
+	if strings.TrimSpace(c.Token) == "" && c.TxnToken == "" {
+		return nil, "", nil, errors.New("native migration requires API authentication: provide an Orka bearer token or transaction token; Kubernetes exec and certificate credentials are not API credentials")
 	}
-	// Resolve the same namespace defaults without selecting a transport yet.
-	c := newClientFromCmdWithServer(cmd, defaultServer)
-	serviceNamespace, serviceName := discoverService(kubeconfigPath, c.Namespace)
-	if serviceName == "" {
-		return nil, "", nil, errors.New("resolve native migration target: Orka service not found; use --server for an explicit endpoint")
-	}
-	kube, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return nil, "", nil, errors.New("resolve native migration target")
-	}
-	service, err := kube.CoreV1().Services(serviceNamespace).Get(cmd.Context(), serviceName, metav1.GetOptions{})
-	if err != nil || service.UID == "" {
-		return nil, "", nil, errors.New("resolve native migration service identity")
-	}
-	identity, err := json.Marshal(struct {
-		Cluster   string
-		Namespace string
-		Service   string
-		UID       string
-	}{restConfig.Host, serviceNamespace, serviceName, string(service.UID)})
-	if err != nil {
-		return nil, "", nil, err
-	}
-	httpClient, cleanup := newMigrationHTTPClient(cmd.Context(), restConfig, kube, service)
-	c.HTTPClient = httpClient
-	c.BaseURL = "http://" + migrationTunnelHost
-	return c, "kubernetes:" + codexstate.DataDigest(identity), cleanup, nil
+	return c, server, func() {}, nil
 }
 
 func migrationDir(name string, create bool) (string, error) {

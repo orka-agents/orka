@@ -108,7 +108,7 @@ func TestMigrateImportRetriesFrozenRequest(t *testing.T) {
 	}
 }
 
-func TestMigrateImportRetriesAcrossAutomaticTunnels(t *testing.T) {
+func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const thread = "01a10020-1222-76e3-977d-d5165792ae72"
 	const name = "rollout-2026-10-02T21-57-44-" + thread + ".jsonl"
@@ -184,22 +184,11 @@ func TestMigrateImportRetriesAcrossAutomaticTunnels(t *testing.T) {
 		cmd.SetArgs(append([]string{"--kubeconfig", kubeconfig, "--namespace", "test", "--token", "test-only", "session", "migrate"}, args...))
 		return cmd.Execute()
 	}
-	require.Error(t, run())
-	require.Equal(t, 1, calls)
-	require.NoError(t, os.Remove(rollout))
-	kubeFixture.setServiceUID("replacement-service-uid")
-	require.ErrorContains(t, run(), "another operation or target")
-	require.Equal(t, 1, calls)
-	kubeFixture.setServiceUID("stable-service-uid")
-	otherCluster := httptest.NewTLSServer(kubeFixture)
-	defer otherCluster.Close()
-	writeKubeconfig(otherCluster.URL)
-	require.ErrorContains(t, run(), "another operation or target")
-	require.Equal(t, 1, calls)
-	writeKubeconfig(kube.URL)
-	require.NoError(t, run())
-	require.Equal(t, 2, calls)
-	require.Equal(t, 2, kubeFixture.tunnelCount())
+	require.ErrorContains(t, run(), "explicit --server")
+	require.Zero(t, calls)
+	require.Zero(t, kubeFixture.tunnelCount())
+	require.NoFileExists(t, filepath.Join(journal, "request.json"))
+	require.NoFileExists(t, filepath.Join(journal, "import-receipt.json"))
 	require.NoFileExists(t, marker)
 }
 
@@ -347,11 +336,12 @@ func TestMigrationTargetFailsClosedWithoutExplicitServer(t *testing.T) {
 			cmd.SetOut(new(bytes.Buffer))
 			cmd.SetErr(new(bytes.Buffer))
 			cmd.SetArgs([]string{"--kubeconfig", path, "session", "migrate", "import", "private", "--codex-home", home, "--thread", "thread", "--journal-dir", journal, "--source-stopped"})
-			require.ErrorContains(t, cmd.Execute(), "invalid or unavailable kubeconfig")
+			require.ErrorContains(t, cmd.Execute(), "explicit --server")
 		})
 	}
 	cmd := newRootCmd()
 	require.NoError(t, cmd.PersistentFlags().Set("server", "http://explicit.example"))
+	require.NoError(t, cmd.PersistentFlags().Set("token", "test-only"))
 	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
 	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
 	c, target, cleanup, err := newMigrationClient(cmd)
@@ -359,4 +349,32 @@ func TestMigrationTargetFailsClosedWithoutExplicitServer(t *testing.T) {
 	defer cleanup()
 	require.Equal(t, "http://explicit.example", target)
 	require.Equal(t, target, c.BaseURL)
+}
+
+func TestMigrateImportRequiresAPIAuthBeforeCapture(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	home, journal := t.TempDir(), t.TempDir()
+	require.NoError(t, os.Chmod(journal, 0o700))
+	cmd := newRootCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--server", "http://explicit.example", "--kubeconfig", "/missing/config", "session", "migrate", "import", "private",
+		"--codex-home", home, "--thread", "missing-thread", "--journal-dir", journal, "--source-stopped"})
+	require.ErrorContains(t, cmd.Execute(), "requires API authentication")
+	require.NoFileExists(t, filepath.Join(journal, "request.json"))
+}
+
+func TestMigrationTargetAllowsTransactionTokenWithoutBearer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd := newRootCmd()
+	require.NoError(t, cmd.PersistentFlags().Set("server", "http://explicit.example"))
+	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
+	require.NoError(t, cmd.PersistentFlags().Set("txn-token", "test-only-transaction"))
+	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
+	c, target, cleanup, err := newMigrationClient(cmd)
+	require.NoError(t, err)
+	defer cleanup()
+	require.Empty(t, c.Token)
+	require.NotEmpty(t, c.TxnToken)
+	require.Equal(t, "http://explicit.example", target)
 }
