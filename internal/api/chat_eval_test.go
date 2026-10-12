@@ -286,10 +286,10 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 }
 
 // Names followed by = or : are tool arguments such as wait_timeout="30m".
-var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*)\b(\s*[=:])?`)
+var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file|request|reply)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*)\b(\s*[=:])?`)
 
 // TestChatEvalPromptToolReferencesExist catches model-message, system-prompt,
-// or tool-description text that still names a renamed or removed tool.
+// or tool-schema text that still names a renamed or removed tool.
 // Coordinator-only tools may be mentioned because the prompt describes what
 // coordinator Agents will do.
 func TestChatEvalPromptToolReferencesExist(t *testing.T) {
@@ -333,10 +333,12 @@ func TestChatEvalPromptToolReferencesExist(t *testing.T) {
 				text := make([]string, 0, 1+len(req.Tools))
 				text = append(text, chatEvalModelInput(req))
 				for _, tool := range req.Tools {
-					text = append(text, tool.Description)
+					schema, err := json.Marshal(tool.Parameters)
+					require.NoError(t, err)
+					text = append(text, tool.Description, string(schema))
 				}
 				require.Empty(t, chatEvalUnknownToolReferences(strings.Join(text, "\n")),
-					"model messages, system prompt, or tool descriptions in request %d name tools that are not registered anywhere", i)
+					"model messages, system prompt, or tool schemas in request %d name tools that are not registered anywhere", i)
 			}
 		})
 	}
@@ -363,9 +365,12 @@ func TestChatEvalUnknownToolReferences(t *testing.T) {
 		text string
 		want []string
 	}{
-		{name: "registered worker tools", text: "Use code_exec, web_fetch, file_read, and file_write."},
+		{name: "registered worker tools", text: "Use code_exec, web_fetch, file_read, file_write, request_approval, and reply_in_conversation."},
 		{name: "stale code tool", text: "Use code_missing_tool.", want: []string{"code_missing_tool"}},
 		{name: "stale web tool", text: "Use web_missing_tool.", want: []string{"web_missing_tool"}},
+		{name: "stale request tool", text: "Use request_missing_tool.", want: []string{"request_missing_tool"}},
+		{name: "stale reply tool", text: "Use reply_missing_tool.", want: []string{"reply_missing_tool"}},
+		{name: "nested schema tool reference", text: `{"properties":{"mode":{"description":"Use request_removed_approval.","enum":["reply_removed_conversation"]}}}`, want: []string{"request_removed_approval", "reply_removed_conversation"}},
 		{name: "stale file tool", text: "Use file_missing_tool.", want: []string{"file_missing_tool"}},
 		{name: "stale versioned tool", text: "Use create_agent_v2.", want: []string{"create_agent_v2"}},
 		{name: "stale tool with numeric segment", text: "Use create_agent_2.", want: []string{"create_agent_2"}},
