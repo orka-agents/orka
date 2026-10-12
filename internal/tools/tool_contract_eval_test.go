@@ -1036,6 +1036,20 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 
 	cases := []evalLimitCase{
 		{
+			name:   "chat wait_for_task positive timeout",
+			limits: []string{"chat/wait_for_task.timeout minimum=1"},
+			check: func(t *testing.T) (bool, string) {
+				call := func() (Tool, context.Context) {
+					task := &corev1alpha1.Task{
+						ObjectMeta: metav1.ObjectMeta{Name: evalPlaceholder, Namespace: defaultNamespace},
+						Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+					}
+					return chatTool("wait_for_task", newFakeClient(task))
+				}
+				return evalRejectsChange(call, `{"name":"eval","timeout":1}`, `{"name":"eval","timeout":0}`, "timeout")
+			},
+		},
+		{
 			name:   "chat create_agent model counts",
 			limits: []string{"chat/create_agent.model.contextWindow minimum=1", "chat/create_agent.model.maxTokens minimum=1"},
 			check: func(t *testing.T) (bool, string) {
