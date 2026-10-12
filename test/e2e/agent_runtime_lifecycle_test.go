@@ -574,7 +574,9 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 			sessions[uid] = true
 		}
 		Expect(sessions).To(HaveLen(len(tasks)), "each concurrent Task needs its own RuntimeSession")
-		waitRuntimePoolCountersZero(codexPool, 1)
+		// Codex native capture also retires the earlier read-smoke Session;
+		// completed one-shot Tasks must not leave any runtime home resident.
+		waitRuntimePoolCountersZero(codexPool, 0)
 	})
 
 	It("cancels a running prompt at its Task timeout", func() {
