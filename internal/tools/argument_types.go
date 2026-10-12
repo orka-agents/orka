@@ -175,6 +175,21 @@ func normalizeArgSchemaType(path string, schema map[string]any, value any) (any,
 	return normalized, nil
 }
 
+// DecodeToolArgumentObject decodes an argument object without normalizing its
+// values. Numbers remain json.Number, and duplicate keys and invalid Unicode
+// are rejected at every depth. Unlike normalization, callers rewriting arguments
+// must also reject invalid JSON, trailing data, and non-object roots.
+func DecodeToolArgumentObject(args json.RawMessage) (map[string]any, error) {
+	values, err := decodeArgObject(args)
+	if err != nil {
+		return nil, err
+	}
+	if values == nil {
+		return nil, fmt.Errorf("tool arguments must be a JSON object")
+	}
+	return values, nil
+}
+
 // decodeArgObject decodes a JSON object of arguments. It returns nil values
 // for invalid JSON, trailing data, or a non-object, which the tool rejects
 // itself. A duplicate key is an error: the tool would see only one of the

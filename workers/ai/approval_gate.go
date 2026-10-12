@@ -801,8 +801,10 @@ func injectIdempotencyKey(args json.RawMessage, key string) (json.RawMessage, er
 		return args, nil
 	}
 	params := map[string]any{}
-	if len(strings.TrimSpace(string(args))) > 0 {
-		if err := json.Unmarshal(args, &params); err != nil {
+	if len(bytes.TrimSpace(args)) > 0 {
+		var err error
+		params, err = tools.DecodeToolArgumentObject(args)
+		if err != nil {
 			return nil, fmt.Errorf("parse tool arguments for idempotency key injection: %w", err)
 		}
 	}
