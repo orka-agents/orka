@@ -834,6 +834,8 @@ func TestBuildSystemPromptActionMandateIncludesPRMonitor(t *testing.T) {
 		wantSequence bool
 	}{
 		{name: "unscoped", wantMandate: true, wantSequence: true},
+		{name: "Agent-only", tools: []string{"create_agent"}, wantMandate: true},
+		{name: "Tool-only", tools: []string{"create_tool"}, wantMandate: true},
 		{name: "monitor-only", tools: []string{"create_pr_monitor"}, wantMandate: true},
 		{name: "monitor with polling", tools: []string{"create_pr_monitor", "wait_for_task", "fetch_task_output"}, wantMandate: true},
 		{name: "task creator with polling", tools: []string{"create_container_task", "wait_for_task", "fetch_task_output"}, wantMandate: true, wantSequence: true},
@@ -862,6 +864,26 @@ func TestBuildSystemPromptActionMandateIncludesPRMonitor(t *testing.T) {
 						t.Errorf("monitor-only prompt contains task guidance %q", unwanted)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestBuildSystemPromptActionMandateCoversRegisteredCreators(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	for _, name := range chattools.ChatToolNames() {
+		if !strings.HasPrefix(name, "create_") {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			b.SetAvailableChatTools([]string{name})
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(prompt, "you MUST include the tool\ncall in the SAME response.") {
+				t.Fatalf("registered creator %s lost the action-call mandate", name)
 			}
 		})
 	}

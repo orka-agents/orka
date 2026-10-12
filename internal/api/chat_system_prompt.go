@@ -73,9 +73,12 @@ const (
 // promptTaskCreators are the chat tools that create tasks.
 var promptTaskCreators = []string{promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask}
 
-// promptActionCreators includes recurring monitors for the action-call mandate,
+// promptActionCreators includes Agent and Tool creation and recurring monitors for the action-call mandate,
 // but not for guidance to wait for and fetch a task result immediately.
-var promptActionCreators = []string{promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask, "create_pr_monitor"}
+var promptActionCreators = []string{
+	promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask,
+	promptToolCreateAgent, "create_tool", "create_pr_monitor",
+}
 
 // promptPart is one piece of guidance and the chat tools it needs. A part with
 // no requirements is general and always kept. Requirements are declared rather
