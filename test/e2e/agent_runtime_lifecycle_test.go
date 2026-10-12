@@ -563,7 +563,10 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		waitTaskRunningOnPool(task, toolProfilePool)
 		snapshot := captureRuntimePoolSnapshot(toolProfilePool, codex.kind, codex.model, corev1alpha1.WorkspaceIntentRead)
 		assertCancelledTask(task, snapshot, corev1alpha1.TaskExecutionReason("TaskTimeout"))
-		Expect(time.Since(started)).To(BeNumerically(">=", timeoutDuration))
+		// Kubernetes timestamps have whole-second precision, so the deadline
+		// can land up to a second before timeoutDuration of wall-clock time.
+		Expect(time.Since(started)).To(BeNumerically(">=", timeoutDuration-time.Second),
+			"the prompt was cancelled before its Task timeout")
 		waitRuntimePoolCountersZero(toolProfilePool, 0)
 	})
 
