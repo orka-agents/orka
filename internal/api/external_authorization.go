@@ -221,15 +221,26 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"DELETE /api/v1/substrate-actor-pools/:name": coreAPIPolicy("delete", "substrateactorpools", "name"),
 	"GET /api/v1/auth/validate":                  {identityOnly: true},
 	"GET /api/v1/auth/whoami":                    {identityOnly: true},
-	"GET /api/v1/secrets":                        {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
-	"POST /api/v1/chat":                          coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
-	"GET /api/v1/chat/config":                    coreAPIPolicy("get", "chats/config", ""),
-	"DELETE /api/v1/chat/:sessionId":             coreAPIPolicy("delete", "sessions", "sessionId"),
-	"POST /openai/v1/responses":                  coreAPIPolicy("create", "chats", ""),
-	"POST /openai/v1/chat/completions":           coreAPIPolicy("create", "chats", ""),
-	"GET /openai/v1/models":                      coreAPIPolicy("list", "providers", ""),
-	"POST /anthropic/v1/messages":                coreAPIPolicy("create", "chats", ""),
-	"GET /anthropic/v1/models":                   coreAPIPolicy("list", "providers", ""),
+	// Connector routes are identity-only at the policy layer; the handlers
+	// additionally require a verified OIDC or context-token identity and
+	// Connection ownership, so TokenReview callers never reach the store.
+	"GET /api/v1/connectors":                   {identityOnly: true},
+	"GET /api/v1/connections":                  {identityOnly: true},
+	"POST /api/v1/connections":                 {identityOnly: true},
+	"GET /api/v1/connections/:name":            {identityOnly: true},
+	"PUT /api/v1/connections/:name":            {identityOnly: true},
+	"DELETE /api/v1/connections/:name":         {identityOnly: true},
+	"POST /api/v1/connections/:name/authorize": {identityOnly: true},
+	"POST /api/v1/connections/:name/complete":  {identityOnly: true},
+	"GET /api/v1/secrets":                      {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
+	"POST /api/v1/chat":                        coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
+	"GET /api/v1/chat/config":                  coreAPIPolicy("get", "chats/config", ""),
+	"DELETE /api/v1/chat/:sessionId":           coreAPIPolicy("delete", "sessions", "sessionId"),
+	"POST /openai/v1/responses":                coreAPIPolicy("create", "chats", ""),
+	"POST /openai/v1/chat/completions":         coreAPIPolicy("create", "chats", ""),
+	"GET /openai/v1/models":                    coreAPIPolicy("list", "providers", ""),
+	"POST /anthropic/v1/messages":              coreAPIPolicy("create", "chats", ""),
+	"GET /anthropic/v1/models":                 coreAPIPolicy("list", "providers", ""),
 }
 
 // externalAPIRouter installs authorization on the endpoint, where Fiber has

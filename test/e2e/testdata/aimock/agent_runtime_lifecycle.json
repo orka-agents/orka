@@ -1,0 +1,31 @@
+{
+  "fixtures": [
+    {"match": {"userMessage": "[e2e:art-scale-zero]"}, "response": {"content": "nonce-art-codex"}},
+    {"match": {"userMessage": "[e2e:art-replacement]"}, "response": {"content": "nonce-art-codex"}},
+    {"match": {"userMessage": "[e2e:art-post-restart]"}, "response": {"content": "restart-art"}},
+    {"match": {"userMessage": "[e2e:art-codex-fork]"}, "response": {"content": "nonce-art-codex"}},
+    {"match": {"userMessage": "[e2e:art-codex-continue]"}, "response": {"content": "nonce-art-codex"}},
+    {"match": {"userMessage": "[e2e:art-opencode-fork]"}, "response": {"content": "nonce-art-opencode"}},
+    {"match": {"userMessage": "[e2e:art-opencode-continue]"}, "response": {"content": "nonce-art-opencode"}},
+    {"match": {"userMessage": "[e2e:art-claude-fork]"}, "response": {"content": "nonce-art-claude"}},
+    {"match": {"userMessage": "[e2e:art-claude-continue]"}, "response": {"content": "nonce-art-claude"}},
+    {"match": {"userMessage": "[e2e:art-copilot-fork]"}, "response": {"content": "nonce-art-copilot"}},
+    {"match": {"userMessage": "[e2e:art-copilot-continue]"}, "response": {"content": "nonce-art-copilot"}},
+    {"match": {"userMessage": "[e2e:art-codex-read]", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-art-codex. First LICENSE line: MIT License"}},
+    {"match": {"userMessage": "[e2e:art-codex-read]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "exec_command", "arguments": {"cmd": "cat LICENSE"}}]}},
+    {"match": {"userMessage": "[e2e:art-concurrent]"}, "latency": 10000, "response": {"content": "Concurrent read summary: the repository is Orka."}},
+    {"match": {"userMessage": "[e2e:art-timeout]"}, "latency": 120000, "response": {"content": "The sleep finished."}},
+    {"match": {"userMessage": "[e2e:art-cancel]"}, "latency": 120000, "response": {"content": "The sleep finished."}},
+    {"match": {"userMessage": "[e2e:art-restart]"}, "latency": 150000, "response": {"content": "The sleep finished."}},
+    {"match": {"userMessage": "[e2e:art-opencode-read]", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-art-opencode. First LICENSE line: MIT License"}},
+    {"match": {"userMessage": "[e2e:art-opencode-read]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "read", "arguments": {"filePath": "LICENSE"}}]}},
+    {"match": {"userMessage": "[e2e:art-opencode-policy]", "toolResultContains": "MIT License"}, "response": {"content": "First LICENSE line: MIT License"}},
+    {"match": {"userMessage": "[e2e:art-opencode-policy]", "hasToolResult": true}, "response": {"toolCalls": [{"name": "read", "arguments": {"filePath": "LICENSE"}}]}},
+    {"match": {"userMessage": "[e2e:art-opencode-policy]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "bash", "arguments": {"command": "touch SHOULD_NOT_EXIST.txt", "description": "Attempt a forbidden mutation"}}]}},
+    {"match": {"userMessage": "[e2e:art-claude-read]", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-art-claude. First LICENSE line: MIT License"}},
+    {"match": {"userMessage": "[e2e:art-claude-read]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "Read", "arguments": {"file_path": "LICENSE"}}]}},
+    {"match": {"userMessage": "[e2e:art-copilot-read]", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-art-copilot. First LICENSE line: MIT License"}},
+    {"match": {"userMessage": "[e2e:art-copilot-read]", "hasToolResult": true}, "response": {"toolCalls": [{"name": "grep", "arguments": {"pattern": "License", "path": "LICENSE"}}]}},
+    {"match": {"userMessage": "[e2e:art-copilot-read]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "view", "arguments": {"path": "LICENSE"}}]}}
+  ]
+}

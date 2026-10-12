@@ -50,6 +50,7 @@ type InternalHandlers struct {
 	memoryStore             store.MemoryStore
 	memoryProposalStore     store.MemoryProposalStore
 	taskProvenanceProtected bool
+	connectorTools          ConnectorToolExecutionConfig
 }
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
@@ -64,6 +65,8 @@ type InternalHandlersConfig struct {
 	// TaskProvenanceProtected permits cross-task coordination only when the
 	// Task provenance admission webhook protects coordination ancestry.
 	TaskProvenanceProtected bool
+	// ConnectorTools lets native workers run connector-backed tools here.
+	ConnectorTools ConnectorToolExecutionConfig
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
@@ -84,6 +87,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.gatewayEventStore = configs[0].GatewayEventStore
 		h.gatewayService = configs[0].GatewayService
 		h.taskProvenanceProtected = configs[0].TaskProvenanceProtected
+		h.connectorTools = configs[0].ConnectorTools
 	}
 	return h
 }

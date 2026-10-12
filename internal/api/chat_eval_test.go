@@ -105,6 +105,8 @@ func runChatEvalTurn(t *testing.T, c client.Client, req ChatRequest, responses .
 
 	cfg := DefaultChatConfig()
 	cfg.MaxIterations = 3
+	// Exercise the full chat-tool catalog, including flag-gated connector tools.
+	cfg.ConnectorsEnabled = true
 	cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
 	ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
 	app := fiber.New()
@@ -236,7 +238,7 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			oidc := newTestOIDCProvider(t)
 			token := issueTestContextToken(t, oidc, nil, map[string]any{
-				"scope": strings.Join([]string{ContextTokenScopeToolsUse, ContextTokenScopeProvidersUse, ContextTokenScopeAgentsRead, ContextTokenScopeSessionsRead, ContextTokenScopeSessionsWrite}, " "),
+				"scope": strings.Join([]string{ContextTokenScopeToolsUse, ContextTokenScopeProvidersUse, ContextTokenScopeAgentsRead, ContextTokenScopeSessionsRead, ContextTokenScopeSessionsWrite, ContextTokenScopeConnectorsRead}, " "),
 				"tctx":  map[string]any{"allowedTools": tt.allowedTools},
 			})
 			authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
@@ -246,6 +248,7 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 			llm.RegisterProvider(chatEvalProviderType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
 			c := chatEvalCluster(t, defaultNamespace)
 			cfg := DefaultChatConfig()
+			cfg.ConnectorsEnabled = true
 			cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
 			ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
 			ch.contextTokenAuthorization = authz
