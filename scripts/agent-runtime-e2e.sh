@@ -263,6 +263,8 @@ task_max_turns="${ACP_E2E_TASK_MAX_TURNS:-24}"
 long_prompt="${ACP_E2E_LONG_PROMPT:-Read LICENSE, NOTICE.md, go.mod, Makefile, and the first ten Go source files you find. Compare their purpose and provide a detailed evidence-backed summary. Do not modify files.}"
 api_local_port="${ACP_E2E_API_LOCAL_PORT:-$((20000 + ($$ % 20000)))}"
 
+[[ "${model_backend}" == "vekil" || "${model_backend}" == "aimock" ]] || \
+  die "ACP_E2E_MODEL_BACKEND must be vekil or aimock"
 is_uint "${opencode_context_window}" || die "ACP_E2E_OPENCODE_CONTEXT_WINDOW must be a positive integer"
 is_uint "${opencode_max_tokens}" || die "ACP_E2E_OPENCODE_MAX_TOKENS must be a positive integer"
 (( opencode_context_window > opencode_max_tokens )) || \
@@ -3797,17 +3799,12 @@ fi
 create_api_identity
 start_api_forward
 
-case "${model_backend}" in
-  vekil)
-    session_nonce="nonce-${run_id}-${RANDOM}-${RANDOM}"
-    restart_nonce="restart-${run_id}-${RANDOM}-${RANDOM}"
-    ;;
-  aimock)
-    session_nonce="nonce-aimock-codex"
-    restart_nonce="restart-aimock"
-    ;;
-  *) die "ACP_E2E_MODEL_BACKEND must be vekil or aimock" ;;
-esac
+session_nonce="nonce-${run_id}-${RANDOM}-${RANDOM}"
+restart_nonce="restart-${run_id}-${RANDOM}-${RANDOM}"
+if [[ "${model_backend}" == "aimock" ]]; then
+  session_nonce="nonce-aimock-codex"
+  restart_nonce="restart-aimock"
+fi
 load_aimock_fixtures codex
 
 codex_agent="$(sanitize_name "acp-codex-${run_id}")"
