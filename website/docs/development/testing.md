@@ -158,13 +158,13 @@ missing or mismatched artifacts staying not ready.
 - `.github/workflows/release-qualification.yml` uses `workflow_dispatch` and is
   serialized. The release workflow dispatches it automatically. Restrict the
   `release-qualification` environment to `main` and exact permitted release
-  branches, require a trusted reviewer, and disable administrator bypass before
-  exposing model-provider credentials. It accepts a full source SHA that must
-  equal both the dispatched workflow commit and selected branch head. GitHub
+  branches, require a trusted reviewer, and disable administrator bypass. It
+  accepts a full source SHA that must equal both the dispatched workflow commit
+  and selected branch head. GitHub
   observations use the job's temporary `GITHUB_TOKEN` with `contents: read`.
-  `COPILOT_GITHUB_TOKEN` supplies model-provider access and can come from the
-  existing repository secret. No stored Git publication token or fork setting
-  is needed. Publication tests use real temporary Git repositories and local
+  Agent execution runs against aimock (`ACP_E2E_MODEL_BACKEND=aimock`), so no
+  model-provider secret, stored Git publication token, or fork setting is
+  needed. Publication tests use real temporary Git repositories and local
   GitHub API test servers. They do not prove the complete cluster-to-GitHub
   publication path or live organization permissions.
   [Release qualification](release-qualification.md) documents trusted dispatch,

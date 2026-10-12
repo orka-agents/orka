@@ -249,6 +249,9 @@ concurrency_tasks="${ACP_E2E_CONCURRENCY_TASKS:-6}"
 wait_seconds="${ACP_E2E_WAIT_SECONDS:-900}"
 state_wait_seconds="${ACP_E2E_STATE_WAIT_SECONDS:-300}"
 keep_resources="${ACP_E2E_KEEP_RESOURCES:-0}"
+# aimock replaces the live Vekil (see scripts/agent-runtime-kind-e2e.sh); its
+# fixtures echo fixed session nonces, so result checks keep their meaning.
+model_backend="${ACP_E2E_MODEL_BACKEND:-vekil}"
 require_parallel="${ACP_E2E_REQUIRE_PARALLEL:-1}"
 timeout_duration="${ACP_E2E_TIMEOUT_DURATION:-90s}"
 cancel_settle_seconds="${ACP_E2E_CANCEL_SETTLE_SECONDS:-120}"
@@ -287,6 +290,29 @@ fi
 
 k() {
   kubectl --context "${context}" "$@"
+}
+
+# load_aimock_fixtures replaces the aimock fixture set with one runtime's
+# script. The continuation and fork prompts are the same for every runtime, so
+# each runtime's checks run against its own set.
+load_aimock_fixtures() {
+  [[ "${model_backend}" == "aimock" ]] || return 0
+  local provider="$1" file loaded
+  file="${script_dir}/fixtures/agent-runtime-aimock/${provider}.json"
+  [[ -f "${file}" ]] || die "missing aimock fixtures for ${provider}: ${file}"
+  # shellcheck disable=SC2016 # This is a Node program.
+  loaded="$(k -n vekil-system exec -i deployment/vekil -- node -e '
+let body = "";
+process.stdin.on("data", (chunk) => { body += chunk; }).on("end", async () => {
+  const url = "http://127.0.0.1:1337/__aimock/fixtures";
+  await fetch(url, { method: "DELETE" });
+  const posted = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+  if (!posted.ok) { process.stderr.write(await posted.text()); process.exit(1); }
+  process.stdout.write(String((await (await fetch(url)).json()).count));
+});' <"${file}")" || die "failed to load aimock fixtures for ${provider}"
+  [[ "${loaded}" == "$(jq '.fixtures | length' "${file}")" ]] || \
+    die "aimock loaded ${loaded} fixtures for ${provider}, not the full set"
+  log "Loaded aimock fixtures for ${provider}"
 }
 
 resource_exists() {
@@ -3711,8 +3737,18 @@ fi
 create_api_identity
 start_api_forward
 
-session_nonce="nonce-${run_id}-${RANDOM}-${RANDOM}"
-restart_nonce="restart-${run_id}-${RANDOM}-${RANDOM}"
+case "${model_backend}" in
+  vekil)
+    session_nonce="nonce-${run_id}-${RANDOM}-${RANDOM}"
+    restart_nonce="restart-${run_id}-${RANDOM}-${RANDOM}"
+    ;;
+  aimock)
+    session_nonce="nonce-aimock-codex"
+    restart_nonce="restart-aimock"
+    ;;
+  *) die "ACP_E2E_MODEL_BACKEND must be vekil or aimock" ;;
+esac
+load_aimock_fixtures codex
 
 codex_agent="$(sanitize_name "acp-codex-${run_id}")"
 codex_task="$(sanitize_name "acp-codex-read-${run_id}")"
@@ -3776,6 +3812,10 @@ opencode_agent="$(sanitize_name "acp-opencode-${run_id}")"
 opencode_task="$(sanitize_name "acp-opencode-read-${run_id}")"
 opencode_session="$(sanitize_name "acp-opencode-session-${run_id}")"
 opencode_nonce="opencode-${run_id}-${RANDOM}-${RANDOM}"
+if [[ "${model_backend}" == "aimock" ]]; then
+  opencode_nonce="nonce-aimock-opencode"
+fi
+load_aimock_fixtures opencode
 log "Running OpenCode native ACP read, continuation, and read-policy validation"
 run_read_smoke opencode "${opencode_model}" "${opencode_agent}" "${opencode_task}" "${opencode_session}" \
   "${opencode_nonce}" "${expected_license_line}"
@@ -3794,6 +3834,10 @@ claude_agent="$(sanitize_name "acp-claude-${run_id}")"
 claude_task="$(sanitize_name "acp-claude-read-${run_id}")"
 claude_session="$(sanitize_name "acp-claude-session-${run_id}")"
 claude_nonce="claude-${run_id}-${RANDOM}-${RANDOM}"
+if [[ "${model_backend}" == "aimock" ]]; then
+  claude_nonce="nonce-aimock-claude"
+fi
+load_aimock_fixtures claude
 log "Running Claude only after all Codex gates and cleanup completed"
 run_read_smoke claude "${claude_model}" "${claude_agent}" "${claude_task}" "${claude_session}" \
   "${claude_nonce}" "${expected_license_line}"
@@ -3806,6 +3850,10 @@ copilot_agent="$(sanitize_name "acp-copilot-${run_id}")"
 copilot_task="$(sanitize_name "acp-copilot-read-${run_id}")"
 copilot_session="$(sanitize_name "acp-copilot-session-${run_id}")"
 copilot_nonce="copilot-${run_id}-${RANDOM}-${RANDOM}"
+if [[ "${model_backend}" == "aimock" ]]; then
+  copilot_nonce="nonce-aimock-copilot"
+fi
+load_aimock_fixtures copilot
 log "Running GitHub Copilot only after all Claude gates and cleanup completed"
 run_read_smoke copilot "${copilot_model}" "${copilot_agent}" "${copilot_task}" "${copilot_session}" \
   "${copilot_nonce}" "${expected_license_line}"
