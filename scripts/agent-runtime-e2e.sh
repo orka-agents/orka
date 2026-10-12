@@ -295,10 +295,11 @@ k() {
 # load_aimock_fixtures replaces the aimock fixture set with one runtime's
 # script. The continuation and fork prompts are the same for every runtime, so
 # each runtime's checks run against its own set. A scripted model answers a
-# nonce only when the request carries the prior turn: rehydrated turns match
-# the earlier answer (or the JSON-quoted restart prompt) inside the canonical
-# transcript, and a native continuation with no earlier assistant turn gets a
-# reply without the nonce. A runtime that drops history therefore fails the
+# nonce only when the request carries the prior turn: rehydrated turns (Pod
+# replacement, scale to zero, controller restart) match the earlier answer, or
+# the JSON-quoted restart prompt, inside the canonical transcript. A
+# continuation or fork on the live session with no earlier assistant turn gets
+# a reply without the nonce. A runtime that drops history therefore fails the
 # nonce checks, as it would with a real model.
 load_aimock_fixtures() {
   [[ "${model_backend}" == "aimock" ]] || return 0

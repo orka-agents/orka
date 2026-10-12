@@ -1,8 +1,8 @@
 {
   "fixtures": [
     {"match": {"userMessage": "Session nonce nonce-aimock-claude. First non-empty LICENSE line"}, "response": {"content": "nonce-aimock-claude"}},
-    {"match": {"userMessage": "Return the session nonce from the prior turn", "turnIndex": 0}, "response": {"content": "No earlier turn reached this request."}},
-    {"match": {"userMessage": "Return the session nonce from the prior turn"}, "response": {"content": "nonce-aimock-claude"}},
+    {"match": {"userMessage": "Return the session nonce", "turnIndex": 0}, "response": {"content": "No earlier turn reached this request."}},
+    {"match": {"userMessage": "Return the session nonce"}, "response": {"content": "nonce-aimock-claude"}},
     {"match": {"userMessage": "Remember the session nonce nonce-aimock-claude", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-aimock-claude. First non-empty LICENSE line: MIT License"}},
     {"match": {"userMessage": "Remember the session nonce nonce-aimock-claude", "hasToolResult": false}, "response": {"toolCalls": [{"name": "Read", "arguments": {"file_path": "LICENSE"}}]}}
   ]
