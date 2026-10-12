@@ -44,6 +44,7 @@ type ToolExecutor struct {
 	sessionManager            *controller.SessionManager
 	namespace                 string
 	provider                  string
+	providerNamespace         string
 	providerType              string
 	executionMode             executionmode.Mode
 	sessionID                 string
@@ -218,6 +219,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		ToolCallID:                toolCall.ID,
 		Tenant:                    e.namespace,
 		Provider:                  e.provider,
+		ProviderNamespace:         e.providerNamespace,
 		ProviderType:              e.providerType,
 		ExecutionMode:             e.executionMode,
 		WatchNamespace:            e.watchNamespace,

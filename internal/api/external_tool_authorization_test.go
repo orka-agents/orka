@@ -905,24 +905,29 @@ func TestChatAgentTaskReferencePreflightPreservesExternalProfile(t *testing.T) {
 }
 
 func TestExternalToolAITaskDefaultsProviderWithoutDiscoveryPermission(t *testing.T) {
-	clientset, _ := externalToolReviews(t, func(spec authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
-		a := spec.ResourceAttributes
-		return externalToolReview(a.Resource != "providers" || a.Verb != "list"), nil
-	})
-	executor, backend, _, _ := newExternalToolExecutor(clientset,
-		&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "session-provider", Namespace: "caller"}})
-	executor.provider = "session-provider"
-	requestClient := newExternalToolClient(backend, clientset, externalToolUser(), "caller", "", false, nil)
-	builder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: requestClient}, "caller", ACPRuntimeAvailability{})
-	builder.SetChatProvider(executor.provider)
-	prompt, err := builder.BuildSystemPrompt(t.Context(), "")
-	require.NoError(t, err)
-	require.NotContains(t, prompt, "chat_provider=session-provider", "hidden discovery metadata must stay hidden")
-	result := executeExternalTool(t, executor, "create_ai_task", `{"prompt":"Analyze code"}`)
-	require.True(t, result.Success, "%s", result.Error)
-	var tasks corev1alpha1.TaskList
-	require.NoError(t, backend.Client.List(t.Context(), &tasks, client.InNamespace("caller")))
-	require.Len(t, tasks.Items, 1)
-	require.NotNil(t, tasks.Items[0].Spec.AI)
-	require.Equal(t, "session-provider", tasks.Items[0].Spec.AI.ProviderRef.Name)
+	for _, target := range []string{"caller", externalToolNamespace} {
+		t.Run(target, func(t *testing.T) {
+			clientset, _ := externalToolReviews(t, func(spec authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
+				a := spec.ResourceAttributes
+				return externalToolReview(a.Resource != "providers" || a.Verb != "list"), nil
+			})
+			executor, backend, _, _ := newExternalToolExecutor(clientset,
+				&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "session-provider", Namespace: "provider-ns"}})
+			executor.provider = "session-provider"
+			executor.providerNamespace = "provider-ns"
+			requestClient := newExternalToolClient(backend, clientset, externalToolUser(), "caller", "", false, nil)
+			builder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: requestClient}, "caller", ACPRuntimeAvailability{})
+			builder.SetChatProvider(executor.provider)
+			prompt, err := builder.BuildSystemPrompt(t.Context(), "")
+			require.NoError(t, err)
+			require.NotContains(t, prompt, "chat_provider=session-provider", "hidden discovery metadata must stay hidden")
+			result := executeExternalTool(t, executor, "create_ai_task", fmt.Sprintf(`{"prompt":"Analyze code","namespace":%q}`, target))
+			require.True(t, result.Success, "%s", result.Error)
+			var tasks corev1alpha1.TaskList
+			require.NoError(t, backend.Client.List(t.Context(), &tasks, client.InNamespace(target)))
+			require.Len(t, tasks.Items, 1)
+			require.NotNil(t, tasks.Items[0].Spec.AI)
+			require.Equal(t, corev1alpha1.ProviderReference{Name: "session-provider", Namespace: "provider-ns"}, *tasks.Items[0].Spec.AI.ProviderRef)
+		})
+	}
 }

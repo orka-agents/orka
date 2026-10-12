@@ -93,6 +93,7 @@ type ToolContext struct {
 	OperationID               string
 	Tenant                    string
 	Provider                  string
+	ProviderNamespace         string
 	ProviderType              string
 	ExecutionMode             executionmode.Mode
 	WatchNamespace            string
