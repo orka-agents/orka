@@ -64,15 +64,16 @@ type ToolExecutor struct {
 	// authorizeConnectorRead gates list_connections for delegated tokens.
 	authorizeConnectorRead func() *tools.ChatToolError
 	// createdTasks is shared by every tool call of this turn.
-	createdTasks         *tools.CreatedTasks
-	registry             *tools.Registry
-	allowedToolNames     map[string]struct{}
-	authorizeTaskCreate  func(context.Context, *corev1alpha1.Task) error
-	authorizeTaskDelete  func(context.Context, *corev1alpha1.Task) error
-	authorizeAgentCreate func(context.Context, *corev1alpha1.Agent) error
-	authorizeAgentUpdate func(context.Context, *corev1alpha1.Agent) error
-	authorizeAgentDelete func(context.Context, *corev1alpha1.Agent) error
-	authorizeSecretRead  func(context.Context, string, string) error
+	createdTasks            *tools.CreatedTasks
+	registry                *tools.Registry
+	allowedToolNames        map[string]struct{}
+	authorizeTaskCreate     func(context.Context, *corev1alpha1.Task) error
+	authorizeTaskDelete     func(context.Context, *corev1alpha1.Task) error
+	authorizeAgentCreate    func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentReference func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentUpdate    func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentDelete    func(context.Context, *corev1alpha1.Agent) error
+	authorizeSecretRead     func(context.Context, string, string) error
 }
 
 // SetExecutionMode supplies the immutable installation mode used by trusted
@@ -229,6 +230,9 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		SessionDeleter:            e.sessionManager,
 		GenerateTaskName:          e.generateTaskName,
 		TaskLabels:                e.taskLabels,
+		AuthorizeAgentReference: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			return chatToolAuthorizationError(e.authorizeAgentReference, ctx, agent, "Use an authorized Agent reference")
+		},
 		AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeTaskCreate, ctx, task, "Use a task configuration authorized by the context token")
 		},

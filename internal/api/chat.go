@@ -409,6 +409,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	for _, name := range chatToolNames {
 		chatToolStubs = append(chatToolStubs, llm.Tool{Name: name})
 	}
+	if !ch.config.ConnectorsEnabled {
+		chatToolStubs = filterCompletionToolsExcluding(chatToolStubs, chattools.ListConnectionsToolName)
+	}
 	offeredChatTools := completionToolNames(filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, chatToolStubs))
 	if len(offeredChatTools) < len(chatToolNames) {
 		promptBuilder.SetAvailableChatTools(offeredChatTools)
@@ -471,6 +474,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.providerType = providerInfo.Type
 	authorizationReader := ch.contextTokenAuthorizationReader()
 	executor.SetPolicyReader(authorizationReader)
+	executor.authorizeAgentReference = func(_ context.Context, agent *corev1alpha1.Agent) error {
+		return authorizeContextTokenAgentTaskReference(contextToken, ch.contextTokenAuthorization, agent.Namespace, agent.Name)
+	}
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
 		return authorizeAndStampToolTaskCreate(ctx, authorizationReader, ch.kubeClient, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
