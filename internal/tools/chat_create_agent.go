@@ -507,15 +507,23 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (strin
 		}
 		for i, item := range allowed {
 			aMap, _ := item.(map[string]any)
-			aa := corev1alpha1.AllowedAgent{
-				Name:      chatGetStringArg(aMap, nameField),
-				Namespace: chatGetStringArg(aMap, namespaceField),
+			nameValue, hasName := aMap[nameField]
+			name, ok := nameValue.(string)
+			if hasName && !ok {
+				return invalid(fmt.Sprintf("allowedAgents[%d].name", i), "a string")
 			}
-			if strings.TrimSpace(aa.Name) == "" {
+			if strings.TrimSpace(name) == "" {
 				result, _ := ChatToolErrorResult(invalidArgumentsErrorType, fmt.Sprintf("coordination.allowedAgents[%d].name is required", i), "Give each allowed agent a name, or omit allowedAgents to allow any agent")
 				return result, false
 			}
-			coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
+			namespace := ""
+			if value, supplied := aMap[namespaceField]; supplied {
+				namespace, ok = value.(string)
+				if !ok {
+					return invalid(fmt.Sprintf("allowedAgents[%d].namespace", i), "a string")
+				}
+			}
+			coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, corev1alpha1.AllowedAgent{Name: name, Namespace: namespace})
 		}
 	}
 	agent.Spec.Coordination = coordCfg

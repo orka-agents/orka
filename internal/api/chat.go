@@ -409,6 +409,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	for _, name := range chatToolNames {
 		chatToolStubs = append(chatToolStubs, llm.Tool{Name: name})
 	}
+	if !ch.config.ConnectorsEnabled {
+		chatToolStubs = filterCompletionToolsExcluding(chatToolStubs, chattools.ListConnectionsToolName)
+	}
 	offeredChatTools := completionToolNames(filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, chatToolStubs))
 	if len(offeredChatTools) < len(chatToolNames) {
 		promptBuilder.SetAvailableChatTools(offeredChatTools)

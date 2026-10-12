@@ -1784,8 +1784,6 @@ func TestToolEvalNestedArgumentTypes(t *testing.T) {
 	wrong := map[string]any{"string": map[string]any{"k": "v"}, "integer": "many", "number": "many", "boolean": "yes", "array": "a,b", "object": []any{}}
 	const ignoredNestedType = "the tool drops or coerces a nested value whose type contradicts its schema"
 	knownDefects := map[string]string{
-		"chat/create_agent: coordination.allowedAgents[].name as wrong type":             ignoredNestedType,
-		"chat/create_agent: coordination.allowedAgents[].namespace as wrong type":        ignoredNestedType,
 		"chat/create_agent: model.name as wrong type":                                    ignoredNestedType,
 		"chat/create_agent: model.provider as wrong type":                                ignoredNestedType,
 		"chat/create_agent: model.temperature as wrong type":                             ignoredNestedType,

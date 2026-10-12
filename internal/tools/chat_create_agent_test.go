@@ -722,3 +722,79 @@ func TestChatCreateAgentTool_Execute_RejectsWrongTypedCoordination(t *testing.T)
 		}
 	}
 }
+
+func TestChatCreateAgentTool_Execute_AllowedAgentIdentities(t *testing.T) {
+	for _, mode := range []string{"direct", "registry"} {
+		t.Run(mode, func(t *testing.T) {
+			for _, tt := range []struct {
+				name          string
+				allowedAgents string
+				want          []corev1alpha1.AllowedAgent
+				wantError     string
+			}{
+				{name: "numeric name", allowedAgents: `[{"name":123}]`, wantError: "coordination.allowedAgents[0].name must be a string"},
+				{name: "boolean name", allowedAgents: `[{"name":true}]`, wantError: "coordination.allowedAgents[0].name must be a string"},
+				{name: "null name", allowedAgents: `[{"name":null}]`, wantError: "coordination.allowedAgents[0].name must be a string"},
+				{name: "object name", allowedAgents: `[{"name":{"value":"coder"}}]`, wantError: "coordination.allowedAgents[0].name must be a string"},
+				{name: "array name", allowedAgents: `[{"name":["coder"]}]`, wantError: "coordination.allowedAgents[0].name must be a string"},
+				{name: "numeric namespace", allowedAgents: `[{"name":"coder","namespace":123}]`, wantError: "coordination.allowedAgents[0].namespace must be a string"},
+				{name: "boolean namespace", allowedAgents: `[{"name":"coder","namespace":false}]`, wantError: "coordination.allowedAgents[0].namespace must be a string"},
+				{name: "null namespace", allowedAgents: `[{"name":"coder","namespace":null}]`, wantError: "coordination.allowedAgents[0].namespace must be a string"},
+				{name: "object namespace", allowedAgents: `[{"name":"coder","namespace":{"value":"team"}}]`, wantError: "coordination.allowedAgents[0].namespace must be a string"},
+				{name: "array namespace", allowedAgents: `[{"name":"coder","namespace":["team"]}]`, wantError: "coordination.allowedAgents[0].namespace must be a string"},
+				{name: "invalid later name", allowedAgents: `[{"name":"coder"},{"name":123}]`, wantError: "coordination.allowedAgents[1].name must be a string"},
+				{name: "invalid later namespace", allowedAgents: `[{"name":"coder"},{"name":"tester","namespace":null}]`, wantError: "coordination.allowedAgents[1].namespace must be a string"},
+				{name: "missing name", allowedAgents: `[{}]`, wantError: "coordination.allowedAgents[0].name is required"},
+				{name: "empty name", allowedAgents: `[{"name":""}]`, wantError: "coordination.allowedAgents[0].name is required"},
+				{name: "blank name", allowedAgents: `[{"name":" \t\n "}]`, wantError: "coordination.allowedAgents[0].name is required"},
+				{name: "omitted namespace", allowedAgents: `[{"name":"coder"}]`, want: []corev1alpha1.AllowedAgent{{Name: "coder"}}},
+				{name: "empty namespace", allowedAgents: `[{"name":"coder","namespace":""}]`, want: []corev1alpha1.AllowedAgent{{Name: "coder"}}},
+				{name: "explicit namespace", allowedAgents: `[{"name":"coder","namespace":"team"}]`, want: []corev1alpha1.AllowedAgent{{Name: "coder", Namespace: "team"}}},
+				{name: "scalar strings", allowedAgents: `[{"name":"123","namespace":"true"}]`, want: []corev1alpha1.AllowedAgent{{Name: "123", Namespace: "true"}}},
+				{name: "multiple agents", allowedAgents: `[{"name":"coder"},{"name":"tester","namespace":"team"}]`, want: []corev1alpha1.AllowedAgent{{Name: "coder"}, {Name: "tester", Namespace: "team"}}},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					fc := newFakeClient()
+					ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
+					tool := &ChatCreateAgentTool{}
+					execute := tool.Execute
+					if mode == "registry" {
+						registry := NewRegistry()
+						registry.Register(tool)
+						execute = func(ctx context.Context, args json.RawMessage) (string, error) {
+							return registry.Execute(ctx, tool.Name(), args)
+						}
+					}
+					result, err := execute(ctx, json.RawMessage(`{"name":"lead","systemPrompt":"p","coordination":{"enabled":true,"allowedAgents":`+tt.allowedAgents+`}}`))
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+					var response ChatToolResult
+					if err := json.Unmarshal([]byte(result), &response); err != nil {
+						t.Fatalf("failed to parse result: %v", err)
+					}
+					var agents corev1alpha1.AgentList
+					if err := fc.List(ctx, &agents); err != nil {
+						t.Fatal(err)
+					}
+					if tt.wantError != "" {
+						if response.Success || response.ErrorType != errTypeInvalidArgs || response.Error != tt.wantError {
+							t.Errorf("result = %#v, want invalid arguments with error %q", response, tt.wantError)
+						}
+						if len(agents.Items) != 0 {
+							t.Errorf("rejected allowedAgents created %d Agents", len(agents.Items))
+						}
+						return
+					}
+					if !response.Success || len(agents.Items) != 1 {
+						t.Fatalf("valid allowedAgents: result = %#v, agents = %d", response, len(agents.Items))
+					}
+					coord := agents.Items[0].Spec.Coordination
+					if coord == nil || !coord.Enabled || !slices.Equal(coord.AllowedAgents, tt.want) {
+						t.Fatalf("coordination = %#v, want enabled with allowedAgents = %#v", coord, tt.want)
+					}
+				})
+			}
+		})
+	}
+}

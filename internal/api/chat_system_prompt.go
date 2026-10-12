@@ -482,8 +482,9 @@ func ruleParts() []promptPart {
    (e.g., code generation, detailed code review, multi-file analysis). Do NOT
    create an AI task just to answer a question — answer it yourself directly.
 `, requires: []string{chatCreateAITaskTool}},
-		{text: `When creating an ai task, always set providerRef to an available provider name.
-   Use this chat session's provider (chat_provider in the Runtime line) unless the user asks for another.
+		{text: `For an Agent-backed ai task, use the selected Agent's providerRef unless the user asks for another provider.
+   For tasks without agentRef, use this chat session's provider (chat_provider in the Runtime line)
+   unless the user explicitly requests another provider.
 `, requires: []string{chatCreateAITaskTool}},
 		{text: `After creating a task, IMMEDIATELY call wait_for_task then fetch_task_output
    in the SAME turn — do not stop to narrate between tool calls.

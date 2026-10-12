@@ -217,12 +217,18 @@ func TestChatEvalRequestContextReachesModel(t *testing.T) {
 // selected agent must stay visible even when its tool is not offered.
 func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 	tests := []struct {
-		name         string
-		allowedTools []string
-		agentRef     string
-		knownDefect  string
+		name               string
+		allowedTools       []string
+		agentRef           string
+		connectorsDisabled bool
+		knownDefect        string
 	}{
 		{name: "all chat tools allowed", allowedTools: chattools.ChatToolNames()},
+		{
+			name:               "connectors disabled despite connector read scope",
+			allowedTools:       []string{"list_tasks", chattools.ListConnectionsToolName},
+			connectorsDisabled: true,
+		},
 		{
 			name:         "read-only tools allowed",
 			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
@@ -251,7 +257,7 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 			llm.RegisterProvider(chatEvalProviderType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
 			c := chatEvalCluster(t, defaultNamespace)
 			cfg := DefaultChatConfig()
-			cfg.ConnectorsEnabled = true
+			cfg.ConnectorsEnabled = !tt.connectorsDisabled
 			cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
 			ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
 			ch.contextTokenAuthorization = authz
@@ -278,8 +284,12 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 			for _, tool := range req.Tools {
 				offered[tool.Name] = true
 			}
-			require.Equal(t, slices.Sorted(slices.Values(tt.allowedTools)), slices.Sorted(maps.Keys(offered)),
-				"offered chat tools must match the token's allowedTools")
+			expectedTools := slices.Clone(tt.allowedTools)
+			if tt.connectorsDisabled {
+				expectedTools = slices.DeleteFunc(expectedTools, func(name string) bool { return name == chattools.ListConnectionsToolName })
+			}
+			require.Equal(t, slices.Sorted(slices.Values(expectedTools)), slices.Sorted(maps.Keys(offered)),
+				"offered chat tools must match authorized and enabled tools")
 			var unavailable []string
 			for _, name := range chattools.ChatToolNames() {
 				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(chatEvalModelInput(req)) {
