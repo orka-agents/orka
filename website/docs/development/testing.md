@@ -224,8 +224,8 @@ missing or mismatched artifacts staying not ready.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:
-  external-provider execution and clean-room publication stay with `Agent Runtime E2E`
-  and `Release Qualification`.
+  external-provider execution stays with `Agent Runtime E2E`, and release acceptance
+  with `Release Qualification`.
   Every Substrate run includes DataOnly suspension, cold continuation, and
   checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
