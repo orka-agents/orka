@@ -90,18 +90,6 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
-	policyReader := toolPolicyReader(ctx, tc.Client)
-	agent, err := loadAgent(ctx, policyReader, namespace, agentRef)
-	if err != nil {
-		result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
-		return result, nil
-	}
-	if agent != nil && agent.Spec.Runtime == nil {
-		return ChatToolErrorResult(invalidArgumentsErrorType,
-			fmt.Sprintf("agent %q has no runtime; create_agent_task only runs Agents with a runtime", agentRef),
-			fmt.Sprintf("Use create_ai_task with agentRef=%q instead", agentRef))
-	}
-
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      tc.GenerateTaskName(),
@@ -117,6 +105,22 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		},
 	}
 
+	// Deny a disallowed reference before discovering whether the Agent exists
+	// or has a runtime. Authorize the complete configuration again below.
+	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
+		return result, nil
+	}
+	policyReader := toolPolicyReader(ctx, tc.Client)
+	agent, err := loadAgent(ctx, policyReader, namespace, agentRef)
+	if err != nil {
+		result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
+		return result, nil
+	}
+	if agent != nil && agent.Spec.Runtime == nil {
+		return ChatToolErrorResult(invalidArgumentsErrorType,
+			fmt.Sprintf("agent %q has no runtime; create_agent_task only runs Agents with a runtime", agentRef),
+			fmt.Sprintf("Use create_ai_task with agentRef=%q instead", agentRef))
+	}
 	if d, errResult, ok := parseTimeoutArg(a); !ok {
 		return errResult, nil
 	} else if d > 0 {
