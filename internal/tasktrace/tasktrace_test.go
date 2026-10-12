@@ -103,3 +103,30 @@ func TestBuildTaskTraceExplicitModelCompletionDequeuesOpenRequest(t *testing.T) 
 		t.Fatalf("warnings = %#v, want none", trace.Warnings)
 	}
 }
+
+func TestBuildTaskTraceRecordsModelAndProvider(t *testing.T) {
+	content := func(v map[string]string) json.RawMessage {
+		data, _ := json.Marshal(v)
+		return data
+	}
+	trace := BuildTaskTrace(TaskMetadata{Name: "task"}, []store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeModelRequestStarted, Content: content(map[string]string{"modelRequestID": "m1", "model": "gpt-4.1", "provider": "openai"})},
+		{Seq: 2, Type: events.ExecutionEventTypeModelRequestCompleted, Content: content(map[string]string{"modelRequestID": "m1", "model": "gpt-4.1-2025-04-14"})},
+		{Seq: 3, Type: events.ExecutionEventTypeModelRequestStarted, Content: content(map[string]string{"modelRequestID": "m2", "model": "claude-haiku-4-5", "provider": "anthropic"})},
+		{Seq: 4, Type: events.ExecutionEventTypeModelRequestFailed, Content: content(map[string]string{"modelRequestID": "m2"})},
+		{Seq: 5, Type: events.ExecutionEventTypeModelRequestCompleted, Content: content(map[string]string{"model": "gemini-2.5-flash", "provider": "gemini"})},
+	}, time.Now())
+	if len(trace.ModelRequests) != 3 {
+		t.Fatalf("model requests = %#v, want 3", trace.ModelRequests)
+	}
+	want := []struct{ model, provider string }{
+		{"gpt-4.1-2025-04-14", "openai"},
+		{"claude-haiku-4-5", "anthropic"},
+		{"gemini-2.5-flash", "gemini"},
+	}
+	for i, w := range want {
+		if got := trace.ModelRequests[i]; got.Model != w.model || got.Provider != w.provider {
+			t.Fatalf("model request %d = %#v, want model %q provider %q", i, got, w.model, w.provider)
+		}
+	}
+}

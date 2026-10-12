@@ -81,6 +81,8 @@ type TraceEvent struct {
 type ModelRequestTrace struct {
 	ID        string     `json:"id"`
 	Status    string     `json:"status"`
+	Model     string     `json:"model,omitempty"`
+	Provider  string     `json:"provider,omitempty"`
 	StartSeq  int64      `json:"startSeq,omitempty"`
 	EndSeq    int64      `json:"endSeq,omitempty"`
 	StartedAt *time.Time `json:"startedAt,omitempty"`
@@ -230,7 +232,7 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			modelByID[id] = len(trace.ModelRequests)
 			openModelIDs = append(openModelIDs, id)
 			createdAt := event.CreatedAt
-			trace.ModelRequests = append(trace.ModelRequests, ModelRequestTrace{ID: id, Status: StatusRunning, StartSeq: event.Seq, StartedAt: &createdAt, Summary: event.Summary})
+			trace.ModelRequests = append(trace.ModelRequests, ModelRequestTrace{ID: id, Status: StatusRunning, Model: firstContentString(event.Content, "model"), Provider: firstContentString(event.Content, "provider"), StartSeq: event.Seq, StartedAt: &createdAt, Summary: event.Summary})
 		case events.ExecutionEventTypeModelRequestCompleted, events.ExecutionEventTypeModelRequestFailed:
 			id := modelRequestID(event)
 			idx := -1
@@ -255,6 +257,10 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			trace.ModelRequests[idx].EndSeq = event.Seq
 			trace.ModelRequests[idx].EndedAt = &endedAt
 			trace.ModelRequests[idx].Summary = prefer(trace.ModelRequests[idx].Summary, event.Summary)
+			// The completion reports the model that answered, which can be more
+			// specific than the requested one.
+			trace.ModelRequests[idx].Model = prefer(trace.ModelRequests[idx].Model, firstContentString(event.Content, "model"))
+			trace.ModelRequests[idx].Provider = prefer(trace.ModelRequests[idx].Provider, firstContentString(event.Content, "provider"))
 			if event.Type == events.ExecutionEventTypeModelRequestFailed {
 				trace.ModelRequests[idx].Status = StatusFailed
 				trace.ModelRequests[idx].Error = issueMessage(event)
