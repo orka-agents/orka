@@ -293,7 +293,7 @@ func taskTypeParts() []promptPart {
   All containers run as non-root with read-only root filesystem.
   Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
 `, requires: []string{promptToolContainerTask}},
-		{text: `- ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
+		{text: `- ai: Run an LLM-powered task. Use create_ai_task; omit providerRef unless the user explicitly requests another provider.
   Use for: reasoning, analysis, content generation, code review, summarization,
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
@@ -306,7 +306,7 @@ func taskTypeParts() []promptPart {
   runtime configured, ALWAYS use create_agent_task with that agent name.
 `, requires: []string{promptToolAgentTask}},
 		{text: `  If the specified Agent has no runtime listed, including coordinator Agents backed
-  by providerRef/model only, use create_ai_task with agentRef and providerRef instead.
+  by providerRef/model only, use create_ai_task with agentRef instead. Omit providerRef unless the user explicitly requests another provider.
 `, requires: []string{chatCreateAITaskTool}},
 		{text: `  When the task involves a git repository, ALWAYS include the gitRepo URL in the
   workspace config so credentials are automatically mounted:
@@ -318,7 +318,7 @@ func taskTypeParts() []promptPart {
   and Grep, with defaultAllowBash=true; only override these when the user asks.
   Use whichever runtime is available. If multiple runtimes are available, prefer codex, then copilot.
 `, requires: []string{promptToolAgentTask}},
-		{text: `  If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
+		{text: `  If no agent runtimes are available, use create_ai_task with agentRef (omitting providerRef unless explicitly overridden) for existing non-runtime agents, or create_ai_task directly for LLM-only work.
 `, requires: []string{chatCreateAITaskTool}},
 		{text: `  Agent tasks need more time than AI tasks. Set timeout to at least 15m.
 `, requires: []string{promptToolAgentTask}},
@@ -409,7 +409,7 @@ or when a child task's result makes other tasks unnecessary.
 1. Create specialist agents with create_agent
 2. Create a coordinator agent with coordination.enabled=true
 3. Create a task referencing the coordinator: use create_agent_task only when the
-   coordinator has runtime listed; otherwise use create_ai_task with agentRef and providerRef.
+   coordinator has runtime listed; otherwise use create_ai_task with agentRef; omit providerRef unless the user explicitly requests another provider.
 
 `, requires: []string{promptToolCreateAgent, promptToolAgentTask, chatCreateAITaskTool}},
 	}
@@ -482,7 +482,8 @@ func ruleParts() []promptPart {
    (e.g., code generation, detailed code review, multi-file analysis). Do NOT
    create an AI task just to answer a question — answer it yourself directly.
 `, requires: []string{chatCreateAITaskTool}},
-		{text: `For an Agent-backed ai task, use the selected Agent's providerRef unless the user asks for another provider.
+		{text: `For an Agent-backed ai task, omit providerRef to use the selected Agent's configured provider
+   unless the user explicitly requests another provider.
    For tasks without agentRef, use this chat session's provider by omitting providerRef
    unless the user explicitly requests another provider.
 `, requires: []string{chatCreateAITaskTool}},
@@ -505,7 +506,7 @@ func ruleParts() []promptPart {
    environment with full tool access. Never use create_agent_task for non-runtime agents.
 `, requires: []string{promptToolAgentTask}},
 		{text: `When an agent has no "runtime" listed, including coordinator agents, use create_ai_task
-   with agentRef and providerRef. Never use create_ai_task for runtime agents.
+   with agentRef; omit providerRef unless the user explicitly requests another provider. Never use create_ai_task for runtime agents.
 `, requires: []string{chatCreateAITaskTool}},
 		{text: `Never use create_container_task for runtime agents.
 `, requires: []string{promptToolContainerTask}},
@@ -513,7 +514,7 @@ func ruleParts() []promptPart {
     - Prefer available coordinator candidates: agents whose names contain "coordinator";
       if "dev-coordinator" exists, prefer it.
     - If the chosen coordinator has "runtime" listed in available_agents, start it with create_agent_task.
-    - If the chosen coordinator has no "runtime" listed, start it with create_ai_task using agentRef and providerRef.
+    - If the chosen coordinator has no "runtime" listed, start it with create_ai_task using agentRef; omit providerRef unless the user explicitly requests another provider.
       A coordinator handles the full workflow: code → validate → review repair loop → PR → CI repair loop → validate + re-review → approve.
     - Do NOT bundle all steps into a single agent task prompt.
 `, requires: []string{promptToolAgentTask, chatCreateAITaskTool}},
@@ -568,7 +569,7 @@ func exampleParts() []promptPart {
 → wait_for_task → fetch_task_output
 `, requires: []string{promptToolContainerTask, promptToolWait, promptToolFetch}},
 		{text: `"review this code for security issues"
-→ create_ai_task (prompt: "Review for security vulnerabilities: ...", providerRef: "openai")
+→ create_ai_task (prompt: "Review for security vulnerabilities: ...")
 → wait_for_task → fetch_task_output → summarize findings
 `, requires: []string{chatCreateAITaskTool, promptToolWait, promptToolFetch}},
 		{text: `"refactor the auth module" (with runtime agent available)
