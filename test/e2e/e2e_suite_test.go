@@ -64,6 +64,8 @@ var (
 	e2eAnthropicModel          string
 	e2eGitHubToken             string
 	e2eLiveCopilotProxyBaseURL string
+	// e2eACPIdlePoolTTL is the controller's idle RuntimePool TTL for this run.
+	e2eACPIdlePoolTTL time.Duration
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
@@ -313,12 +315,20 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, webhookPaths).To(ContainSubstring("/validate-core-orka-ai-v1alpha1-task-provenance"))
 
 	By("patching the controller-manager deployment to use kind-loaded images")
-	// Profile checks can start many distinct runtime pools in a minute. Release
-	// idle workers promptly so they leave CPU for the following container tests.
+	// Profile checks can start many distinct runtime pools in a minute, so the
+	// default lane releases idle workers after 5s to leave CPU for the
+	// following container tests. The agent runtime lifecycle job sets the
+	// production default, which its park and resume checks rely on.
+	idleTTL := strings.TrimSpace(os.Getenv("E2E_ACP_IDLE_POOL_TTL"))
+	if idleTTL == "" {
+		idleTTL = "5s"
+	}
+	e2eACPIdlePoolTTL, err = time.ParseDuration(idleTTL)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "E2E_ACP_IDLE_POOL_TTL must be a Go duration")
 	cmd = exec.Command(
 		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[`+
-			`{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"5s"},`+
+			`{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"`+e2eACPIdlePoolTTL.String()+`"},`+
 			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"}]}]}}}}`,
 	)
 	_, err = utils.Run(cmd)

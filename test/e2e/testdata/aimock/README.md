@@ -15,6 +15,10 @@ Conventions:
   `turnIndex`, `toolCallId`, `toolResultContains`). The suite sets
   `AIMOCK_STRICT_TURN_INDEX=1`, so `turnIndex` matches only its exact turn. Do
   not use `sequenceIndex`: its server-side counter breaks on reruns and retries.
+- When a runtime rehydrates a Session (after a controller restart, Pod
+  replacement, or scale to zero), Orka sends the prior transcript inside the
+  new user message, so it carries every earlier marker too. Put fixtures for
+  later turns before those for earlier turns in the file.
 - Steps that must name a generated resource (a delegated child Task, a created
   Agent) are injected at run time with `injectMockLLMFixtures` once the name is
   known, while the conversation is parked in a scripted wait.
@@ -23,10 +27,13 @@ Conventions:
 - In mock mode (`e2eMockOpenAI`), specs assert on what reached the model with
   `expectMockLLMToolResult` and `expectMockLLMServed` from `mock_llm_test.go`.
 
-The fake forge publication and agent runtime matrix specs deploy a second
-aimock with these same fixtures as `vekil-system/vekil`, the upstream of the
-ACP provider proxy, so the built-in Codex, OpenCode, and Claude runtimes follow
-the scripts too (`fake_forge.json`, `agent_runtime_matrix.json`).
+The fake forge publication, agent runtime matrix, and agent runtime lifecycle
+specs deploy a second aimock with these same fixtures as `vekil-system/vekil`,
+the upstream of the ACP provider proxy, so the built-in Codex, OpenCode,
+Claude, and Copilot runtimes follow the scripts too (`fake_forge.json`,
+`agent_runtime_matrix.json`, `agent_runtime_lifecycle.json`). A fixture's
+`latency` (milliseconds) holds a prompt in flight, which the timeout, cancel,
+and controller restart checks use instead of a real `sleep`.
 Read its requests with `providerProxyMockLLM.requestsFor`.
 
 The fixture format is documented in aimock's

@@ -113,6 +113,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
 | `test/e2e/anthropic_compat_test.go` | Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior, on aimock or the live proxy |
 | `test/e2e/coordination_memory_tools_test.go` | Coordination memory tool auto-injection and execution (`search_transcript`, `recall_memory`, `propose_memory`, `remember`) and proposal review without durable writes, on aimock or the live proxy |
+| `test/e2e/agent_runtime_lifecycle_test.go` | Go port of `scripts/agent-runtime-e2e.sh` (label `agent-runtime`): RuntimePool profile projection and execution fences; read, Session continuation, and Task fork for Codex, OpenCode, Claude, and Copilot; unsafe workspace URLs; concurrency within capacity; Task timeout and deletion cancellation through the cleanup finalizer; controller restart without replay; Pod replacement and scale-to-zero recovery of the same RuntimeSession; OpenCode read-intent tool policy; and Session archival and RuntimePool cleanup. On aimock it also checks that each continuation, fork, and recovery replayed the prior transcript to the model |
 | `test/e2e/agent_runtime_matrix_test.go` | Codex against a pinned read workspace, OpenCode read-intent enforcement, and Claude session wiring through the provider proxy (aimock as Vekil, or the live proxy), plus a digest-pinned Copilot image smoke assertion; it is not the canonical ACP release gate |
 | `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
 | `.github/workflows/gateway-e2e.yml` | Focused, model-free, secret-free Gateway live E2E in Kind using generated bearer tokens, an ephemeral CA, the TLS reference adapter, and the deterministic echo runtime |
@@ -205,6 +206,12 @@ missing or mismatched artifacts staying not ready.
 - The suite enables Task provenance trust after verifying the `orka-admission`
   provenance webhook that `make deploy` installs, so coordination messaging and
   `cancel_task` run in the default lane.
+- The `Agent runtime lifecycle` job in `test-e2e.yml` runs the `agent-runtime`
+  label on its own Kind cluster, and the default job excludes it. Those specs
+  restart the controller and park, replace, and scale RuntimePools, and they
+  need the production idle pool TTL, so the job sets `E2E_ACP_IDLE_POOL_TTL=15m`
+  (the default lane uses `5s`). Run them locally with
+  `make test-e2e E2E_GINKGO_LABEL_FILTER=agent-runtime E2E_ACP_IDLE_POOL_TTL=15m`.
 - The default lane also runs one clean-room publication end to end without
   github.com: a scripted Codex RuntimePool talks to a second aimock deployed as
   `vekil-system/vekil` behind the production provider proxy, and the publisher

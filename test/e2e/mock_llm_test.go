@@ -393,9 +393,12 @@ type mockLLMRequest struct {
 	Timestamp int64  `json:"timestamp"`
 	Path      string `json:"path"`
 	Body      struct {
-		Model    string           `json:"model"`
-		Messages []mockLLMMessage `json:"messages"`
-		Tools    []struct {
+		// Truncated is set when the body exceeded aimock's 64 KB journal cap
+		// and was not recorded.
+		Truncated bool             `json:"__aimock_truncated"`
+		Model     string           `json:"model"`
+		Messages  []mockLLMMessage `json:"messages"`
+		Tools     []struct {
 			Function struct {
 				Name string `json:"name"`
 			} `json:"function"`
@@ -466,6 +469,28 @@ func (m mockLLMInstance) journal() ([]mockLLMRequest, error) {
 // mockLLMRequestsFor returns the suite aimock's requests that carry marker.
 func mockLLMRequestsFor(marker string) ([]mockLLMRequest, error) {
 	return suiteMockLLM.requestsFor(marker)
+}
+
+// servedFor returns the journal entries aimock answered with a fixture that
+// matches promptMarker as its user message. Unlike requestsFor, it also finds
+// requests whose body exceeded the journal cap.
+func (m mockLLMInstance) servedFor(promptMarker string) ([]mockLLMRequest, error) {
+	requests, err := m.journal()
+	if err != nil {
+		return nil, err
+	}
+	var served []mockLLMRequest
+	for _, request := range requests {
+		var fixture struct {
+			Match struct {
+				UserMessage string `json:"userMessage"`
+			} `json:"match"`
+		}
+		if json.Unmarshal(request.Response.Fixture, &fixture) == nil && fixture.Match.UserMessage == promptMarker {
+			served = append(served, request)
+		}
+	}
+	return served, nil
 }
 
 // requestsFor returns the journal entries whose conversation carries marker.
