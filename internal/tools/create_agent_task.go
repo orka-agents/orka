@@ -105,10 +105,13 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		},
 	}
 
-	// Deny a disallowed reference before discovering whether the Agent exists
-	// or has a runtime. Authorize the complete configuration again below.
-	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
-		return result, nil
+	// Check only the reference before lookup. Full Task authorization needs the
+	// external runtime's materialized tool policy and runs after construction.
+	if tc.AuthorizeAgentReference != nil {
+		reference := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: agentRef, Namespace: namespace}}
+		if err := tc.AuthorizeAgentReference(ctx, reference); err != nil {
+			return ChatToolErrorResult(err.Type, err.Message, err.Suggestion)
+		}
 	}
 	policyReader := toolPolicyReader(ctx, tc.Client)
 	agent, err := loadAgent(ctx, policyReader, namespace, agentRef)

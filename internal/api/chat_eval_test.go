@@ -377,31 +377,65 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 }
 
 // Names followed by = or : are tool arguments such as wait_timeout="30m".
-var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file)_[a-z]+(?:_[a-z]+)*)\b(\s*[=:])?`)
+var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*)\b(\s*[=:])?`)
 
-// TestChatEvalPromptToolReferencesExist catches prompt or tool-description text
-// that still names a renamed or removed tool. Coordinator-only tools may be mentioned because the
-// prompt describes what coordinator Agents will do.
+// TestChatEvalPromptToolReferencesExist catches model-message, system-prompt,
+// or tool-description text that still names a renamed or removed tool.
+// Coordinator-only tools may be mentioned because the prompt describes what
+// coordinator Agents will do.
 func TestChatEvalPromptToolReferencesExist(t *testing.T) {
-	c := chatEvalCluster(t, defaultNamespace)
-	provider, _ := runChatEvalTurn(t, c, ChatRequest{Message: "hello"}, &llm.CompletionResponse{Content: "ok"})
-	req := provider.requests[0]
+	for _, tt := range []struct {
+		name          string
+		req           ChatRequest
+		wantDirective string
+	}{
+		{name: "plain chat", req: ChatRequest{Message: "hello"}},
+		{
+			name:          "selected runtime agent directive",
+			req:           ChatRequest{Message: "refactor the auth middleware", AgentRef: "coder"},
+			wantDirective: `[Using agent "coder" which has runtime`,
+		},
+		{
+			// Issue workflows no longer get a synthetic coordinator directive.
+			name: "issue PR workflow",
+			req:  ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := chatEvalCluster(t, defaultNamespace)
+			provider, _ := runChatEvalTurn(t, c, tt.req,
+				&llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "eval-call", Name: "list_agents", Arguments: json.RawMessage(`{}`)}}},
+				&llm.CompletionResponse{Content: "ok"},
+			)
+			require.Len(t, provider.requests, 2, "expected to scan the initial and post-tool model requests")
+			if tt.wantDirective != "" {
+				messages := provider.requests[0].Messages
+				require.NotEmpty(t, messages)
+				content := messages[len(messages)-1].Content
+				require.True(t, strings.HasSuffix(content, tt.req.Message), "user message was not preserved: %q", content)
+				require.Contains(t, strings.TrimSuffix(content, tt.req.Message), tt.wantDirective,
+					"expected HandleChat to inject the selected-agent directive")
+			}
 
-	offered := map[string]bool{}
-	for _, tool := range req.Tools {
-		offered[tool.Name] = true
-	}
-	for _, name := range chattools.ChatToolNames() {
-		require.True(t, offered[name], "chat tool %s is not offered to the model", name)
-	}
+			for i, req := range provider.requests {
+				offered := map[string]bool{}
+				for _, tool := range req.Tools {
+					offered[tool.Name] = true
+				}
+				for _, name := range chattools.ChatToolNames() {
+					require.True(t, offered[name], "chat tool %s is not offered to the model in request %d", name, i)
+				}
 
-	text := make([]string, 0, 1+len(req.Tools))
-	text = append(text, req.SystemPrompt)
-	for _, tool := range req.Tools {
-		text = append(text, tool.Description)
+				text := make([]string, 0, 1+len(req.Tools))
+				text = append(text, chatEvalModelInput(req))
+				for _, tool := range req.Tools {
+					text = append(text, tool.Description)
+				}
+				require.Empty(t, chatEvalUnknownToolReferences(strings.Join(text, "\n")),
+					"model messages, system prompt, or tool descriptions in request %d name tools that are not registered anywhere", i)
+			}
+		})
 	}
-	require.Empty(t, chatEvalUnknownToolReferences(strings.Join(text, "\n")),
-		"prompt or tool descriptions name tools that are not registered anywhere")
 }
 
 func chatEvalUnknownToolReferences(text string) []string {
@@ -429,7 +463,10 @@ func TestChatEvalUnknownToolReferences(t *testing.T) {
 		{name: "stale code tool", text: "Use code_missing_tool.", want: []string{"code_missing_tool"}},
 		{name: "stale web tool", text: "Use web_missing_tool.", want: []string{"web_missing_tool"}},
 		{name: "stale file tool", text: "Use file_missing_tool.", want: []string{"file_missing_tool"}},
-		{name: "arguments are not tools", text: `file_path="x" wait_timeout: "30m"`},
+		{name: "stale versioned tool", text: "Use create_agent_v2.", want: []string{"create_agent_v2"}},
+		{name: "stale tool with numeric segment", text: "Use create_agent_2.", want: []string{"create_agent_2"}},
+		{name: "arguments are not tools", text: `file_path="x" wait_timeout: "30m" file_path_v2="x" wait_timeout2: "30m"`},
+		{name: "other identifiers are not tools", text: "model_v2 task_create_agent_v2 createAgentV2 get_42"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, chatEvalUnknownToolReferences(tt.text))

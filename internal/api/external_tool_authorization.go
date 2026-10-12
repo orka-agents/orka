@@ -66,6 +66,21 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 			}
 			return nil
 		}
+		agentReference := tc.AuthorizeAgentReference
+		tc.AuthorizeAgentReference = func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			for _, permission := range []struct{ verb, resource, name string }{
+				{externalToolCreateVerb, externalToolTaskResource, ""},
+				{"get", externalToolAgentResource, agent.Name},
+			} {
+				if err := authorization.authorize(ctx, agent.Namespace, permission.verb, corev1alpha1.GroupVersion.Group, permission.resource, permission.name); err != nil {
+					return &tools.ChatToolError{Type: externalToolPermissionDenied, Message: err.Error(), Suggestion: externalToolRBACSuggestion}
+				}
+			}
+			if agentReference != nil {
+				return agentReference(ctx, agent)
+			}
+			return nil
+		}
 		taskCreate := tc.AuthorizeTaskCreate
 		tc.AuthorizeTaskCreate = func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			if err := authorization.authorize(ctx, task.Namespace, externalToolCreateVerb, corev1alpha1.GroupVersion.Group, externalToolTaskResource, ""); err != nil {

@@ -133,6 +133,8 @@ type ToolContext struct {
 	TaskLabels          func() map[string]string
 	CheckTaskLimit      func() *ChatToolError
 	AuthorizeTaskCreate func(context.Context, *corev1alpha1.Task) *ChatToolError
+	// AuthorizeAgentReference checks caller authority without resolving the Agent or its runtime profile.
+	AuthorizeAgentReference func(context.Context, *corev1alpha1.Agent) *ChatToolError
 	// SealTaskCreate runs right after a Task this tool created exists, so
 	// the API can bind server-assigned identity (the UID) to the requester
 	// it stamped. A failure is logged by the sealer; the Task stays.
