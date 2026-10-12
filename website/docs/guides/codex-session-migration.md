@@ -175,12 +175,10 @@ Migration does not copy source authentication or source policy into authority.
 Retain the journal and repeat the same command after an uncertain response. The
 CLI reuses its saved bundle and operation ID. Export also reuses the same frozen
 SessionKit install plan and receipt. Changing the target, bundle, or cwd with
-that journal is rejected. Automatic connections use authenticated Kubernetes
-streams without opening a local port or invoking `kubectl`. Retries retain the
-cluster and Service identity. Recreating the Service
-requires a new journal; an explicit server URL must stay unchanged. Invalid or
-unavailable Kubernetes configuration and missing service discovery fail closed.
-Use `--server` to select an explicit endpoint, including a development server.
+that journal is rejected. The explicitly selected API endpoint must stay
+unchanged across retries. Automatic Kubernetes Service discovery and streaming
+are not available for native migration; use `--server` or a saved trusted API
+endpoint and supply API authentication as described above.
 
 An uncertain runtime install retains its target and frozen journal and closes
 pool admission. Exact create retries report that retained outcome without

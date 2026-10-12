@@ -895,3 +895,58 @@ printf '%s\n' 'ok - Task terminal waits require execution and phase projection f
   [[ "${positive_controls}" == 2 && "${negative_controls}" == 7 ]]
 )
 printf '%s\n' 'ok - candidate identity and all workspace URL controls run without live GitHub publication settings'
+
+(
+  eval "$(awk '/^run_read_smoke\(\) \{/,/^\}$/' "${script}")"
+  release_gate=0
+  namespace=test
+  state_wait_seconds=1
+  read_repo_commit=fixture-commit
+  temp_root=/tmp
+  apply_agent() { :; }
+  apply_read_task() { :; }
+  wait_until() { :; }
+  wait_task_pool_name_value() { printf '%s\n' fixture-pool; }
+  capture_pool_snapshot() { :; }
+  assert_task_succeeded_read() { :; }
+  sanitize_name() { printf '%s\n' "$1"; }
+  die() { printf '%s\n' "$*" >&2; exit 1; }
+  k() {
+    local task="$5" query="$7"
+    case "${task}:${query}" in
+      'read:jsonpath={.status.execution.runtimeSessionUID}') printf '%s\n' fixture-session ;;
+      'read:jsonpath={.status.execution.runtimeSessionGeneration}') printf '%s\n' 3 ;;
+      'read:jsonpath={.status.execution.runtimeSessionRecreationPending}') printf '%s\n' "${retired}" ;;
+      'read-continue:jsonpath={.status.execution.runtimeSessionUID}') printf '%s\n' "${fixture_continued_uid}" ;;
+      'read-continue:jsonpath={.status.execution.runtimeSessionGeneration}') printf '%s\n' "${fixture_continued_generation}" ;;
+      *) echo 'unexpected continuation identity query' >&2; exit 1 ;;
+    esac
+  }
+  fixture_continued_uid=fixture-session
+  retired=false
+  fixture_continued_generation=3
+  run_read_smoke codex model agent read session nonce license
+  [[ "${read_smoke_session_uid}" == fixture-session && "${read_smoke_session_generation}" == 3 ]]
+  retired=true
+  fixture_continued_generation=4
+  run_read_smoke codex model agent read session nonce license
+  [[ "${read_smoke_session_uid}" == fixture-session && "${read_smoke_session_generation}" == 4 ]]
+  for case in retired-without-increment resident-with-increment different-uid extra-generation; do
+    if (
+      retired=true
+      fixture_continued_generation=4
+      fixture_continued_uid=fixture-session
+      case "${case}" in
+        retired-without-increment) fixture_continued_generation=3 ;;
+        resident-with-increment) retired=false ;;
+        different-uid) fixture_continued_uid=another-session ;;
+        extra-generation) fixture_continued_generation=5 ;;
+      esac
+      run_read_smoke codex model agent read session nonce license
+    ) >/dev/null 2>&1; then
+      echo "continuation identity accepted ${case}" >&2
+      exit 1
+    fi
+  done
+)
+printf '%s\n' 'ok - continuation preserves its logical UID and advances exactly once only after recorded runtime retirement'

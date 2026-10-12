@@ -49,11 +49,6 @@ func newMigrationKubeFixture(t *testing.T, target string) *migrationKubeFixture 
 	return &migrationKubeFixture{t: t, target: target, serviceUID: "stable-service-uid", websocket: true}
 }
 
-func (f *migrationKubeFixture) setServiceUID(uid types.UID) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.serviceUID = uid
-}
 func (f *migrationKubeFixture) tunnelCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.tunnels }
 func (f *migrationKubeFixture) closedCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.closed }
 func (f *migrationKubeFixture) service() *corev1.Service {

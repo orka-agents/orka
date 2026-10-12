@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/cli/client"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -189,9 +190,21 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		ExpectWithOffset(1, found).To(BeTrue(), "LICENSE never reached the model for %s", promptMarker)
 	}
 
+	// Native export is a public API proof that Codex saved a portable checkpoint.
+	// Keep its conversation bytes out of assertion diagnostics.
+	nativeCheckpoint := func(session string) *client.NativeSessionExport {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		checkpoint, err := client.NewWithNamespace(apiBaseURL, token, namespace).ExportNativeSession(ctx, session)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		ExpectWithOffset(1, checkpoint.ProviderSessionID).NotTo(BeEmpty())
+		ExpectWithOffset(1, checkpoint.DataDigest).To(MatchRegexp(`^sha256:[0-9a-f]{64}$`))
+		return checkpoint
+	}
+
 	// readSmoke ports run_read_smoke for one provider: a read that starts a
-	// Session, a continuation that must stay on the same RuntimeSession, and
-	// a fork of the continuation. It returns the Agent, Session, pool, nonce,
+	// Session, a continuation preserving its identity (cold after native capture),
+	// and a fork of the continuation. It returns the Agent, Session, pool, nonce,
 	// and the continued RuntimeSession identity.
 	readSmoke := func(provider agentRuntimeProvider) (string, string, string, string, string, int64) {
 		agent := name("acp-" + provider.kind)
@@ -213,8 +226,20 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		expectTaskResult(task, nonce, agentRuntimeLicenseLine)
 		expectReadReachedModel(marker(provider.kind + "-read"))
 		firstUID, firstGeneration := taskSessionIdentity(Default, task)
+		firstExecution := getACPTask(Default, task).Status.Execution
+		expectedGeneration := firstGeneration
+		if firstExecution.RuntimeSessionRecreationPending {
+			// Native capture proves writer exit and retires the exact runtime home.
+			// The next turn cold-restores the same logical Session at a new fence.
+			expectedGeneration++
+		}
+		var firstCheckpoint *client.NativeSessionExport
+		if !live && provider.kind == "codex" {
+			Expect(firstExecution.RuntimeSessionRecreationPending).To(BeTrue(), "native capture must retire its runtime generation")
+			firstCheckpoint = nativeCheckpoint(session)
+		}
 
-		By("continuing the Session on the same RuntimePool and RuntimeSession")
+		By("continuing the same Session on its RuntimePool with the expected runtime generation")
 		applyReadTask(agentRuntimeReadTask{Name: continuation, Agent: agent, Provider: provider.kind, Session: session,
 			Prompt: "Continue the existing session. Return the session nonce from the prior turn and no " +
 				"repository-derived replacement. Do not modify files. " + marker(provider.kind+"-continue")})
@@ -225,7 +250,12 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		expectReplayed(marker(provider.kind+"-continue"), nonce)
 		continuedUID, continuedGeneration := taskSessionIdentity(Default, continuation)
 		Expect(continuedUID).To(Equal(firstUID))
-		Expect(continuedGeneration).To(Equal(firstGeneration), "a plain continuation must not recreate the session")
+		Expect(continuedGeneration).To(Equal(expectedGeneration), "continuation must honor the prior turn's runtime retirement fence")
+		if firstCheckpoint != nil {
+			continuedCheckpoint := nativeCheckpoint(session)
+			Expect(continuedCheckpoint.ProviderSessionID).To(Equal(firstCheckpoint.ProviderSessionID), "cold restoration must preserve the native Codex thread")
+			Expect(continuedCheckpoint.DataDigest).NotTo(Equal(firstCheckpoint.DataDigest), "continuation must publish a new native checkpoint")
+		}
 
 		By("forking the continuation through the API")
 		body, status, err := doAuthorizedJSONRequest(http.MethodPost,
