@@ -72,14 +72,19 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	providerName := chatGetStringArg(a, providerRefField)
+	providerNamespace := ""
 	if providerName == "" && task.Spec.AgentRef == nil {
 		providerName = tc.Provider
+		providerNamespace = tc.ProviderNamespace
+		if providerNamespace == "" {
+			providerNamespace = tc.Namespace
+		}
 	}
 	if providerName != "" {
 		if task.Spec.AI == nil {
 			task.Spec.AI = &corev1alpha1.AISpec{}
 		}
-		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
+		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName, Namespace: providerNamespace}
 	}
 
 	if d, errResult, ok := parseTimeoutArg(a); !ok {

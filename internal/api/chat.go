@@ -451,6 +451,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
+	executor.providerNamespace = providerInfo.Namespace
 	executor.providerType = providerInfo.Type
 	authorizationReader := ch.contextTokenAuthorizationReader()
 	executor.SetPolicyReader(authorizationReader)
