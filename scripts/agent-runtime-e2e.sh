@@ -343,12 +343,11 @@ aimock_journal_mark() {
 # assert_aimock_history checks that a model request made since mark carried
 # both the Task's prompt and evidence of the prior turn, which a single fixture
 # match cannot express. A dropped prompt, or lost or foreign history, cannot
-# return the scripted nonce. aimock does not journal bodies over 64 KB
-# (Copilot's); for those a new request must have been answered with the nonce,
-# which the fixtures give only for history-bearing requests.
+# return the scripted nonce. aimock does not journal bodies over 64 KB, so a
+# Task whose requests outgrow that cap fails rather than passing unchecked.
 assert_aimock_history() {
   [[ "${model_backend}" == "aimock" ]] || return 0
-  local provider="$1" task="$2" mark="$3" prompt="$4" evidence="$5" journal
+  local task="$1" mark="$2" prompt="$3" evidence="$4" journal
   journal="${temp_root}/aimock-journal.json"
   read_aimock_journal >"${journal}" || die "failed to read the aimock journal for Task/${task}"
   if jq -e --argjson mark "${mark}" --arg prompt "${prompt}" --arg evidence "${evidence}" '
@@ -357,12 +356,28 @@ assert_aimock_history() {
     ' "${journal}" >/dev/null; then
     return 0
   fi
-  if [[ "${provider}" != "copilot" ]] || ! jq -e --argjson mark "${mark}" --arg evidence "${evidence}" '
-      any(.[$mark:][]; .body.__aimock_truncated == true and .response.fixture.response.content == $evidence)
-    ' "${journal}" >/dev/null; then
-    die "no model request for Task/${task} carried both its prompt and ${evidence} from the prior turn"
+  if jq -e --argjson mark "${mark}" 'any(.[$mark:][]; .body.__aimock_truncated == true)' "${journal}" >/dev/null; then
+    die "Task/${task} model requests exceed the aimock 64 KB journal cap, so their history cannot be verified"
   fi
-  log "Copilot requests exceed the aimock journal cap; fixture history keys carry the Task/${task} evidence"
+  die "no model request for Task/${task} carried both its prompt and ${evidence} from the prior turn"
+}
+
+# aimock_blocking_command_served succeeds once aimock has answered a request
+# made since mark with the scripted sleep 180 tool call.
+aimock_blocking_command_served() {
+  local mark="$1"
+  read_aimock_journal | jq -e --argjson mark "${mark}" '
+    any(.[$mark:][]; any(.response.fixture.response.toolCalls[]?; .arguments.cmd == "sleep 180"))' >/dev/null
+}
+
+# wait_blocking_command_started waits, with aimock, until the scripted model
+# has handed the runtime its sleep 180 command, so timeout, cancellation, and
+# controller restart act on a running workspace command.
+wait_blocking_command_started() {
+  [[ "${model_backend}" == "aimock" ]] || return 0
+  local task="$1" mark="$2"
+  wait_until "Task/${task} sleep 180 tool call" "${state_wait_seconds}" aimock_blocking_command_served "${mark}" || \
+    die "the scripted model never handed Task/${task} its sleep 180 command"
 }
 
 resource_exists() {
@@ -2573,7 +2588,7 @@ run_read_smoke() {
   continuation_snapshot="${temp_root}/${continuation}-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${continuation_snapshot}"
   assert_task_succeeded_read "${continuation}" "${continuation_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${continuation}" "${journal_mark}" "Return the session nonce from the prior turn" "${nonce}"
+  assert_aimock_history "${continuation}" "${journal_mark}" "Return the session nonce from the prior turn" "${nonce}"
 
   local first_uid first_generation continued_uid continued_generation
   first_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
@@ -2607,7 +2622,7 @@ run_read_smoke() {
     fork_snapshot="${temp_root}/${fork_task}-pool.json"
     capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${fork_snapshot}"
     assert_task_succeeded_read "${fork_task}" "${fork_snapshot}" "${read_repo_commit}" "${nonce}" ""
-    assert_aimock_history "${provider}" "${fork_task}" "${journal_mark}" "Return the session nonce represented in the source task timeline" "${nonce}"
+    assert_aimock_history "${fork_task}" "${journal_mark}" "Return the session nonce represented in the source task timeline" "${nonce}"
     jq -e --arg source "${continuation}" --arg seq "${fork_after_seq}" '
       .metadata.annotations["orka.ai/fork-source-task"] == $source
       and .metadata.annotations["orka.ai/fork-source-seq"] == $seq
@@ -2851,9 +2866,10 @@ run_timeout_check() {
   local provider="$1"
   local model="$2"
   local agent="$3"
-  local task pool snapshot start_seconds elapsed_seconds
+  local task pool snapshot start_seconds elapsed_seconds journal_mark
   task="$(sanitize_name "acp-timeout-${run_id}")"
   log "Validating Task timeout after first proving the prompt reached Running"
+  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   start_seconds="${SECONDS}"
   apply_read_task "${task}" "${agent}" "" false "${blocking_prompt}" "${timeout_duration}" true
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
@@ -2861,6 +2877,7 @@ run_timeout_check() {
   tool_profile_pool="${pool}"
   wait_pool_serving "${pool}"
   wait_until "Task/${task} active Running prompt" "${state_wait_seconds}" pool_running_for_task "${task}" "${pool}"
+  wait_blocking_command_started "${task}" "${journal_mark}"
   snapshot="${temp_root}/${task}-running-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${snapshot}"
   assert_cancelled_task "${task}" "${snapshot}" "TaskTimeout"
@@ -2874,9 +2891,10 @@ run_explicit_cancel_check() {
   local provider="$1"
   local model="$2"
   local agent="$3"
-  local task pool snapshot uid cancel_requested_at
+  local task pool snapshot uid cancel_requested_at journal_mark
   task="$(sanitize_name "acp-cancel-${run_id}")"
   log "Validating explicit cancellation after an active Running prompt"
+  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   apply_read_task "${task}" "${agent}" "" false "${blocking_prompt}" "1h" true
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
   pool="$(wait_task_pool_name_value "${task}")"
@@ -2884,6 +2902,7 @@ run_explicit_cancel_check() {
     die "explicit-cancel check selected RuntimePool/${pool}, want shared tool RuntimePool/${tool_profile_pool}"
   wait_pool_serving "${pool}"
   wait_until "Task/${task} active Running prompt" "${state_wait_seconds}" pool_running_for_task "${task}" "${pool}"
+  wait_blocking_command_started "${task}" "${journal_mark}"
   snapshot="${temp_root}/${task}-running-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${snapshot}"
   pool_running_for_task "${task}" "${pool}" || die "Task/${task} was no longer Running immediately before cancellation"
@@ -2919,6 +2938,7 @@ run_controller_restart_check() {
   continuation="$(sanitize_name "acp-post-restart-${run_id}")"
   session="$(sanitize_name "acp-restart-session-${run_id}")"
   log "Validating controller restart while an ACP prompt is actively Running"
+  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   apply_read_task "${task}" "${agent}" "${session}" true \
     "Remember restart nonce ${nonce}. ${blocking_prompt}" "1h" true
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
@@ -2927,6 +2947,7 @@ run_controller_restart_check() {
     die "controller-restart check selected RuntimePool/${pool}, want shared tool RuntimePool/${tool_profile_pool}"
   wait_pool_serving "${pool}"
   wait_until "Task/${task} active Running prompt" "${state_wait_seconds}" pool_running_for_task "${task}" "${pool}"
+  wait_blocking_command_started "${task}" "${journal_mark}"
   old_snapshot="${temp_root}/${task}-pre-restart-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${old_snapshot}"
   old_instance="$(jq -r '.runtimeInstanceID' "${old_snapshot}")"
@@ -2959,7 +2980,7 @@ run_controller_restart_check() {
   [[ "$(wait_task_pool_name_value "${continuation}")" == "${pool}" ]] || \
     die "post-restart continuation selected a different RuntimePool"
   assert_task_succeeded_read "${continuation}" "${new_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${continuation}" "${journal_mark}" "Return the restart nonce from the prior user turn" "${nonce}"
+  assert_aimock_history "${continuation}" "${journal_mark}" "Return the restart nonce from the prior user turn" "${nonce}"
   new_uid="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   new_generation="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ -n "${old_uid}" && "${new_uid}" == "${old_uid}" ]] || \
@@ -3004,7 +3025,7 @@ run_pool_replacement_check() {
     "12m" false
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
   assert_task_succeeded_read "${task}" "${after_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${task}" "${journal_mark}" "Return the original session nonce from the prior transcript" "${nonce}"
+  assert_aimock_history "${task}" "${journal_mark}" "Return the original session nonce from the prior transcript" "${nonce}"
   after_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${after_uid}" == "${before_uid}" ]] || die "Pod replacement changed logical RuntimeSession UID"
@@ -3051,7 +3072,7 @@ run_scale_to_zero_recovery_check() {
   [[ "$(jq -r '.runtimeInstanceID' "${after_snapshot}")" != "${before_instance}" ]] || \
     die "0 -> 1 recovery reused the stopped runtime instance"
   assert_task_succeeded_read "${task}" "${after_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${task}" "${journal_mark}" "Return the original session nonce from the durable transcript" "${nonce}"
+  assert_aimock_history "${task}" "${journal_mark}" "Return the original session nonce from the durable transcript" "${nonce}"
   after_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${after_uid}" == "${replacement_session_uid}" ]] || \
