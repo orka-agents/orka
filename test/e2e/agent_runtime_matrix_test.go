@@ -579,7 +579,10 @@ func verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, taskName string) {
 	Expect(json.Unmarshal([]byte(body), &trace)).To(Succeed())
 	Expect(trace.LatestSeq).To(BeNumerically(">", 0))
 	Expect(trace.ModelRequests).NotTo(BeEmpty())
-	Expect(trace.ModelRequests[len(trace.ModelRequests)-1].Status).To(Equal(tasktrace.StatusCompleted))
+	lastModelRequest := trace.ModelRequests[len(trace.ModelRequests)-1]
+	Expect(lastModelRequest.Status).To(Equal(tasktrace.StatusCompleted))
+	Expect(lastModelRequest.Model).NotTo(BeEmpty(), "trace model request has no model: %#v", lastModelRequest)
+	Expect(lastModelRequest.Provider).NotTo(BeEmpty(), "trace model request has no provider: %#v", lastModelRequest)
 	Expect(trace.ToolCalls).NotTo(BeEmpty())
 	Expect(trace.ToolCalls[len(trace.ToolCalls)-1].Status).To(Equal(tasktrace.StatusCompleted))
 }
