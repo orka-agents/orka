@@ -45,6 +45,23 @@ func TestValidateSpecDirectSecurityRules(t *testing.T) {
 		{name: "transaction output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
 			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "Txn-Token", Prefix: &prefix}
 		}, want: "Txn-Token"},
+		{name: "trace propagation output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "traceparent", Prefix: &prefix}
+		}, want: "trace propagation"},
+		{name: "content type output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "Content-Type", Prefix: &prefix}
+		}, want: "set by the request body"},
+		{name: "idempotency output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "Idempotency-Key", Prefix: &prefix}
+		}, want: "approval operation key"},
+		{name: "prefix with a NUL byte", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			bad := "Bearer \x00"
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Prefix: &bad}
+		}, want: "valid HTTP header value"},
+		{name: "prefix with DEL", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			bad := "Bearer \x7f"
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Prefix: &bad}
+		}, want: "valid HTTP header value"},
 		{name: "http public endpoint", mutate: func(d *corev1alpha1.DirectOutboundAccess) { d.TokenEndpoint.URL = "http://issuer.example.test/token" }, want: "HTTPS"},
 		{name: "private HTTPS endpoint", mutate: func(d *corev1alpha1.DirectOutboundAccess) { d.TokenEndpoint.URL = "https://127.0.0.1/token" }, want: "private"},
 		{name: "jwt actor", mutate: func(d *corev1alpha1.DirectOutboundAccess) {

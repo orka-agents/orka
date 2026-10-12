@@ -98,6 +98,8 @@ assert_secret_mounts() {
   --set-string webhooks.caBundle=Y2E= \
   --set publisher.image.repository=docker.io/sozercan/orka-workspace-publisher \
   --set publisher.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --set workers.ai.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --set workers.general.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   | yaml_to_json \
   | assert_secret_mounts "Helm chart"
 

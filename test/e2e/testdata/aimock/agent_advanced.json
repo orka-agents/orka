@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:agent-session-first]" },
+      "response": { "content": "E2E_SESSION_FIRST_ANSWER: 4" }
+    },
+    {
+      "match": { "userMessage": "[e2e:agent-session-second]" },
+      "response": { "content": "E2E_SESSION_SECOND_ANSWER: you asked what 2+2 is." }
+    }
+  ]
+}

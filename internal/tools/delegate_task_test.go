@@ -2138,3 +2138,34 @@ func TestDelegateTaskToolExecuteStampsTraceContextAndSpanAttributes(t *testing.T
 		t.Fatalf("child model parent = %s, want child step %s", got, want)
 	}
 }
+
+// A delegated child is handed to the seal hook exactly like the other
+// Task-creating tools, so a coordination child of a stamped parent is sealed
+// for connector use.
+func TestDelegateTaskToolSealsTheCreatedChild(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	var sealed string
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client: k8sClient,
+		SealTaskCreate: func(_ context.Context, _ client.Client, task *corev1alpha1.Task) error {
+			sealed = task.Name
+			return nil
+		},
+	})
+	result, err := NewDelegateTaskTool(k8sClient).Execute(ctx, json.RawMessage(`{"agent": "researcher", "prompt": "Research the topic"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatal(err)
+	}
+	if sealed == "" || sealed != delegateResult.TaskName {
+		t.Fatalf("sealed = %q, want the created child %q", sealed, delegateResult.TaskName)
+	}
+}

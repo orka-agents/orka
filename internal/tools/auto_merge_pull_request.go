@@ -322,50 +322,28 @@ func getGitHubPRDetails(ctx context.Context, token, owner, repo string, prNumber
 
 // checkCIStatusDetailed checks CI status and categorizes checks into passed, failed, or pending.
 func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL string) (CICheckResult, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", baseURL, owner, repo, sha)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return CICheckResult{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return CICheckResult{}, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return CICheckResult{}, &githubAPIError{
-			StatusCode: resp.StatusCode,
-			Body:       string(respBody),
+	// GitHub pages check runs (30 by default): every page is read, up to a
+	// bound, so a failing or pending run on a later page is never missed.
+	var runs []checkRun
+	total := 0
+	for page := 1; page <= maxCheckRunPages; page++ {
+		checkResp, err := fetchCheckRunsPage(ctx, token, owner, repo, sha, baseURL, page)
+		if err != nil {
+			return CICheckResult{}, err
+		}
+		total = checkResp.TotalCount
+		runs = append(runs, checkResp.CheckRuns...)
+		if len(checkResp.CheckRuns) < checkRunsPerPage || len(runs) >= total {
+			break
 		}
 	}
 
-	var checkResp struct {
-		TotalCount int `json:"total_count"`
-		CheckRuns  []struct {
-			Name       string `json:"name"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-		} `json:"check_runs"`
-	}
-	if err := json.Unmarshal(respBody, &checkResp); err != nil {
-		return CICheckResult{}, fmt.Errorf("failed to parse check runs response: %w", err)
-	}
-
-	if checkResp.TotalCount == 0 {
+	if total == 0 {
 		return CICheckResult{}, errNoCIChecksConfigured
 	}
 
 	var failed, pending []string
-	for _, check := range checkResp.CheckRuns {
+	for _, check := range runs {
 		if check.Status != "completed" {
 			// queued, in_progress, etc.
 			pending = append(pending, fmt.Sprintf("%s (status=%s)", check.Name, check.Status))
@@ -395,7 +373,78 @@ func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL
 		}, nil
 	}
 
+	// Runs that could not be read are not evidence of success.
+	if len(runs) < total {
+		return CICheckResult{
+			Pending: true,
+			Details: fmt.Sprintf("%d of %d check runs examined; the rest could not be read, so CI is not reported as passed", len(runs), total),
+		}, nil
+	}
+
 	return CICheckResult{Passed: true}, nil
+}
+
+// checkRunsPerPage is the page size requested for check runs (GitHub's
+// maximum); maxCheckRunPages bounds how many pages one check reads.
+const (
+	checkRunsPerPage = 100
+	maxCheckRunPages = 10
+)
+
+type checkRun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+type checkRunsPage struct {
+	TotalCount int        `json:"total_count"`
+	CheckRuns  []checkRun `json:"check_runs"`
+}
+
+// checkRunsErrorBodyLimit caps the error body kept from a failed check-runs
+// request.
+const checkRunsErrorBodyLimit = 4 << 10
+
+// fetchCheckRunsPage reads one page of a commit's check runs.
+func fetchCheckRunsPage(ctx context.Context, token, owner, repo, sha, baseURL string, page int) (checkRunsPage, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=%d&page=%d", baseURL, owner, repo, sha, checkRunsPerPage, page)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return checkRunsPage{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return checkRunsPage{}, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// The error body only explains the status; it is capped so a large
+		// one cannot swell the tool result.
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, checkRunsErrorBodyLimit))
+		return checkRunsPage{}, &githubAPIError{
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+		}
+	}
+	// An oversized page is refused, never decoded from a cut prefix.
+	respBody, err := readGitHubResponse(resp.Body, 1<<20)
+	if err != nil {
+		return checkRunsPage{}, err
+	}
+
+	var checkResp checkRunsPage
+	if err := json.Unmarshal(respBody, &checkResp); err != nil {
+		return checkRunsPage{}, fmt.Errorf("failed to parse check runs response: %w", err)
+	}
+	return checkResp, nil
 }
 
 // githubAPIError represents an HTTP error from the GitHub API, carrying the status code.

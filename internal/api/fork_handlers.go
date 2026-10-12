@@ -188,7 +188,11 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	// Create the Task FIRST (it is the authoritative object). Only after a
 	// confirmed-successful create do we append fork timeline events, so a failed
 	// create can never orphan a TaskForkRequested/Created event (invariant 1 & 4).
-	if err := h.client.Create(c.Context(), forked); err != nil {
+	createErr := h.client.Create(c.Context(), forked)
+	if createErr == nil {
+		sealRequesterStamp(c.Context(), h.client, forked)
+	}
+	if err := createErr; err != nil {
 		switch {
 		case apierrors.IsAlreadyExists(err):
 			// Idempotent recovery only when the caller opted in with an

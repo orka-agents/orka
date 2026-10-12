@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -38,6 +39,12 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		autoContainerTask   = "e2e-auto-container-task"
 		autoSuspendTask     = "e2e-auto-suspend-task"
 		autoSuspendCoord    = "e2e-auto-suspend-coord"
+
+		// aimock fixture markers (test/e2e/testdata/aimock/autonomous_mode.json).
+		autoGoalMarker    = "[e2e:auto-goal]"
+		autoMaxIterMarker = "[e2e:auto-maxiter]"
+		autoEnvMarker     = "[e2e:auto-env]"
+		autoSuspendMarker = "[e2e:auto-suspend]"
 	)
 
 	var (
@@ -155,14 +162,14 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 					"name": "%s"
 				},
 				"ai": {
-					"prompt": "You are a coordinator. Delegate the computation of 2+2 to the agent named '%s' using delegate_task. Then delegate the computation of 3+3 to the same agent. Wait for both results using wait_for_tasks. Once you have both results, call update_plan with goal_complete=true and include the results in the summary.",
+					"prompt": "You are a coordinator. Delegate the computation of 2+2 to the agent named '%s' using delegate_task. Then delegate the computation of 3+3 to the same agent. Wait for both results using wait_for_tasks. Once you have both results, call update_plan with goal_complete=true and include the results in the summary. %s",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
 				}
 			}
-		}`, autoTaskName, namespace, autoCoordinatorName, autoWorkerName, model, autoProviderName)
+		}`, autoTaskName, namespace, autoCoordinatorName, autoWorkerName, autoGoalMarker, model, autoProviderName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
@@ -173,17 +180,54 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		phase := waitForTaskCompletion(autoTaskName, 10*time.Minute)
 		Expect(phase).To(Equal("Succeeded"), "Autonomous task should succeed")
 
-		By("verifying iteration count is at least 1")
+		By("verifying the loop recorded how it ended")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "task", autoTaskName,
-				"-o", "jsonpath={.status.iteration}",
+				"-o", "jsonpath={.status.message}",
 				"-n", namespace,
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty(), "Iteration count should be set")
-			// Iteration is 0-based, so even "0" means at least one iteration ran
+			// status.iteration is 0-based and omitted at 0, so the completion
+			// message is the record that at least one iteration ran.
+			g.Expect(output).To(SatisfyAny(
+				HavePrefix("goal complete after "),
+				HavePrefix("reached max iterations"),
+			))
 		}, 30*time.Second, time.Second).Should(Succeed())
+
+		if e2eMockOpenAI {
+			By("verifying the scripted loop completed its goal on the second iteration")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "task", autoTaskName,
+					"-o", `jsonpath={.status.iteration}{"/"}{.status.message}`,
+					"-n", namespace,
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(
+					"1/goal complete after 2 iterations: Both delegated computations finished: 2+2=4 and 3+3=6."))
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("verifying the second iteration received the plan saved by the first")
+			Eventually(func(g Gomega) {
+				g.Expect(autonomousMockMessages(g, autoGoalMarker, "user")).To(ContainElement(SatisfyAll(
+					ContainSubstring("## Previous Plan State"),
+					ContainSubstring("Delegated 2+2 and 3+3 to the worker agent."),
+					ContainSubstring("Phase 1: delegated both computations"),
+				)))
+				g.Expect(autonomousMockToolResults(g, autoGoalMarker, "update_plan")).To(ConsistOf(
+					"Plan updated: Delegated 2+2 and 3+3 to the worker agent. (progress: 50%)",
+					"Plan updated: Both delegated computations finished: 2+2=4 and 3+3=6. (progress: 100%, goal marked as COMPLETE)",
+				))
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("verifying both delegate_task calls created child tasks that succeeded")
+			Eventually(func(g Gomega) {
+				g.Expect(autonomousMockToolResults(g, autoGoalMarker, "delegate_task")).To(HaveLen(2))
+				g.Expect(autonomousChildPhases(g, autoTaskName)).To(Equal([]string{"Succeeded", "Succeeded"}))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+		}
 
 		By("verifying child tasks were created")
 		Eventually(func(g Gomega) {
@@ -202,7 +246,7 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		verifyResultAvailable(autoTaskName)
 	})
 
-	It("should return plan state via Plan API after completion", func() {
+	It("should clean up plan state once the autonomous task completes", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
 		By("setting up port-forward to controller API")
@@ -215,37 +259,13 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(token).NotTo(BeEmpty())
 
-		By("querying the Plan API for the autonomous task")
+		// The controller deletes plan state when a Task completes, so the
+		// Plan API serves it only while the loop is still running (see the
+		// suspend spec).
+		By("querying the Plan API for the completed autonomous task")
 		Eventually(func(g Gomega) {
-			req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/tasks/"+autoTaskName+"/plan", nil)
-			g.Expect(err).NotTo(HaveOccurred())
-			req.Header.Set("Authorization", "Bearer "+token)
-
-			resp, err := http.DefaultClient.Do(req)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-
-			body, err := io.ReadAll(resp.Body)
-			g.Expect(err).NotTo(HaveOccurred())
-			bodyStr := string(body)
-			// Plan response should contain goal completion and progress info
-			g.Expect(bodyStr).To(SatisfyAny(
-				ContainSubstring("goal_complete"),
-				ContainSubstring("GoalComplete"),
-				ContainSubstring("goalComplete"),
-			))
-			g.Expect(bodyStr).To(SatisfyAny(
-				ContainSubstring("ProgressPct"),
-				ContainSubstring("progressPct"),
-				ContainSubstring("progress_pct"),
-			))
-			g.Expect(bodyStr).To(SatisfyAny(
-				ContainSubstring("Summary"),
-				ContainSubstring("summary"),
-				ContainSubstring("PlanDocument"),
-				ContainSubstring("planDocument"),
-			))
+			status, _ := fetchAutonomousPlan(g, apiBaseURL, token, autoTaskName)
+			g.Expect(status).To(Equal(http.StatusNotFound))
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
@@ -302,14 +322,14 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 					"name": "%s"
 				},
 				"ai": {
-					"prompt": "You are a coordinator. Each iteration, delegate a simple math problem (like 1+1) to the agent named '%s' using delegate_task. Wait for the result. Do NOT call update_plan with goal_complete=true. Just keep delegating tasks.",
+					"prompt": "You are a coordinator. Each iteration, delegate a simple math problem (like 1+1) to the agent named '%s' using delegate_task. Wait for the result. Do NOT call update_plan with goal_complete=true. Just keep delegating tasks. %s",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
 				}
 			}
-		}`, autoMaxIterTask, namespace, autoMaxIterCoord, autoWorkerName, model, autoProviderName)
+		}`, autoMaxIterTask, namespace, autoMaxIterCoord, autoWorkerName, autoMaxIterMarker, model, autoProviderName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
@@ -321,7 +341,7 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		Expect(phase).To(BeElementOf("Succeeded", "Failed"),
 			"Task should reach terminal phase after maxIterations")
 
-		By("verifying iteration count is 2")
+		By("verifying the loop stopped on its last allowed iteration")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "task", autoMaxIterTask,
 				"-o", "jsonpath={.status.iteration}",
@@ -329,9 +349,37 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("2"),
-				"Iteration count should be exactly 2 (maxIterations)")
+			// status.iteration is 0-based: maxIterations=2 runs iterations 0 and 1.
+			g.Expect(output).To(Equal("1"),
+				"The final iteration index should be maxIterations-1")
 		}, 30*time.Second, time.Second).Should(Succeed())
+
+		if e2eMockOpenAI {
+			By("verifying the controller ended the loop at maxIterations")
+			Expect(phase).To(Equal("Succeeded"))
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "task", autoMaxIterTask,
+					"-o", "jsonpath={.status.message}",
+					"-n", namespace,
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("reached max iterations (2)"))
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("verifying both iterations ran and neither marked the goal complete")
+			Eventually(func(g Gomega) {
+				g.Expect(autonomousMockMessages(g, autoMaxIterMarker, "system")).To(SatisfyAll(
+					ContainElement(ContainSubstring("Current iteration: 0 of 2")),
+					ContainElement(ContainSubstring("Current iteration: 1 of 2")),
+					Not(ContainElement(ContainSubstring("Current iteration: 2 of 2"))),
+				))
+				g.Expect(autonomousMockToolResults(g, autoMaxIterMarker, "update_plan")).To(ConsistOf(
+					"Plan updated: Delegated another 1+1 computation; the goal stays open. (progress: 10%)",
+				))
+				g.Expect(autonomousChildPhases(g, autoMaxIterTask)).To(Equal([]string{"Succeeded", "Succeeded"}))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+		}
 	})
 
 	It("should set autonomous environment variables on the Job", func() {
@@ -387,14 +435,14 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 					"name": "%s"
 				},
 				"ai": {
-					"prompt": "say hello",
+					"prompt": "say hello %s",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
 				}
 			}
-		}`, autoEnvTaskName, namespace, autoEnvCoordName, model, autoProviderName)
+		}`, autoEnvTaskName, namespace, autoEnvCoordName, autoEnvMarker, model, autoProviderName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
@@ -431,6 +479,23 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 			g.Expect(envMap).To(HaveKeyWithValue("ORKA_AUTONOMOUS_MAX_ITERATIONS", "10"),
 				"Job should have ORKA_AUTONOMOUS_MAX_ITERATIONS=10")
 		}, 30*time.Second, time.Second).Should(Succeed())
+
+		if e2eMockOpenAI {
+			By("verifying the scripted update_plan ends the loop after one iteration")
+			Expect(waitForTaskCompletion(autoEnvTaskName, 5*time.Minute)).To(Equal("Succeeded"))
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "task", autoEnvTaskName,
+					"-o", "jsonpath={.status.message}",
+					"-n", namespace,
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("goal complete after 1 iterations: Said hello."))
+				g.Expect(autonomousMockToolResults(g, autoEnvMarker, "update_plan")).To(ConsistOf(
+					"Plan updated: Said hello. (progress: 100%, goal marked as COMPLETE)",
+				))
+			}, 30*time.Second, time.Second).Should(Succeed())
+		}
 	})
 
 	It("should return 404 from Plan API for a non-autonomous task", func() {
@@ -536,14 +601,14 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 					"name": "%s"
 				},
 				"ai": {
-					"prompt": "You are a coordinator. Each iteration, delegate a simple task (compute 1+1) to the agent named '%s' using delegate_task. Wait for the result. Do NOT call update_plan with goal_complete=true. Keep delegating each iteration.",
+					"prompt": "You are a coordinator. Each iteration, delegate a simple task (compute 1+1) to the agent named '%s' using delegate_task. Wait for the result. Do NOT call update_plan with goal_complete=true. Keep delegating each iteration. %s",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
 				}
 			}
-		}`, autoSuspendTask, namespace, autoSuspendCoord, autoWorkerName, model, autoProviderName)
+		}`, autoSuspendTask, namespace, autoSuspendCoord, autoWorkerName, autoSuspendMarker, model, autoProviderName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
@@ -559,16 +624,18 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to suspend autonomous task")
 
-		By("verifying the task is no longer Running after suspend")
+		By("waiting for the controller to park the loop at the next iteration boundary")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "task", autoSuspendTask,
-				"-o", "jsonpath={.status.phase}",
+				"-o", `jsonpath={.status.phase}{"/"}{.status.message}`,
 				"-n", namespace,
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(Equal("Running"),
-				"Task should not be Running after suspend")
+			// Suspend takes effect between iterations and deliberately keeps the
+			// task Running so it can resume when spec.suspend is cleared.
+			g.Expect(output).To(HavePrefix("Running/autonomous task suspended at iteration "),
+				"Task should be parked as suspended")
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("verifying the task stopped creating new iterations")
@@ -591,5 +658,98 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(iterAfter).To(Equal(iterBefore),
 			"Iteration count should not increase after suspend")
+
+		if e2eMockOpenAI {
+			By("verifying every completed iteration delegated and kept the goal open")
+			Eventually(func(g Gomega) {
+				g.Expect(autonomousMockToolResults(g, autoSuspendMarker, "update_plan")).To(ConsistOf(
+					"Plan updated: Delegated another 1+1 computation; the goal stays open. (progress: 10%)",
+				))
+				g.Expect(autonomousMockToolResults(g, autoSuspendMarker, "delegate_task")).NotTo(BeEmpty())
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("verifying the Plan API serves the parked loop's latest plan")
+			if apiBaseURL == "" {
+				var pfErr error
+				apiBaseURL, cancelPF, portForwardCmd, pfErr = startControllerAPIPortForward(18084)
+				Expect(pfErr).NotTo(HaveOccurred())
+			}
+			token, err := serviceAccountToken()
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				status, body := fetchAutonomousPlan(g, apiBaseURL, token, autoSuspendTask)
+				g.Expect(status).To(Equal(http.StatusOK), "plan body: %s", body)
+				var plan store.PlanState
+				g.Expect(json.Unmarshal(body, &plan)).To(Succeed())
+				g.Expect(plan.GoalComplete).To(BeFalse())
+				g.Expect(plan.ProgressPct).To(Equal(10))
+				g.Expect(plan.Summary).To(Equal("Delegated another 1+1 computation; the goal stays open."))
+			}, 30*time.Second, time.Second).Should(Succeed())
+		}
 	})
 })
+
+// fetchAutonomousPlan reads a Task's plan through the Plan API and returns the
+// HTTP status and body.
+func fetchAutonomousPlan(g Gomega, apiBaseURL, token, taskName string) (int, []byte) {
+	req, err := http.NewRequest(http.MethodGet, apiBaseURL+"/api/v1/tasks/"+taskName+"/plan", nil)
+	g.Expect(err).NotTo(HaveOccurred())
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	g.Expect(err).NotTo(HaveOccurred())
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	g.Expect(err).NotTo(HaveOccurred())
+	return resp.StatusCode, body
+}
+
+// autonomousMockMessages returns the text of every role message the model
+// received in the conversation marked by marker.
+func autonomousMockMessages(g Gomega, marker, role string) []string {
+	requests, err := mockLLMRequestsFor(marker)
+	g.Expect(err).NotTo(HaveOccurred())
+	var texts []string
+	for _, request := range requests {
+		for _, message := range request.Body.Messages {
+			if message.Role == role {
+				texts = append(texts, message.Text())
+			}
+		}
+	}
+	return texts
+}
+
+// autonomousMockToolResults returns each distinct toolName output the model
+// received in the conversation marked by marker.
+func autonomousMockToolResults(g Gomega, marker, toolName string) []string {
+	requests, err := mockLLMRequestsFor(marker)
+	g.Expect(err).NotTo(HaveOccurred())
+	seen := map[string]bool{}
+	var results []string
+	for _, request := range requests {
+		calls := map[string]string{}
+		for _, message := range request.Body.Messages {
+			for _, call := range message.ToolCalls {
+				calls[call.ID] = call.Function.Name
+			}
+			if message.Role != "tool" || calls[message.ToolCallID] != toolName || seen[message.Text()] {
+				continue
+			}
+			seen[message.Text()] = true
+			results = append(results, message.Text())
+		}
+	}
+	return results
+}
+
+// autonomousChildPhases returns the phases of the Tasks delegated by parent.
+func autonomousChildPhases(g Gomega, parent string) []string {
+	cmd := exec.Command("kubectl", "get", "tasks",
+		"-l", fmt.Sprintf("orka.ai/parent-task=%s", parent),
+		"-o", `jsonpath={range .items[*]}{.status.phase}{"\n"}{end}`,
+		"-n", namespace,
+	)
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	return utils.GetNonEmptyLines(output)
+}

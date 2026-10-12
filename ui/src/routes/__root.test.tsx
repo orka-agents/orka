@@ -8,6 +8,7 @@ vi.mock('zustand/middleware', async () => {
 
 const mockNavigate = vi.fn()
 let mockPathname = '/'
+let mockSearchStr = ''
 
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
@@ -16,7 +17,7 @@ vi.mock('@tanstack/react-router', async () => {
     createRootRoute: (opts: any) => opts,
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: mockPathname }),
+    useLocation: () => ({ pathname: mockPathname, searchStr: mockSearchStr }),
     Outlet: () => <div data-testid="outlet" />,
   }
 })
@@ -29,6 +30,8 @@ describe('__root route', () => {
   beforeEach(() => {
     mockNavigate.mockClear()
     mockPathname = '/'
+    mockSearchStr = ''
+    sessionStorage.clear()
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     useAuthStore.setState({ token: 'test-token' })
     // jsdom doesn't implement matchMedia
@@ -65,6 +68,18 @@ describe('__root route', () => {
     const RootComponent = Route.component!
     render(<RootComponent />)
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/login' })
+  })
+
+  it('keeps a consent callback through sign-in', () => {
+    useAuthStore.setState({ token: null })
+    mockPathname = '/settings/connectors'
+    mockSearchStr = '?status=pending&connection=github-1'
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-1#completion=one-time')
+    const RootComponent = Route.component!
+    render(<RootComponent />)
+    expect(mockNavigate).toHaveBeenCalledWith({ to: '/login', hash: 'completion=one-time' })
+    expect(sessionStorage.getItem('orka-login-return')).toBe('/settings/connectors?status=pending&connection=github-1')
+    window.history.replaceState(null, '', '/')
   })
 
   it('renders Outlet on /login path without token', () => {

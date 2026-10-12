@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@/test/test-utils'
+import { render, screen, waitFor } from '@/test/test-utils'
+import { http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
 import userEvent from '@testing-library/user-event'
 
 vi.mock('zustand/middleware', () => ({
@@ -36,6 +38,35 @@ describe('Sidebar', () => {
     expect(screen.getByText('Runtimes')).toBeInTheDocument()
     expect(screen.getByText('Agents')).toBeInTheDocument()
     expect(screen.getByText('Tools')).toBeInTheDocument()
+  })
+
+  it('hides Connectors once the server says connectors are disabled', async () => {
+    server.use(http.get('/api/v1/chat/config', () => HttpResponse.json({
+      enabled: true, provider: 'p', model: 'm', maxIterations: 1, maxDuration: '1m', maxTasksPerTurn: 1, maxConcurrent: 1, availableTools: [], connectorsEnabled: false,
+    })))
+    render(<Sidebar />)
+    await waitFor(() => expect(screen.queryByText('Connectors')).not.toBeInTheDocument())
+    expect(screen.getByText('Tools')).toBeInTheDocument()
+  })
+
+  it('asks the connectors API when chat is off and hides Connectors on 501', async () => {
+    server.use(
+      http.get('/api/v1/chat/config', () => HttpResponse.json({ error: 'not found' }, { status: 404 })),
+      http.get('/api/v1/connectors', () => HttpResponse.json({ error: 'connectors are not enabled on this controller' }, { status: 501 })),
+    )
+    render(<Sidebar />)
+    await waitFor(() => expect(screen.queryByText('Connectors')).not.toBeInTheDocument())
+  })
+
+  it('keeps Connectors when chat is off but connectors answer', async () => {
+    let probed = false
+    server.use(
+      http.get('/api/v1/chat/config', () => HttpResponse.json({ error: 'not found' }, { status: 404 })),
+      http.get('/api/v1/connectors', () => { probed = true; return HttpResponse.json({ items: [] }) }),
+    )
+    render(<Sidebar />)
+    await waitFor(() => expect(probed).toBe(true))
+    expect(screen.getByText('Connectors')).toBeInTheDocument()
   })
 
   it('active nav item has correct styling', () => {
