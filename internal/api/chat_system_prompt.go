@@ -159,7 +159,7 @@ func buildTaskTypesSection() string {
 `)
 	sb.WriteString(`  All containers run as non-root with read-only root filesystem.
   Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
-- ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
+- ai: Run an LLM-powered task. Use create_ai_task; omit providerRef unless the user explicitly requests another provider.
   Use for: reasoning, analysis, content generation, code review, summarization,
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
@@ -170,7 +170,7 @@ func buildTaskTypesSection() string {
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
   runtime configured, ALWAYS use create_agent_task with that agent name.
   If the specified Agent has no runtime listed, including coordinator Agents backed
-  by providerRef/model only, use create_ai_task with agentRef and providerRef instead.
+  by providerRef/model only, use create_ai_task with agentRef instead. Omit providerRef unless the user explicitly requests another provider.
   When the task involves a git repository, ALWAYS include the gitRepo URL in the
   workspace config so credentials are automatically mounted:
     create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
@@ -180,7 +180,7 @@ func buildTaskTypesSection() string {
   and does not use runtime.secretRef. When omitted, OpenCode defaults defaultAllowedTools to Read, Write, Edit, Bash, Glob,
   and Grep, with defaultAllowBash=true; only override these when the user asks.
   Use whichever runtime is available. If multiple runtimes are available, prefer codex, then copilot.
-  If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
+  If no agent runtimes are available, use create_ai_task with agentRef (omitting providerRef unless explicitly overridden) for existing non-runtime agents, or create_ai_task directly for LLM-only work.
   Agent tasks need more time than AI tasks. Set timeout to at least 15m.
   Do NOT use create_container_task or create_ai_task for runtime agents.
   Do NOT use create_agent_task for non-runtime agents.
@@ -243,7 +243,7 @@ MANUAL (multi-step): For more control, create agents separately:
 1. Create specialist agents with create_agent
 2. Create a coordinator agent with coordination.enabled=true
 3. Create a task referencing the coordinator: use create_agent_task only when the
-   coordinator has runtime listed; otherwise use create_ai_task with agentRef and providerRef.
+   coordinator has runtime listed; otherwise use create_ai_task with agentRef; omit providerRef unless the user explicitly requests another provider.
 
 When no agents exist and the user needs complex work done:
 - For simple commands (e.g., "list pods", "check disk"): use create_container_task
@@ -277,7 +277,8 @@ func buildRulesSection() string {
 2. Use create_ai_task ONLY for work that requires a SEPARATE long-running LLM job
    (e.g., code generation, detailed code review, multi-file analysis). Do NOT
    create an AI task just to answer a question — answer it yourself directly.
-3. For an Agent-backed ai task, use the selected Agent's providerRef unless the user asks for another provider.
+3. For an Agent-backed ai task, omit providerRef to use the selected Agent's configured provider
+   unless the user explicitly requests another provider.
    For tasks without agentRef, use this chat session's provider by omitting providerRef
    unless the user explicitly requests another provider.
 4. After creating a task, IMMEDIATELY call wait_for_task then fetch_task_output
@@ -292,12 +293,12 @@ func buildRulesSection() string {
    available_agents section, ALWAYS use create_agent_task — never create_container_task
    or create_ai_task. Runtime agents have their own CLI environment with full tool access.
    When an agent has no "runtime" listed, including coordinator agents, use create_ai_task
-   with agentRef and providerRef — never create_agent_task.
+   with agentRef, omitting providerRef unless explicitly overridden — never create_agent_task.
 11. For multi-step workflows involving coding + review + PR creation:
     - Prefer available coordinator candidates: agents whose names contain "coordinator";
       if "dev-coordinator" exists, prefer it.
     - If the chosen coordinator has "runtime" listed in available_agents, start it with create_agent_task.
-    - If the chosen coordinator has no "runtime" listed, start it with create_ai_task using agentRef and providerRef.
+    - If the chosen coordinator has no "runtime" listed, start it with create_ai_task using agentRef; omit providerRef unless the user explicitly requests another provider.
       A coordinator handles the full workflow: code → validate → review repair loop → PR → CI repair loop → validate + re-review → approve.
     - If no coordinator candidate exists, use the coordinator pattern: create a coordinator agent that delegates to
       specialist agents (coder, reviewer) sequentially.
@@ -336,7 +337,7 @@ Example 3: "process this CSV with Python"
 → wait_for_task → fetch_task_output
 
 Example 4: "review this code for security issues"
-→ create_ai_task (prompt: "Review for security vulnerabilities: ...", providerRef: "openai")
+→ create_ai_task (prompt: "Review for security vulnerabilities: ...")
 → wait_for_task → fetch_task_output → summarize findings
 
 Example 5: "refactor the auth module" (with runtime agent available)
