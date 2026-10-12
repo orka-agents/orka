@@ -9,34 +9,33 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apitypes "k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const testCancelTaskName = cancelTaskToolName
 
 func TestCancelTaskTool_Name(t *testing.T) {
-	tool := NewCancelTaskTool(newFakeClient())
+	tool := NewCancelTaskTool()
 	if got := tool.Name(); got != testCancelTaskName {
 		t.Errorf("Name() = %v, want %v", got, testCancelTaskName)
 	}
 }
 
 func TestCancelTaskTool_Description(t *testing.T) {
-	tool := NewCancelTaskTool(newFakeClient())
+	tool := NewCancelTaskTool()
 	if got := tool.Description(); got == "" {
 		t.Error("Description() returned empty string")
 	}
 }
 
 func TestCancelTaskTool_Parameters(t *testing.T) {
-	tool := NewCancelTaskTool(newFakeClient())
+	tool := NewCancelTaskTool()
 	params := tool.Parameters()
 	if params == nil {
 		t.Fatal("Parameters() returned nil")
@@ -63,203 +62,101 @@ func TestCancelTaskTool_Parameters(t *testing.T) {
 	}
 }
 
-func TestCancelTaskTool_Execute(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       CancelTaskArgs
-		childTask  *corev1alpha1.Task
-		envVars    map[string]string
-		wantErr    bool
-		wantStatus string
-	}{
-		{
-			name: "cancel running child task",
-			args: CancelTaskArgs{
-				TaskName:  testChildTaskName,
-				Namespace: defaultNamespace,
-				Reason:    "wrong approach",
-			},
-			childTask: &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testChildTaskName,
-					Namespace: defaultNamespace,
-					Labels: map[string]string{
-						labels.LabelParentTask: parentTaskName,
-					},
-				},
-				Spec: corev1alpha1.TaskSpec{
-					Type: corev1alpha1.TaskTypeAI,
-				},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhaseRunning,
-				},
-			},
-			envVars:    map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
-			wantStatus: cancelledStatusString,
-		},
-		{
-			name: "cancel pending child task",
-			args: CancelTaskArgs{
-				TaskName:  "child-task-2",
-				Namespace: defaultNamespace,
-			},
-			childTask: &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "child-task-2",
-					Namespace: defaultNamespace,
-					Labels: map[string]string{
-						labels.LabelParentTask: parentTaskName,
-					},
-				},
-				Spec: corev1alpha1.TaskSpec{
-					Type: corev1alpha1.TaskTypeAI,
-				},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhasePending,
-				},
-			},
-			envVars:    map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
-			wantStatus: cancelledStatusString,
-		},
-		{
-			name: "cannot cancel already succeeded task",
-			args: CancelTaskArgs{
-				TaskName:  "child-task-3",
-				Namespace: defaultNamespace,
-			},
-			childTask: &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "child-task-3",
-					Namespace: defaultNamespace,
-					Labels: map[string]string{
-						labels.LabelParentTask: parentTaskName,
-					},
-				},
-				Spec: corev1alpha1.TaskSpec{
-					Type: corev1alpha1.TaskTypeAI,
-				},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhaseSucceeded,
-				},
-			},
-			envVars:    map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
-			wantStatus: "task is already in Succeeded phase, cannot cancel",
-		},
-		{
-			name: "cannot cancel task from different parent",
-			args: CancelTaskArgs{
-				TaskName:  "other-child",
-				Namespace: defaultNamespace,
-			},
-			childTask: &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "other-child",
-					Namespace: defaultNamespace,
-					Labels: map[string]string{
-						labels.LabelParentTask: "other-parent",
-					},
-				},
-				Spec: corev1alpha1.TaskSpec{
-					Type: corev1alpha1.TaskTypeAI,
-				},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhaseRunning,
-				},
-			},
-			envVars: map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
-			wantErr: true,
-		},
-		{
-			name: "cancel without ORKA_TASK_NAME skips parent check",
-			args: CancelTaskArgs{
-				TaskName:  "child-task-no-parent",
-				Namespace: defaultNamespace,
-			},
-			childTask: &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "child-task-no-parent",
-					Namespace: defaultNamespace,
-				},
-				Spec: corev1alpha1.TaskSpec{
-					Type: corev1alpha1.TaskTypeAI,
-				},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhaseRunning,
-				},
-			},
-			envVars:    map[string]string{},
-			wantStatus: cancelledStatusString,
-		},
-		{
-			name: "missing task name",
-			args: CancelTaskArgs{
-				Namespace: defaultNamespace,
-			},
-			envVars: map[string]string{envOrkaTaskName: parentTaskName},
-			wantErr: true,
-		},
-		{
-			name: taskNotFoundCaseName,
-			args: CancelTaskArgs{
-				TaskName:  testNonexistentName,
-				Namespace: defaultNamespace,
-			},
-			envVars: map[string]string{envOrkaTaskName: parentTaskName},
-			wantErr: true,
-		},
+type cancelTaskRequest struct {
+	method, path, auth, reason string
+}
+
+// startCancelTaskController serves the controller's cancel endpoint and
+// records every request it receives.
+func startCancelTaskController(t *testing.T, status int, body string) *[]cancelTaskRequest {
+	t.Helper()
+	var requests []cancelTaskRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(data, &payload)
+		requests = append(requests, cancelTaskRequest{
+			method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"), reason: payload.Reason,
+		})
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskName, parentTaskName)
+	t.Setenv(workerenv.TaskNamespace, defaultNamespace)
+	t.Setenv(workerenv.ServiceAccountToken, "worker-token")
+	return &requests
+}
+
+func TestCancelTaskTool_ExecuteAsksControllerToCancelChild(t *testing.T) {
+	const result = `{"taskName":"child-task-1","status":"cancellation requested"}`
+	requests := startCancelTaskController(t, http.StatusOK, result)
+
+	got, err := NewCancelTaskTool().Execute(context.Background(),
+		json.RawMessage(`{"task_name":"child-task-1","reason":"wrong approach"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
+	if got != result {
+		t.Fatalf("Execute() = %q, want the controller result %q", got, result)
+	}
+	want := cancelTaskRequest{
+		method: http.MethodPost,
+		path:   "/internal/v1/tasks/" + defaultNamespace + "/" + parentTaskName + "/children/child-task-1/cancel",
+		auth:   "Bearer worker-token",
+		reason: "wrong approach",
+	}
+	if len(*requests) != 1 || (*requests)[0] != want {
+		t.Fatalf("controller requests = %+v, want [%+v]", *requests, want)
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			for k, v := range tt.envVars {
-				t.Setenv(k, v)
+func TestCancelTaskTool_ExecuteReportsControllerRejection(t *testing.T) {
+	startCancelTaskController(t, http.StatusForbidden, "task is outside caller coordination scope")
+
+	_, err := NewCancelTaskTool().Execute(context.Background(), json.RawMessage(`{"task_name":"other-task"}`))
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") ||
+		!strings.Contains(err.Error(), "task is outside caller coordination scope") {
+		t.Fatalf("Execute() error = %v, want the controller rejection", err)
+	}
+}
+
+func TestCancelTaskTool_ExecuteRejectsInvalidRequestsLocally(t *testing.T) {
+	for _, tc := range []struct {
+		name, args, want string
+	}{
+		{name: "missing task name", args: `{}`, want: "task_name is required"},
+		{name: "other namespace", args: `{"task_name":"child-task-1","namespace":"elsewhere"}`, want: "is not a child of the current task"},
+		{name: "malformed", args: `{`, want: "failed to parse arguments"},
+		{
+			name: "long reason",
+			args: `{"task_name":"child-task-1","reason":"` + strings.Repeat("x", MaxCancelReasonLength+1) + `"}`,
+			want: "reason must be at most 512 characters",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := startCancelTaskController(t, http.StatusOK, `{}`)
+			_, err := NewCancelTaskTool().Execute(context.Background(), json.RawMessage(tc.args))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Execute() error = %v, want %q", err, tc.want)
 			}
-
-			var objs []client.Object
-			if tt.childTask != nil {
-				objs = append(objs, tt.childTask)
-			}
-
-			fc := newFakeClient(objs...)
-			tool := NewCancelTaskTool(fc)
-
-			argsJSON, _ := json.Marshal(tt.args)
-			result, err := tool.Execute(context.Background(), argsJSON)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			var res CancelTaskResult
-			if err := json.Unmarshal([]byte(result), &res); err != nil {
-				t.Fatalf("failed to parse result: %v", err)
-			}
-
-			if res.Status != tt.wantStatus {
-				t.Errorf("status = %q, want %q", res.Status, tt.wantStatus)
-			}
-
-			// Verify task was updated if cancelled
-			if tt.wantStatus == cancelledStatusString && tt.childTask != nil {
-				updated := &corev1alpha1.Task{}
-				err := fc.Get(context.Background(), apitypes.NamespacedName{
-					Name:      tt.childTask.Name,
-					Namespace: tt.childTask.Namespace,
-				}, updated)
-				if err != nil {
-					t.Fatalf("failed to get updated task: %v", err)
-				}
-				if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled {
-					t.Errorf("task phase = %v, want Cancelled", updated.Status.Phase)
-				}
+			if len(*requests) != 0 {
+				t.Fatalf("controller received %d requests, want none", len(*requests))
 			}
 		})
+	}
+}
+
+func TestCancelTaskTool_ExecuteRequiresControllerContext(t *testing.T) {
+	t.Setenv(workerenv.ControllerURL, "")
+	t.Setenv(workerenv.TaskName, parentTaskName)
+	t.Setenv(workerenv.TaskNamespace, defaultNamespace)
+
+	_, err := NewCancelTaskTool().Execute(context.Background(), json.RawMessage(`{"task_name":"child-task-1"}`))
+	if err == nil || !strings.Contains(err.Error(), workerenv.ControllerURL) {
+		t.Fatalf("Execute() error = %v, want missing %s", err, workerenv.ControllerURL)
 	}
 }
