@@ -27,9 +27,18 @@ const (
 	liveRuntimeRepoRef      = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"
 	liveRuntimeRepoSentinel = "Hello World!"
 	liveRuntimeTimeout      = 8 * time.Minute
+
+	// Mock-mode models. aimock answers by the prompt markers, so the names
+	// only need the shapes each runtime expects.
+	runtimeMatrixMockCodexModel    = "gpt-5.4-mini"
+	runtimeMatrixMockOpenCodeModel = "openai/gpt-4.1"
+	runtimeMatrixMockClaudeModel   = "claude-sonnet-4.5"
 )
 
-var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
+// The built-in runtimes run against the live Copilot proxy when
+// E2E_LIVE_COPILOT_PROXY_BASE_URL is set. Otherwise aimock stands in for Vekil
+// behind the production provider proxy and replays agent_runtime_matrix.json.
+var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 	const (
 		codexAgentName         = "e2e-live-runtime-codex-agent"
 		codexTaskReadName      = "e2e-live-runtime-codex-read"
@@ -51,11 +60,13 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		opencodeModelSkipReason string
 		claudeModel             string
 		claudeSessionName       string
+		live                    bool
 	)
 
 	BeforeAll(func() {
-		if strings.TrimSpace(e2eLiveCopilotProxyBaseURL) == "" {
-			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set")
+		live = strings.TrimSpace(e2eLiveCopilotProxyBaseURL) != ""
+		if !live && e2eFlagEnabled(mockLLMDisableEnvVar) {
+			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set and " + mockLLMDisableEnvVar + " is set")
 		}
 
 		var err error
@@ -68,6 +79,19 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		token, err = serviceAccountToken()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(token).NotTo(BeEmpty())
+
+		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
+		if !live {
+			By("deploying aimock as the Vekil stand-in behind the provider proxy")
+			projectDir, err := utils.GetProjectDir()
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(providerProxyMockLLM.delete)
+			providerProxyMockLLM.deploy(projectDir)
+			gptModel = runtimeMatrixMockCodexModel
+			opencodeModel = runtimeMatrixMockOpenCodeModel
+			claudeModel = runtimeMatrixMockClaudeModel
+			return
+		}
 
 		By("verifying the live proxy is ready")
 		ready := waitForProxyReadyViaServiceProxy(
@@ -130,8 +154,6 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyClaudeModelPrefixes...,
 		)
 		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a Claude-family model")
-
-		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
 	})
 
 	AfterAll(func() {
@@ -165,7 +187,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			codexTaskReadName,
 			codexAgentName,
 			"Use a tool to read README in the repository root. "+
-				"Wait for the read to succeed, then reply with the exact file contents and nothing else.",
+				"Wait for the read to succeed, then reply with the exact file contents and nothing else. "+
+				"[e2e:runtime-codex-read]",
 			4,
 			nil,
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -213,7 +236,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			opencodeTaskReadName,
 			opencodeAgentName,
-			fmt.Sprintf("Attempt to use Bash and a mutation tool to create SHOULD_NOT_EXIST.txt; those tools must be unavailable. Then read README and include exactly %s in the response without modifying files.", liveRuntimeRepoSentinel),
+			fmt.Sprintf("Attempt to use Bash and a mutation tool to create SHOULD_NOT_EXIST.txt; those tools must be unavailable. Then read README and include exactly %s in the response without modifying files. [e2e:runtime-opencode-read]", liveRuntimeRepoSentinel),
 			4,
 			new(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -251,9 +274,33 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		}, 2*time.Minute)
 		verifyResultAvailable(opencodeTaskReadName)
 		Expect(fetchTaskResultSummaryViaAPI(apiBaseURL, token, opencodeTaskReadName)).To(ContainSubstring(liveRuntimeRepoSentinel))
+		if !live {
+			By("verifying OpenCode offered only read tools and refused the scripted bash call")
+			requests, err := providerProxyMockLLM.requestsFor("[e2e:runtime-opencode-read]")
+			Expect(err).NotTo(HaveOccurred())
+			var withTools int
+			var bashResults []string
+			for _, request := range requests {
+				// Requests without tools, such as title generation, are skipped.
+				if len(request.Body.Tools) == 0 {
+					continue
+				}
+				withTools++
+				var offered []string
+				for _, tool := range request.Body.Tools {
+					offered = append(offered, tool.Function.Name)
+				}
+				Expect(offered).To(ContainElement("read"))
+				Expect(offered).NotTo(ContainElement(BeElementOf("apply_patch", "bash", "edit", "grep", "write")))
+				bashResults = append(bashResults, request.ToolResults("bash")...)
+			}
+			Expect(withTools).To(BeNumerically(">", 0), "OpenCode sent no tool-enabled request")
+			Expect(bashResults).NotTo(BeEmpty(), "OpenCode never answered the scripted bash call")
+			Expect(bashResults[0]).To(ContainSubstring("unavailable tool"))
+		}
 	})
 
-	It("should run claude code through the live proxy with session wiring and exact output", func() {
+	It("should run Claude Code through the provider proxy with session wiring and exact output", func() {
 		DeferCleanup(func() {
 			cleanupLiveRuntimeTask(apiBaseURL, token, claudeTaskName, claudeAgentName)
 		})
@@ -266,7 +313,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			claudeTaskName,
 			claudeAgentName,
-			fmt.Sprintf("Reply with exactly %s and nothing else.", claudeExpectedResponse),
+			fmt.Sprintf("Reply with exactly %s and nothing else. [e2e:runtime-claude]", claudeExpectedResponse),
 			3,
 			new(false),
 			nil,
@@ -532,7 +579,10 @@ func verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, taskName string) {
 	Expect(json.Unmarshal([]byte(body), &trace)).To(Succeed())
 	Expect(trace.LatestSeq).To(BeNumerically(">", 0))
 	Expect(trace.ModelRequests).NotTo(BeEmpty())
-	Expect(trace.ModelRequests[len(trace.ModelRequests)-1].Status).To(Equal(tasktrace.StatusCompleted))
+	lastModelRequest := trace.ModelRequests[len(trace.ModelRequests)-1]
+	Expect(lastModelRequest.Status).To(Equal(tasktrace.StatusCompleted))
+	Expect(lastModelRequest.Model).NotTo(BeEmpty(), "trace model request has no model: %#v", lastModelRequest)
+	Expect(lastModelRequest.Provider).NotTo(BeEmpty(), "trace model request has no provider: %#v", lastModelRequest)
 	Expect(trace.ToolCalls).NotTo(BeEmpty())
 	Expect(trace.ToolCalls[len(trace.ToolCalls)-1].Status).To(Equal(tasktrace.StatusCompleted))
 }

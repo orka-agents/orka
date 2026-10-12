@@ -135,7 +135,7 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 	ctx = usageRequestContext(ctx, h.resultStore, uncachedReaderOr(h.apiReader, h.client), namespace, "")
 	provider = llm.NewTracingProvider(provider)
 	comp.Model = model
-	coordinator, err := prepareCompatCoordinatorTools(c, comp, compatCoordinatorSetup{Namespace: namespace, ToolUseAction: "openAITools", AuthorizationConfig: h.contextTokenAuthorization})
+	coordinator, err := prepareCompatCoordinatorTools(c, comp, h.responsesCoordinatorSetup(namespace))
 	if err != nil {
 		return openAIContextTokenAuthorizationError(c, err)
 	}
@@ -192,7 +192,19 @@ func (h *OpenAICompatHandler) responsesToolContext(c fiber.Ctx, namespace string
 		GenerateTaskName:  func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 		Profile:           openAICompatProxyToolContextProfile, AuthContext: token,
 		AuthorizationConfig: h.contextTokenAuthorization, UserInfo: user,
+		// Linked accounts are wired as on the other compatibility endpoints,
+		// so a GitHub call under a person's link meets the same rules here.
+		LinkedAccounts: h.config.LinkedAccounts, ConnectorsEnabled: h.config.ConnectorsEnabled,
 	})
+}
+
+// responsesCoordinatorSetup is the coordinator tool setup for the Responses
+// endpoint, with the same connector settings as Chat Completions.
+func (h *OpenAICompatHandler) responsesCoordinatorSetup(namespace string) compatCoordinatorSetup {
+	return compatCoordinatorSetup{
+		Namespace: namespace, ToolUseAction: "openAITools", AuthorizationConfig: h.contextTokenAuthorization,
+		ConnectorsEnabled: h.config.ConnectorsEnabled,
+	}
 }
 
 func responsesProviderError(c fiber.Ctx, err error) error {

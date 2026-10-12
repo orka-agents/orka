@@ -184,18 +184,19 @@ LLM-visible parameter schema:
   "properties": {
     "task_name":  {"type": "string", "description": "Name of the child task to cancel"},
     "namespace":  {"type": "string", "description": "Namespace (defaults to current)"},
-    "reason":     {"type": "string", "description": "Reason for cancellation"}
+    "reason":     {"type": "string", "description": "Reason for cancellation", "maxLength": 512}
   },
   "required": ["task_name"]
 }
 ```
 
-Implementation (`internal/tools/cancel_task.go`):
-1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE` from env
-2. Validates the target task is a child of the calling task via `orka.ai/parent-task` label
-3. Only cancels tasks in `Pending` or `Running` phase
-4. Sets the task phase to `Cancelled` via status subresource update
-5. Returns confirmation with task name and cancellation reason
+Implementation (`internal/tools/cancel_task.go` and the controller endpoint
+`POST /internal/v1/tasks/{namespace}/{taskName}/children/{child}/cancel`):
+1. The worker calls the controller as its Task. The endpoint checks that the caller is the parent Task's current worker Pod and that its Job still holds result authority.
+2. The child must carry the provenance-protected parent link (the `orka.ai/parent-task` label plus a controller owner reference with the parent's UID), so Task provenance admission is required.
+3. Only `Pending` or `Running` children can be cancelled. Children running on an agent runtime are refused.
+4. The endpoint records the `orka.ai/cancel-requested` annotation on the child. Only controller identities may set it. The Task controller then completes the child as `Cancelled` through its normal terminal path: it revokes and deletes the worker Job, releases any session lock, and records the outcome.
+5. Returns `{"taskName": ..., "status": "cancellation requested"}`, or the child's phase when it has already finished.
 
 #### `send_message` Tool
 

@@ -45,6 +45,7 @@ import (
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/executionmode"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -57,7 +58,7 @@ func evalToolRegistries(fc client.Client) map[string]*Registry {
 	for _, tool := range []Tool{
 		NewWebSearchTool(), NewCodeExecTool(), NewFileReadTool(), NewWebFetchTool(), NewFileWriteTool(),
 		NewRequestApprovalTool(), NewReplyInConversationTool(),
-		NewDelegateTaskTool(fc), NewWaitForTasksTool(fc), NewCreateContainerTaskTool(fc), NewCancelTaskTool(fc),
+		NewDelegateTaskTool(fc), NewWaitForTasksTool(fc), NewCreateContainerTaskTool(fc), NewCancelTaskTool(),
 		NewSendMessageTool(), NewCheckMessagesTool(), NewCreatePullRequestTool(fc), NewCheckPullRequestCITool(fc),
 		NewMergePullRequestTool(fc), NewAutoMergePullRequestTool(fc), NewReviewPullRequestTool(fc),
 		NewPostReviewCommentTool(fc), NewCheckPRReviewMarkerTool(fc), NewListIssuesTool(fc), NewListPullRequestsTool(fc),
@@ -109,6 +110,7 @@ func evalGuardWebClients(registries ...*Registry) {
 func evalToolSandbox(t *testing.T) {
 	t.Helper()
 	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("ORKA_WORK_DIR", t.TempDir())
 	original := http.DefaultTransport
 	guarded := original.(*http.Transport).Clone()
 	guarded.Proxy = nil
@@ -197,14 +199,18 @@ func evalToolSchema(t *testing.T, tool Tool) map[string]any {
 // reports failure cannot pass a panic off as a known defect.
 var evalPanics atomic.Int64
 
-// evalToolExecute runs a tool, converting a panic into a reported failure.
+// evalToolExecute uses the production registry entrypoint, converting a panic
+// into a reported failure. Register the fixture instance so its local clients
+// and recording executor are preserved.
 func evalToolExecute(ctx context.Context, tool Tool, args string) (result string, panicked any, err error) {
 	defer func() {
 		if panicked = recover(); panicked != nil {
 			evalPanics.Add(1)
 		}
 	}()
-	result, err = tool.Execute(ctx, json.RawMessage(args))
+	registry := NewRegistry()
+	registry.Register(tool)
+	result, err = registry.Execute(ctx, tool.Name(), json.RawMessage(args))
 	return result, nil, err
 }
 
@@ -228,6 +234,7 @@ func evalToolFailure(result string, err error) (bool, string) {
 }
 
 func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
+	evalToolSandbox(t)
 	registered := map[string]bool{}
 	for _, registry := range evalToolRegistries(newFakeClient()) {
 		for _, name := range registry.Names() {
@@ -246,9 +253,9 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 }
 
 // TestToolEvalMalformedArguments sends each tool arguments a model gets wrong:
-// non-object JSON, missing required fields (all at once and each on its own),
-// wrong JSON types, and nested
-// objects encoded as strings. A tool must never panic, must never report
+// non-object JSON, omitted required fields, wrong root JSON types, and nested
+// objects encoded as strings. TestToolEvalRequiredFields isolates each required
+// field; TestToolEvalNestedArgumentTypes probes nested types with valid controls. A tool must never panic, must never report
 // success for a call missing required fields or for an object sent as a
 // string, and must always explain a failure. Chat tools must return a
 // structured result instead of a Go error, which the chat executor reports to
@@ -266,7 +273,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 	violations := map[string]string{}
 	// Panics, Go errors from chat tools, and failures without a message are
 	// never accepted as known defects.
-	var fatal, inconclusive, untested []string
+	var fatal, inconclusive []string
 	for label, registry := range evalToolRegistries(newFakeClient()) {
 		names := registry.Names()
 		sort.Strings(names)
@@ -277,17 +284,6 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			properties, _ := schema["properties"].(map[string]any)
 
 			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "empty object": `{}`}
-			// Omit each required field on its own, so a field the tool checks
-			// cannot hide one it ignores. The call with every required field is
-			// the baseline: where it fails too, a failure proves nothing.
-			if len(required) > 1 {
-				baseline, _ := json.Marshal(evalToolRequiredArgs(required, properties))
-				inputs["all required"] = string(baseline)
-				for i, field := range required {
-					args, _ := json.Marshal(evalToolRequiredArgs(slices.Delete(slices.Clone(required), i, i+1), properties))
-					inputs[fmt.Sprintf("missing %v", field)] = string(args)
-				}
-			}
 			for prop, raw := range properties {
 				propSchema, _ := raw.(map[string]any)
 				typ, _ := propSchema["type"].(string)
@@ -313,7 +309,6 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			}
 			sort.Strings(inputNames)
 
-			baselineFailed := map[string]bool{}
 			for _, input := range inputNames {
 				for _, cluster := range []string{"empty", "seeded"} {
 					fc := evalToolClusters[cluster]()
@@ -329,12 +324,6 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
-					case input == "all required" && failed:
-						baselineFailed[cluster] = true
-					case strings.HasPrefix(input, "missing ") && !failed:
-						violations[key] = fmt.Sprintf("reported success without required field %s in the %s cluster", strings.TrimPrefix(input, "missing "), cluster)
-					case strings.HasPrefix(input, "missing ") && baselineFailed[cluster]:
-						untested = append(untested, key+" ("+cluster+")")
 					}
 				}
 			}
@@ -345,7 +334,6 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 	}
 	sort.Strings(inconclusive)
 	t.Logf("object-as-string handling not observable without more setup: %v", inconclusive)
-	t.Logf("missing required fields not tested because the call with every required field also failed: %v", untested)
 	evalToolReportViolations(t, violations, knownDefects)
 }
 
@@ -501,8 +489,8 @@ func evalToolReportViolations(t *testing.T, violations, knownDefects map[string]
 	}
 }
 
-// evalToolRequiredArgs fills required fields with placeholder values of the
-// declared type, so validation can reach the field under test.
+// evalToolRequiredArgs builds schema-typed placeholders. Executable controls
+// must also use evalArgumentControl for semantic values and dependencies.
 func evalToolRequiredArgs(required []any, properties map[string]any) map[string]any {
 	args := map[string]any{}
 	for _, raw := range required {
@@ -630,7 +618,7 @@ func evalRejects(ctx context.Context, tool Tool, args, field string) (bool, stri
 	switch {
 	case !failed:
 		return false, "accepted " + args
-	case !strings.Contains(strings.ToLower(message), strings.ToLower(field)):
+	case !evalFieldMentioned(message, field):
 		return false, fmt.Sprintf("rejected %s for another reason: %s", args, message)
 	}
 	return true, ""
@@ -697,6 +685,10 @@ func newEvalHTTPStub(t *testing.T) *evalHTTPStub {
 			_, _ = fmt.Fprint(w, `{"state":"success","statuses":[]}`)
 		case strings.HasSuffix(r.URL.Path, "/merge"):
 			_, _ = fmt.Fprint(w, `{"merged":true,"sha":"def456"}`)
+		case strings.HasSuffix(r.URL.Path, "/files"), (r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/reviews")):
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodPost || strings.Contains(r.URL.Path, "/issues/"):
+			_, _ = fmt.Fprint(w, `{"number":1,"id":1,"html_url":"https://github.com/testorg/testrepo/pull/1"}`)
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			_, _ = fmt.Fprint(w, `{"number":1,"state":"open","mergeable":true,"head":{"sha":"abc123","ref":"feature"},"base":{"ref":"main"}}`)
 		default:
@@ -722,6 +714,7 @@ func (s *evalHTTPStub) perPage() []int {
 }
 
 var evalPerPagePattern = regexp.MustCompile(`[?&]per_page=(-?[0-9]+)`)
+var evalMonitorPerPagePattern = regexp.MustCompile(`(?m)^1\. Call list_pull_requests [^\n]*per_page (-?[0-9]+)\.$`)
 
 func (s *evalHTTPStub) sent(fragment string) bool {
 	s.mu.Lock()
@@ -885,23 +878,39 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					fc := agent()
 					tool, ctx := chatTool("create_pr_monitor", fc)
 					result, panicked, err := evalToolExecute(ctx, tool, fmt.Sprintf(base, fmt.Sprintf(`,"per_page":%d`, perPage)))
-					if err != nil || panicked != nil {
-						return false, fmt.Sprintf("per_page=%d: err=%v panic=%v", perPage, err, panicked)
+					if panicked != nil {
+						return false, fmt.Sprintf("per_page=%d: panic=%v", perPage, panicked)
+					}
+					if failed, message := evalToolFailure(result, err); failed {
+						if (perPage < 1 || perPage > 100) && strings.Contains(message, "per_page") {
+							return true, ""
+						}
+						return false, fmt.Sprintf("per_page=%d failed for another reason: %s", perPage, message)
 					}
 					var tasks corev1alpha1.TaskList
-					_ = fc.List(context.Background(), &tasks)
-					if len(tasks.Items) == 0 {
-						return false, fmt.Sprintf("per_page=%d created no monitor Task: %s", perPage, result)
+					if err := fc.List(context.Background(), &tasks); err != nil {
+						return false, fmt.Sprintf("list monitor Tasks: %v", err)
 					}
-					for i := range tasks.Items {
-						if strings.Contains(tasks.Items[i].Spec.Prompt, fmt.Sprintf("per_page %d.", perPage)) {
-							return false, fmt.Sprintf("per_page=%d reached the monitor prompt", perPage)
-						}
+					if len(tasks.Items) != 1 {
+						return false, fmt.Sprintf("per_page=%d created %d monitor Tasks: %s", perPage, len(tasks.Items), result)
+					}
+					matches := evalMonitorPerPagePattern.FindAllStringSubmatch(tasks.Items[0].Spec.Prompt, -1)
+					if len(matches) != 1 {
+						return false, "monitor prompt must contain exactly one list_pull_requests per_page command"
+					}
+					page, err := strconv.Atoi(matches[0][1])
+					if err != nil || page < 1 || page > 100 {
+						return false, fmt.Sprintf("per_page=%d produced monitor per_page=%s outside 1..100", perPage, matches[0][1])
+					}
+					if perPage >= 1 && perPage <= 100 && page != perPage {
+						return false, fmt.Sprintf("valid per_page=%d changed to %d", perPage, page)
 					}
 					return true, ""
 				}
 				call := func() (Tool, context.Context) { return chatTool("create_pr_monitor", agent()) }
 				return evalAll(
+					func() (bool, string) { return pagesClamped(1) },
+					func() (bool, string) { return pagesClamped(100) },
 					func() (bool, string) { return pagesClamped(500) },
 					func() (bool, string) { return pagesClamped(-5) },
 					func() (bool, string) {
@@ -909,6 +918,30 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 						return evalEnumEnforced(call, event, "review_event", "MAYBE", "COMMENT", "APPROVE", "REQUEST_CHANGES")
 					},
 				)
+			},
+		},
+		{
+			name:   "worker cancel_task reason",
+			limits: []string{"worker/cancel_task.reason maxLength=512"},
+			check: func(t *testing.T) (bool, string) {
+				requests := startCancelTaskController(t, http.StatusOK, `{"taskName":"child","status":"Cancelled"}`)
+				call := func() (Tool, context.Context) { return workerTool("cancel_task", newFakeClient()) }
+				for _, character := range []string{"x", "界"} {
+					reason := func(n int) string {
+						return fmt.Sprintf(`{"task_name":"child","reason":%q}`, strings.Repeat(character, n))
+					}
+					before := len(*requests)
+					if ok, detail := evalRejectsChange(call, reason(MaxCancelReasonLength), reason(MaxCancelReasonLength+1), "reason"); !ok {
+						return false, detail
+					}
+					if len(*requests) != before+1 {
+						return false, "an overlong cancellation reason reached the controller"
+					}
+					if (*requests)[before].reason != strings.Repeat(character, MaxCancelReasonLength) {
+						return false, "the valid cancellation reason changed before reaching the controller"
+					}
+				}
+				return true, ""
 			},
 		},
 		{
@@ -1040,7 +1073,16 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					stub := newEvalHTTPStub(t)
 					tool := make(githubTask(), stub.URL)
 					args := fmt.Sprintf(`{"task_name":%q,"repo_url":%q,"per_page":%d}`, testCoderTaskName, testOrgTestRepoURL, perPage)
-					_, _, _ = evalToolExecute(context.Background(), tool, args)
+					result, panicked, err := evalToolExecute(context.Background(), tool, args)
+					if panicked != nil {
+						return false, fmt.Sprintf("%s panicked: %v", tool.Name(), panicked)
+					}
+					if failed, message := evalToolFailure(result, err); failed {
+						if (perPage < 1 || perPage > 100) && strings.Contains(message, "per_page") {
+							return true, ""
+						}
+						return false, fmt.Sprintf("%s failed for another reason: %s", tool.Name(), message)
+					}
 					sent := stub.perPage()
 					switch {
 					case len(sent) == 0:
@@ -1048,13 +1090,20 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					case slices.ContainsFunc(sent, func(v int) bool { return v < 1 || v > 100 }):
 						return false, fmt.Sprintf("%s sent per_page=%v to GitHub for per_page=%d", tool.Name(), sent, perPage)
 					}
+					if perPage >= 1 && perPage <= 100 && slices.ContainsFunc(sent, func(v int) bool { return v != perPage }) {
+						return false, fmt.Sprintf("%s changed valid per_page=%d to %v", tool.Name(), perPage, sent)
+					}
 					return true, ""
 				}
 				issues := func(c client.Client, url string) Tool { return &ListIssuesTool{k8sClient: c, apiBaseURL: url} }
 				pulls := func(c client.Client, url string) Tool { return &ListPullRequestsTool{k8sClient: c, apiBaseURL: url} }
 				return evalAll(
+					func() (bool, string) { return clamped(issues, 1) },
+					func() (bool, string) { return clamped(issues, 100) },
 					func() (bool, string) { return clamped(issues, 500) },
 					func() (bool, string) { return clamped(issues, -5) },
+					func() (bool, string) { return clamped(pulls, 1) },
+					func() (bool, string) { return clamped(pulls, 100) },
 					func() (bool, string) { return clamped(pulls, 500) },
 					func() (bool, string) { return clamped(pulls, -5) },
 				)
@@ -1414,4 +1463,445 @@ func evalProgressEnforced(valid, progress int) func(*testing.T) (bool, string) {
 		}
 		return ok, detail
 	}
+}
+
+// evalArgumentControl supplies executable controls, not just schema-typed
+// placeholders. Each call gets fresh resources so an earlier create/delete
+// cannot invalidate the next control. HTTP, stores, and code execution stay local.
+func evalArgumentControl(t *testing.T, label, name string, schema map[string]any) (evalCall, map[string]any) {
+	t.Helper()
+	required, _ := schema["required"].([]any)
+	properties, _ := schema["properties"].(map[string]any)
+	args := evalToolRequiredArgs(required, properties)
+	stub := newEvalHTTPStub(t)
+	t.Setenv(envOrkaTaskName, "parent")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaControllerURL, stub.URL)
+	t.Setenv(workerenv.ServiceAccountToken, "eval-token")
+	maps.Copy(args, evalArgumentSemanticValues(label, name, stub.URL))
+	forgeTools := []string{"create_pull_request", "check_pull_request_ci", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "check_pr_review_marker", "list_issues", "list_pull_requests", "get_issue", "comment_on_issue"}
+	if slices.Contains(forgeTools, name) {
+		args["task_name"] = testCoderTaskName
+	}
+	call := func() (Tool, context.Context) {
+		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+		parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNamespace, UID: "eval-uid"}}
+		child := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: evalPlaceholder, Namespace: defaultNamespace, UID: "eval-child",
+				Labels:          map[string]string{labels.LabelParentTask: labels.SelectorValue(parent.Name)},
+				Annotations:     map[string]string{labels.AnnotationParentTaskName: parent.Name, labels.AnnotationParentTaskUID: string(parent.UID)},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task"))}},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, ResultRef: &corev1alpha1.ResultReference{Available: true}},
+		}
+		agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: evalPlaceholder, Namespace: defaultNamespace},
+			Spec: corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: evalPlaceholder}, Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}, Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}
+		objects := []client.Object{parent, child, task, secret, &corev1alpha1.Provider{ObjectMeta: agent.ObjectMeta}}
+		if name != "create_tool" {
+			objects = append(objects, &corev1alpha1.Tool{ObjectMeta: agent.ObjectMeta})
+		}
+		if name != "create_agent_task" && name != "delegate_task" {
+			agent.Spec.Runtime = nil
+		}
+		if name != "create_agent" {
+			objects = append(objects, agent)
+		}
+		if name == "create_pr_monitor" {
+			agent.Spec.Runtime = nil
+			read := secret.DeepCopy()
+			read.Name = "eval-read"
+			objects = append(objects, read)
+		}
+		fc := newFakeClient(objects...)
+		tool, _ := evalToolRegistries(fc)[label].Get(name)
+		ctx := evalToolContextFor(label, fc)
+		if label == "worker" {
+			// Worker contexts have no chat hooks; in particular container
+			// creation must take its coordination path, not the chat path.
+			ctx = WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
+		}
+		tc := GetToolContext(ctx)
+		tc.TaskID, tc.TaskUID, tc.ParentTaskID, tc.OperationID = parent.Name, string(parent.UID), parent.Name, "eval-operation"
+		tc.TaskProvenanceProtected = true
+		tc.ResultStore = &fakeResultStore{data: map[string][]byte{defaultNamespace + "/eval": []byte("eval output")}}
+		tc.SessionDeleter = &mockSessionDeleter{}
+		tc.MessageStore = &recordingMessageStore{}
+		memory := &brokerMemoryStore{}
+		tc.MemoryReader, tc.MemoryProposalWriter, tc.TranscriptSearcher = memory, memory, memory
+		tc.GatewayReplySender = &replySenderStub{budget: GatewayReplyBudget{Limit: 10}}
+		tc.ApprovalEmitter = func(context.Context, approvals.ApprovalTarget) error { return nil }
+		tc.Requester = &corev1alpha1.RequestedBy{Issuer: "https://example.com", Subject: "eval-person"}
+		switch tool := tool.(type) {
+		case *CreatePullRequestTool:
+			tool.apiBaseURL = stub.URL
+		case *CheckPullRequestCITool:
+			tool.apiBaseURL = stub.URL
+		case *MergePullRequestTool:
+			tool.apiBaseURL = stub.URL
+		case *AutoMergePullRequestTool:
+			tool.apiBaseURL = stub.URL
+		case *ReviewPullRequestTool:
+			tool.apiBaseURL = stub.URL
+		case *PostReviewCommentTool:
+			tool.apiBaseURL = stub.URL
+		case *CheckPRReviewMarkerTool:
+			tool.apiBaseURL = stub.URL
+		case *ListIssuesTool:
+			tool.apiBaseURL = stub.URL
+		case *ListPullRequestsTool:
+			tool.apiBaseURL = stub.URL
+		case *GetIssueTool:
+			tool.apiBaseURL = stub.URL
+		case *CommentOnIssueTool:
+			tool.apiBaseURL = stub.URL
+		case *FileReadTool:
+			tool.allowedPaths = []string{os.Getenv(workerenv.WorkDir)}
+			if err := os.WriteFile(args["path"].(string), []byte("eval"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		case *FileWriteTool:
+			tool.allowedPaths = []string{os.Getenv(workerenv.WorkDir)}
+		case *WebFetchTool:
+			tool.client = evalWebClient()
+		case *WebSearchTool:
+			tool.client = evalWebClient()
+		case *RunValidationTool:
+			monitor, review := runValidationFixtures()
+			fc := newFakeClient(monitor, review)
+			bindings := newRunValidationBindingStore()
+			tc.Client, tc.Namespace, tc.TaskID, tc.TaskUID = fc, review.Namespace, review.Name, string(review.UID)
+			tc.RepositoryValidationBindings = bindings
+			seedRepositoryValidationReviewBindingForTest(t, ctx, bindings, review, monitor)
+			tool.k8sClient = fc
+		}
+		if name == "code_exec" {
+			tool, _ = evalRecordingCodeExec(t)
+		}
+		return tool, ctx
+	}
+	return call, args
+}
+
+// evalArgumentSemanticValues supplies valid values that schema types alone
+// cannot describe, including local paths and tool-specific enum choices.
+func evalArgumentSemanticValues(label, name, localURL string) map[string]any {
+	switch name {
+	case "create_pr_monitor":
+		return map[string]any{"repo_url": testOrgTestRepoURL, "schedule": "0 * * * *", "readCredentialRef": "eval-read"}
+	case "create_agent":
+		if label == "worker" {
+			return map[string]any{"systemPrompt": "Eval agent"}
+		}
+	case "code_exec":
+		return map[string]any{"language": "python", "code": "print('eval')"}
+	case "file_read", "file_write":
+		return map[string]any{"path": filepath.Join(os.Getenv(workerenv.WorkDir), "eval")}
+	case "wait_for_tasks":
+		return map[string]any{"tasks": []any{evalPlaceholder}}
+	case "post_review_comment":
+		return map[string]any{"event": "COMMENT"}
+	case "create_tool":
+		return map[string]any{"url": localURL}
+	case "web_fetch":
+		return map[string]any{"url": "https://example.com/eval"}
+	}
+	return nil
+}
+
+func evalWebClient() *http.Client {
+	return &http.Client{Transport: webSearchRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/html"}}, Body: io.NopCloser(strings.NewReader(`<html><body><div class="result"><a class="result__a" href="https://example.com/eval">Eval page</a><a class="result__snippet" href="#">Eval result</a></div></body></html>`)), Request: r}, nil
+	})}
+}
+
+func TestToolEvalRequiredFields(t *testing.T) {
+	evalToolSandbox(t)
+	knownDefects := map[string]string{
+		"worker/file_write: missing content":      "the tool treats omitted content as an empty file",
+		"worker/request_approval: missing action": "the tool emits an approval without the required action",
+	}
+	violations := map[string]string{}
+	declared, executed := map[string]bool{}, map[string]bool{}
+	for label, registry := range evalToolRegistries(newFakeClient()) {
+		for _, name := range registry.Names() {
+			tool, _ := registry.Get(name)
+			schema := evalToolSchema(t, tool)
+			required, _ := schema["required"].([]any)
+			for _, field := range required {
+				declared[fmt.Sprintf("%s/%s: missing %s", label, name, field)] = true
+			}
+			if len(required) == 0 {
+				continue
+			}
+			t.Run(label+"/"+name, func(t *testing.T) {
+				call, args := evalArgumentControl(t, label, name, schema)
+				valid, _ := json.Marshal(args)
+				if ok, detail := evalSucceeds(call, string(valid)); !ok {
+					t.Fatalf("required-field control is not executable: %s", detail)
+				}
+				for _, field := range required {
+					key := fmt.Sprintf("%s/%s: missing %s", label, name, field)
+					executed[key] = true
+					missing := maps.Clone(args)
+					delete(missing, field.(string))
+					raw, _ := json.Marshal(missing)
+					fresh, ctx := call()
+					fieldName := field.(string)
+					if fieldName == "tasks" {
+						fieldName = "task name"
+					}
+					failed, message := evalArgumentFailure(t, label, ctx, fresh, string(raw))
+					if !failed {
+						violations[key] = "accepted " + string(raw)
+					} else if !evalFieldMentioned(message, fieldName) {
+						t.Errorf("missing %s rejected for another reason: %s", field, message)
+					}
+				}
+			})
+		}
+	}
+	evalToolReportExecutedViolations(t, violations, knownDefects, declared, executed)
+}
+
+// evalNestedTypeProbes visits properties, array items, and typed map entries.
+// Each probe includes a valid enclosing object/item; sending only the leaf
+// would test missing siblings instead of that leaf's declared type.
+func evalNestedTypeProbes(schema map[string]any, visit func([]string, map[string]any)) {
+	var walk func([]string, map[string]any)
+	walk = func(path []string, node map[string]any) {
+		if len(path) > 1 {
+			visit(path, node)
+		}
+		properties, _ := node["properties"].(map[string]any)
+		for name, raw := range properties {
+			child, _ := raw.(map[string]any)
+			walk(append(slices.Clone(path), name), child)
+		}
+		if items, ok := node["items"].(map[string]any); ok {
+			walk(append(slices.Clone(path), "[]"), items)
+		}
+		if entries, ok := node["additionalProperties"].(map[string]any); ok {
+			walk(append(slices.Clone(path), "*"), entries)
+		}
+	}
+	walk(nil, schema)
+}
+
+func evalArgumentValue(path []string, schema map[string]any) any {
+	key := strings.Join(path, ".")
+	switch key {
+	case "workspace":
+		value := map[string]any{"gitRepo": testOrgTestRepoURL, "intent": "write", "publicationCredentialRef": "eval-write", "prBaseBranch": "main", "forgeCredentialRef": "eval-forge"}
+		properties, _ := schema["properties"].(map[string]any)
+		for field := range value {
+			if _, ok := properties[field]; !ok {
+				delete(value, field)
+			}
+		}
+		return value
+	case "coordination":
+		return map[string]any{"enabled": true}
+	case "workspace.intent":
+		return "write" // The enclosing workspace includes publication credentials.
+	case "workspace.gitRepo", "workspace.publicationGitRepo":
+		return testOrgTestRepoURL
+	case "model":
+		return map[string]any{"name": "eval-model"}
+	case "runtime":
+		return map[string]any{"type": "codex"}
+	case "runtime.type":
+		return "codex"
+	case "runtime.secretRef":
+		return ""
+	case "runtime.defaultAllowedTools.[]":
+		return "Read"
+	case "resources.requests", "resources.limits":
+		return map[string]any{"cpu": "100m"}
+	case "resources.requests.*", "resources.limits.*":
+		return "100m"
+	case "roles.[]":
+		return "assistant"
+	}
+	if enum, _ := schema["enum"].([]any); len(enum) > 0 {
+		return enum[0]
+	}
+	switch schema["type"] {
+	case "object":
+		required, _ := schema["required"].([]any)
+		properties, _ := schema["properties"].(map[string]any)
+		return evalToolRequiredArgs(required, properties)
+	case "array":
+		items, _ := schema["items"].(map[string]any)
+		return []any{evalArgumentValue(append(slices.Clone(path), "[]"), items)}
+	case "integer", "number":
+		return 1
+	case "boolean":
+		return true
+	default:
+		return evalPlaceholder
+	}
+}
+
+// evalSetArgumentPath copies the enclosing containers rather than mutating a
+// shared control. "[]" uses the first item; "*" uses a valid resource-map key.
+func evalSetArgumentPath(value any, schema map[string]any, path, prefix []string, leaf any) any {
+	if len(path) == 0 {
+		return leaf
+	}
+	key := path[0]
+	var childSchema map[string]any
+	if key == "[]" {
+		childSchema, _ = schema["items"].(map[string]any)
+		items, _ := value.([]any)
+		items = slices.Clone(items)
+		if len(items) == 0 {
+			items = []any{evalArgumentValue(append(slices.Clone(prefix), key), childSchema)}
+		}
+		items[0] = evalSetArgumentPath(items[0], childSchema, path[1:], append(slices.Clone(prefix), key), leaf)
+		return items
+	}
+	if key == "*" {
+		childSchema, _ = schema["additionalProperties"].(map[string]any)
+		key = "cpu"
+	} else {
+		properties, _ := schema["properties"].(map[string]any)
+		childSchema, _ = properties[key].(map[string]any)
+	}
+	object, _ := value.(map[string]any)
+	object = maps.Clone(object)
+	if object == nil {
+		object = map[string]any{}
+	}
+	child, ok := object[key]
+	if !ok {
+		child = evalArgumentValue(append(slices.Clone(prefix), path[0]), childSchema)
+	}
+	object[key] = evalSetArgumentPath(child, childSchema, path[1:], append(slices.Clone(prefix), path[0]), leaf)
+	return object
+}
+
+func TestToolEvalNestedArgumentTypes(t *testing.T) {
+	evalToolSandbox(t)
+	wrong := map[string]any{"string": map[string]any{"k": "v"}, "integer": "many", "number": "many", "boolean": "yes", "array": "a,b", "object": []any{}}
+	const ignoredNestedType = "the tool drops or coerces a nested value whose type contradicts its schema"
+	knownDefects := map[string]string{
+		"chat/create_agent: coordination.allowedAgents[].name as wrong type":             ignoredNestedType,
+		"chat/create_agent: coordination.allowedAgents[].namespace as wrong type":        ignoredNestedType,
+		"chat/create_agent: model.name as wrong type":                                    ignoredNestedType,
+		"chat/create_agent: model.provider as wrong type":                                ignoredNestedType,
+		"chat/create_agent: model.temperature as wrong type":                             ignoredNestedType,
+		"chat/create_agent: runtime.defaultAllowBash as wrong type":                      ignoredNestedType,
+		"chat/create_agent: runtime.defaultAllowedTools as wrong type":                   ignoredNestedType,
+		"chat/create_agent: runtime.defaultAllowedTools[] as wrong type":                 ignoredNestedType,
+		"chat/create_agent: runtime.defaultMaxTurns as wrong type":                       ignoredNestedType,
+		"chat/create_agent: runtime.secretRef as wrong type":                             ignoredNestedType,
+		"chat/create_agent: tools[] as wrong type":                                       ignoredNestedType,
+		"chat/create_agent_task: workspace.forgeCredentialRef as wrong type":             ignoredNestedType,
+		"chat/create_agent_task: workspace.prBaseBranch as wrong type":                   ignoredNestedType,
+		"chat/create_agent_task: workspace.publicationCredentialRef as wrong type":       ignoredNestedType,
+		"chat/create_agent_task: workspace.publicationReadCredentialRef as wrong type":   ignoredNestedType,
+		"chat/create_agent_task: workspace.readCredentialRef as wrong type":              ignoredNestedType,
+		"chat/create_agent_task: workspace.subPath as wrong type":                        ignoredNestedType,
+		"chat/create_container_task: args[] as wrong type":                               ignoredNestedType,
+		"chat/create_container_task: command[] as wrong type":                            ignoredNestedType,
+		"chat/create_container_task: workspace.branch as wrong type":                     ignoredNestedType,
+		"chat/create_container_task: workspace.gitRepo as wrong type":                    ignoredNestedType,
+		"chat/create_container_task: workspace.publicationCredentialRef as wrong type":   ignoredNestedType,
+		"chat/create_container_task: workspace.publicationGitRepo as wrong type":         ignoredNestedType,
+		"chat/create_container_task: workspace.pushBranch as wrong type":                 ignoredNestedType,
+		"chat/create_container_task: workspace.readCredentialRef as wrong type":          ignoredNestedType,
+		"chat/create_container_task: workspace.ref as wrong type":                        ignoredNestedType,
+		"chat/create_container_task: workspace.subPath as wrong type":                    ignoredNestedType,
+		"chat/update_agent: tools[] as wrong type":                                       ignoredNestedType,
+		"worker/create_container_task: args[] as wrong type":                             ignoredNestedType,
+		"worker/create_container_task: command[] as wrong type":                          ignoredNestedType,
+		"worker/create_container_task: workspace.branch as wrong type":                   ignoredNestedType,
+		"worker/create_container_task: workspace.gitRepo as wrong type":                  ignoredNestedType,
+		"worker/create_container_task: workspace.publicationCredentialRef as wrong type": ignoredNestedType,
+		"worker/create_container_task: workspace.publicationGitRepo as wrong type":       ignoredNestedType,
+		"worker/create_container_task: workspace.pushBranch as wrong type":               ignoredNestedType,
+		"worker/create_container_task: workspace.readCredentialRef as wrong type":        ignoredNestedType,
+		"worker/create_container_task: workspace.ref as wrong type":                      ignoredNestedType,
+		"worker/create_container_task: workspace.subPath as wrong type":                  ignoredNestedType,
+	}
+	violations := map[string]string{}
+	declared, executed := map[string]bool{}, map[string]bool{}
+	for label, registry := range evalToolRegistries(newFakeClient()) {
+		for _, name := range registry.Names() {
+			tool, _ := registry.Get(name)
+			schema := evalToolSchema(t, tool)
+			evalNestedTypeProbes(schema, func(path []string, node map[string]any) {
+				typ, _ := node["type"].(string)
+				bad, ok := wrong[typ]
+				if !ok {
+					return
+				}
+				field := strings.ReplaceAll(strings.Join(path, "."), ".[]", "[]")
+				key := label + "/" + name + ": " + field + " as wrong type"
+				declared[key] = true
+				t.Run(key, func(t *testing.T) {
+					executed[key] = true
+					call, args := evalArgumentControl(t, label, name, schema)
+					if path[0] == "runtime" {
+						args["model"] = map[string]any{"name": "eval-model"}
+					}
+					valid := evalSetArgumentPath(args, schema, path, nil, evalArgumentValue(path, node))
+					validRaw, _ := json.Marshal(valid)
+					if ok, detail := evalSucceeds(call, string(validRaw)); !ok {
+						t.Fatalf("nested-type control is not executable: %s", detail)
+					}
+					invalid := evalSetArgumentPath(valid, schema, path, nil, bad)
+					invalidRaw, _ := json.Marshal(invalid)
+					fresh, ctx := call()
+					failed, message := evalArgumentFailure(t, label, ctx, fresh, string(invalidRaw))
+					if !failed {
+						violations[key] = "accepted " + string(invalidRaw)
+					} else if !evalFieldMentioned(message, path[0]) && !strings.Contains(message, "json: cannot unmarshal") {
+						// Custom array decoding can name only its item index, not
+						// its parent. Its type error still proves this one mutation.
+						t.Errorf("wrong type rejected for another reason: %s", message)
+					}
+				})
+			})
+		}
+	}
+	evalToolReportExecutedViolations(t, violations, knownDefects, declared, executed)
+}
+
+// evalArgumentFailure keeps panic, chat Go-error, and diagnostic checks outside
+// knownDefect accounting; a different failure must never satisfy a marker.
+func evalArgumentFailure(t *testing.T, label string, ctx context.Context, tool Tool, args string) (bool, string) {
+	t.Helper()
+	result, panicked, err := evalToolExecute(ctx, tool, args)
+	if panicked != nil {
+		t.Fatalf("tool panicked: %v", panicked)
+	}
+	if label == "chat" && err != nil {
+		t.Fatalf("chat tool returned a Go error instead of a structured result: %v", err)
+	}
+	failed, message := evalToolFailure(result, err)
+	if failed && strings.TrimSpace(message) == "" {
+		t.Fatalf("tool failed without an error message: %s", result)
+	}
+	return failed, message
+}
+
+func evalFieldMentioned(message, field string) bool {
+	normalize := func(s string) string { return strings.ReplaceAll(strings.ToLower(s), "_", "") }
+	return strings.Contains(normalize(message), normalize(field))
+}
+
+// Filtered subtest runs cannot prove that a skipped defect was fixed. Schema
+// removals are still checked against the complete inventory, even in a focused
+// run, so obsolete markers do not silently survive changes to the contract.
+func evalToolReportExecutedViolations(t *testing.T, violations, knownDefects map[string]string, declared, executed map[string]bool) {
+	t.Helper()
+	selected := map[string]string{}
+	for key, defect := range knownDefects {
+		if !declared[key] {
+			t.Errorf("schema no longer declares probe; remove knownDefect %q: %s", key, defect)
+		} else if executed[key] {
+			selected[key] = defect
+		}
+	}
+	evalToolReportViolations(t, violations, selected)
 }

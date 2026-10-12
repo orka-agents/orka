@@ -317,6 +317,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		Namespace:           namespace,
 		ToolUseAction:       "anthropicTools",
 		AuthorizationConfig: h.contextTokenAuthorization,
+		ConnectorsEnabled:   h.config.ConnectorsEnabled,
 	})
 	if err != nil {
 		return anthropicContextTokenAuthorizationError(c, err)
@@ -340,6 +341,8 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			AuthContext:               contextToken,
 			AuthorizationConfig:       h.contextTokenAuthorization,
 			UserInfo:                  userInfo,
+			LinkedAccounts:            h.config.LinkedAccounts,
+			ConnectorsEnabled:         h.config.ConnectorsEnabled,
 		})
 	}
 

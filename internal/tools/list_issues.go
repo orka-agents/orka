@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -93,7 +92,7 @@ func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) 
 	}
 
 	// Resolve repo and token using the shared helper
-	owner, repo, token, baseURL, err := resolveReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveReadRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}
@@ -138,10 +137,13 @@ func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) 
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return "", err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	// Parse the response — GitHub issues API returns PRs too, so we filter them out

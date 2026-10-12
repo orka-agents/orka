@@ -961,6 +961,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}
 	span.SetAttributes(orkatracing.DelegateAttributes("", childTask.Name)...)
+	sealTaskCreate(ctx, GetToolContext(ctx), childTask)
 
 	if childTokenExchangeEnabled {
 		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, childTask); err != nil {

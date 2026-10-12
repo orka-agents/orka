@@ -569,7 +569,7 @@ func TestMCPApprovalWrappedOperationHasSafePreview(t *testing.T) {
 	descriptor.Name = request.Call.ToolName
 	call, _, err := f.broker.persistApprovalCall(t.Context(), request, descriptor, ACPMCPAuthenticatedTask{
 		Name: "approval-task", Namespace: request.Namespace, UID: string(request.Metadata.TaskUID),
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

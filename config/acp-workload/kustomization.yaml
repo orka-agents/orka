@@ -114,6 +114,23 @@ replacements:
     options:
       delimiter: "'"
       index: 1
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: acp-workspace-lease-protection
+    fieldPaths:
+    - spec.variables.[name=controllerNamespace].expression
+    options:
+      delimiter: "'"
+      index: 1
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: acp-workspace-lease-protection
+    fieldPaths:
+    - spec.matchConstraints.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
 - source:
     group: ""
     version: v1
@@ -136,6 +153,16 @@ replacements:
       version: v1
       kind: ValidatingAdmissionPolicy
       name: namespace-mode-protection
+    fieldPaths:
+    - spec.variables.[name=controllerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: acp-workspace-lease-protection
     fieldPaths:
     - spec.variables.[name=controllerServiceAccount].expression
     options:

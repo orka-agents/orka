@@ -27,6 +27,7 @@ import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as ToolsToolNameRouteImport } from './routes/tools/$toolName'
 import { Route as TasksNewRouteImport } from './routes/tasks/new'
 import { Route as TasksTaskIdRouteImport } from './routes/tasks/$taskId'
+import { Route as SettingsConnectorsRouteImport } from './routes/settings/connectors'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessionId'
 import { Route as SecurityNewRouteImport } from './routes/security/new'
 import { Route as SecurityRepoIdRouteImport } from './routes/security/$repoId'
@@ -128,6 +129,11 @@ const TasksTaskIdRoute = TasksTaskIdRouteImport.update({
   path: '/tasks/$taskId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsConnectorsRoute = SettingsConnectorsRouteImport.update({
+  id: '/settings/connectors',
+  path: '/settings/connectors',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsSessionIdRoute = SessionsSessionIdRouteImport.update({
   id: '/sessions/$sessionId',
   path: '/sessions/$sessionId',
@@ -196,6 +202,7 @@ export interface FileRoutesByFullPath {
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/settings/connectors': typeof SettingsConnectorsRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
@@ -226,6 +233,7 @@ export interface FileRoutesByTo {
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/settings/connectors': typeof SettingsConnectorsRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
@@ -257,6 +265,7 @@ export interface FileRoutesById {
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/settings/connectors': typeof SettingsConnectorsRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
@@ -289,6 +298,7 @@ export interface FileRouteTypes {
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/settings/connectors'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
@@ -319,6 +329,7 @@ export interface FileRouteTypes {
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/settings/connectors'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
@@ -349,6 +360,7 @@ export interface FileRouteTypes {
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/settings/connectors'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
@@ -380,6 +392,7 @@ export interface RootRouteChildren {
   SecurityRepoIdRoute: typeof SecurityRepoIdRoute
   SecurityNewRoute: typeof SecurityNewRoute
   SessionsSessionIdRoute: typeof SessionsSessionIdRoute
+  SettingsConnectorsRoute: typeof SettingsConnectorsRoute
   TasksTaskIdRoute: typeof TasksTaskIdRoute
   TasksNewRoute: typeof TasksNewRoute
   ToolsToolNameRoute: typeof ToolsToolNameRoute
@@ -524,6 +537,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TasksTaskIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/connectors': {
+      id: '/settings/connectors'
+      path: '/settings/connectors'
+      fullPath: '/settings/connectors'
+      preLoaderRoute: typeof SettingsConnectorsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions/$sessionId': {
       id: '/sessions/$sessionId'
       path: '/sessions/$sessionId'
@@ -612,6 +632,7 @@ const rootRouteChildren: RootRouteChildren = {
   SecurityRepoIdRoute: SecurityRepoIdRoute,
   SecurityNewRoute: SecurityNewRoute,
   SessionsSessionIdRoute: SessionsSessionIdRoute,
+  SettingsConnectorsRoute: SettingsConnectorsRoute,
   TasksTaskIdRoute: TasksTaskIdRoute,
   TasksNewRoute: TasksNewRoute,
   ToolsToolNameRoute: ToolsToolNameRoute,

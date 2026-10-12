@@ -47,6 +47,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
@@ -417,6 +418,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if message, ok := requestedTaskCancellation(task); ok {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
 	}
 
 	// Handle based on current phase
@@ -1444,6 +1449,29 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 }
 
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
+// missingToolPolicyGrace bounds how long a native dispatch waits for an
+// OutboundAccessPolicy that one of the Task's Tools references but that does
+// not exist. Tools are classified strictly (a missing policy cannot be judged
+// connector-backed or not), so the wait is retried for a while in case the
+// policy is being applied, and then the Task fails with the reason rather
+// than staying Pending without one.
+const missingToolPolicyGrace = 2 * time.Minute
+
+// boundMissingToolPolicy handles a dispatch error caused by a missing
+// OutboundAccessPolicy: within the grace period dispatch is retried shortly,
+// after it the Task fails naming the policy. Other errors are not handled.
+func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev1alpha1.Task, err error) (ctrl.Result, bool, error) {
+	if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, false, nil
+	}
+	if task.CreationTimestamp.IsZero() || time.Since(task.CreationTimestamp.Time) < missingToolPolicyGrace {
+		logf.FromContext(ctx).Info("A Tool's outbound access policy does not exist yet; retrying dispatch", "error", err.Error())
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
+	}
+	result, failErr := r.failTask(ctx, task, fmt.Sprintf("a Tool references an outbound access policy that does not exist: %v", err))
+	return result, true, failErr
+}
+
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -1552,13 +1580,40 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Freeze the requester's Connections before anything is created, so a
+	// transient read failure retries dispatch instead of starting a worker
+	// whose connector-backed tools could never bind. The freeze reads the
+	// same Task object the Job is built from (the fresh one for a validation
+	// Task), so its bindings never belong to another revision.
+	frozenConnections, frozenClassification, err := freezeClassifiedRequesterConnections(ctx, reader, NativeWorkerToolRegistry(jobTask, agent), jobTask, aitools.Resolve(jobTask, agent), connectorScope{})
+	if err != nil {
+		if result, handled, failErr := r.boundMissingToolPolicy(ctx, task, err); handled {
+			return result, failErr
+		}
+		log.Error(err, "failed to freeze requester connections; retrying dispatch")
+		return ctrl.Result{}, err
+	}
+
+	connectionBindings := taskConnectionBindings(frozenConnections)
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
 		RepositoryMonitorValidation: validationTask,
+		ConnectionBindings:          connectionBindings,
+		ConnectionBindingsFrozen:    true,
+		ConnectorToolDigests:        nativeConnectorToolDigests(frozenClassification),
+		Reader:                      reader,
 		GatewayReplyEligible:        gatewayReplyEligible,
 	})
 	if err != nil {
+		if errors.Is(err, ErrConnectorToolResolution) {
+			if result, handled, failErr := r.boundMissingToolPolicy(ctx, task, err); handled {
+				return result, failErr
+			}
+			log.Error(err, "failed to resolve connector-backed tools; retrying dispatch")
+			return ctrl.Result{}, err
+		}
 		log.Error(err, "failed to build Job")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
 	}
@@ -1584,12 +1639,21 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			return ctrl.Result{}, recoveryErr
 		}
 		job = existing
+		// The recovered Job was built against the Connections frozen
+		// for it; a freeze taken now must not hand it authority over a
+		// Connection that changed since.
+		recovered, _, bindingErr := FrozenConnectionBindingsFromJob(existing)
+		if bindingErr != nil {
+			return r.failTask(ctx, task, fmt.Sprintf("%v: %v", errTaskJobIdentity, bindingErr))
+		}
+		connectionBindings = recovered
 	} else if err != nil {
 		log.Error(err, "failed to create Job")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
 	}
 	task.Status.JobName = job.Name
 	task.Status.JobUID = string(job.UID)
+	task.Status.ConnectionBindings = connectionBindings
 
 	// Update status to Running
 	now := metav1.Now()
@@ -1618,6 +1682,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		t.Status.Attempts = attempts
 		t.Status.JobName = jobName
 		t.Status.JobUID = jobUID
+		// The retry re-fetches the Task; the bindings frozen before the
+		// Job was created must land in the same status write.
+		t.Status.ConnectionBindings = connectionBindings
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeJobCreated,
 			Status:             metav1.ConditionTrue,
@@ -2514,6 +2581,25 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 }
 
 // completeTask marks a task as completed without asserting that workload execution started.
+// requestedTaskCancellation returns the terminal message of a recorded
+// cancel_task request that this reconciler may complete. Agent Tasks and Tasks
+// with ACP execution are excluded: their terminal status needs the controller
+// epoch mutation guard, and the cancel endpoint refuses them.
+func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
+	message, ok := task.Annotations[labels.AnnotationCancelRequested]
+	if !ok || task.Spec.Type == corev1alpha1.TaskTypeAgent ||
+		(task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0) {
+		return "", false
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending && task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		return "", false
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "cancelled by parent task"
+	}
+	return message, true
+}
+
 func (r *TaskReconciler) completeTask(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -3588,6 +3674,15 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	} else {
 		log.Info("Created scheduled child task", "child", childName)
 		r.Recorder.Eventf(task, "Normal", "ScheduledRun", "Created child task %s", childName)
+		// A run acts for the scheduled Task's requester, so it is sealed
+		// against its verified parent; an unsealed run's connector tools
+		// fail closed.
+		seal := ACPChildTaskSealer(r.taskMetadataReader(), task.Namespace, task.Name, string(task.UID))
+		if err := seal(ctx, r.Client, child); errors.Is(err, ErrChildSealRefused) {
+			log.V(1).Info("Scheduled child task requester was not sealed", "child", childName, "reason", err.Error())
+		} else if err != nil {
+			log.Info("Scheduled child task requester could not be sealed; its connector tools fail closed", "child", childName, "error", err.Error())
+		}
 	}
 
 	// Update status

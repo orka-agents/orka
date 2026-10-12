@@ -10,6 +10,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 func TestDigestMapNormalizesSetValuedContextClaimOrder(t *testing.T) {
@@ -109,5 +112,18 @@ func TestTaskTransactionPreservesCredentialSecretConstraint(t *testing.T) {
 	tx := taskTransactionFromContextToken(token)
 	if tx.Context["secret"] != "resource-credential" {
 		t.Fatalf("context = %#v", tx.Context)
+	}
+}
+
+func TestStampTaskRequesterMarksSource(t *testing.T) {
+	task := &corev1alpha1.Task{}
+	stampTaskRequesterFromUserInfo(task, &UserInfo{AuthType: AuthTypeOIDC, Subject: "alice", Issuer: "https://issuer.example.test"})
+	if task.Spec.RequestedBy == nil || task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {
+		t.Fatalf("requester stamp = %+v annotations = %v", task.Spec.RequestedBy, task.Annotations)
+	}
+	unverified := &corev1alpha1.Task{}
+	stampTaskRequesterFromUserInfo(unverified, &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:ns:bot"})
+	if unverified.Spec.RequestedBy != nil || unverified.Annotations[labels.AnnotationRequestedBySource] != "" {
+		t.Fatalf("service accounts must not be stamped: %+v %v", unverified.Spec.RequestedBy, unverified.Annotations)
 	}
 }

@@ -27,27 +27,6 @@ webhooks:
       matchExpressions:
         - key: workspace.orka.ai/attachment-for
           operator: Exists
-  - name: acpsuspendquotalease.core.orka.ai
-    admissionReviewVersions: [v1]
-    sideEffects: None
-    failurePolicy: Fail
-    matchPolicy: Equivalent
-    timeoutSeconds: 10
-    clientConfig:
-      service: {name: orka-admission, namespace: orka-system, path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease, port: 443}
-    rules:
-      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [coordination.k8s.io], apiVersions: [v1], resources: [leases], scope: Namespaced}
-    namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: orka-system
-    matchConditions:
-      - name: reserved-acp-workspace-lease-name
-        expression: >-
-          request.?name.orValue('').startsWith('acp-suspend-quota-') ||
-          request.?name.orValue('').startsWith('acp-retention-fence-') ||
-          (request.operation == 'CREATE' &&
-          (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
-          object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
   - name: taskprovenance.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
