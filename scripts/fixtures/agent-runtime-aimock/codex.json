@@ -1,13 +1,13 @@
 {
   "fixtures": [
-    {"match": {"userMessage": "after scale-to-zero"}, "response": {"content": "nonce-aimock-codex"}},
-    {"match": {"userMessage": "after exact Pod replacement"}, "response": {"content": "nonce-aimock-codex"}},
-    {"match": {"userMessage": "after controller replacement"}, "response": {"content": "restart-aimock"}},
-    {"match": {"userMessage": "Return the session nonce represented in the source task timeline"}, "response": {"content": "nonce-aimock-codex"}},
+    {"match": {"userMessage": "Session nonce nonce-aimock-codex. First non-empty LICENSE line"}, "response": {"content": "nonce-aimock-codex"}},
+    {"match": {"userMessage": "\"content\":\"Remember restart nonce restart-aimock"}, "response": {"content": "restart-aimock"}},
+    {"match": {"userMessage": "Return the session nonce from the prior turn", "turnIndex": 0}, "response": {"content": "No earlier turn reached this request."}},
     {"match": {"userMessage": "Return the session nonce from the prior turn"}, "response": {"content": "nonce-aimock-codex"}},
     {"match": {"userMessage": "Remember the session nonce nonce-aimock-codex", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-aimock-codex. First non-empty LICENSE line: MIT License"}},
     {"match": {"userMessage": "Remember the session nonce nonce-aimock-codex", "hasToolResult": false}, "response": {"toolCalls": [{"name": "exec_command", "arguments": {"cmd": "cat LICENSE"}}]}},
     {"match": {"userMessage": "provide a detailed evidence-backed summary"}, "latency": 10000, "response": {"content": "The repository is Orka; LICENSE, NOTICE.md, go.mod, and the Makefile describe its license, notices, module, and build."}},
-    {"match": {"userMessage": "Immediately use the Bash tool to run sleep 180"}, "latency": 200000, "response": {"content": "The sleep finished."}}
+    {"match": {"userMessage": "Immediately use the Bash tool to run sleep 180", "hasToolResult": true}, "latency": 200000, "response": {"content": "The sleep finished."}},
+    {"match": {"userMessage": "Immediately use the Bash tool to run sleep 180", "hasToolResult": false}, "response": {"toolCalls": [{"name": "exec_command", "arguments": {"cmd": "sleep 180", "yield_time_ms": 30000, "max_output_tokens": 1024}}]}}
   ]
 }

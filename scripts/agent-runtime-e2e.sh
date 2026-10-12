@@ -294,7 +294,12 @@ k() {
 
 # load_aimock_fixtures replaces the aimock fixture set with one runtime's
 # script. The continuation and fork prompts are the same for every runtime, so
-# each runtime's checks run against its own set.
+# each runtime's checks run against its own set. A scripted model answers a
+# nonce only when the request carries the prior turn: rehydrated turns match
+# the earlier answer (or the JSON-quoted restart prompt) inside the canonical
+# transcript, and a native continuation with no earlier assistant turn gets a
+# reply without the nonce. A runtime that drops history therefore fails the
+# nonce checks, as it would with a real model.
 load_aimock_fixtures() {
   [[ "${model_backend}" == "aimock" ]] || return 0
   local provider="$1" file loaded
@@ -3690,7 +3695,9 @@ if [[ "${release_gate}" -eq 1 ]]; then
   read_repo_commit="$(gh api "repos/${read_repo_slug}/commits/${repo_ref}" --jq '.sha')"
   [[ "$(lower "${read_repo_commit}")" == "$(lower "${repo_ref}")" ]] || \
     die "ACP_E2E_REF did not resolve to the requested immutable commit"
-  expected_license_line="$(gh_raw_file "${read_repo_slug}" LICENSE "${read_repo_commit}" | awk 'NF { print; exit }')"
+  # Read to EOF: exiting at the first line can SIGPIPE gh, which pipefail
+  # then reports as a failed gate.
+  expected_license_line="$(gh_raw_file "${read_repo_slug}" LICENSE "${read_repo_commit}" | awk 'NF && !found { print; found = 1 }')"
   [[ -n "${expected_license_line}" ]] || die "could not independently read the first non-empty LICENSE line"
 fi
 
