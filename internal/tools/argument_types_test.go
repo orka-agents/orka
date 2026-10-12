@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -253,6 +254,9 @@ func TestNormalizeArgTypesRecursive(t *testing.T) {
 		{"null string array item", `{"config":{"items":[{"tags":[null]}]}}`, "", "config.items[0].tags[0] must be a string, got null"},
 		{"bad stringified property", `{"config":"{\"items\":[{\"name\":[]}]}"}`, "", "config.items[0].name must be a string, got an array"},
 		{"duplicate stringified keys", `{"config":"{\"count\":1,\"count\":\"many\"}"}`, "", "config.count must be sent once, got a duplicate"},
+		{"duplicate nested keys inside stringified object", `{"config":"{\"child\":{\"count\":[],\"count\":1}}"}`, "", "config.child.count must be sent once, got a duplicate"},
+		{"reverse duplicate nested keys inside stringified object", `{"config":"{\"child\":{\"count\":1,\"count\":[]}}"}`, "", "config.child.count must be sent once, got a duplicate"},
+		{"duplicate array object keys inside stringified object", `{"config":"{\"items\":[{\"name\":[],\"name\":\"ok\"}]}"}`, "", "config.items[0].name must be sent once, got a duplicate"},
 		{"invalid stringified unicode", `{"config":"{\"name\":\"\\ud800\"}"}`, "", "config.name must be valid Unicode text, got invalid Unicode"},
 		{"bad nested stringified property", `{"config":{"child":"{\"count\":\"many\"}"}}`, "", "config.child.count must be a whole number, got a non-numeric string"},
 	} {
@@ -332,8 +336,8 @@ func TestNormalizeArgTypesAdditionalProperties(t *testing.T) {
 
 func assertNormalizedArgJSON(t *testing.T, got json.RawMessage, want string) {
 	t.Helper()
-	gotValue, gotErr := decodeArgValue(got)
-	wantValue, wantErr := decodeArgValue(json.RawMessage(want))
+	gotValue, gotErr := decodeArgValue(got, "")
+	wantValue, wantErr := decodeArgValue(json.RawMessage(want), "")
 	if gotErr != nil || wantErr != nil || string(mustMarshalTest(t, gotValue)) != string(mustMarshalTest(t, wantValue)) {
 		t.Fatalf("normalized arguments = %s, want %s (decode errors: %v, %v)", got, want, gotErr, wantErr)
 	}
@@ -380,6 +384,9 @@ func TestRegistryExecuteNormalizesCoordinationBeforeAgentCreation(t *testing.T) 
 		name, coordination, wantField string
 	}{
 		{"bad allowed agent name", `{"enabled":true,"allowedAgents":[{"name":[]}]}`, "coordination.allowedAgents[0].name"},
+		{"duplicate allowed agent name invalid first", `{"enabled":true,"allowedAgents":[{"name":[],"name":"coder"}]}`, "coordination.allowedAgents[0].name"},
+		{"duplicate allowed agent name invalid last", `{"enabled":true,"allowedAgents":[{"name":"coder","name":[]}]}`, "coordination.allowedAgents[0].name"},
+		{"duplicate allowed agent name inside stringified config", `"{\"enabled\":true,\"allowedAgents\":[{\"name\":[],\"name\":\"coder\"}]}"`, "coordination.allowedAgents[0].name"},
 		{"bad allowed agent namespace", `{"enabled":true,"allowedAgents":[{"name":"coder","namespace":{}}]}`, "coordination.allowedAgents[0].namespace"},
 		{"bad allowed agent item", `{"enabled":true,"allowedAgents":[false]}`, "coordination.allowedAgents[0]"},
 		{"valid coercions", `{"enabled":"true","maxDepth":"2","maxConcurrentChildren":"3","allowedAgents":[{"name":"coder","namespace":null}]}`, ""},
@@ -408,6 +415,168 @@ func TestRegistryExecuteNormalizesCoordinationBeforeAgentCreation(t *testing.T) 
 			coord := agents.Items[0].Spec.Coordination
 			if coord == nil || !coord.Enabled || coord.MaxDepth != 2 || coord.MaxConcurrentChildren != 3 || len(coord.AllowedAgents) != 1 || coord.AllowedAgents[0].Name != "coder" || coord.AllowedAgents[0].Namespace != "" {
 				t.Fatalf("normalized coordination stored as %#v", coord)
+			}
+		})
+	}
+}
+
+func TestToolArgumentsRejectRecursiveDuplicateKeysBeforeExecution(t *testing.T) {
+	parameters := json.RawMessage(`{
+		"type":"object", "properties":{
+			"config":{"type":"object", "properties":{
+				"name":{"type":"string"},
+				"child":{"type":"object", "properties":{"name":{"type":"string"}}}
+			}},
+			"items":{"type":"array", "items":{"type":"object", "properties":{"name":{"type":"string"}}}},
+			"matrix":{"type":"array", "items":{"type":"array", "items":{"type":"object", "properties":{"name":{"type":"string"}}}}},
+			"labels":{"type":"object", "additionalProperties":{"type":"string"}},
+			"rules":{"type":"object", "additionalProperties":{"type":"object", "properties":{"name":{"type":"string"}}}},
+			"loose":{"type":"array"}
+		}
+	}`)
+	for _, scope := range []struct {
+		name, format, field string
+	}{
+		{"nested object", `{"config":%s}`, "config.name"},
+		{"deep object", `{"config":{"child":%s}}`, "config.child.name"},
+		{"array object", `{"items":[{"name":"sibling"},%s]}`, "items[1].name"},
+		{"nested array object", `{"matrix":[[{"name":"sibling"},%s]]}`, "matrix[0][1].name"},
+		{"typed map key", `{"labels":%s}`, "labels.name"},
+		{"typed map object", `{"rules":{"entry":%s}}`, "rules.entry.name"},
+		{"undeclared object", `{"unknown":%s}`, "unknown.name"},
+		{"untyped array object", `{"loose":[%s]}`, "loose[0].name"},
+	} {
+		t.Run(scope.name, func(t *testing.T) {
+			for _, order := range []struct {
+				name, value string
+			}{
+				{"invalid first", `{"name":[],"name":"ok"}`},
+				{"invalid last", `{"name":"ok","name":[]}`},
+				{"valid types", `{"name":"first","name":"second"}`},
+				{"null first", `{"name":null,"name":"ok"}`},
+				{"escaped key", `{"name":[],"\u006eame":"ok"}`},
+			} {
+				t.Run(order.name, func(t *testing.T) {
+					called := false
+					var executed json.RawMessage
+					tool := &mockTool{
+						name: "typed", parameters: parameters,
+						executeFunc: func(_ context.Context, args json.RawMessage) (string, error) {
+							called, executed = true, args
+							return "ok", nil
+						},
+					}
+					args := json.RawMessage(fmt.Sprintf(scope.format, order.value))
+					normalized, err := NormalizeToolArguments(tool, args)
+					var argErr *ToolArgumentError
+					if !errors.As(err, &argErr) || argErr.Field != scope.field || argErr.Want != "sent once" || argErr.Got != "a duplicate" || normalized != nil {
+						t.Fatalf("NormalizeToolArguments() = %s, %v; want duplicate-key error for %s", normalized, err, scope.field)
+					}
+					r := NewRegistry()
+					r.Register(tool)
+					_, err = r.Execute(context.Background(), tool.Name(), args)
+					if !errors.As(err, &argErr) || argErr.Field != scope.field || argErr.Want != "sent once" || argErr.Got != "a duplicate" || called {
+						t.Fatalf("Execute() error = %v, called = %v; want duplicate-key error for %s and no side effect", err, called, scope.field)
+					}
+					control := json.RawMessage(fmt.Sprintf(scope.format, `{"name":"ok"}`))
+					normalized, err = NormalizeToolArguments(tool, control)
+					if err != nil {
+						t.Fatalf("NormalizeToolArguments() rejected valid control: %v", err)
+					}
+					if _, err := r.Execute(context.Background(), tool.Name(), control); err != nil || !called || string(executed) != string(normalized) {
+						t.Fatalf("valid control executed = %s, called = %v, error = %v; want normalized %s", executed, called, err, normalized)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNormalizeToolArgumentsPreservesRecursiveValues(t *testing.T) {
+	tool := &mockTool{name: "typed", parameters: json.RawMessage(`{
+		"type":"object", "properties":{
+			"config":{"type":"object", "properties":{
+				"name":{"type":"string"}, "count":{"type":"integer"},
+				"ratio":{"type":"number"}, "enabled":{"type":"boolean"},
+				"child":{"type":"object", "properties":{"count":{"type":"integer"}}}
+			}},
+			"items":{"type":"array", "items":{"type":"object", "properties":{"name":{"type":"string"}, "count":{"type":"integer"}}}},
+			"labels":{"type":"object", "additionalProperties":{"type":"string"}},
+			"ratios":{"type":"object", "additionalProperties":{"type":"number"}},
+			"rules":{"type":"object", "additionalProperties":{"type":"object", "properties":{"name":{"type":"string"}, "count":{"type":"integer"}}}}
+		}
+	}`)}
+	for _, tt := range []struct {
+		name, args, want string
+	}{
+		{"unchanged numbers and sibling keys", `{"config":{"name":"ok","count":9007199254740993,"ratio":1.00e+03,"enabled":false},"items":[{"name":"ok"},{"name":"ok"}],"ratios":{"a":2.0000000000000001,"b":1e-400},"rules":{"a":{"name":"ok"},"b":{"name":"ok"}}}`, "raw"},
+		{"coercions and nulls", `{"config":{"name":null,"count":"9007199254740993","ratio":"1.0000000000000001","enabled":"TRUE"},"items":[{"name":null,"count":"1e2"}],"labels":{"app":null,"number":42,"enabled":false},"ratios":{"exact":"2.0000000000000001"},"rules":{"entry":{"name":null,"count":"10.0"}},"unused":[9007199254740993,1.00e+03,1e400,null,{},[]]}`, `{"config":{"count":9007199254740993,"ratio":1.0000000000000001,"enabled":true},"items":[{"count":100}],"labels":{"number":42,"enabled":false},"ratios":{"exact":2.0000000000000001},"rules":{"entry":{"count":10}},"unused":[9007199254740993,1.00e+03,1e400,null,{},[]]}`},
+		{"stringified object spelling", `{"config":"{\"ratio\":1.00e+03,\"count\":9007199254740993}"}`, `{"config":{"ratio":1.00e+03,"count":9007199254740993}}`},
+		{"stringified nested continuations", `{"config":"{\"child\":\"{\\\"count\\\":\\\"10.0\\\"}\"}","items":["{\"name\":\"coder\",\"count\":\"9007199254740993\"}"],"rules":{"entry":"{\"name\":\"coder\",\"count\":\"1e2\"}"}}`, `{"config":{"child":{"count":10}},"items":[{"name":"coder","count":9007199254740993}],"rules":{"entry":{"name":"coder","count":100}}}`},
+		{"object shorthand and opaque strings", `{"config":"profile/name","items":["coder"],"unused":"{\"name\":[],\"name\":\"ok\"}"}`, "raw"},
+		{"valid Unicode", `{"config":{"name":"\ud83d\ude00"},"items":[{"name":"café"}],"labels":{"\u0061":"one","b":"two"}}`, "raw"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeToolArguments(tool, json.RawMessage(tt.args))
+			if err != nil {
+				t.Fatalf("NormalizeToolArguments() error = %v", err)
+			}
+			if tt.want == "raw" {
+				if string(got) != tt.args {
+					t.Fatalf("NormalizeToolArguments() = %s, want original %s", got, tt.args)
+				}
+				return
+			}
+			assertNormalizedArgJSON(t, got, tt.want)
+		})
+	}
+	// Approval-bound callers must still distinguish numbers that float64
+	// decoding would collapse to the same value.
+	for _, tt := range []struct {
+		field, first, second string
+	}{
+		{"count", "9007199254740992", "9007199254740993"},
+		{"ratio", "1.0000000000000001", "1.0000000000000002"},
+	} {
+		t.Run("distinct "+tt.field, func(t *testing.T) {
+			var normalized [2]json.RawMessage
+			for i, value := range []string{tt.first, tt.second} {
+				args := json.RawMessage(fmt.Sprintf(`{"config":{"%s":"%s"}}`, tt.field, value))
+				got, err := NormalizeToolArguments(tool, args)
+				want := fmt.Sprintf(`{"config":{"%s":%s}}`, tt.field, value)
+				if err != nil || string(got) != want {
+					t.Fatalf("NormalizeToolArguments(%s) = %s, %v; want %s", args, got, err, want)
+				}
+				normalized[i] = got
+			}
+			if string(normalized[0]) == string(normalized[1]) {
+				t.Fatalf("distinct approval-bound arguments collapsed to %s", normalized[0])
+			}
+		})
+	}
+}
+
+func TestNormalizeToolArgumentsRejectsInvalidNestedUnicode(t *testing.T) {
+	tool := &mockTool{name: "typed", parameters: json.RawMessage(`{
+		"type":"object", "properties":{
+			"config":{"type":"object", "properties":{"name":{"type":"string"}}},
+			"items":{"type":"array", "items":{"type":"object", "properties":{"name":{"type":"string"}}}}
+		}
+	}`)}
+	for _, tt := range []struct {
+		name, args, field string
+	}{
+		{"nested surrogate", `{"config":{"name":"\ud800"}}`, "config"},
+		{"array surrogate", `{"items":[{"name":"\udc00"}]}`, "items"},
+		{"nested field name", `{"config":{"bad\ud800key":"ok"}}`, "config"},
+		{"nested UTF-8", `{"config":{"name":"` + string([]byte{0xff}) + `"}}`, "config"},
+		{"stringified surrogate", `{"config":"{\"name\":\"\\ud800\"}"}`, "config.name"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NormalizeToolArguments(tool, json.RawMessage(tt.args))
+			var argErr *ToolArgumentError
+			if !errors.As(err, &argErr) || argErr.Field != tt.field || argErr.Want != "valid Unicode text" || argErr.Got != "invalid Unicode" {
+				t.Fatalf("NormalizeToolArguments() error = %v, want invalid Unicode error for %s", err, tt.field)
 			}
 		})
 	}

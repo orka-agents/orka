@@ -207,9 +207,9 @@ func decodeArgObject(args json.RawMessage) (map[string]any, error) {
 		if !protocol.ValidJSONUnicode(raw) {
 			return nil, &ToolArgumentError{Field: key, Want: "valid Unicode text", Got: "invalid Unicode"}
 		}
-		value, err := decodeArgValue(raw)
+		value, err := decodeArgValue(raw, key)
 		if err != nil {
-			return nil, nil
+			return nil, err
 		}
 		values[key] = value
 	}
@@ -219,13 +219,57 @@ func decodeArgObject(args json.RawMessage) (map[string]any, error) {
 	return values, nil
 }
 
-// decodeArgValue decodes one argument value, keeping numbers as json.Number.
-func decodeArgValue(raw json.RawMessage) (any, error) {
+// decodeArgValue decodes one argument value, keeping numbers as json.Number
+// and rejecting duplicate keys at every depth before decoding loses them.
+func decodeArgValue(raw json.RawMessage, path string) (any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	var value any
-	err := decoder.Decode(&value)
-	return value, err
+	return decodeArgJSONValue(decoder, path)
+}
+
+func decodeArgJSONValue(decoder *json.Decoder, path string) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch token {
+	case json.Delim('{'):
+		values := map[string]any{}
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key := token.(string)
+			field := key
+			if path != "" {
+				field = path + "." + key
+			}
+			if _, duplicate := values[key]; duplicate {
+				return nil, &ToolArgumentError{Field: field, Want: "sent once", Got: "a duplicate"}
+			}
+			value, err := decodeArgJSONValue(decoder, field)
+			if err != nil {
+				return nil, err
+			}
+			values[key] = value
+		}
+		_, err := decoder.Token()
+		return values, err
+	case json.Delim('['):
+		values := []any{}
+		for decoder.More() {
+			value, err := decodeArgJSONValue(decoder, fmt.Sprintf("%s[%d]", path, len(values)))
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		_, err := decoder.Token()
+		return values, err
+	default:
+		return token, nil
+	}
 }
 
 // canonicalJSONInteger returns the plain spelling of an integral JSON number
