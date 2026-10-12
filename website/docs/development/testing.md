@@ -145,13 +145,12 @@ missing or mismatched artifacts staying not ready.
 - `scripts/agent-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
   topology with digest-pinned local images, and then calls the canonical script.
-- `.github/workflows/agent-runtime-e2e.yml` runs on relevant pushes to the
-  default branch, nightly, and manual dispatch. It requires the repository's
+- `.github/workflows/agent-runtime-e2e.yml` runs by manual dispatch only. It
+  requires the repository's
   `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and
   Copilot against real model providers without mounting provider credentials
   into RuntimePools. The workflow rejects dispatches from other branches before
-  using the secret. It runs unattended as ordinary CI without a deployment
-  environment.
+  using the secret. It runs as ordinary CI without a deployment environment.
   When migrating from `live-acp-runtime-smoke`, ensure the provider secret is
   available at repository scope. After the renamed workflow succeeds, retire
   the old environment and preserve its deployment history.
