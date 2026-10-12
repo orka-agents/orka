@@ -515,7 +515,9 @@ func ruleParts() []promptPart {
     - If the chosen coordinator has "runtime" listed in available_agents, start it with create_agent_task.
     - If the chosen coordinator has no "runtime" listed, start it with create_ai_task using agentRef and providerRef.
       A coordinator handles the full workflow: code → validate → review repair loop → PR → CI repair loop → validate + re-review → approve.
-    - If no coordinator candidate exists, use the coordinator pattern: create a coordinator agent that delegates to
+    - Do NOT bundle all steps into a single agent task prompt.
+`, requires: []string{promptToolAgentTask, chatCreateAITaskTool}},
+		{text: `If no coordinator candidate exists for a coding + review + PR workflow, use create_agent to create a coordinator agent that delegates to
       specialist agents (coder, reviewer) sequentially.
       In the coordinator prompt, tell it to:
       * run coder → validation → reviewers → coder repairs → validation → reviewers until validation passes and all reviewers approve,
@@ -529,8 +531,7 @@ func ruleParts() []promptPart {
       * prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues;
       * report REVIEW_BLOCKED or CI_BLOCKED when the review or CI repair bound is exhausted;
       * avoid merge tools unless the user explicitly asks to merge.
-    - Do NOT bundle all steps into a single agent task prompt.
-`, requires: []string{promptToolAgentTask, chatCreateAITaskTool}},
+`, requires: []string{promptToolCreateAgent, promptToolAgentTask, chatCreateAITaskTool}},
 		{text: `Agent tasks run for 5-20 minutes. NEVER stop polling wait_for_task while a task
     is still running. Keep calling wait_for_task until the task reaches Succeeded or Failed.
 `, requires: []string{promptToolWait}},

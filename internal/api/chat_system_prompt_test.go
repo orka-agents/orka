@@ -965,3 +965,29 @@ func TestSystemPromptAgentProviderPrecedence(t *testing.T) {
 		t.Error("generic Provider rule can override an Agent's configured provider")
 	}
 }
+
+func TestSystemPromptCoordinatorCreationRequiresCreateAgent(t *testing.T) {
+	for _, canCreate := range []bool{false, true} {
+		t.Run(fmt.Sprint(canCreate), func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			tools := []string{"create_agent_task", "create_ai_task"}
+			if canCreate {
+				tools = append(tools, "create_agent")
+			}
+			b.SetAvailableChatTools(tools)
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{`chosen coordinator has "runtime" listed`, `chosen coordinator has no "runtime" listed`} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("existing coordinator routing lost %q", want)
+				}
+			}
+			if strings.Contains(prompt, "If no coordinator candidate exists") != canCreate {
+				t.Fatalf("coordinator creation guidance does not match create_agent availability: %v", canCreate)
+			}
+		})
+	}
+}
