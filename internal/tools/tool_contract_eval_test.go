@@ -711,6 +711,63 @@ func evalRejects(ctx context.Context, tool Tool, args, field string) (bool, stri
 	return true, ""
 }
 
+// evalWebFetchURLLimit changes only URL length, keeping max_chars valid. The
+// control is exactly at the advertised character limit, not just a short URL.
+func evalWebFetchURLLimit(call evalCall) (bool, string) {
+	const prefix = "https://1.1.1.1/"
+	maxLength := brokeredWebFetchMaxURLBytes / utf8.UTFMax
+	args := func(length int) string {
+		return fmt.Sprintf(`{"url":%q,"max_chars":%d}`, prefix+strings.Repeat("x", length-len(prefix)), brokeredWebFetchMaxChars)
+	}
+	ok, detail := evalRejectsChange(call, args(maxLength), args(maxLength+1), "url")
+	if strings.HasPrefix(detail, "accepted ") {
+		detail = fmt.Sprintf("accepted URL with %d characters and max_chars=%d", maxLength+1, brokeredWebFetchMaxChars)
+	}
+	return ok, detail
+}
+
+func TestToolEvalWebFetchURLLimit(t *testing.T) {
+	cases := []struct {
+		name      string
+		rejection string
+		ok        bool
+		detail    string
+	}{
+		{name: "wrong-reason rejection", rejection: "max_chars must be no greater than 50000", detail: "for another reason: max_chars"},
+		{name: "URL rejection", rejection: "url must be no greater than 16384 characters", ok: true},
+		{name: "accepted overlong URL", detail: "accepted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			call := func() (Tool, context.Context) {
+				return &mockTool{executeFunc: func(_ context.Context, raw json.RawMessage) (string, error) {
+					var args WebFetchArgs
+					if err := json.Unmarshal(raw, &args); err != nil {
+						t.Fatal(err)
+					}
+					wantLength := brokeredWebFetchMaxURLBytes/utf8.UTFMax + calls
+					if utf8.RuneCountInString(args.URL) != wantLength || args.MaxChars != brokeredWebFetchMaxChars {
+						t.Fatalf("call %d: URL length = %d, max_chars = %d, want %d and %d", calls, utf8.RuneCountInString(args.URL), args.MaxChars, wantLength, brokeredWebFetchMaxChars)
+					}
+					calls++
+					if calls == 2 && tc.rejection != "" {
+						return "", fmt.Errorf("%s", tc.rejection)
+					}
+					return `{"content":"eval"}`, nil
+				}}, context.Background()
+			}
+			ok, detail := evalWebFetchURLLimit(call)
+			if ok != tc.ok || (tc.detail == "" && detail != "") || !strings.Contains(detail, tc.detail) {
+				t.Errorf("URL limit check = (%v, %q), want (%v, detail containing %q)", ok, detail, tc.ok, tc.detail)
+			}
+			if calls != 2 {
+				t.Errorf("calls = %d, want valid control and invalid probe", calls)
+			}
+		})
+	}
+}
+
 // evalEnumEnforced checks that every declared value succeeds and that a value
 // outside the enum fails with a message naming the field.
 func evalEnumEnforced(call evalCall, args func(value string) string, field, invalid string, declared ...string) (bool, string) {
@@ -1159,11 +1216,13 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "brokered web_fetch url",
 			limits: []string{"brokered/web_fetch.url maxLength=16384"},
 			check: func(t *testing.T) (bool, string) {
-				// One character past the advertised maxLength. The over-limit
-				// max_chars stops the call before any request if the URL passes.
-				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
-				url := "https://1.1.1.1/" + long(brokeredWebFetchMaxURLBytes/utf8.UTFMax)
-				return evalRejects(context.Background(), tool, `{"url":"`+url+`","max_chars":50001}`, "url")
+				return evalWebFetchURLLimit(func() (Tool, context.Context) {
+					tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
+					// A stubbed transport lets the boundary control succeed and
+					// an accepted overlong URL expose the defect without dialing.
+					tool.(*WebFetchTool).client = evalWebClient()
+					return tool, context.Background()
+				})
 			},
 		},
 		{

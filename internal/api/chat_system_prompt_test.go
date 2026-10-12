@@ -121,7 +121,7 @@ func TestBuildTaskTypesSection(t *testing.T) {
 			}
 			for _, want := range []string{
 				"Use create_agent_task only for Agents that have runtime listed",
-				"use create_ai_task with agentRef and providerRef instead",
+				"use create_ai_task with agentRef instead",
 				"Do NOT use create_agent_task for non-runtime agents",
 				"OpenCode is supported there as a built-in ACP RuntimePool profile when its image is configured",
 				"does not use runtime.secretRef",
@@ -190,7 +190,7 @@ func TestBuildCoordinationSection(t *testing.T) {
 				for _, want := range []string{
 					"use create_agent_task only when the",
 					"coordinator has runtime listed",
-					"use create_ai_task with agentRef and providerRef",
+					"use create_ai_task with agentRef",
 				} {
 					if !strings.Contains(s, want) {
 						t.Errorf("missing %q", want)
@@ -249,7 +249,7 @@ func TestBuildRulesSection(t *testing.T) {
 		`if "dev-coordinator" exists, prefer it`,
 		`chosen coordinator has "runtime" listed`,
 		`chosen coordinator has no "runtime" listed`,
-		"create_ai_task using agentRef and providerRef",
+		"create_ai_task using agentRef",
 		"code → validate → review repair loop → PR → CI repair loop → validate + re-review → approve",
 		"at most 8 review repair tasks",
 		"at most 3 repair tasks",
@@ -943,7 +943,7 @@ func TestScopedAIProviderGuidanceKeepsExplicitOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"use the selected Agent's providerRef unless the user asks for another provider", "unless the user explicitly requests another provider"} {
+	for _, want := range []string{"omit providerRef to use the selected Agent's configured provider", "unless the user explicitly requests another provider"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("provider selection lost explicit override: %q", want)
 		}
@@ -956,9 +956,17 @@ func TestSystemPromptAgentProviderPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"use the selected Agent's providerRef", "For tasks without agentRef, use this chat session's provider", "unless the user explicitly requests another provider"} {
+	for _, want := range []string{"omit providerRef to use the selected Agent's configured provider", "For tasks without agentRef, use this chat session's provider", "unless the user explicitly requests another provider"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("missing provider-precedence guidance %q", want)
+		}
+	}
+	for _, contradiction := range []string{
+		"with agentRef and providerRef", "using agentRef and providerRef", "with agentRef/providerRef",
+		"Use create_ai_task with a providerRef", `providerRef: "openai"`,
+	} {
+		if strings.Contains(prompt, contradiction) {
+			t.Errorf("provider precedence contradicted by %q", contradiction)
 		}
 	}
 	if strings.Contains(prompt, "always set providerRef to an available provider name") {
