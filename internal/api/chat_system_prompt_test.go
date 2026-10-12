@@ -949,3 +949,19 @@ func TestScopedAIProviderGuidanceKeepsExplicitOverrides(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemPromptAgentProviderPrecedence(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	prompt, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"use the selected Agent's providerRef", "For tasks without agentRef, use this chat session's provider", "unless the user explicitly requests another provider"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("missing provider-precedence guidance %q", want)
+		}
+	}
+	if strings.Contains(prompt, "always set providerRef to an available provider name") {
+		t.Error("generic Provider rule can override an Agent's configured provider")
+	}
+}

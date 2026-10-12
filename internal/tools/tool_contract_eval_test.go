@@ -522,36 +522,79 @@ func evalToolRequiredArgs(required []any, properties map[string]any) map[string]
 func evalToolLimits(t *testing.T) []string {
 	t.Helper()
 	var limits []string
-	var walk func(prefix string, schema map[string]any, nested bool)
-	walk = func(prefix string, schema map[string]any, nested bool) {
-		for _, keyword := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum", "minLength", "maxLength", "minItems", "maxItems", "pattern"} {
-			if value, ok := schema[keyword]; ok {
-				limits = append(limits, prefix+" "+keyword+"="+evalLimitValue(value))
-			}
-		}
-		if required, _ := schema["required"].([]any); nested {
-			for _, field := range required {
-				limits = append(limits, fmt.Sprintf("%s.%v required", prefix, field))
-			}
-		}
-		properties, _ := schema["properties"].(map[string]any)
-		for name, raw := range properties {
-			if child, ok := raw.(map[string]any); ok {
-				walk(prefix+"."+name, child, true)
-			}
-		}
-		if items, ok := schema["items"].(map[string]any); ok {
-			walk(prefix+"[]", items, true)
-		}
-	}
 	for label, registry := range evalToolRegistries(newFakeClient()) {
 		for _, name := range registry.Names() {
 			tool, _ := registry.Get(name)
-			walk(label+"/"+name, evalToolSchema(t, tool), false)
+			limits = append(limits, evalSchemaLimits(label+"/"+name, evalToolSchema(t, tool), false)...)
 		}
 	}
 	sort.Strings(limits)
 	return limits
+}
+
+// evalSchemaLimits follows the same properties, items, and typed-map surfaces
+// as the malformed-argument sweep. Map entries use {*} in both inventories.
+func evalSchemaLimits(prefix string, schema map[string]any, nested bool) []string {
+	var limits []string
+	for _, keyword := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum", "minLength", "maxLength", "minItems", "maxItems", "pattern"} {
+		if value, ok := schema[keyword]; ok {
+			limits = append(limits, prefix+" "+keyword+"="+evalLimitValue(value))
+		}
+	}
+	if required, _ := schema["required"].([]any); nested {
+		for _, field := range required {
+			limits = append(limits, fmt.Sprintf("%s.%v required", prefix, field))
+		}
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	for name, raw := range properties {
+		if child, ok := raw.(map[string]any); ok {
+			limits = append(limits, evalSchemaLimits(prefix+"."+name, child, true)...)
+		}
+	}
+	if items, ok := schema["items"].(map[string]any); ok {
+		limits = append(limits, evalSchemaLimits(prefix+"[]", items, true)...)
+	}
+	if entries, ok := schema["additionalProperties"].(map[string]any); ok {
+		limits = append(limits, evalSchemaLimits(prefix+"{*}", entries, true)...)
+	}
+	return limits
+}
+
+func TestToolEvalLimitsIncludeTypedMapValues(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(`{
+		"type":"object",
+		"required":["settings"],
+		"properties":{
+			"settings":{"type":"object","additionalProperties":{
+				"type":"string","minLength":1,"maxLength":8,"enum":["dev","prod"]
+			}},
+			"batches":{"type":"array","items":{"type":"object","additionalProperties":{
+				"type":"object","required":["value"],"properties":{
+					"value":{"type":"string","minLength":2,"maxLength":12,"enum":["staging","prod"]}
+				}
+			}}},
+			"free":{"type":"object","additionalProperties":true},
+			"closed":{"type":"object","additionalProperties":false}
+		}
+	}`), &schema); err != nil {
+		t.Fatal(err)
+	}
+	got := evalSchemaLimits("fixture/tool", schema, false)
+	sort.Strings(got)
+	want := []string{
+		"fixture/tool.batches[]{*}.value enum=staging|prod",
+		"fixture/tool.batches[]{*}.value maxLength=12",
+		"fixture/tool.batches[]{*}.value minLength=2",
+		"fixture/tool.batches[]{*}.value required",
+		"fixture/tool.settings{*} enum=dev|prod",
+		"fixture/tool.settings{*} maxLength=8",
+		"fixture/tool.settings{*} minLength=1",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("schema limits = %v, want %v", got, want)
+	}
 }
 
 // evalLimitValue formats a schema keyword's value for a limit key: a number in
@@ -722,6 +765,40 @@ func (s *evalHTTPStub) sent(fragment string) bool {
 	return slices.ContainsFunc(s.requests, func(request string) bool { return strings.Contains(request, fragment) })
 }
 
+// evalMonitorPagesEnforced accepts a per_page-specific rejection or verifies
+// the actual list_pull_requests command in the generated monitor Task.
+func evalMonitorPagesEnforced(fc client.Client, tool Tool, ctx context.Context, args string, perPage int) (bool, string) {
+	result, panicked, err := evalToolExecute(ctx, tool, args)
+	if panicked != nil {
+		return false, fmt.Sprintf("per_page=%d: panic=%v", perPage, panicked)
+	}
+	if failed, message := evalToolFailure(result, err); failed {
+		if (perPage < 1 || perPage > 100) && strings.Contains(message, "per_page") {
+			return true, ""
+		}
+		return false, fmt.Sprintf("per_page=%d failed for another reason: %s", perPage, message)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := fc.List(context.Background(), &tasks); err != nil {
+		return false, fmt.Sprintf("list monitor Tasks: %v", err)
+	}
+	if len(tasks.Items) != 1 {
+		return false, fmt.Sprintf("per_page=%d created %d monitor Tasks: %s", perPage, len(tasks.Items), result)
+	}
+	matches := evalMonitorPerPagePattern.FindAllStringSubmatch(tasks.Items[0].Spec.Prompt, -1)
+	if len(matches) != 1 {
+		return false, "monitor prompt must contain exactly one list_pull_requests per_page command"
+	}
+	page, err := strconv.Atoi(matches[0][1])
+	if err != nil || page < 1 || page > 100 {
+		return false, fmt.Sprintf("per_page=%d produced monitor per_page=%s outside 1..100", perPage, matches[0][1])
+	}
+	if perPage >= 1 && perPage <= 100 && page != perPage {
+		return false, fmt.Sprintf("valid per_page=%d changed to %d", perPage, page)
+	}
+	return true, ""
+}
+
 // evalCRDModelField returns the generated Agent CRD schema for spec.model.<field>,
 // which the Kubernetes API enforces when a tool writes the Agent.
 func evalCRDModelField(t *testing.T, field string) map[string]any {
@@ -877,35 +954,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				pagesClamped := func(perPage int) (bool, string) {
 					fc := agent()
 					tool, ctx := chatTool("create_pr_monitor", fc)
-					result, panicked, err := evalToolExecute(ctx, tool, fmt.Sprintf(base, fmt.Sprintf(`,"per_page":%d`, perPage)))
-					if panicked != nil {
-						return false, fmt.Sprintf("per_page=%d: panic=%v", perPage, panicked)
-					}
-					if failed, message := evalToolFailure(result, err); failed {
-						if (perPage < 1 || perPage > 100) && strings.Contains(message, "per_page") {
-							return true, ""
-						}
-						return false, fmt.Sprintf("per_page=%d failed for another reason: %s", perPage, message)
-					}
-					var tasks corev1alpha1.TaskList
-					if err := fc.List(context.Background(), &tasks); err != nil {
-						return false, fmt.Sprintf("list monitor Tasks: %v", err)
-					}
-					if len(tasks.Items) != 1 {
-						return false, fmt.Sprintf("per_page=%d created %d monitor Tasks: %s", perPage, len(tasks.Items), result)
-					}
-					matches := evalMonitorPerPagePattern.FindAllStringSubmatch(tasks.Items[0].Spec.Prompt, -1)
-					if len(matches) != 1 {
-						return false, "monitor prompt must contain exactly one list_pull_requests per_page command"
-					}
-					page, err := strconv.Atoi(matches[0][1])
-					if err != nil || page < 1 || page > 100 {
-						return false, fmt.Sprintf("per_page=%d produced monitor per_page=%s outside 1..100", perPage, matches[0][1])
-					}
-					if perPage >= 1 && perPage <= 100 && page != perPage {
-						return false, fmt.Sprintf("valid per_page=%d changed to %d", perPage, page)
-					}
-					return true, ""
+					return evalMonitorPagesEnforced(fc, tool, ctx, fmt.Sprintf(base, fmt.Sprintf(`,"per_page":%d`, perPage)), perPage)
 				}
 				call := func() (Tool, context.Context) { return chatTool("create_pr_monitor", agent()) }
 				return evalAll(
@@ -1833,7 +1882,7 @@ func TestToolEvalNestedArgumentTypes(t *testing.T) {
 				if !ok {
 					return
 				}
-				field := strings.ReplaceAll(strings.Join(path, "."), ".[]", "[]")
+				field := strings.NewReplacer(".[]", "[]", ".*", "{*}").Replace(strings.Join(path, "."))
 				key := label + "/" + name + ": " + field + " as wrong type"
 				declared[key] = true
 				t.Run(key, func(t *testing.T) {
