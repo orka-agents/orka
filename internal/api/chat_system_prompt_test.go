@@ -759,6 +759,114 @@ func TestBuildDynamicContextSkillListError(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptDistinguishesWorkerCatalogFromChatTools(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(
+		&corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "namespace-tool", Namespace: "default"},
+			Spec:       corev1alpha1.ToolSpec{Description: "Useful agent attachment metadata"},
+		},
+		&corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "other-namespace-tool", Namespace: "other"},
+		},
+	).Build()
+	_, toolsSection, _, _, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).buildDynamicContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name  string
+		tools []string
+	}{
+		{name: "unscoped"},
+		{name: "read-only", tools: []string{"list_tools"}},
+		{name: "task creator", tools: []string{"create_ai_task"}},
+		{name: "tool-less", tools: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			if tt.tools != nil {
+				b.SetAvailableChatTools(tt.tools)
+			}
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, after, ok := strings.Cut(prompt, "<available_tools>\n")
+			if !ok {
+				t.Fatal("missing worker tool catalog")
+			}
+			catalog, _, ok := strings.Cut(after, "</available_tools>")
+			if !ok {
+				t.Fatal("missing worker tool catalog closing tag")
+			}
+			for _, want := range append(slices.Clone(builtinProxyTools), "namespace-tool - Useful agent attachment metadata") {
+				if !strings.Contains(catalog, want) {
+					t.Errorf("catalog lost %q", want)
+				}
+			}
+			if strings.Contains(catalog, "other-namespace-tool") {
+				t.Error("catalog includes a tool from another namespace")
+			}
+			if tt.tools == nil {
+				if catalog != toolsSection {
+					t.Error("unscoped worker tool catalog changed")
+				}
+				return
+			}
+			for _, want := range []string{"Agent/worker attachment catalog", "not directly callable chat API tools", "only the tools in <available_chat_tools>"} {
+				if !strings.Contains(catalog, want) {
+					t.Errorf("scoped catalog is missing %q", want)
+				}
+			}
+			if !strings.HasSuffix(catalog, toolsSection) {
+				t.Error("scoped worker tool catalog metadata changed")
+			}
+		})
+	}
+}
+
+func TestBuildSystemPromptActionMandateIncludesPRMonitor(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	for _, tt := range []struct {
+		name         string
+		tools        []string
+		wantMandate  bool
+		wantSequence bool
+	}{
+		{name: "unscoped", wantMandate: true, wantSequence: true},
+		{name: "monitor-only", tools: []string{"create_pr_monitor"}, wantMandate: true},
+		{name: "monitor with polling", tools: []string{"create_pr_monitor", "wait_for_task", "fetch_task_output"}, wantMandate: true},
+		{name: "task creator with polling", tools: []string{"create_container_task", "wait_for_task", "fetch_task_output"}, wantMandate: true, wantSequence: true},
+		{name: "read-only", tools: []string{"list_tasks"}},
+		{name: "polling-only", tools: []string{"wait_for_task", "fetch_task_output"}},
+		{name: "tool-less", tools: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			if tt.tools != nil {
+				b.SetAvailableChatTools(tt.tools)
+			}
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(prompt, "you MUST include the tool\ncall in the SAME response."); got != tt.wantMandate {
+				t.Errorf("action-call mandate present = %v, want %v", got, tt.wantMandate)
+			}
+			if got := strings.Contains(prompt, "call create_*_task, then wait_for_task, then fetch_task_output all in sequence"); got != tt.wantSequence {
+				t.Errorf("task result sequence present = %v, want %v", got, tt.wantSequence)
+			}
+			if slices.Equal(tt.tools, []string{"create_pr_monitor"}) {
+				for _, unwanted := range []string{"create_*_task", "wait_for_task", "fetch_task_output", "<scheduling>"} {
+					if strings.Contains(prompt, unwanted) {
+						t.Errorf("monitor-only prompt contains task guidance %q", unwanted)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
 	full, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).BuildSystemPrompt(context.Background(), "")

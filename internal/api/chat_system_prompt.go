@@ -73,6 +73,10 @@ const (
 // promptTaskCreators are the chat tools that create tasks.
 var promptTaskCreators = []string{promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask}
 
+// promptActionCreators includes recurring monitors for the action-call mandate,
+// but not for guidance to wait for and fetch a task result immediately.
+var promptActionCreators = []string{promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask, "create_pr_monitor"}
+
 // promptPart is one piece of guidance and the chat tools it needs. A part with
 // no requirements is general and always kept. Requirements are declared rather
 // than read from the text, so rewording a part cannot change who sees it.
@@ -165,6 +169,10 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	sb.WriteString("</available_agents>\n\n")
 
 	sb.WriteString("<available_tools>\n")
+	if b.availableChatTools != nil {
+		sb.WriteString("Agent/worker attachment catalog (built-in worker tools and namespace Tool resources), not directly callable chat API tools.\n")
+		sb.WriteString("For direct chat calls, only the tools in <available_chat_tools> are available in this conversation.\n")
+	}
 	sb.WriteString(toolsSection)
 	sb.WriteString("</available_tools>\n")
 	sb.WriteString(providersSection)
@@ -224,7 +232,7 @@ wait for results, and report back.
 // behaviorParts splits the behavior guidance so the instruction to call tools
 // in the same response survives when the polling tools are not offered, and
 // the rule to call a tool for run and create requests applies only when a task
-// creation tool is offered.
+// or recurring monitor creation tool is offered.
 func behaviorParts() []promptPart {
 	return []promptPart{
 		{text: `<behavior>
@@ -232,7 +240,7 @@ func behaviorParts() []promptPart {
 		{text: `CRITICAL RULE: When the user asks you to run, create, or execute something,
 you MUST call the appropriate tool in your response. NEVER respond with only text
 like "I'll create that task" or "Let me run that" — you MUST include the tool
-call in the SAME response. `, anyOf: promptTaskCreators},
+call in the SAME response. `, anyOf: promptActionCreators},
 		{text: `If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
 without stopping to narrate between steps. `, requires: []string{promptToolWait, promptToolFetch}, anyOf: promptTaskCreators},
