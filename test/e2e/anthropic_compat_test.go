@@ -23,9 +23,17 @@ import (
 const (
 	liveAnthropicGoalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 	liveAnthropicMaxTokens         = 128
+	// anthropicCompatMarker routes the prompts to anthropic_compat.json in
+	// mock mode.
+	anthropicCompatMarker = "[e2e:anthropic-compat]"
+	// anthropicCompatMockModel is any model name; aimock answers by marker.
+	anthropicCompatMockModel = "claude-sonnet-4.5"
 )
 
-var _ = Describe("Live Anthropic Compat API", Ordered, func() {
+// The Anthropic-compatible API runs against the live Copilot proxy when
+// E2E_LIVE_COPILOT_PROXY_BASE_URL is set, and otherwise against the suite's
+// aimock, both behind an openai Provider.
+var _ = Describe("Anthropic Compat API", Ordered, func() {
 	const (
 		liveAnthropicProviderName = "e2e-live-anthropic-compat-provider"
 		liveAnthropicSecretName   = "e2e-live-anthropic-compat-secret"
@@ -42,8 +50,9 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		if strings.TrimSpace(e2eLiveCopilotProxyBaseURL) == "" {
-			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set")
+		live := strings.TrimSpace(e2eLiveCopilotProxyBaseURL) != ""
+		if !live && !e2eMockOpenAI {
+			Skip("Skipping: needs E2E_LIVE_COPILOT_PROXY_BASE_URL or aimock")
 		}
 
 		var err error
@@ -61,24 +70,29 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(token).NotTo(BeEmpty())
 
-		By("verifying the live proxy is ready")
-		ready := waitForProxyReadyViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
-		)
-		Expect(ready.Status).To(Equal("ready"))
-		Expect(ready.Error).To(BeEmpty())
+		providerBaseURL := mockLLMServiceURL() + "/v1"
+		liveClaudeModel = anthropicCompatMockModel
+		if live {
+			By("verifying the live proxy is ready")
+			ready := waitForProxyReadyViaServiceProxy(
+				liveCopilotProxyServiceNamespace(),
+				liveCopilotProxyServiceName(),
+				liveCopilotProxyServicePort(),
+			)
+			Expect(ready.Status).To(Equal("ready"))
+			Expect(ready.Error).To(BeEmpty())
 
-		By("discovering a live Claude-family model from the proxy catalog")
-		liveClaudeModel = discoverPreferredProxyModelViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
-			liveCopilotProxyClaudeModelPreferences,
-			liveCopilotProxyClaudeModelPrefixes...,
-		)
-		Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose an allowed Claude-family model")
+			By("discovering a live Claude-family model from the proxy catalog")
+			liveClaudeModel = discoverPreferredProxyModelViaServiceProxy(
+				liveCopilotProxyServiceNamespace(),
+				liveCopilotProxyServiceName(),
+				liveCopilotProxyServicePort(),
+				liveCopilotProxyClaudeModelPreferences,
+				liveCopilotProxyClaudeModelPrefixes...,
+			)
+			Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose an allowed Claude-family model")
+			providerBaseURL = e2eLiveCopilotProxyBaseURL
+		}
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveAnthropicSecretName, namespace, map[string]string{
@@ -90,8 +104,9 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 
-		By("creating a Provider CRD backed by the live copilot proxy")
-		createProviderCRD(liveAnthropicProviderName, "openai", liveAnthropicSecretName, "api-key", e2eLiveCopilotProxyBaseURL, liveClaudeModel)
+		By("creating an openai Provider CRD for the compat API")
+		createProviderCRD(liveAnthropicProviderName, "openai", liveAnthropicSecretName, "api-key",
+			providerBaseURL, liveClaudeModel)
 		DeferCleanup(func() {
 			cmd := exec.Command("kubectl", "delete", "provider", liveAnthropicProviderName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
@@ -230,9 +245,9 @@ func postLiveAnthropicJSON(apiBaseURL, token, providerName, model, expectedText 
 		"max_tokens": %d,
 		"messages": [{
 			"role": "user",
-			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools."
+			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools. %s"
 		}]
-	}`, providerName, model, liveAnthropicMaxTokens, liveAnthropicGoalStateSentinel, expectedText)
+	}`, providerName, model, liveAnthropicMaxTokens, liveAnthropicGoalStateSentinel, expectedText, anthropicCompatMarker)
 
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiBaseURL, "/")+"/anthropic/v1/messages", strings.NewReader(body))
 	Expect(err).NotTo(HaveOccurred())
@@ -263,9 +278,9 @@ func postLiveAnthropicSSE(apiBaseURL, token, providerName, model, expectedText s
 		"stream": true,
 		"messages": [{
 			"role": "user",
-			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools."
+			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools. %s"
 		}]
-	}`, providerName, model, liveAnthropicMaxTokens, liveAnthropicGoalStateSentinel, expectedText)
+	}`, providerName, model, liveAnthropicMaxTokens, liveAnthropicGoalStateSentinel, expectedText, anthropicCompatMarker)
 
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiBaseURL, "/")+"/anthropic/v1/messages", strings.NewReader(body))
 	Expect(err).NotTo(HaveOccurred())

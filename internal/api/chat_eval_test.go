@@ -102,6 +102,8 @@ func runChatEvalTurn(t *testing.T, c client.Client, req ChatRequest, responses .
 
 	cfg := DefaultChatConfig()
 	cfg.MaxIterations = 3
+	// Exercise the full chat-tool catalog, including flag-gated connector tools.
+	cfg.ConnectorsEnabled = true
 	cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
 	ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
 	app := fiber.New()

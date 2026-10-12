@@ -58,6 +58,13 @@ var _ = Describe("Model Fallback Providers", Ordered, func() {
 		By("creating a fallback Provider CRD")
 		createProviderCRD(fallbackProviderName, "openai", "e2e-openai-secret", "api-key", e2eOpenAIBaseURL, model)
 
+		// aimock rejects the primary model with 401 and answers only the
+		// fallback model, so the worker must actually fail over.
+		fallbackModel := model
+		if e2eMockOpenAI {
+			fallbackModel = "gpt-4o-mini-e2e-fallback"
+		}
+
 		By("creating an Agent with fallback configuration")
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
@@ -80,7 +87,7 @@ var _ = Describe("Model Fallback Providers", Ordered, func() {
 					]
 				}
 			}
-		}`, agentName, namespace, primaryProviderName, model, fallbackProviderName, model)
+		}`, agentName, namespace, primaryProviderName, model, fallbackProviderName, fallbackModel)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(agentManifest)
@@ -98,7 +105,7 @@ var _ = Describe("Model Fallback Providers", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "What is 5+5? Reply with just the number.",
+					"prompt": "What is 5+5? Reply with just the number. [e2e:fallback-provider]",
 					"providerRef": {
 						"name": "%s"
 					},
@@ -134,5 +141,17 @@ var _ = Describe("Model Fallback Providers", Ordered, func() {
 		By("waiting for the task to complete successfully")
 		phase := waitForTaskCompletion(taskName, 3*time.Minute)
 		Expect(phase).To(Equal("Succeeded"), "Task with fallback providers should succeed")
+
+		if e2eMockOpenAI {
+			By("verifying the primary model was rejected and the fallback model answered")
+			requests, err := mockLLMRequestsFor("[e2e:fallback-provider]")
+			Expect(err).NotTo(HaveOccurred())
+			statusByModel := map[string][]int{}
+			for _, request := range requests {
+				statusByModel[request.Body.Model] = append(statusByModel[request.Body.Model], request.Response.Status)
+			}
+			Expect(statusByModel).To(HaveKeyWithValue(model, ContainElement(401)), "requests by model: %v", statusByModel)
+			Expect(statusByModel).To(HaveKeyWithValue(fallbackModel, ContainElement(200)), "requests by model: %v", statusByModel)
+		}
 	})
 })

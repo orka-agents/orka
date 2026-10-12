@@ -417,3 +417,98 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context, tas
 	}
 	return d.reconcileMCPApprovalExecutions(ctx, fence, tasks, approvalEffects)
 }
+
+// RunExternalEffectWithReplay runs one idempotent external effect from outside
+// the ACP dispatcher, such as the controller's connector-tool endpoint, with
+// the same reservation, lease, and replay semantics the ACP broker uses.
+func RunExternalEffectWithReplay[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplay(ctx, effects, fence, identity, request, call)
+}
+
+// RunExternalEffectWithReplayCallTimeout is RunExternalEffectWithReplay with
+// the caller's real operation deadline, so the effect call and its ledger
+// lease cover a legitimately long tool timeout instead of the per-kind clamp.
+func RunExternalEffectWithReplayCallTimeout[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayCallTimeout(ctx, effects, fence, identity, request, callTimeout, call)
+}
+
+// SettleExternalEffect records a terminal state for an effect whose call
+// returned an error, so the ledger never shows it as still in flight.
+func SettleExternalEffect(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	state store.ExternalEffectState,
+) error {
+	return settleExternalEffectStore(ctx, effects, fence, identity, state, nil)
+}
+
+// ErrExternalEffectNotPending reports an effect another execution moved out
+// of Pending (it is in flight, or settled); only that execution settles it.
+var ErrExternalEffectNotPending = errors.New("external effect is no longer pending")
+
+// SettlePendingExternalEffect moves an effect that is still exactly Pending
+// (reserved, never started) to state. An effect already in state is left
+// as is; one in flight or settled otherwise belongs to another execution and
+// is reported with ErrExternalEffectNotPending, never transitioned.
+func SettlePendingExternalEffect(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	state store.ExternalEffectState,
+) error {
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return err
+	}
+	effect, err := effects.GetExternalEffect(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if effect.State == state {
+		return nil
+	}
+	if effect.State != store.ExternalEffectPending {
+		return fmt.Errorf("%w: external effect %s is %s", ErrExternalEffectNotPending, effect.ID, effect.State)
+	}
+	// Pinned to the Pending state and version just read: an execution that
+	// claims the record meanwhile makes this transition fail instead.
+	if _, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
+		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: store.ExternalEffectPending,
+		NewState: state, RequestDigest: effect.RequestDigest, ExpectedLeaseOwner: effect.LeaseOwner, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return fmt.Errorf("%w: %w", ErrExternalEffectNotPending, err)
+		}
+		return err
+	}
+	return nil
+}
+
+// ExternalEffectRequestDigest is the digest under which RunExternalEffectWithReplay
+// reserves an effect, so a caller can recognize its own committed record.
+func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
+	return acpDomainDigest("external-effect-request", map[string]any{
+		"identity": identity, "request": request,
+	})
+}

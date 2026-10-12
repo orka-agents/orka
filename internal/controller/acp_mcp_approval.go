@@ -73,13 +73,18 @@ func acpMCPApprovalOutcomeContent(approvalID, taskUID, outcome, reason string, r
 // immutable, Task-owned Secret keeps the original arguments across redelivery
 // and controller restart without exposing them in Task status or approval APIs.
 type acpMCPApprovalCall struct {
-	ID            string                         `json:"id"`
-	RequestDigest string                         `json:"requestDigest"`
-	Task          ACPMCPAuthenticatedTask        `json:"task"`
-	Request       harnessv2.MCPBrokerCallRequest `json:"request"`
-	Descriptor    harnessv2.MCPToolDescriptor    `json:"descriptor"`
-	CreatedAt     time.Time                      `json:"createdAt"`
-	ExpiresAt     time.Time                      `json:"expiresAt"`
+	ID            string `json:"id"`
+	RequestDigest string `json:"requestDigest"`
+	// ConnectionDigest names the frozen Connection a connector-backed call
+	// acts under (policy, UID, generation digest; never the token) and is
+	// bound into RequestDigest, so the approval and its effect record
+	// identify the linked account.
+	ConnectionDigest string                         `json:"connectionDigest,omitempty"`
+	Task             ACPMCPAuthenticatedTask        `json:"task"`
+	Request          harnessv2.MCPBrokerCallRequest `json:"request"`
+	Descriptor       harnessv2.MCPToolDescriptor    `json:"descriptor"`
+	CreatedAt        time.Time                      `json:"createdAt"`
+	ExpiresAt        time.Time                      `json:"expiresAt"`
 }
 
 func acpMCPApprovalIdentity(request harnessv2.MCPBrokerCallRequest) string {
@@ -97,7 +102,7 @@ func acpMCPApprovalIdentityFromCallDigest(namespace, taskUID, taskAttempt, promp
 	return store.CanonicalControlID("acp-tool-approval-v2", namespace, taskUID, taskAttempt, promptID, callIDDigest)
 }
 
-func acpMCPApprovalRequestDigest(request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error) {
+func acpMCPApprovalRequestDigest(request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor, connectionDigest string) (string, error) {
 	return acpDomainDigest("acp-tool-approval-request", struct {
 		Namespace   string                           `json:"namespace"`
 		Fence       harnessv2.Fence                  `json:"fence"`
@@ -108,8 +113,10 @@ func acpMCPApprovalRequestDigest(request harnessv2.MCPBrokerCallRequest, descrip
 		Call        harnessv2.MCPToolCall            `json:"call"`
 		Descriptor  harnessv2.MCPToolDescriptor      `json:"descriptor"`
 		Policy      harnessv2.MCPPolicyConfiguration `json:"policy"`
+		Connection  string                           `json:"connection,omitempty"`
 	}{
-		Namespace: request.Namespace, Fence: request.Metadata.Fence,
+		Connection: connectionDigest,
+		Namespace:  request.Namespace, Fence: request.Metadata.Fence,
 		TaskUID: request.Metadata.TaskUID, TaskAttempt: request.Metadata.TaskAttempt,
 		PromptID: request.Metadata.PromptID, OperationID: request.Metadata.OperationID,
 		Call: request.Call, Descriptor: descriptor, Policy: request.Authorization.Configuration(),
@@ -122,7 +129,19 @@ func (b *ACPMCPBroker) serveApprovedCall(w http.ResponseWriter, ctx context.Cont
 		writeACPMCPError(w, http.StatusServiceUnavailable, "MCP approval storage is unavailable")
 		return
 	}
-	call, secretUID, err := b.persistApprovalCall(ctx, request, descriptor, credentials.Task)
+	// A connector-backed call binds the frozen Connection it acts under into
+	// the approval and its effect record; one that cannot name its
+	// Connection is refused before anything is recorded.
+	connectionDigest := ""
+	if digester, ok := b.Executor.(acpMCPConnectionDigester); ok {
+		digest, digestErr := digester.ConnectionDigest(withACPMCPAuthenticatedTask(ctx, credentials.Task), request, descriptor)
+		if digestErr != nil {
+			writeACPMCPError(w, http.StatusBadGateway, "MCP tool connection binding is unavailable")
+			return
+		}
+		connectionDigest = digest
+	}
+	call, secretUID, err := b.persistApprovalCall(ctx, request, descriptor, credentials.Task, connectionDigest)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeACPMCPError(w, http.StatusConflict, "MCP approval call does not match its stored action")
@@ -167,8 +186,8 @@ func (b *ACPMCPBroker) serveApprovedCall(w http.ResponseWriter, ctx context.Cont
 	})
 }
 
-func (b *ACPMCPBroker) persistApprovalCall(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor, task ACPMCPAuthenticatedTask) (*acpMCPApprovalCall, types.UID, error) {
-	digest, err := acpMCPApprovalRequestDigest(request, descriptor)
+func (b *ACPMCPBroker) persistApprovalCall(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor, task ACPMCPAuthenticatedTask, connectionDigest string) (*acpMCPApprovalCall, types.UID, error) {
+	digest, err := acpMCPApprovalRequestDigest(request, descriptor, connectionDigest)
 	if err != nil {
 		return nil, "", err
 	}
@@ -178,7 +197,7 @@ func (b *ACPMCPBroker) persistApprovalCall(ctx context.Context, request harnessv
 		wait = harnessv2.MCPApprovalWaitTimeout
 	}
 	call := acpMCPApprovalCall{
-		ID: acpMCPApprovalIdentity(request), RequestDigest: digest, Task: task,
+		ID: acpMCPApprovalIdentity(request), RequestDigest: digest, ConnectionDigest: connectionDigest, Task: task,
 		Request: request, Descriptor: descriptor, CreatedAt: now, ExpiresAt: now.Add(wait),
 	}
 	if !task.Deadline.IsZero() && task.Deadline.Before(call.ExpiresAt) {
@@ -225,8 +244,8 @@ func (b *ACPMCPBroker) loadApprovalCall(ctx context.Context, expected *acpMCPApp
 	if err := json.Unmarshal(secret.Data[acpApprovalSecretKey], &stored); err != nil {
 		return nil, "", store.ConflictErrorf("stored approval call is invalid")
 	}
-	digest, err := acpMCPApprovalRequestDigest(stored.Request, stored.Descriptor)
-	if err != nil || stored.ID != expected.ID || stored.ID != acpMCPApprovalIdentity(stored.Request) ||
+	digest, err := acpMCPApprovalRequestDigest(stored.Request, stored.Descriptor, stored.ConnectionDigest)
+	if err != nil || stored.ID != expected.ID || stored.ConnectionDigest != expected.ConnectionDigest || stored.ID != acpMCPApprovalIdentity(stored.Request) ||
 		stored.Task.UID != expected.Task.UID || stored.Task.Name != expected.Task.Name || stored.Task.Namespace != expected.Task.Namespace ||
 		stored.RequestDigest != expected.RequestDigest || digest != expected.RequestDigest || stored.CreatedAt.IsZero() ||
 		stored.ExpiresAt.IsZero() || stored.ExpiresAt.After(stored.CreatedAt.Add(harnessv2.MCPApprovalWaitTimeout)) {
@@ -571,7 +590,20 @@ func (b *ACPMCPBroker) validateApprovalTool(ctx context.Context, call *acpMCPApp
 	if validator, ok := b.Executor.(interface {
 		ValidateACPMCPTool(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) error
 	}); ok {
-		return validator.ValidateACPMCPTool(ctx, call.Request, call.Descriptor)
+		if err := validator.ValidateACPMCPTool(ctx, call.Request, call.Descriptor); err != nil {
+			return err
+		}
+	}
+	// A connector-backed call must still act under the Connection and the
+	// injection configuration (Tool and policy) the approval was bound to.
+	if digester, ok := b.Executor.(acpMCPConnectionDigester); ok {
+		digest, err := digester.ConnectionDigest(withACPMCPAuthenticatedTask(ctx, call.Task), call.Request, call.Descriptor)
+		if err != nil {
+			return err
+		}
+		if digest != call.ConnectionDigest {
+			return errors.New("connector binding changed after prompt authorization")
+		}
 	}
 	return nil
 }

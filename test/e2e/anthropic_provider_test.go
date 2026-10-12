@@ -62,7 +62,7 @@ var _ = Describe("Anthropic Provider AI Tasks", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "What is 3+3? Reply with only the number.",
+					"prompt": "What is 3+3? Reply with only the number. [e2e:anthropic-provider-proxy]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
@@ -82,5 +82,12 @@ var _ = Describe("Anthropic Provider AI Tasks", Ordered, func() {
 
 		By("verifying the result is available")
 		verifyResultAvailable(taskName)
+
+		if e2eMockAnthropic {
+			By("verifying the worker called the Anthropic Messages API at the Provider base URL")
+			served := expectMockLLMServed("[e2e:anthropic-provider-proxy]", 30*time.Second)
+			Expect(served[0].Path).To(Equal("/v1/messages"))
+			Expect(served[0].Body.Model).To(Equal(model))
+		}
 	})
 })

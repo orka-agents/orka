@@ -540,6 +540,31 @@ func (a internalCallerAuthorizer) verifiedCoordinationParent(
 	return parent, nil
 }
 
+// verifiedCoordinationChild returns childName when it is a live child of
+// callerTask whose parent link is protected by Task provenance admission.
+func (a internalCallerAuthorizer) verifiedCoordinationChild(
+	ctx context.Context,
+	callerTask *corev1alpha1.Task,
+	childName string,
+) (*corev1alpha1.Task, error) {
+	if !a.taskProvenanceProtected {
+		return nil, fiber.NewError(fiber.StatusForbidden, "coordination requires Task provenance admission")
+	}
+	child := &corev1alpha1.Task{}
+	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: callerTask.Namespace, Name: childName}, child); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusForbidden, "task is outside caller coordination scope")
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load child task")
+	}
+	parentName, parentUID, hasParent, valid := coordinationParentIdentity(child)
+	if child.UID == "" || !child.DeletionTimestamp.IsZero() || !valid || !hasParent ||
+		parentName != callerTask.Name || parentUID != callerTask.UID {
+		return nil, fiber.NewError(fiber.StatusForbidden, "task is outside caller coordination scope")
+	}
+	return child, nil
+}
+
 func serviceAccountNameFromUsername(username string) string {
 	parts := strings.Split(strings.TrimSpace(username), ":")
 	if len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" {
