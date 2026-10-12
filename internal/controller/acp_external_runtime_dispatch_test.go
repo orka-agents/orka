@@ -56,6 +56,8 @@ type externalACPDispatchFixture struct {
 }
 
 type externalACPDispatchFixtureOptions struct {
+	beforeTerminal                  func(harnessv2.StartPromptRequest, harnessv2.Event)
+	onCancel                        func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
 	contextTimeout                  time.Duration
 	statusTransform                 func(*harnessv2.StatusResponse)
 	profileTransform                func(*harnessv2.RuntimeProfile)
@@ -244,6 +246,8 @@ func newExternalACPDispatchFixtureWithOptions(
 	deleteRequests := make(chan harnessv2.DeleteRuntimeSessionRequest, 8)
 	server := newDispatcherRuntimeServerForPoolWithOptions(
 		t, profile, profileDigest, acpDispatcherTestPoolUID, dispatcherRuntimeServerOptions{
+			beforeTerminal:                   options.beforeTerminal,
+			onCancel:                         options.onCancel,
 			disableAgentSessionConfiguration: true,
 			disablePermissions:               true,
 			terminalEvents:                   options.terminalEvents,
@@ -1115,6 +1119,127 @@ func TestACPDispatcherRetryableUnsentExternalWorkspaceDeltaRetriesSameOperation(
 	}
 	if attempt.ExecutionState != store.PromptExecutionSucceeded || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		t.Fatalf("retried workspace delta PromptAttempt = %#v", attempt)
+	}
+}
+
+func TestACPDispatcherCancellationPreservesCompletedStreamResult(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		terminal    harnessv2.EventType
+		cause       error
+		outcome     harnessv2.PromptOutcome
+		stopReason  harnessv2.ACPStopReason
+		wantPhase   corev1alpha1.TaskPhase
+		wantOutcome corev1alpha1.TaskExecutionOutcome
+		wantReason  corev1alpha1.TaskExecutionReason
+	}{
+		{name: "completed after task deletion", terminal: harnessv2.EventCompleted, cause: context.Canceled,
+			outcome: harnessv2.PromptOutcomeSucceeded, stopReason: harnessv2.ACPStopReasonEndTurn,
+			wantPhase: corev1alpha1.TaskPhaseSucceeded, wantOutcome: corev1alpha1.TaskExecutionOutcomeSucceeded},
+		{name: "completed at task deadline", terminal: harnessv2.EventCompleted, cause: context.DeadlineExceeded,
+			outcome: harnessv2.PromptOutcomeSucceeded, stopReason: harnessv2.ACPStopReasonEndTurn,
+			wantPhase: corev1alpha1.TaskPhaseSucceeded, wantOutcome: corev1alpha1.TaskExecutionOutcomeSucceeded},
+		{name: "cancelled at task deadline", terminal: harnessv2.EventCancelled, cause: context.DeadlineExceeded,
+			outcome: harnessv2.PromptOutcomeCancelled, stopReason: harnessv2.ACPStopReasonCancelled,
+			wantPhase: corev1alpha1.TaskPhaseCancelled, wantOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+			wantReason: acpTaskTimeoutReason},
+		{name: "failed during task deletion", terminal: harnessv2.EventFailed, cause: context.Canceled,
+			outcome: harnessv2.PromptOutcomeFailed, stopReason: harnessv2.ACPStopReasonRefusal,
+			wantPhase: corev1alpha1.TaskPhaseFailed, wantOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
+			wantReason: acpPromptFailedReason},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var fixture *externalACPDispatchFixture
+			var cancelRuntime context.CancelFunc
+			cancelObserved := make(chan struct{})
+			terminalReady := make(chan harnessv2.Event, 1)
+			var cancelCalls atomic.Int32
+			fixture = newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
+				externalACPDispatchFixtureOptions{
+					terminalEvents: map[harnessv2.PromptID]harnessv2.EventType{"prompt-cancel-completed-stream-uid-1": test.terminal},
+					beforeTerminal: func(_ harnessv2.StartPromptRequest, terminal harnessv2.Event) {
+						terminalReady <- terminal
+						deadline := time.Now().Add(3 * time.Second)
+						for {
+							task := &corev1alpha1.Task{}
+							key := client.ObjectKey{Namespace: defaultNS, Name: "cancel-completed-stream"}
+							if err := fixture.client.Get(fixture.ctx, key, task); err != nil {
+								t.Error(err)
+								return
+							}
+							if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateRunning {
+								if err := fixture.client.Delete(fixture.ctx, task); err != nil {
+									t.Error(err)
+									return
+								}
+								break
+							}
+							if time.Now().After(deadline) {
+								t.Error("prompt acceptance was not persisted")
+								return
+							}
+							time.Sleep(time.Millisecond)
+						}
+						cancelRuntime()
+						select {
+						case <-cancelObserved:
+						case <-time.After(3 * time.Second):
+							t.Error("controller did not request cancellation")
+						}
+					},
+					onCancel: func(request harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse {
+						if cancelCalls.Add(1) != 1 {
+							t.Error("prompt cancellation was resubmitted")
+						}
+						terminal := <-terminalReady
+						wantReason := harnessv2.CancelReasonControllerShutdown
+						if errors.Is(test.cause, context.DeadlineExceeded) {
+							wantReason = harnessv2.CancelReasonTaskTimeout
+						}
+						if request.Reason != wantReason || request.Metadata.TaskUID != terminal.Identity.TaskUID ||
+							request.Metadata.TaskAttempt != terminal.Identity.TaskAttempt || request.Metadata.PromptID != terminal.Identity.PromptID ||
+							request.Metadata.Fence.RuntimeSessionUID != terminal.Identity.RuntimeSessionUID ||
+							request.Metadata.Fence.RuntimeSessionGeneration != terminal.Identity.RuntimeSessionGeneration {
+							t.Error("cancellation changed the accepted prompt identity or reason")
+						}
+						close(cancelObserved)
+						return harnessv2.CancelPromptResponse{
+							Protocol:       harnessv2.ProtocolVersion,
+							Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+							BarrierState:   harnessv2.CancellationBarrierSettled, SettlementProven: true,
+							Settlement: harnessv2.PromptSettlement{
+								TerminalEvent: terminal.Type, Outcome: test.outcome,
+								StopReason: test.stopReason, SettledAt: terminal.Identity.Timestamp,
+							},
+						}
+					},
+				})
+			queued := fixture.queueTask(t, "cancel-completed-stream", "cancel-completed-stream-uid", "finish during cancellation", nil)
+			runtimeCtx, cancelCause := context.WithCancelCause(fixture.ctx)
+			cancelRuntime = func() { cancelCause(test.cause) }
+			t.Cleanup(cancelRuntime)
+			fixture.dispatcher.runtimeContextFactory = func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc) {
+				return runtimeCtx, cancelRuntime
+			}
+			completed := fixture.dispatch(t, queued)
+			if completed.Status.Phase != test.wantPhase || completed.Status.Execution == nil ||
+				completed.Status.Execution.Outcome != test.wantOutcome || completed.Status.Execution.Reason != test.wantReason {
+				t.Fatalf("settlement lost during cancellation: phase=%s execution=%v", completed.Status.Phase, completed.Status.Execution)
+			}
+			if test.terminal == harnessv2.EventCompleted {
+				if completed.Status.Delivery == nil || completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeReadValidated {
+					t.Fatalf("completed result not read-validated: %v", completed.Status.Delivery)
+				}
+				result, err := fixture.persistence.GetResult(fixture.ctx, completed.Namespace, completed.Name)
+				if err != nil || string(result) != "from runtime" {
+					t.Fatalf("completed result = %q, err=%v", result, err)
+				}
+			}
+			if cancelCalls.Load() != 1 || fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 1 {
+				t.Fatalf("runtime operations: cancellations=%d creates=%d deletes=%d", cancelCalls.Load(),
+					fixture.createCalls.Load(), fixture.deleteCalls.Load())
+			}
+		})
 	}
 }
 

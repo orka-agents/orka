@@ -1267,6 +1267,7 @@ main() {
   local manager_ref publisher_ref fake_runtime_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+  general_worker_image="$(orka_kind_registry_push "${general_worker_image}" "orka/general-worker")"
   fake_runtime_ref="$(orka_kind_registry_push "${fake_runtime_image}" "orka/acp-security-fixture")"
 
   log "Bootstrapping test-only admission TLS"

@@ -45,6 +45,9 @@ var (
 	harnessV2FixtureImage        = "ghcr.io/orka-agents/orka/harness-v2-e2e-fixture:e2e"
 	gatewayE2EEnvVar             = "E2E_GATEWAY"
 	managerRef                   string
+	aiWorkerRef                  string
+	generalWorkerRef             string
+	gatewayNativeWorkerRef       string
 	acpCodexRuntimeRef           string
 	acpClaudeRuntimeRef          string
 	acpCopilotRuntimeRef         string
@@ -61,6 +64,8 @@ var (
 	e2eAnthropicModel          string
 	e2eGitHubToken             string
 	e2eLiveCopilotProxyBaseURL string
+	// e2eACPIdlePoolTTL is the controller's idle RuntimePool TTL for this run.
+	e2eACPIdlePoolTTL time.Duration
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
@@ -96,6 +101,11 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build harness-v2 E2E fixture image")
 
+	By("building the fake forge E2E fixture image")
+	cmd = exec.Command("docker", "build", "-t", fakeForgeImage, "-f", "test/fixtures/fakeforge/Dockerfile", ".")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build fake forge E2E fixture image")
+
 	if gatewayE2EEnabled() {
 		By("building the Gateway reference adapter Docker image")
 		cmd = exec.Command("docker", "build", "-t", gatewayReferenceAdapterImage,
@@ -116,6 +126,7 @@ var _ = BeforeSuite(func() {
 		aiWorkerImage,
 		generalWorkerImage,
 		harnessV2FixtureImage,
+		fakeForgeImage,
 	}
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
@@ -125,12 +136,22 @@ var _ = BeforeSuite(func() {
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))
 	}
 
-	By("publishing digest-pinned ACP and publisher images to a Kind-local registry")
+	By("publishing digest-pinned platform images to a Kind-local registry")
 	registry, registryContainer, err := prepareKindLocalRegistry()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to prepare Kind-local registry")
 	e2eRegistryContainerName = registryContainer
 	managerRef, err = pushImageToLocalRegistry(registry, managerImage, "orka/controller:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish controller image")
+	aiWorkerRef, err = pushImageToLocalRegistry(registry, aiWorkerImage, "orka/ai-worker:e2e")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish AI worker image")
+	generalWorkerRef, err = pushImageToLocalRegistry(registry, generalWorkerImage, "orka/general-worker:e2e")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish general worker image")
+	if gatewayE2EEnabled() {
+		gatewayNativeWorkerRef, err = pushImageToLocalRegistry(
+			registry, gatewayNativeWorkerImage, "orka/gateway-e2e-worker:e2e",
+		)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish Gateway native worker fixture image")
+	}
 	acpCodexRuntimeRef, err = pushImageToLocalRegistry(registry, acpCodexRuntimeImage, "orka/acp-codex-runtime:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish Codex ACP runtime image")
 	acpClaudeRuntimeRef, err = pushImageToLocalRegistry(registry, acpClaudeRuntimeImage, "orka/acp-claude-runtime:e2e")
@@ -157,6 +178,7 @@ var _ = BeforeSuite(func() {
 		"E2E_COPILOT_PROXY_BASE_URL",
 		"COPILOT_PROXY_BASE_URL",
 	)
+	configureMockLLMCredentials()
 
 	By("bootstrapping manager namespace identity")
 	cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "ensure-static-mode-namespace.sh"),
@@ -178,6 +200,11 @@ var _ = BeforeSuite(func() {
 	cmd.Stdin = strings.NewReader(vekilNamespace)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create the Vekil namespace")
+
+	if e2eMockLLMEnabled() {
+		By("deploying the aimock mock LLM for providers without a live key")
+		suiteMockLLM.deploy(projectDir)
+	}
 
 	By("creating e2e K8s secrets from environment variables")
 	if e2eOpenAIAPIKey != "" {
@@ -243,6 +270,8 @@ var _ = BeforeSuite(func() {
 	By("deploying the controller-manager")
 	cmd = exec.Command("make", "deploy",
 		fmt.Sprintf("IMG=%s", managerRef),
+		fmt.Sprintf("AI_WORKER_IMG=%s", aiWorkerRef),
+		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerRef),
 		fmt.Sprintf("ACP_CODEX_RUNTIME_IMG=%s", acpCodexRuntimeRef),
 		fmt.Sprintf("ACP_CLAUDE_RUNTIME_IMG=%s", acpClaudeRuntimeRef),
 		fmt.Sprintf("ACP_COPILOT_RUNTIME_IMG=%s", acpCopilotRuntimeRef),
@@ -274,12 +303,33 @@ var _ = BeforeSuite(func() {
 	}, 30*time.Second, time.Second).Should(Succeed())
 	_, _ = fmt.Fprintf(GinkgoWriter, "Resolved controller-manager deployment: %s\n", controllerManagerDeployment)
 
+	// make deploy installs the fail-closed orka-admission webhooks. Like a
+	// production rollout's second wave, the controller trusts Task provenance
+	// (and so enables coordination messaging and cancel_task) only after the
+	// provenance handler is in place.
+	By("verifying the Task provenance webhook is installed")
+	cmd = exec.Command("kubectl", "get", "validatingwebhookconfiguration", "orka-admission",
+		"-o", "jsonpath={.webhooks[*].clientConfig.service.path}")
+	webhookPaths, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to read the orka-admission webhooks")
+	ExpectWithOffset(1, webhookPaths).To(ContainSubstring("/validate-core-orka-ai-v1alpha1-task-provenance"))
+
 	By("patching the controller-manager deployment to use kind-loaded images")
-	// Profile checks can start many distinct runtime pools in a minute. Release
-	// idle workers promptly so they leave CPU for the following container tests.
+	// Profile checks can start many distinct runtime pools in a minute, so the
+	// default lane releases idle workers after 5s to leave CPU for the
+	// following container tests. The agent runtime lifecycle job sets the
+	// production default, which its park and resume checks rely on.
+	idleTTL := strings.TrimSpace(os.Getenv("E2E_ACP_IDLE_POOL_TTL"))
+	if idleTTL == "" {
+		idleTTL = "5s"
+	}
+	e2eACPIdlePoolTTL, err = time.ParseDuration(idleTTL)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "E2E_ACP_IDLE_POOL_TTL must be a Go duration")
 	cmd = exec.Command(
 		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
-		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"5s"}]}]}}}}`,
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[`+
+			`{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"`+e2eACPIdlePoolTTL.String()+`"},`+
+			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"}]}]}}}}`,
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")
@@ -347,6 +397,9 @@ var _ = AfterSuite(func() {
 			return runBoundedE2ECleanup(30*time.Second, "kubectl", "delete", "secret", s,
 				"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s")
 		})
+	}
+	if e2eMockLLMEnabled() {
+		step("deleting the aimock mock LLM", suiteMockLLM.delete)
 	}
 	step("undeploying the controller-manager", func() error {
 		return runBoundedE2ECleanup(2*time.Minute, "make", "undeploy", "ignore-not-found=true")

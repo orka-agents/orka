@@ -1,7 +1,6 @@
-# Current application release version. Chart.yaml has its own version and may
-# advance independently for chart-only changes. Release preparation aligns both
-# versions for a tagged application release.
-VERSION := v0.1.1
+# Source checkouts are development builds. Release preparation stamps the
+# requested application and chart versions on the release branch.
+VERSION ?= v0.0.0-dev
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
@@ -179,6 +178,8 @@ KIND_CLUSTER ?= orka-test-e2e
 E2E_GO_TEST_TIMEOUT ?= 50m
 E2E_GINKGO_FOCUS ?=
 E2E_GINKGO_FOCUS_ARG = $(if $(E2E_GINKGO_FOCUS),-ginkgo.focus="$(E2E_GINKGO_FOCUS)",)
+E2E_GINKGO_LABEL_FILTER ?=
+E2E_GINKGO_LABEL_FILTER_ARG = $(if $(E2E_GINKGO_LABEL_FILTER),-ginkgo.label-filter="$(E2E_GINKGO_LABEL_FILTER)",)
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -196,7 +197,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG)
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG)
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

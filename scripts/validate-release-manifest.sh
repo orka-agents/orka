@@ -52,7 +52,7 @@ done
 
 cd "${repo_root}"
 if [[ -z "${release_tag}" ]]; then
-  release_tag="$(awk '$1 == "VERSION" && $2 == ":=" { print $3; exit }' Makefile)"
+  release_tag="$(awk '$1 == "VERSION" && ($2 == ":=" || $2 == "?=") { print $3; exit }' Makefile)"
 fi
 [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]] || \
   die "release tag must match vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N; got ${release_tag}"

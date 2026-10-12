@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	distributionref "github.com/distribution/reference"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -641,6 +642,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
 		container.Image = b.AIWorkerImage
+		container.ImagePullPolicy = platformImagePullPolicy(container.Image)
 		container.Command = []string{workerBinaryPath}
 		container.Args = []string{"--mode=ai"}
 	case corev1alpha1.TaskTypeContainer:
@@ -674,6 +676,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			}
 		} else {
 			container.Image = b.GeneralWorkerImage
+			container.ImagePullPolicy = platformImagePullPolicy(container.Image)
 			container.Command = []string{workerBinaryPath}
 			// Pass the user command as args to the worker binary
 			workerArgs := make([]string, 0, len(task.Spec.Command)+len(task.Spec.Args))
@@ -690,6 +693,17 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 	})
 
 	return container, nil
+}
+
+// platformImagePullPolicy refreshes mutable platform images and caches valid digest references.
+func platformImagePullPolicy(image string) corev1.PullPolicy {
+	named, err := distributionref.ParseNormalizedNamed(image)
+	if err == nil {
+		if _, pinned := named.(distributionref.Digested); pinned {
+			return corev1.PullIfNotPresent
+		}
+	}
+	return corev1.PullAlways
 }
 
 func resolveExecution(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *corev1alpha1.ExecutionSpec {
@@ -1752,7 +1766,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	initContainer := corev1.Container{
 		Name:            "fetch-session",
 		Image:           b.InitImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.InitImage),
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{"sh", "-c", sessionTranscriptFetchCommand()},
 		Env: []corev1.EnvVar{
@@ -2196,7 +2210,7 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 	initContainer := corev1.Container{
 		Name:            workspacePreparationInitContainerName,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{workerBinaryPath},
 		Args:            []string{"--prepare-workspace-only"},
@@ -2225,7 +2239,7 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationNetworkProbeContainer,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{workerBinaryPath},
 		Args: []string{
@@ -2250,7 +2264,7 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationNetworkGateContainer,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{workerBinaryPath},
 		Args: []string{
@@ -2307,7 +2321,7 @@ func (b *JobBuilder) addRepositoryMonitorValidationCommand(job *batchv1.Job, tas
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationCommandContainer,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{workerBinaryPath},
 		Args: []string{
