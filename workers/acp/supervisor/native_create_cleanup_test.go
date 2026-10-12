@@ -159,11 +159,14 @@ func TestSupervisorNativeCreateRejectPreservesPreexistingFrozenJournal(t *testin
 }
 
 func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
-	for _, mode := range []string{"native", "ordinary"} {
+	for _, mode := range []string{"native", "ordinary", "ordinary-delete"} {
 		t.Run(mode, func(t *testing.T) {
+			if mode == "ordinary-delete" && runtime.GOOS != "linux" {
+				t.Skip("explicit descendant exit proof requires Linux")
+			}
 			fixture := newNativeCreateFixture(t, "native-resume-reject-held")
 			var unrelatedJournal string
-			if mode == "ordinary" {
+			if mode != "native" {
 				fixture.request.NativeRestore = nil
 				fixture.server.cfg.Provider.AuthMethodID = "unsupported-test-auth"
 				sealRequest(t, &fixture.request.Metadata.RequestDigest, fixture.request)
@@ -185,7 +188,7 @@ func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
 			fixture.server.mu.Lock()
 			state := fixture.server.sessions[fixture.request.RuntimeSessionID]
 			fixture.server.mu.Unlock()
-			if state == nil || state.runtime == nil || state.nativeInstallUnresolved == nil || state.creating || isDrainCleanupState(state) {
+			if state == nil || state.runtime == nil || state.creating || isDrainCleanupState(state) {
 				t.Fatal("unproven initialization lost its stopped runtime or retained evidence")
 			}
 			if _, err := state.runtime.StartPrompt(t.Context(), "after-failed-create", "digest", []acp.ContentBlock{acp.Text("continue")}); err == nil {
@@ -201,6 +204,7 @@ func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
 			if status.Lifecycle != harnessv2.SupervisorLifecycleTerminating || status.Drain.AcceptingNewSessions {
 				t.Fatal("unproven initialization left pool admission open")
 			}
+			assertRetainedCreateClassification(t, state, status, mode)
 			remaining := fixture.cfg.UIDAllocator.Remaining()
 			replay := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
 			if replay.Code != response.Code || replay.Body.String() != response.Body.String() || fixture.cfg.UIDAllocator.Remaining() != remaining {
@@ -211,9 +215,27 @@ func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("failed initialization did not kill its adapter")
 			}
-			assertRetainedCreateCleanup(t, fixture, mode, plan, unrelatedJournal)
-
+			if mode == "ordinary-delete" {
+				assertRetainedCreateDeletion(t, fixture, mode)
+				assertUnrelatedNativeJournalPreserved(t, unrelatedJournal)
+			} else {
+				assertRetainedCreateCleanup(t, fixture, mode, plan, unrelatedJournal)
+			}
 		})
+	}
+}
+
+func assertRetainedCreateClassification(t *testing.T, state *sessionState, status harnessv2.StatusResponse, mode string) {
+	t.Helper()
+	if len(status.Sessions) != 1 || status.Sessions[0].State != harnessv2.RuntimeSessionStatePoisoned {
+		t.Fatal("failed create did not retain a poisoned runtime")
+	}
+	if mode == "native" {
+		if state.nativeInstallUnresolved == nil || state.createCleanupUnproven != nil || !status.Sessions[0].NativeInstallUnresolved {
+			t.Fatal("native initialization lost its unresolved installation classification")
+		}
+	} else if state.nativeInstallUnresolved != nil || state.createCleanupUnproven == nil || status.Sessions[0].NativeInstallUnresolved {
+		t.Fatal("ordinary initialization was incorrectly classified as an unresolved native installation")
 	}
 }
 
@@ -228,30 +250,60 @@ func assertRetainedCreateCleanup(t *testing.T, fixture *nativeCreateFixture, mod
 	if runtime.GOOS != "linux" && closeErr == nil {
 		t.Fatal("close skipped the retained child instead of checking exit proof")
 	}
-	if _, err := os.Stat(fixture.paths.Root); err != nil {
-		t.Fatal("shutdown discarded unproven create evidence")
+	if mode == "native" || runtime.GOOS != "linux" {
+		if _, err := os.Stat(fixture.paths.Root); err != nil {
+			t.Fatal("shutdown discarded retained create evidence")
+		}
+	} else if _, err := os.Lstat(fixture.paths.Root); !os.IsNotExist(err) {
+		t.Fatal("shutdown retained ordinary private files after proven child exit")
 	}
 	if mode == "native" && !bytes.Equal(plan, readNativeJournalFile(t, fixture.journal, "plan.json")) {
 		t.Fatal("shutdown discarded the native install plan")
 	}
-	if runtime.GOOS == "linux" {
-		deletion := harnessv2.DeleteRuntimeSessionRequest{Protocol: harnessv2.ProtocolVersion, Metadata: testMetadata(fixture.request.Metadata.Fence, "delete-failed-native", false), Reason: "cleanup after proven exit"}
-		sealRequest(t, &deletion.Metadata.RequestDigest, deletion)
-		deleted := performMutation(t, fixture.server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", deletion, fixture.cfg)
-		if deleted.Code != http.StatusOK {
-			t.Fatalf("explicit retained runtime delete: %d %s", deleted.Code, deleted.Body.String())
-		}
-		if mode == "native" {
-			assertNativeCreatePathsAbsent(t, fixture)
-		} else if _, err := os.Lstat(fixture.paths.Root); !os.IsNotExist(err) {
-			t.Fatal("proven ordinary cleanup retained its private runtime home")
-		}
+	if mode == "native" && runtime.GOOS == "linux" {
+		assertRetainedCreateDeletion(t, fixture, mode)
 	}
-	if mode == "ordinary" {
-		preserved, err := os.ReadFile(unrelatedJournal)
-		if err != nil || string(preserved) != "preserve unrelated native evidence" {
-			t.Fatal("ordinary cleanup changed unrelated native evidence")
-		}
+
+	if mode != "native" {
+		assertUnrelatedNativeJournalPreserved(t, unrelatedJournal)
+	}
+}
+
+func assertRetainedCreateDeletion(t *testing.T, fixture *nativeCreateFixture, mode string) {
+	t.Helper()
+	deletion := harnessv2.DeleteRuntimeSessionRequest{Protocol: harnessv2.ProtocolVersion, Metadata: testMetadata(fixture.request.Metadata.Fence, "delete-failed-native", false), Reason: "cleanup after proven exit"}
+	sealRequest(t, &deletion.Metadata.RequestDigest, deletion)
+	deleted := performMutation(t, fixture.server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", deletion, fixture.cfg)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("explicit retained runtime delete: %d %s", deleted.Code, deleted.Body.String())
+	}
+	if mode == "native" {
+		assertNativeCreatePathsAbsent(t, fixture)
+	} else if _, err := os.Lstat(fixture.paths.Root); !os.IsNotExist(err) {
+		t.Fatal("proven ordinary cleanup retained its private runtime home")
+	}
+	var response harnessv2.DeleteRuntimeSessionResponse
+	if err := json.Unmarshal(deleted.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Validate(); err != nil {
+		t.Fatalf("retained runtime delete response: %v", err)
+	}
+	if len(fixture.server.status().Sessions) != 0 {
+		t.Fatal("explicit delete did not remove the exact retained runtime")
+	}
+	remaining := fixture.cfg.UIDAllocator.Remaining()
+	replay := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
+	if replay.Code != http.StatusConflict || fixture.cfg.UIDAllocator.Remaining() != remaining {
+		t.Fatal("deleted failed create replay allocated another identity")
+	}
+}
+
+func assertUnrelatedNativeJournalPreserved(t *testing.T, path string) {
+	t.Helper()
+	preserved, err := os.ReadFile(path)
+	if err != nil || string(preserved) != "preserve unrelated native evidence" {
+		t.Fatal("ordinary cleanup changed unrelated native evidence")
 	}
 }
 

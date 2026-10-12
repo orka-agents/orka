@@ -252,12 +252,12 @@ func retainsNativeCaptureEvidence(state *sessionState) bool {
 }
 
 const nativeInstallUnknownMessage = "native installation outcome is unknown; original plan and private destination retained"
-const nativeCreateCleanupUnprovenMessage = "native runtime creation cleanup could not be proven; private home and original journal retained"
+const createCleanupUnprovenMessage = "runtime creation cleanup could not be proven; private home retained"
 
-type nativeCreateCleanupUnprovenError struct{ Err error }
+type createCleanupUnprovenError struct{ Err error }
 
-func (e *nativeCreateCleanupUnprovenError) Error() string { return e.Err.Error() }
-func (e *nativeCreateCleanupUnprovenError) Unwrap() error { return e.Err }
+func (e *createCleanupUnprovenError) Error() string { return e.Err.Error() }
+func (e *createCleanupUnprovenError) Unwrap() error { return e.Err }
 
 // Only an unstarted or provably stopped writer permits this cleanup. A journal
 // that predates this create may bind another private destination and is retained.
@@ -279,7 +279,7 @@ func isNativeInstallUnknown(err error) bool {
 	return unknown
 }
 
-func (s *Server) retainUnresolvedNativeInstall(state *sessionState, request harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, runtime *acp.RuntimeSession, message string, now time.Time) {
+func (s *Server) retainUnresolvedCreate(state *sessionState, request harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, runtime *acp.RuntimeSession, message string, now time.Time) {
 	s.mu.Lock()
 	state.paths = paths
 	state.runtime = runtime
@@ -290,11 +290,20 @@ func (s *Server) retainUnresolvedNativeInstall(state *sessionState, request harn
 	state.creating = false
 	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
 	state.descriptor.LastTransitionAt = now
-	state.nativeInstallUnresolved = &failedCreateReplay{
+	replay := &failedCreateReplay{
 		operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
 		statusCode: http.StatusConflict, code: harnessv2.ErrorCodeCleanupUnproven, message: message,
 	}
-	cleanup := s.poisonPoolLocked("native_install_outcome_unknown")
+	poisonReason := "runtime_create_cleanup_unproven"
+	if request.NativeRestore != nil {
+		state.nativeInstallUnresolved = replay
+		poisonReason = "native_install_outcome_unknown"
+	} else {
+		// Ordinary cleanup remains visible to the controller's exact-runtime
+		// deletion path; it must not claim an unknown native installation.
+		state.createCleanupUnproven = replay
+	}
+	cleanup := s.poisonPoolLocked(poisonReason)
 	s.mu.Unlock()
 	s.startDrainCleanup(cleanup)
 }

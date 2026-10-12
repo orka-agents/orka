@@ -240,6 +240,7 @@ func sessionCreationStage(err error) string {
 type sessionState struct {
 	supportsNativeSessions  bool
 	nativeInstallUnresolved *failedCreateReplay
+	createCleanupUnproven   *failedCreateReplay
 	nativeInstallJournal    string
 	id                      harnessv2.RuntimeSessionID
 	runtime                 *acp.RuntimeSession
@@ -801,7 +802,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if classification.Class == harnessv2.RequestClassificationDuplicate && !existing.creating {
-			if replay := existing.nativeInstallUnresolved; replay != nil {
+			replay := existing.nativeInstallUnresolved
+			if replay == nil {
+				replay = existing.createCleanupUnproven
+			}
+			if replay != nil {
 				s.mu.Unlock()
 				writeError(w, replay.statusCode, replay.code, replay.message, nil, replay.retryable)
 				return
@@ -878,13 +883,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
 	if createErr != nil {
 		if isNativeInstallUnknown(createErr) && paths.Root != "" {
-			s.retainUnresolvedNativeInstall(state, request, paths, nil, nativeInstallUnknownMessage, now)
+			s.retainUnresolvedCreate(state, request, paths, nil, nativeInstallUnknownMessage, now)
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeInstallUnknownMessage, nil, false)
 			return
 		}
-		if _, retained := errors.AsType[*nativeCreateCleanupUnprovenError](createErr); retained && paths.Root != "" {
-			s.retainUnresolvedNativeInstall(state, request, paths, runtimeSession, nativeCreateCleanupUnprovenMessage, now)
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeCreateCleanupUnprovenMessage, nil, false)
+		if _, retained := errors.AsType[*createCleanupUnprovenError](createErr); retained && paths.Root != "" {
+			s.retainUnresolvedCreate(state, request, paths, runtimeSession, createCleanupUnprovenMessage, now)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, createCleanupUnprovenMessage, nil, false)
 			return
 		}
 		// The allocated UID/GID is permanently consumed (identities are never
@@ -980,7 +985,7 @@ func (s *Server) createSession(
 		}
 		if cleanupErr := cleanupFailedNativeCreate(paths, nativeJournalDir, ownsNativeJournal); cleanupErr != nil {
 			resultPaths = paths
-			resultErr = sessionCreationFailed("native create filesystem cleanup", &nativeCreateCleanupUnprovenError{Err: errors.Join(resultErr, cleanupErr)})
+			resultErr = sessionCreationFailed("native create filesystem cleanup", &createCleanupUnprovenError{Err: errors.Join(resultErr, cleanupErr)})
 		}
 	}()
 	// Under a durable workspace root, the repository workspace of one logical
@@ -1289,7 +1294,7 @@ func (s *Server) createSession(
 	if err != nil {
 		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
 			cleanup = false
-			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &nativeCreateCleanupUnprovenError{Err: err})
+			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &createCleanupUnprovenError{Err: err})
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
@@ -1319,7 +1324,7 @@ func (s *Server) createSession(
 			if deleteErr != nil || !cleanupResult.Proven {
 				if request.NativeRestore != nil {
 					cleanup = false
-					return runtimeSession, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", &nativeCreateCleanupUnprovenError{Err: errors.Join(commitErr, deleteErr)})
+					return runtimeSession, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", &createCleanupUnprovenError{Err: errors.Join(commitErr, deleteErr)})
 				}
 				s.poisonPool("durable_commit_session_cleanup_unproven")
 			}
@@ -1590,7 +1595,7 @@ func (s *Server) startDrainCleanup(cleanup []drainCleanupCandidate) {
 }
 
 func isDrainCleanupState(state *sessionState) bool {
-	if state == nil || retainsNativeCaptureEvidence(state) {
+	if state == nil || state.createCleanupUnproven != nil || retainsNativeCaptureEvidence(state) {
 		return false
 	}
 	switch state.descriptor.State {
