@@ -47,8 +47,8 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
-	var a map[string]any
-	if err := json.Unmarshal(args, &a); err != nil {
+	a, err := decodeUpdateAgentArgs(args)
+	if err != nil {
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
@@ -126,4 +126,35 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, messageField: "Agent updated"})
+}
+
+// decodeUpdateAgentArgs preserves temperature's exact number text until bounds
+// validation. Other arguments retain their existing float64 decoding, and model
+// strings and null values keep their existing behavior.
+func decodeUpdateAgentArgs(args json.RawMessage) (map[string]any, error) {
+	var values map[string]any
+	if err := json.Unmarshal(args, &values); err != nil {
+		return nil, err
+	}
+	model, ok := values[modelField].(map[string]any)
+	if !ok {
+		return values, nil
+	}
+	if _, numeric := model["temperature"].(float64); !numeric {
+		return values, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(args, &raw); err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw[modelField], &fields); err != nil {
+		return nil, err
+	}
+	var temperature json.Number
+	if err := json.Unmarshal(fields["temperature"], &temperature); err != nil {
+		return nil, err
+	}
+	model["temperature"] = temperature
+	return values, nil
 }
