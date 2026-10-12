@@ -218,6 +218,7 @@ type usageWorkflowFixture struct {
 	reconciler *controller.RepositoryMonitorReconciler
 	tasks      *controller.TaskReconciler
 	github     *usageWorkflowGitHub
+	transport  *http.Transport
 	url        string
 	stopAPI    context.CancelFunc
 	apiDone    chan error
@@ -232,8 +233,11 @@ func newUsageWorkflowFixture(t *testing.T) *usageWorkflowFixture {
 	f := &usageWorkflowFixture{
 		dbPath: filepath.Join(t.TempDir(), "usage.db"), scheme: runtime.NewScheme(),
 		startedAt: time.Now().UTC().Add(-time.Minute),
+		transport: http.DefaultTransport.(*http.Transport).Clone(),
 		viewer:    "fixture-viewer-" + t.Name(), outsider: "fixture-outsider-" + t.Name(),
 	}
+	// Do not let pooled fixture connections outlive requests and delay API shutdown.
+	f.transport.DisableKeepAlives = true
 	for _, add := range []func(*runtime.Scheme) error{
 		corev1alpha1.AddToScheme, corev1.AddToScheme, batchv1.AddToScheme, rbacv1.AddToScheme, authenticationv1.AddToScheme,
 	} {
@@ -371,7 +375,7 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 				return true
 			default:
 			}
-			response, err := (&http.Client{Timeout: time.Second}).Get(f.url + "/readyz")
+			response, err := (&http.Client{Transport: f.transport, Timeout: time.Second}).Get(f.url + "/readyz")
 			if err != nil {
 				return false
 			}
@@ -421,7 +425,7 @@ func (f *usageWorkflowFixture) request(t *testing.T, method, path, bearer string
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	response, err := (&http.Client{Transport: f.transport, Timeout: 10 * time.Second}).Do(req)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, response.Body.Close()) }()
 	data, err := io.ReadAll(response.Body)
@@ -445,7 +449,7 @@ func (f *usageWorkflowFixture) submitIssueWebhook(t *testing.T, want int) {
 	req.Header.Set("X-GitHub-Event", "issues")
 	req.Header.Set("X-GitHub-Delivery", "usage-issue-delivery")
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	response, err := (&http.Client{Transport: f.transport, Timeout: 5 * time.Second}).Do(req)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, response.Body.Close()) }()
 	data, err := io.ReadAll(response.Body)
@@ -579,7 +583,7 @@ func (f *usageWorkflowFixture) runDelegatedWorker(
 	t.Setenv(workerenv.ServiceAccountToken, "")
 	bearerPath := filepath.Join(t.TempDir(), "bearer")
 	require.NoError(t, os.WriteFile(bearerPath, []byte("usage-worker-fixture"), 0o600))
-	transport := &usageWorkflowTransport{base: http.DefaultTransport}
+	transport := &usageWorkflowTransport{base: f.transport}
 	recorder := common.NewHTTPEventRecorder(common.HTTPEventRecorderConfig{
 		ControllerURL: f.url, Namespace: child.Namespace, TaskName: child.Name, BearerPath: bearerPath,
 		Client: &http.Client{Transport: transport, Timeout: 5 * time.Second},
