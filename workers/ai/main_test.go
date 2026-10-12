@@ -947,7 +947,8 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	if strings.Contains(string(data), "sk-test12345678901234567890") {
 		t.Fatalf("AI worker events leaked fake API key: %s", data)
 	}
-	var sawTelemetryProvider bool
+	// The task trace reads the "provider" and "model" content keys.
+	var sawResponseTelemetry bool
 	for _, event := range recorder.Events() {
 		if event.Type != events.ExecutionEventTypeModelRequestCompleted {
 			continue
@@ -956,13 +957,13 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 		if err := json.Unmarshal(event.Content, &content); err != nil {
 			t.Fatalf("unmarshal model event content: %v", err)
 		}
-		if content["provider"] == "azure.ai.openai" {
-			sawTelemetryProvider = true
+		if content["provider"] == "azure.ai.openai" && content["model"] == "test-model" {
+			sawResponseTelemetry = true
 			break
 		}
 	}
-	if !sawTelemetryProvider {
-		t.Fatalf("model completion event did not preserve response provider: %#v", recorder.Events())
+	if !sawResponseTelemetry {
+		t.Fatalf("model completion event did not preserve response provider and model: %#v", recorder.Events())
 	}
 }
 

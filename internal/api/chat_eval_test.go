@@ -45,7 +45,8 @@ const (
 	chatEvalProviderType = "chat-eval-scripted"
 	chatEvalNamespace    = "team-eval"
 	// chatEvalMaxModelContextBytes bounds the system prompt plus tool schemas
-	// sent on every chat turn. Raise it deliberately when the prompt must grow.
+	// for the seeded eval fixture, not every possible namespace. Raise it
+	// deliberately when that fixture or its prompt must grow.
 	chatEvalMaxModelContextBytes = 40000
 )
 
@@ -285,7 +286,7 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 }
 
 // Names followed by = or : are tool arguments such as wait_timeout="30m".
-var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get)_[a-z]+(?:_[a-z]+)*)\b(\s*[=:])?`)
+var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file)_[a-z]+(?:_[a-z]+)*)\b(\s*[=:])?`)
 
 // TestChatEvalPromptToolReferencesExist catches prompt or tool-description text
 // that still names a renamed or removed tool. Coordinator-only tools may be mentioned because the
@@ -295,10 +296,6 @@ func TestChatEvalPromptToolReferencesExist(t *testing.T) {
 	provider, _ := runChatEvalTurn(t, c, ChatRequest{Message: "hello"}, &llm.CompletionResponse{Content: "ok"})
 	req := provider.requests[0]
 
-	known := map[string]bool{}
-	for _, name := range chattools.KnownBuiltInToolNames() {
-		known[name] = true
-	}
 	offered := map[string]bool{}
 	for _, tool := range req.Tools {
 		offered[tool.Name] = true
@@ -312,14 +309,41 @@ func TestChatEvalPromptToolReferencesExist(t *testing.T) {
 	for _, tool := range req.Tools {
 		text = append(text, tool.Description)
 	}
+	require.Empty(t, chatEvalUnknownToolReferences(strings.Join(text, "\n")),
+		"prompt or tool descriptions name tools that are not registered anywhere")
+}
+
+func chatEvalUnknownToolReferences(text string) []string {
+	known := map[string]bool{}
+	for _, name := range chattools.KnownBuiltInToolNames() {
+		known[name] = true
+	}
 	var stale []string
-	for _, m := range chatEvalToolMentionPattern.FindAllStringSubmatch(strings.Join(text, "\n"), -1) {
+	for _, m := range chatEvalToolMentionPattern.FindAllStringSubmatch(text, -1) {
 		name, isArgument := m[1], m[2] != ""
 		if !isArgument && !known[name] && !slices.Contains(stale, name) {
 			stale = append(stale, name)
 		}
 	}
-	require.Empty(t, stale, "prompt or tool descriptions name tools that are not registered anywhere")
+	return stale
+}
+
+func TestChatEvalUnknownToolReferences(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want []string
+	}{
+		{name: "registered worker tools", text: "Use code_exec, web_fetch, file_read, and file_write."},
+		{name: "stale code tool", text: "Use code_missing_tool.", want: []string{"code_missing_tool"}},
+		{name: "stale web tool", text: "Use web_missing_tool.", want: []string{"web_missing_tool"}},
+		{name: "stale file tool", text: "Use file_missing_tool.", want: []string{"file_missing_tool"}},
+		{name: "arguments are not tools", text: `file_path="x" wait_timeout: "30m"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, chatEvalUnknownToolReferences(tt.text))
+		})
+	}
 }
 
 func TestChatEvalModelContextBudget(t *testing.T) {
@@ -379,6 +403,10 @@ func TestChatEvalModelDecisionsFailFast(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := chatEvalCluster(t, defaultNamespace)
+			var agentsBefore corev1alpha1.AgentList
+			var tasksBefore corev1alpha1.TaskList
+			require.NoError(t, c.List(context.Background(), &agentsBefore))
+			require.NoError(t, c.List(context.Background(), &tasksBefore))
 			_, resp := runChatEvalTurn(t, c, ChatRequest{Message: "eval"},
 				&llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "eval-call", Name: tt.tool, Arguments: json.RawMessage(tt.args)}}},
 				&llm.CompletionResponse{Content: "done"},
@@ -392,6 +420,14 @@ func TestChatEvalModelDecisionsFailFast(t *testing.T) {
 			}
 			rejected := !result.Success && strings.TrimSpace(result.Error) != ""
 			expectChatEvalCheck(t, rejected, "tool accepted the decision", tt.knownDefect)
+			if rejected {
+				var agentsAfter corev1alpha1.AgentList
+				var tasksAfter corev1alpha1.TaskList
+				require.NoError(t, c.List(context.Background(), &agentsAfter))
+				require.NoError(t, c.List(context.Background(), &tasksAfter))
+				require.Equal(t, agentsBefore.Items, agentsAfter.Items, "rejected call changed Agents")
+				require.Equal(t, tasksBefore.Items, tasksAfter.Items, "rejected call changed Tasks")
+			}
 		})
 	}
 }
