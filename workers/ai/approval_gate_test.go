@@ -2756,3 +2756,57 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 		t.Fatalf("a locally executed tool must keep the full digest: got %q err = %v", got, err)
 	}
 }
+
+func TestRequestApprovalRawArgumentsFailClosed(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	customTools := map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool}
+	baseToolCtx := &toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"}
+	target, err := explicitApprovalTargetForCall(context.Background(), llm.ToolCall{
+		Arguments: json.RawMessage(`{"action":"dispatch","targetTool":"dispatch_work_order","targetArguments":{}}`),
+	}, customTools, baseToolCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resolved := range []bool{false, true} {
+		for _, tt := range []struct {
+			name string
+			args string
+		}{
+			{"duplicate action", `{"action":"dispatch","action":"dispatch",` +
+				`"targetTool":"dispatch_work_order","targetArguments":"{}"}`},
+			{"duplicate nested key", `{"action":"dispatch","targetTool":"dispatch_work_order",` +
+				`"targetArguments":"{\"x\":1,\"x\":2}"}`},
+			{"invalid Unicode", `{"action":"\ud800","targetTool":"dispatch_work_order","targetArguments":"{}"}`},
+		} {
+			t.Run(fmt.Sprintf("resolved=%v/%s", resolved, tt.name), func(t *testing.T) {
+				gate := &approvalGate{namespace: "default", taskName: "incident-task", taskUID: "task-uid-1"}
+				if resolved {
+					gate.resolved = []approvals.ResolvedApproval{resolvedApprovalForTarget(target)}
+				}
+				toolName := "request_approval"
+				if resolved {
+					toolName = " request_approval "
+				}
+				calls := []llm.ToolCall{{ID: "malformed", Name: toolName, Arguments: json.RawMessage(tt.args)}}
+				recorder := common.NewFakeEventRecorder()
+				messages, result, stop, continueLLM, err := processApprovalBatch(context.Background(), nil, calls,
+					gate, map[string]struct{}{"request_approval": {}}, customTools, recorder, baseToolCtx)
+				if err != nil || stop || !continueLLM || result != "" || len(messages) != 1 {
+					t.Fatalf("invalid raw call did not return validation: messages=%v result=%q stop=%v continue=%v err=%v",
+						messages, result, stop, continueLLM, err)
+				}
+				if strings.Contains(messages[0].Content, "already approved") {
+					t.Fatal("malformed raw call matched an existing approval")
+				}
+				for _, event := range recorder.Events() {
+					if event.Type == events.ExecutionEventTypeApprovalRequested {
+						t.Fatal("malformed raw call emitted approval request")
+					}
+				}
+			})
+		}
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,8 +69,8 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
-	var a map[string]any
-	if err := json.Unmarshal(args, &a); err != nil {
+	a, err := decodeChatCreateAgentArgs(args)
+	if err != nil {
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
@@ -108,10 +109,12 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			name := chatGetStringArg(m, nameField)
 			provider := chatGetStringArg(m, "provider")
 			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: name, Provider: provider}
-			if temp, ok := m["temperature"]; ok {
-				if tempF, ok := temp.(float64); ok {
-					agent.Spec.Model.Temperature = &tempF
+			if raw, supplied := m["temperature"]; supplied && raw != nil {
+				temperature, err := parseChatAgentTemperature(raw)
+				if err != nil {
+					return ChatToolErrorResult("invalid_arguments", err.Error(), "Use model.temperature between 0 and 2, or omit it.")
 				}
+				agent.Spec.Model.Temperature = &temperature
 			}
 			if raw, supplied := m["contextWindow"]; supplied {
 				contextWindow, err := parsePositiveAgentModelInt32("model.contextWindow", raw)
@@ -214,6 +217,113 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created"})
+}
+
+// decodeChatCreateAgentArgs preserves the number text only for fields whose
+// bounds must be checked before narrowing. Other fields retain json.Unmarshal's
+// float64 decoding, including model limits and coordination's existing parser.
+func decodeChatCreateAgentArgs(args json.RawMessage) (map[string]any, error) {
+	var values map[string]any
+	if err := json.Unmarshal(args, &values); err != nil {
+		return nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(args, &raw); err != nil {
+		return nil, err
+	}
+	for _, field := range [][2]string{{modelField, "temperature"}, {runtimeField, "defaultMaxTurns"}} {
+		object, ok := values[field[0]].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, numeric := object[field[1]].(float64); !numeric {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw[field[0]], &fields); err != nil {
+			return nil, err
+		}
+		var number json.Number
+		if err := json.Unmarshal(fields[field[1]], &number); err != nil {
+			return nil, err
+		}
+		object[field[1]] = number
+	}
+	return values, nil
+}
+
+func chatAgentNumber(raw any) (json.Number, bool) {
+	var text string
+	switch value := raw.(type) {
+	case json.Number:
+		text = value.String()
+	case string:
+		text = strings.TrimSpace(value)
+	case float64:
+		text = strconv.FormatFloat(value, 'g', -1, 64)
+	default:
+		return "", false
+	}
+	return json.Number(text), jsonNumberPattern.MatchString(text)
+}
+
+func parseChatAgentDefaultMaxTurns(raw any) (int32, error) {
+	number, ok := chatAgentNumber(raw)
+	if ok {
+		text, got := canonicalJSONInteger(number.String())
+		if got == "" {
+			turns, err := strconv.ParseInt(text, 10, 64)
+			// Mirror the Agent CRD's 1..1000 bounds before converting to int32.
+			if err == nil && turns >= minMaxTurns && turns <= maxMaxTurns {
+				return int32(turns), nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("runtime.defaultMaxTurns must be a whole number between %d and %d", minMaxTurns, maxMaxTurns)
+}
+
+func parseChatAgentTemperature(raw any) (float64, error) {
+	number, ok := chatAgentNumber(raw)
+	if ok && chatAgentTemperatureInRange(number.String()) {
+		if temperature, err := number.Float64(); err == nil {
+			return temperature, nil
+		}
+	}
+	return 0, fmt.Errorf("model.temperature must be a number between 0 and 2")
+}
+
+// chatAgentTemperatureInRange checks a valid JSON number's exact decimal value.
+// Comparing its decimal magnitude avoids both float64 boundary rounding and
+// allocating an arbitrary-precision rational for attacker-supplied exponents.
+func chatAgentTemperatureInRange(text string) bool {
+	mantissa, exponent, _ := strings.Cut(strings.ToLower(text), "e")
+	mantissa, negative := strings.CutPrefix(mantissa, "-")
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return true // Any spelling of zero, including negative zero.
+	}
+	if negative {
+		return false
+	}
+	exp := 0
+	if exponent != "" {
+		var err error
+		exp, err = strconv.Atoi(exponent)
+		if err != nil {
+			// An exponent beyond the machine integer range dwarfs the
+			// mantissa: a nonzero value is either below 2 or above it.
+			return strings.HasPrefix(exponent, "-")
+		}
+	}
+	// The value is digits * 10^(exp-len(fraction)). A value with exactly
+	// one whole digit needs a coefficient comparison; all others are
+	// strictly below or above 2. Compare exponents without adding them.
+	boundaryExp := len(fraction) - len(digits) + 1
+	if exp != boundaryExp {
+		return exp < boundaryExp
+	}
+	return digits[0] < '2' || (digits[0] == '2' && strings.Trim(digits[1:], "0") == "")
 }
 
 // requireExistingProvider rejects a providerRef that names no Provider, so the
@@ -429,9 +539,13 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent, mode execut
 	if agent.Spec.Model != nil {
 		agent.Spec.Model.Provider = ""
 	}
-	if maxTurns, ok := rtMap["defaultMaxTurns"].(float64); ok && maxTurns > 0 {
-		maxTurnsInt := int32(maxTurns)
-		agent.Spec.Runtime.DefaultMaxTurns = &maxTurnsInt
+	if raw, supplied := rtMap["defaultMaxTurns"]; supplied && raw != nil {
+		maxTurns, err := parseChatAgentDefaultMaxTurns(raw)
+		if err != nil {
+			result, _ := ChatToolErrorResult("invalid_arguments", err.Error(), "Use a whole-number runtime.defaultMaxTurns between 1 and 1000, or omit it.")
+			return result, false
+		}
+		agent.Spec.Runtime.DefaultMaxTurns = &maxTurns
 	}
 	_, allowedToolsSupplied := rtMap["defaultAllowedTools"]
 	if allowedToolsSupplied {

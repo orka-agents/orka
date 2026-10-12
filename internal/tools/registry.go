@@ -420,11 +420,11 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	// arguments as sent, before decoding stringified objects collapses
 	// duplicate keys.
 	call := func(ctx context.Context) (string, error) {
-		normalized, err := normalizeArgTypes(tool, args)
+		normalized, err := NormalizeToolArguments(tool, args)
 		if err != nil {
 			return "", err
 		}
-		return tool.Execute(ctx, decodeStringifiedObjectArgs(tool, normalized))
+		return tool.Execute(ctx, normalized)
 	}
 	if telemetryDisabled() {
 		if !ok {
@@ -882,6 +882,17 @@ func KnownBuiltInToolNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// NormalizeToolArguments validates the original JSON before applying the same
+// type and stringified-object normalization used by Registry.Execute. Consumers
+// comparing a call to a recorded decision can use it without executing the tool.
+func NormalizeToolArguments(tool Tool, args json.RawMessage) (json.RawMessage, error) {
+	normalized, err := normalizeArgTypes(tool, args)
+	if err != nil {
+		return nil, err
+	}
+	return decodeStringifiedObjectArgs(tool, normalized), nil
 }
 
 // decodeStringifiedObjectArgs replaces top-level arguments that the tool schema
