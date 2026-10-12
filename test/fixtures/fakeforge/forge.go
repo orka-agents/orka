@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/cgi"
 	"os"
@@ -83,6 +84,7 @@ var surfaceRoles = map[string][]string{
 const maxUploadPackRequest = 8 << 20
 
 var (
+	commitSHAPattern  = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 	repositoryPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*$`)
 	gitPathPattern    = regexp.MustCompile(`^/([a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*)\.git(/.*)$`)
 )
@@ -222,6 +224,9 @@ func (s *Server) Handler() http.Handler {
 			return
 		case r.URL.Path == "/fake/file":
 			s.serveFile(recorder, r)
+			return
+		case r.URL.Path == "/fake/commit":
+			s.serveCommit(recorder, r)
 			return
 		case strings.HasPrefix(r.URL.Path, apiPrefix+"/"):
 			role, ok := s.authorize(recorder, r, SurfaceAPI)
@@ -524,9 +529,12 @@ func (s *Server) renderPull(ctx context.Context, pull *pullRequest) (map[string]
 
 // State is the fixture's observable state for test assertions.
 type State struct {
-	Branches map[string]map[string]string `json:"branches"`
-	Pulls    []PullState                  `json:"pulls"`
-	Requests []RequestRecord              `json:"requests"`
+	// Repositories maps each repository to the numeric ID the REST API
+	// reports.
+	Repositories map[string]int64             `json:"repositories"`
+	Branches     map[string]map[string]string `json:"branches"`
+	Pulls        []PullState                  `json:"pulls"`
+	Requests     []RequestRecord              `json:"requests"`
 }
 
 // PullState is one pull request as tests observe it.
@@ -547,7 +555,12 @@ func (s *Server) serveState(w http.ResponseWriter) {
 	for repository := range s.repos {
 		repositories = append(repositories, repository)
 	}
-	state := State{Branches: map[string]map[string]string{}, Requests: append([]RequestRecord(nil), s.requests...)}
+	state := State{
+		Repositories: map[string]int64{},
+		Branches:     map[string]map[string]string{},
+		Requests:     append([]RequestRecord(nil), s.requests...),
+	}
+	maps.Copy(state.Repositories, s.repos)
 	for _, pull := range s.pulls {
 		state.Pulls = append(state.Pulls, PullState(*pull))
 	}
@@ -586,6 +599,59 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write(output)
+}
+
+// CommitState is one commit as tests observe it: its tree, its parents, and
+// the paths it changed against its first parent.
+type CommitState struct {
+	SHA     string       `json:"sha"`
+	Tree    string       `json:"tree"`
+	Parents []string     `json:"parents"`
+	Files   []FileChange `json:"files"`
+}
+
+// FileChange is one path a commit changed, with git's status letter.
+type FileChange struct {
+	Status string `json:"status"`
+	Path   string `json:"path"`
+}
+
+// serveCommit describes one commit so tests can check exactly what was
+// published.
+func (s *Server) serveCommit(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	repository, sha := query.Get("repo"), query.Get("sha")
+	if !s.known(repository) || !commitSHAPattern.MatchString(sha) {
+		http.NotFound(w, r)
+		return
+	}
+	bare := s.bare(repository)
+	output, err := s.run(r.Context(), "--git-dir", bare, "show", "--no-patch", "--format=%H%n%T%n%P", sha+"^{commit}")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
+	if len(lines) < 2 {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "unexpected commit format"})
+		return
+	}
+	commit := CommitState{SHA: lines[0], Tree: lines[1], Parents: []string{}, Files: []FileChange{}}
+	if len(lines) > 2 {
+		commit.Parents = strings.Fields(lines[2])
+	}
+	changes, err := s.run(r.Context(), "--git-dir", bare,
+		"diff-tree", "--no-commit-id", "--name-status", "-r", "--root", commit.SHA)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "diff-tree failed"})
+		return
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(changes)), "\n") {
+		if status, path, ok := strings.Cut(line, "\t"); ok {
+			commit.Files = append(commit.Files, FileChange{Status: status, Path: path})
+		}
+	}
+	writeJSON(w, http.StatusOK, commit)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

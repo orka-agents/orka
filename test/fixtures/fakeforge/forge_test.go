@@ -239,6 +239,20 @@ func TestForgeReconcilesPullRequestsForPushedBranches(t *testing.T) {
 		t.Fatalf("state = %+v", state)
 	}
 
+	status, body = api(t, server, http.MethodGet, "/fake/commit?repo=e2e/source&sha="+pushed, "", nil)
+	var commit CommitState
+	if status != http.StatusOK || json.Unmarshal(body, &commit) != nil {
+		t.Fatalf("commit = %d %s", status, body)
+	}
+	if commit.SHA != pushed || len(commit.Tree) != 40 || len(commit.Parents) != 1 ||
+		commit.Parents[0] != state.Branches["e2e/source"]["main"] || len(commit.Files) != 0 {
+		t.Fatalf("commit = %+v, want the empty change on top of main", commit)
+	}
+	status, _ = api(t, server, http.MethodGet, "/fake/commit?repo=e2e/source&sha=HEAD", "", nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("symbolic commit status = %d, want 404", status)
+	}
+
 	status, body = api(t, server, http.MethodGet, "/fake/file?repo=e2e/source&ref=orka/e2e&path=README.md", "", nil)
 	if status != http.StatusOK || !strings.HasPrefix(string(body), "# e2e/source") {
 		t.Fatalf("file = %d %s", status, body)

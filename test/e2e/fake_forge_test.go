@@ -138,6 +138,17 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 			credentials[role] = map[string]any{"name": fakeForgeCredential(role), "key": "token"}
 		}
 
+		By("recording the credential Secret versions and the base head the Task starts from")
+		credentialVersions := map[string]string{}
+		for _, role := range fakeforge.Roles {
+			credentialVersions[role] = secretResourceVersion(fakeForgeCredential(role))
+		}
+		startingSHA := fakeForgeState().Branches[fakeForgeRepository]["main"]
+		Expect(startingSHA).To(MatchRegexp(`^[0-9a-f]{40}$`))
+		expectPublisherCannotReadSecrets(fakeForgeCredential(fakeforge.RoleRead),
+			fakeForgeCredential(fakeforge.RolePublicationRead), fakeForgeCredential(fakeforge.RolePush),
+			fakeForgeCredential(fakeforge.RoleForge))
+
 		By("creating a Codex agent and a write Task against the fake forge")
 		DeferCleanup(func() { cleanupLiveRuntimeTask(apiBaseURL, token, taskName, agentName) })
 		Expect(applyManifestJSON(runtimeAgentManifest(agentName, "codex", codexModel, 6, nil))).To(Succeed())
@@ -161,6 +172,9 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 		}
 		Expect(applyManifestJSON(task)).To(Succeed())
 
+		By("capturing the write-intent RuntimePool while the scripted turn is held")
+		snapshot := captureRuntimePoolSnapshot(waitTaskPoolName(taskName), "codex", codexModel,
+			corev1alpha1.WorkspaceIntentWrite)
 		Expect(waitForTaskCompletion(taskName, forgeTimeout)).To(Equal("Succeeded"))
 
 		By("verifying the scripted Codex edit ran through the provider proxy")
@@ -195,6 +209,60 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 			HaveField("Title", "E2E fake forge publication"),
 		)))
 		Expect(fakeForgeFile(pushBranch, writtenFile)).To(Equal(writtenLine + "\n"))
+
+		By("verifying the execution fence, the credential freeze, and the publication receipt")
+		var finished corev1alpha1.Task
+		kubectlJSON(Default, &finished, "get", "task", taskName, "-n", namespace)
+		execution := finished.Status.Execution
+		Expect(execution).NotTo(BeNil())
+		Expect(execution.State).To(Equal(corev1alpha1.TaskExecutionStateSucceeded))
+		Expect(execution.Outcome).To(Equal(corev1alpha1.TaskExecutionOutcomeSucceeded))
+		Expect(finished.Status.JobName).To(BeEmpty())
+		assertTaskFence(Default, finished, snapshot, false)
+		for _, role := range fakeforge.Roles {
+			Expect(secretResourceVersion(fakeForgeCredential(role))).To(Equal(credentialVersions[role]))
+		}
+		Expect(execution.ReadCredentialResourceVersion).To(Equal(credentialVersions[fakeforge.RoleRead]))
+		Expect(execution.PublicationReadCredentialResourceVersion).
+			To(Equal(credentialVersions[fakeforge.RolePublicationRead]))
+		Expect(execution.PublicationCredentialResourceVersion).To(Equal(credentialVersions[fakeforge.RolePush]))
+		Expect(execution.ForgeCredentialResourceVersion).To(Equal(credentialVersions[fakeforge.RoleForge]))
+
+		Expect(delivery.PublicationID).NotTo(BeEmpty())
+		for _, sha := range []string{delivery.StartingSHA, delivery.TreeSHA, delivery.ExpectedCommitSHA} {
+			Expect(sha).To(MatchRegexp(`^[0-9a-f]{40}$`))
+		}
+		Expect(delivery.ArtifactDigest).To(MatchRegexp(`^sha256:[a-f0-9]{64}$`))
+		Expect(delivery.StartingSHA).To(Equal(startingSHA))
+		Expect(delivery.RemoteBeforeSHA).NotTo(BeNil(), "the receipt must record that the branch was absent")
+		Expect(*delivery.RemoteBeforeSHA).To(BeEmpty())
+		Expect(delivery.Branch).To(Equal(pushBranch))
+		Expect(delivery.SourceRepository).NotTo(BeNil())
+		Expect(delivery.PublicationRepository).To(Equal(delivery.SourceRepository))
+		Expect(delivery.VerifiedRemoteSHA).To(Equal(delivery.ExpectedCommitSHA))
+
+		By("verifying the forge holds one new commit that adds only the scripted file")
+		commit := fakeForgeCommit(delivery.ExpectedCommitSHA)
+		Expect(commit.Tree).To(Equal(delivery.TreeSHA))
+		Expect(commit.Parents).To(Equal([]string{startingSHA}))
+		Expect(commit.Files).To(Equal([]fakeforge.FileChange{{Status: "A", Path: writtenFile}}))
+		Expect(state.Branches[fakeForgeRepository]).To(HaveKeyWithValue("main", startingSHA),
+			"publication must not move the base branch")
+
+		receipt := delivery.PRReceipt
+		Expect(receipt.Number).To(BeNumerically(">", 0))
+		Expect(receipt.ID).To(Equal(fmt.Sprintf("github:%d:%d", state.Repositories[fakeForgeRepository], receipt.Number)))
+		Expect(receipt.URL).To(Equal(fmt.Sprintf("https://%s/%s/pull/%d",
+			fakeForgeHost(), fakeForgeRepository, receipt.Number)))
+		Expect(receipt.State).To(Equal("Open"))
+		Expect(receipt.BaseBranch).To(Equal("main"))
+		Expect(receipt.HeadBranch).To(Equal(pushBranch))
+		Expect(receipt.HeadSHA).To(Equal(delivery.VerifiedRemoteSHA))
+		Expect(state.Pulls).To(ContainElement(SatisfyAll(
+			HaveField("Number", receipt.Number),
+			HaveField("BaseRepo", fakeForgeRepository),
+			HaveField("HeadRepo", fakeForgeRepository),
+		)))
 
 		By("verifying each credential reached only its own forge surface")
 		// The forge refuses a role's token on another surface with 403.
@@ -421,16 +489,7 @@ func newFakeForgeTLS(host string) (caPEM, certPEM, keyPEM []byte) {
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 }
 
-type fakeForgeObservedState struct {
-	Branches map[string]map[string]string `json:"branches"`
-	Pulls    []struct {
-		Title      string `json:"title"`
-		Body       string `json:"body"`
-		BaseBranch string `json:"baseBranch"`
-		HeadBranch string `json:"headBranch"`
-	} `json:"pulls"`
-	Requests []fakeforge.RequestRecord `json:"requests"`
-}
+type fakeForgeObservedState = fakeforge.State
 
 func fakeForgeProxyPath(suffix string) string {
 	return fmt.Sprintf("/api/v1/namespaces/%s/services/https:%s:443/proxy%s", namespace, fakeForgeName, suffix)
@@ -442,6 +501,46 @@ func fakeForgeState() fakeForgeObservedState {
 	var state fakeForgeObservedState
 	ExpectWithOffset(1, json.Unmarshal([]byte(output), &state)).To(Succeed())
 	return state
+}
+
+func fakeForgeCommit(sha string) fakeforge.CommitState {
+	output, err := utils.Run(exec.Command("kubectl", "get", "--raw",
+		fakeForgeProxyPath("/fake/commit?repo="+fakeForgeRepository+"&sha="+sha)))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	var commit fakeforge.CommitState
+	ExpectWithOffset(1, json.Unmarshal([]byte(output), &commit)).To(Succeed())
+	return commit
+}
+
+func secretResourceVersion(name string) string {
+	output, err := utils.Run(exec.Command("kubectl", "get", "secret", name, "-n", namespace,
+		"-o", "jsonpath={.metadata.resourceVersion}"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, strings.TrimSpace(output)).NotTo(BeEmpty())
+	return strings.TrimSpace(output)
+}
+
+// expectPublisherCannotReadSecrets ports assert_publisher_cannot_access_secret:
+// the publisher's ServiceAccount can neither read the credential Secrets nor
+// create workloads that could.
+func expectPublisherCannotReadSecrets(secrets ...string) {
+	account, err := utils.Run(exec.Command("kubectl", "get", "deployment", publisherDeployment, "-n", namespace,
+		"-o", "jsonpath={.spec.template.spec.serviceAccountName}"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	identity := fmt.Sprintf("--as=system:serviceaccount:%s:%s", namespace, strings.TrimSpace(account))
+	checks := make([][]string, 0, 5+len(secrets))
+	checks = append(checks, []string{"list", "secrets"}, []string{"watch", "secrets"}, []string{"create", "pods"},
+		[]string{"create", "deployments.apps"}, []string{"create", "jobs.batch"})
+	for _, secret := range secrets {
+		checks = append(checks, []string{"get", "secret/" + secret})
+	}
+	for _, check := range checks {
+		args := append([]string{"auth", "can-i"}, check...)
+		output, _ := exec.Command("kubectl", append(args, "-n", namespace, identity)...).CombinedOutput()
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		ExpectWithOffset(1, strings.TrimSpace(lines[len(lines)-1])).To(Equal("no"),
+			"the publisher can %s", strings.Join(check, " "))
+	}
 }
 
 func fakeForgeFile(branch, path string) string {

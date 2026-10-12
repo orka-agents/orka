@@ -2,6 +2,7 @@
   "fixtures": [
     {
       "match": {"userMessage": "[e2e:forge-write]", "hasToolResult": false},
+      "latency": 15000,
       "response": {
         "toolCalls": [
           {
