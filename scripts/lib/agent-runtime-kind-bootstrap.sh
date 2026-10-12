@@ -98,6 +98,8 @@ live_acp_kind_preflight() {
   [[ -x "${LIVE_ACP_VALIDATOR_SCRIPT}" ]] || live_acp_kind_die "agent runtime validator is not executable: ${LIVE_ACP_VALIDATOR_SCRIPT}" || return 1
   case "${LIVE_ACP_MODEL_BACKEND}" in
     aimock)
+      live_acp_kind_enabled "${RELEASE_GATE:-0}" || \
+        live_acp_kind_die "ACP_E2E_MODEL_BACKEND=aimock scripts only RELEASE_GATE=1; smoke checks need real models" || return 1
       [[ "${LIVE_ACP_AIMOCK_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || \
         live_acp_kind_die "ACP_E2E_AIMOCK_IMAGE must be digest-pinned" || return 1
       compgen -G "${LIVE_ACP_REPO_ROOT}/scripts/fixtures/agent-runtime-aimock/*.json" >/dev/null || \
