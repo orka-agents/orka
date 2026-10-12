@@ -320,25 +320,43 @@ process.stdin.on("data", (chunk) => { body += chunk; }).on("end", async () => {
   log "Loaded aimock fixtures for ${provider}"
 }
 
-# assert_aimock_history checks that one model request carried both the Task's
-# prompt and evidence of the prior turn, which a single fixture match cannot
-# express. A dropped prompt, or lost or foreign history, cannot return the
-# scripted nonce. aimock does not journal bodies over 64 KB (Copilot's), so for
-# those the fixture history keys and RuntimeSession checks carry the proof.
+# read_aimock_journal writes every model request aimock has answered.
+read_aimock_journal() {
+  # shellcheck disable=SC2016 # This is a Node program.
+  k -n vekil-system exec deployment/vekil -- node -e '
+fetch("http://127.0.0.1:1337/__aimock/journal").then((r) => r.text()).then((t) => process.stdout.write(t));'
+}
+
+# aimock_journal_mark prints the journal length so a history check can
+# consider only the requests made after it submits a Task.
+aimock_journal_mark() {
+  if [[ "${model_backend}" != "aimock" ]]; then
+    echo 0
+    return 0
+  fi
+  read_aimock_journal | jq -e 'length'
+}
+
+# assert_aimock_history checks that a model request made since mark carried
+# both the Task's prompt and evidence of the prior turn, which a single fixture
+# match cannot express. A dropped prompt, or lost or foreign history, cannot
+# return the scripted nonce. aimock does not journal bodies over 64 KB
+# (Copilot's); for those a new request must have been answered with the nonce,
+# which the fixtures give only for history-bearing requests.
 assert_aimock_history() {
   [[ "${model_backend}" == "aimock" ]] || return 0
-  local provider="$1" task="$2" prompt="$3" evidence="$4" journal
+  local provider="$1" task="$2" mark="$3" prompt="$4" evidence="$5" journal
   journal="${temp_root}/aimock-journal.json"
-  k -n vekil-system exec deployment/vekil -- node -e '
-fetch("http://127.0.0.1:1337/__aimock/journal").then((r) => r.text()).then((t) => process.stdout.write(t));' \
-    >"${journal}" || die "failed to read the aimock journal for Task/${task}"
-  if jq -e --arg prompt "${prompt}" --arg evidence "${evidence}" '
-      any(.[]; .body.__aimock_truncated != true
+  read_aimock_journal >"${journal}" || die "failed to read the aimock journal for Task/${task}"
+  if jq -e --argjson mark "${mark}" --arg prompt "${prompt}" --arg evidence "${evidence}" '
+      any(.[$mark:][]; .body.__aimock_truncated != true
         and (.body | tostring | contains($prompt) and contains($evidence)))
     ' "${journal}" >/dev/null; then
     return 0
   fi
-  if [[ "${provider}" != "copilot" ]] || ! jq -e 'any(.[]; .body.__aimock_truncated == true)' "${journal}" >/dev/null; then
+  if [[ "${provider}" != "copilot" ]] || ! jq -e --argjson mark "${mark}" --arg evidence "${evidence}" '
+      any(.[$mark:][]; .body.__aimock_truncated == true and .response.fixture.response.content == $evidence)
+    ' "${journal}" >/dev/null; then
     die "no model request for Task/${task} carried both its prompt and ${evidence} from the prior turn"
   fi
   log "Copilot requests exceed the aimock journal cap; fixture history keys carry the Task/${task} evidence"
@@ -2529,7 +2547,7 @@ run_read_smoke() {
   local session="$5"
   local nonce="$6"
   local expected_line="$7"
-  local continuation fork_task pool snapshot continuation_snapshot fork_snapshot fork_response fork_after_seq
+  local continuation fork_task pool snapshot continuation_snapshot fork_snapshot fork_response fork_after_seq journal_mark
   apply_agent "${provider}" "${model}" "${agent}"
   apply_read_task "${task}" "${agent}" "${session}" true \
     "Read LICENSE. Remember the session nonce ${nonce}. Report the nonce and the first non-empty LICENSE line exactly. Do not modify any file." \
@@ -2542,6 +2560,7 @@ run_read_smoke() {
 
   continuation="$(sanitize_name "${task}-continue")"
   [[ "${continuation}" != "${task}" ]] || die "continuation Task name collided with source Task name"
+  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${continuation}"
   apply_read_task "${continuation}" "${agent}" "${session}" false \
     "Continue the existing session. Return the session nonce from the prior turn and no repository-derived replacement. Do not modify files." \
     "12m" false
@@ -2551,7 +2570,7 @@ run_read_smoke() {
   continuation_snapshot="${temp_root}/${continuation}-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${continuation_snapshot}"
   assert_task_succeeded_read "${continuation}" "${continuation_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${continuation}" "Return the session nonce from the prior turn" "${nonce}"
+  assert_aimock_history "${provider}" "${continuation}" "${journal_mark}" "Return the session nonce from the prior turn" "${nonce}"
 
   local first_uid first_generation continued_uid continued_generation
   first_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
@@ -2567,6 +2586,7 @@ run_read_smoke() {
     fork_task="$(sanitize_name "${task}-fork")"
     [[ "${fork_task}" != "${task}" && "${fork_task}" != "${continuation}" ]] || \
       die "forked Task name collided with source or continuation Task name"
+    journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${fork_task}"
     fork_response="$(api_fork_task "${continuation}" "${fork_task}" \
       "Return the session nonce represented in the source task timeline. Do not modify files.")" || \
       die "Task fork API request failed"
@@ -2584,7 +2604,7 @@ run_read_smoke() {
     fork_snapshot="${temp_root}/${fork_task}-pool.json"
     capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${fork_snapshot}"
     assert_task_succeeded_read "${fork_task}" "${fork_snapshot}" "${read_repo_commit}" "${nonce}" ""
-    assert_aimock_history "${provider}" "${fork_task}" "Return the session nonce represented in the source task timeline" "${nonce}"
+    assert_aimock_history "${provider}" "${fork_task}" "${journal_mark}" "Return the session nonce represented in the source task timeline" "${nonce}"
     jq -e --arg source "${continuation}" --arg seq "${fork_after_seq}" '
       .metadata.annotations["orka.ai/fork-source-task"] == $source
       and .metadata.annotations["orka.ai/fork-source-seq"] == $seq
@@ -2891,7 +2911,7 @@ run_controller_restart_check() {
   local model="$2"
   local agent="$3"
   local nonce="$4"
-  local task continuation session pool old_snapshot new_snapshot old_instance old_epoch old_uid old_generation new_uid new_generation
+  local task continuation session pool old_snapshot new_snapshot old_instance old_epoch old_uid old_generation new_uid new_generation journal_mark
   task="$(sanitize_name "acp-restart-${run_id}")"
   continuation="$(sanitize_name "acp-post-restart-${run_id}")"
   session="$(sanitize_name "acp-restart-session-${run_id}")"
@@ -2928,6 +2948,7 @@ run_controller_restart_check() {
   (( $(jq -r '.controllerEpoch' "${new_snapshot}") > old_epoch )) || \
     die "controller epoch did not advance across restart"
 
+  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${continuation}"
   apply_read_task "${continuation}" "${agent}" "${session}" false \
     "Continue the existing session after controller replacement. Return the restart nonce from the prior user turn. Do not modify files." \
     "12m" true
@@ -2935,7 +2956,7 @@ run_controller_restart_check() {
   [[ "$(wait_task_pool_name_value "${continuation}")" == "${pool}" ]] || \
     die "post-restart continuation selected a different RuntimePool"
   assert_task_succeeded_read "${continuation}" "${new_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${continuation}" "Return the restart nonce from the prior user turn" "${nonce}"
+  assert_aimock_history "${provider}" "${continuation}" "${journal_mark}" "Return the restart nonce from the prior user turn" "${nonce}"
   new_uid="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   new_generation="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ -n "${old_uid}" && "${new_uid}" == "${old_uid}" ]] || \
@@ -2954,7 +2975,7 @@ run_pool_replacement_check() {
   local pool="$4"
   local session="$5"
   local nonce="$6"
-  local before_snapshot after_snapshot before_instance before_uid before_generation pod_ns pod_name task after_uid after_generation
+  local before_snapshot after_snapshot before_instance before_uid before_generation pod_ns pod_name task after_uid after_generation journal_mark
   log "Validating exact-Pod RuntimePool replacement and create:false recovery"
   before_snapshot="${temp_root}/pool-replacement-before.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${before_snapshot}"
@@ -2974,12 +2995,13 @@ run_pool_replacement_check() {
     die "RuntimePool/${pool} supervisor boot ID did not change"
 
   task="$(sanitize_name "acp-post-replacement-${run_id}")"
+  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   apply_read_task "${task}" "${agent}" "${session}" false \
     "Continue the existing session after exact Pod replacement. Return the original session nonce from the prior transcript. Do not modify files." \
     "12m" false
   wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
   assert_task_succeeded_read "${task}" "${after_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${task}" "Return the original session nonce from the prior transcript" "${nonce}"
+  assert_aimock_history "${provider}" "${task}" "${journal_mark}" "Return the original session nonce from the prior transcript" "${nonce}"
   after_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${after_uid}" == "${before_uid}" ]] || die "Pod replacement changed logical RuntimeSession UID"
@@ -2996,7 +3018,7 @@ run_scale_to_zero_recovery_check() {
   local pool="$4"
   local session="$5"
   local nonce="$6"
-  local before_snapshot after_snapshot before_instance before_pool_uid task after_uid after_generation
+  local before_snapshot after_snapshot before_instance before_pool_uid task after_uid after_generation journal_mark
   log "Validating authenticated drain: Serving -> Draining -> Quiescent -> Stopping -> Stopped"
   before_snapshot="${temp_root}/scale-zero-before.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${before_snapshot}"
@@ -3012,6 +3034,7 @@ run_scale_to_zero_recovery_check() {
 
   log "Validating 0 -> 1 recovery of the same logical Session"
   task="$(sanitize_name "acp-scale-zero-recovery-${run_id}")"
+  journal_mark="$(aimock_journal_mark)" || die "failed to read the aimock journal before Task/${task}"
   apply_read_task "${task}" "${agent}" "${session}" false \
     "Continue the existing session after scale-to-zero. Return the original session nonce from the durable transcript. Do not modify files." \
     "12m" false
@@ -3025,7 +3048,7 @@ run_scale_to_zero_recovery_check() {
   [[ "$(jq -r '.runtimeInstanceID' "${after_snapshot}")" != "${before_instance}" ]] || \
     die "0 -> 1 recovery reused the stopped runtime instance"
   assert_task_succeeded_read "${task}" "${after_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  assert_aimock_history "${provider}" "${task}" "Return the original session nonce from the durable transcript" "${nonce}"
+  assert_aimock_history "${provider}" "${task}" "${journal_mark}" "Return the original session nonce from the durable transcript" "${nonce}"
   after_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${after_uid}" == "${replacement_session_uid}" ]] || \
