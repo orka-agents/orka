@@ -158,34 +158,67 @@ func TestSupervisorNativeCreateRejectPreservesPreexistingFrozenJournal(t *testin
 	}
 }
 
-func TestSupervisorNativeCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
-	fixture := newNativeCreateFixture(t, "native-resume-reject-held")
-	fixture.server.cfg.CancelGrace = time.Nanosecond
-	response := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
-	var failure harnessv2.ErrorResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || response.Code != http.StatusConflict || failure.Code != harnessv2.ErrorCodeCleanupUnproven || failure.Retryable {
-		t.Fatalf("unproven native create: %d %s", response.Code, response.Body.String())
+func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
+	for _, mode := range []string{"native", "ordinary"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newNativeCreateFixture(t, "native-resume-reject-held")
+			var unrelatedJournal string
+			if mode == "ordinary" {
+				fixture.request.NativeRestore = nil
+				fixture.server.cfg.Provider.AuthMethodID = "unsupported-test-auth"
+				sealRequest(t, &fixture.request.Metadata.RequestDigest, fixture.request)
+				// An ordinary create must not claim or remove another native operation's journal.
+				unrelatedJournal = filepath.Join(fixture.journal, "unrelated-evidence")
+				if err := os.MkdirAll(fixture.journal, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(unrelatedJournal, []byte("preserve unrelated native evidence"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixture.server.cfg.CancelGrace = time.Nanosecond
+			response := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
+			var failure harnessv2.ErrorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || response.Code != http.StatusConflict || failure.Code != harnessv2.ErrorCodeCleanupUnproven || failure.Retryable {
+				t.Fatalf("unproven create: %d %s", response.Code, response.Body.String())
+			}
+			fixture.server.mu.Lock()
+			state := fixture.server.sessions[fixture.request.RuntimeSessionID]
+			fixture.server.mu.Unlock()
+			if state == nil || state.runtime == nil || state.nativeInstallUnresolved == nil || state.creating || isDrainCleanupState(state) {
+				t.Fatal("unproven initialization lost its stopped runtime or retained evidence")
+			}
+			if _, err := state.runtime.StartPrompt(t.Context(), "after-failed-create", "digest", []acp.ContentBlock{acp.Text("continue")}); err == nil {
+				t.Fatal("unproven initialization admitted another prompt")
+			}
+			var plan []byte
+			if mode == "native" {
+				plan = readNativeJournalFile(t, fixture.journal, "plan.json")
+			} else if state.nativeInstallJournal != "" {
+				t.Fatal("ordinary initialization claimed a native install journal")
+			}
+			status := fixture.server.status()
+			if status.Lifecycle != harnessv2.SupervisorLifecycleTerminating || status.Drain.AcceptingNewSessions {
+				t.Fatal("unproven initialization left pool admission open")
+			}
+			remaining := fixture.cfg.UIDAllocator.Remaining()
+			replay := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
+			if replay.Code != response.Code || replay.Body.String() != response.Body.String() || fixture.cfg.UIDAllocator.Remaining() != remaining {
+				t.Fatal("unproven create retry changed the operation or reused an identity")
+			}
+			select {
+			case <-state.runtime.Process().Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("failed initialization did not kill its adapter")
+			}
+			assertRetainedCreateCleanup(t, fixture, mode, plan, unrelatedJournal)
+
+		})
 	}
-	fixture.server.mu.Lock()
-	state := fixture.server.sessions[fixture.request.RuntimeSessionID]
-	fixture.server.mu.Unlock()
-	if state == nil || state.runtime == nil || state.nativeInstallUnresolved == nil || state.creating || isDrainCleanupState(state) {
-		t.Fatal("unproven initialization lost its stopped runtime or retained evidence")
-	}
-	if _, err := state.runtime.StartPrompt(t.Context(), "after-failed-create", "digest", []acp.ContentBlock{acp.Text("continue")}); err == nil {
-		t.Fatal("unproven initialization admitted another prompt")
-	}
-	plan := readNativeJournalFile(t, fixture.journal, "plan.json")
-	remaining := fixture.cfg.UIDAllocator.Remaining()
-	replay := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
-	if replay.Code != response.Code || replay.Body.String() != response.Body.String() || fixture.cfg.UIDAllocator.Remaining() != remaining {
-		t.Fatal("unproven create retry changed the operation or reused an identity")
-	}
-	select {
-	case <-state.runtime.Process().Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("failed initialization did not kill its adapter")
-	}
+}
+
+func assertRetainedCreateCleanup(t *testing.T, fixture *nativeCreateFixture, mode string, plan []byte, unrelatedJournal string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	closeErr := fixture.server.Close(ctx)
@@ -195,8 +228,11 @@ func TestSupervisorNativeCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T
 	if runtime.GOOS != "linux" && closeErr == nil {
 		t.Fatal("close skipped the retained child instead of checking exit proof")
 	}
-	if _, err := os.Stat(fixture.paths.Root); err != nil || !bytes.Equal(plan, readNativeJournalFile(t, fixture.journal, "plan.json")) {
+	if _, err := os.Stat(fixture.paths.Root); err != nil {
 		t.Fatal("shutdown discarded unproven create evidence")
+	}
+	if mode == "native" && !bytes.Equal(plan, readNativeJournalFile(t, fixture.journal, "plan.json")) {
+		t.Fatal("shutdown discarded the native install plan")
 	}
 	if runtime.GOOS == "linux" {
 		deletion := harnessv2.DeleteRuntimeSessionRequest{Protocol: harnessv2.ProtocolVersion, Metadata: testMetadata(fixture.request.Metadata.Fence, "delete-failed-native", false), Reason: "cleanup after proven exit"}
@@ -205,7 +241,17 @@ func TestSupervisorNativeCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T
 		if deleted.Code != http.StatusOK {
 			t.Fatalf("explicit retained runtime delete: %d %s", deleted.Code, deleted.Body.String())
 		}
-		assertNativeCreatePathsAbsent(t, fixture)
+		if mode == "native" {
+			assertNativeCreatePathsAbsent(t, fixture)
+		} else if _, err := os.Lstat(fixture.paths.Root); !os.IsNotExist(err) {
+			t.Fatal("proven ordinary cleanup retained its private runtime home")
+		}
+	}
+	if mode == "ordinary" {
+		preserved, err := os.ReadFile(unrelatedJournal)
+		if err != nil || string(preserved) != "preserve unrelated native evidence" {
+			t.Fatal("ordinary cleanup changed unrelated native evidence")
+		}
 	}
 }
 

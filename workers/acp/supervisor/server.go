@@ -1287,7 +1287,7 @@ func (s *Server) createSession(
 		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
 	})
 	if err != nil {
-		if initialization, failed := errors.AsType[*acp.InitializationError](err); request.NativeRestore != nil && failed && !initialization.Cleanup.Proven {
+		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
 			cleanup = false
 			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &nativeCreateCleanupUnprovenError{Err: err})
 		}

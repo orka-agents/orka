@@ -283,7 +283,9 @@ func (s *Server) retainUnresolvedNativeInstall(state *sessionState, request harn
 	s.mu.Lock()
 	state.paths = paths
 	state.runtime = runtime
-	state.nativeInstallJournal = filepath.Join(s.cfg.SessionBaseDir, ".native-install", sessionPathID(state.descriptor.RuntimeSessionUID, state.descriptor.Generation))
+	if request.NativeRestore != nil {
+		state.nativeInstallJournal = filepath.Join(s.cfg.SessionBaseDir, ".native-install", sessionPathID(state.descriptor.RuntimeSessionUID, state.descriptor.Generation))
+	}
 	state.profile = request.Profile
 	state.creating = false
 	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
