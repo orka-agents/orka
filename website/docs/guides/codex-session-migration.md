@@ -93,7 +93,11 @@ historical records retained after compaction. Orka does not compress or truncate
 the bundle. Oversized native data is rejected; an established native-continuity
 Session does not silently fall back to transcript-only continuation. Lowering
 the policy preserves stored checkpoints but can block export, restore, or new
-capture until the limit is raised again. This is an Orka transport restriction,
+capture until the limit is raised again. Before lowering the cap, pause new
+native Tasks, let active turns finish and durably finalize their checkpoints,
+and verify that retained checkpoints fit the proposed cap. If capture is already
+blocked, preserve the exact runtime Pod and its capture evidence; force-deleting
+it can lose uncommitted native history. This is an Orka transport restriction,
 not SessionKit's native storage limit. Larger limits increase memory, temporary
 storage, and encrypted database usage; choose them for the expected workload.
 
