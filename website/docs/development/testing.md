@@ -123,7 +123,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
-| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
+| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation, cancellation/timeout, restart/replacement, publication/PR verification, immutable images, and cleanup |
 | `.github/workflows/agent-runtime-e2e.yml` / `scripts/agent-runtime-kind-e2e.sh` | Manual agent runtime smoke that calls real model providers, requires credentials, and bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
 | `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved chart and runtime acceptance, real local Git publication tests, GitHub API fixture tests, and cleanup; no stored Git publication credentials |
 
@@ -139,10 +139,11 @@ missing or mismatched artifacts staying not ready.
 ### E2E key requirements
 
 - `scripts/agent-runtime-e2e.sh --context <context>` is the canonical ACP
-  deployed-cluster validator. Its default mode is a smoke test; set
-  `RELEASE_GATE=1` for full runtime acceptance, including Task result/fork and
-  scale-to-zero scenarios. The Kind wrapper also requires uncached publication
-  tests. A smoke result cannot qualify a release. Live GitHub publication is
+  deployed-cluster validator. Its default mode is a smoke test of runtime
+  behavior against real models. `RELEASE_GATE=1` checks the shipped artifacts
+  instead: one workspace read with its API result per runtime, unsafe workspace
+  rejection, and image digests. The Kind wrapper also requires uncached
+  publication tests. A smoke result cannot qualify a release. Live GitHub publication is
   available only through an explicit local opt-in.
 - `scripts/agent-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
@@ -159,13 +160,13 @@ missing or mismatched artifacts staying not ready.
 - `.github/workflows/release-qualification.yml` uses `workflow_dispatch` and is
   serialized. The release workflow dispatches it automatically. Restrict the
   `release-qualification` environment to `main` and exact permitted release
-  branches, require a trusted reviewer, and disable administrator bypass before
-  exposing model-provider credentials. It accepts a full source SHA that must
-  equal both the dispatched workflow commit and selected branch head. GitHub
+  branches, require a trusted reviewer, and disable administrator bypass. It
+  accepts a full source SHA that must equal both the dispatched workflow commit
+  and selected branch head. GitHub
   observations use the job's temporary `GITHUB_TOKEN` with `contents: read`.
-  `COPILOT_GITHUB_TOKEN` supplies model-provider access and can come from the
-  existing repository secret. No stored Git publication token or fork setting
-  is needed. Publication tests use real temporary Git repositories and local
+  Agent execution runs against aimock (`ACP_E2E_MODEL_BACKEND=aimock`), so no
+  model-provider secret, stored Git publication token, or fork setting is
+  needed. Publication tests use real temporary Git repositories and local
   GitHub API test servers. They do not prove the complete cluster-to-GitHub
   publication path or live organization permissions.
   [Release qualification](release-qualification.md) documents trusted dispatch,
@@ -183,15 +184,13 @@ missing or mismatched artifacts staying not ready.
   `config/acp-production` Vekil ingress boundary; durable controller/Publisher
   PVCs; a distinct publication fork; and authenticated `gh` access for
   independent remote and PR verification/cleanup.
-- Canonical ACP acceptance runs all Codex scenarios, including publication,
-  before deleting the Codex pool and starting OpenCode. It validates OpenCode
-  native ACP read, continuation, and read-intent tool policy, deletes the
-  OpenCode pool, starts Claude, and then runs live Copilot read/continuation
-  after Claude cleanup. Every provider phase verifies exact Pod UID, image ID,
-  runtime instance/profile, and RuntimeSession identity. Codex additionally
-  covers cancellation and timeout settlement, controller restart, pool
-  replacement, drain/scale-to-zero, and publication/remote delivery; release
-  mode also exercises Task forks.
+- The validator runs Codex, then OpenCode, Claude, and Copilot, deleting each
+  provider's pools before starting the next. Every provider phase verifies exact
+  Pod UID, image ID, runtime instance/profile, and RuntimeSession identity. Smoke
+  mode also checks continuation, OpenCode's read-intent tool policy, and, for
+  Codex, concurrency, cancellation and timeout settlement, controller restart,
+  and pool replacement. Release mode runs only the reads and, with the local
+  opt-in, the live publication canary.
 - `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
   When either key is unset, the suite deploys [aimock](https://github.com/CopilotKit/aimock)
@@ -224,8 +223,8 @@ missing or mismatched artifacts staying not ready.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:
-  external-provider execution and clean-room publication stay with `Agent Runtime E2E`
-  and `Release Qualification`.
+  external-provider execution stays with `Agent Runtime E2E`, and release acceptance
+  with `Release Qualification`.
   Every Substrate run includes DataOnly suspension, cold continuation, and
   checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
