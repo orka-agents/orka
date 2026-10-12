@@ -32,7 +32,7 @@ func (e *ToolNotFoundError) Error() string {
 	return fmt.Sprintf("tool %q not found", e.Name)
 }
 
-// ToolArgumentError reports a top-level argument whose JSON type contradicts
+// ToolArgumentError reports an argument path whose JSON type contradicts
 // the tool schema.
 type ToolArgumentError struct {
 	Field string
@@ -47,50 +47,31 @@ func (e *ToolArgumentError) Error() string {
 // jsonNumberPattern matches a JSON number literal.
 var jsonNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
 
-// normalizeArgTypes checks top-level arguments against the JSON types the tool
+// normalizeArgTypes recursively checks arguments against the JSON types the tool
 // schema declares, before the tool sees them. A null value for a declared
-// field counts as omitted. Numeric strings become numbers for integer and number fields, and
-// strconv.ParseBool strings become booleans, matching the leniency tools
+// field counts as omitted. Numeric strings become numbers for integer and number
+// fields, and strconv.ParseBool strings become booleans, matching the leniency tools
 // already apply. A value whose type plainly contradicts the schema is
 // rejected: an object or array for a string, a non-numeric value for a number,
 // a non-boolean value for a boolean, a non-array for an array, and a number,
 // boolean, or array for an object. Strings stay allowed for objects, which
 // some tools read as shorthand, and numbers and booleans stay allowed for
-// strings. Fields the schema does not declare pass through unchanged.
+// strings. Object strings containing JSON objects are decoded before checking
+// their contents. Fields without a declared property or typed additionalProperties
+// schema pass through unchanged. Null array items cannot count as omitted fields.
 func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error) {
 	values, err := decodeArgObject(args)
 	if err != nil || len(values) == 0 {
 		return args, err
 	}
-	var schema struct {
-		Properties map[string]struct {
-			Type any `json:"type"`
-		} `json:"properties"`
-	}
+	var schema map[string]any
 	if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
 		return args, nil
 	}
 
-	changed := false
-	for name, value := range values {
-		if value == nil {
-			// Undeclared fields, null or not, are left for the tool to judge,
-			// as reply_in_conversation does when it rejects extra fields.
-			if _, declared := schema.Properties[name]; declared {
-				delete(values, name)
-				changed = true
-			}
-			continue
-		}
-		want, _ := schema.Properties[name].Type.(string)
-		normalized, err := normalizeArgType(name, want, value)
-		if err != nil {
-			return nil, err
-		}
-		if normalized != nil {
-			values[name] = normalized
-			changed = true
-		}
+	changed, err := normalizeArgObjectTypes("", schema, values)
+	if err != nil {
+		return nil, err
 	}
 	if !changed {
 		return args, nil
@@ -98,6 +79,98 @@ func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error)
 	normalized, err := json.Marshal(values)
 	if err != nil {
 		return args, nil
+	}
+	return normalized, nil
+}
+
+// normalizeArgObjectTypes checks declared properties and typed map values.
+// Boolean additionalProperties schemas do not declare a value type or reject
+// extra keys here; other schema constraints remain the tool's responsibility.
+func normalizeArgObjectTypes(path string, schema, values map[string]any) (bool, error) {
+	properties, _ := schema[jsonSchemaPropertiesField].(map[string]any)
+	additional, _ := schema["additionalProperties"].(map[string]any)
+	if _, typed := additional[jsonSchemaTypeField].(string); !typed {
+		additional = nil
+	}
+	changed := false
+	for name, value := range values {
+		property, declared := properties[name]
+		fieldSchema, _ := property.(map[string]any)
+		if !declared && additional != nil {
+			fieldSchema, declared = additional, true
+		}
+		if !declared {
+			continue
+		}
+		if value == nil {
+			delete(values, name)
+			changed = true
+			continue
+		}
+		field := name
+		if path != "" {
+			field = path + "." + name
+		}
+		normalized, err := normalizeArgSchemaType(field, fieldSchema, value)
+		if err != nil {
+			return false, err
+		}
+		if normalized != nil {
+			values[name] = normalized
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+// normalizeArgSchemaType applies the scalar rules before descending into any
+// declared object properties, array items, or typed additionalProperties.
+func normalizeArgSchemaType(path string, schema map[string]any, value any) (any, error) {
+	want, _ := schema[jsonSchemaTypeField].(string)
+	normalized, err := normalizeArgType(path, want, value)
+	if err != nil {
+		return nil, err
+	}
+	if encoded, isString := value.(string); want == jsonSchemaTypeObject && isString {
+		object, err := decodeArgObject(json.RawMessage(encoded))
+		if err != nil {
+			if argErr, ok := err.(*ToolArgumentError); ok {
+				return nil, &ToolArgumentError{Field: path + "." + argErr.Field, Want: argErr.Want, Got: argErr.Got}
+			}
+			return nil, err
+		}
+		if object == nil {
+			return nil, nil // Preserve non-object strings used as shorthand.
+		}
+		value = object
+		// Preserve the object spelling and key order when its contents do
+		// not need normalization, like decodeStringifiedObjectArgs does.
+		normalized = json.RawMessage(encoded)
+	}
+	switch value := value.(type) {
+	case map[string]any:
+		changed, err := normalizeArgObjectTypes(path, schema, value)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			normalized = value
+		}
+	case []any:
+		items, typed := schema[itemsField].(map[string]any)
+		if !typed {
+			break
+		}
+		for i, item := range value {
+			replacement, err := normalizeArgSchemaType(fmt.Sprintf("%s[%d]", path, i), items, item)
+			if err != nil {
+				return nil, err
+			}
+			if replacement != nil {
+				value[i] = replacement
+				normalized = value
+			}
+		}
 	}
 	return normalized, nil
 }
@@ -213,7 +286,7 @@ func normalizeArgType(name, want string, value any) (any, error) {
 	switch want {
 	case jsonSchemaTypeString:
 		switch value.(type) {
-		case map[string]any, []any:
+		case nil, map[string]any, []any:
 			return nil, &ToolArgumentError{Field: name, Want: "a string", Got: jsonValueKind(value)}
 		}
 	case jsonSchemaTypeInteger, jsonSchemaTypeNumber:

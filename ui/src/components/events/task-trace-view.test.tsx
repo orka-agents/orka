@@ -45,6 +45,21 @@ describe('TaskTraceView', () => {
     expect(screen.getByText('one call')).toBeInTheDocument()
   })
 
+  it('shows the model and provider for each model request', () => {
+    const trace = makeTrace({
+      modelRequests: [
+        { id: 'm1', status: 'completed', model: 'gpt-4.1', provider: 'openai', startSeq: 1, endSeq: 2 },
+        { id: 'm2', status: 'failed', provider: 'anthropic', startSeq: 3, endSeq: 4 },
+        { id: 'm3', status: 'completed', startSeq: 5, endSeq: 6 },
+      ],
+    })
+    render(<TaskTraceView trace={trace} />)
+    const items = within(screen.getByText('Model requests').closest('section')!).getAllByRole('listitem')
+    expect(within(items[0]).getByText('gpt-4.1 · openai')).toBeInTheDocument()
+    expect(within(items[1]).getByText('anthropic')).toBeInTheDocument()
+    expect(within(items[2]).queryByText(/·/)).not.toBeInTheDocument()
+  })
+
   it('renders a tool-heavy trace', () => {
     const trace = makeTrace({
       toolCalls: [

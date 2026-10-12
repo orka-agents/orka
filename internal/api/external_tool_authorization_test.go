@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -847,3 +848,30 @@ func boolString(value bool) string {
 }
 
 var _ client.Client = (*externalToolCountingClient)(nil)
+
+func TestExternalToolCreateAgentProviderChecksDoNotBypassCaller(t *testing.T) {
+	for _, denied := range []string{"create", "provider-get", "none"} {
+		for _, provider := range []string{"private-provider", "missing-provider"} {
+			t.Run(denied+"/"+provider, func(t *testing.T) {
+				clientset, _ := externalToolReviews(t, func(spec authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
+					a := spec.ResourceAttributes
+					return externalToolReview((denied != "create" || a.Resource != "agents" || a.Verb != "create") &&
+						(denied != "provider-get" || a.Resource != "providers" || a.Verb != "get")), nil
+				})
+				executor, backend, _, _ := newExternalToolExecutor(clientset,
+					&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "private-provider", Namespace: externalToolNamespace}})
+				executor.policyReader = backend
+				args := fmt.Sprintf(`{"name":"new-agent","namespace":%q,"providerRef":%q}`, externalToolNamespace, provider)
+				result := executeExternalTool(t, executor, "create_agent", args)
+				if denied != "none" {
+					require.False(t, result.Success)
+					require.Equal(t, "permission_denied", result.ErrorType)
+					require.Zero(t, backend.reads, "denied caller reached direct policy reader")
+					require.Zero(t, backend.writes)
+				} else {
+					require.Equal(t, provider == "private-provider", result.Success, "%s", result.Error)
+				}
+			})
+		}
+	}
+}

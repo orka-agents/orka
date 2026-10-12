@@ -119,7 +119,7 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 		}
 	}
 
-	owner, repo, token, _, err := resolveScopedForgeRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, _, err := resolveScopedForgeRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}

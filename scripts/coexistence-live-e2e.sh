@@ -633,6 +633,8 @@ main() {
     --from-file="ca.crt=${wrapper_tls_dir}/ca.crt" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
+  # This agent-only fixture never launches native worker Jobs. Supply its local
+  # controller image as an inert worker reference instead of a published default.
   log "Installing the harness-v1 release ${v1_release}"
   run helm install "${v1_release}" "${chart_dir}" \
     --namespace "${v1_namespace}" \
@@ -641,6 +643,10 @@ main() {
     --set "controller.watchNamespace=${v1_namespace}" \
     --set "controller.image.repository=$(split_image_repository "${manager_ref}")" \
     --set "controller.image.digest=$(split_image_digest "${manager_ref}")" \
+    --set "workers.ai.image.repository=$(split_image_repository "${manager_ref}")" \
+    --set "workers.ai.image.digest=$(split_image_digest "${manager_ref}")" \
+    --set "workers.general.image.repository=$(split_image_repository "${manager_ref}")" \
+    --set "workers.general.image.digest=$(split_image_digest "${manager_ref}")" \
     --set controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
     --set controller.agentExecutionSnapshot.key=key \
     --set webhooks.tls.existingSecret=orka-webhook-tls \
@@ -666,6 +672,10 @@ main() {
     --set-string controller.acpRuntime.opencodeImage= \
     --set "controller.image.repository=$(split_image_repository "${manager_ref}")" \
     --set "controller.image.digest=$(split_image_digest "${manager_ref}")" \
+    --set "workers.ai.image.repository=$(split_image_repository "${manager_ref}")" \
+    --set "workers.ai.image.digest=$(split_image_digest "${manager_ref}")" \
+    --set "workers.general.image.repository=$(split_image_repository "${manager_ref}")" \
+    --set "workers.general.image.digest=$(split_image_digest "${manager_ref}")" \
     --set "publisher.image.repository=$(split_image_repository "${publisher_ref}")" \
     --set "publisher.image.digest=$(split_image_digest "${publisher_ref}")"
   # The v2 release deliberately omits webhooks.tls.* and

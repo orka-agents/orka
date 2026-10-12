@@ -1,0 +1,57 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: ConnectorProvider
+metadata:
+  name: github
+spec:
+  displayName: GitHub
+  oauth:
+    authorizeURL: https://github.com/login/oauth/authorize
+    tokenURL: https://github.com/login/oauth/access_token
+    # GitHub has no RFC 7009 revocation endpoint, so revocationURL is unset:
+    # a disconnect deletes the tokens Orka holds, and the person revokes the
+    # authorization itself in GitHub under Settings > Applications.
+    # The public client ID of your GitHub OAuth App. The client secret lives
+    # only in the Secret below.
+    clientID: Iv1.replace-with-your-client-id
+    clientSecretRef:
+      name: github-connector-oauth
+      key: clientSecret
+    scopes:
+      # readOnly Connections request these; readWrite Connections add the
+      # write scopes on top. GitHub OAuth Apps have no read-only scope for
+      # private repositories: reading them needs `repo`, which also grants
+      # write. Orka still hides the write tools from a readOnly Connection,
+      # but move `repo` into `read` only if that trade-off is acceptable.
+      read:
+        - read:user
+      write:
+        - repo
+  tools:
+    # Built-in GitHub tools run under the linked account. The class is fixed
+    # by what each tool does with the credential: read tools only read, write
+    # tools mutate the forge, are hidden from readOnly Connections, and
+    # always ask for approval.
+    - name: list_pull_requests
+      class: read
+      source: Builtin
+    - name: list_issues
+      class: read
+      source: Builtin
+    - name: get_issue
+      class: read
+      source: Builtin
+    - name: review_pull_request
+      class: read
+      source: Builtin
+    - name: check_pull_request_ci
+      class: read
+      source: Builtin
+    - name: comment_on_issue
+      class: write
+      source: Builtin
+    - name: create_pull_request
+      class: write
+      source: Builtin
+    - name: post_review_comment
+      class: write
+      source: Builtin

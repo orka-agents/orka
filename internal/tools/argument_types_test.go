@@ -200,3 +200,215 @@ func TestRegistryExecuteRejectsDuplicateStringifiedObjects(t *testing.T) {
 		t.Fatal("the tool ran with a duplicate key")
 	}
 }
+
+func TestNormalizeArgTypesRecursive(t *testing.T) {
+	tool := &mockTool{name: "typed", parameters: json.RawMessage(`{
+		"type":"object", "properties":{
+			"config":{"type":"object", "additionalProperties":false, "properties":{
+				"name":{"type":"string", "enum":["allowed"]},
+				"count":{"type":"integer", "minimum":1, "maximum":10},
+				"ratio":{"type":"number"},
+				"enabled":{"type":"boolean"},
+				"child":{"type":"object", "properties":{"count":{"type":"integer"}}},
+				"items":{"type":"array", "items":{"type":"object", "properties":{
+					"name":{"type":"string"}, "count":{"type":"integer"},
+					"tags":{"type":"array", "items":{"type":"string"}}
+				}}},
+				"counts":{"type":"array", "items":{"type":"integer"}},
+				"flags":{"type":"array", "items":{"type":"array", "items":{"type":"boolean"}}},
+				"untyped":{"type":"array", "items":true},
+				"structure":{"properties":{"counts":{"items":{"type":"integer"}}}}
+			}}
+		}
+	}`)}
+	for _, tt := range []struct {
+		name, args, want, wantErr string
+	}{
+		{"valid unchanged", `{"config":{"name":"custom","count":0,"enabled":false,"items":[{"name":"coder","tags":["user"]}],"extra":{"count":"anything"}}}`, "raw", ""},
+		{"nested coercions", `{"config":{"count":" 12 ","ratio":"1.5","enabled":"FALSE","child":{"count":1e2}}}`, `{"config":{"count":12,"ratio":1.5,"enabled":false,"child":{"count":100}}}`, ""},
+		{"nested null fields omitted", `{"config":{"count":null,"child":{"count":null},"items":[{"name":null}],"extra":null}}`, `{"config":{"child":{},"items":[{}],"extra":null}}`, ""},
+		{"array item coercions", `{"config":{"counts":["9007199254740993",10.0,"1e3"],"flags":[["TRUE","0",false]]}}`, `{"config":{"counts":[9007199254740993,10,1000],"flags":[[true,false,false]]}}`, ""},
+		{"primitive string leniency", `{"config":{"name":false,"items":[{"name":42,"tags":[false,42,"user"]}]}}`, "raw", ""},
+		{"untyped items unchanged", `{"config":{"untyped":[null,{"count":"anything"},[]]}}`, "raw", ""},
+		{"stringified object", `{"config":"{\"count\":\"5\",\"enabled\":\"true\"}"}`, `{"config":{"count":5,"enabled":true}}`, ""},
+		{"nested stringified object", `{"config":{"child":"{\"count\":\"5\"}"}}`, `{"config":{"child":{"count":5}}}`, ""},
+		{"stringified array object item", `{"config":{"items":["{\"name\":\"coder\",\"count\":\"5\"}"]}}`, `{"config":{"items":[{"name":"coder","count":5}]}}`, ""},
+		{"object shorthand unchanged", `{"config":{"child":"main","items":["coder"]}}`, "raw", ""},
+		{"non-object string unchanged", `{"config":{"child":"[1,2]"}}`, "raw", ""},
+		{"declared children without parent types", `{"config":{"structure":{"counts":["5"]}}}`, `{"config":{"structure":{"counts":[5]}}}`, ""},
+		{"untyped parent not inferred", `{"config":{"structure":"main"}}`, "raw", ""},
+		{"bad child without parent types", `{"config":{"structure":{"counts":["many"]}}}`, "", "config.structure.counts[0] must be a whole number, got a non-numeric string"},
+		{"bad nested integer", `{"config":{"count":"many"}}`, "", "config.count must be a whole number, got a non-numeric string"},
+		{"deep fractional integer", `{"config":{"child":{"count":1.5}}}`, "", "config.child.count must be a whole number, got a fraction"},
+		{"bad nested number", `{"config":{"ratio":true}}`, "", "config.ratio must be a number, got a boolean"},
+		{"bad nested boolean", `{"config":{"enabled":"yes"}}`, "", "config.enabled must be a boolean, got a non-boolean string"},
+		{"bad nested object", `{"config":{"child":[]}}`, "", "config.child must be an object, got an array"},
+		{"bad nested array", `{"config":{"items":{}}}`, "", "config.items must be an array, got an object"},
+		{"bad object array item", `{"config":{"items":[false]}}`, "", "config.items[0] must be an object, got a boolean"},
+		{"bad array item property", `{"config":{"items":[{"name":[]}]}}`, "", "config.items[0].name must be a string, got an array"},
+		{"bad string array item", `{"config":{"items":[{"tags":[{}]}]}}`, "", "config.items[0].tags[0] must be a string, got an object"},
+		{"bad integer array item", `{"config":{"counts":[1,"many"]}}`, "", "config.counts[1] must be a whole number, got a non-numeric string"},
+		{"bad nested array item", `{"config":{"flags":[[true,"yes"]]}}`, "", "config.flags[0][1] must be a boolean, got a non-boolean string"},
+		{"null object array item", `{"config":{"items":[null]}}`, "", "config.items[0] must be an object, got null"},
+		{"null string array item", `{"config":{"items":[{"tags":[null]}]}}`, "", "config.items[0].tags[0] must be a string, got null"},
+		{"bad stringified property", `{"config":"{\"items\":[{\"name\":[]}]}"}`, "", "config.items[0].name must be a string, got an array"},
+		{"duplicate stringified keys", `{"config":"{\"count\":1,\"count\":\"many\"}"}`, "", "config.count must be sent once, got a duplicate"},
+		{"invalid stringified unicode", `{"config":"{\"name\":\"\\ud800\"}"}`, "", "config.name must be valid Unicode text, got invalid Unicode"},
+		{"bad nested stringified property", `{"config":{"child":"{\"count\":\"many\"}"}}`, "", "config.child.count must be a whole number, got a non-numeric string"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeArgTypes(tool, json.RawMessage(tt.args))
+			if tt.wantErr != "" {
+				var argErr *ToolArgumentError
+				if !errors.As(err, &argErr) || err.Error() != "invalid arguments: "+tt.wantErr {
+					t.Fatalf("normalizeArgTypes() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeArgTypes() error = %v", err)
+			}
+			if tt.want == "raw" {
+				if string(got) != tt.args {
+					t.Fatalf("normalizeArgTypes() = %s, want original %s", got, tt.args)
+				}
+				return
+			}
+			assertNormalizedArgJSON(t, got, tt.want)
+		})
+	}
+}
+
+func TestNormalizeArgTypesAdditionalProperties(t *testing.T) {
+	tool := &mockTool{name: "typed", parameters: json.RawMessage(`{
+		"type":"object", "additionalProperties":{"type":"integer"}, "properties":{
+			"labels":{"type":"object", "additionalProperties":{"type":"string"}},
+			"counts":{"type":"object", "properties":{"enabled":{"type":"boolean"}}, "additionalProperties":{"type":"integer"}},
+			"rules":{"type":"object", "additionalProperties":{"type":"object", "properties":{"enabled":{"type":"boolean"}}}},
+			"names":{"type":"object", "additionalProperties":{"type":"array", "items":{"type":"string"}}},
+			"anything":{"type":"object", "additionalProperties":true},
+			"untyped":{"type":"object", "additionalProperties":{}}
+		}
+	}`)}
+	for _, tt := range []struct {
+		name, args, want, wantErr string
+	}{
+		{"typed root extras", `{"extra":"5"}`, `{"extra":5}`, ""},
+		{"typed root null omitted", `{"extra":null}`, `{}`, ""},
+		{"typed values normalized", `{"counts":{"first":"1e2","second":2.0,"enabled":"true"}}`, `{"counts":{"first":100,"second":2,"enabled":true}}`, ""},
+		{"typed null values omitted", `{"labels":{"app":null},"counts":{"first":null}}`, `{"labels":{},"counts":{}}`, ""},
+		{"string value leniency", `{"labels":{"app":false,"number":42}}`, "raw", ""},
+		{"untyped extras unchanged", `{"anything":{"value":null,"other":{"x":[]}},"untyped":{"value":null}}`, "raw", ""},
+		{"recursive typed values", `{"rules":{"first":{"enabled":"TRUE"},"second":"{\"enabled\":\"false\"}"}}`, `{"rules":{"first":{"enabled":true},"second":{"enabled":false}}}`, ""},
+		{"typed arrays unchanged", `{"names":{"roles":["user","assistant"]}}`, "raw", ""},
+		{"bad typed root extra", `{"extra":[]}`, "", "extra must be a whole number, got an array"},
+		{"bad typed string value", `{"labels":{"app":{}}}`, "", "labels.app must be a string, got an object"},
+		{"bad typed integer value", `{"counts":{"first":"many"}}`, "", "counts.first must be a whole number, got a non-numeric string"},
+		{"bad recursive typed value", `{"rules":{"first":{"enabled":[]}}}`, "", "rules.first.enabled must be a boolean, got an array"},
+		{"bad typed array value", `{"names":{"roles":[{}]}}`, "", "names.roles[0] must be a string, got an object"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeArgTypes(tool, json.RawMessage(tt.args))
+			if tt.wantErr != "" {
+				var argErr *ToolArgumentError
+				if !errors.As(err, &argErr) || err.Error() != "invalid arguments: "+tt.wantErr {
+					t.Fatalf("normalizeArgTypes() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeArgTypes() error = %v", err)
+			}
+			if tt.want == "raw" {
+				if string(got) != tt.args {
+					t.Fatalf("normalizeArgTypes() = %s, want original %s", got, tt.args)
+				}
+				return
+			}
+			assertNormalizedArgJSON(t, got, tt.want)
+		})
+	}
+}
+
+func assertNormalizedArgJSON(t *testing.T, got json.RawMessage, want string) {
+	t.Helper()
+	gotValue, gotErr := decodeArgValue(got)
+	wantValue, wantErr := decodeArgValue(json.RawMessage(want))
+	if gotErr != nil || wantErr != nil || string(mustMarshalTest(t, gotValue)) != string(mustMarshalTest(t, wantValue)) {
+		t.Fatalf("normalized arguments = %s, want %s (decode errors: %v, %v)", got, want, gotErr, wantErr)
+	}
+}
+
+func TestRegistryExecuteRejectsNestedArgumentTypesBeforeTheTool(t *testing.T) {
+	for _, tt := range []struct {
+		name, args, field, control string
+		tool                       Tool
+	}{
+		{"chat allowed agent name", `{"name":"lead","coordination":{"enabled":true,"allowedAgents":[{"name":[]}]}}`, "coordination.allowedAgents[0].name", `{"name":"lead","coordination":{"enabled":"true","maxDepth":"2","allowedAgents":[{"name":"coder"}]}}`, &ChatCreateAgentTool{}},
+		{"chat tools entry", `{"name":"lead","tools":[{}]}`, "tools[0]", `{"name":"lead","tools":["web_search"]}`, &ChatCreateAgentTool{}},
+		{"coordinator tools entry", `{"role":"coder","systemPrompt":"p","tools":[[]]}`, "tools[0]", `{"role":"coder","systemPrompt":"p","tools":["web_search"]}`, &CreateAgentTool{}},
+		{"transcript role entry", `{"query":"prior","roles":[{}]}`, "roles[0]", `{"query":"prior","roles":["user","assistant"]}`, NewSearchTranscriptTool()},
+		{"stringified coordination", `{"name":"lead","coordination":"{\"enabled\":true,\"allowedAgents\":[{\"name\":[]}]}"}`, "coordination.allowedAgents[0].name", `{"name":"lead","coordination":"{\"enabled\":true,\"allowedAgents\":[{\"name\":\"coder\"}]}"}`, &ChatCreateAgentTool{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			r := NewRegistry()
+			r.Register(&mockTool{
+				name: tt.tool.Name(), parameters: tt.tool.Parameters(),
+				executeFunc: func(context.Context, json.RawMessage) (string, error) {
+					called = true
+					return "ok", nil
+				},
+			})
+			_, err := r.Execute(context.Background(), tt.tool.Name(), json.RawMessage(tt.args))
+			var argErr *ToolArgumentError
+			if !errors.As(err, &argErr) || argErr.Field != tt.field {
+				t.Fatalf("Execute() error = %v, want a ToolArgumentError for %s", err, tt.field)
+			}
+			if called {
+				t.Fatal("the tool ran with a wrong-typed nested argument")
+			}
+			if _, err := r.Execute(context.Background(), tt.tool.Name(), json.RawMessage(tt.control)); err != nil || !called {
+				t.Fatalf("valid control did not reach the tool: called = %v, error = %v", called, err)
+			}
+		})
+	}
+}
+
+func TestRegistryExecuteNormalizesCoordinationBeforeAgentCreation(t *testing.T) {
+	for _, tt := range []struct {
+		name, coordination, wantField string
+	}{
+		{"bad allowed agent name", `{"enabled":true,"allowedAgents":[{"name":[]}]}`, "coordination.allowedAgents[0].name"},
+		{"bad allowed agent namespace", `{"enabled":true,"allowedAgents":[{"name":"coder","namespace":{}}]}`, "coordination.allowedAgents[0].namespace"},
+		{"bad allowed agent item", `{"enabled":true,"allowedAgents":[false]}`, "coordination.allowedAgents[0]"},
+		{"valid coercions", `{"enabled":"true","maxDepth":"2","maxConcurrentChildren":"3","allowedAgents":[{"name":"coder","namespace":null}]}`, ""},
+		{"valid stringified config", `"{\"enabled\":\"true\",\"maxDepth\":\"2\",\"maxConcurrentChildren\":\"3\",\"allowedAgents\":[{\"name\":\"coder\"}]}"`, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			r := NewRegistry()
+			RegisterChatTools(r)
+			result, err := r.Execute(newCreateAgentTaskToolCtx(fc), "create_agent", json.RawMessage(`{"name":"lead","systemPrompt":"p","coordination":`+tt.coordination+`}`))
+			var agents corev1alpha1.AgentList
+			if listErr := fc.List(context.Background(), &agents); listErr != nil {
+				t.Fatal(listErr)
+			}
+			if tt.wantField != "" {
+				var argErr *ToolArgumentError
+				if !errors.As(err, &argErr) || argErr.Field != tt.wantField || len(agents.Items) != 0 {
+					t.Fatalf("Execute() error = %v, agents = %d; want rejected %s and no Agents", err, len(agents.Items), tt.wantField)
+				}
+				return
+			}
+			var response ChatToolResult
+			if err != nil || json.Unmarshal([]byte(result), &response) != nil || !response.Success || len(agents.Items) != 1 {
+				t.Fatalf("valid Execute() result = %s, error = %v, agents = %d", result, err, len(agents.Items))
+			}
+			coord := agents.Items[0].Spec.Coordination
+			if coord == nil || !coord.Enabled || coord.MaxDepth != 2 || coord.MaxConcurrentChildren != 3 || len(coord.AllowedAgents) != 1 || coord.AllowedAgents[0].Name != "coder" || coord.AllowedAgents[0].Namespace != "" {
+				t.Fatalf("normalized coordination stored as %#v", coord)
+			}
+		})
+	}
+}

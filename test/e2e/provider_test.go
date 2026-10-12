@@ -10,8 +10,10 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,6 +29,37 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 		openaiTaskName        = "e2e-provider-openai-task"
 		anthropicTaskName     = "e2e-provider-anthropic-task"
 	)
+
+	var (
+		apiBaseURL string
+		token      string
+	)
+
+	BeforeAll(func() {
+		var (
+			cancelPF context.CancelFunc
+			pfCmd    *exec.Cmd
+			err      error
+		)
+		apiBaseURL, cancelPF, pfCmd, err = startControllerAPIPortForward(18093)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { stopPortForward(cancelPF, pfCmd) })
+		token, err = serviceAccountToken()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	// expectProviderTaskResult checks the stored result through the controller
+	// API: exactly the scripted answer in mock mode, and the right number with
+	// a live key.
+	expectProviderTaskResult := func(taskName string, mocked bool) {
+		By("fetching the task result through the controller API")
+		result := strings.TrimSpace(fetchTaskResultViaAPI(apiBaseURL, token, taskName))
+		if mocked {
+			Expect(result).To(Equal("4"))
+		} else {
+			Expect(result).To(ContainSubstring("4"))
+		}
+	}
 
 	AfterAll(func() {
 		By("cleaning up provider test resources")
@@ -63,6 +96,7 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(Equal(openaiProviderName))
 		}, 30*time.Second, time.Second).Should(Succeed())
+		expectProviderValidated(openaiProviderName, "openai", e2eOpenAIBaseURL, model)
 
 		By("creating an AI task referencing the OpenAI provider")
 		taskManifest := fmt.Sprintf(`{
@@ -75,7 +109,7 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "What is 2+2? Reply with just the number.",
+					"prompt": "What is 2+2? Reply with just the number. [e2e:provider-openai]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
@@ -95,6 +129,15 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 
 		By("verifying the result is available")
 		verifyResultAvailable(openaiTaskName)
+		expectNativeAITaskSucceeded(openaiTaskName)
+		expectProviderTaskResult(openaiTaskName, e2eMockOpenAI)
+
+		if e2eMockOpenAI {
+			By("verifying the worker called the OpenAI Responses API with the Task model")
+			served := expectMockLLMServed("[e2e:provider-openai]", 30*time.Second)
+			Expect(served[0].Path).To(Equal("/v1/responses"))
+			Expect(served[0].Body.Model).To(Equal(model))
+		}
 	})
 
 	It("should complete an AI task using an Anthropic provider", func() {
@@ -107,6 +150,7 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 
 		By("creating an Anthropic Provider CRD")
 		createProviderCRD(anthropicProviderName, "anthropic", "e2e-anthropic-secret", "ANTHROPIC_API_KEY", e2eAnthropicBaseURL, model)
+		expectProviderValidated(anthropicProviderName, "anthropic", e2eAnthropicBaseURL, model)
 
 		By("creating an AI task referencing the Anthropic provider")
 		taskManifest := fmt.Sprintf(`{
@@ -119,7 +163,7 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "What is 2+2? Reply with just the number.",
+					"prompt": "What is 2+2? Reply with just the number. [e2e:provider-anthropic]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
@@ -139,5 +183,14 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 
 		By("verifying the result is available")
 		verifyResultAvailable(anthropicTaskName)
+		expectNativeAITaskSucceeded(anthropicTaskName)
+		expectProviderTaskResult(anthropicTaskName, e2eMockAnthropic)
+
+		if e2eMockAnthropic {
+			By("verifying the worker called the Anthropic Messages API with the Task model")
+			served := expectMockLLMServed("[e2e:provider-anthropic]", 30*time.Second)
+			Expect(served[0].Path).To(Equal("/v1/messages"))
+			Expect(served[0].Body.Model).To(Equal(model))
+		}
 	})
 })

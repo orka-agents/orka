@@ -10,6 +10,7 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -79,11 +80,12 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "Use the web_search tool to search for 'Kubernetes container orchestration'. Summarize what you find in 2-3 sentences.",
+					"prompt": "Use the web_search tool to search for 'Kubernetes container orchestration'. Summarize what you find in 2-3 sentences. [e2e:tools-web-search]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
-					}
+					},
+					"tools": ["web_search"]
 				}
 			}
 		}`, searchTaskName, namespace, model, toolProviderName)
@@ -99,6 +101,20 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 
 		By("verifying result is stored")
 		verifyResultAvailable(searchTaskName)
+
+		if e2eMockOpenAI {
+			By("verifying the web_search results reached the model")
+			// Without SEARCH_API_URL the worker searches DuckDuckGo and falls
+			// back to canned results, so only the result shape is stable.
+			output := expectMockLLMToolResult("[e2e:tools-web-search]", "web_search", 30*time.Second)
+			var results []struct {
+				Title string `json:"title"`
+				URL   string `json:"url"`
+			}
+			Expect(json.Unmarshal([]byte(output), &results)).To(Succeed(), "web_search output: %s", output)
+			Expect(results).NotTo(BeEmpty(), "web_search output: %s", output)
+			Expect(results[0].URL).NotTo(BeEmpty())
+		}
 	})
 
 	// Test: AI task using file_read tool
@@ -111,6 +127,8 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		}
 
 		By("creating an AI task that reads a file")
+		// code_exec runs in its own Pod by default, so a file it writes is not
+		// visible to file_read in the worker. Stage the file with file_write.
 		taskManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
@@ -121,11 +139,12 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "First use the code_exec tool to create a file at /tmp/e2e-read-test.txt with the content 'hello from file_read test'. Then use the file_read tool to read /tmp/e2e-read-test.txt and tell me what it contains.",
+					"prompt": "First use the file_write tool to create a file at /tmp/e2e-read-test.txt with the content 'hello from file_read test'. Then use the file_read tool to read /tmp/e2e-read-test.txt and tell me what it contains. [e2e:tools-file-read]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
-					}
+					},
+					"tools": ["file_write", "file_read"]
 				}
 			}
 		}`, fileReadTaskName, namespace, model, toolProviderName)
@@ -141,6 +160,19 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 
 		By("verifying result is stored")
 		verifyResultAvailable(fileReadTaskName)
+
+		if e2eMockOpenAI {
+			By("verifying file_read returned the requested byte range")
+			// The fixture reads 9 bytes at offset 11 of "hello from file_read test".
+			output := expectMockLLMToolResult("[e2e:tools-file-read]", "file_read", 30*time.Second)
+			var result struct {
+				Content   string `json:"content"`
+				Truncated bool   `json:"truncated"`
+			}
+			Expect(json.Unmarshal([]byte(output), &result)).To(Succeed(), "file_read output: %s", output)
+			Expect(result.Content).To(Equal("file_read"))
+			Expect(result.Truncated).To(BeTrue(), "a partial read should report truncation")
+		}
 	})
 
 	// Test: Custom Tool CRD
@@ -280,14 +312,15 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "Use the %s tool to echo the message 'hello from custom tool'. Report what the tool returned.",
+					"prompt": "Use the %s tool to echo the message 'hello from custom tool'. Report what the tool returned. [e2e:tools-custom-tool]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
-					}
+					},
+					"tools": [%q]
 				}
 			}
-		}`, customToolTask, namespace, customToolName, model, toolProviderName)
+		}`, customToolTask, namespace, customToolName, model, toolProviderName, customToolName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
@@ -298,6 +331,15 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		phase := waitForTaskCompletion(customToolTask, 5*time.Minute)
 		Expect(phase).To(BeElementOf("Succeeded", "Failed"),
 			"Custom tool task should reach terminal phase")
+
+		if e2eMockOpenAI {
+			Expect(phase).To(Equal("Succeeded"), "Scripted custom tool task should succeed")
+
+			By("verifying the echo receiver's response reached the model")
+			output := expectMockLLMToolResult("[e2e:tools-custom-tool]", customToolName, 30*time.Second)
+			Expect(output).To(ContainSubstring("echo"), "custom tool output: %s", output)
+			Expect(output).To(ContainSubstring("hello from custom tool"), "custom tool output: %s", output)
+		}
 	})
 
 	// Test: Agent tool filtering via allowedTools/disallowedTools
@@ -477,11 +519,12 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "Use the web_fetch tool to fetch https://httpbin.org/get and summarize the response.",
+					"prompt": "Use the web_fetch tool to fetch https://httpbin.org/get and summarize the response. [e2e:tools-web-fetch]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
-					}
+					},
+					"tools": ["web_fetch"]
 				}
 			}
 		}`, webFetchTaskName, namespace, model, toolProviderName)
@@ -497,6 +540,19 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 
 		By("verifying result is stored")
 		verifyResultAvailable(webFetchTaskName)
+
+		if e2eMockOpenAI {
+			// The fixture fetches the link-local metadata address and the
+			// in-cluster aimock Service instead of the internet, so this
+			// checks the SSRF guard on both an IP literal and a resolved name.
+			By("verifying web_fetch refused non-public destinations")
+			outputs := expectMockLLMToolResults("[e2e:tools-web-fetch]", "web_fetch", 2, 30*time.Second)
+			Expect(outputs[0]).To(ContainSubstring("URL must not target private, loopback, or link-local addresses"))
+			Expect(outputs[1]).To(ContainSubstring("non-public address"))
+			for _, output := range outputs {
+				Expect(output).NotTo(ContainSubstring(`"status"`), "web_fetch reached a private endpoint: %s", output)
+			}
+		}
 	})
 
 	// Test: AI task using file_write tool
@@ -519,11 +575,12 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "Use the file_write tool to write 'e2e test' to /tmp/e2e-write-test.txt, then file_read it and tell me the contents.",
+					"prompt": "Use the file_write tool to write 'e2e test' to /tmp/e2e-write-test.txt, then file_read it and tell me the contents. [e2e:tools-file-write]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
-					}
+					},
+					"tools": ["file_write", "file_read"]
 				}
 			}
 		}`, fileWriteTaskName, namespace, model, toolProviderName)
@@ -539,5 +596,24 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 
 		By("verifying result is stored")
 		verifyResultAvailable(fileWriteTaskName)
+
+		if e2eMockOpenAI {
+			By("verifying file_write created the file and file_read read it back")
+			writeOutput := expectMockLLMToolResult("[e2e:tools-file-write]", "file_write", 30*time.Second)
+			var written struct {
+				Size    int  `json:"size"`
+				Created bool `json:"created"`
+			}
+			Expect(json.Unmarshal([]byte(writeOutput), &written)).To(Succeed(), "file_write output: %s", writeOutput)
+			Expect(written.Created).To(BeTrue())
+			Expect(written.Size).To(Equal(len("e2e test")))
+
+			readOutput := expectMockLLMToolResult("[e2e:tools-file-write]", "file_read", 30*time.Second)
+			var read struct {
+				Content string `json:"content"`
+			}
+			Expect(json.Unmarshal([]byte(readOutput), &read)).To(Succeed(), "file_read output: %s", readOutput)
+			Expect(read.Content).To(Equal("e2e test"))
+		}
 	})
 })
