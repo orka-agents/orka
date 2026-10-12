@@ -9,17 +9,22 @@ Usage: scripts/agent-runtime-kind-e2e.sh [--namespace NAME] [--keep-cluster] [--
 
 Builds the Orka controller, worker, and agent runtime images, creates a
 repo-scoped Kind cluster, deploys a pinned Vekil proxy and Orka, then runs
-scripts/agent-runtime-e2e.sh against real model providers.
+scripts/agent-runtime-e2e.sh against real model providers. With
+ACP_E2E_MODEL_BACKEND=aimock (RELEASE_GATE=1 only) it deploys aimock as
+vekil-system/vekil instead, scripted by scripts/fixtures/agent-runtime-aimock,
+and needs no model credential.
 
-This wrapper is intentionally noninteractive: COPILOT_GITHUB_TOKEN is required
-and is written only through the Vekil deploy helper into a Kubernetes Secret.
-It never prints the token or starts GitHub device-code login. CI uses the same
-path as local runs.
+With the Vekil backend this wrapper is intentionally noninteractive:
+COPILOT_GITHUB_TOKEN is required and is written only through the Vekil deploy
+helper into a Kubernetes Secret. It never prints the token or starts GitHub
+device-code login. CI uses the same path as local runs.
 
 Environment:
   ACP_E2E_KIND_TAG        kindctl tag (default: run-scoped agent-runtime)
   ACP_E2E_KIND_CONFIG     optional Kind config path
   ACP_E2E_KEEP_CLUSTER=1  keep the cluster and local registry after the run
+  ACP_E2E_MODEL_BACKEND   vekil (default; real models) or aimock (scripted, release gate only)
+  ACP_E2E_AIMOCK_IMAGE    digest-pinned aimock image override
   ACP_E2E_VEKIL_IMAGE     digest-pinned Vekil image override
   ACP_E2E_VEKIL_LOCAL_IMAGE local Docker image published through the run's
                           registry and digest-pinned there (development builds)
@@ -203,6 +208,8 @@ LIVE_ACP_SECRET_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agent-runtime-
 export LIVE_ACP_SECRET_DIR LIVE_ACP_RELEASE_BUNDLE_DIR
 acp_report_update '.stage = "bootstrap"'
 live_acp_kind_bootstrap
+acp_report_update '.coverage.modelBackend = $backend' --arg backend "${LIVE_ACP_MODEL_BACKEND}"
+export ACP_E2E_MODEL_BACKEND="${LIVE_ACP_MODEL_BACKEND}"
 
 validator_args=(--context "${LIVE_ACP_CONTEXT}")
 if [[ -z "${namespace}" ]]; then
@@ -214,7 +221,11 @@ validator_args+=(--namespace "${namespace}")
 # This wrapper owns a dedicated Kind cluster, so the shared controller watch
 # namespace cannot contain unrelated RuntimePool consumers.
 export ACP_E2E_ALLOW_SHARED_POOL_MUTATION="${ACP_E2E_ALLOW_SHARED_POOL_MUTATION:-1}"
-live_acp_kind_log "Running agent runtime validator against real model providers"
+if [[ "${LIVE_ACP_MODEL_BACKEND}" == "aimock" ]]; then
+  live_acp_kind_log "Running agent runtime validator against scripted aimock models"
+else
+  live_acp_kind_log "Running agent runtime validator against real model providers"
+fi
 # Persist this before launching the child. If it is killed, an absent Task
 # receipt alone cannot establish that publication never started.
 acp_report_update '.validatorStarted = true'

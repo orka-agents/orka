@@ -234,6 +234,50 @@ func evalToolFailure(result string, err error) (bool, string) {
 	return false, ""
 }
 
+func TestToolEvalFailureClassification(t *testing.T) {
+	cases := []struct {
+		name    string
+		result  string
+		err     error
+		failed  bool
+		message string
+	}{
+		{name: "merge_pull_request", result: `{"merged":true,"checks_passed":true,"message":"Pull request merged successfully"}`},
+		{name: "auto_merge_pull_request", result: `{"merged":true,"checks_passed":true,"outcome":"merged","message":"Pull request merged successfully"}`},
+		{name: "check_pull_request_ci", result: `{"status":"passed","checks_passed":true,"message":"all CI checks passed"}`},
+		{name: "structured error", result: `{"success":false,"error":"invalid timeout","message":"informational"}`, failed: true, message: "invalid timeout"},
+		{name: "executor error", result: `{"error":"execution failed"}`, failed: true, message: "execution failed"},
+		{name: "failure without error", result: `{"success":false,"message":"not an error field"}`, failed: true},
+		{name: "Go error", result: `{"message":"informational"}`, err: fmt.Errorf("request failed"), failed: true, message: "request failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			failed, message := evalToolFailure(tc.result, tc.err)
+			if failed != tc.failed || message != tc.message {
+				t.Fatalf("evalToolFailure = (%v, %q), want (%v, %q)", failed, message, tc.failed, tc.message)
+			}
+			if !tc.failed {
+				before := evalBaselineFailures.Load()
+				call := func() (Tool, context.Context) {
+					return &mockTool{
+						name:       tc.name,
+						parameters: json.RawMessage(`{"type":"object"}`),
+						executeFunc: func(context.Context, json.RawMessage) (string, error) {
+							return tc.result, nil
+						},
+					}, context.Background()
+				}
+				if ok, detail := evalSucceeds(call, `{}`); !ok {
+					t.Fatalf("successful message payload failed its valid control: %s", detail)
+				}
+				if evalBaselineFailures.Load() != before {
+					t.Fatal("successful message payload incremented evalBaselineFailures")
+				}
+			}
+		})
+	}
+}
+
 func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 	evalToolSandbox(t)
 	registered := map[string]bool{}
@@ -700,6 +744,80 @@ func evalRecordingCodeExec(t *testing.T) (*CodeExecTool, *recordingCodeExecutor)
 	}, sandbox
 }
 
+// evalCodeExecMinimumTimeout accepts a timeout-specific rejection or a clamp
+// observed in the invalid call's own executor request, never the valid control's.
+func evalCodeExecMinimumTimeout(tool Tool, sandbox *recordingCodeExecutor) (bool, string) {
+	call := func() (Tool, context.Context) { return tool, context.Background() }
+	timeout := func(v int) string { return fmt.Sprintf(`{"language":"bash","code":"echo test","timeout":%d}`, v) }
+	if ok, detail := evalSucceeds(call, timeout(1)); !ok {
+		return false, detail
+	}
+	before := sandbox.calls
+	ok, detail := evalRejects(context.Background(), tool, timeout(0), "timeout")
+	if ok {
+		return true, ""
+	}
+	if sandbox.calls != before+1 {
+		return false, detail
+	}
+	if sandbox.req.Timeout == time.Second {
+		return true, ""
+	}
+	return false, fmt.Sprintf("timeout 0 ran with %s", sandbox.req.Timeout)
+}
+
+func TestToolEvalCodeExecMinimumTimeout(t *testing.T) {
+	cases := []struct {
+		name      string
+		rejection string
+		timeout   time.Duration
+		ok        bool
+		calls     int
+		detail    string
+	}{
+		{name: "wrong-reason rejection", rejection: "unsupported language: bash", calls: 1, detail: "for another reason: unsupported language: bash"},
+		{name: "timeout rejection", rejection: "timeout must be at least 1", ok: true, calls: 1},
+		{name: "clamped timeout", timeout: time.Second, ok: true, calls: 2},
+		{name: "default timeout is not a clamp", timeout: defaultCodeExecTimeout, calls: 2, detail: "timeout 0 ran with 30s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool, sandbox := evalRecordingCodeExec(t)
+			control := &mockTool{
+				name:       tool.Name(),
+				parameters: tool.Parameters(),
+				executeFunc: func(ctx context.Context, raw json.RawMessage) (string, error) {
+					var args struct {
+						Timeout int `json:"timeout"`
+					}
+					if err := json.Unmarshal(raw, &args); err != nil {
+						return "", err
+					}
+					if args.Timeout != 0 {
+						return tool.Execute(ctx, raw)
+					}
+					if tc.rejection != "" {
+						return "", fmt.Errorf("%s", tc.rejection)
+					}
+					result := sandbox.Execute(ctx, CodeExecutionRequest{Timeout: tc.timeout})
+					encoded, err := json.Marshal(result)
+					return string(encoded), err
+				},
+			}
+			ok, detail := evalCodeExecMinimumTimeout(control, sandbox)
+			if ok != tc.ok || (tc.detail == "" && detail != "") || !strings.Contains(detail, tc.detail) {
+				t.Errorf("minimum timeout check = (%v, %q), want (%v, detail containing %q)", ok, detail, tc.ok, tc.detail)
+			}
+			if sandbox.calls != tc.calls {
+				t.Errorf("executor calls = %d, want %d", sandbox.calls, tc.calls)
+			}
+			if tc.calls == 1 && sandbox.req.Timeout != time.Second {
+				t.Errorf("valid control timeout = %s, want 1s", sandbox.req.Timeout)
+			}
+		})
+	}
+}
+
 func evalAll(checks ...func() (bool, string)) (bool, string) {
 	for _, check := range checks {
 		if ok, detail := check(); !ok {
@@ -1050,16 +1168,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check: func(t *testing.T) (bool, string) {
 				// Zero is the value just below the minimum.
 				tool, sandbox := evalRecordingCodeExec(t)
-				call := func() (Tool, context.Context) { return tool, context.Background() }
-				timeout := func(v int) string { return fmt.Sprintf(`{"language":"bash","code":"echo test","timeout":%d}`, v) }
-				ok, detail := evalRejectsChange(call, timeout(1), timeout(0), "timeout")
-				if ok || strings.HasPrefix(detail, "valid call") {
-					return ok, detail
-				}
-				if sandbox.calls > 0 && sandbox.req.Timeout == time.Second {
-					return true, ""
-				}
-				return false, fmt.Sprintf("timeout 0 ran with %s", sandbox.req.Timeout)
+				return evalCodeExecMinimumTimeout(tool, sandbox)
 			},
 		},
 		{
