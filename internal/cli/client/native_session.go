@@ -44,7 +44,10 @@ func (c *Client) nativeSessionRequest(ctx context.Context, method, name string, 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTPClient.Do(req)
+	// Portable conversation data must remain at the explicitly selected server.
+	httpClient := *c.HTTPClient
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("native session request: %w", err)
 	}
