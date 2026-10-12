@@ -1037,6 +1037,12 @@ func explicitApprovalTargetForCall(
 			return approvals.ApprovalTarget{}, err
 		}
 	}
+	// Match RequestApprovalTool.Execute before a resolved decision can bypass it.
+	switch req.Severity {
+	case "", "warning", "critical":
+	default:
+		return approvals.ApprovalTarget{}, fmt.Errorf("invalid severity %q: must be warning or critical", req.Severity)
+	}
 	baseToolCtx = prepareApprovalToolContext(baseToolCtx, nil)
 	if baseToolCtx == nil {
 		baseToolCtx = tools.GetToolContext(ctx)
