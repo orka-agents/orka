@@ -377,7 +377,7 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 }
 
 // Names followed by = or : are tool arguments such as wait_timeout="30m".
-var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file|request|reply)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*)\b(\s*[=:])?`)
+var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file|request|reply|recall|propose|search|remember|merge|auto|comment|post|review)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*|remember)\b(\s*"?\s*[=:])?`)
 
 // TestChatEvalPromptBuiltInToolReferencesExist catches model-message, system-prompt,
 // or tool-schema text that still names a renamed or removed built-in tool.
@@ -465,18 +465,35 @@ func TestChatEvalUnknownBuiltInToolReferences(t *testing.T) {
 		{name: "registered worker tools", text: "Use code_exec, web_fetch, file_read, file_write, request_approval, and reply_in_conversation."},
 		{name: "stale code tool", text: "Use code_missing_tool.", want: []string{"code_missing_tool"}},
 		{name: "stale web tool", text: "Use web_missing_tool.", want: []string{"web_missing_tool"}},
+		{name: "registered memory tools", text: "Use recall_memory, propose_memory, search_transcript, and remember."},
+		{name: "stale forge tools", text: "Use merge_removed_request, auto_removed_merge, comment_removed_issue, post_removed_review, and review_removed_request.", want: []string{"merge_removed_request", "auto_removed_merge", "comment_removed_issue", "post_removed_review", "review_removed_request"}},
+		{name: "stale memory tools", text: "Use recall_removed_memory, propose_removed_memory, search_removed_transcript, and remember_removed_memory.", want: []string{"recall_removed_memory", "propose_removed_memory", "search_removed_transcript", "remember_removed_memory"}},
 		{name: "stale request tool", text: "Use request_missing_tool.", want: []string{"request_missing_tool"}},
 		{name: "stale reply tool", text: "Use reply_missing_tool.", want: []string{"reply_missing_tool"}},
 		{name: "nested schema tool reference", text: `{"properties":{"mode":{"description":"Use request_removed_approval.","enum":["reply_removed_conversation"]}}}`, want: []string{"request_removed_approval", "reply_removed_conversation"}},
 		{name: "stale file tool", text: "Use file_missing_tool.", want: []string{"file_missing_tool"}},
 		{name: "stale versioned tool", text: "Use create_agent_v2.", want: []string{"create_agent_v2"}},
 		{name: "stale tool with numeric segment", text: "Use create_agent_2.", want: []string{"create_agent_2"}},
+		{name: "schema property keys are not tools", text: `{"review_event":{},"wait_timeout2":"30m","file_path":"x"}`},
 		{name: "arguments are not tools", text: `file_path="x" wait_timeout: "30m" file_path_v2="x" wait_timeout2: "30m"`},
 		{name: "custom identifiers are outside the built-in scan", text: "Use custom-tool or custom_tool."},
 		{name: "other identifiers are not tools", text: "model_v2 task_create_agent_v2 createAgentV2 get_42"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, chatEvalUnknownBuiltInToolReferences(tt.text))
+		})
+	}
+}
+
+// New built-in families must participate in the scan rather than being silently
+// ignored. This pins coverage to the actual registry, including single-word tools.
+func TestChatEvalEveryKnownBuiltInToolNameIsScanned(t *testing.T) {
+	for _, name := range chattools.KnownBuiltInToolNames() {
+		t.Run(name, func(t *testing.T) {
+			match := chatEvalToolMentionPattern.FindStringSubmatch(name)
+			require.Len(t, match, 3, "registered built-in is outside the tool-reference scan")
+			require.Equal(t, name, match[1])
+			require.Empty(t, chatEvalUnknownBuiltInToolReferences(name))
 		})
 	}
 }
