@@ -1349,9 +1349,9 @@ func TestCreateAgentTaskTool_AuthorizesBeforeAgentState(t *testing.T) {
 			}
 			ctx := newCreateAgentTaskToolCtx(fc)
 			calls := 0
-			GetToolContext(ctx).AuthorizeTaskCreate = func(_ context.Context, task *corev1alpha1.Task) *ChatToolError {
+			GetToolContext(ctx).AuthorizeAgentReference = func(_ context.Context, agent *corev1alpha1.Agent) *ChatToolError {
 				calls++
-				if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "disallowed" {
+				if agent.Name != "disallowed" {
 					t.Fatal("preflight lost the Agent reference")
 				}
 				return &ChatToolError{Type: "permission_denied", Message: "agent reference is not allowed"}

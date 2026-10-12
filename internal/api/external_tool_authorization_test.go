@@ -875,3 +875,31 @@ func TestExternalToolCreateAgentProviderChecksDoNotBypassCaller(t *testing.T) {
 		}
 	}
 }
+
+func TestChatAgentTaskReferencePreflightPreservesExternalProfile(t *testing.T) {
+	agent, externalRuntime := testExternalRuntimeAuthorizationObjects([]string{"Read"})
+	externalRuntime.Spec.Capabilities.Profile.WorkspaceIntent = "read"
+	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(agent, externalRuntime).Build()
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}, TransactionContext: map[string]any{
+		"namespace": "default", "allowedAgents": []any{"agentkit"},
+	}}
+	executor := NewToolExecutor(fc, nil, "default", "eval-session", "", false, 5, time.Second, nil)
+	executor.SetPolicyReader(fc)
+	referenceChecks, fullChecks := 0, 0
+	executor.authorizeAgentReference = func(_ context.Context, ref *corev1alpha1.Agent) error {
+		referenceChecks++
+		return authorizeContextTokenAgentTaskReference(token, cfg, ref.Namespace, ref.Name)
+	}
+	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
+		fullChecks++
+		require.NotNil(t, task.Spec.AgentRuntime, "full authorization ran before materialization")
+		require.Equal(t, []string{"Read"}, task.Spec.AgentRuntime.AllowedTools)
+		return authorizeContextTokenTaskCreateObject(ctx, fc, token, cfg, "full-task-test", task)
+	})
+	result := executeExternalTool(t, executor, "create_agent_task", `{"agentRef":"agentkit","prompt":"work"}`)
+	require.True(t, result.Success, "%s", result.Error)
+	require.Equal(t, 1, referenceChecks)
+	require.Equal(t, 1, fullChecks)
+}
