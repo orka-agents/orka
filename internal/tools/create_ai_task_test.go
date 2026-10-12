@@ -395,36 +395,43 @@ func TestCreateAITaskTool_Execute_MissingContext(t *testing.T) {
 
 func TestCreateAITaskTool_Execute_ProviderDefaults(t *testing.T) {
 	for _, tt := range []struct {
-		name     string
-		provider string
-		args     string
-		want     string
+		name              string
+		provider          string
+		providerNamespace string
+		taskNamespace     string
+		args              string
+		want              string
+		wantNamespace     string
 	}{
-		{name: "agentless session default", provider: "session-provider", args: `{"prompt":"Analyze code"}`, want: "session-provider"},
+		{name: "agentless session default", provider: "session-provider", args: `{"prompt":"Analyze code"}`, want: "session-provider", wantNamespace: defaultNamespace},
 		{name: "explicit override", provider: "session-provider", args: `{"prompt":"Analyze code","providerRef":"requested-provider"}`, want: "requested-provider"},
 		{name: "Agent defaults stay authoritative", provider: "session-provider", args: `{"prompt":"Analyze code","agentRef":"reviewer"}`},
 		{name: "Agent explicit override", provider: "session-provider", args: `{"prompt":"Analyze code","agentRef":"reviewer","providerRef":"requested-provider"}`, want: "requested-provider"},
+		{name: "cross-namespace task inherits session identity", provider: "session-provider", taskNamespace: "other", args: `{"prompt":"Analyze code","namespace":"other"}`, want: "session-provider", wantNamespace: defaultNamespace},
+		{name: "resolved Provider namespace is preserved", provider: "session-provider", providerNamespace: "provider-ns", args: `{"prompt":"Analyze code"}`, want: "session-provider", wantNamespace: "provider-ns"},
+		{name: "cross-namespace explicit override stays task-local", provider: "session-provider", providerNamespace: "provider-ns", taskNamespace: "other", args: `{"prompt":"Analyze code","namespace":"other","providerRef":"requested-provider"}`, want: "requested-provider"},
 		{name: "no session provider", args: `{"prompt":"Analyze code"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fc := newFakeClient()
 			checked := false
-			providerName := func(task *corev1alpha1.Task) string {
+			providerRef := func(task *corev1alpha1.Task) corev1alpha1.ProviderReference {
 				if task.Spec.AI != nil && task.Spec.AI.ProviderRef != nil {
-					return task.Spec.AI.ProviderRef.Name
+					return *task.Spec.AI.ProviderRef
 				}
-				return ""
+				return corev1alpha1.ProviderReference{}
 			}
+			want := corev1alpha1.ProviderReference{Name: tt.want, Namespace: tt.wantNamespace}
 			ctx := WithToolContext(t.Context(), &ToolContext{
-				Client: fc, Namespace: defaultNamespace, Provider: tt.provider,
+				Client: fc, Namespace: defaultNamespace, Provider: tt.provider, ProviderNamespace: tt.providerNamespace,
 				GenerateTaskName: func() string { return testAITaskName },
 				TaskLabels:       func() map[string]string { return nil },
 				CheckTaskLimit:   func() *ChatToolError { return nil },
 				IncrementTasks:   func() {},
 				AuthorizeTaskCreate: func(_ context.Context, task *corev1alpha1.Task) *ChatToolError {
 					checked = true
-					if got := providerName(task); got != tt.want {
-						t.Errorf("authorization saw provider %q, want %q", got, tt.want)
+					if got := providerRef(task); got != want {
+						t.Errorf("authorization saw provider %#v, want %#v", got, want)
 					}
 					return nil
 				},
@@ -441,11 +448,15 @@ func TestCreateAITaskTool_Execute_ProviderDefaults(t *testing.T) {
 				t.Fatalf("creation failed or skipped authorization: %s", result)
 			}
 			var created corev1alpha1.Task
-			if err := fc.Get(t.Context(), client.ObjectKey{Name: testAITaskName, Namespace: defaultNamespace}, &created); err != nil {
+			namespace := tt.taskNamespace
+			if namespace == "" {
+				namespace = defaultNamespace
+			}
+			if err := fc.Get(t.Context(), client.ObjectKey{Name: testAITaskName, Namespace: namespace}, &created); err != nil {
 				t.Fatal(err)
 			}
-			if got := providerName(&created); got != tt.want {
-				t.Fatalf("stored provider %q, want %q", got, tt.want)
+			if got := providerRef(&created); got != want {
+				t.Fatalf("stored provider %#v, want %#v", got, want)
 			}
 		})
 	}
