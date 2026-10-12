@@ -308,6 +308,14 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if sqliteHome := os.Getenv("CODEX_SQLITE_HOME"); sqliteHome != "" {
+				// Relative overrides depend on the resume CWD; fresh-home validation
+				// covers databases in this exact absolute home only.
+				resolvedSQLiteHome, sqliteErr := migrationDir(sqliteHome, false)
+				if sqliteHome != strings.TrimSpace(sqliteHome) || !filepath.IsAbs(sqliteHome) || sqliteErr != nil || resolvedSQLiteHome != resolvedHome {
+					return errors.New("CODEX_SQLITE_HOME must be unset or an absolute path without surrounding whitespace resolving to the destination CODEX_HOME before native export")
+				}
+			}
 			resolvedCWD, err := migrationDir(cwd, false)
 			if err != nil {
 				return err

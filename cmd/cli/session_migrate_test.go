@@ -193,6 +193,7 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 }
 
 func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {
+	t.Setenv("CODEX_SQLITE_HOME", "")
 	snapshot := storetest.NativeSessionSnapshot(t, "native-export-context")
 	serverCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -236,9 +237,15 @@ func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {
 	if !bytes.Contains(rollout, []byte("native-export-context")) {
 		t.Fatal("context absent from native target")
 	}
+	// A direct destination override and a symlink to it are the same safe home.
+	t.Setenv("CODEX_SQLITE_HOME", home)
 	if err := migrationCommand(t, server.URL, args...); err != nil {
 		t.Fatal(err)
 	}
+	sqliteLink := filepath.Join(t.TempDir(), "sqlite-home")
+	require.NoError(t, os.Symlink(home, sqliteLink))
+	t.Setenv("CODEX_SQLITE_HOME", sqliteLink)
+	require.NoError(t, migrationCommand(t, server.URL, args...))
 	if serverCalls != 1 {
 		t.Fatalf("retry fetched a newer checkpoint: %d", serverCalls)
 	}
@@ -248,6 +255,69 @@ func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte(receipt.OperationID)) {
 		t.Fatal("retry changed install plan")
+	}
+}
+
+func TestMigrateExportRejectsExternalSQLiteHomeBeforeAPI(t *testing.T) {
+	for _, mode := range []string{"external", "symlink-external", "missing", "private-child", "relative-process-home", "space-suffix-alias", "unicode-space-suffix-alias"} {
+		t.Run(mode, func(t *testing.T) {
+			serverCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				serverCalls++
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			home, journal, external := t.TempDir(), t.TempDir(), t.TempDir()
+			require.NoError(t, os.Chmod(home, 0o700))
+			require.NoError(t, os.Chmod(journal, 0o700))
+			require.NoError(t, os.Chmod(external, 0o700))
+			sqliteHome := external
+			switch mode {
+			case "symlink-external":
+				sqliteHome = filepath.Join(t.TempDir(), "sqlite-home")
+				require.NoError(t, os.Symlink(external, sqliteHome))
+			case "missing":
+				sqliteHome = filepath.Join(external, "missing")
+			case "private-child":
+				sqliteHome = filepath.Join(home, "sqlite")
+				require.NoError(t, os.Mkdir(sqliteHome, 0o700))
+			case "relative-process-home":
+				// Export runs inside the home, but Codex will resume in another CWD.
+				t.Chdir(home)
+				sqliteHome = "."
+			case "space-suffix-alias", "unicode-space-suffix-alias":
+				// Codex trims the value, so the spaced alias must not pass validation.
+				external = filepath.Join(t.TempDir(), "sqlite-home")
+				require.NoError(t, os.Mkdir(external, 0o700))
+				suffix := " "
+				if mode == "unicode-space-suffix-alias" {
+					suffix = "\u2003"
+				}
+				sqliteHome = external + suffix
+				require.NoError(t, os.Symlink(home, sqliteHome))
+			}
+			t.Setenv("CODEX_SQLITE_HOME", sqliteHome)
+			database := filepath.Join(external, "state_5.sqlite")
+			original := []byte("unrelated native database")
+			require.NoError(t, os.WriteFile(database, original, 0o600))
+			before, err := os.ReadDir(home)
+			require.NoError(t, err)
+			binary := filepath.Join(t.TempDir(), "codex")
+			require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'codex-cli 0.160.0\\n'\n"), 0o700))
+			err = migrationCommand(t, server.URL, "export", "source", "--codex-home", home, "--cwd", t.TempDir(),
+				"--journal-dir", journal, "--codex-bin", binary)
+			require.ErrorContains(t, err, "CODEX_SQLITE_HOME must be unset or an absolute path without surrounding whitespace resolving to the destination CODEX_HOME")
+			require.Zero(t, serverCalls)
+			for _, name := range []string{"request.json", "plan.json", "receipt.json"} {
+				require.NoFileExists(t, filepath.Join(journal, name))
+			}
+			after, err := os.ReadDir(home)
+			require.NoError(t, err)
+			require.Equal(t, before, after, "rejected export changed its destination")
+			unchanged, err := os.ReadFile(database)
+			require.NoError(t, err)
+			require.Equal(t, original, unchanged)
+		})
 	}
 }
 

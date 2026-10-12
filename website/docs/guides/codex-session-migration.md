@@ -40,9 +40,14 @@ rollout. SessionKit does not modify those databases or reconcile divergent
 local and cluster histories.
 
 Use a separate fresh `CODEX_HOME` on return and resume the UUID explicitly.
-Keep `CODEX_SQLITE_HOME` unset or point it at that home's private database
-directory. Your original home remains unchanged and can still be an import
-source. Safe per-thread replacement in an existing home is not implemented.
+Keep `CODEX_SQLITE_HOME` unset or set it to an absolute path without surrounding
+whitespace resolving to that exact private `CODEX_HOME`. The export CLI rejects
+relative and whitespace-padded overrides, resolves symlinks, and rejects a
+different database directory, including a nested directory whose existing
+database state is not checked by fresh-home validation, before fetching or
+staging the checkpoint. Your original
+home remains unchanged and can still be an import source. Safe per-thread
+replacement in an existing home is not implemented.
 
 ### Encrypted native reasoning
 
