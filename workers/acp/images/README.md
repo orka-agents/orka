@@ -139,13 +139,20 @@ The adapter returns JSON-RPC `invalid_request` (`-32600`) with
 `data.reason: "thread_active_writer"` when another Codex client owns a thread.
 A caller must release that writer before retrying. For an unmaterialized
 thread, the adapter falls back to `thread/read` in the same live app-server;
-a missing persisted thread still fails. Orka currently creates provider
-sessions with `session/new` and continues them with `session/prompt`. It does
-not expose native `session/load` or `session/resume`; installing an imported
-SessionKit bundle and handling these restore errors remain consumer work.
-A native restore consumer must also set the adapter's `MODEL_PROVIDER` to the
-destination provider ID. `CODEX_CONFIG.model_provider` alone does not select
-the provider passed to `thread/resume` in this adapter release.
+a missing persisted thread still fails. For new conversations, Orka uses
+`session/new` and continues with `session/prompt`.
+
+For native Codex restoration, the supervisor installs a verified SessionKit
+bundle into the child's fresh private `CODEX_HOME` before starting codex-acp.
+Orka requires the adapter's advertised `session/resume` capability and resumes
+the original thread UUID with the current working directory, provider, MCP
+tools, approvals, and sandbox settings. Missing resume support or a failed
+resume rejects creation without falling back to `session/new`.
+The supervisor also sets `MODEL_PROVIDER` to the destination provider ID;
+`CODEX_CONFIG.model_provider` alone does not select the provider passed to
+`thread/resume` in this adapter release. See the
+[Codex session migration guide](../../../website/docs/guides/codex-session-migration.md)
+for supported history, import/export commands, and recovery limits.
 
 The Copilot image instead installs the unmodified official per-architecture
 release executable. Its tar asset is checksum-verified, must contain exactly one
