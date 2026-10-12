@@ -395,11 +395,12 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 // Names followed by = or : are tool arguments such as wait_timeout="30m".
 var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file|request|reply)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*)\b(\s*[=:])?`)
 
-// TestChatEvalPromptToolReferencesExist catches model-message, system-prompt,
-// or tool-schema text that still names a renamed or removed tool.
+// TestChatEvalPromptBuiltInToolReferencesExist catches model-message, system-prompt,
+// or tool-schema text that still names a renamed or removed built-in tool.
+// Custom Tool CRD identifiers are outside this built-in vocabulary check.
 // Coordinator-only tools may be mentioned because the prompt describes what
 // coordinator Agents will do.
-func TestChatEvalPromptToolReferencesExist(t *testing.T) {
+func TestChatEvalPromptBuiltInToolReferencesExist(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
 		req           ChatRequest
@@ -449,14 +450,14 @@ func TestChatEvalPromptToolReferencesExist(t *testing.T) {
 					require.NoError(t, err)
 					text = append(text, tool.Description, string(schema))
 				}
-				require.Empty(t, chatEvalUnknownToolReferences(strings.Join(text, "\n")),
-					"model messages, system prompt, or tool schemas in request %d name tools that are not registered anywhere", i)
+				require.Empty(t, chatEvalUnknownBuiltInToolReferences(strings.Join(text, "\n")),
+					"model messages, system prompt, or tool schemas in request %d name built-in tools that are not registered", i)
 			}
 		})
 	}
 }
 
-func chatEvalUnknownToolReferences(text string) []string {
+func chatEvalUnknownBuiltInToolReferences(text string) []string {
 	known := map[string]bool{}
 	for _, name := range chattools.KnownBuiltInToolNames() {
 		known[name] = true
@@ -471,7 +472,7 @@ func chatEvalUnknownToolReferences(text string) []string {
 	return stale
 }
 
-func TestChatEvalUnknownToolReferences(t *testing.T) {
+func TestChatEvalUnknownBuiltInToolReferences(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		text string
@@ -487,10 +488,11 @@ func TestChatEvalUnknownToolReferences(t *testing.T) {
 		{name: "stale versioned tool", text: "Use create_agent_v2.", want: []string{"create_agent_v2"}},
 		{name: "stale tool with numeric segment", text: "Use create_agent_2.", want: []string{"create_agent_2"}},
 		{name: "arguments are not tools", text: `file_path="x" wait_timeout: "30m" file_path_v2="x" wait_timeout2: "30m"`},
+		{name: "custom identifiers are outside the built-in scan", text: "Use custom-tool or custom_tool."},
 		{name: "other identifiers are not tools", text: "model_v2 task_create_agent_v2 createAgentV2 get_42"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, chatEvalUnknownToolReferences(tt.text))
+			require.Equal(t, tt.want, chatEvalUnknownBuiltInToolReferences(tt.text))
 		})
 	}
 }
