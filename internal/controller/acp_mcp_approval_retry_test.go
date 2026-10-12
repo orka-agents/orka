@@ -158,6 +158,9 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 			done := f.start(f.request)
 			pending := f.pending()
 			fault.active.Store(true)
+			if source == "decision" || source == "receipt" {
+				requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
+			}
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
 			if source == "receipt" || source == "decision" {
