@@ -974,6 +974,7 @@ func handleExplicitRequestApprovalBatch(
 		if _, ok := allowedToolCalls["request_approval"]; !ok {
 			return nil, nil
 		}
+		call = normalizeRequestApprovalCall(call)
 		if gate != nil && len(gate.resolved) > 0 {
 			if target, err := explicitApprovalTargetForCall(ctx, call, customTools, baseToolCtx); err == nil {
 				if decision, found := gate.resolvedDecision(target); found {
@@ -997,6 +998,29 @@ func handleExplicitRequestApprovalBatch(
 		return &approvalBatchDecision{result: result}, nil
 	}
 	return nil, nil
+}
+
+// normalizeRequestApprovalCall applies the registry's stringified-object semantics
+// before both resolved-decision matching and execution. Invalid and non-object
+// targetArguments stay unchanged so the request_approval tool rejects them.
+func normalizeRequestApprovalCall(call llm.ToolCall) llm.ToolCall {
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(call.Arguments, &args); err != nil {
+		return call
+	}
+	var encoded string
+	if err := json.Unmarshal(args["targetArguments"], &encoded); err != nil {
+		return call
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(encoded), &object); err != nil || object == nil {
+		return call
+	}
+	args["targetArguments"] = json.RawMessage(encoded)
+	if normalized, err := json.Marshal(args); err == nil {
+		call.Arguments = normalized
+	}
+	return call
 }
 
 func blockingApprovalOverflowBatchToolResults(

@@ -886,3 +886,29 @@ func TestBuildSystemPromptKeepsGeneralRulesForScopedCallers(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildSystemPromptKeepsSingleCreatorRouting(t *testing.T) {
+	for _, tool := range []string{"create_ai_task", "create_container_task", "create_agent_task"} {
+		t.Run(tool, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			b.SetAvailableChatTools([]string{tool})
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, other := range []string{"create_ai_task", "create_container_task", "create_agent_task"} {
+				if other != tool && strings.Contains(prompt, other) {
+					t.Errorf("prompt for %s names unavailable %s", tool, other)
+				}
+			}
+			if tool == "create_agent_task" {
+				if !strings.Contains(prompt, "ALWAYS use create_agent_task") || !strings.Contains(prompt, "Do NOT use create_agent_task for non-runtime agents") {
+					t.Error("agent-only prompt lost runtime routing")
+				}
+			} else if !strings.Contains(prompt, "Do NOT use "+tool+" for runtime agents") {
+				t.Error("non-runtime creator lost the runtime prohibition")
+			}
+		})
+	}
+}

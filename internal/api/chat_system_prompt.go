@@ -322,8 +322,10 @@ func taskTypeParts() []promptPart {
 `, requires: []string{chatCreateAITaskTool}},
 		{text: `  Agent tasks need more time than AI tasks. Set timeout to at least 15m.
 `, requires: []string{promptToolAgentTask}},
-		{text: `  Do NOT use create_container_task or create_ai_task for runtime agents.
-`, requires: []string{promptToolContainerTask, chatCreateAITaskTool}},
+		{text: `  Do NOT use create_container_task for runtime agents.
+`, requires: []string{promptToolContainerTask}},
+		{text: `  Do NOT use create_ai_task for runtime agents.
+`, requires: []string{chatCreateAITaskTool}},
 		{text: `  Do NOT use create_agent_task for non-runtime agents.
 `, requires: []string{promptToolAgentTask}},
 	}
@@ -498,11 +500,14 @@ func ruleParts() []promptPart {
 		{text: `If no agents exist and user needs an agent task, create the agent first with create_agent.
 `, requires: []string{promptToolCreateAgent}},
 		{text: `When the user specifies an agent (agentRef) that has a "runtime" listed in the
-   available_agents section, ALWAYS use create_agent_task — never create_container_task
-   or create_ai_task. Runtime agents have their own CLI environment with full tool access.
-   When an agent has no "runtime" listed, including coordinator agents, use create_ai_task
-   with agentRef and providerRef — never create_agent_task.
-`, requires: []string{promptToolAgentTask, promptToolContainerTask, chatCreateAITaskTool}},
+   available_agents section, ALWAYS use create_agent_task. Runtime agents have their own CLI
+   environment with full tool access. Never use create_agent_task for non-runtime agents.
+`, requires: []string{promptToolAgentTask}},
+		{text: `When an agent has no "runtime" listed, including coordinator agents, use create_ai_task
+   with agentRef and providerRef. Never use create_ai_task for runtime agents.
+`, requires: []string{chatCreateAITaskTool}},
+		{text: `Never use create_container_task for runtime agents.
+`, requires: []string{promptToolContainerTask}},
 		{text: `For multi-step workflows involving coding + review + PR creation:
     - Prefer available coordinator candidates: agents whose names contain "coordinator";
       if "dev-coordinator" exists, prefer it.
