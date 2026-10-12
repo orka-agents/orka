@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -437,7 +438,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	}
 
 	sessionInfo := fmt.Sprintf("namespace=%s", b.namespace)
-	if b.chatProvider != "" {
+	if b.chatProvider != "" && slices.Contains(providerNames, b.chatProvider) {
 		sessionInfo += fmt.Sprintf(" | chat_provider=%s", b.chatProvider)
 	}
 	providersSection = fmt.Sprintf("Runtime: %s | providers=[%s] | agents=%d | tools=%d | container=yes | agent_runtimes=[%s]\n",

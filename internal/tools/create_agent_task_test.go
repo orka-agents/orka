@@ -1333,3 +1333,40 @@ func TestCreateAgentTaskTool_Execute_MissingContext(t *testing.T) {
 		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
 	}
 }
+
+func TestCreateAgentTaskTool_AuthorizesBeforeAgentState(t *testing.T) {
+	for _, state := range []string{"missing", "runtime", "non-runtime"} {
+		t.Run(state, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "disallowed", Namespace: defaultNamespace}}
+			if state == "runtime" {
+				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}
+			}
+			fc := newFakeClient()
+			if state != "missing" {
+				if err := fc.Create(context.Background(), agent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := newCreateAgentTaskToolCtx(fc)
+			calls := 0
+			GetToolContext(ctx).AuthorizeTaskCreate = func(_ context.Context, task *corev1alpha1.Task) *ChatToolError {
+				calls++
+				if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "disallowed" {
+					t.Fatal("preflight lost the Agent reference")
+				}
+				return &ChatToolError{Type: "permission_denied", Message: "agent reference is not allowed"}
+			}
+			result, err := (&CreateAgentTaskTool{}).Execute(ctx, json.RawMessage(`{"agentRef":"disallowed","prompt":"work"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Success || response.ErrorType != "permission_denied" || response.Error != "agent reference is not allowed" || calls != 1 {
+				t.Fatalf("state=%s response=%#v authorization calls=%d", state, response, calls)
+			}
+		})
+	}
+}

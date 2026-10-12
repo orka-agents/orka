@@ -755,3 +755,25 @@ func TestBuildDynamicContextSkillListError(t *testing.T) {
 		t.Errorf("error = %q, expected 'listing skills' message", err.Error())
 	}
 }
+
+func TestSystemPromptChatProviderMustBeVisible(t *testing.T) {
+	for _, visible := range []bool{false, true} {
+		t.Run(fmt.Sprint(visible), func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			if visible {
+				if err := c.Create(context.Background(), &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "visible-provider", Namespace: "default"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			b.SetChatProvider("visible-provider")
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(prompt, "chat_provider=visible-provider") != visible {
+				t.Fatalf("chat provider visibility differs from discovery: visible=%v", visible)
+			}
+		})
+	}
+}
