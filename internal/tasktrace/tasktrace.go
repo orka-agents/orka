@@ -10,6 +10,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 const (
@@ -232,7 +233,7 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			modelByID[id] = len(trace.ModelRequests)
 			openModelIDs = append(openModelIDs, id)
 			createdAt := event.CreatedAt
-			trace.ModelRequests = append(trace.ModelRequests, ModelRequestTrace{ID: id, Status: StatusRunning, Model: firstContentString(event.Content, "model"), Provider: firstContentString(event.Content, "provider"), StartSeq: event.Seq, StartedAt: &createdAt, Summary: event.Summary})
+			trace.ModelRequests = append(trace.ModelRequests, ModelRequestTrace{ID: id, Status: StatusRunning, Model: modelRequestModel(event), Provider: modelRequestProvider(event), StartSeq: event.Seq, StartedAt: &createdAt, Summary: event.Summary})
 		case events.ExecutionEventTypeModelRequestCompleted, events.ExecutionEventTypeModelRequestFailed:
 			id := modelRequestID(event)
 			idx := -1
@@ -259,8 +260,8 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			trace.ModelRequests[idx].Summary = prefer(trace.ModelRequests[idx].Summary, event.Summary)
 			// The completion reports the model that answered, which can be more
 			// specific than the requested one.
-			trace.ModelRequests[idx].Model = prefer(trace.ModelRequests[idx].Model, firstContentString(event.Content, "model"))
-			trace.ModelRequests[idx].Provider = prefer(trace.ModelRequests[idx].Provider, firstContentString(event.Content, "provider"))
+			trace.ModelRequests[idx].Model = prefer(trace.ModelRequests[idx].Model, modelRequestModel(event))
+			trace.ModelRequests[idx].Provider = prefer(trace.ModelRequests[idx].Provider, modelRequestProvider(event))
 			if event.Type == events.ExecutionEventTypeModelRequestFailed {
 				trace.ModelRequests[idx].Status = StatusFailed
 				trace.ModelRequests[idx].Error = issueMessage(event)
@@ -395,6 +396,20 @@ func cloneTruncation(value *events.ExecutionEventTruncation) *events.ExecutionEv
 
 func modelRequestID(event store.ExecutionEvent) string {
 	return firstContentString(event.Content, "modelRequestID", "model_request_id", "requestID", "id")
+}
+
+// modelRequestModel accepts the GenAI semantic-convention aliases that the
+// execution event API also reads, preferring the response model on
+// completion and failure events.
+func modelRequestModel(event store.ExecutionEvent) string {
+	if event.Type == events.ExecutionEventTypeModelRequestStarted {
+		return firstContentString(event.Content, "model", genai.AttrRequestModel, genai.AttrResponseModel)
+	}
+	return firstContentString(event.Content, "model", genai.AttrResponseModel, genai.AttrRequestModel)
+}
+
+func modelRequestProvider(event store.ExecutionEvent) string {
+	return firstContentString(event.Content, "provider", genai.AttrProviderName)
 }
 
 func toolCallID(event store.ExecutionEvent) string {
