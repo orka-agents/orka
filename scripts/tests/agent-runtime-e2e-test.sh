@@ -929,3 +929,63 @@ printf '%s\n' 'ok - Task terminal waits require execution and phase projection f
   [[ "${positive_controls}" == 2 && "${negative_controls}" == 7 ]]
 )
 printf '%s\n' 'ok - candidate identity and all workspace URL controls run without live GitHub publication settings'
+
+(
+  for name in aimock_journal_mark assert_aimock_history aimock_blocking_command_served; do
+    function_body="$(awk -v signature="${name}() {" '$0 == signature { copying=1 } copying { print } copying && $0 == "}" { exit }' "${script}")"
+    [[ -n "${function_body}" ]] || {
+      echo "aimock journal helper ${name} is missing" >&2
+      exit 1
+    }
+    eval "${function_body}"
+  done
+  temp_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-aimock-journal.XXXXXX")"
+  trap 'rm -rf "${temp_root}"' EXIT
+  die() { printf '%s\n' "$*" >"${temp_root}/died"; exit 1; }
+  log() { :; }
+  journal_json='[]'
+  read_aimock_journal() { printf '%s\n' "${journal_json}"; }
+  request() {
+    jq -cn --arg user "$1" --arg answer "$2" \
+      '{body:{messages:[{role:"user",content:$user}]}, response:{fixture:{response:{content:$answer}}}}'
+  }
+  continuation='Return the session nonce from the prior turn'
+  model_backend=aimock
+
+  stale="$(request "Remember the session nonce n1. ${continuation}" n1)"
+  journal_json="[${stale}]"
+  [[ "$(aimock_journal_mark)" == 1 ]]
+  journal_json="[${stale},$(request "Remember the session nonce n1. ${continuation}" n1)]"
+  (assert_aimock_history task 1 "${continuation}" n1)
+  journal_json="[${stale},$(request "${continuation}" n1)]"
+  if (assert_aimock_history task 1 "${continuation}" n1); then
+    echo "history check accepted a request without the prior nonce" >&2
+    exit 1
+  fi
+  journal_json="[${stale},$(request "Remember the session nonce other. ${continuation}" n1)]"
+  if (assert_aimock_history task 1 "${continuation}" n1); then
+    echo "history check accepted foreign history" >&2
+    exit 1
+  fi
+  journal_json="[${stale},{\"body\":{\"__aimock_truncated\":true},\"response\":{\"fixture\":{\"response\":{\"content\":\"n1\"}}}}]"
+  if (assert_aimock_history task 1 "${continuation}" n1); then
+    echo "history check accepted a request it could not inspect" >&2
+    exit 1
+  fi
+  grep -F '64 KB journal cap' "${temp_root}/died" >/dev/null
+
+  sleep_call='{"response":{"fixture":{"response":{"toolCalls":[{"name":"exec_command","arguments":{"cmd":"sleep 180"}}]}}}}'
+  journal_json="[${sleep_call},${stale}]"
+  if aimock_blocking_command_served 1; then
+    echo "blocking command wait accepted a tool call from an earlier Task" >&2
+    exit 1
+  fi
+  journal_json="[${stale},${sleep_call}]"
+  aimock_blocking_command_served 1
+
+  model_backend=vekil
+  journal_json='not json'
+  [[ "$(aimock_journal_mark)" == 0 ]]
+  (assert_aimock_history task 0 "${continuation}" n1)
+)
+printf '%s\n' 'ok - aimock history checks need the prompt and prior nonce in one new, inspectable request'
