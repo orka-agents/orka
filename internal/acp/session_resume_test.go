@@ -410,6 +410,9 @@ func TestRuntimeSessionDeleteClosesProviderSessionWhenAdvertised(t *testing.T) {
 }
 
 func TestRuntimeSessionDeleteSkipsCloseAfterFreeze(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Freeze and process-group signals are unsupported on Windows")
+	}
 	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeClose, nil, nil)
 	freezeCtx, cancelFreeze := context.WithTimeout(context.Background(), time.Second)
 	// Freeze proof is Linux-only; the attempt alone may leave the tree
