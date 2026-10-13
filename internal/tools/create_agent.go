@@ -185,7 +185,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 						"items": {
 							"type": "object",
 							"properties": {
-								"name": {"type": "string"},
+								"name": {"type": "string", "minLength": 1, "pattern": "\\S"},
 								"namespace": {"type": "string"}
 							},
 							"required": ["name"]

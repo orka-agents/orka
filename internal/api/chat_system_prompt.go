@@ -319,9 +319,9 @@ func taskTypeParts() []promptPart {
 		{text: `  If the specified Agent has no runtime listed, including coordinator Agents backed
   by providerRef/model only, use create_ai_task with agentRef instead. Omit providerRef unless the user explicitly requests another provider.
 `, requires: []string{chatCreateAITaskTool}},
-		{text: `  When the task involves a git repository, ALWAYS include the gitRepo URL in the
-  workspace config so credentials are automatically mounted:
-    create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
+		{text: `  When the task involves a git repository, ALWAYS include workspace.gitRepo so
+  the repository workspace is prepared for the runtime:
+    create_agent_task({"agentRef": "coder", "prompt": "...", "workspace": {"gitRepo": "https://github.com/org/repo"}, "timeout": "15m"})
   When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
   OpenCode is supported there as a built-in ACP RuntimePool profile when its image is configured. It requires
   model.name plus reviewed model.contextWindow and model.maxTokens ceilings, uses the controller provider proxy,
@@ -584,12 +584,12 @@ func exampleParts() []promptPart {
 → wait_for_task → fetch_task_output → summarize findings
 `, requires: []string{chatCreateAITaskTool, promptToolWait, promptToolFetch}},
 		{text: `"refactor the auth module" (with runtime agent available)
-→ create_agent_task (agent: "coder", prompt: "Refactor the auth module...", gitRepo: "https://github.com/org/repo")
+→ create_agent_task({"agentRef": "coder", "prompt": "Refactor the auth module...", "workspace": {"gitRepo": "https://github.com/org/repo"}})
 → wait_for_task → fetch_task_output
 `, requires: []string{promptToolAgentTask, promptToolWait, promptToolFetch}},
 		{text: `User specifies --agent my-agent (which has runtime: copilot)
-→ create_agent_task (agent: "my-agent", prompt: "...", gitRepo: "https://github.com/org/repo")
-  (Use create_agent_task because the agent has a runtime; include gitRepo for credentials)
+→ create_agent_task({"agentRef": "my-agent", "prompt": "...", "workspace": {"gitRepo": "https://github.com/org/repo"}})
+  (Use create_agent_task because the agent has a runtime; include workspace.gitRepo for repository access)
 → wait_for_task → fetch_task_output
 `, requires: []string{promptToolAgentTask, promptToolWait, promptToolFetch}},
 		{text: `"Research X and then write a guide based on findings" (multi-step pipeline)

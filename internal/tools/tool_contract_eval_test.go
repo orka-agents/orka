@@ -1425,14 +1425,22 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "chat create_agent allowed agent name",
-			limits: []string{"chat/create_agent.coordination.allowedAgents[].name required"},
-			check:  evalAllowedAgentNameRequired(chatTool, `"name":"a","systemPrompt":"p"`),
+			name: "chat create_agent allowed agent name",
+			limits: []string{
+				"chat/create_agent.coordination.allowedAgents[].name required",
+				"chat/create_agent.coordination.allowedAgents[].name minLength=1",
+				"chat/create_agent.coordination.allowedAgents[].name pattern=\\S",
+			},
+			check: evalAllowedAgentNameRequired(chatTool, `"name":"a","systemPrompt":"p"`),
 		},
 		{
-			name:   "worker create_agent allowed agent name",
-			limits: []string{"worker/create_agent.coordination.allowedAgents[].name required"},
-			check:  evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
+			name: "worker create_agent allowed agent name",
+			limits: []string{
+				"worker/create_agent.coordination.allowedAgents[].name required",
+				"worker/create_agent.coordination.allowedAgents[].name minLength=1",
+				"worker/create_agent.coordination.allowedAgents[].name pattern=\\S",
+			},
+			check: evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
 		},
 		{
 			name:   "worker post_review_comment comment path",
@@ -1587,9 +1595,9 @@ func evalDelegateCluster() client.Client {
 }
 
 // evalAllowedAgentNameRequired checks that create_agent, given its required
-// fields, rejects an allowed agent without a name instead of dropping it or
-// storing it unnamed. The worker tool resolves its parent Task from the
-// environment.
+// fields, rejects missing, empty, or whitespace-only allowed agent names
+// instead of dropping or storing them. The worker tool resolves its parent
+// Task from the environment.
 func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context.Context), required string) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		t.Setenv(envOrkaTaskName, "parent")
@@ -1597,7 +1605,17 @@ func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context
 		allowed := func(agent string) string {
 			return `{` + required + `,"coordination":{"enabled":true,"allowedAgents":[` + agent + `]}}`
 		}
-		return evalRejectsChange(call, allowed(`{"name":"coder","namespace":"default"}`), allowed(`{"namespace":"default"}`), "allowedAgents")
+		valid := allowed(`{"name":"coder","namespace":"default"}`)
+		for _, agent := range []string{
+			`{"namespace":"default"}`,
+			`{"name":"","namespace":"default"}`,
+			`{"name":" \t\r\n ","namespace":"default"}`,
+		} {
+			if ok, detail := evalRejectsChange(call, valid, allowed(agent), "allowedAgents"); !ok {
+				return false, detail
+			}
+		}
+		return true, ""
 	}
 }
 

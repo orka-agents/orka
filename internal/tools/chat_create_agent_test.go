@@ -33,6 +33,10 @@ func TestChatCreateAgentTool_ParametersDescribeOpenCodeACP(t *testing.T) {
 	}
 }
 
+func TestChatCreateAgentTool_ParametersRequireNonblankAllowedAgentNames(t *testing.T) {
+	assertCreateAgentAllowedAgentNameSchema(t, (&ChatCreateAgentTool{}).Parameters())
+}
+
 func TestChatCreateAgentTool_Execute_RejectsMissingProviderRef(t *testing.T) {
 	fc := newFakeClient(&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProviderOpenAI, Namespace: defaultNamespace}})
 	ctx := WithToolContext(context.Background(), &ToolContext{

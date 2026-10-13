@@ -168,6 +168,35 @@ func expectChatEvalCheck(t *testing.T, ok bool, detail, knownDefect string) {
 // TestChatEvalRequestContextReachesModel checks that request fields the prompt
 // tells the model to act on change what the model sees. Identical model input
 // for different requests means the model cannot follow that instruction.
+func TestChatEvalFeatureGateDoesNotRestrictUnscopedPrompt(t *testing.T) {
+	for _, connectorsEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("connectors=%v", connectorsEnabled), func(t *testing.T) {
+			provider := &evalRecordingProvider{chatMockProvider: chatMockProvider{
+				name: chatEvalProviderType, responses: []*llm.CompletionResponse{{Content: "done"}},
+			}}
+			llm.RegisterProvider(chatEvalProviderType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
+			cfg := DefaultChatConfig()
+			cfg.ConnectorsEnabled = connectorsEnabled
+			ch := newTestChatHandler(t, chatEvalCluster(t, defaultNamespace), newTestSessionStore(t), newTestResultStore(t), cfg)
+			app := fiber.New()
+			app.Post("/api/v1/chat", ch.HandleChat)
+			body, err := json.Marshal(ChatRequest{Message: "hello", Provider: "openai"})
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Len(t, provider.requests, 1)
+			require.Contains(t, provider.requests[0].SystemPrompt, "<capabilities>")
+			require.NotContains(t, provider.requests[0].SystemPrompt, "<available_chat_tools>")
+			require.Equal(t, connectorsEnabled, slices.Contains(completionToolNames(provider.requests[0].Tools), chattools.ListConnectionsToolName))
+		})
+	}
+}
+
 func TestChatEvalRequestContextReachesModel(t *testing.T) {
 	const message = "review the design doc at https://example.com/design.md and list the top 3 risks"
 	tests := []struct {

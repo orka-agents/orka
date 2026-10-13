@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"slices"
@@ -934,7 +935,7 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 	}
 
 	agentOnly := build("create_agent_task")
-	for _, want := range []string{"- agent:", "ALWAYS include the gitRepo URL", "Set timeout to at least 15m", "Do NOT use create_agent_task for non-runtime agents"} {
+	for _, want := range []string{"- agent:", "ALWAYS include workspace.gitRepo", "Set timeout to at least 15m", "Do NOT use create_agent_task for non-runtime agents"} {
 		if !strings.Contains(agentOnly, want) {
 			t.Errorf("agent-task-only prompt is missing %q", want)
 		}
@@ -1125,6 +1126,57 @@ func TestSystemPromptCoordinatorCreationRequiresCreateAgent(t *testing.T) {
 			}
 			if strings.Contains(prompt, "If no coordinator candidate exists") != canCreate {
 				t.Fatalf("coordinator creation guidance does not match create_agent availability: %v", canCreate)
+			}
+		})
+	}
+}
+
+func TestSystemPromptAgentTaskExamplesMatchSchema(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	var schema map[string]any
+	if err := json.Unmarshal((&chattools.CreateAgentTaskTool{}).Parameters(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties := schema["properties"].(map[string]any)
+	workspaceProperties := properties["workspace"].(map[string]any)["properties"].(map[string]any)
+	for _, scoped := range []bool{false, true} {
+		t.Run(fmt.Sprint(scoped), func(t *testing.T) {
+			builder := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			if scoped {
+				builder.SetAvailableChatTools([]string{"create_agent_task", "wait_for_task", "fetch_task_output"})
+			}
+			prompt, err := builder.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			examples := regexp.MustCompile(`create_agent_task\s*\(([^\n]*)\)`).FindAllStringSubmatch(prompt, -1)
+			if len(examples) != 3 {
+				t.Fatalf("agent-task examples = %d, want 3", len(examples))
+			}
+			for _, example := range examples {
+				var args map[string]any
+				if err := json.Unmarshal([]byte(example[1]), &args); err != nil {
+					t.Fatalf("agent-task example is not valid JSON: %s: %v", example[1], err)
+				}
+				for name := range args {
+					if _, ok := properties[name]; !ok {
+						t.Errorf("example uses undeclared argument %q", name)
+					}
+				}
+				for _, name := range schema["required"].([]any) {
+					if value, ok := args[name.(string)].(string); !ok || value == "" {
+						t.Errorf("example lacks required argument %q", name)
+					}
+				}
+				workspace, ok := args["workspace"].(map[string]any)
+				if !ok || workspace["gitRepo"] == nil {
+					t.Fatalf("repository example lacks workspace.gitRepo: %s", example[1])
+				}
+				for name := range workspace {
+					if _, ok := workspaceProperties[name]; !ok {
+						t.Errorf("example uses undeclared workspace argument %q", name)
+					}
+				}
 			}
 		})
 	}
