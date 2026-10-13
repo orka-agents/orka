@@ -229,7 +229,8 @@ env_key = "NATIVE_MIGRATION_LOCAL_KEY"
 			"resumed turn must use the destination cwd, model, approval, and sandbox policy")
 		after, err := nativeMigrationHomeFiles(sourceHome)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(before).To(Equal(after), "migration must never change the stopped source home")
+		Expect(nativeMigrationHomesEqual(before, after)).To(BeTrue(),
+			"migration must preserve source contents, file identities, modes, and mtimes")
 	})
 })
 
@@ -278,8 +279,13 @@ func nativeMigrationReadRollout(home string) []byte {
 	return data
 }
 
-func nativeMigrationHomeFiles(home string) (map[string]string, error) {
-	files := map[string]string{}
+type nativeMigrationFileSnapshot struct {
+	Digest string
+	Info   fs.FileInfo
+}
+
+func nativeMigrationHomeFiles(home string) (map[string]nativeMigrationFileSnapshot, error) {
+	files := map[string]nativeMigrationFileSnapshot{}
 	err := filepath.WalkDir(home, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
@@ -292,11 +298,29 @@ func nativeMigrationHomeFiles(home string) (map[string]string, error) {
 		if err != nil {
 			return err
 		}
-		// Compare digests, not credential-bearing file contents.
-		files[rel] = codexstate.DataDigest(data)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		// Keep only digests and metadata, never credential-bearing file contents.
+		files[rel] = nativeMigrationFileSnapshot{Digest: codexstate.DataDigest(data), Info: info}
 		return nil
 	})
 	return files, err
+}
+
+func nativeMigrationHomesEqual(before, after map[string]nativeMigrationFileSnapshot) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for path, original := range before {
+		current, ok := after[path]
+		if !ok || original.Digest != current.Digest || !os.SameFile(original.Info, current.Info) ||
+			original.Info.Mode() != current.Info.Mode() || !original.Info.ModTime().Equal(current.Info.ModTime()) {
+			return false
+		}
+	}
+	return true
 }
 
 // Remove the nonce from the historical command arguments so only a genuine

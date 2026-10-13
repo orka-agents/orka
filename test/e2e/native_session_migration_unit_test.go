@@ -6,21 +6,29 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/codexstate"
+	"github.com/orka-agents/orka/test/utils"
 	"github.com/orka-agents/sessionkit/harness/codex/writerlock"
 )
 
 func TestNativeMigrationSourceNonceOnlyInToolOutput(t *testing.T) {
+	projectDir, err := utils.GetProjectDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// TestE2E's command runner leaves the process at the repository root.
+	// Exercise that full-binary ordering even in focused unit runs.
+	t.Chdir(projectDir)
 	fixture := "rollout-2026-10-02T21-57-44-" + nativeMigrationThread + ".jsonl"
-	original, err := os.ReadFile(filepath.Join("../../internal/codexstate/testdata", fixture))
+	original, err := os.ReadFile(filepath.Join(projectDir, "internal/codexstate/testdata", fixture))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +99,7 @@ func TestNativeMigrationSourceNonceOnlyInToolOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !maps.Equal(before, after) {
+	if !nativeMigrationHomesEqual(before, after) {
 		t.Fatal("capture changed the stopped source files or native lock namespace")
 	}
 }
@@ -105,7 +113,12 @@ func TestNativeMigrationSourceRejectsMalformedRecord(t *testing.T) {
 }
 
 func TestNativeMigrationFixturesMatchContinuationMarkersAndPreferReturnLeg(t *testing.T) {
-	data, err := os.ReadFile("testdata/aimock/native_session_migration.json")
+	projectDir, err := utils.GetProjectDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(projectDir)
+	data, err := os.ReadFile(filepath.Join(projectDir, mockLLMFixtureDir, "native_session_migration.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,5 +216,55 @@ func TestNativeMigrationCurrentPolicyMustComeFromReturnedTurn(t *testing.T) {
 		if nativeMigrationCurrentPolicy(stale, "/current") {
 			t.Fatal("source policy was accepted as current destination policy")
 		}
+	}
+}
+
+func TestNativeMigrationSourceSnapshotDetectsMutation(t *testing.T) {
+	for _, change := range []string{"unchanged", "contents", "replacement", "mode", "mtime", "added", "deleted"} {
+		t.Run(change, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "source.jsonl")
+			original := []byte("original native history\n")
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := nativeMigrationHomeFiles(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "contents":
+				err = os.WriteFile(path, []byte("changed native history\n"), 0o600)
+			case "replacement":
+				replacement := path + ".new"
+				if err := os.WriteFile(replacement, original, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				stamp := before["source.jsonl"].Info.ModTime()
+				if err := os.Chtimes(replacement, stamp, stamp); err != nil {
+					t.Fatal(err)
+				}
+				err = os.Rename(replacement, path)
+			case "mode":
+				err = os.Chmod(path, 0o400)
+			case "mtime":
+				stamp := before["source.jsonl"].Info.ModTime().Add(time.Hour)
+				err = os.Chtimes(path, stamp, stamp)
+			case "added":
+				err = os.WriteFile(filepath.Join(home, "added"), nil, 0o600)
+			case "deleted":
+				err = os.Remove(path)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := nativeMigrationHomeFiles(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nativeMigrationHomesEqual(before, after) != (change == "unchanged") {
+				t.Fatal("source snapshot failed to distinguish unchanged files from a mutation")
+			}
+		})
 	}
 }
