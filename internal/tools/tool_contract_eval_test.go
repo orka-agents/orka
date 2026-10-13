@@ -589,7 +589,8 @@ func evalToolRequiredArgs(required []any, properties map[string]any) map[string]
 	return args
 }
 
-// evalToolLimits lists every limit (minimum, maximum, enum, length, pattern)
+// evalToolLimits lists every limit (minimum, maximum, enum, length, pattern,
+// and closed-object constraints)
 // that a tool schema declares with its value, keyed like
 // "chat/create_agent_task.maxTurns maximum=100", so changing a schema value
 // also requires updating the case that probes it. It also lists every required
@@ -632,8 +633,13 @@ func evalSchemaLimits(prefix string, schema map[string]any, nested bool) []strin
 	if items, ok := schema["items"].(map[string]any); ok {
 		limits = append(limits, evalSchemaLimits(prefix+"[]", items, true)...)
 	}
-	if entries, ok := schema["additionalProperties"].(map[string]any); ok {
+	switch entries := schema["additionalProperties"].(type) {
+	case map[string]any:
 		limits = append(limits, evalSchemaLimits(prefix+"{*}", entries, true)...)
+	case bool:
+		if !entries {
+			limits = append(limits, prefix+" additionalProperties=false")
+		}
 	}
 	return limits
 }
@@ -642,6 +648,7 @@ func TestToolEvalLimitsIncludeTypedMapValues(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal([]byte(`{
 		"type":"object",
+		"additionalProperties":false,
 		"required":["settings"],
 		"properties":{
 			"settings":{"type":"object","additionalProperties":{
@@ -661,10 +668,12 @@ func TestToolEvalLimitsIncludeTypedMapValues(t *testing.T) {
 	got := evalSchemaLimits("fixture/tool", schema, false)
 	sort.Strings(got)
 	want := []string{
+		"fixture/tool additionalProperties=false",
 		"fixture/tool.batches[]{*}.value enum=staging|prod",
 		"fixture/tool.batches[]{*}.value maxLength=12",
 		"fixture/tool.batches[]{*}.value minLength=2",
 		"fixture/tool.batches[]{*}.value required",
+		"fixture/tool.closed additionalProperties=false",
 		"fixture/tool.settings{*} enum=dev|prod",
 		"fixture/tool.settings{*} maxLength=8",
 		"fixture/tool.settings{*} minLength=1",
@@ -1060,6 +1069,10 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		return newFakeClient(task, secret)
 	}
 
+	replyCall := func() (Tool, context.Context) {
+		return NewReplyInConversationTool(), replyContext(&replySenderStub{budget: GatewayReplyBudget{Limit: 10}})
+	}
+
 	cases := []evalLimitCase{
 		{
 			name:   "chat create_agent model counts",
@@ -1413,14 +1426,53 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "worker reply_in_conversation content",
-			limits: []string{"worker/reply_in_conversation.content maxLength=16384", "worker/reply_in_conversation.content minLength=1"},
+			name:   "worker reply_in_conversation additionalProperties",
+			limits: []string{"worker/reply_in_conversation additionalProperties=false"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := workerTool("reply_in_conversation", newFakeClient())
-				return evalAll(
-					func() (bool, string) { return evalRejects(ctx, tool, `{"content":""}`, "content") },
-					func() (bool, string) { return evalRejects(ctx, tool, `{"content":"`+long(16385)+`"}`, "content") },
-				)
+				// The generic invalid-request diagnostic names content, not
+				// the unknown key. Only the extra field changes from the control.
+				return evalRejectsChange(replyCall, `{"content":"hello"}`, `{"content":"hello","target":"other-room"}`, "content")
+			},
+		},
+		{
+			name:   "worker reply_in_conversation content minimum",
+			limits: []string{"worker/reply_in_conversation.content minLength=1"},
+			check: func(t *testing.T) (bool, string) {
+				return evalRejectsChange(replyCall, `{"content":"x"}`, `{"content":""}`, "content")
+			},
+		},
+		{
+			name:   "worker reply_in_conversation content ASCII maximum",
+			limits: []string{"worker/reply_in_conversation.content maxLength=16384"},
+			check: func(t *testing.T) (bool, string) {
+				return evalRejectsChange(replyCall, `{"content":"`+long(16384)+`"}`, `{"content":"`+long(16385)+`"}`, "content")
+			},
+		},
+		{
+			name:        "worker reply_in_conversation content Unicode maximum",
+			limits:      []string{"worker/reply_in_conversation.content maxLength=16384"},
+			knownDefect: "reply_in_conversation advertises a 16384-character maximum but rejects schema-valid multibyte content above 16384 UTF-8 bytes",
+			check: func(t *testing.T) (bool, string) {
+				args := func(content string) string { return `{"content":"` + content + `"}` }
+				// Prove authenticated multibyte replies work up to the byte
+				// boundary before probing schema-valid strings beyond it.
+				for _, content := range []string{strings.Repeat("é", 8192), strings.Repeat("界", 5461)} {
+					if ok, detail := evalSucceeds(replyCall, args(content)); !ok {
+						return false, detail
+					}
+				}
+				var rejections []string
+				for _, characters := range []int{5462, 16384} {
+					content := strings.Repeat("界", characters)
+					tool, ctx := replyCall()
+					if failed, message := evalArgumentFailure(t, "worker", ctx, tool, args(content)); failed {
+						if !evalFieldMentioned(message, "content") {
+							t.Errorf("schema-valid content rejected for another reason: %s", message)
+						}
+						rejections = append(rejections, fmt.Sprintf("schema-valid content with %d characters/%d UTF-8 bytes rejected: %s", characters, len(content), message))
+					}
+				}
+				return len(rejections) == 0, strings.Join(rejections, "; ")
 			},
 		},
 		{
