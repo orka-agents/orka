@@ -12,11 +12,11 @@ RUN set -eu; \
     mkdir -p /artifacts /opt/copilot/bin; \
     case "$TARGETARCH" in \
       amd64) \
-        copilot_url="https://github.com/github/copilot-cli/releases/download/v1.0.77/copilot-linux-x64.tar.gz"; \
-        copilot_sha="c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c" ;; \
+        copilot_url="https://github.com/github/copilot-cli/releases/download/v1.0.96/copilot-linux-x64.tar.gz"; \
+        copilot_sha="66b60b58b14d72390f30d6d7f8480d18a0f05c111d132e4ff8f92ae637d413f8" ;; \
       arm64) \
-        copilot_url="https://github.com/github/copilot-cli/releases/download/v1.0.77/copilot-linux-arm64.tar.gz"; \
-        copilot_sha="5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a" ;; \
+        copilot_url="https://github.com/github/copilot-cli/releases/download/v1.0.96/copilot-linux-arm64.tar.gz"; \
+        copilot_sha="5073e1ee39fab0c724d10e6fc852977830b5196aa9b66cde934a65faa8010d6b" ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     artifact-tool download \
@@ -26,8 +26,8 @@ RUN set -eu; \
     test -f /opt/copilot/bin/copilot; \
     chmod 0755 /opt/copilot/bin/copilot; \
     artifact-tool download \
-      "https://raw.githubusercontent.com/github/copilot-cli/aee1edd29ef0f2058425bf399bcc9e5002a2b8f2/LICENSE.md" \
-      "1fbd0dcc55c66738b1b591632132c927de20c8443dff1d55b4851e378883e402" \
+      "https://raw.githubusercontent.com/github/copilot-cli/dcdc0273c0250d8b32677ca99bc0e1f5006daa89/LICENSE.md" \
+      "c694e2d9b3f3bb40704ca9bdc823dc90269999ab4c013dfd8a52c407046074b4" \
       /artifacts/copilot-LICENSE.md 65536
 
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
@@ -51,14 +51,14 @@ RUN set -eu; \
 # official Copilot binary. Node and its package managers are removed below.
 FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
 LABEL org.opencontainers.image.title="Orka ACP GitHub Copilot runtime" \
-      org.opencontainers.image.description="Orka harness v2 ACP supervisor with GitHub Copilot CLI 1.0.77" \
+      org.opencontainers.image.description="Orka harness v2 ACP supervisor with GitHub Copilot CLI 1.0.96" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
       org.opencontainers.image.licenses="MIT AND LicenseRef-GitHub-Copilot-CLI" \
       ai.orka.acp.provider="copilot" \
-      ai.orka.acp.adapter.version="1.0.77" \
-      ai.orka.acp.adapter.revision="aee1edd29ef0f2058425bf399bcc9e5002a2b8f2" \
-      ai.orka.acp.adapter.digest.amd64="sha256:c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c" \
-      ai.orka.acp.adapter.digest.arm64="sha256:5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a"
+      ai.orka.acp.adapter.version="1.0.96" \
+      ai.orka.acp.adapter.revision="dcdc0273c0250d8b32677ca99bc0e1f5006daa89" \
+      ai.orka.acp.adapter.digest.amd64="sha256:66b60b58b14d72390f30d6d7f8480d18a0f05c111d132e4ff8f92ae637d413f8" \
+      ai.orka.acp.adapter.digest.arm64="sha256:5073e1ee39fab0c724d10e6fc852977830b5196aa9b66cde934a65faa8010d6b"
 ENV HOME=/root \
     ORKA_ACP_PROVIDER=copilot \
     SSL_CERT_DIR=/etc/ssl/certs \

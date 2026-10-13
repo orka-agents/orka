@@ -26,10 +26,10 @@ const (
 	ClaudeSDKLinuxX64SHA256   = "8d2ccffbdf63aef1436a30b0fd32ef0eac663c3465318b181138471a68f02b92"
 	ClaudeSDKLinuxARM64SHA256 = "51080502df2942d2092c4a5b7122eda518041fbe954027a1e128ede3cb337563"
 
-	CopilotCLIVersion          = "1.0.77"
-	CopilotCLISourceCommit     = "aee1edd29ef0f2058425bf399bcc9e5002a2b8f2"
-	CopilotCLILinuxX64SHA256   = "c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c"
-	CopilotCLILinuxARM64SHA256 = "5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a"
+	CopilotCLIVersion          = "1.0.96"
+	CopilotCLISourceCommit     = "dcdc0273c0250d8b32677ca99bc0e1f5006daa89"
+	CopilotCLILinuxX64SHA256   = "66b60b58b14d72390f30d6d7f8480d18a0f05c111d132e4ff8f92ae637d413f8"
+	CopilotCLILinuxARM64SHA256 = "5073e1ee39fab0c724d10e6fc852977830b5196aa9b66cde934a65faa8010d6b"
 
 	OpenCodeVersion                       = "1.18.9"
 	OpenCodeSourceCommit                  = "4da7bb44c84e013fa53e9c5d02ac753d1435c81a"

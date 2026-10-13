@@ -98,12 +98,12 @@ GitHub Copilot inputs:
 
 | Input | Pin |
 | --- | --- |
-| Copilot CLI | `1.0.77`; source commit `aee1edd29ef0f2058425bf399bcc9e5002a2b8f2` |
-| Copilot CLI `linux/amd64` | official `copilot-linux-x64.tar.gz`; SHA-256 `c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c` |
-| Copilot CLI `linux/arm64` | official `copilot-linux-arm64.tar.gz`; SHA-256 `5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a` |
-| Copilot CLI license | `LICENSE.md` at the pinned source commit; SHA-256 `1fbd0dcc55c66738b1b591632132c927de20c8443dff1d55b4851e378883e402` |
+| Copilot CLI | `1.0.96`; source commit `dcdc0273c0250d8b32677ca99bc0e1f5006daa89` |
+| Copilot CLI `linux/amd64` | official `copilot-linux-x64.tar.gz`; SHA-256 `66b60b58b14d72390f30d6d7f8480d18a0f05c111d132e4ff8f92ae637d413f8` |
+| Copilot CLI `linux/arm64` | official `copilot-linux-arm64.tar.gz`; SHA-256 `5073e1ee39fab0c724d10e6fc852977830b5196aa9b66cde934a65faa8010d6b` |
+| Copilot CLI license | `LICENSE.md` at the pinned source commit; SHA-256 `c694e2d9b3f3bb40704ca9bdc823dc90269999ab4c013dfd8a52c407046074b4` |
 
-Copilot CLI `1.0.77` is newer than the `1.0.76-0` boundary that fixed
+Copilot CLI `1.0.96` is newer than the `1.0.76-0` boundary that fixed
 credentialless custom-provider session creation in ACP mode. Orka therefore
 keeps the real upstream credential behind its provider proxy and starts
 Copilot ACP sessions without GitHub login or an ACP authentication exchange.
@@ -215,7 +215,7 @@ docker buildx build \
   --builder remote-vm \
   --platform linux/amd64,linux/arm64 \
   --file workers/acp/images/copilot/Dockerfile \
-  --tag docker.io/sozercan/orka-acp-copilot:1.0.77 \
+  --tag docker.io/sozercan/orka-acp-copilot:1.0.96 \
   --provenance=mode=max \
   --sbom=true \
   --push \

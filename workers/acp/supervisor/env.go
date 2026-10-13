@@ -587,11 +587,13 @@ var copilotToolIDs = map[string][]string{
 // session removes from the model's catalog regardless of policy: sub-agent
 // orchestration, skills, SQL, and background task tools have no Orka
 // equivalent and would bypass the RuntimeSession boundary. The list is exactly
-// the set GitHub Copilot CLI 1.0.77 registers under the supervisor's flags
+// the set GitHub Copilot CLI 1.0.96 registers under the supervisor's flags
 // (verified in --acp mode): the CLI prints an "Unknown tool name" diagnostic
 // into the agent message stream for every --excluded-tools name outside its
 // catalog, and names such as ask_user, report_intent, exit_plan_mode, lsp, or
-// code_review are not registered tool names in that build at all. GitHub MCP
+// code_review are not registered tool names in that build at all. That build
+// registers skill only when the workspace contains skills, so it stays listed
+// for repositories that ship them. GitHub MCP
 // tools register as github-mcp-server-<tool> and are removed by
 // --disable-builtin-mcps; the ask_user tool is removed by --no-ask-user.
 var copilotAlwaysExcludedToolIDs = []string{"list_agents", "read_agent", "skill", "sql", "task", "write_agent"}
@@ -625,7 +627,7 @@ func copilotSessionProjection(
 		}
 	}
 	args := []string{"--excluded-tools=" + strings.Join(excluded, ",")}
-	// Copilot 1.0.77 supplies display titles, not structured tool names, in
+	// Copilot 1.0.96 supplies display titles, not structured tool names, in
 	// permission requests. Project the frozen native grants into CLI permission
 	// rules instead of treating those titles as authority. Exclusions above
 	// still remove every native tool outside the effective policy.
