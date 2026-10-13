@@ -1,5 +1,8 @@
 {
   "fixtures": [
+    {"match": {"userMessage": "[e2e:art-copilot-rebuild]"}, "response": {"content": "nonce-art-copilot"}},
+    {"match": {"userMessage": "[e2e:art-claude-after-exit]"}, "response": {"content": "nonce-art-claude"}},
+    {"match": {"userMessage": "[e2e:art-opencode-after-exit]"}, "response": {"content": "nonce-art-opencode"}},
     {"match": {"userMessage": "[e2e:art-scale-zero]"}, "response": {"content": "nonce-art-codex"}},
     {"match": {"userMessage": "[e2e:art-replacement]"}, "response": {"content": "nonce-art-codex"}},
     {"match": {"userMessage": "[e2e:art-post-restart]"}, "response": {"content": "restart-art"}},

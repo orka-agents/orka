@@ -267,6 +267,81 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		return agent, session, pool, nonce, continuedUID, continuedGeneration
 	}
 
+	// continueAfterAdapterExit kills the idle adapter behind the Session's
+	// RuntimeSession uid/generation, as an adapter crash between prompts would,
+	// and continues the Session. An adapter that advertises session/resume is
+	// restarted under the same RuntimeSession generation and resumes its own
+	// conversation. Copilot cannot resume, so the supervisor refuses its next
+	// prompt before writing it to the agent, and the continuation after that
+	// rebuilds the Session from its transcript at a later generation.
+	continueAfterAdapterExit := func(provider agentRuntimeProvider, agent, session, pool, nonce, uid string,
+		generation int64,
+	) {
+		snapshot := captureRuntimePoolSnapshot(pool, provider.kind, provider.model, corev1alpha1.WorkspaceIntentRead)
+		By(fmt.Sprintf("killing the idle %s adapter of Session %s", provider.kind, session))
+		killedAt := time.Now().UnixMilli()
+		killed := killRuntimeSessionAdapter(snapshot, uid, generation)
+
+		task := name("acp-" + provider.kind + "-after-exit")
+		applyReadTask(agentRuntimeReadTask{Name: task, Agent: agent, Provider: provider.kind, Session: session,
+			Prompt: "Continue the existing session. Return the session nonce from the prior turn and no " +
+				"repository-derived replacement. Do not modify files. " + marker(provider.kind+"-after-exit")})
+		Expect(waitTaskPoolName(task)).To(Equal(pool), "the continuation selected a different RuntimePool")
+		if provider.kind == copilot.kind {
+			By("failing the Copilot prompt before it reaches the agent")
+			failed := waitTaskTerminalProjection(task)
+			Expect(failed.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed), failed.Status.Message)
+			Expect(failed.Status.Execution.State).To(Equal(corev1alpha1.TaskExecutionStateFailed))
+			Expect(failed.Status.Execution.Outcome).To(Equal(corev1alpha1.TaskExecutionOutcomeFailed))
+			Expect(failed.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("RuntimeLost")))
+			assertTaskFence(Default, failed, snapshot, false)
+			Expect(failed.Status.Execution.RuntimeSessionUID).To(Equal(uid))
+			Expect(failed.Status.Execution.RuntimeSessionGeneration).To(Equal(generation))
+
+			By("rebuilding the Copilot Session from its transcript on the next continuation")
+			rebuild := name("acp-copilot-rebuild")
+			applyReadTask(agentRuntimeReadTask{Name: rebuild, Agent: agent, Provider: provider.kind, Session: session,
+				Prompt: "Continue the existing session. Return the session nonce from the earlier turns and no " +
+					"repository-derived replacement. Do not modify files. " + marker("copilot-rebuild")})
+			Expect(waitTaskPoolName(rebuild)).To(Equal(pool), "the rebuild selected a different RuntimePool")
+			assertTaskSucceededRead(rebuild, snapshot)
+			expectTaskResult(rebuild, nonce)
+			expectReplayed(marker("copilot-rebuild"), nonce)
+			rebuiltUID, rebuiltGeneration := taskSessionIdentity(Default, rebuild)
+			Expect(rebuiltUID).To(Equal(uid))
+			Expect(rebuiltGeneration).To(BeNumerically(">", generation),
+				"Copilot must rebuild the Session, not reuse its adapter")
+			return
+		}
+
+		assertTaskSucceededRead(task, snapshot)
+		expectTaskResult(task, nonce)
+		expectReplayed(marker(provider.kind+"-after-exit"), nonce)
+		resumedUID, resumedGeneration := taskSessionIdentity(Default, task)
+		Expect(resumedUID).To(Equal(uid))
+		Expect(resumedGeneration).To(Equal(generation), "%s must resume its exited adapter in place, not rebuild the Session",
+			provider.kind)
+		Expect(runtimeSessionAdapters(Default, snapshot, uid, generation)).To(ConsistOf(Not(Equal(killed))),
+			"the supervisor did not restart the %s adapter", provider.kind)
+		if provider.kind == claude.kind && !live {
+			// Claude Agent ACP sends one "Hi" request while answering
+			// session/resume. The supervisor resumes before granting the
+			// prompt provider access, so the proxy refuses it and it never
+			// reaches aimock.
+			By("checking the provider proxy refused the model request Claude makes while resuming")
+			requests, err := providerProxyMockLLM.journal()
+			Expect(err).NotTo(HaveOccurred())
+			for _, request := range requests {
+				messages := request.Body.Messages
+				if request.Timestamp < killedAt || len(messages) != 1 {
+					continue
+				}
+				Expect(messages[0].Role == "user" && strings.TrimSpace(messages[0].Text()) == "Hi").To(BeFalse(),
+					"Claude's resume-time model request reached the provider outside a prompt")
+			}
+		}
+	}
+
 	// removeProviderResources ports remove_provider_resources: delete the run's
 	// Tasks and archive their Sessions, stop and delete the provider's
 	// RuntimePools once nothing references them, delete the Agents, and
@@ -715,8 +790,9 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		removeProviderResources(codex.kind, codexAgent, codexToolAgent)
 	})
 
-	It("runs OpenCode with Session continuation and enforces read intent", func() {
-		agent, _, pool, _, _, _ := readSmoke(opencode)
+	It("runs OpenCode with Session continuation, resumes an exited idle adapter, and enforces read intent", func() {
+		agent, session, pool, nonce, uid, generation := readSmoke(opencode)
+		continueAfterAdapterExit(opencode, agent, session, pool, nonce, uid, generation)
 		parkRuntimePool(pool)
 
 		By("asking OpenCode to mutate a read-intent workspace")
@@ -756,13 +832,15 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		removeProviderResources(opencode.kind, agent, policyAgent)
 	})
 
-	It("runs Claude Code with Session continuation", func() {
-		agent, _, _, _, _, _ := readSmoke(claude)
+	It("runs Claude Code with Session continuation and resumes an exited idle adapter in place", func() {
+		agent, session, pool, nonce, uid, generation := readSmoke(claude)
+		continueAfterAdapterExit(claude, agent, session, pool, nonce, uid, generation)
 		removeProviderResources(claude.kind, agent)
 	})
 
-	It("runs GitHub Copilot with Session continuation", func() {
-		agent, _, _, _, _, _ := readSmoke(copilot)
+	It("runs GitHub Copilot with Session continuation and rebuilds a Session whose idle adapter exited", func() {
+		agent, session, pool, nonce, uid, generation := readSmoke(copilot)
+		continueAfterAdapterExit(copilot, agent, session, pool, nonce, uid, generation)
 		removeProviderResources(copilot.kind, agent)
 	})
 })
