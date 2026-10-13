@@ -298,11 +298,14 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 }
 
 // TestToolEvalMalformedArguments sends each tool arguments a model gets wrong:
-// non-object JSON, omitted required fields, wrong root JSON types, and nested
-// objects encoded as strings. TestToolEvalRequiredFields isolates each required
-// field; TestToolEvalNestedArgumentTypes checks nested types with valid controls.
-// Chat tools return structured results or typed ToolArgumentError values that
-// the chat executor turns into structured errors; other Go errors are failures.
+// non-object JSON, omitted required fields, and nested objects encoded as
+// strings. RequiredFields isolates required fields; TopLevelArgumentTypes and
+// NestedArgumentTypes probe types with executable controls. A tool must never
+// panic, accept a non-null non-object root, or accept missing required fields.
+// Object strings must be rejected or decoded equivalently, and every failure
+// must have a diagnostic. Chat tools return structured results or typed
+// ToolArgumentError values that the chat executor turns into structured errors;
+// other Go errors are failures.
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
 	// Worker tools resolve their parent Task from the environment; the seeded
@@ -310,9 +313,6 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 	t.Setenv(envOrkaTaskName, evalPlaceholder)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	knownDefects := map[string]string{}
-	wrongValue := map[string]string{
-		"string": `{"k":"v"}`, "integer": `"many"`, "number": `"many"`, "boolean": `"yes"`, "array": `"a,b"`, "object": `"{\"k\":\"v\"}"`,
-	}
 	violations := map[string]string{}
 	// Panics, Go errors from chat tools, and failures without a message are
 	// never accepted as known defects.
@@ -326,17 +326,10 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			required, _ := schema["required"].([]any)
 			properties, _ := schema["properties"].(map[string]any)
 
-			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "empty object": `{}`}
-			wrongTypeAllowed := map[string]bool{}
+			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "boolean": `true`, "empty object": `{}`}
 			for prop, raw := range properties {
 				propSchema, _ := raw.(map[string]any)
 				typ, _ := propSchema["type"].(string)
-				if value, ok := wrongValue[typ]; ok {
-					input := fmt.Sprintf("%s as wrong type", prop)
-					inputs[input] = fmt.Sprintf(`{%q:%s}`, prop, value)
-					// An object sent as a JSON string is decoded and honored.
-					wrongTypeAllowed[input] = typ == "object"
-				}
 				if typ == "object" {
 					key := fmt.Sprintf("%s/%s: %s as JSON string", label, name, prop)
 					switch verdict := evalObjectStringHandling(label, name, required, properties, prop); {
@@ -369,10 +362,10 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 						fatal = append(fatal, fmt.Sprintf("%s: returned Go error %q instead of a structured result", key, err))
 					case failed && strings.TrimSpace(message) == "":
 						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
+					case (input == "array" || input == "string" || input == "number" || input == "boolean") && !failed:
+						violations[key] = fmt.Sprintf("reported success for a non-object root in the %s cluster", cluster)
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
-					case strings.HasSuffix(input, "as wrong type") && !wrongTypeAllowed[input] && !failed:
-						violations[key] = fmt.Sprintf("reported success with a wrong-typed value in the %s cluster", cluster)
 					}
 				}
 			}
@@ -496,8 +489,9 @@ func evalObjectPayload(prop string, schema map[string]any) map[string]any {
 	return payload
 }
 
-// evalClusterSnapshot renders the specs of the Agents and Tasks a tool call
-// left behind. Names are left out because worker tools add random suffixes.
+// evalClusterSnapshot compares effective specs, not generated names or other
+// per-call metadata. Sorting retains object kind and multiplicity without
+// depending on the order the client returns objects.
 func evalClusterSnapshot(fc client.Client) string {
 	var agents corev1alpha1.AgentList
 	var tasks corev1alpha1.TaskList
@@ -506,14 +500,46 @@ func evalClusterSnapshot(fc client.Client) string {
 	parts := make([]string, 0, len(agents.Items)+len(tasks.Items))
 	for i := range agents.Items {
 		spec, _ := json.Marshal(agents.Items[i].Spec)
-		parts = append(parts, "agent "+string(spec))
+		parts = append(parts, "agent "+agents.Items[i].Namespace+" "+string(spec))
 	}
 	for i := range tasks.Items {
 		spec, _ := json.Marshal(tasks.Items[i].Spec)
-		parts = append(parts, "task "+string(spec))
+		parts = append(parts, "task "+tasks.Items[i].Namespace+" "+string(spec))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\n")
+}
+
+func TestToolEvalClusterSnapshotIgnoresGeneratedMetadata(t *testing.T) {
+	objects := func(suffix string) []client.Object {
+		meta := metav1.ObjectMeta{Name: "generated-" + suffix, Namespace: defaultNamespace, ResourceVersion: suffix}
+		return []client.Object{
+			&corev1alpha1.Agent{ObjectMeta: meta, Spec: corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: "provider"}}},
+			&corev1alpha1.Task{ObjectMeta: meta, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}},
+		}
+	}
+	baseline := evalClusterSnapshot(newFakeClient(objects("one")...))
+	if got := evalClusterSnapshot(newFakeClient(objects("two")...)); got != baseline {
+		t.Fatalf("identical specs with different generated metadata compare unequal: %s != %s", got, baseline)
+	}
+	for _, kind := range []string{"agent", "task", "namespace", "multiplicity"} {
+		t.Run(kind, func(t *testing.T) {
+			changed := objects("two")
+			switch kind {
+			case "agent":
+				changed[0].(*corev1alpha1.Agent).Spec.ProviderRef.Name = "other-provider"
+			case "task":
+				changed[1].(*corev1alpha1.Task).Spec.Type = corev1alpha1.TaskTypeContainer
+			case "namespace":
+				changed[0].SetNamespace("other-namespace")
+			case "multiplicity":
+				changed = append(changed, objects("three")...)
+			}
+			if got := evalClusterSnapshot(newFakeClient(changed...)); got == baseline {
+				t.Fatal("snapshot hid an effective spec or object-count difference")
+			}
+		})
+	}
 }
 
 // evalToolReportViolations applies the knownDefect contract to a sweep.
@@ -1478,14 +1504,22 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "chat create_agent allowed agent name",
-			limits: []string{"chat/create_agent.coordination.allowedAgents[].name required"},
-			check:  evalAllowedAgentNameRequired(chatTool, `"name":"a","systemPrompt":"p"`),
+			name: "chat create_agent allowed agent name",
+			limits: []string{
+				"chat/create_agent.coordination.allowedAgents[].name required",
+				"chat/create_agent.coordination.allowedAgents[].name minLength=1",
+				"chat/create_agent.coordination.allowedAgents[].name pattern=\\S",
+			},
+			check: evalAllowedAgentNameRequired(chatTool, `"name":"a","systemPrompt":"p"`),
 		},
 		{
-			name:   "worker create_agent allowed agent name",
-			limits: []string{"worker/create_agent.coordination.allowedAgents[].name required"},
-			check:  evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
+			name: "worker create_agent allowed agent name",
+			limits: []string{
+				"worker/create_agent.coordination.allowedAgents[].name required",
+				"worker/create_agent.coordination.allowedAgents[].name minLength=1",
+				"worker/create_agent.coordination.allowedAgents[].name pattern=\\S",
+			},
+			check: evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
 		},
 		{
 			name:   "worker post_review_comment comment path",
@@ -1640,9 +1674,9 @@ func evalDelegateCluster() client.Client {
 }
 
 // evalAllowedAgentNameRequired checks that create_agent, given its required
-// fields, rejects an allowed agent without a name instead of dropping it or
-// storing it unnamed. The worker tool resolves its parent Task from the
-// environment.
+// fields, rejects missing, empty, or whitespace-only allowed agent names
+// instead of dropping or storing them. The worker tool resolves its parent
+// Task from the environment.
 func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context.Context), required string) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		t.Setenv(envOrkaTaskName, "parent")
@@ -1650,7 +1684,17 @@ func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context
 		allowed := func(agent string) string {
 			return `{` + required + `,"coordination":{"enabled":true,"allowedAgents":[` + agent + `]}}`
 		}
-		return evalRejectsChange(call, allowed(`{"name":"coder","namespace":"default"}`), allowed(`{"namespace":"default"}`), "allowedAgents")
+		valid := allowed(`{"name":"coder","namespace":"default"}`)
+		for _, agent := range []string{
+			`{"namespace":"default"}`,
+			`{"name":"","namespace":"default"}`,
+			`{"name":" \t\r\n ","namespace":"default"}`,
+		} {
+			if ok, detail := evalRejectsChange(call, valid, allowed(agent), "allowedAgents"); !ok {
+				return false, detail
+			}
+		}
+		return true, ""
 	}
 }
 
@@ -2047,6 +2091,55 @@ func evalSetArgumentPath(value any, schema map[string]any, path, prefix []string
 	}
 	object[key] = evalSetArgumentPath(child, childSchema, path[1:], append(slices.Clone(prefix), path[0]), leaf)
 	return object
+}
+
+// Top-level wrong types need executable siblings: a missing required field
+// must not mask acceptance of the mutated property. JSON-encoded objects are
+// checked separately by evalObjectStringHandling, which permits equivalent
+// decoding as well as rejection. Unparseable numeric/boolean strings and
+// object/array mismatches avoid intentional string and comma-list coercions.
+func TestToolEvalTopLevelArgumentTypes(t *testing.T) {
+	evalToolSandbox(t)
+	wrong := map[string]any{"string": map[string]any{"k": "v"}, "integer": "many", "number": "many", "boolean": "yes", "array": map[string]any{"k": "v"}, "object": []any{}}
+	knownDefects := map[string]string{}
+	violations := map[string]string{}
+	declared, executed := map[string]bool{}, map[string]bool{}
+	for label, registry := range evalToolRegistries(newFakeClient()) {
+		for _, name := range registry.Names() {
+			tool, _ := registry.Get(name)
+			schema := evalToolSchema(t, tool)
+			properties, _ := schema["properties"].(map[string]any)
+			for field, raw := range properties {
+				node, _ := raw.(map[string]any)
+				typ, _ := node["type"].(string)
+				bad, ok := wrong[typ]
+				if !ok {
+					continue
+				}
+				key := label + "/" + name + ": " + field + " as wrong type"
+				declared[key] = true
+				t.Run(key, func(t *testing.T) {
+					executed[key] = true
+					call, args := evalArgumentControl(t, label, name, schema)
+					valid, _ := json.Marshal(args)
+					if ok, detail := evalSucceeds(call, string(valid)); !ok {
+						t.Fatalf("top-level-type control is not executable: %s", detail)
+					}
+					invalid := maps.Clone(args)
+					invalid[field] = bad
+					invalidRaw, _ := json.Marshal(invalid)
+					fresh, ctx := call()
+					failed, message := evalArgumentFailure(t, label, ctx, fresh, string(invalidRaw))
+					if !failed {
+						violations[key] = "accepted " + string(invalidRaw)
+					} else if !evalFieldMentioned(message, field) && !strings.Contains(message, "json: cannot unmarshal") {
+						violations[key] = "wrong type rejected for another reason: " + message
+					}
+				})
+			}
+		}
+	}
+	evalToolReportExecutedViolations(t, violations, knownDefects, declared, executed)
 }
 
 func TestToolEvalNestedArgumentTypes(t *testing.T) {

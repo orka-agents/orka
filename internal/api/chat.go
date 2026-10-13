@@ -413,7 +413,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		chatToolStubs = filterCompletionToolsExcluding(chatToolStubs, chattools.ListConnectionsToolName)
 	}
 	offeredChatTools := completionToolNames(filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, chatToolStubs))
-	if len(offeredChatTools) < len(chatToolNames) {
+	if len(offeredChatTools) < len(chatToolStubs) {
 		promptBuilder.SetAvailableChatTools(offeredChatTools)
 	}
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
