@@ -905,7 +905,13 @@ func handleExplicitRequestApprovalBatch(
 		}
 		call = normalizeRequestApprovalCall(call)
 		if gate != nil && len(gate.resolved) > 0 {
-			if target, err := explicitApprovalTargetForCall(ctx, call, customTools, baseToolCtx); err == nil {
+			var matchingArgs map[string]any
+			_ = json.Unmarshal(call.Arguments, &matchingArgs)
+			// Do not let missing targetArguments inherit the empty-object
+			// approval matching default before request_approval validates it.
+			_, hasTargetArguments := matchingArgs["targetArguments"].(map[string]any)
+			target, err := explicitApprovalTargetForCall(ctx, call, customTools, baseToolCtx)
+			if hasTargetArguments && err == nil {
 				if decision, found := gate.resolvedDecision(target); found {
 					return &approvalBatchDecision{
 						continueLLM: true,
