@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -276,6 +277,97 @@ func TestApprovedBuiltinInjectionFailureDoesNotConsumeApproval(t *testing.T) {
 	assertRecordedEventTypesEventually(t, recorder, []string{
 		events.ExecutionEventTypeToolCallFailed, events.ExecutionEventTypeToolCallCompleted,
 	})
+}
+
+func TestApprovedBuiltinPreflightFailureDoesNotConsumeApproval(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	var executions []json.RawMessage
+	toolspkg.DefaultRegistry.Register(injectionRegistryTool{recordingTool{
+		name: gatedDispatchTool,
+		onExecute: func(args json.RawMessage) {
+			executions = append(executions, append(json.RawMessage(nil), args...))
+		},
+	}})
+	invalid := json.RawMessage(`{"count":{}}`)
+	valid := json.RawMessage(`{"count":1}`)
+	invalidTarget := approvalTargetForTest(t, invalid)
+	validTarget := approvalTargetForTest(t, valid)
+	// Corrected arguments have a distinct approval identity; do not loosen
+	// exact argument binding just to permit a retry.
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{
+		resolvedApprovalForTarget(invalidTarget), resolvedApprovalForTarget(validTarget),
+	})
+	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+	t.Setenv(workerenv.AutonomousMode, "true")
+	provider := &mockProvider{}
+	for i, args := range []json.RawMessage{invalid, invalid, valid, valid} {
+		provider.responses = append(provider.responses, &llm.CompletionResponse{
+			ToolCalls: []llm.ToolCall{{ID: fmt.Sprint(i), Name: gatedDispatchTool, Arguments: args}}, StopReason: "tool_use",
+		})
+	}
+	provider.responses = append(provider.responses, &llm.CompletionResponse{Content: doneResult, StopReason: "end_turn"})
+	result, err := runInjectionAgentLoop(provider, common.NewFakeEventRecorder())
+	if err != nil || result != doneResult || len(executions) != 1 || len(provider.requests) != 5 {
+		t.Fatalf("agent loop = %q, %v, executions = %d, requests = %d; want one corrected execution",
+			result, err, len(executions), len(provider.requests))
+	}
+	assertInjectedExecutionArguments(t, executions[0], validTarget.ApprovalID, string(valid))
+	for i, want := range []string{
+		"count must be a whole number", "count must be a whole number", `{"ok":true}`, "skipping duplicate",
+	} {
+		messages := provider.requests[i+1].Messages
+		if content := messages[len(messages)-1].Content; !strings.Contains(content, want) {
+			t.Errorf("continuation %d = %q, want %q", i, content, want)
+		}
+	}
+}
+
+type failingInjectionRegistryTool struct {
+	injectionRegistryTool
+	err error
+}
+
+func (t failingInjectionRegistryTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	_, _ = t.injectionRegistryTool.Execute(ctx, args)
+	return "", t.err
+}
+
+func TestApprovedBuiltinExecutionErrorStillConsumesApproval(t *testing.T) {
+	for _, execErr := range []error{
+		errors.New("execution failed"),
+		&toolspkg.ToolArgumentError{Field: "count", Want: "valid", Got: "invalid"},
+	} {
+		t.Run(execErr.Error(), func(t *testing.T) {
+			restore := replaceDefaultToolRegistryForTest(t)
+			defer restore()
+			executions := 0
+			toolspkg.DefaultRegistry.Register(failingInjectionRegistryTool{
+				injectionRegistryTool: injectionRegistryTool{recordingTool{
+					name: gatedDispatchTool, onExecute: func(json.RawMessage) { executions++ },
+				}},
+				err: execErr,
+			})
+			args := json.RawMessage(`{"count":1}`)
+			target := approvalTargetForTest(t, args)
+			setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{resolvedApprovalForTarget(target)})
+			t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+			t.Setenv(workerenv.AutonomousMode, "true")
+			provider := &mockProvider{responses: []*llm.CompletionResponse{
+				{ToolCalls: []llm.ToolCall{{ID: "first", Name: gatedDispatchTool, Arguments: args}}, StopReason: "tool_use"},
+				{ToolCalls: []llm.ToolCall{{ID: "repeat", Name: gatedDispatchTool, Arguments: args}}, StopReason: "tool_use"},
+				{Content: doneResult, StopReason: "end_turn"},
+			}}
+			result, err := runInjectionAgentLoop(provider, common.NewFakeEventRecorder())
+			if err != nil || result != doneResult || executions != 1 || len(provider.requests) != 3 {
+				t.Fatalf("agent loop = %q, %v, executions = %d; want one attempted execution", result, err, executions)
+			}
+			messages := provider.requests[2].Messages
+			if content := messages[len(messages)-1].Content; !strings.Contains(content, "skipping duplicate") {
+				t.Fatalf("retry result = %q, want duplicate suppression", content)
+			}
+		})
+	}
 }
 
 func runInjectionAgentLoop(provider llm.Provider, recorder common.EventRecorder) (string, error) {

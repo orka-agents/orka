@@ -9,8 +9,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +59,9 @@ func TestWaitForTaskTool_Parameters(t *testing.T) {
 	}
 	if got := timeout[jsonSchemaMinimumField]; got != float64(1) {
 		t.Errorf("timeout minimum = %v, want 1", got)
+	}
+	if got := timeout[jsonSchemaMaximumField]; got != float64(60) {
+		t.Errorf("timeout maximum = %v, want 60", got)
 	}
 }
 
@@ -325,6 +331,32 @@ func TestWaitForTaskTool_RegistryTimeout(t *testing.T) {
 			if reads != 1 {
 				t.Errorf("Task reads = %d, want only the initial read", reads)
 			}
+		})
+	}
+}
+
+func TestWaitForTaskTool_Execute_TimeoutClampsToMax(t *testing.T) {
+	for _, timeout := range []int64{60, 61, 9223372036854775807} {
+		t.Run(fmt.Sprint(timeout), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				task := &corev1alpha1.Task{
+					ObjectMeta: metav1.ObjectMeta{Name: testRunningTaskName, Namespace: defaultNamespace},
+					Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+				}
+				ctx := WithToolContext(context.Background(), &ToolContext{Client: newFakeClient(task), Namespace: defaultNamespace})
+				registry := NewRegistry()
+				registry.Register(&WaitForTaskTool{})
+				started := time.Now()
+				result, err := registry.Execute(ctx, waitForTaskToolName,
+					json.RawMessage(fmt.Sprintf(`{"name":"running-task","timeout":%d}`, timeout)))
+				if err != nil || !strings.Contains(result, "still running") {
+					t.Fatalf("wait = %q, %v; want running-task continuation", result, err)
+				}
+				// Polling can add one two-second tick after the capped deadline.
+				if elapsed := time.Since(started); elapsed < 60*time.Second || elapsed > 62*time.Second {
+					t.Fatalf("timeout %d waited %s, want the 60-second cap plus at most one poll", timeout, elapsed)
+				}
+			})
 		})
 	}
 }

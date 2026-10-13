@@ -1075,8 +1075,8 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 
 	cases := []evalLimitCase{
 		{
-			name:   "chat wait_for_task positive timeout",
-			limits: []string{"chat/wait_for_task.timeout minimum=1"},
+			name:   "chat wait_for_task timeout bounds",
+			limits: []string{"chat/wait_for_task.timeout minimum=1", "chat/wait_for_task.timeout maximum=60"},
 			check: func(t *testing.T) (bool, string) {
 				call := func() (Tool, context.Context) {
 					task := &corev1alpha1.Task{
@@ -1085,7 +1085,25 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					}
 					return chatTool("wait_for_task", newFakeClient(task))
 				}
+				// The actual maximum wait is pinned with virtual time by
+				// TestWaitForTaskTool_Execute_TimeoutClampsToMax.
 				return evalRejectsChange(call, `{"name":"eval","timeout":1}`, `{"name":"eval","timeout":0}`, "timeout")
+			},
+		},
+		{
+			name:   "chat create_agent runtime turns",
+			limits: []string{"chat/create_agent.runtime.defaultMaxTurns minimum=1", "chat/create_agent.runtime.defaultMaxTurns maximum=1000"},
+			check: func(t *testing.T) (bool, string) {
+				call := func() (Tool, context.Context) { return chatTool("create_agent", newFakeClient()) }
+				turns := func(v int) string {
+					return fmt.Sprintf(`{"name":"a","model":{"name":"test-model"},"runtime":{"type":"claude","defaultMaxTurns":%d}}`, v)
+				}
+				return evalAll(
+					func() (bool, string) { return evalRejectsChange(call, turns(1), turns(0), "runtime.defaultMaxTurns") },
+					func() (bool, string) {
+						return evalRejectsChange(call, turns(1000), turns(1001), "runtime.defaultMaxTurns")
+					},
+				)
 			},
 		},
 		{

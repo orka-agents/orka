@@ -36,6 +36,28 @@ func TestChatCreateAgentTool_ParametersDescribeOpenCodeACP(t *testing.T) {
 	}
 }
 
+func TestChatCreateAgentTool_ParametersRuntimeTurnBounds(t *testing.T) {
+	var schema struct {
+		Properties struct {
+			Runtime struct {
+				Properties struct {
+					DefaultMaxTurns struct {
+						Minimum int `json:"minimum"`
+						Maximum int `json:"maximum"`
+					} `json:"defaultMaxTurns"`
+				} `json:"properties"`
+			} `json:"runtime"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal((&ChatCreateAgentTool{}).Parameters(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	bounds := schema.Properties.Runtime.Properties.DefaultMaxTurns
+	if bounds.Minimum != 1 || bounds.Maximum != 1000 {
+		t.Fatalf("runtime.defaultMaxTurns bounds = %+v, want 1..1000", bounds)
+	}
+}
+
 // Exercise direct execution and the registry's numeric-string normalization.
 // The fake client does not enforce CRD validation, so rejected values must not
 // reach creation (including the optional initial Task).

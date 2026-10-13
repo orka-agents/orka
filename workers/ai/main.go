@@ -1539,6 +1539,17 @@ func executeAgentLoopWithEvents(
 					}
 					execCtx = tools.WithToolContext(stepCtx, &toolCtxCopy)
 				}
+				if execErr == nil && approvalKey != "" {
+					// Schema preflight cannot execute the tool, so it must not
+					// consume approval. Once execution starts, retain the fired
+					// key even if the tool returns an argument-shaped error.
+					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
+						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
+						if execErr != nil {
+							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments", execErr.Error())
+						}
+					}
+				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)
 					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
