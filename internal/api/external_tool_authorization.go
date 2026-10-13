@@ -70,7 +70,7 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 		tc.AuthorizeAgentReference = func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			for _, permission := range []struct{ verb, resource, name string }{
 				{externalToolCreateVerb, externalToolTaskResource, ""},
-				{"get", externalToolAgentResource, agent.Name},
+				{gatewayVerbGet, externalToolAgentResource, agent.Name},
 			} {
 				if err := authorization.authorize(ctx, agent.Namespace, permission.verb, corev1alpha1.GroupVersion.Group, permission.resource, permission.name); err != nil {
 					return &tools.ChatToolError{Type: externalToolPermissionDenied, Message: err.Error(), Suggestion: externalToolRBACSuggestion}

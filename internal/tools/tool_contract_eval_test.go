@@ -297,13 +297,13 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 }
 
 // TestToolEvalMalformedArguments sends each tool arguments a model gets wrong:
-// non-object JSON, omitted required fields, wrong root JSON types, and nested
-// objects encoded as strings. TestToolEvalRequiredFields isolates each required
-// field; TestToolEvalNestedArgumentTypes probes nested types with valid controls. A tool must never panic, must never report
-// success for a call missing required fields or for an object sent as a
-// string, and must always explain a failure. Chat tools must return a
-// structured result instead of a Go error, which the chat executor reports to
-// the model as an unknown tool.
+// non-object JSON, omitted required fields, and nested objects encoded as
+// strings. RequiredFields isolates required fields; TopLevelArgumentTypes and
+// NestedArgumentTypes probe types with executable controls. A tool must never
+// panic, accept a non-null non-object root, or accept missing required fields.
+// Object strings must be rejected or decoded equivalently, and every failure
+// must have a diagnostic. Chat tools must return a structured result instead of
+// a Go error, which the chat executor reports to the model as an unknown tool.
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
 	// Worker tools resolve their parent Task from the environment; the seeded
@@ -311,9 +311,6 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 	t.Setenv(envOrkaTaskName, evalPlaceholder)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	knownDefects := map[string]string{}
-	wrongValue := map[string]string{
-		"string": `{"k":"v"}`, "integer": `"many"`, "number": `"many"`, "boolean": `"yes"`, "array": `"a,b"`, "object": `"{\"k\":\"v\"}"`,
-	}
 	violations := map[string]string{}
 	// Panics, Go errors from chat tools, and failures without a message are
 	// never accepted as known defects.
@@ -327,13 +324,10 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			required, _ := schema["required"].([]any)
 			properties, _ := schema["properties"].(map[string]any)
 
-			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "empty object": `{}`}
+			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "boolean": `true`, "empty object": `{}`}
 			for prop, raw := range properties {
 				propSchema, _ := raw.(map[string]any)
 				typ, _ := propSchema["type"].(string)
-				if value, ok := wrongValue[typ]; ok {
-					inputs[fmt.Sprintf("%s as wrong type", prop)] = fmt.Sprintf(`{%q:%s}`, prop, value)
-				}
 				if typ == "object" {
 					key := fmt.Sprintf("%s/%s: %s as JSON string", label, name, prop)
 					switch verdict := evalObjectStringHandling(label, name, required, properties, prop); {
@@ -366,6 +360,8 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 						fatal = append(fatal, fmt.Sprintf("%s: returned Go error %q, which the chat executor reports as an unknown tool", key, err))
 					case failed && strings.TrimSpace(message) == "":
 						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
+					case (input == "array" || input == "string" || input == "number" || input == "boolean") && !failed:
+						violations[key] = fmt.Sprintf("reported success for a non-object root in the %s cluster", cluster)
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
 					}
@@ -491,8 +487,9 @@ func evalObjectPayload(prop string, schema map[string]any) map[string]any {
 	return payload
 }
 
-// evalClusterSnapshot renders the specs of the Agents and Tasks a tool call
-// left behind. Names are left out because worker tools add random suffixes.
+// evalClusterSnapshot compares effective specs, not generated names or other
+// per-call metadata. Sorting retains object kind and multiplicity without
+// depending on the order the client returns objects.
 func evalClusterSnapshot(fc client.Client) string {
 	var agents corev1alpha1.AgentList
 	var tasks corev1alpha1.TaskList
@@ -501,14 +498,46 @@ func evalClusterSnapshot(fc client.Client) string {
 	parts := make([]string, 0, len(agents.Items)+len(tasks.Items))
 	for i := range agents.Items {
 		spec, _ := json.Marshal(agents.Items[i].Spec)
-		parts = append(parts, "agent "+string(spec))
+		parts = append(parts, "agent "+agents.Items[i].Namespace+" "+string(spec))
 	}
 	for i := range tasks.Items {
 		spec, _ := json.Marshal(tasks.Items[i].Spec)
-		parts = append(parts, "task "+string(spec))
+		parts = append(parts, "task "+tasks.Items[i].Namespace+" "+string(spec))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\n")
+}
+
+func TestToolEvalClusterSnapshotIgnoresGeneratedMetadata(t *testing.T) {
+	objects := func(suffix string) []client.Object {
+		meta := metav1.ObjectMeta{Name: "generated-" + suffix, Namespace: defaultNamespace, ResourceVersion: suffix}
+		return []client.Object{
+			&corev1alpha1.Agent{ObjectMeta: meta, Spec: corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: "provider"}}},
+			&corev1alpha1.Task{ObjectMeta: meta, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}},
+		}
+	}
+	baseline := evalClusterSnapshot(newFakeClient(objects("one")...))
+	if got := evalClusterSnapshot(newFakeClient(objects("two")...)); got != baseline {
+		t.Fatalf("identical specs with different generated metadata compare unequal: %s != %s", got, baseline)
+	}
+	for _, kind := range []string{"agent", "task", "namespace", "multiplicity"} {
+		t.Run(kind, func(t *testing.T) {
+			changed := objects("two")
+			switch kind {
+			case "agent":
+				changed[0].(*corev1alpha1.Agent).Spec.ProviderRef.Name = "other-provider"
+			case "task":
+				changed[1].(*corev1alpha1.Task).Spec.Type = corev1alpha1.TaskTypeContainer
+			case "namespace":
+				changed[0].SetNamespace("other-namespace")
+			case "multiplicity":
+				changed = append(changed, objects("three")...)
+			}
+			if got := evalClusterSnapshot(newFakeClient(changed...)); got == baseline {
+				t.Fatal("snapshot hid an effective spec or object-count difference")
+			}
+		})
+	}
 }
 
 // evalToolReportViolations applies the knownDefect contract to a sweep.
@@ -2012,6 +2041,127 @@ func evalSetArgumentPath(value any, schema map[string]any, path, prefix []string
 	}
 	object[key] = evalSetArgumentPath(child, childSchema, path[1:], append(slices.Clone(prefix), path[0]), leaf)
 	return object
+}
+
+// Top-level wrong types need executable siblings: a missing required field
+// must not mask acceptance of the mutated property. JSON-encoded objects are
+// checked separately by evalObjectStringHandling, which permits equivalent
+// decoding as well as rejection. Unparseable numeric/boolean strings and
+// object/array mismatches avoid intentional string and comma-list coercions.
+func TestToolEvalTopLevelArgumentTypes(t *testing.T) {
+	evalToolSandbox(t)
+	wrong := map[string]any{"string": map[string]any{"k": "v"}, "integer": "many", "number": "many", "boolean": "yes", "array": map[string]any{"k": "v"}, "object": []any{}}
+	const (
+		ignoredTopLevelType = "the tool drops or coerces a top-level value whose type contradicts its schema"
+		coercedLookupType   = "the tool coerces a wrong-typed value and then fails a resource lookup instead of rejecting the type"
+	)
+	knownDefects := map[string]string{
+		"chat/cancel_task: name as wrong type":                    coercedLookupType,
+		"chat/cancel_task: namespace as wrong type":               coercedLookupType,
+		"chat/check_task_progress: name as wrong type":            coercedLookupType,
+		"chat/check_task_progress: namespace as wrong type":       coercedLookupType,
+		"chat/create_agent: initialPrompt as wrong type":          ignoredTopLevelType,
+		"chat/create_agent: name as wrong type":                   ignoredTopLevelType,
+		"chat/create_agent: namespace as wrong type":              ignoredTopLevelType,
+		"chat/create_agent: providerRef as wrong type":            coercedLookupType,
+		"chat/create_agent: systemPrompt as wrong type":           ignoredTopLevelType,
+		"chat/create_agent: tools as wrong type":                  ignoredTopLevelType,
+		"chat/create_agent_task: agentRef as wrong type":          ignoredTopLevelType,
+		"chat/create_agent_task: namespace as wrong type":         ignoredTopLevelType,
+		"chat/create_agent_task: prompt as wrong type":            ignoredTopLevelType,
+		"chat/create_agent_task: schedule as wrong type":          ignoredTopLevelType,
+		"chat/create_ai_task: agentRef as wrong type":             ignoredTopLevelType,
+		"chat/create_ai_task: namespace as wrong type":            ignoredTopLevelType,
+		"chat/create_ai_task: priority as wrong type":             ignoredTopLevelType,
+		"chat/create_ai_task: prompt as wrong type":               ignoredTopLevelType,
+		"chat/create_ai_task: providerRef as wrong type":          ignoredTopLevelType,
+		"chat/create_ai_task: schedule as wrong type":             ignoredTopLevelType,
+		"chat/create_ai_task: sessionRef as wrong type":           ignoredTopLevelType,
+		"chat/create_container_task: args as wrong type":          ignoredTopLevelType,
+		"chat/create_container_task: command as wrong type":       ignoredTopLevelType,
+		"chat/create_container_task: image as wrong type":         ignoredTopLevelType,
+		"chat/create_container_task: namespace as wrong type":     ignoredTopLevelType,
+		"chat/create_container_task: prior_task as wrong type":    ignoredTopLevelType,
+		"chat/create_container_task: priority as wrong type":      ignoredTopLevelType,
+		"chat/create_container_task: schedule as wrong type":      ignoredTopLevelType,
+		"chat/create_pr_monitor: agentRef as wrong type":          coercedLookupType,
+		"chat/create_pr_monitor: name as wrong type":              ignoredTopLevelType,
+		"chat/create_pr_monitor: per_page as wrong type":          ignoredTopLevelType,
+		"chat/create_pr_monitor: prompt as wrong type":            ignoredTopLevelType,
+		"chat/create_pr_monitor: providerRef as wrong type":       ignoredTopLevelType,
+		"chat/create_pr_monitor: readCredentialRef as wrong type": coercedLookupType,
+		"chat/create_pr_monitor: schedule as wrong type":          ignoredTopLevelType,
+		"chat/create_tool: description as wrong type":             ignoredTopLevelType,
+		"chat/create_tool: method as wrong type":                  ignoredTopLevelType,
+		"chat/create_tool: name as wrong type":                    ignoredTopLevelType,
+		"chat/create_tool: namespace as wrong type":               ignoredTopLevelType,
+		"chat/create_tool: url as wrong type":                     ignoredTopLevelType,
+		"chat/delete_agent: name as wrong type":                   coercedLookupType,
+		"chat/delete_agent: namespace as wrong type":              coercedLookupType,
+		"chat/delete_session: namespace as wrong type":            ignoredTopLevelType,
+		"chat/delete_session: sessionId as wrong type":            ignoredTopLevelType,
+		"chat/delete_tool: name as wrong type":                    coercedLookupType,
+		"chat/delete_tool: namespace as wrong type":               coercedLookupType,
+		"chat/fetch_task_output: name as wrong type":              coercedLookupType,
+		"chat/fetch_task_output: namespace as wrong type":         coercedLookupType,
+		"chat/list_agents: namespace as wrong type":               ignoredTopLevelType,
+		"chat/list_tasks: limit as wrong type":                    ignoredTopLevelType,
+		"chat/list_tasks: namespace as wrong type":                ignoredTopLevelType,
+		"chat/list_tasks: status as wrong type":                   ignoredTopLevelType,
+		"chat/list_tools: namespace as wrong type":                ignoredTopLevelType,
+		"chat/update_agent: name as wrong type":                   coercedLookupType,
+		"chat/update_agent: namespace as wrong type":              coercedLookupType,
+		"chat/update_agent: systemPrompt as wrong type":           ignoredTopLevelType,
+		"chat/update_agent: tools as wrong type":                  ignoredTopLevelType,
+		"chat/wait_for_task: name as wrong type":                  coercedLookupType,
+		"chat/wait_for_task: namespace as wrong type":             coercedLookupType,
+		"chat/wait_for_task: timeout as wrong type":               ignoredTopLevelType,
+		"worker/create_container_task: args as wrong type":        ignoredTopLevelType,
+		"worker/create_container_task: command as wrong type":     ignoredTopLevelType,
+		"worker/create_container_task: image as wrong type":       ignoredTopLevelType,
+		"worker/create_container_task: namespace as wrong type":   coercedLookupType,
+		"worker/create_container_task: prior_task as wrong type":  ignoredTopLevelType,
+		"worker/create_container_task: priority as wrong type":    ignoredTopLevelType,
+		"worker/create_container_task: schedule as wrong type":    ignoredTopLevelType,
+	}
+	violations := map[string]string{}
+	declared, executed := map[string]bool{}, map[string]bool{}
+	for label, registry := range evalToolRegistries(newFakeClient()) {
+		for _, name := range registry.Names() {
+			tool, _ := registry.Get(name)
+			schema := evalToolSchema(t, tool)
+			properties, _ := schema["properties"].(map[string]any)
+			for field, raw := range properties {
+				node, _ := raw.(map[string]any)
+				typ, _ := node["type"].(string)
+				bad, ok := wrong[typ]
+				if !ok {
+					continue
+				}
+				key := label + "/" + name + ": " + field + " as wrong type"
+				declared[key] = true
+				t.Run(key, func(t *testing.T) {
+					executed[key] = true
+					call, args := evalArgumentControl(t, label, name, schema)
+					valid, _ := json.Marshal(args)
+					if ok, detail := evalSucceeds(call, string(valid)); !ok {
+						t.Fatalf("top-level-type control is not executable: %s", detail)
+					}
+					invalid := maps.Clone(args)
+					invalid[field] = bad
+					invalidRaw, _ := json.Marshal(invalid)
+					fresh, ctx := call()
+					failed, message := evalArgumentFailure(t, label, ctx, fresh, string(invalidRaw))
+					if !failed {
+						violations[key] = "accepted " + string(invalidRaw)
+					} else if !evalFieldMentioned(message, field) && !strings.Contains(message, "json: cannot unmarshal") {
+						violations[key] = "wrong type rejected for another reason: " + message
+					}
+				})
+			}
+		}
+	}
+	evalToolReportExecutedViolations(t, violations, knownDefects, declared, executed)
 }
 
 func TestToolEvalNestedArgumentTypes(t *testing.T) {
