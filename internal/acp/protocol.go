@@ -13,6 +13,7 @@ const (
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
 	MethodSessionNew        = "session/new"
+	MethodSessionLoad       = "session/load"
 	MethodSessionResume     = "session/resume"
 	MethodSessionClose      = "session/close"
 	MethodSessionPrompt     = "session/prompt"
@@ -100,20 +101,13 @@ type AgentCapabilities struct {
 	Meta                Meta               `json:"_meta,omitempty"`
 }
 
-// SessionCapability reports whether the agent advertised the named
-// sessionCapabilities entry. ACP marks a supported capability with an object
-// (usually `{}`); a boolean true is accepted for lenient agents, and null,
-// false, or an absent key mean unsupported.
+// SessionCapability accepts the ACP capability object or a boolean true.
 func (c AgentCapabilities) SessionCapability(name string) bool {
-	value, ok := c.SessionCapabilities[name]
-	if !ok || value == nil {
-		return false
-	}
-	switch typed := value.(type) {
+	switch value := c.SessionCapabilities[name].(type) {
 	case bool:
-		return typed
+		return value
 	case map[string]any:
-		return true
+		return value != nil
 	default:
 		return false
 	}
@@ -187,8 +181,7 @@ type NewSessionResponse struct {
 	Meta          Meta              `json:"_meta,omitempty"`
 }
 
-// ResumeSessionRequest reconnects a fresh adapter process to an existing
-// provider session. Unlike session/load, the agent MUST NOT replay history.
+// ResumeSessionRequest reconnects without replaying conversation history.
 type ResumeSessionRequest struct {
 	SessionID             string      `json:"sessionId"`
 	CWD                   string      `json:"cwd"`
@@ -197,8 +190,6 @@ type ResumeSessionRequest struct {
 	Meta                  Meta        `json:"_meta,omitempty"`
 }
 
-// ResumeSessionResponse is nominally empty; agents MAY echo the session ID
-// and initial mode, model, or configuration state.
 type ResumeSessionResponse struct {
 	SessionID     string            `json:"sessionId,omitempty"`
 	Modes         json.RawMessage   `json:"modes,omitempty"`
@@ -214,6 +205,20 @@ type CloseSessionRequest struct {
 
 type CloseSessionResponse struct {
 	Meta Meta `json:"_meta,omitempty"`
+}
+
+type LoadSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+type LoadSessionResponse struct {
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
 }
 
 type ContentBlock struct {

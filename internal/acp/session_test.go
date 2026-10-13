@@ -398,8 +398,23 @@ const (
 	helperClosedStateFile       = "closed"
 )
 
+// helperCreationResumeMode reports the modes that resume a provider session
+// while the runtime session is created, instead of after an idle adapter exit.
+func helperCreationResumeMode(mode string) bool {
+	switch mode {
+	case "resume-success", "resume-error", "resume-wrong-id", "resume-unsupported":
+		return true
+	default:
+		return false
+	}
+}
+
 func helperSessionCapabilities(mode string) map[string]any {
 	switch mode {
+	case "resume-success", "resume-error", "resume-wrong-id":
+		return map[string]any{SessionCapabilityResume: true}
+	case "resume-unsupported":
+		return map[string]any{SessionCapabilityResume: false}
 	case helperModeResume:
 		return map[string]any{SessionCapabilityResume: map[string]any{}, SessionCapabilityClose: map[string]any{}}
 	case helperModeResumeReject:
@@ -460,7 +475,7 @@ func TestACPHelperProcess(t *testing.T) {
 		}
 		switch message.Method {
 		case MethodInitialize:
-			capabilities := map[string]any{}
+			capabilities := map[string]any{"loadSession": true, "mcpCapabilities": map[string]bool{"http": true}}
 			if sessionCapabilities := helperSessionCapabilities(mode); sessionCapabilities != nil {
 				capabilities["sessionCapabilities"] = sessionCapabilities
 			}
@@ -472,6 +487,10 @@ func TestACPHelperProcess(t *testing.T) {
 				},
 			})
 		case MethodSessionNew:
+			if helperCreationResumeMode(mode) {
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "session/new fallback forbidden"}})
+				continue
+			}
 			if mode == "metadata" {
 				var request NewSessionRequest
 				if err := json.Unmarshal(message.Params, &request); err != nil || !validTestNewSessionMetadata(request.Meta) {
@@ -486,6 +505,21 @@ func TestACPHelperProcess(t *testing.T) {
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{"sessionId": providerSession}})
 		case MethodSessionResume:
 			var request ResumeSessionRequest
+			if helperCreationResumeMode(mode) {
+				cwd, _ := os.Getwd()
+				if mode == "resume-error" || json.Unmarshal(message.Params, &request) != nil ||
+					request.CWD != cwd || len(request.MCPServers) != 1 || request.MCPServers[0].Name != "current-mcp" {
+					writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "resume rejected"}})
+					continue
+				}
+				providerSession = request.SessionID
+				response := map[string]any{}
+				if mode == "resume-wrong-id" {
+					response["sessionId"] = "another-thread"
+				}
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": response})
+				continue
+			}
 			if err := json.Unmarshal(message.Params, &request); err != nil || mode == helperModeResumeReject ||
 				request.SessionID == "" || request.SessionID != readHelperState(helperSessionStateFile) ||
 				request.CWD == "" || request.Meta[sessionMetaRuntimeSessionID] != "test-session" {
@@ -540,7 +574,7 @@ func TestACPHelperProcess(t *testing.T) {
 					"jsonrpc": "2.0", "id": 50, "method": MethodRequestPermission,
 					"params": map[string]any{"sessionId": providerSession, "toolCall": map[string]any{"toolCallId": "tool-1", "title": "test"}, "options": []map[string]any{{"optionId": "allow", "name": "Allow", "kind": "allow_once"}}},
 				})
-			case "immediate":
+			case "immediate", "resume-success":
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonEndTurn}})
 			case "rpc-error":
 				writeACPHelper(writer, map[string]any{

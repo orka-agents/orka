@@ -14,11 +14,13 @@ require (
 	github.com/gofiber/fiber/v3 v3.5.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/lestrrat-go/jwx/v3 v3.2.0
-	github.com/onsi/ginkgo/v2 v2.32.2
-	github.com/onsi/gomega v1.43.0
+	github.com/onsi/ginkgo/v2 v2.33.0
+	github.com/onsi/gomega v1.44.0
 	github.com/open-policy-agent/cert-controller v0.16.0
 	github.com/openai/openai-go/v3 v3.50.0
+	github.com/orka-agents/sessionkit v0.0.0-20261009211105-8c7dfc5d9553
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/robfig/cron/v3 v3.0.1
@@ -48,8 +50,9 @@ require (
 	k8s.io/apimachinery v0.37.0
 	k8s.io/apiserver v0.37.0
 	k8s.io/client-go v0.37.0
+	k8s.io/streaming v0.37.0
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
-	modernc.org/sqlite v1.57.0
+	modernc.org/sqlite v1.60.1
 	oras.land/oras-go/v2 v2.6.2
 	sigs.k8s.io/agent-sandbox v1.0.3
 	sigs.k8s.io/controller-runtime v0.25.0
@@ -111,7 +114,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
-	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
@@ -173,7 +175,7 @@ require (
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/tools v0.50.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.5.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
@@ -183,10 +185,9 @@ require (
 	k8s.io/component-base v0.37.0 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad // indirect
-	k8s.io/streaming v0.37.0 // indirect
-	modernc.org/libc v1.74.4 // indirect
+	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.11.0 // indirect
+	modernc.org/memory v1.12.1 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect

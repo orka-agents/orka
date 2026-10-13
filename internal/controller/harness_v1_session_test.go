@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,9 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/stretchr/testify/require"
 )
 
 type harnessV1SessionFenceStore struct {
@@ -95,6 +99,53 @@ func copyHarnessV1SessionControl(control store.SessionControl) *store.SessionCon
 		copyControl.Lease = &copyLease
 	}
 	return &copyControl
+}
+
+func TestPrepareHarnessV1TaskSessionRejectsNativeImportBeforeMutation(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
+			_, initial, task, verified, attempt := harnessV1SessionFenceFixture(t, false)
+			ctx := t.Context()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "native-harness-v1.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			transcripts := sqlite.NewStore(db, "")
+			cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
+			require.NoError(t, err)
+			require.NoError(t, transcripts.SetAgentExecutionSnapshotCipher(cipher))
+			snapshot := storetest.NativeSessionSnapshot(t, "native history must not enter harness v1")
+			snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""
+			_, err = transcripts.StageNativeSessionImport(ctx, store.NativeSessionImport{
+				Namespace: task.Namespace, SessionName: task.Spec.SessionRef.Name, OperationID: "native-stage",
+				RequestDigest: store.NativeSessionImportDigest(task.Namespace, task.Spec.SessionRef.Name, snapshot.DataDigest), Snapshot: snapshot,
+			})
+			require.NoError(t, err)
+			uid := ""
+			if bound {
+				uid = initial.SessionUID
+				require.NoError(t, transcripts.BindSessionCleanupIdentity(ctx, task.Namespace, task.Spec.SessionRef.Name, uid))
+			}
+			before, err := transcripts.GetNativeSession(ctx, task.Namespace, task.Spec.SessionRef.Name, uid)
+			require.NoError(t, err)
+			controls := &harnessV1SessionFenceStore{controls: []store.SessionControl{initial}}
+			continuity, err := NewHarnessV1SessionContinuity(HarnessV1SessionContinuityConfig{SessionControls: controls, Transcripts: transcripts})
+			require.NoError(t, err)
+			dispatcher := &HarnessV1Dispatcher{Sessions: continuity}
+			err = dispatcher.prepareHarnessV1TaskSession(ctx, task, verified, attempt, store.ControllerEpochFence{})
+			require.ErrorIs(t, err, store.ErrValidation)
+			require.True(t, isPermanentHarnessV1PreSubmitSessionError(err))
+			require.Zero(t, controls.getCalls)
+			require.Zero(t, controls.acquireCalls)
+			require.Zero(t, controls.createTurnCalls)
+			after, err := transcripts.GetNativeSession(ctx, task.Namespace, task.Spec.SessionRef.Name, uid)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			session, err := transcripts.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+			require.NoError(t, err)
+			require.Zero(t, session.MessageCount)
+			require.Empty(t, session.ActiveTask)
+		})
+	}
 }
 
 func TestPrepareHarnessV1TaskSessionRechecksFrozenControlBeforeAcquire(t *testing.T) {

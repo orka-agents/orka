@@ -23,6 +23,11 @@ LIVE_ACP_VEKIL_PORT_FORWARD_PID=""
 LIVE_ACP_VEKIL_PORT_FORWARD_LOG=""
 LIVE_ACP_VEKIL_BASE_URL=""
 LIVE_ACP_VEKIL_PORT_FORWARD_OWNED=0
+# ACP_E2E_MODEL_BACKEND=aimock replaces the live Vekil with aimock at the same
+# vekil-system/vekil identity, scripted by scripts/fixtures/agent-runtime-aimock,
+# so the lane needs no model-provider credential.
+LIVE_ACP_MODEL_BACKEND="${ACP_E2E_MODEL_BACKEND:-vekil}"
+LIVE_ACP_AIMOCK_IMAGE="${ACP_E2E_AIMOCK_IMAGE:-ghcr.io/copilotkit/aimock:1.43.0@sha256:163ecad18171e7d28752c386f448cc168bae71b2278d6b9e61a50f454860d8ed}"
 
 live_acp_kind_log() {
   printf '==> %s\n' "$*" >&2
@@ -90,19 +95,34 @@ live_acp_kind_preflight() {
     done
   fi
   [[ -x "${LIVE_ACP_KINDCTL_BIN}" ]] || live_acp_kind_die "kindctl is not executable: ${LIVE_ACP_KINDCTL_BIN}" || return 1
-  [[ -x "${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" ]] || live_acp_kind_die "Vekil deploy script is not executable: ${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" || return 1
   [[ -x "${LIVE_ACP_VALIDATOR_SCRIPT}" ]] || live_acp_kind_die "agent runtime validator is not executable: ${LIVE_ACP_VALIDATOR_SCRIPT}" || return 1
-  if [[ -n "${LIVE_ACP_VEKIL_LOCAL_IMAGE:-}" ]]; then
-    # A locally built Vekil is published through the run's own registry and
-    # digest-pinned there, so development builds stay immutable end to end.
-    docker image inspect "${LIVE_ACP_VEKIL_LOCAL_IMAGE}" >/dev/null 2>&1 || \
-      live_acp_kind_die "LIVE_ACP_VEKIL_LOCAL_IMAGE is not a local Docker image: ${LIVE_ACP_VEKIL_LOCAL_IMAGE}" || return 1
-  else
-    [[ "${LIVE_ACP_VEKIL_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || \
-      live_acp_kind_die "LIVE_ACP_VEKIL_IMAGE must be digest-pinned" || return 1
-  fi
-  [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]] || \
-    live_acp_kind_die "COPILOT_GITHUB_TOKEN is required; this bootstrap is noninteractive and never starts device-code login" || return 1
+  case "${LIVE_ACP_MODEL_BACKEND}" in
+    aimock)
+      live_acp_kind_enabled "${RELEASE_GATE:-0}" || \
+        live_acp_kind_die "ACP_E2E_MODEL_BACKEND=aimock scripts only RELEASE_GATE=1; smoke checks need real models" || return 1
+      [[ "${LIVE_ACP_AIMOCK_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || \
+        live_acp_kind_die "ACP_E2E_AIMOCK_IMAGE must be digest-pinned" || return 1
+      compgen -G "${LIVE_ACP_REPO_ROOT}/scripts/fixtures/agent-runtime-aimock/*.json" >/dev/null || \
+        live_acp_kind_die "scripts/fixtures/agent-runtime-aimock has no fixtures" || return 1
+      ;;
+    vekil)
+      [[ -x "${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" ]] || live_acp_kind_die "Vekil deploy script is not executable: ${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" || return 1
+      if [[ -n "${LIVE_ACP_VEKIL_LOCAL_IMAGE:-}" ]]; then
+        # A locally built Vekil is published through the run's own registry and
+        # digest-pinned there, so development builds stay immutable end to end.
+        docker image inspect "${LIVE_ACP_VEKIL_LOCAL_IMAGE}" >/dev/null 2>&1 || \
+          live_acp_kind_die "LIVE_ACP_VEKIL_LOCAL_IMAGE is not a local Docker image: ${LIVE_ACP_VEKIL_LOCAL_IMAGE}" || return 1
+      else
+        [[ "${LIVE_ACP_VEKIL_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || \
+          live_acp_kind_die "LIVE_ACP_VEKIL_IMAGE must be digest-pinned" || return 1
+      fi
+      [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]] || \
+        live_acp_kind_die "COPILOT_GITHUB_TOKEN is required; this bootstrap is noninteractive and never starts device-code login" || return 1
+      ;;
+    *)
+      live_acp_kind_die "ACP_E2E_MODEL_BACKEND must be vekil or aimock" || return 1
+      ;;
+  esac
   [[ "${ACP_E2E_OPENCODE_CONTEXT_WINDOW:-}" =~ ^[1-9][0-9]*$ ]] || \
     live_acp_kind_die "ACP_E2E_OPENCODE_CONTEXT_WINDOW must be a positive integer" || return 1
   [[ "${ACP_E2E_OPENCODE_MAX_TOKENS:-}" =~ ^[1-9][0-9]*$ ]] || \
@@ -491,6 +511,99 @@ live_acp_kind_deploy_vekil() {
   live_acp_kind_probe_configured_models
 }
 
+# live_acp_kind_deploy_aimock stands aimock in for Vekil. The provider proxy
+# reaches it at the production upstream (vekil.vekil-system.svc:1337), and its
+# NetworkPolicy admits only Pods labeled app.kubernetes.io/name=vekil there.
+# The validator loads each runtime's fixtures before that runtime's checks.
+live_acp_kind_deploy_aimock() {
+  local context="${LIVE_ACP_CONTEXT}" fixture_dir="${LIVE_ACP_REPO_ROOT}/scripts/fixtures/agent-runtime-aimock"
+  local -a from_files=()
+  local file
+  for file in "${fixture_dir}"/*.json; do
+    from_files+=("--from-file=${file}")
+  done
+  live_acp_kind_log "Deploying aimock as the vekil-system/vekil model upstream"
+  kubectl --context "${context}" create namespace vekil-system --dry-run=client -o yaml |
+    kubectl --context "${context}" apply -f - >/dev/null
+  kubectl --context "${context}" -n vekil-system create configmap vekil-fixtures "${from_files[@]}" \
+    --dry-run=client -o yaml | kubectl --context "${context}" apply -f - >/dev/null
+  kubectl --context "${context}" apply -f - >/dev/null <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vekil
+  namespace: vekil-system
+  labels:
+    app.kubernetes.io/name: vekil
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vekil
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vekil
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: aimock
+          image: ${LIVE_ACP_AIMOCK_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args: ["--host", "0.0.0.0", "--port", "1337", "--journal-max", "0", "--validate-on-load",
+            "--fixtures", "/fixtures/codex.json"]
+          env:
+            # aimock otherwise lets a turnIndex fixture match later turns.
+            - name: AIMOCK_STRICT_TURN_INDEX
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 1337
+          readinessProbe:
+            httpGet:
+              path: /__aimock/health
+              port: http
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: fixtures
+              mountPath: /fixtures
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: fixtures
+          configMap:
+            name: vekil-fixtures
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vekil
+  namespace: vekil-system
+spec:
+  selector:
+    app.kubernetes.io/name: vekil
+  ports:
+    - name: http
+      port: 1337
+      targetPort: http
+YAML
+  kubectl --context "${context}" -n vekil-system rollout status deployment/vekil --timeout="${LIVE_ACP_ROLLOUT_TIMEOUT}"
+}
+
 live_acp_kind_deploy_orka() {
   live_acp_kind_log "Installing current CRDs"
   live_acp_kind_run make -C "${LIVE_ACP_REPO_ROOT}" install
@@ -567,7 +680,11 @@ live_acp_kind_create_release_credentials() {
 live_acp_kind_bootstrap() {
   live_acp_kind_create_cluster
   live_acp_kind_start_registry
-  live_acp_kind_deploy_vekil
+  if [[ "${LIVE_ACP_MODEL_BACKEND}" == "aimock" ]]; then
+    live_acp_kind_deploy_aimock
+  else
+    live_acp_kind_deploy_vekil
+  fi
   if [[ -n "${LIVE_ACP_RELEASE_BUNDLE_DIR:-}" ]]; then
     live_acp_kind_use_release_images
     live_acp_kind_deploy_release_chart

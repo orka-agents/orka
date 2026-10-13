@@ -476,7 +476,7 @@ func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Dur
 	if err != nil {
 		return nil, err
 	}
-	// Copilot CLI 1.0.77 omits name on its native shell permission request.
+	// Copilot CLI 1.0.96 omits name on its native shell permission request.
 	// Recognize its command envelope only for this provider; titles and the
 	// generic execute kind alone cannot identify an authorized tool. The
 	// controller and supervisor still require Bash in the frozen tool policy.

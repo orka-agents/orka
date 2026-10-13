@@ -29,6 +29,8 @@ type Client struct {
 	TxnToken   string
 	Namespace  string
 	HTTPClient *http.Client
+	// NativeSessionMaxBytes bounds migration bundles independently of ordinary API responses.
+	NativeSessionMaxBytes int
 }
 
 // NewWithNamespace creates a new Orka API client with a default namespace.

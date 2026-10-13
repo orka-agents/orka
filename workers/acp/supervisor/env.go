@@ -47,6 +47,7 @@ const (
 	architectureARM64            = "arm64"
 	acpCommandProtocol           = "acp"
 	EnvListenAddress             = "ORKA_ACP_LISTEN_ADDRESS"
+	EnvNativeSessionMaxBytes     = "ORKA_NATIVE_SESSION_MAX_BYTES"
 	EnvRuntimeInstanceID         = "ORKA_ACP_RUNTIME_INSTANCE_ID"
 	EnvSupervisorBootID          = "ORKA_ACP_SUPERVISOR_BOOT_ID"
 	EnvPodUID                    = "ORKA_ACP_POD_UID"
@@ -133,6 +134,10 @@ const EnvFoundryRecoveryProfileDigest = "ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGES
 
 //nolint:gocyclo // Keep environment defaults, overrides, and derived runtime limits together.
 func LoadConfigFromEnv() (Config, error) {
+	nativeSessionMaxBytes, err := nativeSessionMaxBytesFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	providerKind := requiredEnv(EnvProvider)
 	model := requiredEnv(EnvModel)
 	intent := harnessv2.WorkspaceIntent(requiredEnv(EnvWorkspaceIntent))
@@ -198,6 +203,7 @@ func LoadConfigFromEnv() (Config, error) {
 		foundryRecovery = true
 	}
 	limits := defaultProtocolLimits()
+	limits.MaxNativeSessionBytes = nativeSessionMaxBytes
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
 	if durableWorkspaceKey != "" {
 		// A stable data key belongs to one dedicated workspace. Enforce its
@@ -308,6 +314,7 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
+		SupportsNativeSessions:            providerKind == providerKindCodex,
 		SupportsFoundryRecovery:           foundryRecovery,
 		Provider:                          providerCaps,
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
@@ -451,6 +458,14 @@ func codexSessionProjection(
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
+	if request.NativeRestore != nil {
+		// Do not inherit imported approval or sandbox settings during resume.
+		// This is a fail-closed fallback for both workspace intents. Every prompt
+		// explicitly applies the orka-external agent mode's externalSandbox;
+		// the RuntimeSession boundary, not this fallback, governs workspace writes.
+		config["approval_policy"] = "on-request"
+		config["sandbox_mode"] = "read-only"
+	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		config["developer_instructions"] = systemPrompt
 	}
@@ -539,8 +554,9 @@ func claudeSessionProjection(
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
 	} else {
-		// Claude Code 2.1.217 infers high effort for unknown gateway model IDs,
-		// including claude-haiku-4.5, even when the model rejects effort.
+		// Claude Code (verified through 2.1.293) infers high effort for unknown
+		// gateway model IDs, including claude-haiku-4.5, even when the model
+		// rejects effort.
 		// "unset" omits that inferred API field; explicit effort stays in options
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
@@ -572,11 +588,13 @@ var copilotToolIDs = map[string][]string{
 // session removes from the model's catalog regardless of policy: sub-agent
 // orchestration, skills, SQL, and background task tools have no Orka
 // equivalent and would bypass the RuntimeSession boundary. The list is exactly
-// the set GitHub Copilot CLI 1.0.77 registers under the supervisor's flags
+// the set GitHub Copilot CLI 1.0.96 registers under the supervisor's flags
 // (verified in --acp mode): the CLI prints an "Unknown tool name" diagnostic
 // into the agent message stream for every --excluded-tools name outside its
 // catalog, and names such as ask_user, report_intent, exit_plan_mode, lsp, or
-// code_review are not registered tool names in that build at all. GitHub MCP
+// code_review are not registered tool names in that build at all. That build
+// registers skill only when the workspace contains skills, so it stays listed
+// for repositories that ship them. GitHub MCP
 // tools register as github-mcp-server-<tool> and are removed by
 // --disable-builtin-mcps; the ask_user tool is removed by --no-ask-user.
 var copilotAlwaysExcludedToolIDs = []string{"list_agents", "read_agent", "skill", "sql", "task", "write_agent"}
@@ -610,7 +628,7 @@ func copilotSessionProjection(
 		}
 	}
 	args := []string{"--excluded-tools=" + strings.Join(excluded, ",")}
-	// Copilot 1.0.77 supplies display titles, not structured tool names, in
+	// Copilot 1.0.96 supplies display titles, not structured tool names, in
 	// permission requests. Project the frozen native grants into CLI permission
 	// rules instead of treating those titles as authority. Exclusions above
 	// still remove every native tool outside the effective policy.
@@ -710,10 +728,8 @@ func providerProfile(
 				}
 				return map[string]string{
 					noBrowserEnv: "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
-					// The pinned adapter's thread/resume provider selector reads
-					// MODEL_PROVIDER, not the model_provider in CODEX_CONFIG.
-					"MODEL_PROVIDER": codexProviderID,
-					"CODEX_CONFIG":   string(config), "INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
+					"CODEX_CONFIG": string(config), "MODEL_PROVIDER": codexProviderID,
+					"INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
 				}, nil
 			},
 			PrepareSession: prepareCodexHome,
@@ -1079,7 +1095,24 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxEventLineBytes: 1 << 20, MaxTerminalResultBytes: 1 << 20, MaxBufferedEvents: supervisorMaxBufferedPromptEvents,
 		MaxUpdateEventsPerSecond: maxUpdates, MinPromptLeaseMillis: 5_000, MaxPromptLeaseMillis: 120_000,
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
+		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+func nativeSessionMaxBytesFromEnv() (int, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvNativeSessionMaxBytes))
+	if raw == "" {
+		return harnessv2.DefaultMaxNativeSessionBytes, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", EnvNativeSessionMaxBytes)
+	}
+	limit, err = harnessv2.NormalizeNativeSessionMaxBytes(limit)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", EnvNativeSessionMaxBytes, err)
+	}
+	return limit, nil
 }
 
 func workspaceArtifactDownloadLimitFromEnv() (int64, error) {

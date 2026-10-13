@@ -53,6 +53,47 @@ spec:
               OutboundAccessPolicySpec configures exactly one outbound credential or
               routing adapter.
             properties:
+              connection:
+                description: |-
+                  Connection injects the requesting person's linked-account credential for
+                  a ConnectorProvider. The Task's verified requester must hold a Ready
+                  Connection to that provider; otherwise the call fails closed with no
+                  fallback to any other credential.
+                properties:
+                  output:
+                    description: 'Output configures credential injection. Defaults
+                      to Authorization: Bearer.'
+                    properties:
+                      header:
+                        default: Authorization
+                        description: Header defaults to Authorization. Txn-Token is
+                          forbidden.
+                        type: string
+                      prefix:
+                        default: 'Bearer '
+                        description: Prefix defaults to "Bearer ". Set an explicit
+                          empty string for no prefix.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: Txn-Token cannot be used as the resource credential
+                        output header
+                      rule: '!has(self.header) || self.header.lowerAscii() != ''txn-token'''
+                  providerRef:
+                    description: |-
+                      ProviderRef names the same-namespace ConnectorProvider whose Connections
+                      supply the credential.
+                    properties:
+                      name:
+                        description: Name is the referenced object name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - providerRef
+                type: object
               direct:
                 description: Direct exchanges a resolved subject for a downstream
                   resource credential.
@@ -473,8 +514,9 @@ spec:
                 type: object
             type: object
             x-kubernetes-validations:
-            - message: exactly one of direct or gateway is required
-              rule: has(self.direct) != has(self.gateway)
+            - message: exactly one of direct, gateway, or connection is required
+              rule: '[has(self.direct), has(self.gateway), has(self.connection)].filter(x,
+                x).size() == 1'
           status:
             description: OutboundAccessPolicyStatus contains only safe validation
               state.

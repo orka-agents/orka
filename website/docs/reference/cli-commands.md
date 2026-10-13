@@ -28,6 +28,8 @@ Available Commands:
   auth          Inspect authentication
   completion    Generate the autocompletion script for the specified shell
   config        Manage CLI configuration
+  connect       Link one of your accounts to a connector provider
+  connection    Manage your linked accounts
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
   login         Authenticate with the Orka dashboard
@@ -573,6 +575,163 @@ Usage:
 
 Flags:
   -h, --help   help for view
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connect`
+
+```text
+Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link to become ready. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
+
+Usage:
+  orka connect <provider> [flags]
+
+Flags:
+  -h, --help               help for connect
+      --mode string        Link mode: readOnly or readWrite (write tools ask for approval) (default "readOnly")
+      --no-open            Print the consent URL without opening a browser
+      --no-wait            Return as soon as consent has started
+      --timeout duration   How long to wait for the link to become ready (default 5m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection`
+
+```text
+Manage your linked accounts
+
+Usage:
+  orka connection [command]
+
+Available Commands:
+  complete    Finish a consent with the completion value the provider callback returned
+  delete      Disconnect a linked account and delete its tokens
+  get         Show one of your linked accounts
+  list        List your linked accounts
+  providers   List the connector providers you can link
+
+Flags:
+  -h, --help   help for connection
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka connection [command] --help" for more information about a command.
+```
+
+## `orka connection complete`
+
+```text
+After consent, the controller sends the browser to the dashboard with a one-time completion value in the URL fragment (#completion=...). When the dashboard is not signed in as you, pass that value here to finish the link as yourself; it is accepted exactly once.
+
+Usage:
+  orka connection complete <name> [flags]
+
+Flags:
+      --completion string   The value after '#completion=' in the dashboard URL the provider callback opened
+  -h, --help                help for complete
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection delete`
+
+```text
+Disconnect a linked account and delete its tokens
+
+Usage:
+  orka connection delete <name> [flags]
+
+Flags:
+  -h, --help   help for delete
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection get`
+
+```text
+Show one of your linked accounts
+
+Usage:
+  orka connection get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection list`
+
+```text
+List your linked accounts
+
+Usage:
+  orka connection list [flags]
+
+Flags:
+  -h, --help            help for list
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka connection providers`
+
+```text
+List the connector providers you can link
+
+Usage:
+  orka connection providers [flags]
+
+Flags:
+  -h, --help            help for providers
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3761,6 +3920,7 @@ Available Commands:
   follow      Follow session execution events
   get         Get a session resource
   list        List session resources
+  migrate     Move Codex 0.160.0 paginated conversation state
 
 Flags:
   -h, --help   help for session
@@ -3826,6 +3986,7 @@ the filters, so "what did the agent say last?" is:
   ModelContextUpdated
   ModelMessage
   ContextTruncated
+  NativeSessionCaptureSkipped
   ToolCallStarted
   ToolCallCompleted
   ToolCallFailed
@@ -3932,6 +4093,83 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka session migrate`
+
+```text
+Move Codex 0.160.0 paginated conversation state
+
+Usage:
+  orka session migrate [command]
+
+Available Commands:
+  export      Install a saved Orka checkpoint into a fresh local Codex home
+  import      Stage a stopped local Codex thread for its first Orka Task
+
+Flags:
+  -h, --help                   help for migrate
+      --max-bundle-bytes int   Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka session migrate [command] --help" for more information about a command.
+```
+
+## `orka session migrate export`
+
+```text
+Install a saved Orka checkpoint into a fresh local Codex home
+
+Usage:
+  orka session migrate export <session-name> [flags]
+
+Flags:
+      --codex-bin string     Codex 0.160.0 executable (default "codex")
+      --codex-home string    Fresh isolated destination CODEX_HOME
+      --cwd string           Existing destination working directory
+  -h, --help                 help for export
+      --journal-dir string   Private directory outside CODEX_HOME, retained for retries
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+      --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka session migrate import`
+
+```text
+Stage a stopped local Codex thread for its first Orka Task
+
+Usage:
+  orka session migrate import <new-session-name> [flags]
+
+Flags:
+      --codex-home string    Source CODEX_HOME (must already exist)
+  -h, --help                 help for import
+      --journal-dir string   Private directory retained for exact retries
+      --source-stopped       Confirm every source Codex writer has stopped
+      --thread string        Native thread UUID
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+      --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
@@ -4639,6 +4877,7 @@ the filters, so "what did the agent say last?" is:
   ModelContextUpdated
   ModelMessage
   ContextTruncated
+  NativeSessionCaptureSkipped
   ToolCallStarted
   ToolCallCompleted
   ToolCallFailed

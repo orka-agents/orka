@@ -286,6 +286,7 @@ func newTaskScopedInternalApp(h *InternalHandlers, user *UserInfo) *fiber.App {
 	app.Post("/internal/v1/messages/:namespace", h.SendMessage)
 	app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
 	app.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+	app.Post("/internal/v1/tasks/:namespace/:taskName/children/:child/cancel", h.CancelChildTask)
 	app.Post("/internal/v1/events/:namespace/:streamType/:streamID", h.SubmitExecutionEvent)
 	return app
 }

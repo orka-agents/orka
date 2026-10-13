@@ -82,6 +82,7 @@ type Provider struct {
 	client                              openai.Client
 	baseURL                             string
 	providerType                        string
+	azureDeploymentName                 string
 	mode                                atomic.Int32 // apiMode
 	allowBareResponsesForbiddenFallback bool
 }
@@ -121,8 +122,18 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		client:                              client,
 		baseURL:                             config.BaseURL,
 		providerType:                        providerType,
+		azureDeploymentName:                 config.AzureDeploymentName,
 		allowBareResponsesForbiddenFallback: isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
 	}, nil
+}
+
+// requestModel resolves only the upstream routing identity, leaving the
+// caller's logical model intact for authorization, fallback, and telemetry.
+func (p *Provider) requestModel(model string) string {
+	if p.providerType == providerTypeAzureOpenAI && p.azureDeploymentName != "" {
+		return p.azureDeploymentName
+	}
+	return model
 }
 
 // Name returns the provider name. It remains "openai" for Azure because
@@ -396,6 +407,7 @@ func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 
 func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := buildResponsesParams(req)
+	params.Model = p.requestModel(req.Model)
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
@@ -1033,7 +1045,9 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		defer close(ch)
 
 		send := newStreamSender(ctx, ch)
-		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), p.TelemetryProviderName(), send, req.ResponsesInput)
+		params := buildResponsesParams(req)
+		params.Model = p.requestModel(req.Model)
+		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, params), p.TelemetryProviderName(), send, req.ResponsesInput)
 	}()
 	return ch
 }
@@ -1182,7 +1196,7 @@ func convertChatResponseFormat(rf *llm.ResponseFormat) openai.ChatCompletionNewP
 
 func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := openai.ChatCompletionNewParams{
-		Model:    req.Model,
+		Model:    p.requestModel(req.Model),
 		Messages: convertChatRequestMessages(req),
 	}
 	if req.Store != nil {
@@ -1259,7 +1273,7 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		}
 
 		params := openai.ChatCompletionNewParams{
-			Model:    req.Model,
+			Model:    p.requestModel(req.Model),
 			Messages: convertChatRequestMessages(req),
 		}
 		if req.Store != nil {

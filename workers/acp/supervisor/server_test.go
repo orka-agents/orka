@@ -1058,6 +1058,7 @@ func newTestServer(t *testing.T, mode string) (*Server, Config, harnessv2.Runtim
 func newTestServerWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken string) (*Server, Config, harnessv2.RuntimeProfile) {
 	t.Helper()
 	cfg, profile := newTestConfigWithUpstream(t, mode, upstreamURL, upstreamToken)
+	cfg.Capabilities.SupportsNativeSessions = strings.HasPrefix(mode, "native-")
 	if mode == providerProjectionCanaryMode {
 		cfg.Provider.ProjectSession = func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, _ ProviderProxyBinding) (ProviderSessionProjection, error) {
 			return ProviderSessionProjection{
@@ -1361,6 +1362,9 @@ func TestSupervisorACPHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	var sessionID = "provider-session"
+	if strings.HasPrefix(mode, "native-") {
+		sessionID = testNativeThreadID
+	}
 	var promptID json.RawMessage
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -1379,8 +1383,8 @@ func TestSupervisorACPHelper(t *testing.T) {
 		}
 		switch message.Method {
 		case acp.MethodInitialize:
-			agentCapabilities := map[string]any{"mcpCapabilities": map[string]any{"http": true}}
-			if mode == adapterResumeMode || mode == adapterResumeFailureMode {
+			agentCapabilities := map[string]any{"loadSession": true, "mcpCapabilities": map[string]any{"http": true}}
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || strings.HasPrefix(mode, "native-") {
 				agentCapabilities["sessionCapabilities"] = map[string]any{acp.SessionCapabilityResume: map[string]any{}}
 			}
 			writeHelperMessage(writer, map[string]any{
@@ -1391,6 +1395,10 @@ func TestSupervisorACPHelper(t *testing.T) {
 				},
 			})
 		case acp.MethodSessionResume:
+			if mode != adapterResumeMode && mode != adapterResumeFailureMode {
+				handleSupervisorNativeResume(writer, message.ID, message.Params)
+				continue
+			}
 			var request acp.ResumeSessionRequest
 			persisted, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile))
 			if err := json.Unmarshal(message.Params, &request); err != nil || mode != adapterResumeMode ||
@@ -1403,21 +1411,21 @@ func TestSupervisorACPHelper(t *testing.T) {
 			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{}})
 		case acp.MethodSessionNew:
+			if strings.HasPrefix(mode, "native-resume") {
+				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "error": map[string]any{"code": -32602, "message": "unexpected session/new during native restore"}})
+				continue
+			}
 			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterExitAfterPromptMode {
 				// The child's HOME is the session home, which real agents use
 				// for the state a fresh adapter process resumes from.
 				_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile), []byte(sessionID), 0o600)
 			}
-			if mode == providerProjectionCanaryMode {
-				var request acp.NewSessionRequest
-				if err := json.Unmarshal(message.Params, &request); err != nil || request.Meta["provider.canary"] != providerProjectionCanaryValue ||
-					request.Meta["orka.runtimeSessionID"] != "session-1" || request.Meta["orka.profileDigest"] == "" {
-					writeHelperMessage(writer, map[string]any{
-						testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
-						"error": map[string]any{"code": -32602, "message": "provider session metadata was not projected"},
-					})
-					continue
-				}
+			if mode == providerProjectionCanaryMode && !validSupervisorProjection(message.Params) {
+				writeHelperMessage(writer, map[string]any{
+					testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
+					"error": map[string]any{"code": -32602, "message": "provider session metadata was not projected"},
+				})
+				continue
 			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{"sessionId": sessionID}})
 		case acp.MethodSessionPrompt:
@@ -1431,6 +1439,11 @@ func TestSupervisorACPHelper(t *testing.T) {
 					fmt.Fprintln(os.Stderr, err)
 					os.Exit(4)
 				}
+			}
+			if strings.HasPrefix(mode, "native-prompt-error") {
+				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "error": map[string]any{"code": -32603, "message": "native provider prompt failed"}})
+				promptID = nil
+				continue
 			}
 			if mode == toolBurstRPCErrorMode {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{

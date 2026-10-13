@@ -100,7 +100,15 @@ func clearPortForwardCache() {
 
 // newClientFromCmd creates a client.Client using flag values resolved against config.
 func newClientFromCmd(cmd *cobra.Command) *client.Client {
-	server, _ := cmd.Flags().GetString("server")
+	return newClientFromCmdWithServer(cmd, "")
+}
+
+// newClientFromCmdWithServer preserves credential/config resolution while using
+// a transport already selected by the caller.
+func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Client {
+	if server == "" {
+		server, _ = cmd.Flags().GetString("server")
+	}
 	token, _ := cmd.Flags().GetString("token")
 	txnToken, _ := cmd.Flags().GetString("txn-token")
 	txnTokenFile, _ := cmd.Flags().GetString("txn-token-file")

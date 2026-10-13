@@ -80,6 +80,7 @@ Production:
 | Tools | `/tools` | Table of built-in and custom tools |
 | Tool Detail | `/tools/:toolName` | Tool spec with JSON Schema parameters |
 | Chat | `/chat` | Interactive chat with SSE streaming and tool execution |
+| Settings › Connectors | `/settings/connectors` | Link your own accounts (for example GitHub) for agents to act as you, change a link between read-only and read-write, reconnect, and disconnect; the OAuth callback returns here |
 | Login | `/login` | Token input for ServiceAccount authentication |
 
 ## Execution events

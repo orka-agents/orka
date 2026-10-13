@@ -142,6 +142,9 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 		normalized.Key.TaskUID, messageCountDelta, normalized.FinalizedAt); err != nil {
 		return nil, err
 	}
+	if err := s.commitNativeSessionFinalizationTx(ctx, tx, turn.ID, normalized.Namespace, normalized.SessionName, normalized.Key.SessionUID, normalized.NativeSession, normalized.NativeSessionCarried); err != nil {
+		return nil, err
+	}
 	turnResult, err := tx.ExecContext(ctx,
 		`UPDATE session_turns
 		 SET state = 'Finalized', terminal_kind = ?, terminal_content = ?, finalization_digest = ?,
@@ -168,6 +171,7 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	turn.TerminalKind = normalized.TerminalKind
 	turn.TerminalContent = normalized.TerminalContent
 	turn.FinalizationDigest = normalized.FinalizationDigest
+	turn.NativeSessionDigest = store.NativeSessionCaptureDigest(normalized.NativeSession)
 	turn.PublicationID = normalized.PublicationID
 	turn.PublicationReceipt = clonePublicationReceipt(normalized.PublicationReceipt)
 	turn.ProjectionID = projection.ID
@@ -311,6 +315,9 @@ func normalizeSessionTurnPersistenceFinalization(request store.CommitSessionTurn
 	if request.SkipTranscriptAppend && request.SkipUserPromptAppend {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, store.ValidationErrorf("session turn cannot combine full transcript suppression with user-prompt-only suppression")
 	}
+	if err := validateNativeFinalization(request.NativeSession, request.NativeSessionCarried, request.TerminalKind, request.SkipTranscriptAppend); err != nil {
+		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
+	}
 	if err := store.ValidateControlText("session turn terminal content", request.TerminalContent); err != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
 	}
@@ -414,6 +421,7 @@ func normalizeActivateSessionTurnProjectionRequest(request store.ActivateSession
 
 func sessionTurnPersistenceFinalizationMatches(turn store.SessionTurn, request store.CommitSessionTurnFinalizationRequest) bool {
 	return turn.FinalizationDigest == request.FinalizationDigest && turn.TerminalKind == request.TerminalKind &&
+		turn.NativeSessionDigest == store.NativeSessionCaptureDigest(request.NativeSession) &&
 		turn.TerminalContent == request.TerminalContent && turn.PublicationID == request.PublicationID &&
 		reflect.DeepEqual(turn.PublicationReceipt, request.PublicationReceipt) && turn.ProjectionID == request.Projection.ID &&
 		turn.ProjectionKind == request.Projection.ProjectionKind && turn.ProjectionDigest == request.Projection.PayloadDigest &&

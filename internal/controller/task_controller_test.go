@@ -28,6 +28,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -734,6 +735,57 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(Equal("task timed out"))
+		})
+
+		It("should complete a parent's cancel request through the terminal path", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			ss, ok := r.ResultStore.(*sqlite.Store)
+			Expect(ok).To(BeTrue())
+			taskName := "test-running-cancel-requested"
+			sessionName := taskName + "-session"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        taskName,
+					Namespace:   ns,
+					Finalizers:  []string{labels.TaskFinalizer},
+					Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by parent task: wrong approach"},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:       corev1alpha1.TaskTypeContainer,
+					Image:      "alpine:latest",
+					Command:    []string{"sleep", "100"},
+					SessionRef: &corev1alpha1.SessionReference{Name: sessionName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			Expect(ss.CreateSession(ctx, &store.SessionRecord{Namespace: ns, Name: sessionName, SessionType: "task"})).To(Succeed())
+			Expect(ss.AcquireLock(ctx, ns, sessionName, taskName, string(task.UID))).To(Succeed())
+
+			started := metav1.Now()
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = taskName + "-job"
+			task.Status.JobUID = taskName + "-job-uid"
+			task.Status.StartTime = &started
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseCancelled))
+			Expect(task.Status.Message).To(Equal("cancelled by parent task: wrong approach"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+			session, err := ss.GetSession(ctx, ns, sessionName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(session.ActiveTask).To(BeEmpty())
+			Expect(ss.CheckTaskJobAuthority(ctx, store.TaskJobIdentity{
+				Namespace: ns, TaskUID: string(task.UID), JobUID: taskName + "-job-uid",
+			})).To(MatchError(store.ErrTaskJobRevoked))
 		})
 
 		It("should report task timeout when the Job active deadline fails first", func() {

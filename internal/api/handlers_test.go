@@ -37,6 +37,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -198,7 +199,16 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	// The API server assigns UIDs; the fake client does not, and the
+	// requester stamp binds the UID.
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetUID() == "" {
+				obj.SetUID(types.UID("uid-" + obj.GetName()))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
@@ -533,7 +543,12 @@ func TestHandlers_CreateTask_DefaultNamespace(t *testing.T) {
 	}
 }
 
+// testAPIRequesterStampKey is the stamp key the API tests seal under.
+var testAPIRequesterStampKey = []byte("fedcba9876543210fedcba9876543210")
+
 func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
+	SetRequesterStampKey(testAPIRequesterStampKey)
+	t.Cleanup(func() { SetRequesterStampKey(nil) })
 	provider := newTestOIDCProvider(t)
 	handlers, app := setupTestHandlers()
 	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{OIDC: provider.config()}))
@@ -582,6 +597,10 @@ func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
 	}
 	if created.Spec.RequestedBy.Username != "alex" {
 		t.Fatalf("requestedBy.username = %q, want %q", created.Spec.RequestedBy.Username, "alex")
+	}
+	if created.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI ||
+		!connectors.RequesterStampValid(testAPIRequesterStampKey, created) {
+		t.Fatalf("the created task must carry a stamp sealed for its UID: %v", created.Annotations)
 	}
 	if created.Spec.RequestedBy.Email != "alex@example.test" {
 		t.Fatalf("requestedBy.email = %q, want %q", created.Spec.RequestedBy.Email, "alex@example.test")
@@ -2837,7 +2856,16 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	// The API server assigns UIDs; the fake client does not, and the
+	// requester stamp binds the UID.
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetUID() == "" {
+				obj.SetUID(types.UID("uid-" + obj.GetName()))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})

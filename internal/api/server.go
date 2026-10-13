@@ -26,10 +26,12 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/uiembed"
 )
@@ -76,6 +78,7 @@ type ServerConfig struct {
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	NativeSessionMaxBytes     int
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
@@ -96,6 +99,8 @@ type ServerConfig struct {
 	TaskProvenanceProtected   bool
 	ControllerEpochs          ControllerEpochFenceSource
 	E2EPromptFaultEnabled     bool
+	Connectors                ConnectorConfig
+	ConnectorTools            ConnectorToolExecutionConfig
 }
 
 // Server is the REST API server
@@ -155,6 +160,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
+		NativeSessionMaxBytes:     config.NativeSessionMaxBytes,
 		SessionManager:            sessionManager,
 		PlanStore:                 config.PlanStore,
 		KubeClient:                config.Clientset,
@@ -168,6 +174,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
+		Connectors:                config.Connectors,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
@@ -187,6 +194,10 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 }
 
 func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	return requestBodyConfigWithNativeSessionLimit(header, harnessv2.DefaultMaxNativeSessionBytes)
+}
+
+func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nativeSessionMaxBytes int) fasthttp.RequestConfig {
 	if string(header.Method()) != fiber.MethodPost {
 		return fasthttp.RequestConfig{}
 	}
@@ -197,6 +208,13 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	}
 	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
+	}
+	// Use Fiber's fasthttp path semantics for the streaming exemption, including
+	// fragment handling. net/url would retain a literal '#' in the path and
+	// leave a routed native import without its bounded read deadline.
+	var nativeURI fasthttp.URI
+	if nativeURI.Parse(header.Host(), header.RequestURI()) == nil && isNativeSessionImportPath(string(nativeURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: harnessv2.NativeSessionJSONLimit(nativeSessionMaxBytes), ReadTimeout: 30 * time.Second}
 	}
 	// Internal broker endpoints authorize against per-pool secrets that are
 	// only resolvable from the request body, so unauthenticated peers cannot
@@ -213,7 +231,7 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
-	config := requestBodyConfig(header)
+	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
 	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
 	// net/url's request-target parsing differs for a literal '#' character.
 	var uri fasthttp.URI
@@ -309,6 +327,11 @@ func (s *Server) setupRoutes() {
 	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
 	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
 
+	// The connector OAuth callback arrives from the provider through the
+	// person's browser without an Orka bearer token. The signed single-use
+	// state and the sealed PKCE verifier authenticate it instead.
+	s.app.Get(connectors.CallbackPath, s.handlers.ConnectionCallback)
+
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
@@ -335,6 +358,8 @@ func (s *Server) setupRoutes() {
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
 	api.Get("/sessions/:id", s.handlers.GetSession)
+	api.Get("/sessions/:id/native", s.handlers.ExportNativeSession)
+	api.Post("/sessions/:id/native", s.handlers.ImportNativeSession)
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
@@ -466,6 +491,17 @@ func (s *Server) setupRoutes() {
 	api.Get("/auth/validate", s.handleAuthValidate)
 	api.Get("/auth/whoami", s.handleAuthWhoAmI)
 
+	// Connector catalog and per-person Connections. Every handler re-checks
+	// that the caller is a verified human identity and owns the Connection.
+	api.Get("/connectors", s.handlers.ListConnectors)
+	api.Get("/connections", s.handlers.ListConnections)
+	api.Post("/connections", s.handlers.CreateConnection)
+	api.Get("/connections/:name", s.handlers.GetConnection)
+	api.Put("/connections/:name", s.handlers.UpdateConnection)
+	api.Delete("/connections/:name", s.handlers.DeleteConnection)
+	api.Post("/connections/:name/authorize", s.handlers.AuthorizeConnection)
+	api.Post("/connections/:name/complete", s.handlers.CompleteConnection)
+
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
 
@@ -506,6 +542,7 @@ func (s *Server) setupRoutes() {
 				GatewayEventStore:       s.GatewayEventStore,
 				GatewayService:          s.config.GatewayService,
 				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
+				ConnectorTools:          s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -517,7 +554,12 @@ func (s *Server) setupRoutes() {
 			s.internalHandlers.GetGatewayReplyOrigin)
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		// Native workers run connector-backed tools here; the person's token
+		// never leaves the controller.
+		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
+		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
+		internal.Post("/tasks/:namespace/:taskName/children/:child/cancel", s.internalHandlers.CancelChildTask)
 		internal.Get("/tasks/:namespace/:taskName/gateway-messages/budget", s.internalHandlers.GetGatewayMessageBudget)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)

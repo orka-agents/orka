@@ -72,7 +72,7 @@ func TestPromptNotAcceptedFailsOnlyProvenIdleResumeRejection(t *testing.T) {
 			// issue a cancellation when the caller deadline races the response.
 			if err := fixture.dispatcher.handlePromptStreamError(
 				fixture.ctx, nil, nil, "runtime-session", task, fixture.attemptID, fixture.fence,
-				harnessv2.Fence{}, journalState, test.accepted, writeEvidence, test.contextErr, rejection,
+				harnessv2.Fence{}, journalState, test.accepted, writeEvidence, test.contextErr, rejection, nil,
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -153,6 +153,7 @@ func TestPromptNotAcceptedDeferredSessionFinalizationAllowsContinuation(t *testi
 		return dispatcher.handlePromptStreamError(ctx, nil, nil, "runtime-session", task, attempt.ID, fence, harnessv2.Fence{}, nil,
 			false, harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteComplete}, nil,
 			&harnessv2.ClientError{Operation: "start_prompt", Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusConflict, Code: harnessv2.ErrorCodePromptNotAccepted},
+			nil,
 		)
 	}
 	if err := run(); err != nil {
