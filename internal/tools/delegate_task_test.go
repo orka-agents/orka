@@ -326,6 +326,79 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 	}
 }
 
+func TestDelegateTaskTool_EmptyAllowedAgentsDenies(t *testing.T) {
+	for _, policy := range []string{"empty", "absent"} {
+		t.Run(policy, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+			t.Setenv(envOrkaCoordinationDepth, "0")
+			t.Setenv(envOrkaCoordinationMaxDepth, "3")
+			t.Setenv(envOrkaCoordinationAllowedAgents, "")
+			if policy == "absent" {
+				if err := os.Unsetenv(envOrkaCoordinationAllowedAgents); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Tool delegation needs an explicit allowlist even for a dynamically created Agent.
+			agent := researcherAgent()
+			agent.Labels = map[string]string{labels.LabelCreatedBy: "create_agent", labels.LabelParentTask: parentTaskName}
+			kube := newFakeClient(parentTask(), agent)
+			_, err := NewDelegateTaskTool(kube).Execute(context.Background(), json.RawMessage(`{"agent":"researcher","prompt":"Investigate"}`))
+			if err == nil || !strings.Contains(err.Error(), "not in the allowed agents list") {
+				t.Fatalf("Execute() error = %v, want allowed agents denial", err)
+			}
+			if !strings.Contains(err.Error(), "configure spec.coordination.allowedAgents") {
+				t.Fatalf("Execute() error = %v, want the field to configure", err)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := kube.List(context.Background(), &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks.Items) != 1 {
+				t.Fatalf("got %d Tasks, want only the parent", len(tasks.Items))
+			}
+		})
+	}
+}
+
+func TestDelegateTaskTool_AllowedAgentNamespaces(t *testing.T) {
+	for _, tt := range []struct {
+		name, policy, agentNS, taskNS string
+		wantAllowed                   bool
+	}{
+		{"bare same namespace", "researcher", defaultNamespace, defaultNamespace, true},
+		{"qualified same namespace", "default/researcher", defaultNamespace, defaultNamespace, true},
+		{"qualified cross namespace", "catalog/researcher", testAgentCatalogNS, defaultNamespace, true},
+		{"bare cannot grant cross namespace", "researcher", testAgentCatalogNS, defaultNamespace, false},
+		{"bare cannot follow child namespace", "researcher", testAgentCatalogNS, testAgentCatalogNS, false},
+		{"bare retains parent default for moved child", "researcher", defaultNamespace, testAgentCatalogNS, true},
+		{"qualified wrong namespace", "default/researcher", testAgentCatalogNS, defaultNamespace, false},
+		{"qualified wrong name", "catalog/coder", testAgentCatalogNS, defaultNamespace, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+			t.Setenv(envOrkaCoordinationDepth, "0")
+			t.Setenv(envOrkaCoordinationMaxDepth, "3")
+			t.Setenv(envOrkaCoordinationAllowedAgents, tt.policy)
+			agent := researcherAgent()
+			agent.Namespace = tt.agentNS
+			kube := newFakeClient(parentTask(), agent)
+			args, err := json.Marshal(DelegateTaskArgs{Agent: agent.Name, AgentNamespace: tt.agentNS, TaskNamespace: tt.taskNS, Prompt: "Investigate"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = NewDelegateTaskTool(kube).Execute(context.Background(), args)
+			if tt.wantAllowed && err != nil {
+				t.Fatalf("Execute() error = %v, want allowed", err)
+			}
+			if !tt.wantAllowed && (err == nil || !strings.Contains(err.Error(), "not in the allowed agents list")) {
+				t.Fatalf("Execute() error = %v, want allowed agents denial", err)
+			}
+		})
+	}
+}
+
 func TestDelegateTaskTool_CrossNamespaceAgentKeepsChildInParentNamespace(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)

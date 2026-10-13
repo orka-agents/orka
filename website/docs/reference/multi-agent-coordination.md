@@ -11,6 +11,53 @@ depth, and concurrency limits. Each delegation creates a child Task. Native AI c
 run in worker Jobs; children targeting built-in ACP runtimes use RuntimeSessions and
 RuntimePools.
 
+## Explicit delegation policy
+
+`spec.coordination.allowedAgents` is an explicit name-and-namespace allowlist for
+`delegate_task`, in both native workers and the ACP broker. An empty or omitted
+list **denies tool delegation**, including to Agents created by `create_agent`.
+An entry without `namespace` defaults to the **coordinating parent Agent's
+namespace**, not the child Task's namespace. A same-named Agent in another
+namespace needs its own explicit entry:
+
+```yaml
+coordination:
+  enabled: true
+  allowedAgents:
+    - name: researcher               # In the coordinator Agent's namespace
+    - name: researcher
+      namespace: specialist-catalog  # A different, explicitly allowed Agent
+```
+
+Use `agentNamespace` to select a cross-namespace target while keeping the child
+Task in the parent Task's namespace. Namespace isolation and watch-namespace
+restrictions still apply. Controller-rendered worker policies use `namespace/name`
+entries. Legacy bare names in `ORKA_COORDINATION_ALLOWED_AGENTS` match only the
+parent Task namespace (falling back to the current namespace when it is absent).
+Changing `taskNamespace` cannot broaden that default.
+
+The Task controller also checks explicit entries by name **and** namespace. It
+still has a separate legacy exemption for an Agent marked
+`orka.ai/created-by: create_agent` whose parent-task label/annotation matches the
+parent Task name. That exemption is unchanged, is not an ownership/provenance
+check, and is **not** used by `delegate_task`. Do not rely on it to bypass a tool
+allowlist.
+
+### Upgrade behavior
+
+Native `delegate_task` previously treated an empty/absent worker allowlist as
+unrestricted; it now refuses delegation, matching the broker. Populate explicit
+entries before submitting coordinating Tasks, including for dynamically created
+specialists. Cross-namespace targets must be listed with their namespace.
+
+Native worker policy is frozen in each Job environment. Editing an Agent's list
+does **not** refresh an already-running worker. Newly built Jobs use the current
+list, including later autonomous iterations. For non-autonomous two-stage
+bootstrap, first create specialists and return their names
+without delegating; an operator then allowlists them and submits a new delegation
+Task. Keep the creation Task while its owned specialists are needed. See the
+[self-bootstrapping example](https://github.com/orka-agents/orka/tree/main/examples/self-bootstrapping).
+
 ## Workflow
 
 This example uses a native `type: ai` coordinator. Its children can target native AI
@@ -74,7 +121,9 @@ LLM-visible parameter schema:
   "properties": {
     "agent":       {"type": "string", "description": "Name of the agent to delegate to"},
     "prompt":      {"type": "string", "description": "The task prompt for the agent"},
-    "namespace":   {"type": "string", "description": "Namespace (defaults to current)"},
+    "namespace":   {"type": "string", "description": "Legacy namespace for both child Task and Agent lookup"},
+    "agentNamespace": {"type": "string", "description": "Target Agent namespace (defaults to taskNamespace/current namespace)"},
+    "taskNamespace": {"type": "string", "description": "Child Task namespace (defaults to parent Task namespace)"},
     "priority":    {"type": "integer", "description": "Priority 0-1000 (defaults to parent priority)"},
     "workspace":   {"type": "object", "description": "Git workspace configuration for agent runtime tasks",
       "properties": {
@@ -114,7 +163,7 @@ also applies when `createPR` is false.
 
 Implementation (`internal/tools/delegate_task.go`):
 1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE`, `ORKA_COORDINATION_DEPTH` from env
-2. Reads `ORKA_COORDINATION_ALLOWED_AGENTS` and validates the target agent is allowed
+2. Reads the frozen `ORKA_COORDINATION_ALLOWED_AGENTS` and validates the target Agent's name and namespace; empty/absent denies. Brokered calls instead read the authenticated parent Agent's coordination config, not process env.
 3. Checks depth + 1 does not exceed `ORKA_COORDINATION_MAX_DEPTH`
 4. Creates child Task via K8s API with:
    - `GenerateName: {parentName}-child-`
@@ -257,7 +306,7 @@ Located in `internal/controller/task_controller.go`.
 
 #### `handlePending` — coordination validation
 
-After agent resolution, before dispatch, the controller validates coordination constraints for child tasks (identified by `orka.ai/coordination-depth` annotation):
+After agent resolution, before dispatch, the controller validates coordination constraints for child tasks (identified by `orka.ai/coordination-depth` annotation). The simplified explicit-policy path below omits the legacy dynamic-Agent exemption described above:
 
 ```go
 if depthStr := task.Annotations["orka.ai/coordination-depth"]; depthStr != "" {
@@ -269,7 +318,11 @@ if depthStr := task.Annotations["orka.ai/coordination-depth"]; depthStr != "" {
     r.Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask)
 
     parentAgent := &corev1alpha1.Agent{}
-    r.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: task.Namespace}, parentAgent)
+    parentAgentNS := parentTask.Spec.AgentRef.Namespace
+    if parentAgentNS == "" {
+        parentAgentNS = parentTask.Namespace
+    }
+    r.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: parentAgentNS}, parentAgent)
 
     coord := parentAgent.Spec.Coordination
     if coord == nil || !coord.Enabled {
@@ -281,10 +334,18 @@ if depthStr := task.Annotations["orka.ai/coordination-depth"]; depthStr != "" {
         return r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depthInt, coord.MaxDepth))
     }
 
-    // 2. Enforce allowedAgents
+    // 2. Enforce explicit allowedAgents by name and namespace
+    childAgentNS := task.Spec.AgentRef.Namespace
+    if childAgentNS == "" {
+        childAgentNS = task.Namespace
+    }
     allowed := false
     for _, a := range coord.AllowedAgents {
-        if a.Name == task.Spec.AgentRef.Name {
+        allowedNS := a.Namespace
+        if allowedNS == "" {
+            allowedNS = parentAgent.Namespace
+        }
+        if a.Name == task.Spec.AgentRef.Name && allowedNS == childAgentNS {
             allowed = true
             break
         }
@@ -347,9 +408,13 @@ if _, hasChildren := task.Labels["orka.ai/parent-task"]; !hasChildren {
 
 ### Job builder — coordination config
 
-Located in `internal/controller/job_builder.go`. In `addAIEnvVars`, when an agent has coordination enabled, the following env vars are injected:
+Located in `internal/controller/job_builder.go`. The controller reserves
+`ORKA_COORDINATION_ALLOWED_AGENTS` with an explicit empty value even without
+coordination, overriding Task env/ValueFrom and Secret EnvFrom. Enabled coordination
+renders the explicit policy even when empty. The relevant flow is:
 
 ```go
+envVars = setControllerEnvValue(envVars, "ORKA_COORDINATION_ALLOWED_AGENTS", "")
 if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
     envVars = append(envVars,
         corev1.EnvVar{Name: "ORKA_COORDINATION_ENABLED", Value: "true"},
@@ -361,12 +426,14 @@ if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Ena
 
     var agentNames []string
     for _, a := range agent.Spec.Coordination.AllowedAgents {
-        agentNames = append(agentNames, a.Name)
+        namespace := a.Namespace
+        if namespace == "" {
+            namespace = agent.Namespace
+        }
+        agentNames = append(agentNames, namespace+"/"+a.Name)
     }
-    envVars = append(envVars,
-        corev1.EnvVar{Name: "ORKA_COORDINATION_ALLOWED_AGENTS",
-            Value: strings.Join(agentNames, ",")},
-    )
+    envVars = setControllerEnvValue(envVars, "ORKA_COORDINATION_ALLOWED_AGENTS",
+        strings.Join(agentNames, ","))
 
     // Current depth (0 for top-level coordinator)
     depth := "0"

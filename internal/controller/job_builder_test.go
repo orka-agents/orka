@@ -1440,8 +1440,8 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 				MaxDepth:              3,
 				MaxConcurrentChildren: 5,
 				AllowedAgents: []corev1alpha1.AllowedAgent{
-					{Name: "backend-dev"},
-					{Name: "frontend-dev"},
+					{Name: "backend-dev", Namespace: defaultNS},
+					{Name: "frontend-dev", Namespace: defaultNS},
 				},
 			},
 		},
@@ -1456,7 +1456,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 		{"ORKA_COORDINATION_ENABLED", "true"},
 		{"ORKA_COORDINATION_MAX_DEPTH", "3"},
 		{"ORKA_COORDINATION_MAX_CHILDREN", "5"},
-		{"ORKA_COORDINATION_ALLOWED_AGENTS", "backend-dev,frontend-dev"},
+		{"ORKA_COORDINATION_ALLOWED_AGENTS", "default/backend-dev,default/frontend-dev"},
 		{"ORKA_COORDINATION_DEPTH", "0"},
 		{workerenv.ControllerMode, string(executionmode.HarnessV2)},
 	}
@@ -1477,6 +1477,71 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 		if !strings.Contains(toolsEnv.Value, tool) {
 			t.Errorf("ORKA_AI_TOOLS = %s, want to contain %s", toolsEnv.Value, tool)
 		}
+	}
+}
+
+func TestJobBuilder_AllowedAgentsPreserveNamespaces(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Coordinate work"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coordinator", Namespace: "catalog"},
+		Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{
+			Enabled: true,
+			AllowedAgents: []corev1alpha1.AllowedAgent{
+				{Name: "researcher"},
+				{Name: "researcher", Namespace: defaultNS},
+				{Name: "coder", Namespace: "other-team"},
+			},
+		}},
+	}
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
+	env, found := findEnvVar(envVars, workerenv.CoordinationAllowedAgents)
+	if !found || env.Value != "catalog/researcher,default/researcher,other-team/coder" {
+		t.Fatalf("allowed agents env = %#v, found=%t; want namespace-qualified policy defaulting to parent Agent namespace", env, found)
+	}
+}
+
+func TestJobBuilder_EmptyAllowedAgentsCannotBeSpoofed(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		coord *corev1alpha1.CoordinationConfig
+	}{
+		{"absent coordination", nil},
+		{"disabled coordination", &corev1alpha1.CoordinationConfig{Enabled: false}},
+		{"absent allowlist", &corev1alpha1.CoordinationConfig{Enabled: true}},
+		{"empty allowlist", &corev1alpha1.CoordinationConfig{Enabled: true, AllowedAgents: []corev1alpha1.AllowedAgent{}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "task-uid"},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Coordinate work", Env: []corev1.EnvVar{
+					{Name: workerenv.CoordinationAllowedAgents, Value: "catalog/researcher"},
+					{Name: workerenv.CoordinationAllowedAgents, ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "task-policy"}, Key: "allow",
+					}}},
+				}},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "coordinator", Namespace: defaultNS},
+				Spec:       corev1alpha1.AgentSpec{Coordination: tt.coord, SecretRef: &corev1.LocalObjectReference{Name: testAgentSecretName}},
+			}
+			job, err := builder.Build(context.Background(), task, agent, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			container := job.Spec.Template.Spec.Containers[0]
+			if !hasAgentEnvFromSecret(container.EnvFrom) {
+				t.Fatal("expected Agent Secret EnvFrom to exercise policy reservation")
+			}
+			env, found := findEnvVar(container.Env, workerenv.CoordinationAllowedAgents)
+			if !found || env.Value != "" || env.ValueFrom != nil || countEnvVars(container.Env, workerenv.CoordinationAllowedAgents) != 1 {
+				t.Fatalf("allowed agents env = %#v, found=%t; want one explicit empty controller-owned value overriding Task env and EnvFrom", env, found)
+			}
+		})
 	}
 }
 
@@ -1589,13 +1654,14 @@ func TestJobBuilder_buildEnvVars_NoCoordination(t *testing.T) {
 
 	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
 
-	if env, found := findEnvVar(envVars, workerenv.CoordinationEnabled); !found || env.Value != "" {
-		t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", workerenv.CoordinationEnabled, env, found)
+	for _, name := range []string{workerenv.CoordinationEnabled, workerenv.CoordinationAllowedAgents} {
+		if env, found := findEnvVar(envVars, name); !found || env.Value != "" {
+			t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", name, env, found)
+		}
 	}
 	coordinationVars := []string{
 		"ORKA_COORDINATION_MAX_DEPTH",
 		"ORKA_COORDINATION_MAX_CHILDREN",
-		"ORKA_COORDINATION_ALLOWED_AGENTS",
 		"ORKA_COORDINATION_DEPTH",
 	}
 	for _, name := range coordinationVars {

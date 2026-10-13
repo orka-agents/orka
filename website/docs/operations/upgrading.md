@@ -8,6 +8,32 @@ description: "Back up Orka, update its Kubernetes resource definitions, and chec
 Orka currently supports new installations only. Upgrades between versions are
 not yet supported. Follow [Install Orka](installation.md) for setup.
 
+## Delegation policy behavior change
+
+This is a configuration compatibility note, not a supported in-place upgrade
+procedure; the new-installation-only policy above still applies.
+
+Native worker `delegate_task` now denies an empty or omitted
+`spec.coordination.allowedAgents`, matching the ACP broker. Previously, an
+empty/absent native worker allowlist permitted any target. Explicit entries match
+both Agent name and namespace; omitted entry namespaces default to the
+coordinating **parent Agent's namespace**, not the child Task's namespace. List
+cross-namespace targets explicitly.
+
+Before submitting coordinating Tasks, populate the list for every intended
+specialist, including Agents created dynamically with `create_agent`. The Task
+controller's legacy label/parent-task dynamic-Agent exemption is unchanged, is
+not an ownership/provenance check, and does not bypass the tool's allowlist.
+
+Native worker policy is frozen in each Job environment. Editing a coordinator
+while its worker runs does **not** refresh that worker's policy. Newly built Jobs
+use the current list, including later autonomous iterations. For non-autonomous
+two-stage bootstrap, let the first Task create specialists and return their names without
+delegating; an operator then allowlists them and submits a **new Task**. Retain
+the creation Task while its owned specialists are needed. See
+[explicit delegation policy](../reference/multi-agent-coordination.md#explicit-delegation-policy)
+and the [two-stage bootstrap example](https://github.com/orka-agents/orka/tree/main/examples/self-bootstrapping).
+
 ## What release checks cover {#release-checks}
 
 The release checks install the chart after creating CRDs and internal Secrets

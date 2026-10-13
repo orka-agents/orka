@@ -190,7 +190,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 							},
 							"required": ["name"]
 						},
-						"description": "Agents this agent can delegate to"
+						"description": "Explicit Agents allowed for delegate_task, including dynamically created Agents. Empty or omitted denies tool delegation. Entries match name and namespace; omitted namespace defaults to the parent Agent namespace."
 					}
 				}
 			},

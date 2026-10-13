@@ -245,6 +245,24 @@ func TestAIWorkerEnvValidateRequired(t *testing.T) {
 	}
 }
 
+func TestCoordinationEnvRendersEmptyAllowedAgents(t *testing.T) {
+	for _, policy := range [][]string{nil, {}} {
+		envVars := (CoordinationEnv{Enabled: true, AllowedAgents: policy}).EnvVars()
+		found := false
+		for _, envVar := range envVars {
+			if envVar.Name == CoordinationAllowedAgents {
+				found = true
+				if envVar.Value != "" || envVar.ValueFrom != nil {
+					t.Fatalf("allowed agents env = %#v, want explicit empty value", envVar)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("enabled coordination must render even an empty allowed agents policy")
+		}
+	}
+}
+
 func TestCoordinationEnvRenderAndParse(t *testing.T) {
 	env := CoordinationEnv{
 		Enabled:                 true,

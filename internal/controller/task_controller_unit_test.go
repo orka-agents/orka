@@ -1898,6 +1898,102 @@ func TestValidateCoordinationConstraints_MaxDepthExceeded(t *testing.T) {
 	}
 }
 
+func TestValidateCoordinationConstraints_ExplicitAgentNamespaces(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		allowed     []corev1alpha1.AllowedAgent
+		parentNS    string
+		targetNS    string
+		wantAllowed bool
+	}{
+		{"absent denies", nil, defaultNS, "", false},
+		{"empty denies", []corev1alpha1.AllowedAgent{}, defaultNS, "", false},
+		{"implicit same namespace", []corev1alpha1.AllowedAgent{{Name: "child-agent"}}, defaultNS, "", true},
+		{"explicit same namespace", []corev1alpha1.AllowedAgent{{Name: "child-agent", Namespace: defaultNS}}, defaultNS, "", true},
+		{"explicit cross namespace", []corev1alpha1.AllowedAgent{{Name: "child-agent", Namespace: "catalog"}}, defaultNS, "catalog", true},
+		{"implicit cannot grant cross namespace", []corev1alpha1.AllowedAgent{{Name: "child-agent"}}, defaultNS, "catalog", false},
+		{"wrong explicit namespace", []corev1alpha1.AllowedAgent{{Name: "child-agent", Namespace: "catalog"}}, defaultNS, "", false},
+		{"defaults to parent Agent namespace", []corev1alpha1.AllowedAgent{{Name: "child-agent"}}, "catalog", "catalog", true},
+		{"does not default to child Task namespace", []corev1alpha1.AllowedAgent{{Name: "child-agent"}}, "catalog", "", false},
+		{"wrong name", []corev1alpha1.AllowedAgent{{Name: "other-agent", Namespace: "catalog"}}, defaultNS, "catalog", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent", Namespace: tt.parentNS}},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: tt.parentNS},
+				Spec:       corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, AllowedAgents: tt.allowed}},
+			}
+			child := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: defaultNS,
+					Labels:      map[string]string{labels.LabelParentTask: parent.Name},
+					Annotations: map[string]string{labels.AnnotationCoordinationDepth: "1"},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "child-agent", Namespace: tt.targetNS}},
+			}
+			r := newUnitReconciler(newTestScheme(), parent, agent, child)
+			_, err, done := r.validateCoordinationConstraints(context.Background(), child)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done == tt.wantAllowed {
+				t.Fatalf("done=%t, want allowed=%t", done, tt.wantAllowed)
+			}
+			if !tt.wantAllowed && (child.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(child.Status.Message, "not in parent's allowedAgents")) {
+				t.Fatalf("status = %#v, want allowedAgents failure", child.Status)
+			}
+		})
+	}
+}
+
+func TestValidateCoordinationConstraints_DynamicLegacyEmptyPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name, createdBy, parentLabel, parentAnnotation, targetNS string
+		wantAllowed                                              bool
+	}{
+		{"matching labels without ownership", "create_agent", "parent", "", defaultNS, true},
+		{"matching annotation", "create_agent", "", "parent", defaultNS, true},
+		{"matching cross namespace", "create_agent", "parent", "", "catalog", true},
+		{"wrong parent", "create_agent", "other-parent", "", defaultNS, false},
+		{"missing created by marker", "", "parent", "", defaultNS, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"}},
+			}
+			coordinator := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: defaultNS},
+				Spec:       corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}},
+			}
+			dynamic := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "dynamic-agent", Namespace: tt.targetNS,
+				Labels:      map[string]string{labels.LabelCreatedBy: tt.createdBy, labels.LabelParentTask: tt.parentLabel},
+				Annotations: map[string]string{labels.AnnotationParentTaskName: tt.parentAnnotation},
+			}}
+			child := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: defaultNS,
+					Labels:      map[string]string{labels.LabelParentTask: parent.Name},
+					Annotations: map[string]string{labels.AnnotationCoordinationDepth: "1"},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: dynamic.Name, Namespace: tt.targetNS}},
+			}
+			r := newUnitReconciler(newTestScheme(), parent, coordinator, dynamic, child)
+			_, err, done := r.validateCoordinationConstraints(context.Background(), child)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done == tt.wantAllowed {
+				t.Fatalf("done=%t, want legacy dynamic exemption allowed=%t", done, tt.wantAllowed)
+			}
+			if !tt.wantAllowed && (child.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(child.Status.Message, "not in parent's allowedAgents")) {
+				t.Fatalf("status = %#v, want allowedAgents failure", child.Status)
+			}
+		})
+	}
+}
+
 func TestValidateCoordinationConstraints_AllowedAgentPass(t *testing.T) {
 	scheme := newTestScheme()
 	parentTask := &corev1alpha1.Task{

@@ -121,9 +121,17 @@ spec:
 | `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
 | `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
 | `approvalRequiredTools` | list | `[]` | Custom Tool CRD names that require human approval before execution in enabled autonomous coordination mode. Built-in tools, including `request_approval`, are rejected |
-| `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
+| `allowedAgents` | list | `[]` | Explicit name/namespace targets for `delegate_task`. Empty/omitted denies tool delegation, including to dynamically created Agents. Omitted entry namespaces default to the coordinating parent Agent's namespace |
 | `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
 | `maxDepth` | int32 | `3` | Maximum delegation depth |
+
+The Task controller retains a separate legacy `create_agent` label/parent-task
+exemption; `delegate_task` does not use it. **Upgrade note:** native workers no
+longer treat empty/absent allowlists as unrestricted. Set explicit entries before
+submitting Tasks. Worker policy is frozen per Job; updating an Agent cannot refresh
+a running worker. Newly built Jobs receive the current list, including a later
+autonomous iteration. The non-autonomous bootstrap example uses a **new Task**. See
+[delegation policy and upgrade behavior](multi-agent-coordination.md#explicit-delegation-policy).
 
 **Auto-injected coordination tools** (when `enabled: true`):
 

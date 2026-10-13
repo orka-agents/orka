@@ -1,44 +1,91 @@
-# Self-bootstrapping coordinator
+# Two-stage self-bootstrapping coordinator
 
-This example demonstrates Orka's self-bootstrapping agent pattern, where a coordinator
-agent dynamically creates specialist agents and delegates work to them. The
-deliverable is a reviewed implementation plan. For repository changes, use
+This example creates specialist Agents first, then requires an operator to
+allowlist them before a **new Task** delegates planning and review work. It is
+not an automatic create-and-delegate bootstrap. For repository changes, use
 [code-review](../code-review).
 
-## How It Works
+## Why two stages?
 
-1. A coordinator agent is configured with coordination enabled
-2. When given a task, it analyzes the requirements and creates specialist agents
-3. Specialists execute their assigned work in parallel
-4. The coordinator reviews results and iterates if needed
-5. Deleting the parent Task removes its owned specialist Agents and child Tasks
+An empty or omitted `spec.coordination.allowedAgents` denies `delegate_task`,
+including to Agents just created with `create_agent`. The native worker's policy
+is frozen in its Job environment: editing the coordinator does **not** refresh
+an already-running worker, and the same worker cannot resume with the new list.
+The controller retains a legacy label/parent-task dynamic-Agent exemption, but
+the tool does not use it. Automatic bootstrap delegation would require future
+provenance work, not a dynamic bypass here.
 
-## Usage
+## 1. Create specialists without delegation
 
-Update `spec.providerRef.name` in `coordinator-agent.yaml` to match the Provider CRD in your cluster before applying it.
+Update `spec.providerRef.name` in `coordinator-agent.yaml` to match the Provider
+in your cluster, then apply the Agent and submit the bootstrap Task:
 
-### Via YAML
 ```bash
 kubectl -n orka-system apply -f examples/self-bootstrapping/coordinator-agent.yaml
 task_name="$(kubectl -n orka-system create -f examples/self-bootstrapping/coordinator-task.yaml -o jsonpath='{.metadata.name}')"
 kubectl -n orka-system get task "$task_name" -w
 ```
 
-### Via Chat (One-Shot)
-In the Orka chat, simply ask:
-> "Create a coordinator to produce a reviewed implementation plan for a TODO REST API in Go"
+Read the Task result in the UI or CLI. It returns the created Agents' exact names,
+namespaces, roles, and suggested prompts, **not** specialist work results or a
+reviewed implementation plan.
 
-The chat can bootstrap the coordinator and let it create the specialists it needs.
+Alternatively, submit a bootstrap Task through the CLI:
 
-### Via CLI
 ```bash
-orka -n orka-system task create --agent coordinator "Plan a TODO REST API in Go with CRUD endpoints and tests"
+orka -n orka-system task create --agent coordinator "BOOTSTRAP Agents for API design, test planning, and review of a TODO REST API in Go. Create native AI specialists and return their names and namespaces. Do not delegate."
 ```
 
-## Key Concepts
+## 2. Operator allowlists the created Agents
 
-- **Auto-cleanup**: Specialist agents have owner references to the coordinator task,
-  so they are garbage collected when the task is deleted
-- **Provider inheritance**: Specialists inherit the coordinator's LLM provider config
-- **Depth limits**: Coordination depth is enforced (default: 3 levels) to prevent infinite loops
-- **Concurrency limits**: Maximum concurrent child tasks is configurable (default: 5)
+Keep the creation Task: `create_agent` gives each specialist an owner reference
+to it, so deleting that Task garbage-collects the specialists. Do not delete it
+while later Tasks still need these Agents.
+
+Edit the coordinator:
+
+```bash
+kubectl -n orka-system edit agent coordinator
+```
+
+Populate `spec.coordination.allowedAgents` using the **actual names returned by
+the bootstrap**, for example (replace these illustrative names before use):
+
+```yaml
+allowedAgents:
+  - name: api-designer
+    namespace: orka-system
+  - name: test-planner
+    namespace: orka-system
+  - name: plan-reviewer
+    namespace: orka-system
+```
+
+Entries match both name and namespace. If `namespace` is omitted, it defaults to
+the coordinating Agent's namespace, not the child Task's namespace.
+
+## 3. Submit a NEW delegation Task
+
+Once the list is saved, create a new Task naming the approved specialists (again,
+replace the example names with the exact names from stage 1):
+
+```bash
+orka -n orka-system task create --agent coordinator "DELEGATION: use existing allowlisted orka-system/api-designer, orka-system/test-planner, and orka-system/plan-reviewer. Plan a TODO REST API in Go with CRUD endpoints, in-memory storage, handler tests, and error handling. Delegate planning and review, then combine results into a reviewed plan under 800 words. Do not create replacement Agents or publish code."
+```
+
+This new native worker receives the updated explicit allowlist. The original
+bootstrap worker does not. Children of the delegation Task are owned by that
+Task; specialists remain owned by the original creation Task.
+
+## Key concepts
+
+- **Explicit policy**: tool delegation always needs an allowlisted Agent, even
+  when the coordinator created it dynamically.
+- **Auto-cleanup**: deleting the creation Task removes its specialists; deleting
+  a delegation Task removes that Task's child Tasks.
+- **Provider inheritance**: specialists inherit the creator's LLM provider config.
+- **Depth and concurrency**: the coordinator config limits delegation to three
+  levels and five concurrent children.
+
+See [Multi-agent coordination](../../website/docs/reference/multi-agent-coordination.md)
+for policy semantics and upgrade behavior.

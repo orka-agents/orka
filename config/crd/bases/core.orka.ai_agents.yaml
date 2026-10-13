@@ -59,8 +59,10 @@ spec:
                 description: Coordination enables agent-to-agent delegation
                 properties:
                   allowedAgents:
-                    description: AllowedAgents lists agents this agent can delegate
-                      to
+                    description: |-
+                      AllowedAgents lists explicit name/namespace targets for delegate_task.
+                      Empty or omitted denies tool delegation, including to dynamically created Agents.
+                      The Task controller retains its legacy label/parent-task dynamic-Agent exemption.
                     items:
                       description: AllowedAgent defines an agent that can be delegated
                         to
@@ -69,8 +71,8 @@ spec:
                           description: Name is the name of the agent
                           type: string
                         namespace:
-                          description: Namespace is the namespace of the agent (defaults
-                            to same namespace)
+                          description: Namespace is the target Agent namespace (defaults
+                            to the coordinating parent Agent's namespace).
                           type: string
                       required:
                       - name

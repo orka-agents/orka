@@ -266,7 +266,9 @@ type CoordinationConfig struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
 
-	// AllowedAgents lists agents this agent can delegate to
+	// AllowedAgents lists explicit name/namespace targets for delegate_task.
+	// Empty or omitted denies tool delegation, including to dynamically created Agents.
+	// The Task controller retains its legacy label/parent-task dynamic-Agent exemption.
 	// +optional
 	AllowedAgents []AllowedAgent `json:"allowedAgents,omitempty"`
 
@@ -307,7 +309,7 @@ type AllowedAgent struct {
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
 
-	// Namespace is the namespace of the agent (defaults to same namespace)
+	// Namespace is the target Agent namespace (defaults to the coordinating parent Agent's namespace).
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }

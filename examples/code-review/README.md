@@ -82,12 +82,16 @@ or `headSHA` is missing, the coordinator reports the result and stops.
 
 `coordinator-agent.yaml` sets `spec.coordination`:
 
-- `allowedAgents` — the only Agents this coordinator may delegate to. Anything else is
-  rejected by the controller, not by the prompt.
+- `allowedAgents` — explicit name/namespace targets for `delegate_task`. Empty or
+  omitted denies tool delegation; an omitted entry namespace defaults to the parent
+  Agent's namespace. Both the tool and controller check explicit entries. The controller
+  retains a separate legacy `create_agent` label/parent-task exemption, but the tool
+  does not use it, even for dynamically created Agents.
 - `maxDepth: 3` — a delegated agent may delegate further, but only three levels deep.
 - `maxConcurrentChildren: 2` — at most two child Tasks running at once.
 
-These are enforced when the child Task is reconciled, so a coordinator that ignores its
-system prompt still cannot exceed them. See
+The tool checks the allowlist and depth before creating a child Task; the controller
+checks coordination constraints again during reconciliation, with the legacy exemption
+noted above. These are runtime checks, not prompt instructions. See
 [Multi-agent coordination](../../website/docs/reference/multi-agent-coordination.md) for
 the full tool schemas and controller checks.

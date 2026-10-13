@@ -7,13 +7,14 @@ spec:
   agentRef:
     name: coordinator
   prompt: |
-    Produce a reviewed implementation plan for a TODO REST API in Go:
+    BOOTSTRAP specialist Agents for a future reviewed implementation plan for a TODO REST API in Go:
     - CRUD endpoints (GET, POST, PUT, DELETE) for /api/todos
     - In-memory storage
     - Unit tests for all handlers
     - Clean code with proper error handling
 
-    Create specialist agents for API design and test planning, then review and
-    combine their results into a plan under 800 words. Use the supplied context;
-    no repository access, code execution, or publication is needed.
+    Create specialist Agents for API design, test planning, and review. Return their
+    exact names, namespaces, roles, and suggested delegation prompts. Do not delegate:
+    the operator must add them to allowedAgents and submit a NEW Task first.
+    Use the supplied context; no repository access, code execution, or publication is needed.
   timeout: 10m

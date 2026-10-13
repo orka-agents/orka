@@ -832,6 +832,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
 	envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "")
 	envVars = setControllerEnvValue(envVars, workerenv.CoordinationEnabled, "")
+	envVars = setControllerEnvValue(envVars, workerenv.CoordinationAllowedAgents, "")
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
@@ -1138,7 +1139,11 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, connectorWrite []string) []corev1.EnvVar {
 	agentNames := make([]string, 0, len(agent.Spec.Coordination.AllowedAgents))
 	for _, a := range agent.Spec.Coordination.AllowedAgents {
-		agentNames = append(agentNames, a.Name)
+		namespace := a.Namespace
+		if namespace == "" {
+			namespace = agent.Namespace
+		}
+		agentNames = append(agentNames, namespace+"/"+a.Name)
 	}
 
 	// Current depth (0 for top-level coordinator)

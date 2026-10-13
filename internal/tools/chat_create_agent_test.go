@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -22,6 +23,33 @@ import (
 )
 
 const testProviderOpenAI = "openai"
+
+func TestCreateAgentSchemasDescribeFailClosedDelegation(t *testing.T) {
+	for _, tool := range []Tool{&ChatCreateAgentTool{}, NewCreateAgentTool(newFakeClient(), executionmode.HarnessV2)} {
+		t.Run(tool.Name()+"/"+fmt.Sprintf("%T", tool), func(t *testing.T) {
+			var schema struct {
+				Properties struct {
+					Coordination struct {
+						Properties struct {
+							AllowedAgents struct {
+								Description string `json:"description"`
+							} `json:"allowedAgents"`
+						} `json:"properties"`
+					} `json:"coordination"`
+				} `json:"properties"`
+			}
+			if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
+				t.Fatal(err)
+			}
+			description := schema.Properties.Coordination.Properties.AllowedAgents.Description
+			for _, want := range []string{"Empty or omitted denies", "parent Agent namespace"} {
+				if !strings.Contains(description, want) {
+					t.Errorf("allowedAgents description missing %q: %s", want, description)
+				}
+			}
+		})
+	}
+}
 
 func TestChatCreateAgentTool_ParametersDescribeOpenCodeACP(t *testing.T) {
 	params := string((&ChatCreateAgentTool{}).Parameters())

@@ -324,7 +324,7 @@ Coordinator Agent (depth 0)
 
 **Controller enforcement** (in `handlePending`):
 - **maxDepth**: Rejects child tasks exceeding the coordinator's depth limit
-- **allowedAgents**: Rejects delegation to agents not in the coordinator's allow list
+- **allowedAgents**: Explicit entries match Agent name and namespace (omitted namespace defaults to the parent Agent's namespace). Empty/omitted lists deny `delegate_task`, including for dynamically created Agents. The controller separately retains its legacy `create_agent` label/parent-task exemption; it is not an ownership/provenance check and does not bypass tool policy
 - **maxConcurrentChildren**: Requeues (not fails) child tasks when the active sibling count is at the limit
 
 **ChildTaskStatus tracking** (in `handleRunning`): Coordinator tasks get `status.childTasks[]` populated with each child's name, agent, phase, and truncated result.

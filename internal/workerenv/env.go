@@ -548,9 +548,8 @@ func (e CoordinationEnv) EnvVars() []corev1.EnvVar {
 		Env(CoordinationEnabled, trueString),
 		Env(CoordinationMaxDepth, strconv.Itoa(e.MaxDepth)),
 		Env(CoordinationMaxChildren, strconv.Itoa(e.MaxChildren)),
-	}
-	if len(e.AllowedAgents) > 0 {
-		envVars = append(envVars, Env(CoordinationAllowedAgents, JoinCSV(e.AllowedAgents)))
+		// Empty is a deny policy too; reserve it against Task env and Secret EnvFrom.
+		Env(CoordinationAllowedAgents, JoinCSV(e.AllowedAgents)),
 	}
 	if e.Depth != "" {
 		envVars = append(envVars, Env(CoordinationDepth, e.Depth))

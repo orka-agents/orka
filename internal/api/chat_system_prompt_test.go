@@ -202,6 +202,24 @@ func TestBuildCoordinationSection(t *testing.T) {
 	}
 }
 
+func TestBuildCoordinationSectionRequiresExplicitDelegationPolicy(t *testing.T) {
+	s := buildCoordinationSection()
+	for _, want := range []string{
+		"allowedAgents",
+		"Empty or omitted allowedAgents denies delegate_task",
+		"Do not delegate during bootstrap",
+		"NEW Task",
+		"Keep the creation Task",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing delegation-policy guidance %q", want)
+		}
+	}
+	if strings.Contains(s, "PREFERRED (one-shot)") {
+		t.Error("prompt still prescribes unlisted one-shot bootstrap delegation")
+	}
+}
+
 func TestBuildSchedulingSection(t *testing.T) {
 	tests := []struct {
 		name    string

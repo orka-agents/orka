@@ -185,7 +185,7 @@ func (t *DelegateTaskTool) Name() string {
 
 // Description returns the tool description
 func (t *DelegateTaskTool) Description() string {
-	return "Delegate a task to another agent. Creates a child Task CR that will be picked up by the specified agent. Supports iterative workflows via prior_task (applies previous diff) and feedback (prepends review feedback to prompt)."
+	return "Delegate a task to an explicitly allowlisted agent (name and namespace), including dynamically created agents. Empty or absent allowedAgents denies delegation. Creates a child Task CR that will be picked up by the specified agent. Supports iterative workflows via prior_task (applies previous diff) and feedback (prepends review feedback to prompt)."
 }
 
 // Parameters returns the JSON Schema for parameters
@@ -327,10 +327,10 @@ type delegationContext struct {
 	priority     *int32
 }
 
-func delegatedAgentAllowed(agentName, agentNamespace, taskNamespace, allowedAgents string) bool {
+func delegatedAgentAllowed(agentName, agentNamespace, defaultAgentNamespace, allowedAgents string) bool {
 	agentName = strings.TrimSpace(agentName)
 	agentNamespace = strings.TrimSpace(agentNamespace)
-	taskNamespace = strings.TrimSpace(taskNamespace)
+	defaultAgentNamespace = strings.TrimSpace(defaultAgentNamespace)
 	for allowed := range strings.SplitSeq(allowedAgents, ",") {
 		allowed = strings.TrimSpace(allowed)
 		if allowed == "" {
@@ -343,7 +343,7 @@ func delegatedAgentAllowed(agentName, agentNamespace, taskNamespace, allowedAgen
 			}
 			continue
 		}
-		if allowed == agentName && (agentNamespace == "" || agentNamespace == taskNamespace) {
+		if allowed == agentName && (agentNamespace == "" || agentNamespace == defaultAgentNamespace) {
 			return true
 		}
 	}
@@ -496,11 +496,11 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 			if name == "" {
 				continue
 			}
-			if namespace := strings.TrimSpace(agent.Namespace); namespace != "" {
-				allowed = append(allowed, namespacedDelegateAgent(namespace, name))
-			} else {
-				allowed = append(allowed, name)
+			namespace := strings.TrimSpace(agent.Namespace)
+			if namespace == "" {
+				namespace = parentAgent.Namespace
 			}
+			allowed = append(allowed, namespacedDelegateAgent(namespace, name))
 		}
 		allowedAgents = strings.Join(allowed, ",")
 	}
@@ -528,10 +528,15 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		return nil, fmt.Errorf("coordination depth exceeded: current depth %d, max depth %d", currentDepth, maxDepth)
 	}
 
-	// Validate agent is allowed, including namespace when the allowlist entry is
-	// namespaced as namespace/name. Bare names retain existing same-name behavior.
-	if (brokered || allowedAgents != "") && !delegatedAgentAllowed(delegateArgs.Agent, agentNS, taskNS, allowedAgents) {
-		return nil, fmt.Errorf("agent %q is not in the allowed agents list", namespacedDelegateAgent(agentNS, delegateArgs.Agent))
+	// Controller-rendered policies are namespace-qualified. Legacy bare env names
+	// default to the parent Task namespace, never a caller-selected child namespace.
+	// Empty or absent allowlists deny delegation.
+	defaultAgentNS := parentNamespace
+	if defaultAgentNS == "" {
+		defaultAgentNS = taskNS
+	}
+	if !delegatedAgentAllowed(delegateArgs.Agent, agentNS, defaultAgentNS, allowedAgents) {
+		return nil, fmt.Errorf("agent %q is not in the allowed agents list; configure spec.coordination.allowedAgents to include this Agent", namespacedDelegateAgent(agentNS, delegateArgs.Agent))
 	}
 
 	// Determine priority.

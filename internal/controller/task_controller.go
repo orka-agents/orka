@@ -1131,8 +1131,16 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	// Enforce allowedAgents
 	if task.Spec.AgentRef != nil {
 		allowed := false
+		childAgentNS := task.Spec.AgentRef.Namespace
+		if childAgentNS == "" {
+			childAgentNS = task.Namespace
+		}
 		for _, a := range coord.AllowedAgents {
-			if a.Name == task.Spec.AgentRef.Name {
+			allowedNS := a.Namespace
+			if allowedNS == "" {
+				allowedNS = parentAgent.Namespace
+			}
+			if a.Name == task.Spec.AgentRef.Name && allowedNS == childAgentNS {
 				allowed = true
 				break
 			}

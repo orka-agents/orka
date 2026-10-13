@@ -434,16 +434,17 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 
 	// Auto-route to dev-coordinator for issue/PR workflows.
-	// Chat just creates the coordinator — the coordinator creates its own specialist agents.
+	// Bootstrap specialists first; delegation starts in a new explicitly allowlisted Task.
 	if req.AgentRef == "" && looksLikeIssueWorkflow(req.Message) {
 		userContent = fmt.Sprintf("[System: This is an issue workflow. "+
-			"You MUST create a dev-coordinator agent using create_agent with initialPrompt (one-shot pattern). "+
+			"You MUST create a dev-coordinator agent using create_agent with a bootstrap-only initialPrompt. "+
 			"Set coordination.enabled=true, providerRef=\"copilot\", model.name=\"gpt-5.4\", maxDepth=3, maxConcurrentChildren=5. "+
 			"CRITICAL: The dev-coordinator must NOT have a runtime — it must be a plain AI agent with providerRef. "+
 			"The coordinator system prompt must instruct it to: "+
-			"1) Use create_agent to create any specialist agents it needs (coder as copilot runtime, reviewers as copilot runtime with different models like claude-opus-4.6, gpt-5.4, gemini-3-pro). "+
-			"Set allowedAgents to include the agents it creates. "+
-			"2) Follow this adaptive workflow: "+
+			"1) In the bootstrap Task, use create_agent to create any specialist agents it needs (coder as copilot runtime, reviewers as copilot runtime with different models like claude-opus-4.6, gpt-5.4, gemini-3-pro), then return their exact names and namespaces. "+
+			"Empty or omitted allowedAgents denies delegate_task, even for newly created specialists. Do not delegate in the bootstrap Task. "+
+			"Ask the operator to configure allowedAgents with those exact targets and start a NEW Task; editing the Agent cannot refresh the running worker's frozen policy. Keep the creation Task while its owned specialists are needed. "+
+			"2) In the new delegation Task, use only those existing allowlisted specialists and follow this adaptive workflow: "+
 			"Phase 1 — ANALYZE: Read the issue and determine what phases are needed. "+
 			"Phase 2 — PLAN & DESIGN: If needed, delegate design/planning to a coder agent, then review with multiple reviewer agents in parallel. "+
 			"Phase 3 — CODE: Delegate implementation to the coder agent with a pushBranch. "+
@@ -451,7 +452,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			"Phase 5 — REVIEW LOOP: Delegate parallel reviews to reviewer agents, then delegate coder repairs on the same branch until validation passes and all reviewers approve. Bound this to at most 8 review repair tasks. "+
 			"Phase 6 — PR + CI LOOP: After validation passes and reviewers approve, create or update the PR, then call check_pull_request_ci once with wait_timeout=\"30m\" and poll_interval=\"30s\". If checks fail, delegate a focused CI repair task to the coder on the PR branch, then re-run validation and reviewers before re-checking CI. Bound this to at most 3 CI repair tasks; if the CI check times out while still pending, report CI_PENDING. "+
 			"Phase 7 — APPROVE: Post final approval only after validation passes, reviewers approve, and CI is green. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Report VALIDATION_BLOCKED, REVIEW_BLOCKED, CI_BLOCKED, or CI_PENDING when a bounded loop is exhausted. Do not merge unless the user explicitly asks. "+
-			"Use initialPrompt to pass the user's request so the coordinator starts immediately. "+
+			"Use initialPrompt to pass the user's requirements for the bootstrap-only Task; stop after returning the specialist inventory and operator instructions. "+
 			"Include the gitRepo URL in the initialPrompt.]\n\n%s", req.Message)
 	}
 	messages = append(messages, llm.Message{

@@ -396,6 +396,65 @@ func brokeredDelegateFixtures(transactional bool) (*corev1alpha1.Task, *corev1al
 	return parent, coordinator, researcher
 }
 
+func TestBrokeredDelegateTaskAllowedAgentNamespaces(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		allowed       []corev1alpha1.AllowedAgent
+		coordinatorNS string
+		targetNS      string
+		wantAllowed   bool
+	}{
+		{"absent denies", nil, brokerTestNamespace, brokerTestNamespace, false},
+		{"empty denies", []corev1alpha1.AllowedAgent{}, brokerTestNamespace, brokerTestNamespace, false},
+		{"implicit same namespace", []corev1alpha1.AllowedAgent{{Name: "researcher"}}, brokerTestNamespace, brokerTestNamespace, true},
+		{"explicit same namespace", []corev1alpha1.AllowedAgent{{Name: "researcher", Namespace: brokerTestNamespace}}, brokerTestNamespace, brokerTestNamespace, true},
+		{"explicit cross namespace", []corev1alpha1.AllowedAgent{{Name: "researcher", Namespace: "catalog"}}, brokerTestNamespace, "catalog", true},
+		{"implicit cannot grant cross namespace", []corev1alpha1.AllowedAgent{{Name: "researcher"}}, brokerTestNamespace, "catalog", false},
+		{"defaults to parent Agent namespace", []corev1alpha1.AllowedAgent{{Name: "researcher"}}, "catalog", "catalog", true},
+		{"does not default to Task namespace", []corev1alpha1.AllowedAgent{{Name: "researcher"}}, "catalog", brokerTestNamespace, false},
+		{"wrong explicit namespace", []corev1alpha1.AllowedAgent{{Name: "researcher", Namespace: brokerTestNamespace}}, brokerTestNamespace, "catalog", false},
+		{"wrong name", []corev1alpha1.AllowedAgent{{Name: "coder", Namespace: "catalog"}}, brokerTestNamespace, "catalog", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Process env and create_agent labels must not broaden broker policy.
+			t.Setenv(envOrkaCoordinationAllowedAgents, "researcher,catalog/researcher")
+			parent, coordinator, researcher := brokeredDelegateFixtures(false)
+			coordinator.Namespace = tt.coordinatorNS
+			coordinator.Spec.Coordination.AllowedAgents = tt.allowed
+			parent.Spec.AgentRef.Namespace = tt.coordinatorNS
+			researcher.Namespace = tt.targetNS
+			researcher.Labels = map[string]string{labels.LabelCreatedBy: "create_agent", labels.LabelParentTask: parent.Name}
+			kube := newFakeClient(parent, coordinator, researcher)
+			ctx := WithToolContext(context.Background(), &ToolContext{
+				Brokered: true, Namespace: parent.Namespace, TaskID: parent.Name, TaskUID: string(parent.UID),
+				SessionID: "runtime-session-uid", OperationID: "delegate-operation",
+			})
+			args, err := json.Marshal(DelegateTaskArgs{Agent: researcher.Name, AgentNamespace: tt.targetNS, Prompt: "Investigate"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = NewDelegateTaskTool(kube).Execute(ctx, args)
+			if tt.wantAllowed && err != nil {
+				t.Fatalf("Execute() error = %v, want allowed", err)
+			}
+			if !tt.wantAllowed && (err == nil || !strings.Contains(err.Error(), "not in the allowed agents list")) {
+				t.Fatalf("Execute() error = %v, want allowed agents denial", err)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := kube.List(ctx, &tasks); err != nil {
+				t.Fatal(err)
+			}
+			wantTasks := 1
+			if tt.wantAllowed {
+				wantTasks++
+			}
+			if len(tasks.Items) != wantTasks {
+				t.Fatalf("got %d Tasks, want %d", len(tasks.Items), wantTasks)
+			}
+		})
+	}
+}
+
 func TestBrokeredDelegateTaskEnforcesNamespaceScopeBeforeResourceAccess(t *testing.T) {
 	tests := []struct {
 		name          string
