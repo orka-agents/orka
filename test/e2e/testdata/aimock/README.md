@@ -36,5 +36,18 @@ Claude, and Copilot runtimes follow the scripts too (`fake_forge.json`,
 and controller restart checks use instead of a real `sleep`.
 Read its requests with `providerProxyMockLLM.requestsFor`.
 
+`native_session_migration.json` runs in the `agent-runtime` lane on Linux.
+It imports a supported Codex 0.160.0 paginated source through the public CLI,
+continues on the deployed Codex RuntimePool, exports through the CLI, and
+executes `codex exec resume` in a fresh local home using the pinned binary
+from the tested runtime image. Continuation fixtures match their user markers, not `toolResultContains`
+(which checks only the final message). Journal assertions require both legs
+to send the original native tool result to aimock; the nonce is absent from prompts and assistant replies.
+The return leg also proves the cluster reply reaches inference, the UUID
+and native prefix survive, the source stays untouched, and newly supplied
+local credentials and read-only policy are used. The non-reasoning mock model
+`gpt-4.1` avoids aimock synthesizing encrypted reasoning, which native migration
+deliberately rejects. No live provider key is needed.
+
 The fixture format is documented in aimock's
 [write-fixtures skill](https://github.com/CopilotKit/aimock/blob/v1.43.0/skills/write-fixtures/SKILL.md).

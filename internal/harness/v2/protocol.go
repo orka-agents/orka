@@ -66,6 +66,7 @@ type ProtocolLimits struct {
 	MaxResidentSessions      uint32 `json:"maxResidentSessions"`
 	MaxConcurrentPrompts     uint32 `json:"maxConcurrentPrompts"`
 	MaxRequestBytes          int    `json:"maxRequestBytes"`
+	MaxNativeSessionBytes    int    `json:"maxNativeSessionBytes,omitempty"`
 	MaxEventLineBytes        int    `json:"maxEventLineBytes"`
 	MaxTerminalResultBytes   int    `json:"maxTerminalResultBytes"`
 	MaxBufferedEvents        int    `json:"maxBufferedEvents"`
@@ -82,6 +83,7 @@ func DefaultProtocolLimits() ProtocolLimits {
 		MaxResidentSessions:      DefaultMaxResidentSessions,
 		MaxConcurrentPrompts:     DefaultMaxConcurrentPrompts,
 		MaxRequestBytes:          1 << 20,
+		MaxNativeSessionBytes:    DefaultMaxNativeSessionBytes,
 		MaxEventLineBytes:        stream.MaxLineBytes,
 		MaxTerminalResultBytes:   stream.MaxTerminalResultBytes,
 		MaxBufferedEvents:        stream.MaxBufferedEvents,
@@ -93,7 +95,19 @@ func DefaultProtocolLimits() ProtocolLimits {
 	}
 }
 
+// EffectiveMaxNativeSessionBytes preserves the old 512 KiB contract for runtimes
+// that predate the explicit native-session capability limit.
+func (l ProtocolLimits) EffectiveMaxNativeSessionBytes() int {
+	if l.MaxNativeSessionBytes == 0 {
+		return LegacyMaxNativeSessionBytes
+	}
+	return l.MaxNativeSessionBytes
+}
+
 func (l ProtocolLimits) Validate() error {
+	if _, err := NormalizeNativeSessionMaxBytes(l.MaxNativeSessionBytes); err != nil {
+		return err
+	}
 	if l.MaxResidentSessions == 0 {
 		return fmt.Errorf("max resident sessions must be positive")
 	}
@@ -188,6 +202,7 @@ type CapabilitiesResponse struct {
 	SupportsDrain                     bool                            `json:"supportsDrain"`
 	SupportsPublicationFinalization   bool                            `json:"supportsPublicationFinalization"`
 	SupportsAgentSessionConfiguration bool                            `json:"supportsAgentSessionConfiguration,omitempty"`
+	SupportsNativeSessions            bool                            `json:"supportsNativeSessions,omitempty"`
 	SupportsFoundryRecovery           bool                            `json:"supportsFoundryRecovery,omitempty"`
 }
 
@@ -250,18 +265,28 @@ type DrainStatus struct {
 }
 
 type RuntimeSessionStatus struct {
-	RuntimeSessionID        RuntimeSessionID    `json:"runtimeSessionID"`
-	RuntimeSessionUID       RuntimeSessionUID   `json:"runtimeSessionUID"`
-	Generation              uint64              `json:"generation"`
-	State                   RuntimeSessionState `json:"state"`
-	ActivePromptID          PromptID            `json:"activePromptID,omitempty"`
-	PendingPermissionCount  uint32              `json:"pendingPermissionCount"`
-	ReservedForFinalization bool                `json:"reservedForFinalization"`
-	LiveDescendantCount     uint32              `json:"liveDescendantCount"`
-	LastTransitionAt        time.Time           `json:"lastTransitionAt"`
+	NativeInstallUnresolved bool                      `json:"nativeInstallUnresolved,omitempty"`
+	NativeRestoration       *NativeSessionRestoration `json:"nativeRestoration,omitempty"`
+	RuntimeSessionID        RuntimeSessionID          `json:"runtimeSessionID"`
+	RuntimeSessionUID       RuntimeSessionUID         `json:"runtimeSessionUID"`
+	Generation              uint64                    `json:"generation"`
+	State                   RuntimeSessionState       `json:"state"`
+	ActivePromptID          PromptID                  `json:"activePromptID,omitempty"`
+	PendingPermissionCount  uint32                    `json:"pendingPermissionCount"`
+	ReservedForFinalization bool                      `json:"reservedForFinalization"`
+	LiveDescendantCount     uint32                    `json:"liveDescendantCount"`
+	LastTransitionAt        time.Time                 `json:"lastTransitionAt"`
 }
 
 func (s RuntimeSessionStatus) Validate() error {
+	if s.NativeInstallUnresolved && s.State != RuntimeSessionStatePoisoned {
+		return fmt.Errorf("unresolved native install must retain a poisoned runtime session")
+	}
+	if s.NativeRestoration != nil {
+		if err := s.NativeRestoration.Validate(); err != nil {
+			return fmt.Errorf("native restoration: %w", err)
+		}
+	}
 	if err := requireIdentifier("runtime session ID", string(s.RuntimeSessionID)); err != nil {
 		return err
 	}
@@ -515,19 +540,26 @@ func (r StatusResponse) Validate() error {
 type ErrorCode string
 
 const (
-	ErrorCodeInvalidRequest      ErrorCode = "invalid_request"
-	ErrorCodeUnauthenticated     ErrorCode = "unauthenticated"
-	ErrorCodeForbidden           ErrorCode = "forbidden"
-	ErrorCodeExpired             ErrorCode = "expired"
-	ErrorCodeStaleFence          ErrorCode = "stale_fence"
-	ErrorCodeDigestConflict      ErrorCode = "digest_conflict"
-	ErrorCodeAlreadyAccepted     ErrorCode = "already_accepted"
-	ErrorCodeSettled             ErrorCode = "settled"
-	ErrorCodeRateLimited         ErrorCode = "rate_limited"
-	ErrorCodeSessionPoisoned     ErrorCode = "session_poisoned"
-	ErrorCodeWorkspaceResumeLost ErrorCode = "workspace_resume_lost"
-	ErrorCodeOutcomeUnknown      ErrorCode = "outcome_unknown"
-	ErrorCodeCleanupUnproven     ErrorCode = "cleanup_unproven"
+	ErrorCodeInvalidRequest           ErrorCode = "invalid_request"
+	ErrorCodeUnauthenticated          ErrorCode = "unauthenticated"
+	ErrorCodeForbidden                ErrorCode = "forbidden"
+	ErrorCodeExpired                  ErrorCode = "expired"
+	ErrorCodeStaleFence               ErrorCode = "stale_fence"
+	ErrorCodeDigestConflict           ErrorCode = "digest_conflict"
+	ErrorCodeAlreadyAccepted          ErrorCode = "already_accepted"
+	ErrorCodeSettled                  ErrorCode = "settled"
+	ErrorCodeRateLimited              ErrorCode = "rate_limited"
+	ErrorCodeSessionPoisoned          ErrorCode = "session_poisoned"
+	ErrorCodeNativeCaptureUnsupported ErrorCode = "native_capture_unsupported"
+	// ErrorCodeNativeCaptureNotStarted answers a capture reconciliation whose
+	// original operation this runtime incarnation never recorded, so no capture
+	// has started and the controller may begin a fresh one.
+	ErrorCodeNativeCaptureNotStarted ErrorCode = "native_capture_not_started"
+	// RetryReady proves capture failed after writer exit; a fresh operation may retry the retained private tree.
+	ErrorCodeNativeCaptureRetryReady ErrorCode = "native_capture_retry_ready"
+	ErrorCodeWorkspaceResumeLost     ErrorCode = "workspace_resume_lost"
+	ErrorCodeOutcomeUnknown          ErrorCode = "outcome_unknown"
+	ErrorCodeCleanupUnproven         ErrorCode = "cleanup_unproven"
 )
 
 type ErrorResponse struct {
@@ -545,7 +577,8 @@ func (r ErrorResponse) Validate() error {
 	switch r.Code {
 	case ErrorCodeInvalidRequest, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodeExpired,
 		ErrorCodeStaleFence, ErrorCodeDigestConflict, ErrorCodeAlreadyAccepted, ErrorCodeSettled,
-		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
+		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeNativeCaptureUnsupported, ErrorCodeNativeCaptureNotStarted, ErrorCodeNativeCaptureRetryReady,
+		ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
 	default:
 		return fmt.Errorf("unsupported error code %q", r.Code)
 	}

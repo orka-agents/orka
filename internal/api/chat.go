@@ -1563,6 +1563,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 		if fbProviderCRD.Spec.Azure != nil {
 			fbConfig.AzureAPIVersion = fbProviderCRD.Spec.Azure.APIVersion
+			fbConfig.AzureDeploymentName = fbProviderCRD.Spec.Azure.DeploymentName
 		}
 
 		fbProvider, err := llm.NewProvider(string(fbProviderCRD.Spec.Type), fbConfig)

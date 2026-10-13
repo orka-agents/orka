@@ -266,6 +266,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var apiPort int
+	var nativeSessionMaxBytes int
 	var watchNamespace string
 	var generalWorkerImage string
 	var aiWorkerServiceAccountName string
@@ -454,6 +455,9 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.IntVar(&apiPort, "api-port", 8080, "The port the REST API server binds to.")
+	nativeSessionMaxBytesDefault, nativeSessionMaxBytesErr := nativeSessionMaxBytesFromEnv()
+	flag.IntVar(&nativeSessionMaxBytes, "native-session-max-bytes", nativeSessionMaxBytesDefault,
+		"Maximum encoded native session bundle bytes (default 8 MiB, maximum 64 MiB).")
 	flag.StringVar(&watchNamespace, "watch-namespace", "", "Required single namespace to watch for resources.")
 	flag.BoolVar(&workspaceProviderAPIEnabled, "enable-workspace-provider-api",
 		envBool("ORKA_ENABLE_WORKSPACE_PROVIDER_API"),
@@ -830,6 +834,11 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	acpUpgradeDrainOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
+	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
+	if nativeSessionMaxBytesErr != nil {
+		setupLog.Error(nativeSessionMaxBytesErr, "invalid native session size configuration")
+		os.Exit(1)
+	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
 	if handled, err := controller.RunACPUpgradeDrainTriggerMode(context.Background(), acpUpgradeDrainOptions); handled {
 		if err != nil {
@@ -1414,6 +1423,10 @@ func main() {
 		setupLog.Error(err, "unable to acquire and initialize the exclusive SQLite store", "path", storePath)
 		os.Exit(1)
 	}
+	if err := sqliteStore.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
+		setupLog.Error(err, "unable to configure native session store limit")
+		os.Exit(1)
+	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
@@ -1727,6 +1740,7 @@ func main() {
 		runtimePoolReconciler.ControllerAPIURL = jobBuilder.ControllerURL
 		runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 		runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
+		runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
 		runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 			BaseURL:         acpProviderProxyBaseURL,
 			Namespace:       acpProviderProxyNamespace,
@@ -2261,6 +2275,7 @@ func main() {
 	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
+		NativeSessionMaxBytes:     nativeSessionMaxBytes,
 		WatchNamespace:            watchNamespace,
 		ExecutionMode:             mode,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
@@ -2578,6 +2593,37 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespac
 	options.ByObject[&networkingv1.NetworkPolicy{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&policyv1.PodDisruptionBudget{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	return options
+}
+
+// An explicit flag replaces the environment default, including a malformed one.
+// Only the resulting value determines the configured policy.
+func effectiveNativeSessionMaxBytes(flags *flag.FlagSet, value int, envErr error) (int, error) {
+	explicit := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "native-session-max-bytes" {
+			explicit = true
+		}
+	})
+	if !explicit && envErr != nil {
+		return 0, envErr
+	}
+	return harnessv2.NormalizeNativeSessionMaxBytes(value)
+}
+
+func nativeSessionMaxBytesFromEnv() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("ORKA_NATIVE_SESSION_MAX_BYTES"))
+	if raw == "" {
+		return harnessv2.DefaultMaxNativeSessionBytes, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("ORKA_NATIVE_SESSION_MAX_BYTES must be an integer")
+	}
+	limit, err = harnessv2.NormalizeNativeSessionMaxBytes(limit)
+	if err != nil {
+		return 0, fmt.Errorf("ORKA_NATIVE_SESSION_MAX_BYTES: %w", err)
+	}
+	return limit, nil
 }
 
 func envBool(name string) bool {

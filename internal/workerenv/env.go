@@ -62,18 +62,19 @@ const (
 	OutboundAccessTrustedTokenEndpointServices = "ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"
 
 	// AI worker env vars.
-	AIProvider          = "ORKA_AI_PROVIDER"
-	AIModel             = "ORKA_AI_MODEL"
-	AITemperature       = "ORKA_AI_TEMPERATURE"
-	AIMaxTokens         = "ORKA_AI_MAX_TOKENS"
-	AIPrompt            = "ORKA_AI_PROMPT"
-	AISystemPrompt      = "ORKA_AI_SYSTEM_PROMPT"
-	AIBaseURL           = "ORKA_AI_BASE_URL"
-	AIAzureAPIVersion   = "ORKA_AI_AZURE_API_VERSION"
-	AITools             = "ORKA_AI_TOOLS"
-	GatewayReplyEnabled = "ORKA_GATEWAY_REPLY_ENABLED"
-	AIFallbackCount     = "ORKA_AI_FALLBACK_COUNT"
-	ControllerMode      = "ORKA_CONTROLLER_MODE"
+	AIProvider            = "ORKA_AI_PROVIDER"
+	AIModel               = "ORKA_AI_MODEL"
+	AITemperature         = "ORKA_AI_TEMPERATURE"
+	AIMaxTokens           = "ORKA_AI_MAX_TOKENS"
+	AIPrompt              = "ORKA_AI_PROMPT"
+	AISystemPrompt        = "ORKA_AI_SYSTEM_PROMPT"
+	AIBaseURL             = "ORKA_AI_BASE_URL"
+	AIAzureAPIVersion     = "ORKA_AI_AZURE_API_VERSION"
+	AIAzureDeploymentName = "ORKA_AI_AZURE_DEPLOYMENT_NAME"
+	AITools               = "ORKA_AI_TOOLS"
+	GatewayReplyEnabled   = "ORKA_GATEWAY_REPLY_ENABLED"
+	AIFallbackCount       = "ORKA_AI_FALLBACK_COUNT"
+	ControllerMode        = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -345,11 +346,12 @@ func TransactionLogFields(transactionID, profile string) string {
 
 // FallbackProviderEnv is one fallback provider entry from the AI worker env contract.
 type FallbackProviderEnv struct {
-	Provider        string
-	APIKey          string
-	Model           string
-	BaseURL         string
-	AzureAPIVersion string
+	Provider            string
+	APIKey              string
+	Model               string
+	BaseURL             string
+	AzureAPIVersion     string
+	AzureDeploymentName string
 }
 
 // FallbackPrefix returns the prefix for fallback provider i.
@@ -362,6 +364,9 @@ func FallbackAPIKeyKey(i int) string          { return FallbackPrefix(i) + "_API
 func FallbackModelKey(i int) string           { return FallbackPrefix(i) + "_MODEL" }
 func FallbackBaseURLKey(i int) string         { return FallbackPrefix(i) + "_BASE_URL" }
 func FallbackAzureAPIVersionKey(i int) string { return FallbackPrefix(i) + "_AZURE_API_VERSION" }
+func FallbackAzureDeploymentNameKey(i int) string {
+	return FallbackPrefix(i) + "_AZURE_DEPLOYMENT_NAME"
+}
 
 // EnvVars renders the non-secret fallback metadata env vars for fallback i.
 // API keys should normally be rendered from SecretKeyRef by the caller.
@@ -372,6 +377,7 @@ func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 	}
 	envVars = AppendIfSet(envVars, FallbackBaseURLKey(i), e.BaseURL)
 	envVars = AppendIfSet(envVars, FallbackAzureAPIVersionKey(i), e.AzureAPIVersion)
+	envVars = AppendIfSet(envVars, FallbackAzureDeploymentNameKey(i), e.AzureDeploymentName)
 	if e.APIKey != "" {
 		envVars = append(envVars, Env(FallbackAPIKeyKey(i), e.APIKey))
 	}
@@ -381,11 +387,12 @@ func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 // ParseFallbackProviderEnv reads fallback provider i.
 func ParseFallbackProviderEnv(getenv func(string) string, i int) FallbackProviderEnv {
 	return FallbackProviderEnv{
-		Provider:        getenv(FallbackProviderKey(i)),
-		APIKey:          getenv(FallbackAPIKeyKey(i)),
-		Model:           getenv(FallbackModelKey(i)),
-		BaseURL:         getenv(FallbackBaseURLKey(i)),
-		AzureAPIVersion: getenv(FallbackAzureAPIVersionKey(i)),
+		Provider:            getenv(FallbackProviderKey(i)),
+		APIKey:              getenv(FallbackAPIKeyKey(i)),
+		Model:               getenv(FallbackModelKey(i)),
+		BaseURL:             getenv(FallbackBaseURLKey(i)),
+		AzureAPIVersion:     getenv(FallbackAzureAPIVersionKey(i)),
+		AzureDeploymentName: getenv(FallbackAzureDeploymentNameKey(i)),
 	}
 }
 
@@ -419,6 +426,7 @@ type AIWorkerEnv struct {
 	SystemPrompt                     string
 	BaseURL                          string
 	AzureAPIVersion                  string
+	AzureDeploymentName              string
 	Tools                            []string
 	GatewayReplyEnabled              bool
 	Fallbacks                        []FallbackProviderEnv
@@ -448,6 +456,7 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	)
 	envVars = AppendIfSet(envVars, AIBaseURL, e.BaseURL)
 	envVars = AppendIfSet(envVars, AIAzureAPIVersion, e.AzureAPIVersion)
+	envVars = AppendIfSet(envVars, AIAzureDeploymentName, e.AzureDeploymentName)
 	if e.GatewayReplyEnabled {
 		envVars = append(envVars, Env(GatewayReplyEnabled, "true"))
 	}
@@ -488,6 +497,7 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		SystemPrompt:                     getenv(AISystemPrompt),
 		BaseURL:                          getenv(AIBaseURL),
 		AzureAPIVersion:                  getenv(AIAzureAPIVersion),
+		AzureDeploymentName:              getenv(AIAzureDeploymentName),
 		Tools:                            SplitCSV(getenv(AITools)),
 		GatewayReplyEnabled:              IsTrue(getenv(GatewayReplyEnabled)),
 		Fallbacks:                        ParseFallbacks(getenv),

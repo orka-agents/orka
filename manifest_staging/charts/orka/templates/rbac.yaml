@@ -351,7 +351,7 @@ rules:
   # Virtual Session API permissions
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
-    verbs: ["get", "list", "update", "delete"]
+    verbs: ["get", "list", "create", "update", "delete"]
 
   # Chat admission does not authorize nested tool resource operations.
   - apiGroups: ["core.orka.ai"]
