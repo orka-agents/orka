@@ -554,8 +554,9 @@ func claudeSessionProjection(
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
 	} else {
-		// Claude Code 2.1.217 infers high effort for unknown gateway model IDs,
-		// including claude-haiku-4.5, even when the model rejects effort.
+		// Claude Code (verified through 2.1.293) infers high effort for unknown
+		// gateway model IDs, including claude-haiku-4.5, even when the model
+		// rejects effort.
 		// "unset" omits that inferred API field; explicit effort stays in options
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}

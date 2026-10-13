@@ -87,12 +87,12 @@ Claude inputs:
 
 | Input | Pin |
 | --- | --- |
-| Claude Agent ACP source | commit `c19bddcf7914259d6c15103a2d1580c7371e1d16`; codeload archive SHA-256 `e927898fd1b9d32a9a070c4217a89ba793c2baa1b03a4ffb509b13236333cf36` |
-| Claude Agent ACP release | `0.61.0`; npm tar SHA-256 `bb410d53e2d13591da5ebcaf09ae055d166ffefb27b7172988650cd62ef4ebd3` |
-| Claude Agent SDK | `0.3.217`; npm tar SHA-256 `20363761b29724950b749ecbc5186c46e29f2a0330554ca309a9e7ff8d6e5799` |
-| Claude Code | `2.1.217`, carried by the SDK native package |
-| Claude native `linux/amd64` | npm tar SHA-256 `8d2ccffbdf63aef1436a30b0fd32ef0eac663c3465318b181138471a68f02b92` |
-| Claude native `linux/arm64` | npm tar SHA-256 `51080502df2942d2092c4a5b7122eda518041fbe954027a1e128ede3cb337563` |
+| Claude Agent ACP source | commit `4e1fc1e8df2b9af3b1b2d6880ba90c5862283ba8`; codeload archive SHA-256 `533a654f100d54b86ce457fc128e7b1f3e85e3478474e536968bca6999953242` |
+| Claude Agent ACP release | `0.89.1`; npm tar SHA-256 `0df9fa22a5e1ccc39bfba37c0c58f272febed6884fb51a2df970840796ea2acb` |
+| Claude Agent SDK | `0.3.293`; npm tar SHA-256 `395bfbda4294c6334fa18be3706a46ff31851b4f4a6f74ba11ac96c9d97ced9f` |
+| Claude Code | `2.1.293`, carried by the SDK native package |
+| Claude native `linux/amd64` | npm tar SHA-256 `bdcb3a8e653e96aace67adb5ce6a50d20753c62093ec45396882fdb327535a76` |
+| Claude native `linux/arm64` | npm tar SHA-256 `7a896de19be15b52b0b0ede2befe58c11ff2321064c3333ccac3f84eadafc36c` |
 
 GitHub Copilot inputs:
 
@@ -203,7 +203,7 @@ docker buildx build \
   --builder remote-vm \
   --platform linux/amd64,linux/arm64 \
   --file workers/acp/images/claude/Dockerfile \
-  --tag docker.io/sozercan/orka-acp-claude:0.61.0-sdk-0.3.217 \
+  --tag docker.io/sozercan/orka-acp-claude:0.89.1-sdk-0.3.293 \
   --provenance=mode=max \
   --sbom=true \
   --push \
