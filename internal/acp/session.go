@@ -512,6 +512,16 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 			return nil, AgentCapabilities{}, fmt.Errorf("exited adapter cleanup could not be proven; remaining pids %v", status.RemainingPIDs)
 		}
 	}
+	// The exited client's read loop calls this session's handlers
+	// synchronously and closes Done when it ends. Wait for it, so a
+	// notification still buffered on the old stdout is delivered now, while
+	// no prompt is active, and can never reach the prompt the replacement
+	// admits.
+	select {
+	case <-exited.Client().Done():
+	case <-resumeCtx.Done():
+		return nil, AgentCapabilities{}, fmt.Errorf("drain exited adapter output: %w", resumeCtx.Err())
+	}
 	process, capabilities, err := s.launchAdapter(resumeCtx)
 	if err != nil {
 		if process != nil {
