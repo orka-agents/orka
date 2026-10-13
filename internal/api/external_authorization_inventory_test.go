@@ -59,6 +59,8 @@ GET /api/v1/tasks/:id/artifacts | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/artifacts/:filename | get core.orka.ai:tasks protected
 GET /api/v1/sessions | list core.orka.ai:sessions
 GET /api/v1/sessions/:id | get core.orka.ai:sessions protected
+GET /api/v1/sessions/:id/native | get core.orka.ai:sessions protected
+POST /api/v1/sessions/:id/native | create core.orka.ai:sessions; get core.orka.ai:sessions protected
 GET /api/v1/sessions/:id/events | get core.orka.ai:sessions protected
 GET /api/v1/sessions/:id/stream | get core.orka.ai:sessions protected
 DELETE /api/v1/sessions/:id | delete core.orka.ai:sessions protected
