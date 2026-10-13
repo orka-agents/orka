@@ -596,6 +596,8 @@ func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDiges
 // session/resume is then refused instead of spending the prompt's turns. It is
 // a no-op when the adapter is alive or the session is deleted, busy, or has
 // already settled promptID; StartPromptWithLeaseDeadline reports those cases.
+// It is the only path that restarts an adapter: StartPromptWithLeaseDeadline
+// treats an exited adapter as lost.
 func (s *RuntimeSession) RecoverExitedAdapter(ctx context.Context, promptID, requestDigest string, leaseDeadline time.Time) error {
 	promptID = strings.TrimSpace(promptID)
 	requestDigest = strings.TrimSpace(requestDigest)
@@ -617,8 +619,9 @@ func (s *RuntimeSession) RecoverExitedAdapter(ctx context.Context, promptID, req
 		s.mu.Unlock()
 		return nil
 	}
-	// As in StartPromptWithLeaseDeadline: a restart that finished past the
-	// lease retires the replacement before any ACP prompt write.
+	// A restart can finish its RPC on time but wait for s.mu past the lease.
+	// Retire that replacement before any ACP prompt write, so the caller gets
+	// a typed loss instead of a generic lease failure.
 	s.deleted = true
 	process := s.process
 	s.mu.Unlock()
@@ -676,28 +679,18 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 		s.mu.Unlock()
 		return PromptRun{}, &DuplicatePromptError{PromptID: promptID, Active: true}
 	}
-	restartsBeforeAdmission := s.adapterRestarts
-	if err := s.recoverExitedAdapterLocked(ctx, promptID, requestDigest, leaseDeadline); err != nil {
-		s.mu.Unlock()
-		return PromptRun{}, err
-	}
-	if s.deleted {
-		s.mu.Unlock()
-		return PromptRun{}, fmt.Errorf("runtime session is deleted")
-	}
-	if !leaseDeadline.After(time.Now()) {
-		leaseErr := fmt.Errorf("prompt lease expired before admission: %w", context.DeadlineExceeded)
-		if s.adapterRestarts == restartsBeforeAdmission {
-			s.mu.Unlock()
-			return PromptRun{}, leaseErr
+	if exited := s.process; processExited(exited) {
+		// Only RecoverExitedAdapter restarts an adapter, before the caller
+		// grants this prompt any access. An adapter that exited after that
+		// is lost rather than resumed with the prompt's gates already open.
+		exitErr := errors.New("adapter process exited")
+		if exited != nil {
+			if err := exited.Client().Err(); err != nil {
+				exitErr = err
+			}
 		}
-		// Recovery may finish its RPC on time but wait for this mutex past
-		// the lease. Retire the replacement before any ACP prompt write.
-		s.deleted = true
-		process := s.process
 		s.mu.Unlock()
-		_ = stopProcessBestEffort(process, s.config.CancelGrace)
-		return PromptRun{}, &AdapterLostError{Attempted: true, Cause: leaseErr}
+		return PromptRun{}, &AdapterLostError{Cause: exitErr}
 	}
 	process := s.process
 	active := &activePrompt{

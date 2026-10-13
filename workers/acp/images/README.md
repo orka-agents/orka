@@ -160,9 +160,10 @@ child exits while its RuntimeSession is idle and the agent advertises
 `sessionCapabilities.resume`, the supervisor restarts the adapter under the
 same session identity and reconnects it with `session/resume` (no history
 replay) before the next prompt. The restart finishes before that prompt gets
-provider or MCP access, so a model request the agent sends during
+provider or MCP access, so a model request the agent makes before answering
 `session/resume` is refused instead of counting against the prompt's
-`maxTurns`. Notifications received while the resume
+`maxTurns`; Claude Agent ACP 0.89.1 completes its one such request before it
+answers. Notifications received while the resume
 handshake is in flight are discarded. Session-control updates such as
 `available_commands_update` are excluded from harness prompt streams
 regardless of arrival order. This resume is same-Pod only: the agent's state

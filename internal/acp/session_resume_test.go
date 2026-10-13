@@ -12,11 +12,24 @@ import (
 	"time"
 )
 
+// startPromptAfterRecovery mirrors the supervisor: resume an adapter that
+// exited while idle, then submit the prompt under the same lease.
+func startPromptAfterRecovery(ctx context.Context, session *RuntimeSession, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time) (PromptRun, error) {
+	if err := session.RecoverExitedAdapter(ctx, promptID, requestDigest, leaseDeadline); err != nil {
+		return PromptRun{}, err
+	}
+	return session.StartPromptWithLeaseDeadline(ctx, promptID, requestDigest, prompt, leaseDeadline)
+}
+
+func defaultPromptLease(session *RuntimeSession) time.Time {
+	return time.Now().Add(session.config.PromptLease)
+}
+
 func runHelperPrompt(t *testing.T, session *RuntimeSession, promptID string) (PromptResult, int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	run, err := session.StartPrompt(ctx, promptID, "sha256:"+promptID, []ContentBlock{Text("hello")})
+	run, err := startPromptAfterRecovery(ctx, session, promptID, "sha256:"+promptID, []ContentBlock{Text("hello")}, defaultPromptLease(session))
 	if err != nil {
 		t.Fatalf("start %s: %v", promptID, err)
 	}
@@ -74,6 +87,32 @@ func TestRuntimeSessionResumesAdapterInPlaceAfterIdleExit(t *testing.T) {
 	}
 }
 
+// Only RecoverExitedAdapter restarts an adapter. A caller that has already
+// opened the prompt's provider gates must never resume one inside StartPrompt,
+// where a model call made during session/resume would be admitted.
+func TestRuntimeSessionStartPromptDoesNotResumeExitedAdapter(t *testing.T) {
+	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{helperExitAfterPromptEnv: "1"})
+	result, _ := runHelperPrompt(t, session, "prompt-1")
+	if result.Outcome != PromptOutcomeCompleted {
+		t.Fatalf("first prompt = %#v", result)
+	}
+	awaitAdapterExit(t, session)
+	exited := session.Process()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")})
+	if lost, ok := errors.AsType[*AdapterLostError](err); !ok || lost.Attempted {
+		t.Fatalf("StartPrompt on an exited adapter = %v, want unattempted AdapterLostError", err)
+	}
+	if session.Process() != exited || session.AdapterRestarts() != 0 {
+		t.Fatal("StartPrompt restarted the exited adapter")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, helperResumedStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("StartPrompt sent session/resume: stat = %v", err)
+	}
+}
+
 func TestRuntimeSessionIdleAdapterExitWithoutResumeCapabilityIsLost(t *testing.T) {
 	session, _ := newTestRuntimeSessionWithOptions(t, "immediate", nil, map[string]string{helperExitAfterPromptEnv: "1"})
 	result, _ := runHelperPrompt(t, session, "prompt-1")
@@ -84,7 +123,7 @@ func TestRuntimeSessionIdleAdapterExitWithoutResumeCapabilityIsLost(t *testing.T
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")})
+	_, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")}, defaultPromptLease(session))
 	var lost *AdapterLostError
 	if !errors.As(err, &lost) {
 		t.Fatalf("prompt after unresumable adapter exit = %v, want AdapterLostError", err)
@@ -108,7 +147,7 @@ func TestRuntimeSessionRejectedResumeIsLostAndStopsReplacement(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")})
+	_, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")}, defaultPromptLease(session))
 	var lost *AdapterLostError
 	if !errors.As(err, &lost) || !lost.Attempted {
 		t.Fatalf("prompt after rejected resume = %v, want attempted AdapterLostError", err)
@@ -121,7 +160,7 @@ func TestRuntimeSessionRejectedResumeIsLostAndStopsReplacement(t *testing.T) {
 	}
 	// A later prompt must fail the same way rather than wedge on the
 	// in-flight marker.
-	if _, err := session.StartPrompt(ctx, "prompt-3", "sha256:prompt-3", []ContentBlock{Text("again")}); !errors.As(err, &lost) {
+	if _, err := startPromptAfterRecovery(ctx, session, "prompt-3", "sha256:prompt-3", []ContentBlock{Text("again")}, defaultPromptLease(session)); !errors.As(err, &lost) {
 		t.Fatalf("second prompt after rejected resume = %v, want AdapterLostError", err)
 	}
 }
@@ -140,7 +179,7 @@ func TestRuntimeSessionInterruptedResumeIsLostAndStopsReplacement(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")})
+	_, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")}, defaultPromptLease(session))
 	if lost, ok := errors.AsType[*AdapterLostError](err); !ok || !lost.Attempted {
 		t.Fatalf("prompt whose caller left mid-resume = %v, want attempted AdapterLostError", err)
 	}
@@ -182,7 +221,7 @@ func TestRuntimeSessionCancelPromptDuringBlockedResume(t *testing.T) {
 			t.Cleanup(releaseResume)
 			started := make(chan error, 1)
 			go func() {
-				run, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run")})
+				run, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run")}, defaultPromptLease(session))
 				if err == nil {
 					for event := range run.Events {
 						run.Release(event)
@@ -233,7 +272,7 @@ func TestRuntimeSessionCancelPromptDuringBlockedResume(t *testing.T) {
 			} else if err == nil || cleanup.Proven {
 				t.Fatal("unsupported descendant inspection produced a cleanup proof")
 			}
-			if _, err := session.StartPrompt(ctx, "after-delete", "sha256:after-delete", []ContentBlock{Text("must not run")}); err == nil {
+			if _, err := startPromptAfterRecovery(ctx, session, "after-delete", "sha256:after-delete", []ContentBlock{Text("must not run")}, defaultPromptLease(session)); err == nil {
 				t.Fatal("cleanup reopened the runtime session")
 			}
 		})
@@ -268,7 +307,7 @@ func TestRuntimeSessionDeleteDuringBlockedResume(t *testing.T) {
 			t.Cleanup(releaseResume)
 			started := make(chan error, 1)
 			go func() {
-				run, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run")})
+				run, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run")}, defaultPromptLease(session))
 				if err == nil {
 					for event := range run.Events {
 						run.Release(event)
@@ -312,7 +351,7 @@ func TestRuntimeSessionDeleteDuringBlockedResume(t *testing.T) {
 				t.Fatal("unsupported descendant inspection produced a cleanup proof")
 			}
 			assertRestartCancelledBeforeAdmission(t, session, exited, replacementPID, stateDir)
-			if _, err := session.StartPrompt(ctx, "after-delete", "sha256:after-delete", []ContentBlock{Text("must not run")}); err == nil {
+			if _, err := startPromptAfterRecovery(ctx, session, "after-delete", "sha256:after-delete", []ContentBlock{Text("must not run")}, defaultPromptLease(session)); err == nil {
 				t.Fatal("deletion reopened admission")
 			}
 		})
@@ -321,15 +360,15 @@ func TestRuntimeSessionDeleteDuringBlockedResume(t *testing.T) {
 
 func assertRestartPromptIdentityReserved(t *testing.T, session *RuntimeSession, ctx context.Context) {
 	t.Helper()
-	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("duplicate")})
+	_, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("duplicate")}, defaultPromptLease(session))
 	if duplicate, ok := errors.AsType[*DuplicatePromptError](err); !ok || !duplicate.Active {
 		t.Errorf("pending identity duplicate = %v, want active duplicate", err)
 	}
-	_, err = session.StartPrompt(ctx, "prompt-2", "sha256:changed", []ContentBlock{Text("changed")})
+	_, err = startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:changed", []ContentBlock{Text("changed")}, defaultPromptLease(session))
 	if _, ok := errors.AsType[*DigestConflictError](err); !ok {
 		t.Errorf("pending identity digest conflict = %v", err)
 	}
-	if _, err := session.StartPrompt(ctx, "prompt-other", "sha256:other", []ContentBlock{Text("other")}); err == nil {
+	if _, err := startPromptAfterRecovery(ctx, session, "prompt-other", "sha256:other", []ContentBlock{Text("other")}, defaultPromptLease(session)); err == nil {
 		t.Error("another prompt was admitted during restart")
 	}
 	if _, err := session.CancelPrompt(ctx, "prompt-other"); err == nil {
@@ -360,12 +399,12 @@ func assertRestartCancelledBeforeAdmission(t *testing.T, session *RuntimeSession
 
 func assertCancelledPromptIdentityNotReplayed(t *testing.T, session *RuntimeSession, ctx context.Context) {
 	t.Helper()
-	_, err := session.StartPrompt(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not replay")})
+	_, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not replay")}, defaultPromptLease(session))
 	duplicate, ok := errors.AsType[*DuplicatePromptError](err)
 	if !ok || duplicate.Active || duplicate.Result == nil || duplicate.Result.Accepted || duplicate.Result.Outcome != PromptOutcomeCancelled {
 		t.Fatalf("cancelled identity replay = %v, want settled not-accepted duplicate", err)
 	}
-	if _, err := session.StartPrompt(ctx, "prompt-2", "sha256:changed", []ContentBlock{Text("changed")}); err == nil {
+	if _, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:changed", []ContentBlock{Text("changed")}, defaultPromptLease(session)); err == nil {
 		t.Fatal("cancelled prompt identity accepted a conflicting digest")
 	} else if _, ok := errors.AsType[*DigestConflictError](err); !ok {
 		t.Fatalf("cancelled identity digest conflict = %v", err)
@@ -469,7 +508,7 @@ func TestRuntimeSessionRejectsLeaseExpiredWhileResumeWaitsForAdmissionLock(t *te
 	deadline := time.Now().Add(2 * time.Second)
 	started := make(chan error, 1)
 	go func() {
-		run, err := session.StartPromptWithLeaseDeadline(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run after lease expiry")}, deadline)
+		run, err := startPromptAfterRecovery(ctx, session, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("must not run after lease expiry")}, deadline)
 		if err == nil {
 			for event := range run.Events {
 				run.Release(event)
@@ -502,7 +541,7 @@ func TestRuntimeSessionRejectsLeaseExpiredWhileResumeWaitsForAdmissionLock(t *te
 	if session.AdapterRestarts() != 1 {
 		t.Fatal("test did not complete the resume RPC before lease expiry")
 	}
-	if _, err := session.StartPrompt(ctx, "prompt-3", "sha256:prompt-3", []ContentBlock{Text("must not reuse retired replacement")}); err == nil {
+	if _, err := startPromptAfterRecovery(ctx, session, "prompt-3", "sha256:prompt-3", []ContentBlock{Text("must not reuse retired replacement")}, defaultPromptLease(session)); err == nil {
 		t.Fatal("lease-expired replacement remained open to prompt admission")
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, helperPromptAfterResumeFile)); !errors.Is(err, os.ErrNotExist) {
