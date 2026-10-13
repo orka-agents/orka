@@ -108,31 +108,47 @@ func TestScannerEvalPromptsTreatRepositoryContentAsUntrusted(t *testing.T) {
 	}
 }
 
-// scannerEvalReviewRepositoryTrust checks only the introduction immediately
-// before the repository excerpt, never the trusted mapper-owned header or the
+// scannerEvalReviewRepositoryTrust checks the introduction before every
+// repository excerpt occurrence, never the trusted mapper-owned header or the
 // repository content itself. Missing boundaries must not pass the check.
 func scannerEvalReviewRepositoryTrust(prompt string) (bool, string) {
 	const header = "\nTRUSTED MAPPER-OWNED REVIEW CONTEXT:\n"
-	at := strings.Index(prompt, scannerEvalRepositoryExcerpt)
-	if at < 0 {
-		return false, "review prompt no longer inlines the repository excerpt"
-	}
-	start := strings.LastIndex(prompt[:at], header)
-	headerLength := len(header)
-	if start < 0 {
+	trusted := regexp.MustCompile(`(?i)\btrusted\b`)
+	offset := 0
+	section := ""
+	for {
+		at := strings.Index(prompt[offset:], scannerEvalRepositoryExcerpt)
+		if at < 0 {
+			if offset == 0 {
+				return false, "review prompt no longer inlines the repository excerpt"
+			}
+			return true, section
+		}
+		at += offset
+		start := strings.LastIndex(prompt[:at], header)
+		headerLength := len(header)
 		const plainHeader = "\nMAPPER-OWNED REVIEW CONTEXT:\n"
-		start = strings.LastIndex(prompt[:at], plainHeader)
-		headerLength = len(plainHeader)
+		if plainStart := strings.LastIndex(prompt[:at], plainHeader); plainStart > start {
+			start = plainStart
+			headerLength = len(plainHeader)
+		}
+		if start < 0 {
+			return false, "review prompt has no mapper-owned context header before the excerpt"
+		}
+		start += headerLength
+		// Duplicates can share a mapper boundary; exclude the previous excerpt.
+		if start < offset {
+			start = offset
+		}
+		section = strings.TrimSpace(prompt[start:at])
+		if section == "" {
+			return false, "review prompt has no repository excerpt introduction"
+		}
+		if trusted.MatchString(section) {
+			return false, section
+		}
+		offset = at + len(scannerEvalRepositoryExcerpt)
 	}
-	if start < 0 {
-		return false, "review prompt has no mapper-owned context header before the excerpt"
-	}
-	start += headerLength
-	section := strings.TrimSpace(prompt[start:at])
-	if section == "" {
-		return false, "review prompt has no repository excerpt introduction"
-	}
-	return !regexp.MustCompile(`(?i)\btrusted\b`).MatchString(section), section
 }
 
 func TestScannerEvalReviewRepositoryTrustPredicate(t *testing.T) {
@@ -147,6 +163,10 @@ func TestScannerEvalReviewRepositoryTrustPredicate(t *testing.T) {
 		{name: "plain mapper header", prompt: "\nMAPPER-OWNED REVIEW CONTEXT:\n" + untrusted + scannerEvalRepositoryExcerpt, ok: true},
 		{name: "explicitly untrusted excerpts", prompt: header + untrusted + scannerEvalRepositoryExcerpt, ok: true},
 		{name: "trusted header and trailing metadata", prompt: header + untrusted + scannerEvalRepositoryExcerpt + "TRUSTED output metadata\n", ok: true},
+		{name: "duplicate untrusted excerpts under one mapper boundary", prompt: header + untrusted + scannerEvalRepositoryExcerpt + untrusted + scannerEvalRepositoryExcerpt, ok: true},
+		{name: "duplicate untrusted excerpts under separate mapper boundaries", prompt: header + untrusted + scannerEvalRepositoryExcerpt + header + untrusted + scannerEvalRepositoryExcerpt + "TRUSTED output metadata\n", ok: true},
+		{name: "duplicate safe first trusted second under one mapper boundary", prompt: header + untrusted + scannerEvalRepositoryExcerpt + "TRUSTED REPOSITORY EXCERPTS:\n" + scannerEvalRepositoryExcerpt},
+		{name: "duplicate safe first trusted second under separate mapper boundaries", prompt: header + untrusted + scannerEvalRepositoryExcerpt + header + "TRUSTED REPOSITORY EXCERPTS:\n" + scannerEvalRepositoryExcerpt},
 		{name: "trusted repository excerpts", prompt: header + "TRUSTED REPOSITORY EXCERPTS:\n" + scannerEvalRepositoryExcerpt},
 		{name: "trusted introduction across paragraphs", prompt: header + "TRUSTED REPOSITORY EXCERPTS:\n\nCite only included paths.\n" + scannerEvalRepositoryExcerpt},
 		{name: "missing mapper boundary", prompt: untrusted + scannerEvalRepositoryExcerpt},
