@@ -91,7 +91,7 @@ SOFTWARE.
 
 ## OpenCode
 
-The digest-pinned OpenCode ACP runtime image redistributes the unmodified OpenCode 1.18.9 native binary under the following MIT license.
+The digest-pinned OpenCode ACP runtime image redistributes the unmodified OpenCode 1.19.0 native binary under the following MIT license.
 
 MIT License
 

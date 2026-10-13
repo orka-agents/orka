@@ -11,19 +11,19 @@ RUN go build -buildvcs=false -trimpath -ldflags='-s -w' -o /usr/local/bin/artifa
 RUN set -eu; \
     mkdir -p /artifacts /src; \
     artifact-tool download \
-      "https://codeload.github.com/anomalyco/opencode/tar.gz/4da7bb44c84e013fa53e9c5d02ac753d1435c81a" \
-      "bbc3363c6886c63865a60b75d456fff3fbe6b87d8a86f44b2439900695b35de3" \
+      "https://codeload.github.com/anomalyco/opencode/tar.gz/733b2c627e5aec39cb33cc22373bdce33053ef2c" \
+      "ab433f7a5fc9e54c90da18bd3457298009f426424805f043aa32c03543b4a192" \
       /artifacts/opencode-source.tgz 100663296; \
     case "$TARGETARCH" in \
       amd64) \
-        native_url="https://registry.npmjs.org/opencode-linux-x64-baseline/-/opencode-linux-x64-baseline-1.18.9.tgz"; \
-        native_sha="59bf22db1f20c6c9836c926800a8e6416228330c2b518ade3d431d315cd76366"; \
+        native_url="https://registry.npmjs.org/opencode-linux-x64-baseline/-/opencode-linux-x64-baseline-1.19.0.tgz"; \
+        native_sha="6bdf946045ebfa5773811d0037c1ca8c8a3831880434289b9e4a40c2f1fe8432"; \
         ripgrep_url="https://snapshot.debian.org/file/096560a159a8be70155f16209d91777019011677"; \
         ripgrep_fallback_url="https://deb.debian.org/debian/pool/main/r/rust-ripgrep/ripgrep_15.2.0-1_amd64.deb"; \
         ripgrep_deb_sha="d9d86586969e925b8627936ec4387d10cc65baf7d42195258743a49e711b6157" ;; \
       arm64) \
-        native_url="https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.9.tgz"; \
-        native_sha="4846a7e470797950f209126442a291cc06574fd44ddbb96c89d730017f60aae7"; \
+        native_url="https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.19.0.tgz"; \
+        native_sha="8481102c5d475013302d2f4766cea02b7390e76e74c146408a8cebe2b7f6778f"; \
         ripgrep_url="https://snapshot.debian.org/file/482bbe93dc82997d7d84c901990e8d9f4327457c"; \
         ripgrep_fallback_url="https://deb.debian.org/debian/pool/main/r/rust-ripgrep/ripgrep_15.2.0-1_arm64.deb"; \
         ripgrep_deb_sha="8f18379cd499dd890d27190a359fe194d0bce92d7efad8e47b0f636e64bf4b46" ;; \
@@ -38,10 +38,10 @@ RUN set -eu; \
     fi; \
     tar -xzf /artifacts/opencode-source.tgz -C /src --strip-components=1; \
     grep -Eq '"name":[[:space:]]*"opencode"' /src/packages/opencode/package.json; \
-    grep -Eq '"version":[[:space:]]*"1\.18\.9"' /src/packages/opencode/package.json; \
+    grep -Eq '"version":[[:space:]]*"1\.19\.0"' /src/packages/opencode/package.json; \
     printf '%s  %s\n' '625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b' /src/LICENSE | sha256sum -c -; \
     printf '%s  %s\n' 'b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812' /tmp/opencode-AGENTS.md | sha256sum -c -; \
-    printf '%s  %s\n' '0327bebb4a2fe44b09b19b4de3bc3de7e6c148712e17eff346ba346abc7c3349' /tmp/orka-NOTICE.md | sha256sum -c -; \
+    printf '%s  %s\n' '0f876edfd5c73c4a99ffb0565c8ea3350a4db1167cc3ded7d8b50cc0fa061ff0' /tmp/orka-NOTICE.md | sha256sum -c -; \
     cp /src/LICENSE /artifacts/opencode-LICENSE; \
     cp /src/README.md /artifacts/opencode-README.md; \
     cp /tmp/opencode-AGENTS.md /artifacts/opencode-AGENTS.md; \
@@ -61,22 +61,22 @@ RUN set -eu; \
     case "$TARGETARCH" in \
       amd64) \
         package_name=opencode-linux-x64-baseline; \
-        binary_sha=7c4d91c84d2bfdeabb59257e3490c5e5acb08f2aacb3e42f3ddc296a1c3f1aca; \
+        binary_sha=135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd; \
         debian_arch=amd64; \
         ripgrep_sha=af751db9b06d308fd5078aa973880cc8c75678289386bf1a6ee5faa614aa6f2d ;; \
       arm64) \
         package_name=opencode-linux-arm64; \
-        binary_sha=ae8a9b7c591d3c763463f16bfb5f45230c4c741f039e8967218662836449ecdf; \
+        binary_sha=1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df; \
         debian_arch=arm64; \
         ripgrep_sha=d3febe5d02e2a15da0909200caeb5af0be65e58736331c2ab88b7086d62e942b ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     grep -Eq '"name":[[:space:]]*"'"$package_name"'"' /tmp/native/package/package.json; \
-    grep -Eq '"version":[[:space:]]*"1\.18\.9"' /tmp/native/package/package.json; \
+    grep -Eq '"version":[[:space:]]*"1\.19\.0"' /tmp/native/package/package.json; \
     test -x /tmp/native/package/bin/opencode; \
     printf '%s  %s\n' "$binary_sha" /tmp/native/package/bin/opencode | sha256sum -c -; \
     install -m 0755 /tmp/native/package/bin/opencode /opt/opencode/bin/opencode; \
-    test "$(/opt/opencode/bin/opencode --version)" = "1.18.9"; \
+    test "$(/opt/opencode/bin/opencode --version)" = "1.19.0"; \
     test "$(dpkg-deb -f /tmp/ripgrep.deb Package)" = ripgrep; \
     test "$(dpkg-deb -f /tmp/ripgrep.deb Version)" = 15.2.0-1; \
     test "$(dpkg-deb -f /tmp/ripgrep.deb Architecture)" = "$debian_arch"; \
@@ -107,17 +107,17 @@ RUN set -eu; \
 
 FROM --platform=$TARGETPLATFORM docker.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 LABEL org.opencontainers.image.title="Orka ACP OpenCode runtime" \
-      org.opencontainers.image.description="Orka harness v2 ACP supervisor with native OpenCode ACP 1.18.9" \
+      org.opencontainers.image.description="Orka harness v2 ACP supervisor with native OpenCode ACP 1.19.0" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
       org.opencontainers.image.licenses="MIT AND (MIT OR Unlicense)" \
       ai.orka.acp.provider="opencode" \
-      ai.orka.acp.adapter.version="1.18.9" \
-      ai.orka.acp.adapter.revision="4da7bb44c84e013fa53e9c5d02ac753d1435c81a" \
-      ai.orka.acp.adapter.source.digest="sha256:bbc3363c6886c63865a60b75d456fff3fbe6b87d8a86f44b2439900695b35de3" \
-      ai.orka.acp.adapter.digest.amd64="sha256:59bf22db1f20c6c9836c926800a8e6416228330c2b518ade3d431d315cd76366" \
-      ai.orka.acp.adapter.digest.arm64="sha256:4846a7e470797950f209126442a291cc06574fd44ddbb96c89d730017f60aae7" \
-      ai.orka.acp.adapter.binary.digest.amd64="sha256:7c4d91c84d2bfdeabb59257e3490c5e5acb08f2aacb3e42f3ddc296a1c3f1aca" \
-      ai.orka.acp.adapter.binary.digest.arm64="sha256:ae8a9b7c591d3c763463f16bfb5f45230c4c741f039e8967218662836449ecdf" \
+      ai.orka.acp.adapter.version="1.19.0" \
+      ai.orka.acp.adapter.revision="733b2c627e5aec39cb33cc22373bdce33053ef2c" \
+      ai.orka.acp.adapter.source.digest="sha256:ab433f7a5fc9e54c90da18bd3457298009f426424805f043aa32c03543b4a192" \
+      ai.orka.acp.adapter.digest.amd64="sha256:6bdf946045ebfa5773811d0037c1ca8c8a3831880434289b9e4a40c2f1fe8432" \
+      ai.orka.acp.adapter.digest.arm64="sha256:8481102c5d475013302d2f4766cea02b7390e76e74c146408a8cebe2b7f6778f" \
+      ai.orka.acp.adapter.binary.digest.amd64="sha256:135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd" \
+      ai.orka.acp.adapter.binary.digest.arm64="sha256:1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df" \
       ai.orka.acp.ripgrep.version="15.2.0" \
       ai.orka.acp.ripgrep.debian.version="15.2.0-1" \
       ai.orka.acp.ripgrep.package.digest.amd64="sha256:d9d86586969e925b8627936ec4387d10cc65baf7d42195258743a49e711b6157" \
@@ -125,7 +125,7 @@ LABEL org.opencontainers.image.title="Orka ACP OpenCode runtime" \
       ai.orka.acp.ripgrep.binary.digest.amd64="sha256:af751db9b06d308fd5078aa973880cc8c75678289386bf1a6ee5faa614aa6f2d" \
       ai.orka.acp.ripgrep.binary.digest.arm64="sha256:d3febe5d02e2a15da0909200caeb5af0be65e58736331c2ab88b7086d62e942b" \
       ai.orka.acp.root-instruction.digest="sha256:b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812" \
-      ai.orka.notice.digest="sha256:0327bebb4a2fe44b09b19b4de3bc3de7e6c148712e17eff346ba346abc7c3349"
+      ai.orka.notice.digest="sha256:0f876edfd5c73c4a99ffb0565c8ea3350a4db1167cc3ded7d8b50cc0fa061ff0"
 ENV HOME=/root \
     ORKA_ACP_PROVIDER=opencode \
     PATH=/usr/local/bin:/usr/bin:/bin

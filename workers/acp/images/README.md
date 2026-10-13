@@ -112,14 +112,14 @@ OpenCode inputs:
 
 | Input | Pin |
 | --- | --- |
-| OpenCode release | `1.18.9` |
-| OpenCode source | tag commit `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`; codeload archive SHA-256 `bbc3363c6886c63865a60b75d456fff3fbe6b87d8a86f44b2439900695b35de3` |
-| OpenCode `linux/amd64` | baseline `opencode-linux-x64-baseline-1.18.9.tgz` (no AVX2 scheduling assumption); npm tar SHA-256 `59bf22db1f20c6c9836c926800a8e6416228330c2b518ade3d431d315cd76366`; extracted binary SHA-256 `7c4d91c84d2bfdeabb59257e3490c5e5acb08f2aacb3e42f3ddc296a1c3f1aca` |
-| OpenCode `linux/arm64` | `opencode-linux-arm64-1.18.9.tgz`; npm tar SHA-256 `4846a7e470797950f209126442a291cc06574fd44ddbb96c89d730017f60aae7`; extracted binary SHA-256 `ae8a9b7c591d3c763463f16bfb5f45230c4c741f039e8967218662836449ecdf` |
+| OpenCode release | `1.19.0` |
+| OpenCode source | tag commit `733b2c627e5aec39cb33cc22373bdce33053ef2c`; codeload archive SHA-256 `ab433f7a5fc9e54c90da18bd3457298009f426424805f043aa32c03543b4a192` |
+| OpenCode `linux/amd64` | baseline `opencode-linux-x64-baseline-1.19.0.tgz` (no AVX2 scheduling assumption); npm tar SHA-256 `6bdf946045ebfa5773811d0037c1ca8c8a3831880434289b9e4a40c2f1fe8432`; extracted binary SHA-256 `135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd` |
+| OpenCode `linux/arm64` | `opencode-linux-arm64-1.19.0.tgz`; npm tar SHA-256 `8481102c5d475013302d2f4766cea02b7390e76e74c146408a8cebe2b7f6778f`; extracted binary SHA-256 `1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df` |
 | ripgrep `linux/amd64` | Debian `15.2.0-1` glibc package from immutable snapshot file `096560a159a8be70155f16209d91777019011677` with a versioned Debian-pool fallback; package SHA-256 `d9d86586969e925b8627936ec4387d10cc65baf7d42195258743a49e711b6157`; extracted `rg` SHA-256 `af751db9b06d308fd5078aa973880cc8c75678289386bf1a6ee5faa614aa6f2d` |
 | ripgrep `linux/arm64` | Debian `15.2.0-1` glibc package from immutable snapshot file `482bbe93dc82997d7d84c901990e8d9f4327457c` with a versioned Debian-pool fallback; package SHA-256 `8f18379cd499dd890d27190a359fe194d0bce92d7efad8e47b0f636e64bf4b46`; extracted `rg` SHA-256 `d3febe5d02e2a15da0909200caeb5af0be65e58736331c2ab88b7086d62e942b` |
 | Orka root instruction | `workers/acp/images/opencode/AGENTS.md`; SHA-256 `b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812` |
-| Image third-party notice | `workers/acp/images/opencode/NOTICE.md` (mirrors root `NOTICE.md`); SHA-256 `0327bebb4a2fe44b09b19b4de3bc3de7e6c148712e17eff346ba346abc7c3349` |
+| Image third-party notice | `workers/acp/images/opencode/NOTICE.md` (mirrors root `NOTICE.md`); SHA-256 `0f876edfd5c73c4a99ffb0565c8ea3350a4db1167cc3ded7d8b50cc0fa061ff0` |
 
 Codex and Claude adapters are compiled from exact GitHub source archives after
 frozen `package-lock.json` installs with `npm ci --ignore-scripts`. Their
@@ -175,7 +175,7 @@ permission prompts. The image vendors the checksum-pinned Debian glibc ripgrep 1
 preventing OpenCode's Glob/Grep tools from
 attempting a runtime GitHub download. The private config directory is seeded
 only with empty `node_modules` plus root package/lock dependency metadata for
-`@opencode-ai/plugin` 1.18.9 so OpenCode's shallow dependency check does not
+`@opencode-ai/plugin` 1.19.0 so OpenCode's shallow dependency check does not
 launch a background network install; no plugin implementation is vendored. As
 with the other built-in runtime images, Git is intentionally absent: the ACP
 child sees a materialized workspace tree without repository credentials, and
@@ -227,7 +227,7 @@ docker buildx build \
   --builder remote-vm \
   --platform linux/amd64,linux/arm64 \
   --file workers/acp/images/opencode/Dockerfile \
-  --tag docker.io/sozercan/orka-acp-opencode:1.18.9-rg-15.2.0 \
+  --tag docker.io/sozercan/orka-acp-opencode:1.19.0-rg-15.2.0 \
   --provenance=mode=max \
   --sbom=true \
   --push \
