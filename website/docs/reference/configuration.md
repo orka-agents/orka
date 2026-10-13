@@ -1139,6 +1139,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--chat-tool-timeout` | `60s` | Max time for single tool execution |
 | `--chat-max-concurrent` | `10` | Max concurrent chat sessions |
 | `--chat-max-tasks-per-turn` | `5` | Max tasks created per chat turn |
+| `--native-session-max-bytes` | `8388608` | Maximum encoded native session bundle bytes. Environment default: `ORKA_NATIVE_SESSION_MAX_BYTES`; hard ceiling: `67108864`. Propagated to built-in runtimes. Local migration CLI uses `--max-bundle-bytes`. |
 | `--chat-max-session-size` | `512000` | Soft limit for session size before truncation (bytes) |
 | `--leader-elect` | `false` | Enable leader election. Static controller installations require `true`; the Lease is stored in the watched namespace. |
 | `--metrics-bind-address` | `0` | Metrics endpoint address |

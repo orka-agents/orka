@@ -165,6 +165,28 @@ func TestCodexAdapterUsesTrustedReasoningMetadata(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterUsesFrozenNoneReasoningEffort(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(codexReasoningEffortEnv, "high")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Metadata: map[string]string{
+			harness.MetadataRuntimePolicyFrozen: "true",
+			"reasoningEffort":                   "none",
+		},
+		Env: []string{codexReasoningEffortEnv + "=xhigh"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "model_reasoning_effort=none") ||
+		strings.Contains(joined, "model_reasoning_effort=high") || strings.Contains(joined, "model_reasoning_effort=xhigh") {
+		t.Fatalf("args = %q, want frozen none effort instead of environment defaults", joined)
+	}
+}
+
 func TestCodexAdapterRequiresAllowBash(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "false")
 	adapter := NewCodexAdapter(CodexAdapterConfig{})

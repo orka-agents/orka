@@ -1,0 +1,20 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[e2e:native-migration-local]"
+      },
+      "response": {
+        "content": "NATIVE_LOCAL_CONTINUATION"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:native-migration-cluster]"
+      },
+      "response": {
+        "content": "NATIVE_CLUSTER_CONTINUATION"
+      }
+    }
+  ]
+}

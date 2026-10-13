@@ -47,6 +47,7 @@ const (
 	architectureARM64            = "arm64"
 	acpCommandProtocol           = "acp"
 	EnvListenAddress             = "ORKA_ACP_LISTEN_ADDRESS"
+	EnvNativeSessionMaxBytes     = "ORKA_NATIVE_SESSION_MAX_BYTES"
 	EnvRuntimeInstanceID         = "ORKA_ACP_RUNTIME_INSTANCE_ID"
 	EnvSupervisorBootID          = "ORKA_ACP_SUPERVISOR_BOOT_ID"
 	EnvPodUID                    = "ORKA_ACP_POD_UID"
@@ -133,6 +134,10 @@ const EnvFoundryRecoveryProfileDigest = "ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGES
 
 //nolint:gocyclo // Keep environment defaults, overrides, and derived runtime limits together.
 func LoadConfigFromEnv() (Config, error) {
+	nativeSessionMaxBytes, err := nativeSessionMaxBytesFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	providerKind := requiredEnv(EnvProvider)
 	model := requiredEnv(EnvModel)
 	intent := harnessv2.WorkspaceIntent(requiredEnv(EnvWorkspaceIntent))
@@ -198,6 +203,7 @@ func LoadConfigFromEnv() (Config, error) {
 		foundryRecovery = true
 	}
 	limits := defaultProtocolLimits()
+	limits.MaxNativeSessionBytes = nativeSessionMaxBytes
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
 	if durableWorkspaceKey != "" {
 		// A stable data key belongs to one dedicated workspace. Enforce its
@@ -308,6 +314,7 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
+		SupportsNativeSessions:            providerKind == providerKindCodex,
 		SupportsFoundryRecovery:           foundryRecovery,
 		Provider:                          providerCaps,
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
@@ -451,6 +458,14 @@ func codexSessionProjection(
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
+	if request.NativeRestore != nil {
+		// Do not inherit imported approval or sandbox settings during resume.
+		// This is a fail-closed fallback for both workspace intents. Every prompt
+		// explicitly applies the orka-external agent mode's externalSandbox;
+		// the RuntimeSession boundary, not this fallback, governs workspace writes.
+		config["approval_policy"] = "on-request"
+		config["sandbox_mode"] = "read-only"
+	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		config["developer_instructions"] = systemPrompt
 	}
@@ -710,7 +725,8 @@ func providerProfile(
 				}
 				return map[string]string{
 					noBrowserEnv: "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
-					"CODEX_CONFIG": string(config), "INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
+					"CODEX_CONFIG": string(config), "MODEL_PROVIDER": codexProviderID,
+					"INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
 				}, nil
 			},
 			PrepareSession: prepareCodexHome,
@@ -1076,7 +1092,24 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxEventLineBytes: 1 << 20, MaxTerminalResultBytes: 1 << 20, MaxBufferedEvents: supervisorMaxBufferedPromptEvents,
 		MaxUpdateEventsPerSecond: maxUpdates, MinPromptLeaseMillis: 5_000, MaxPromptLeaseMillis: 120_000,
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
+		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+func nativeSessionMaxBytesFromEnv() (int, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvNativeSessionMaxBytes))
+	if raw == "" {
+		return harnessv2.DefaultMaxNativeSessionBytes, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", EnvNativeSessionMaxBytes)
+	}
+	limit, err = harnessv2.NormalizeNativeSessionMaxBytes(limit)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", EnvNativeSessionMaxBytes, err)
+	}
+	return limit, nil
 }
 
 func workspaceArtifactDownloadLimitFromEnv() (int64, error) {

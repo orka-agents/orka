@@ -190,8 +190,8 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 	}
 
 	// readSmoke ports run_read_smoke for one provider: a read that starts a
-	// Session, a continuation that must stay on the same RuntimeSession, and
-	// a fork of the continuation. It returns the Agent, Session, pool, nonce,
+	// Session, a continuation preserving its identity (cold after recorded retirement),
+	// and a fork of the continuation. It returns the Agent, Session, pool, nonce,
 	// and the continued RuntimeSession identity.
 	readSmoke := func(provider agentRuntimeProvider) (string, string, string, string, string, int64) {
 		agent := name("acp-" + provider.kind)
@@ -213,8 +213,16 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		expectTaskResult(task, nonce, agentRuntimeLicenseLine)
 		expectReadReachedModel(marker(provider.kind + "-read"))
 		firstUID, firstGeneration := taskSessionIdentity(Default, task)
+		firstExecution := getACPTask(Default, task).Status.Execution
+		expectedGeneration := firstGeneration
+		if firstExecution.RuntimeSessionRecreationPending {
+			// Checkpoint settlement retires the writer even when the first native
+			// capture is unsupported. Continue the same logical Session at its
+			// recorded next generation, without assuming portable native state.
+			expectedGeneration++
+		}
 
-		By("continuing the Session on the same RuntimePool and RuntimeSession")
+		By("continuing the same Session on its RuntimePool with the expected runtime generation")
 		applyReadTask(agentRuntimeReadTask{Name: continuation, Agent: agent, Provider: provider.kind, Session: session,
 			Prompt: "Continue the existing session. Return the session nonce from the prior turn and no " +
 				"repository-derived replacement. Do not modify files. " + marker(provider.kind+"-continue")})
@@ -225,7 +233,7 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		expectReplayed(marker(provider.kind+"-continue"), nonce)
 		continuedUID, continuedGeneration := taskSessionIdentity(Default, continuation)
 		Expect(continuedUID).To(Equal(firstUID))
-		Expect(continuedGeneration).To(Equal(firstGeneration), "a plain continuation must not recreate the session")
+		Expect(continuedGeneration).To(Equal(expectedGeneration), "continuation must honor the prior turn's runtime retirement fence")
 
 		By("forking the continuation through the API")
 		body, status, err := doAuthorizedJSONRequest(http.MethodPost,
@@ -544,7 +552,9 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 			sessions[uid] = true
 		}
 		Expect(sessions).To(HaveLen(len(tasks)), "each concurrent Task needs its own RuntimeSession")
-		waitRuntimePoolCountersZero(codexPool, 1)
+		// Codex native capture also retires the earlier read-smoke Session;
+		// completed one-shot Tasks must not leave any runtime home resident.
+		waitRuntimePoolCountersZero(codexPool, 0)
 	})
 
 	It("cancels a running prompt at its Task timeout", func() {
