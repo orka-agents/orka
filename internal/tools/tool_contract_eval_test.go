@@ -2093,6 +2093,77 @@ func evalSetArgumentPath(value any, schema map[string]any, path, prefix []string
 	return object
 }
 
+// Explicit null is distinct from an omitted property for legacy map parsers.
+// Probe required leaves inside valid parents, including array/map entries.
+func TestToolEvalNullRequiredFields(t *testing.T) {
+	evalToolSandbox(t)
+	knownDefects := map[string]string{
+		"worker/file_write: null content":      "the tool accepts or coerces explicit null instead of rejecting the required field",
+		"worker/request_approval: null action": "the tool accepts or coerces explicit null instead of rejecting the required field",
+	}
+	violations := map[string]string{}
+	declared, executed := map[string]bool{}, map[string]bool{}
+	for label, registry := range evalToolRegistries(newFakeClient()) {
+		for _, name := range registry.Names() {
+			tool, _ := registry.Get(name)
+			schema := evalToolSchema(t, tool)
+			evalRequiredNullProbes(schema, nil, func(path []string, node map[string]any) {
+				field := strings.NewReplacer(".[]", "[]", ".*", "{*}").Replace(strings.Join(path, "."))
+				key := label + "/" + name + ": null " + field
+				declared[key] = true
+				t.Run(key, func(t *testing.T) {
+					executed[key] = true
+					call, args := evalArgumentControl(t, label, name, schema)
+					if path[0] == "runtime" {
+						args["model"] = map[string]any{"name": "eval-model"}
+					}
+					var valid any = maps.Clone(args)
+					if len(path) > 1 {
+						valid = evalSetArgumentPath(args, schema, path, nil, evalArgumentValue(path, node))
+					}
+					validRaw, _ := json.Marshal(valid)
+					if ok, detail := evalSucceeds(call, string(validRaw)); !ok {
+						t.Fatalf("null-required-field control is not executable: %s", detail)
+					}
+					invalid := evalSetArgumentPath(valid, schema, path, nil, nil)
+					invalidRaw, _ := json.Marshal(invalid)
+					fresh, ctx := call()
+					failed, message := evalArgumentFailure(t, label, ctx, fresh, string(invalidRaw))
+					fieldName := path[len(path)-1]
+					if fieldName == "tasks" {
+						fieldName = "task name"
+					}
+					if !failed {
+						violations[key] = "accepted " + string(invalidRaw)
+					} else if !evalFieldMentioned(message, fieldName) && !strings.Contains(message, "json: cannot unmarshal") {
+						violations[key] = "null rejected for another reason: " + message
+					}
+				})
+			})
+		}
+	}
+	evalToolReportExecutedViolations(t, violations, knownDefects, declared, executed)
+}
+
+func evalRequiredNullProbes(node map[string]any, path []string, visit func([]string, map[string]any)) {
+	properties, _ := node["properties"].(map[string]any)
+	required, _ := node["required"].([]any)
+	for _, raw := range required {
+		name := raw.(string)
+		child, _ := properties[name].(map[string]any)
+		visit(append(slices.Clone(path), name), child)
+	}
+	for name, raw := range properties {
+		child, _ := raw.(map[string]any)
+		evalRequiredNullProbes(child, append(slices.Clone(path), name), visit)
+	}
+	for _, entry := range []struct{ key, segment string }{{"items", "[]"}, {"additionalProperties", "*"}} {
+		if child, ok := node[entry.key].(map[string]any); ok {
+			evalRequiredNullProbes(child, append(slices.Clone(path), entry.segment), visit)
+		}
+	}
+}
+
 // Top-level wrong types need executable siblings: a missing required field
 // must not mask acceptance of the mutated property. JSON-encoded objects are
 // checked separately by evalObjectStringHandling, which permits equivalent
