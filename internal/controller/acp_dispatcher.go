@@ -1080,8 +1080,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	profile = bound.plan.Profile
 	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
-		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) || errors.Is(nativeErr, errNativeSessionHistoryBoundary) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, nativeErr)
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, nativeErr)
 	}
@@ -1133,8 +1133,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	)
 	if err != nil {
 		endSessionTrace(err)
-		if errors.Is(err, errNativeSessionRuntimeUnsupported) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		if errors.Is(err, errNativeSessionRuntimeUnsupported) || errors.Is(err, errNativeSessionHistoryBoundary) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, err)
 		}
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)

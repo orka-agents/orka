@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -22,6 +23,7 @@ const nativeInstallUnresolvedAnnotation = "orka.ai/native-session-install-unreso
 
 var errNativeSessionInstallUnresolved = fmt.Errorf("%w: native Session installation outcome is unresolved; original runtime home and frozen plan require receipt reconciliation", store.ErrNotReady)
 var errNativeSessionRuntimeUnsupported = fmt.Errorf("%w: staged native Session requires a Codex runtime advertising native sessions", store.ErrConflict)
+var errNativeSessionHistoryBoundary = fmt.Errorf("%w: native Session restore loads the whole saved conversation, so sessionRef.throughMessageId must be empty or name the latest message", store.ErrConflict)
 var errNativeSessionCheckpointRequired = fmt.Errorf("%w: native Session continuity requires a checkpoint before canonical settlement; exact lease and runtime evidence retained", store.ErrNotReady)
 
 // Appending a terminal result without the corresponding native state would make
@@ -140,7 +142,10 @@ func (d *ACPDispatcher) loadTaskNativeSession(ctx context.Context, task *corev1a
 // control or acquiring its mutation lease. The preparation path checks again
 // before opening a turn in case an import was staged after this read.
 func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, supported bool) error {
-	if supported || task.Spec.SessionRef == nil || d.nativeSessionStore() == nil {
+	if task.Spec.SessionRef == nil || d.nativeSessionStore() == nil {
+		return nil
+	}
+	if supported && strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) == "" {
 		return nil
 	}
 	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
@@ -153,15 +158,35 @@ func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, ta
 	if err != nil {
 		return err
 	}
-	if native != nil {
+	if native == nil {
+		return nil
+	}
+	if !supported {
 		return errNativeSessionRuntimeUnsupported
+	}
+	if !nativeRestoreHonorsHistoryBoundary(task.Spec.SessionRef, native) {
+		return errNativeSessionHistoryBoundary
 	}
 	return nil
 }
 
-func (d *ACPDispatcher) rejectNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence) error {
+// nativeRestoreHonorsHistoryBoundary reports whether restoring checkpoint keeps
+// the Task within its sessionRef cutoff. The provider reloads its whole saved
+// conversation, so only an absent cutoff or the checkpoint's own boundary fits.
+func nativeRestoreHonorsHistoryBoundary(ref *corev1alpha1.SessionReference, checkpoint *store.NativeSessionRecord) bool {
+	through := strings.TrimSpace(ref.ThroughMessageID)
+	return through == "" || through == checkpoint.ThroughMessageID
+}
+
+// rejectNativeSessionRuntime fails a Task that cannot use the Session's native
+// checkpoint before it binds the Session. cause selects the reported reason.
+func (d *ACPDispatcher) rejectNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
 	reason := corev1alpha1.TaskExecutionReason("NativeSessionRuntimeUnsupported")
 	message := errNativeSessionRuntimeUnsupported.Error()
+	if errors.Is(cause, errNativeSessionHistoryBoundary) {
+		reason = corev1alpha1.TaskExecutionReason("NativeSessionHistoryBoundaryUnsupported")
+		message = errNativeSessionHistoryBoundary.Error()
+	}
 	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "native-session-runtime-unsupported", reason, message); err != nil {
 		return err
 	}

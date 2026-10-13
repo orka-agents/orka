@@ -320,6 +320,9 @@ func (d *ACPDispatcher) prepareTaskSession(
 	if preparation.nativeSession != nil && !nativeSessionsSupported {
 		return nil, errNativeSessionRuntimeUnsupported
 	}
+	if preparation.nativeSession != nil && !nativeRestoreHonorsHistoryBoundary(task.Spec.SessionRef, preparation.nativeSession) {
+		return nil, errNativeSessionHistoryBoundary
+	}
 	lease, turn, err := d.bindAndOpenTaskSessionTurn(
 		ctx, task, fence, runtimeInstanceID, preparation.control, preparation.userPrompt,
 		acpSessionTranscriptAppendPolicyForTask(task), lineage,

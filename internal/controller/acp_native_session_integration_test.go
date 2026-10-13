@@ -967,3 +967,110 @@ func TestACPDispatcherExpiredNativeCaptureIntentStartsFreshSafeCapture(t *testin
 		})
 	}
 }
+
+// Native restore loads the provider's whole saved conversation, so it cannot
+// honor a sessionRef.throughMessageId that names an earlier message. Such a
+// Task must fail before it binds the Session, not read history past its cutoff.
+// A cutoff at the checkpoint's own boundary still restores natively.
+func TestACPDispatcherNativeRestoreHonorsHistoryCutoff(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		uid      types.UID
+		appends  bool
+		through  string
+		rejected bool
+	}{
+		{name: "earlier-append", uid: "79797979-7979-7979-7979-797979797979", appends: true, through: "turn-1-assistant", rejected: true},
+		{name: "earlier-no-append", uid: "7a7a7a7a-7a7a-7a7a-7a7a-7a7a7a7a7a7a", through: "turn-1-assistant", rejected: true},
+		{name: "latest-no-append", uid: "7b7b7b7b-7b7b-7b7b-7b7b-7b7b7b7b7b7b", through: "turn-2-assistant"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			const sessionName = "native-cutoff"
+			snapshot := storetest.NativeSessionSnapshot(t, "native conversation covering two turns")
+			creates, restores, prompts := 0, 0, 0
+			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-cutoff-"+test.name, test.uid,
+				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+					options := dispatcherRuntimeServerOptions{
+						nativeSnapshot: &snapshot,
+						onPrompt: func(request harnessv2.StartPromptRequest) {
+							prompts++
+							require.Len(t, request.Input.Content, 1, "restored prompts must omit canonical bootstrap")
+						},
+					}
+					return newDispatcherRuntimeServerWithOptions(t, profile, digest, options, func(request harnessv2.CreateRuntimeSessionRequest) {
+						creates++
+						if request.NativeRestore != nil {
+							restores++
+						}
+					})
+				}, func(task *corev1alpha1.Task) {
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{
+						Name: sessionName, Append: test.appends, ThroughMessageID: test.through,
+					}
+				})
+			defer fixture.stop()
+			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			fixture.dispatcher.EventStore = persistence
+			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
+				NewSessionUID: func() (string, error) { return "native-cutoff-owner", nil },
+			})
+			require.NoError(t, err)
+			fixture.dispatcher.Sessions = continuity
+			fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+			require.NoError(t, err)
+			control, err := continuity.EnsureSession(ctx, ACPEnsureSessionRequest{
+				Namespace: "default", SessionName: sessionName, SessionType: defaultACPSessionType, Fence: fence, CreatedAt: time.Now().UTC(),
+			})
+			require.NoError(t, err)
+			require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, control.Namespace, control.SessionName, control.SessionUID))
+			now := time.Now().UTC()
+			require.NoError(t, persistence.AppendMessages(ctx, control.Namespace, control.SessionName, []store.SessionMessage{
+				{ID: "turn-1-user", Role: "user", Content: "first request", Timestamp: now},
+				{ID: "turn-1-assistant", Role: "assistant", Content: "first answer", Timestamp: now},
+				{ID: "turn-2-user", Role: "user", Content: "second request", Timestamp: now},
+				{ID: "turn-2-assistant", Role: "assistant", Content: "second answer", Timestamp: now},
+			}))
+			require.NoError(t, persistence.SaveNativeSession(ctx, store.NativeSessionRecord{
+				Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+				SourceOperationID: "capture-native-cutoff", RuntimeSessionGeneration: 1,
+				MessageCount: 4, ThroughMessageID: "turn-2-assistant", Snapshot: snapshot,
+			}))
+			before, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			require.NoError(t, err)
+
+			reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+			require.NoError(t, err)
+			require.NotNil(t, reserved)
+			require.NoError(t, fixture.dispatcher.executeReservedTask(ctx, reserved, target))
+
+			current := fixture.currentTask(t, ctx)
+			if !test.rejected {
+				require.Equal(t, corev1alpha1.TaskPhaseSucceeded, current.Status.Phase)
+				require.Equal(t, 1, restores, "a cutoff at the checkpoint boundary restores natively")
+				require.Equal(t, 1, prompts)
+				return
+			}
+			require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+			require.Equal(t, corev1alpha1.TaskExecutionReason("NativeSessionHistoryBoundaryUnsupported"), current.Status.Execution.Reason)
+			attempt, err := persistence.GetPromptAttempt(ctx, fixture.attemptID)
+			require.NoError(t, err)
+			require.Equal(t, store.PromptExecutionFailed, attempt.ExecutionState)
+			require.Empty(t, attempt.SessionUID)
+			require.Zero(t, attempt.SessionLeaseGeneration)
+			after, err := persistence.GetSessionControl(ctx, control.Namespace, control.SessionName)
+			require.NoError(t, err)
+			require.Nil(t, after.Lease, "a rejected Task must not lease the Session")
+			native, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			require.NoError(t, err)
+			require.Equal(t, before, native, "the checkpoint must stay unchanged")
+			transcript, err := persistence.LoadTranscript(ctx, control.Namespace, control.SessionName, 100)
+			require.NoError(t, err)
+			require.Len(t, transcript, 4)
+			require.Zero(t, creates)
+			require.Zero(t, prompts)
+		})
+	}
+}

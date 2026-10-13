@@ -212,6 +212,12 @@ a Session with a native checkpoint they retain the exact runtime evidence and
 hold the Session lease until reconciliation. Accepted turns with
 `sessionRef.append: false` leave the checkpoint unchanged and retire their
 runtime before a later Task loads the saved state.
+Native restore reloads Codex's whole saved conversation, so
+`sessionRef.maxMessages` limits only the canonical transcript Orka sends when
+no checkpoint is used. A Task whose `sessionRef.throughMessageId` names any
+message other than the Session's latest fails before it binds the Session, with
+reason `NativeSessionHistoryBoundaryUnsupported`, because restore cannot stop
+at an earlier message.
 A capture intent that reaches the runtime only after it expired is reconciled
 against the runtime's own record. When the same runtime incarnation never
 recorded that capture, it reports `native_capture_not_started` and the
