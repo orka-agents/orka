@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -85,6 +88,29 @@ func TestSupervisorResumesIdleAdapterInPlace(t *testing.T) {
 	server.mu.Unlock()
 	if sessionState == harnessv2.RuntimeSessionStatePoisoned {
 		t.Fatal("resumed session was poisoned")
+	}
+}
+
+// An agent may call the model while session/resume reconnects it (Claude Agent
+// ACP 0.89.1 sends one request). The restart runs before the next prompt gets
+// provider access, so the proxy refuses that call rather than spending one of
+// the prompt's turns on it.
+func TestSupervisorRefusesModelCallsDuringIdleAdapterResume(t *testing.T) {
+	server, cfg, create, state := runFirstPromptThenAwaitAdapterExit(t, adapterResumeModelCallMode)
+	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
+	if response.Code != http.StatusOK {
+		t.Fatalf("prompt after adapter exit status = %d body=%s", response.Code, response.Body.String())
+	}
+	if state.runtime.AdapterRestarts() != 1 {
+		t.Fatalf("adapter restarts = %d, want 1", state.runtime.AdapterRestarts())
+	}
+	status, err := os.ReadFile(filepath.Join(state.paths.Home, helperResumeModelCallFile))
+	if err != nil {
+		t.Fatalf("read resume model-call status: %v", err)
+	}
+	if string(status) != strconv.Itoa(http.StatusForbidden) {
+		t.Fatalf("model call during resume returned %q, want %d", status, http.StatusForbidden)
 	}
 }
 

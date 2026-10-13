@@ -590,6 +590,42 @@ func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDiges
 	return s.StartPromptWithLeaseDeadline(ctx, promptID, requestDigest, prompt, time.Now().Add(s.config.PromptLease))
 }
 
+// RecoverExitedAdapter restarts and resumes an adapter that exited while the
+// session was idle, so a caller can finish that handshake before it grants the
+// prompt any provider or MCP access: an agent that calls the model during
+// session/resume is then refused instead of spending the prompt's turns. It is
+// a no-op when the adapter is alive or the session is deleted, busy, or has
+// already settled promptID; StartPromptWithLeaseDeadline reports those cases.
+func (s *RuntimeSession) RecoverExitedAdapter(ctx context.Context, promptID, requestDigest string, leaseDeadline time.Time) error {
+	promptID = strings.TrimSpace(promptID)
+	requestDigest = strings.TrimSpace(requestDigest)
+	s.mu.Lock()
+	if s.deleted || s.active != nil || s.resuming != nil || !leaseDeadline.After(time.Now()) {
+		s.mu.Unlock()
+		return nil
+	}
+	if _, settled := s.tombstones[promptID]; settled {
+		s.mu.Unlock()
+		return nil
+	}
+	restartsBefore := s.adapterRestarts
+	if err := s.recoverExitedAdapterLocked(ctx, promptID, requestDigest, leaseDeadline); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.adapterRestarts == restartsBefore || s.deleted || leaseDeadline.After(time.Now()) {
+		s.mu.Unlock()
+		return nil
+	}
+	// As in StartPromptWithLeaseDeadline: a restart that finished past the
+	// lease retires the replacement before any ACP prompt write.
+	s.deleted = true
+	process := s.process
+	s.mu.Unlock()
+	_ = stopProcessBestEffort(process, s.config.CancelGrace)
+	return &AdapterLostError{Attempted: true, Cause: fmt.Errorf("prompt lease expired before admission: %w", context.DeadlineExceeded)}
+}
+
 // StartPromptWithLeaseDeadline preserves the controller's absolute lease bound
 // across capability activation and admission delays.
 func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time) (PromptRun, error) {

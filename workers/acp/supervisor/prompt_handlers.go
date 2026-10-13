@@ -150,6 +150,24 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
+	// Resume an adapter that exited while idle before this prompt gets any
+	// provider or MCP access. Some agents call the model during
+	// session/resume; with the prompt not yet active the provider proxy
+	// refuses that call instead of charging it to this prompt's maxTurns.
+	s.mu.Unlock()
+	recoverErr := runtimeSession.RecoverExitedAdapter(
+		r.Context(), string(request.Metadata.PromptID), string(request.Metadata.RequestDigest), request.Lease.ExpiresAt,
+	)
+	s.mu.Lock()
+	if recoverErr == nil && state.prompt != prompt {
+		recoverErr = fmt.Errorf("prompt %s was cleared while its adapter resumed", request.Metadata.PromptID)
+	}
+	if recoverErr != nil {
+		s.mu.Unlock()
+		s.rejectPromptStart(w, state, prompt, request, sessionID, recoverErr)
+		return
+	}
+	now = time.Now().UTC()
 	if providerProxy == nil ||
 		providerProxy.activatePrompt(request, state.agentConfiguration.MaxTurns, now) != nil {
 		state.prompt = nil
@@ -183,35 +201,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		content, request.Lease.ExpiresAt,
 	)
 	if err != nil {
-		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
-		s.mu.Lock()
-		if state.prompt == prompt {
-			state.prompt = nil
-			delete(state.operations, request.Metadata.OperationID)
-		}
-		s.mu.Unlock()
-		if lost, ok := errors.AsType[*acp.AdapterLostError](err); ok {
-			// The adapter child exited between prompts and the provider
-			// session could not be resumed in place, so this generation has
-			// no agent to continue. Retire the session: the controller sees a
-			// typed rejection before any ACP prompt write, records RuntimeLost,
-			// drops the binding, and the next continuation recreates a
-			// RuntimeSession from Orka's canonical transcript.
-			slog.Warn(
-				"ACP adapter lost while idle; retiring runtime session",
-				"sessionID", sessionID, "promptID", request.Metadata.PromptID,
-				"resumeAttempted", lost.Attempted,
-				// The cause can carry adapter-controlled JSON-RPC text.
-				"errorDetail", redactedPromptErrorDetail(lost),
-			)
-			s.poisonSession(state, "adapter lost while idle")
-			writeError(
-				w, http.StatusConflict, harnessv2.ErrorCodePromptNotAccepted,
-				"ACP adapter exited while idle; prompt was not accepted and runtime session was retired", nil, false,
-			)
-			return
-		}
-		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, safeError(err), nil, false)
+		s.rejectPromptStart(w, state, prompt, request, sessionID, err)
 		return
 	}
 
@@ -2633,6 +2623,44 @@ func remoteSettlementFailureResult(prompt *promptState, result acp.PromptResult)
 	result.StopReason = ""
 	result.Err = errFoundryCleanupUnproven
 	return result
+}
+
+// rejectPromptStart settles a prompt that failed before any ACP prompt write:
+// it revokes the prompt's capabilities, clears its reservation, and retires the
+// session when the idle adapter could not be resumed.
+func (s *Server) rejectPromptStart(
+	w http.ResponseWriter, state *sessionState, prompt *promptState,
+	request harnessv2.StartPromptRequest, sessionID harnessv2.RuntimeSessionID, err error,
+) {
+	deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+	s.mu.Lock()
+	if state.prompt == prompt {
+		state.prompt = nil
+		delete(state.operations, request.Metadata.OperationID)
+	}
+	s.mu.Unlock()
+	if lost, ok := errors.AsType[*acp.AdapterLostError](err); ok {
+		// The adapter child exited between prompts and the provider
+		// session could not be resumed in place, so this generation has
+		// no agent to continue. Retire the session: the controller sees a
+		// typed rejection before any ACP prompt write, records RuntimeLost,
+		// drops the binding, and the next continuation recreates a
+		// RuntimeSession from Orka's canonical transcript.
+		slog.Warn(
+			"ACP adapter lost while idle; retiring runtime session",
+			"sessionID", sessionID, "promptID", request.Metadata.PromptID,
+			"resumeAttempted", lost.Attempted,
+			// The cause can carry adapter-controlled JSON-RPC text.
+			"errorDetail", redactedPromptErrorDetail(lost),
+		)
+		s.poisonSession(state, "adapter lost while idle")
+		writeError(
+			w, http.StatusConflict, harnessv2.ErrorCodePromptNotAccepted,
+			"ACP adapter exited while idle; prompt was not accepted and runtime session was retired", nil, false,
+		)
+		return
+	}
+	writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, safeError(err), nil, false)
 }
 
 func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState) {

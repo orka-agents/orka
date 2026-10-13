@@ -46,6 +46,12 @@ const adapterResumeFailureMode = "resume-fails-after-exit"
 // adapterExitAfterPromptMode exits after every prompt without advertising
 // session/resume, so an idle session loses its agent for good.
 const adapterExitAfterPromptMode = "exit-after-prompt"
+
+// adapterResumeModelCallMode is adapterResumeMode plus a model request from the
+// child during session/resume, as Claude Agent ACP sends; the provider proxy's
+// status code is recorded in helperResumeModelCallFile in the child's HOME.
+const adapterResumeModelCallMode = "resume-after-exit-model-call"
+const helperResumeModelCallFile = "acp-helper-resume-model-call"
 const helperProviderSessionFile = "acp-helper-provider-session"
 const testPromptOneID = "prompt-1"
 const testPromptTwoID = "prompt-2"
@@ -1126,7 +1132,7 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		Environment: map[string]string{"GO_WANT_SUPERVISOR_ACP_HELPER": "1", "SUPERVISOR_ACP_HELPER_MODE": mode},
 		AdapterName: "fake-acp", AdapterDigest: testDigest("adapter"),
 	}
-	if mode == providerProxyCanaryMode {
+	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode {
 		provider.EnvironmentForSession = func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
 			config, err := json.Marshal(map[string]string{"openai_base_url": proxy.BaseURL})
 			if err != nil {
@@ -1384,7 +1390,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 		switch message.Method {
 		case acp.MethodInitialize:
 			agentCapabilities := map[string]any{"loadSession": true, "mcpCapabilities": map[string]any{"http": true}}
-			if mode == adapterResumeMode || mode == adapterResumeFailureMode || strings.HasPrefix(mode, "native-") {
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || strings.HasPrefix(mode, "native-") {
 				agentCapabilities["sessionCapabilities"] = map[string]any{acp.SessionCapabilityResume: map[string]any{}}
 			}
 			writeHelperMessage(writer, map[string]any{
@@ -1395,13 +1401,13 @@ func TestSupervisorACPHelper(t *testing.T) {
 				},
 			})
 		case acp.MethodSessionResume:
-			if mode != adapterResumeMode && mode != adapterResumeFailureMode {
+			if mode != adapterResumeMode && mode != adapterResumeFailureMode && mode != adapterResumeModelCallMode {
 				handleSupervisorNativeResume(writer, message.ID, message.Params)
 				continue
 			}
 			var request acp.ResumeSessionRequest
 			persisted, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile))
-			if err := json.Unmarshal(message.Params, &request); err != nil || mode != adapterResumeMode ||
+			if err := json.Unmarshal(message.Params, &request); err != nil || (mode != adapterResumeMode && mode != adapterResumeModelCallMode) ||
 				request.SessionID == "" || request.SessionID != string(persisted) || request.Meta["orka.runtimeSessionID"] != "session-1" {
 				writeHelperMessage(writer, map[string]any{
 					testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
@@ -1409,13 +1415,16 @@ func TestSupervisorACPHelper(t *testing.T) {
 				})
 				continue
 			}
+			if mode == adapterResumeModelCallMode {
+				recordProviderCallDuringResume()
+			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{}})
 		case acp.MethodSessionNew:
 			if strings.HasPrefix(mode, "native-resume") {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "error": map[string]any{"code": -32602, "message": "unexpected session/new during native restore"}})
 				continue
 			}
-			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterExitAfterPromptMode {
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || mode == adapterExitAfterPromptMode {
 				// The child's HOME is the session home, which real agents use
 				// for the state a fresh adapter process resumes from.
 				_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile), []byte(sessionID), 0o600)
@@ -1490,7 +1499,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{"stopReason": acp.StopReasonEndTurn}})
 				promptID = nil
 			}
-			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterExitAfterPromptMode {
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || mode == adapterExitAfterPromptMode {
 				// Simulate an adapter crash while the session is idle.
 				os.Exit(0)
 			}
@@ -1571,6 +1580,29 @@ func validateProviderProxyChildIsolation() error {
 		return err
 	}
 	return nil
+}
+
+// recordProviderCallDuringResume sends a model request from the adapter child
+// while session/resume is in flight and records the provider proxy's status
+// code in the child's HOME.
+func recordProviderCallDuringResume() {
+	var status string
+	baseURL, err := providerProxyBaseURLFromChild()
+	if err != nil {
+		status = "error: " + err.Error()
+	} else if request, err := http.NewRequest(http.MethodPost, baseURL+"/responses", strings.NewReader(`{"model":"test-model","input":"Hi"}`)); err != nil {
+		status = "error: " + err.Error()
+	} else {
+		request.Header.Set(providerAuthorizationHeader, "Bearer "+os.Getenv("CODEX_API_KEY"))
+		request.Header.Set("Content-Type", "application/json")
+		if response, err := http.DefaultClient.Do(request); err != nil {
+			status = "error: " + err.Error()
+		} else {
+			status = strconv.Itoa(response.StatusCode)
+			_ = response.Body.Close()
+		}
+	}
+	_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperResumeModelCallFile), []byte(status), 0o600)
 }
 
 func exerciseProviderProxyFromChild() error {
