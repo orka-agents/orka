@@ -423,8 +423,8 @@ func main() {
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.StringVar(&webhookCertRotationSecret, "webhook-cert-rotation-secret", "",
 		"Name of a Secret in the controller Pod namespace that the controller fills with a self-signed CA and "+
-			"webhook serving certificate. The Secret must be mounted at --webhook-cert-path; the controller waits "+
-			"for the kubelet to project it there and injects the CA into --webhook-cert-rotation-webhook. "+
+			"webhook serving certificate. The controller watches the Secret and writes the pair to a writable "+
+			"--webhook-cert-path, then injects the CA into --webhook-cert-rotation-webhook. "+
 			"Empty means the operator supplies the mounted certificate.")
 	flag.StringVar(&webhookCertRotationWebhook, "webhook-cert-rotation-webhook", "",
 		"Name of the ValidatingWebhookConfiguration whose caBundle the controller keeps in sync when "+
@@ -1109,7 +1109,15 @@ func main() {
 	}
 
 	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
+	webhookTLSOpts := slices.Clone(tlsOpts)
+	certificateSyncer := &webhookCertSyncer{options: webhookCertRotation}
+	if webhookCertRotation.enabled() {
+		webhookTLSOpts = append(webhookTLSOpts, func(c *tls.Config) {
+			c.GetCertificate = certificateSyncer.GetCertificate
+			// Resumed TLS sessions bypass GetCertificate's current trust check.
+			c.SessionTicketsDisabled = true
+		})
+	}
 	webhookServerOptions := webhook.Options{
 		TLSOpts: webhookTLSOpts,
 	}
@@ -1202,6 +1210,10 @@ func main() {
 		os.Exit(1)
 	}
 	if webhookCertRotation.enabled() {
+		if err := setupWebhookCertSyncer(mgr, currentPodNamespace(), certificateSyncer); err != nil {
+			setupLog.Error(err, "unable to set up webhook certificate synchronization")
+			os.Exit(1)
+		}
 		setupLog.Info("controller-managed webhook certificate rotation enabled",
 			"secret", webhookCertRotation.SecretName,
 			"webhook", webhookCertRotation.WebhookName,
@@ -2252,7 +2264,7 @@ func main() {
 		os.Exit(1)
 	}
 	if managerAdmissionEnabled {
-		if err := mgr.AddReadyzCheck("webhook", webhookReadyChecker(webhookCertsReady, webhookServer.StartedChecker())); err != nil {
+		if err := mgr.AddReadyzCheck("webhook", webhookReadyChecker(webhookCertsReady, certificateSyncer.ReadyChecker(webhookServer.StartedChecker()))); err != nil {
 			setupLog.Error(err, "unable to set up webhook ready check")
 			os.Exit(1)
 		}

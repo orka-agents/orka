@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/open-policy-agent/cert-controller/pkg/rotator"
@@ -67,6 +68,14 @@ func validateWebhookCertRotationOptions(o webhookCertRotationOptions) error {
 	if len(missing) > 0 {
 		return fmt.Errorf("--webhook-cert-rotation-secret requires %s", strings.Join(missing, ", "))
 	}
+	for _, name := range []string{o.CertName, o.KeyName} {
+		if filepath.Base(name) != name || name == "." || strings.HasPrefix(name, "..") {
+			return errors.New("webhook certificate and key names must be plain file names")
+		}
+	}
+	if o.CertName == o.KeyName {
+		return errors.New("webhook certificate and key names must differ")
+	}
 	if strings.Contains(o.DNSName, "/") || strings.Contains(o.DNSName, ":") {
 		return fmt.Errorf("--webhook-cert-rotation-dns-name must be a bare DNS name, got %q", o.DNSName)
 	}
@@ -75,9 +84,9 @@ func validateWebhookCertRotationOptions(o webhookCertRotationOptions) error {
 
 // setupWebhookCertRotation registers the certificate rotator with the manager
 // and returns a channel that closes once the serving certificate has been
-// written to the Secret, projected by the kubelet into CertDir, and its CA
-// injected into the webhook configuration. The rotator never writes files
-// itself, so CertDir must be a mount of SecretName. Without rotation the
+// written to the Secret, synchronized into CertDir, and its CA injected into
+// the webhook configuration. The API syncer writes CertDir; the rotator still
+// waits for those files without depending on kubelet projection. Without rotation the
 // channel is already closed so callers can wait on it unconditionally.
 func setupWebhookCertRotation(
 	mgr manager.Manager,
