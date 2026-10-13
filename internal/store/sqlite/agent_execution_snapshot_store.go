@@ -109,10 +109,14 @@ func (s *Store) SetAgentExecutionSnapshotCipher(snapshotCipher *AgentExecutionSn
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate retained agent execution snapshots while verifying key: %w", err)
 	}
-	// Connector custody (wrapped data keys, retired rows, parked consents
-	// and completions) is sealed under the same key; a candidate that
-	// cannot open every retained row would strand linked accounts with
-	// nothing left to use or revoke.
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := s.verifyNativeSessionCipher(snapshotCipher); err != nil {
+		return err
+	}
+	// Connector custody is sealed under the same key. Verify every retained
+	// row before replacing it so linked accounts remain usable and revocable.
 	if err := s.verifyConnectorRowsWithCipher(snapshotCipher); err != nil {
 		return err
 	}

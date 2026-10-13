@@ -189,10 +189,11 @@ type StreamChunk struct {
 
 // ProviderConfig holds configuration for creating a provider
 type ProviderConfig struct {
-	APIKey          string
-	BaseURL         string // Optional override for API URL
-	ProviderType    string // e.g. "openai", "azure-openai"
-	AzureAPIVersion string // Azure OpenAI API version (e.g. "2024-02-15-preview")
+	APIKey              string
+	BaseURL             string // Optional override for API URL
+	ProviderType        string // e.g. "openai", "azure-openai"
+	AzureAPIVersion     string // Azure OpenAI API version (e.g. "2024-02-15-preview")
+	AzureDeploymentName string // Azure request model override; logical model selection is unchanged
 }
 
 // ProviderFactory is a function that creates a provider

@@ -218,8 +218,8 @@ type usageWorkflowFixture struct {
 	reconciler *controller.RepositoryMonitorReconciler
 	tasks      *controller.TaskReconciler
 	github     *usageWorkflowGitHub
-	transport  *http.Transport
 	url        string
+	transport  *http.Transport
 	stopAPI    context.CancelFunc
 	apiDone    chan error
 	startedAt  time.Time
@@ -233,10 +233,11 @@ func newUsageWorkflowFixture(t *testing.T) *usageWorkflowFixture {
 	f := &usageWorkflowFixture{
 		dbPath: filepath.Join(t.TempDir(), "usage.db"), scheme: runtime.NewScheme(),
 		startedAt: time.Now().UTC().Add(-time.Minute),
-		transport: http.DefaultTransport.(*http.Transport).Clone(),
 		viewer:    "fixture-viewer-" + t.Name(), outsider: "fixture-outsider-" + t.Name(),
 	}
-	// Do not let pooled fixture connections outlive requests and delay API shutdown.
+	// This fixture tests persisted workflow state, not connection reuse. Own
+	// its HTTP connections so idle keep-alives cannot delay API replacement.
+	f.transport = http.DefaultTransport.(*http.Transport).Clone()
 	f.transport.DisableKeepAlives = true
 	for _, add := range []func(*runtime.Scheme) error{
 		corev1alpha1.AddToScheme, corev1.AddToScheme, batchv1.AddToScheme, rbacv1.AddToScheme, authenticationv1.AddToScheme,
@@ -398,6 +399,7 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 func (f *usageWorkflowFixture) stop(t *testing.T) {
 	t.Helper()
 	if f.stopAPI != nil {
+		f.transport.CloseIdleConnections()
 		f.stopAPI()
 		select {
 		case err := <-f.apiDone:

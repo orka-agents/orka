@@ -185,10 +185,11 @@ func run(transcriptPath string) (err error) {
 
 	// Create LLM provider
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
-		APIKey:          apiKey,
-		BaseURL:         baseURL,
-		ProviderType:    provider,
-		AzureAPIVersion: azureAPIVersion,
+		APIKey:              apiKey,
+		BaseURL:             baseURL,
+		ProviderType:        provider,
+		AzureAPIVersion:     azureAPIVersion,
+		AzureDeploymentName: workerEnv.AzureDeploymentName,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
@@ -207,10 +208,11 @@ func run(transcriptPath string) (err error) {
 			}
 
 			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, llm.ProviderConfig{
-				APIKey:          fallbackEnv.APIKey,
-				BaseURL:         fallbackEnv.BaseURL,
-				ProviderType:    fallbackEnv.Provider,
-				AzureAPIVersion: fallbackEnv.AzureAPIVersion,
+				APIKey:              fallbackEnv.APIKey,
+				BaseURL:             fallbackEnv.BaseURL,
+				ProviderType:        fallbackEnv.Provider,
+				AzureAPIVersion:     fallbackEnv.AzureAPIVersion,
+				AzureDeploymentName: fallbackEnv.AzureDeploymentName,
 			})
 			if err != nil {
 				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
