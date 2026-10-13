@@ -122,8 +122,8 @@ type AgentCLIRuntime struct {
 	DefaultAllowBash *bool `json:"defaultAllowBash,omitempty"`
 
 	// DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
-	// Runtime adapters reject values they do not support (for example, Codex does not support max).
-	// +kubebuilder:validation:Enum=low;medium;high;xhigh;max
+	// Runtime adapters reject values they do not support (none is Codex-only; max is Claude-only).
+	// +kubebuilder:validation:Enum=none;low;medium;high;xhigh;max
 	// +optional
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
 }

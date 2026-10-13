@@ -2506,15 +2506,21 @@ run_read_smoke() {
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${continuation_snapshot}"
   assert_task_succeeded_read "${continuation}" "${continuation_snapshot}" "${read_repo_commit}" "${nonce}" ""
 
-  local first_uid first_generation continued_uid continued_generation
+  local first_uid first_generation first_retired expected_generation continued_uid continued_generation
   first_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   first_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  first_retired="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionRecreationPending}')"
+  expected_generation="${first_generation}"
+  if [[ "${first_retired}" == true ]]; then
+    # Native checkpointing retires the writer before the next cold continuation.
+    expected_generation="$((first_generation + 1))"
+  fi
   continued_uid="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   continued_generation="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ -n "${first_uid}" && "${first_uid}" == "${continued_uid}" ]] || \
     die "create:false continuation did not preserve RuntimeSession UID"
-  [[ "${first_generation}" == "${continued_generation}" ]] || \
-    die "create:false continuation unexpectedly changed RuntimeSession generation without replacement"
+  [[ "${expected_generation}" == "${continued_generation}" ]] || \
+    die "create:false continuation did not honor the prior Task's RuntimeSession retirement fence"
 
   read_smoke_session_uid="${continued_uid}"
   read_smoke_session_generation="${continued_generation}"

@@ -1641,6 +1641,7 @@ func TestRequestApprovalToolInvalidTargetArgumentsFailClosed(t *testing.T) {
 		name            string
 		targetArguments json.RawMessage
 	}{
+		{name: "missing"},
 		{name: "invalid string", targetArguments: json.RawMessage(`"not JSON"`)},
 		{name: "trailing JSON", targetArguments: json.RawMessage(`"{} {}"`)},
 		{name: "array", targetArguments: json.RawMessage(`[]`)},
@@ -1651,11 +1652,14 @@ func TestRequestApprovalToolInvalidTargetArgumentsFailClosed(t *testing.T) {
 		{name: "double-stringified object", targetArguments: json.RawMessage(`"\"{}\""`)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			callArgs, err := json.Marshal(map[string]json.RawMessage{
-				"action":          json.RawMessage(`"dispatch"`),
-				"targetTool":      json.RawMessage(`"dispatch_work_order"`),
-				"targetArguments": tt.targetArguments,
-			})
+			args := map[string]json.RawMessage{
+				"action":     json.RawMessage(`"dispatch"`),
+				"targetTool": json.RawMessage(`"dispatch_work_order"`),
+			}
+			if tt.targetArguments != nil {
+				args["targetArguments"] = tt.targetArguments
+			}
+			callArgs, err := json.Marshal(args)
 			if err != nil {
 				t.Fatalf("marshal approval call: %v", err)
 			}

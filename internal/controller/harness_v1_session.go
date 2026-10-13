@@ -92,6 +92,9 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		verified.body.HarnessV1.SessionBootstrap == nil {
 		return fmt.Errorf("%w: frozen harness v1 Session identity is incomplete", store.ErrConflict)
 	}
+	if err := d.rejectHarnessV1NativeSession(ctx, task.Namespace, name); err != nil {
+		return err
+	}
 	bootstrap := verified.body.HarnessV1.SessionBootstrap
 	transcriptBackedPrompt := ref.PromptIncluded && strings.TrimSpace(ref.ThroughMessageID) != ""
 	if !ref.Create && !transcriptBackedPrompt {
@@ -138,6 +141,11 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	if err := validateFrozenHarnessV1SessionControl(bootstrap, control, task, attempt); err != nil {
 		return err
 	}
+	// Import may have won transcript creation after the initial read. Once
+	// EnsureSession has returned, new imports cannot claim this name.
+	if err := d.rejectHarnessV1NativeSession(ctx, task.Namespace, name); err != nil {
+		return err
+	}
 	lease, err := d.Sessions.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
 		Session:             *control,
 		Fence:               fence,
@@ -171,6 +179,34 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		OpenedAt:             time.Now().UTC(),
 	})
 	return err
+}
+
+// rejectHarnessV1NativeSession reads native ownership without binding a staged
+// import. Harness v1 cannot restore or publish a native checkpoint.
+func (d *HarnessV1Dispatcher) rejectHarnessV1NativeSession(ctx context.Context, namespace, name string) error {
+	native, ok := d.Sessions.transcripts.(store.NativeSessionStore)
+	if !ok {
+		return nil
+	}
+	uid := ""
+	if cleanup, ok := d.Sessions.transcripts.(store.SessionCleanupPersistenceStore); ok {
+		var err error
+		uid, err = cleanup.GetSessionCleanupIdentity(ctx, namespace, name)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read native Session owner before harness v1 admission: %w", err)
+		}
+	}
+	_, err := native.GetNativeSession(ctx, namespace, name, uid)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check native Session before harness v1 admission: %w", err)
+	}
+	return permanentHarnessV1PreSubmitSession(store.ValidationErrorf("native Session requires a Codex runtime with native continuity; harness v1 cannot restore or publish its checkpoint"))
 }
 
 // classifyHarnessV1PreSubmitSessionConflict promotes only a conflict whose
