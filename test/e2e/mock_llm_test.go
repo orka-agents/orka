@@ -394,11 +394,12 @@ type mockLLMRequest struct {
 	Path      string `json:"path"`
 	Body      struct {
 		// Truncated is set when the body exceeded aimock's 64 KB journal cap
-		// and was not recorded.
-		Truncated bool             `json:"__aimock_truncated"`
-		Model     string           `json:"model"`
-		Messages  []mockLLMMessage `json:"messages"`
-		Tools     []struct {
+		// and was not recorded; OriginalByteSize is then the body's size.
+		Truncated        bool             `json:"__aimock_truncated"`
+		OriginalByteSize int              `json:"originalByteSize"`
+		Model            string           `json:"model"`
+		Messages         []mockLLMMessage `json:"messages"`
+		Tools            []struct {
 			Function struct {
 				Name string `json:"name"`
 			} `json:"function"`

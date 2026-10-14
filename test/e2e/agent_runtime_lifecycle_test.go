@@ -165,6 +165,33 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		}, time.Minute, 2*time.Second).Should(Succeed())
 	}
 
+	// expectHistoryCarried checks in mock mode, for requests whose bodies the
+	// aimock journal cap hides, that the first model request of the turn
+	// marked continued is at least historyBytes larger than the first request
+	// of the turn marked first, so it carried the first turn's messages and
+	// tool results rather than an empty conversation.
+	expectHistoryCarried := func(first, continued string, historyBytes int) {
+		if live {
+			return
+		}
+		earliest := func(marker string) mockLLMRequest {
+			served, err := providerProxyMockLLM.servedFor(marker)
+			ExpectWithOffset(2, err).NotTo(HaveOccurred())
+			ExpectWithOffset(2, served).NotTo(BeEmpty(), "aimock answered no request for %s", marker)
+			request := served[0]
+			for _, candidate := range served[1:] {
+				if candidate.Timestamp < request.Timestamp {
+					request = candidate
+				}
+			}
+			ExpectWithOffset(2, request.Body.Truncated).To(BeTrue(), "%s fits the journal; check its content instead", marker)
+			return request
+		}
+		before, after := earliest(first), earliest(continued)
+		ExpectWithOffset(1, after.Body.OriginalByteSize).To(BeNumerically(">=", before.Body.OriginalByteSize+historyBytes),
+			"%s reached the model without the history of %s", continued, first)
+	}
+
 	// expectNativeCheckpointSaved checks that task's turn saved the agent's
 	// own conversation instead of falling back to the canonical transcript.
 	expectNativeCheckpointSaved := func(task string) {
@@ -289,6 +316,13 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		if provider.kind == claude.kind {
 			By("checking the provider proxy refused the model request Claude makes while resuming")
 			expectNoResumeModelRequest(continuedAt)
+		}
+		if provider.kind == copilot.kind {
+			// Copilot's requests exceed the journal cap, so expectReplayed
+			// cannot see the nonce. The first turn read the roughly 1 KB
+			// LICENSE, which a loaded conversation sends again.
+			By("checking the loaded Copilot conversation reached the model with the first turn")
+			expectHistoryCarried(marker(provider.kind+"-read"), marker(provider.kind+"-continue"), 1024)
 		}
 		continuedUID, continuedGeneration := taskSessionIdentity(Default, continuation)
 		Expect(continuedUID).To(Equal(firstUID))
