@@ -234,15 +234,16 @@ func TestAimockEvalCaptureFinalFlushDeadline(t *testing.T) {
 	blocked := `Object.defineProperty(process, "stdout", {value: {write(_chunk, _callback) {
 		setInterval(() => {}, 1000); return true;
 	}}});`
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Node startup on a hosted runner can take seconds, so wall-clock time does
+	// not identify the deadline. Exit status 1 with the local context unexpired
+	// does: a local kill reports -1.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, node, "-e", blocked+mockLLMCaptureScript(port, 100*time.Millisecond))
 	cmd.WaitDelay = time.Second
-	started := time.Now()
 	err = cmd.Run()
 	var exit *exec.ExitError
 	require.ErrorAs(t, err, &exit)
 	require.Equal(t, 1, exit.ExitCode())
 	require.NoError(t, ctx.Err(), "the remote deadline, not the local test deadline, must stop the reader")
-	require.Less(t, time.Since(started), 2*time.Second)
 }
