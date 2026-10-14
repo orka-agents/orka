@@ -94,15 +94,16 @@ func TestCopilotCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		events string
 		reason string
 	}{
-		"newer Copilot CLI":  {copilotFixtureEvents(copilotFixtureSession, "1.0.120"), "Copilot CLI 1.0.120 started"},
-		"another session":    {copilotFixtureEvents("8f1d0c3e-0000-4000-8000-000000000000", copilotVersion), "starts another session"},
-		"no session.start":   {strings.SplitN(copilotFixtureEvents(copilotFixtureSession, copilotVersion), "\n", 2)[1], "does not begin with session.start"},
-		"second session":     {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + strings.SplitN(copilotFixtureEvents(copilotFixtureSession, copilotVersion), "\n", 2)[0] + "\n", "more than one session"},
-		"another schema":     {strings.Replace(copilotFixtureEvents(copilotFixtureSession, copilotVersion), `"version":1`, `"version":2`, 1), "schema 2"},
-		"partial event":      {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"user.message"`, "partial event"},
-		"untyped event":      {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"data":{}}` + "\n", "not one event"},
-		"unknown event":      {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"session.future","data":{}}` + "\n", `"session.future" event, which Copilot CLI 1.0.96 does not record`},
-		"event not a object": {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + "[]\n", "not one event"},
+		"newer Copilot CLI":        {copilotFixtureEvents(copilotFixtureSession, "1.0.120"), "Copilot CLI 1.0.120 started"},
+		"another session":          {copilotFixtureEvents("8f1d0c3e-0000-4000-8000-000000000000", copilotVersion), "starts another session"},
+		"no session.start":         {strings.SplitN(copilotFixtureEvents(copilotFixtureSession, copilotVersion), "\n", 2)[1], "does not begin with session.start"},
+		"second session":           {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + strings.SplitN(copilotFixtureEvents(copilotFixtureSession, copilotVersion), "\n", 2)[0] + "\n", "more than one session"},
+		"another schema":           {strings.Replace(copilotFixtureEvents(copilotFixtureSession, copilotVersion), `"version":1`, `"version":2`, 1), "schema 2"},
+		"partial event":            {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"user.message"`, "partial event"},
+		"untyped event":            {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"data":{}}` + "\n", "not one event"},
+		"event with trailing data": {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"user.message","data":{}}]` + "\n", "not one event"},
+		"unknown event":            {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"session.future","data":{}}` + "\n", `"session.future" event, which Copilot CLI 1.0.96 does not record`},
+		"event not a object":       {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + "[]\n", "not one event"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			source, events := newCopilotFixture(t)

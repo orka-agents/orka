@@ -230,8 +230,7 @@ func inspectCopilotEvents(events []byte, providerSessionID string) (string, erro
 			Type string          `json:"type"`
 			Data json.RawMessage `json:"data"`
 		}
-		decoder := json.NewDecoder(bytes.NewReader(line))
-		if !bytes.HasPrefix(line, []byte("{")) || decoder.Decode(&event) != nil || decoder.More() || event.Type == "" {
+		if !bytes.HasPrefix(line, []byte("{")) || decodeOnly(json.NewDecoder(bytes.NewReader(line)), &event) != nil || event.Type == "" {
 			return "", errors.New("the Copilot CLI event log holds an entry that is not one event")
 		}
 		if !copilotEventTypes[event.Type] && unknown == "" {
