@@ -132,6 +132,16 @@ func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"newer Claude Code": {reason: "Claude Code 2.1.999 wrote", mutate: func(t *testing.T, f claudeFixture) {
 			writeForTest(t, f.transcript, claudeFixtureEntries(f.dirs.Workspace, f.toolResultsDir, "2.1.999"))
 		}},
+		"newer Claude Code earlier in the transcript": {reason: "Claude Code 2.1.999 wrote", mutate: func(t *testing.T, f claudeFixture) {
+			writeForTest(t, f.transcript, claudeFixtureEntries(f.dirs.Workspace, f.toolResultsDir, "2.1.999")+
+				claudeFixtureEntries(f.dirs.Workspace, f.toolResultsDir, claudeCodeVersion))
+		}},
+		"unknown entry type": {reason: `type "future-entry", which Claude Code 2.1.293 does not read`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"future-entry","sessionId":"`+claudeFixtureSession+`"}`+"\n")
+		}},
+		"unparseable release": {reason: `records release "2.1"`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1"}`+"\n")
+		}},
 		"another session's entry": {reason: "another session", mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"user","sessionId":"8f1d0c3e-0000-4000-8000-000000000000"}`+"\n")
 		}},
@@ -226,6 +236,9 @@ func TestClaudeInspectRejectsTamperedBundles(t *testing.T) {
 		"no transcript": rebuild(func(e map[string][]byte) { delete(e, "session.jsonl") }),
 		"no manifest":   rebuild(func(e map[string][]byte) { delete(e, "manifest.json") }),
 		"invalid entry": rebuild(func(e map[string][]byte) { e["session.jsonl"] = append(e["session.jsonl"], "[]\n"...) }),
+		"unknown entry type": rebuild(func(e map[string][]byte) {
+			e["session.jsonl"] = append(e["session.jsonl"], `{"type":"future-entry"}`+"\n"...)
+		}),
 		"relative spills": rebuild(func(e map[string][]byte) {
 			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`"/`), []byte(`"`), 1)
 		}),

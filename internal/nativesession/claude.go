@@ -97,10 +97,10 @@ func (claudeFormat) Capture(_ context.Context, dirs Dirs, providerSessionID stri
 		return nil, err
 	}
 	version, err := inspectClaudeTranscript(transcript, providerSessionID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrUnsupported, err)
+	if err != nil && !errors.Is(err, ErrUnsupported) {
+		err = fmt.Errorf("%w: %w", ErrUnsupported, err)
 	}
-	if err := requireSupportedClaudeVersion(version); err != nil {
+	if err != nil {
 		return nil, err
 	}
 	toolResultsDir := filepath.Join(folder, providerSessionID, claudeToolResultsDir)
@@ -216,11 +216,18 @@ func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string,
 		return err
 	}
 	created = append(created, staged)
-	if err = os.Rename(staged, filepath.Join(folder, bundle.manifest.SessionID+".jsonl")); err != nil {
+	destination := filepath.Join(folder, bundle.manifest.SessionID+".jsonl")
+	if err = os.Rename(staged, destination); err != nil {
+		return err
+	}
+	// Until the folder is synced, a failure still removes the published
+	// transcript, so a retry finds no partial install.
+	created[len(created)-1] = destination
+	if err = syncDir(folder); err != nil {
 		return err
 	}
 	created = nil
-	return syncDir(folder)
+	return nil
 }
 
 // findClaudeSession returns the one project folder under projects that holds
@@ -315,22 +322,41 @@ func readClaudeToolResults(dir string, budget int) (map[string][]byte, error) {
 	return files, nil
 }
 
-// inspectClaudeTranscript checks that transcript is JSON lines of objects
-// belonging to providerSessionID, and returns the Claude Code release that
-// wrote its last versioned entry.
+// claudeEntryTypes are the transcript entry types Claude Code 2.1.293 reads,
+// from its own classification of transcript entries.
+var claudeEntryTypes = map[string]bool{
+	"user": true, "assistant": true, "system": true, "attachment": true, "progress": true,
+	"file-history-snapshot": true, "file-history-delta": true, "last-prompt": true, "continued-in": true,
+	"content-replacement": true, "api-request-shape": true, "api-request-blob": true, "api-request": true,
+	"fork-context-ref": true, "frame-link": true, "summary": true, "custom-title": true, "ended-by-model": true,
+	"ai-title": true, "tag": true, "relocated": true, "agent-name": true, "agent-color": true, "agent-setting": true,
+	"pr-link": true, "artifact-comment-monitor": true, "artifact-autoreact-ledger": true, "bridge-session": true,
+	"history-suppression": true, "attribution-snapshot": true, "mode": true, "permission-mode": true,
+	"isolation-latch": true, "dev-mods": true, "memory-mode": true, "atis-latch": true, "worktree-state": true,
+	"cost-state": true, "queue-operation": true, "observer-ref": true,
+}
+
+// inspectClaudeTranscript checks that transcript is JSON lines of entries of
+// providerSessionID that Claude Code claudeCodeVersion reads, and returns the
+// latest Claude Code release that wrote it. A later release's transcript is
+// unsupported.
 func inspectClaudeTranscript(transcript []byte, providerSessionID string) (string, error) {
 	if len(transcript) == 0 || transcript[len(transcript)-1] != '\n' {
 		return "", errors.New("the Claude Code transcript is empty or ends in a partial entry")
 	}
-	version, owned := "", false
+	version, owned, unknown := "", false, ""
 	for line := range bytes.Lines(transcript) {
 		var entry struct {
+			Type      string  `json:"type"`
 			SessionID *string `json:"sessionId"`
 			Version   string  `json:"version"`
 		}
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		if !bytes.HasPrefix(line, []byte("{")) || decoder.Decode(&entry) != nil || decoder.More() {
 			return "", errors.New("the Claude Code transcript holds an entry that is not one JSON object")
+		}
+		if !claudeEntryTypes[entry.Type] && unknown == "" {
+			unknown = entry.Type
 		}
 		if entry.SessionID != nil {
 			if *entry.SessionID != providerSessionID {
@@ -339,14 +365,25 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 			owned = true
 		}
 		if entry.Version != "" {
-			version = entry.Version
+			if _, ok := parseRelease(entry.Version); !ok {
+				return "", fmt.Errorf("the Claude Code transcript records release %q", entry.Version)
+			}
+			if order, _ := compareReleases(entry.Version, version); version == "" || order > 0 {
+				version = entry.Version
+			}
 		}
 	}
 	if !owned {
 		return "", errors.New("the Claude Code transcript holds no entries of the session")
 	}
-	if _, ok := parseRelease(version); !ok {
+	if version == "" {
 		return "", errors.New("the Claude Code transcript does not record a release")
+	}
+	if err := requireSupportedClaudeVersion(version); err != nil {
+		return "", err
+	}
+	if unknown != "" {
+		return "", fmt.Errorf("the Claude Code transcript holds an entry of type %q, which Claude Code %s does not read", unknown, claudeCodeVersion)
 	}
 	return version, nil
 }
@@ -418,9 +455,6 @@ func decodeClaudeBundle(data []byte, maxBytes int) (claudeBundle, error) {
 	}
 	if version != bundle.manifest.Version {
 		return claudeBundle{}, errors.New("the Claude Code bundle manifest names another release than its transcript")
-	}
-	if err := requireSupportedClaudeVersion(version); err != nil {
-		return claudeBundle{}, err
 	}
 	return bundle, nil
 }
