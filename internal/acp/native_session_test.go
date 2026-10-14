@@ -12,7 +12,7 @@ import (
 )
 
 func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T) {
-	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id", "load-success", "load-error", "load-wrong-id"} {
+	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id", "load-success", "load-error", "load-wrong-id", "load-over-budget"} {
 		t.Run(mode, func(t *testing.T) {
 			uid, gid := os.Getuid(), os.Getgid()
 			if uid == 0 {
@@ -41,11 +41,16 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 			command, helperCommand := testAdapterCommand(t), testExecHelperCommand(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			replayBudget := 0
+			if mode == "load-over-budget" {
+				replayBudget = 64
+			}
 			session, err := NewRuntimeSession(ctx, RuntimeSessionConfig{
 				ID: "resume-session", Generation: 1, ProfileDigest: "sha256:profile", ResumeSessionID: nativeID,
-				MCPServers:  []MCPServer{{Name: "current-mcp", Type: "http", URL: "http://current.example/mcp"}},
-				Process:     ProcessConfig{Command: command, Args: []string{"-test.run=TestACPHelperProcess"}, Environment: env, Paths: paths, UID: uid, GID: gid, ExecHelperCommand: helperCommand},
-				CancelGrace: 100 * time.Millisecond,
+				MCPServers:         []MCPServer{{Name: "current-mcp", Type: "http", URL: "http://current.example/mcp"}},
+				Process:            ProcessConfig{Command: command, Args: []string{"-test.run=TestACPHelperProcess"}, Environment: env, Paths: paths, UID: uid, GID: gid, ExecHelperCommand: helperCommand},
+				CancelGrace:        100 * time.Millisecond,
+				MaxLoadReplayBytes: replayBudget,
 			})
 			if mode != "resume-success" && mode != "load-success" {
 				if err == nil {
@@ -58,6 +63,7 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 					"resume-unsupported": "did not advertise session/resume",
 					"resume-wrong-id":    "bound a different provider session",
 					"load-wrong-id":      "replayed a different provider session",
+					"load-over-budget":   "session/load replayed more than 64 bytes",
 				}[mode]
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("native resume error = %v, want %s", err, want)

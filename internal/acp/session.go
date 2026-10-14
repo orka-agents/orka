@@ -17,6 +17,10 @@ const (
 	DefaultBufferedEvents     = 256
 	DefaultBufferedEventBytes = 32 << 20
 	DefaultInitializeTimeout  = 60 * time.Second
+	// DefaultLoadReplayBytes bounds the history a session/load replays: a
+	// native checkpoint holds at most 64 MiB encoded, which its format lets
+	// expand at most eightfold.
+	DefaultLoadReplayBytes = 512 << 20
 )
 
 type RuntimeSessionConfig struct {
@@ -44,6 +48,9 @@ type RuntimeSessionConfig struct {
 	// the event-count limit fires. Consumers release bytes through
 	// PromptRun.Release.
 	MaxBufferedEventBytes int
+	// MaxLoadReplayBytes bounds the aggregate session/update payload a
+	// session/load replays before it answers.
+	MaxLoadReplayBytes int
 }
 
 type RuntimeSession struct {
@@ -62,10 +69,13 @@ type RuntimeSession struct {
 	// its done channel closes when the restart settles either way.
 	resuming        *runtimeSessionRestart
 	adapterRestarts int
-	// loading is the provider session a session/load is replaying, and
-	// foreignReplay records a replayed update that did not belong to it.
-	loading       string
-	foreignReplay bool
+	// loading is the provider session a session/load is replaying.
+	// replayBytes counts what it replayed, and the first replay that breaks
+	// a bound sets loadErr and calls stopLoad.
+	loading     string
+	replayBytes int
+	loadErr     error
+	stopLoad    context.CancelFunc
 	// frozen is set from a workspace freeze attempt until a proven thaw.
 	frozen     bool
 	active     *activePrompt
@@ -268,6 +278,9 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	if cfg.MaxBufferedEventBytes <= 0 {
 		cfg.MaxBufferedEventBytes = DefaultBufferedEventBytes
 	}
+	if cfg.MaxLoadReplayBytes <= 0 {
+		cfg.MaxLoadReplayBytes = DefaultLoadReplayBytes
+	}
 	session := &RuntimeSession{
 		id:            cfg.ID,
 		generation:    cfg.Generation,
@@ -300,22 +313,23 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		case capabilities.LoadSession:
 			// The agent replays the history as session/update notifications
 			// before it answers. No prompt is active and the provider session
-			// is not yet bound, so handleNotification only checks that each
-			// one belongs to the loaded session and drops it.
+			// is not yet bound, so handleNotification only checks each one
+			// against the loaded session and the replay budget, and drops it.
+			loadCtx, stopLoad := context.WithCancel(initCtx)
 			session.mu.Lock()
-			session.loading = cfg.ResumeSessionID
+			session.loading, session.stopLoad = cfg.ResumeSessionID, stopLoad
 			session.mu.Unlock()
-			_, err = process.Client().LoadSession(initCtx, LoadSessionRequest{
+			_, err = process.Client().LoadSession(loadCtx, LoadSessionRequest{
 				SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 				MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 			})
+			stopLoad()
 			session.mu.Lock()
-			foreign := session.foreignReplay
-			session.loading = ""
-			session.mu.Unlock()
-			if err == nil && foreign {
-				err = fmt.Errorf("ACP session/load replayed a different provider session")
+			if session.loadErr != nil {
+				err = session.loadErr
 			}
+			session.loading, session.stopLoad = "", nil
+			session.mu.Unlock()
 		default:
 			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume or session/load support"))
 		}
@@ -1067,11 +1081,7 @@ func (s *RuntimeSession) handleNotification(_ context.Context, notification Inco
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.loading != "" {
-		// The client dispatches notifications in order, so every update
-		// session/load replays arrives before its response.
-		if err != nil || update.SessionID != s.loading {
-			s.foreignReplay = true
-		}
+		s.checkReplayLocked(len(notification.Params), update.SessionID, err)
 		return
 	}
 	if err != nil {
@@ -1082,6 +1092,26 @@ func (s *RuntimeSession) handleNotification(_ context.Context, notification Inco
 		return
 	}
 	s.emitLocked(active, PromptEvent{Type: PromptEventUpdate, Update: &update, Size: len(notification.Params)})
+}
+
+// checkReplayLocked holds an update session/load replays to the loaded
+// session and the replay budget, and stops the load at the first breach. The
+// client dispatches notifications in order, so every replayed update arrives
+// before the load's response.
+func (s *RuntimeSession) checkReplayLocked(size int, sessionID string, decodeErr error) {
+	if s.loadErr != nil {
+		return
+	}
+	s.replayBytes += size
+	switch {
+	case s.replayBytes > s.config.MaxLoadReplayBytes:
+		s.loadErr = fmt.Errorf("ACP session/load replayed more than %d bytes", s.config.MaxLoadReplayBytes)
+	case decodeErr != nil || sessionID != s.loading:
+		s.loadErr = errors.New("ACP session/load replayed a different provider session")
+	default:
+		return
+	}
+	s.stopLoad()
 }
 
 func (s *RuntimeSession) handleRequest(ctx context.Context, request IncomingRequest) (any, *RPCError) {
