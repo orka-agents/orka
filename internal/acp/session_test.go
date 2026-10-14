@@ -402,7 +402,7 @@ const (
 // while the runtime session is created, instead of after an idle adapter exit.
 func helperCreationResumeMode(mode string) bool {
 	switch mode {
-	case "resume-success", "resume-error", "resume-wrong-id", "resume-unsupported", "load-success", "load-error":
+	case "resume-success", "resume-error", "resume-wrong-id", "resume-unsupported", "load-success", "load-error", "load-wrong-id":
 		return true
 	default:
 		return false
@@ -554,17 +554,21 @@ func TestACPHelperProcess(t *testing.T) {
 		case MethodSessionLoad:
 			var request LoadSessionRequest
 			cwd, _ := os.Getwd()
-			if mode != "load-success" || json.Unmarshal(message.Params, &request) != nil ||
+			if (mode != "load-success" && mode != "load-wrong-id") || json.Unmarshal(message.Params, &request) != nil ||
 				request.CWD != cwd || len(request.MCPServers) != 1 || request.MCPServers[0].Name != "current-mcp" {
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "load rejected"}})
 				continue
 			}
 			providerSession = request.SessionID
+			replayed := providerSession
+			if mode == "load-wrong-id" {
+				replayed = "another-provider-session"
+			}
 			// session/load replays the history before it answers.
 			for _, kind := range []string{"user_message_chunk", "agent_message_chunk"} {
 				writeACPHelper(writer, map[string]any{
 					"jsonrpc": "2.0", "method": MethodSessionUpdate,
-					"params": map[string]any{"sessionId": providerSession, "update": map[string]any{"sessionUpdate": kind, "content": map[string]any{"type": "text", "text": "imported history"}}},
+					"params": map[string]any{"sessionId": replayed, "update": map[string]any{"sessionUpdate": kind, "content": map[string]any{"type": "text", "text": "imported history"}}},
 				})
 			}
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})

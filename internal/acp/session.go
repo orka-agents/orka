@@ -62,6 +62,10 @@ type RuntimeSession struct {
 	// its done channel closes when the restart settles either way.
 	resuming        *runtimeSessionRestart
 	adapterRestarts int
+	// loading is the provider session a session/load is replaying, and
+	// foreignReplay records a replayed update that did not belong to it.
+	loading       string
+	foreignReplay bool
 	// frozen is set from a workspace freeze attempt until a proven thaw.
 	frozen     bool
 	active     *activePrompt
@@ -296,11 +300,22 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		case capabilities.LoadSession:
 			// The agent replays the history as session/update notifications
 			// before it answers. No prompt is active and the provider session
-			// is not yet bound, so handleNotification drops every one.
+			// is not yet bound, so handleNotification only checks that each
+			// one belongs to the loaded session and drops it.
+			session.mu.Lock()
+			session.loading = cfg.ResumeSessionID
+			session.mu.Unlock()
 			_, err = process.Client().LoadSession(initCtx, LoadSessionRequest{
 				SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 				MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 			})
+			session.mu.Lock()
+			foreign := session.foreignReplay
+			session.loading = ""
+			session.mu.Unlock()
+			if err == nil && foreign {
+				err = fmt.Errorf("ACP session/load replayed a different provider session")
+			}
 		default:
 			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume or session/load support"))
 		}
@@ -1048,11 +1063,20 @@ func (s *RuntimeSession) handleNotification(_ context.Context, notification Inco
 		return
 	}
 	var update SessionNotification
-	if err := json.Unmarshal(notification.Params, &update); err != nil {
-		return
-	}
+	err := json.Unmarshal(notification.Params, &update)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.loading != "" {
+		// The client dispatches notifications in order, so every update
+		// session/load replays arrives before its response.
+		if err != nil || update.SessionID != s.loading {
+			s.foreignReplay = true
+		}
+		return
+	}
+	if err != nil {
+		return
+	}
 	active := s.active
 	if active == nil || active.settled || update.SessionID != s.providerSessionID {
 		return
