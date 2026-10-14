@@ -345,8 +345,14 @@ func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ str
 	if err = os.Rename(staged, destination); err != nil {
 		return err
 	}
+	// Until the directory is synced, a failure still removes the published
+	// database, so a retry finds no partial install.
+	created[len(created)-1] = destination
+	if err = syncDir(root); err != nil {
+		return err
+	}
 	created = nil
-	return syncDir(root)
+	return nil
 }
 
 // copyOpenCodeDatabase takes a consistent copy of a stopped OpenCode
