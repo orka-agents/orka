@@ -226,17 +226,22 @@ func newTaskScopedCreateConflictFixtureForRuntime(
 	for _, option := range taskOptions {
 		option(task)
 	}
+	model := &corev1alpha1.ModelConfig{Name: acpTestModel}
+	if runtimeType == corev1alpha1.AgentRuntimeOpencode {
+		// OpenCode names a provider and needs reviewed model limits.
+		model = &corev1alpha1.ModelConfig{Name: "openai/" + acpTestModel, ContextWindow: new(int32(32768)), MaxTokens: new(int32(4096))}
+	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Model: model,
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type: runtimeType, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
 	image := "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)
-	images := ACPRuntimeImages{Codex: image, Claude: image}
+	images := ACPRuntimeImages{Codex: image, Claude: image, Opencode: image}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
 	task.Status.Execution.RuntimePoolName = plan.PoolName

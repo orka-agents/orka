@@ -714,7 +714,9 @@ func TestNativeCapturePersistsUnderCanonicalSessionOwner(t *testing.T) {
 }
 
 func TestACPDispatcherRejectsIncompatibleNativeRuntimeBeforeSessionMutation(t *testing.T) {
-	for _, runtimeType := range []corev1alpha1.AgentRuntimeType{corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude} {
+	for _, runtimeType := range []corev1alpha1.AgentRuntimeType{
+		corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeOpencode,
+	} {
 		t.Run(string(runtimeType), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
@@ -726,9 +728,11 @@ func TestACPDispatcherRejectsIncompatibleNativeRuntimeBeforeSessionMutation(t *t
 						onDelete: func(harnessv2.DeleteRuntimeSessionRequest) { deletes++ },
 						onPrompt: func(harnessv2.StartPromptRequest) { prompts++ },
 					}
-					// Codex without the capability and a non-Codex runtime advertising
-					// it must both reject the import before Session mutation.
-					if runtimeType == corev1alpha1.AgentRuntimeClaude {
+					// A staged Codex import must be rejected before Session mutation by
+					// Codex without the capability, by a runtime advertising it for a
+					// provider without native sessions, and by a runtime restoring
+					// another provider's native sessions.
+					if runtimeType != corev1alpha1.AgentRuntimeCodex {
 						options.nativeSnapshot = &snapshot
 					}
 					return newDispatcherRuntimeServerWithOptions(t, profile, digest, options, func(harnessv2.CreateRuntimeSessionRequest) { creates++ })

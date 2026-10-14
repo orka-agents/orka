@@ -143,22 +143,28 @@ func (d *ACPDispatcher) loadTaskNativeSession(ctx context.Context, task *corev1a
 // control or acquiring its mutation lease. The preparation path checks again
 // before opening a turn in case an import was staged after this read.
 // nativeProvider is the provider kind whose checkpoints the runtime restores,
-// or empty when it restores none. A provider mismatch is caught on the same
-// pre-binding path by prepareTaskSession.
+// or empty when it restores none. A staged import has no Session control, so
+// only this check can see its provider before binding; prepareTaskSession
+// checks a bound checkpoint's provider before the lease.
 func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, nativeProvider string) error {
 	if task.Spec.SessionRef == nil || d.nativeSessionStore() == nil {
 		return nil
 	}
-	if nativeProvider != "" && strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) == "" {
+	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		control = &store.SessionControl{SessionName: task.Spec.SessionRef.Name}
+	case err != nil:
+		return err
+	case nativeProvider != "" && strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) == "":
 		return nil
 	}
-	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
-	if errors.Is(err, store.ErrNotFound) {
-		control = &store.SessionControl{SessionName: task.Spec.SessionRef.Name}
-	} else if err != nil {
-		return err
-	}
 	native, err := d.loadTaskNativeSession(ctx, task, control)
+	if nativeProvider != "" && errors.Is(err, store.ErrConflict) {
+		// The checkpoint has an owner, so it is not a staged import;
+		// prepareTaskSession loads it under that owner.
+		return nil
+	}
 	if err != nil {
 		return err
 	}
