@@ -101,6 +101,7 @@ func TestCopilotCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"another schema":     {strings.Replace(copilotFixtureEvents(copilotFixtureSession, copilotVersion), `"version":1`, `"version":2`, 1), "schema 2"},
 		"partial event":      {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"user.message"`, "partial event"},
 		"untyped event":      {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"data":{}}` + "\n", "not one event"},
+		"unknown event":      {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"session.future","data":{}}` + "\n", `"session.future" event, which Copilot CLI 1.0.96 does not record`},
 		"event not a object": {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + "[]\n", "not one event"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -166,6 +167,9 @@ func TestCopilotInspectRejectsTamperedBundles(t *testing.T) {
 		}),
 		"no events":     rebuild(func(e map[string][]byte) { delete(e, "events.jsonl") }),
 		"invalid event": rebuild(func(e map[string][]byte) { e["events.jsonl"] = append(e["events.jsonl"], "[]\n"...) }),
+		"unknown event": rebuild(func(e map[string][]byte) {
+			e["events.jsonl"] = append(e["events.jsonl"], `{"type":"session.future","data":{}}`+"\n"...)
+		}),
 		"trailing data": append(append([]byte(nil), data...), data...),
 		"not gzip":      []byte("plain"),
 	} {

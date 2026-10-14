@@ -19,6 +19,8 @@ const (
 	copilotVersion      = "1.0.96"
 	copilotBundleFormat = "orka/copilot-session-v1"
 	copilotEventsEntry  = "events.jsonl"
+	// copilotSessionStart is the event that begins every event log.
+	copilotSessionStart = "session.start"
 	// copilotEventsSchema is the events.jsonl schema that session.start
 	// records.
 	copilotEventsSchema = 1
@@ -74,10 +76,10 @@ func (copilotFormat) Capture(_ context.Context, dirs Dirs, providerSessionID str
 		return nil, err
 	}
 	version, err := inspectCopilotEvents(events, providerSessionID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrUnsupported, err)
+	if err != nil && !errors.Is(err, ErrUnsupported) {
+		err = fmt.Errorf("%w: %w", ErrUnsupported, err)
 	}
-	if err := requireSupportedCopilotVersion(version); err != nil {
+	if err != nil {
 		return nil, err
 	}
 	data, err := writeBundle(limit, copilotManifest{Format: copilotBundleFormat, Version: version, SessionID: providerSessionID},
@@ -145,21 +147,83 @@ func (copilotFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string
 		return err
 	}
 	created = append(created, staged)
-	if err = os.Rename(staged, filepath.Join(sessionDir, copilotEventsEntry)); err != nil {
+	destination := filepath.Join(sessionDir, copilotEventsEntry)
+	if err = os.Rename(staged, destination); err != nil {
+		return err
+	}
+	// Until the directory is synced, a failure still removes the published
+	// event log, so a retry finds no partial install.
+	created[len(created)-1] = destination
+	if err = syncDir(sessionDir); err != nil {
 		return err
 	}
 	created = nil
-	return syncDir(sessionDir)
+	return nil
 }
 
-// inspectCopilotEvents checks that events is JSON lines of events that start
-// with providerSessionID's session.start, and returns the Copilot CLI release
-// that started the session.
+// copilotEventTypes are the event types Copilot CLI 1.0.96 records: the
+// SessionEvent schema that the @github/copilot-sdk release pinning it (1.0.20)
+// generates, plus session.usage_record, which its event log also holds.
+var copilotEventTypes = map[string]bool{
+	"abort": true, "assistant.fusion_phase_activity": true, "assistant.fusion_phase_completed": true,
+	"assistant.fusion_phase_failed": true, "assistant.fusion_phase_started": true, "assistant.idle": true,
+	"assistant.intent": true, "assistant.message": true, "assistant.message_delta": true,
+	"assistant.message_start": true, "assistant.reasoning": true, "assistant.reasoning_delta": true,
+	"assistant.server_tool_progress": true, "assistant.streaming_delta": true, "assistant.tool_call_delta": true,
+	"assistant.turn_end": true, "assistant.turn_start": true, "assistant.usage": true,
+	"auto_mode_switch.completed": true, "auto_mode_switch.requested": true, "capabilities.changed": true,
+	"command.completed": true, "command.execute": true, "command.queued": true, "commands.changed": true,
+	"elicitation.completed": true, "elicitation.requested": true, "exit_plan_mode.completed": true,
+	"exit_plan_mode.requested": true, "external_tool.completed": true, "external_tool.requested": true,
+	"hook.end": true, "hook.progress": true, "hook.start": true, "human_response.recorded": true,
+	"mcp_app.tool_call_complete": true, "mcp.headers_refresh_completed": true, "mcp.headers_refresh_required": true,
+	"mcp.oauth_completed": true, "mcp.oauth_required": true, "mcp.prompts.list_changed": true,
+	"mcp.resources.list_changed": true, "mcp.tools.list_changed": true, "model.call_failure": true,
+	"model.call_finished": true, "pending_messages.modified": true, "permission.assentDetected": true,
+	"permission.carriedForward": true, "permission.completed": true, "permission.contextualAuthorization": true,
+	"permission.messageAuthorization": true, "permission.messageAuthorizationDegraded": true,
+	"permission.messageAuthorizationRead": true, "permission.requested": true, "sampling.completed": true,
+	"sampling.requested": true, "session_limits_exhausted.completed": true, "session_limits_exhausted.requested": true,
+	"session.auto_mode_resolved": true, "session.auto_tier_recommendation": true,
+	"session.auto_tier_switch_failed": true, "session.autopilot_objective_changed": true,
+	"session.background_tasks_changed": true, "session.binary_asset": true, "session.canvas.closed": true,
+	"session.canvas.opened": true, "session.canvas.recorded": true, "session.canvas.registry_changed": true,
+	"session.canvas.removed": true, "session.canvas.unavailable": true, "session.compaction_complete": true,
+	"session.compaction_start": true, "session.completion_receipt": true, "session.context_changed": true,
+	"session.context_cleared": true, "session.custom_agents_updated": true, "session.custom_notification": true,
+	"session.error": true, "session.extensions_loaded": true, "session.extensions.attachments_pushed": true,
+	"session.fusion_completed": true, "session.fusion_resolved": true, "session.fusion_route_failed": true,
+	"session.fusion_route_started": true, "session.handoff": true, "session.idle": true, "session.indexed_search": true,
+	"session.info": true, "session.managed_plugin_progress": true, "session.managed_settings_enforced": true,
+	"session.managed_settings_resolved": true, "session.mcp_server_needs_reconnect": true,
+	"session.mcp_server_removed": true, "session.mcp_server_status_changed": true, "session.mcp_servers_loaded": true,
+	"session.mode_changed": true, "session.mode_notice_delivered": true, "session.model_change": true,
+	"session.model_deselected": true, "session.permission_recovery": true, "session.permissions_changed": true,
+	"session.plan_changed": true, "session.quota_observation": true, "session.remote_steerable_changed": true,
+	"session.resume": true, "session.schedule_cancelled": true, "session.schedule_created": true,
+	"session.schedule_rearmed": true, "session.session_limits_changed": true, "session.shutdown": true,
+	"session.skills_loaded": true, "session.snapshot_rewind": true, copilotSessionStart: true,
+	"session.task_complete": true, "session.title_changed": true, "session.todos_changed": true,
+	"session.tools_updated": true, "session.truncation": true, "session.usage_checkpoint": true,
+	"session.usage_info": true, "session.usage_record": true, "session.warning": true,
+	"session.workspace_file_changed": true, "skill.invoked": true, "subagent.completed": true,
+	"subagent.configured": true, "subagent.deselected": true, "subagent.failed": true, "subagent.selected": true,
+	"subagent.started": true, "system.message": true, "system.notification": true, "tool_search.activated": true,
+	"tool.execution_complete": true, "tool.execution_partial_result": true, "tool.execution_progress": true,
+	"tool.execution_start": true, "tool.shell_output": true, "tool.user_requested": true, "ui.ephemeral_query": true,
+	"user_input.completed": true, "user_input.requested": true, "user.message": true, "workflow.run_settled": true,
+	"workflow.run_started": true, "workflow.run_updated": true,
+}
+
+// inspectCopilotEvents checks that events is JSON lines of events Copilot CLI
+// copilotVersion records, starting with providerSessionID's session.start, and
+// returns the Copilot CLI release that started the session. A later release's
+// session is unsupported.
 func inspectCopilotEvents(events []byte, providerSessionID string) (string, error) {
 	if len(events) == 0 || events[len(events)-1] != '\n' {
 		return "", errors.New("the Copilot CLI event log is empty or ends in a partial event")
 	}
-	version := ""
+	version, unknown := "", ""
 	first := true
 	for line := range bytes.Lines(events) {
 		var event struct {
@@ -170,6 +234,9 @@ func inspectCopilotEvents(events []byte, providerSessionID string) (string, erro
 		if !bytes.HasPrefix(line, []byte("{")) || decoder.Decode(&event) != nil || decoder.More() || event.Type == "" {
 			return "", errors.New("the Copilot CLI event log holds an entry that is not one event")
 		}
+		if !copilotEventTypes[event.Type] && unknown == "" {
+			unknown = event.Type
+		}
 		switch {
 		case first:
 			var start struct {
@@ -177,7 +244,7 @@ func inspectCopilotEvents(events []byte, providerSessionID string) (string, erro
 				CopilotVersion string `json:"copilotVersion"`
 				Version        int    `json:"version"`
 			}
-			if event.Type != "session.start" || json.Unmarshal(event.Data, &start) != nil {
+			if event.Type != copilotSessionStart || json.Unmarshal(event.Data, &start) != nil {
 				return "", errors.New("the Copilot CLI event log does not begin with session.start")
 			}
 			if start.SessionID != providerSessionID {
@@ -190,9 +257,15 @@ func inspectCopilotEvents(events []byte, providerSessionID string) (string, erro
 				return "", errors.New("the Copilot CLI event log does not record a release")
 			}
 			version, first = start.CopilotVersion, false
-		case event.Type == "session.start":
+		case event.Type == copilotSessionStart:
 			return "", errors.New("the Copilot CLI event log starts more than one session")
 		}
+	}
+	if err := requireSupportedCopilotVersion(version); err != nil {
+		return "", err
+	}
+	if unknown != "" {
+		return "", fmt.Errorf("the Copilot CLI event log holds a %q event, which Copilot CLI %s does not record", unknown, copilotVersion)
 	}
 	return version, nil
 }
@@ -228,9 +301,6 @@ func decodeCopilotBundle(data []byte, maxBytes int) (copilotManifest, []byte, er
 	}
 	if version != manifest.Version {
 		return copilotManifest{}, nil, errors.New("the Copilot CLI bundle manifest names another release than its event log")
-	}
-	if err := requireSupportedCopilotVersion(version); err != nil {
-		return copilotManifest{}, nil, err
 	}
 	return manifest, events, nil
 }
