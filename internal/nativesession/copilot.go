@@ -136,20 +136,34 @@ func (copilotFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string
 		}
 	}
 	destination := filepath.Join(sessionDir, copilotEventsEntry)
+	staged := filepath.Join(sessionDir, ".events.jsonl.restore")
 	synced := []string{sessionDir, filepath.Dir(sessionDir), dirs.State, filepath.Dir(dirs.State)}
 	if err = os.Mkdir(sessionDir, 0o700); err != nil {
-		// A retry after an install that completed but was not acknowledged
-		// finds exactly what it would write.
-		if errors.Is(err, os.ErrExist) && holdsFile(destination, events) {
-			return syncDirs(synced...)
+		if !errors.Is(err, os.ErrExist) {
+			return err
 		}
-		if errors.Is(err, os.ErrExist) {
+		if err = requireRealPath(sessionDir, true); err != nil {
+			return err
+		}
+		entries, readErr := os.ReadDir(sessionDir)
+		switch {
+		case readErr != nil:
+			return readErr
+		case len(entries) == 1 && holdsFile(destination, events):
+			// A retry after an install that completed but was not
+			// acknowledged finds exactly what it would write, and nothing else.
+			return syncDirs(synced...)
+		case len(entries) == 0 || len(entries) == 1 && entries[0].Name() == filepath.Base(staged):
+			// An install killed before it published the event log left only
+			// its own staging, which this one replaces.
+			if err = os.Remove(staged); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		default:
 			return errors.New("the Copilot CLI state directory already holds the session")
 		}
-		return err
 	}
 	created = append(created, sessionDir)
-	staged := filepath.Join(sessionDir, ".events.jsonl.restore")
 	if err = writeNewFile(staged, events); err != nil {
 		return err
 	}

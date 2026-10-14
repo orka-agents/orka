@@ -68,6 +68,13 @@ func TestCopilotFormatCarriesTheSessionIntoANewHome(t *testing.T) {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 	destination := Dirs{State: filepath.Join(realDir(t), ".copilot"), Workspace: realDir(t)}
+	// An install killed before it published the event log leaves only its
+	// staging behind, and the retry replaces it.
+	sessionDir := filepath.Dir(copilotEventsPath(destination.State, copilotFixtureSession))
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeForTest(t, filepath.Join(sessionDir, ".events.jsonl.restore"), `{"type":"session.st`)
 	if err := format.Install(t.Context(), data, destination, realDir(t), copilotFixtureLimit); err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +93,14 @@ func TestCopilotFormatCarriesTheSessionIntoANewHome(t *testing.T) {
 	// A retry after an unacknowledged install finds exactly what it wrote.
 	if err := format.Install(t.Context(), data, destination, realDir(t), copilotFixtureLimit); err != nil {
 		t.Fatalf("repeating a completed install must succeed: %v", err)
+	}
+	workspace := filepath.Join(filepath.Dir(copilotEventsPath(destination.State, copilotFixtureSession)), "workspace.yaml")
+	writeForTest(t, workspace, "cwd: /elsewhere\n")
+	if err := format.Install(t.Context(), data, destination, realDir(t), copilotFixtureLimit); err == nil {
+		t.Fatal("a retry must not accept a session directory holding state the install did not write")
+	}
+	if err := os.Remove(workspace); err != nil {
+		t.Fatal(err)
 	}
 	appendForTest(t, events, `{"type":"user.message","data":{"content":"later turn"},"id":"e5","timestamp":"2026-10-13T04:58:00.000Z","parentId":"e4"}`+"\n")
 	later, err := format.Capture(t.Context(), source, copilotFixtureSession, copilotFixtureLimit)
