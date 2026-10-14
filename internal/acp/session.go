@@ -321,11 +321,19 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 			session.mu.Lock()
 			session.loading, session.stopLoad = cfg.ResumeSessionID, stopLoad
 			session.mu.Unlock()
+			// The replay ends at the answer: updates that follow it, such as
+			// available_commands_update, are not history.
+			endReplay := func() {
+				session.mu.Lock()
+				session.loading = ""
+				session.mu.Unlock()
+			}
 			_, err = process.Client().LoadSession(loadCtx, LoadSessionRequest{
 				SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 				MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
-			})
+			}, endReplay)
 			stopLoad()
+			endReplay()
 			session.mu.Lock()
 			switch {
 			case session.loadErr != nil:
@@ -335,7 +343,7 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 				// that the agent loaded the installed conversation.
 				err = errors.New("ACP session/load replayed none of the provider session's history")
 			}
-			session.loading, session.stopLoad = "", nil
+			session.stopLoad = nil
 			session.mu.Unlock()
 		default:
 			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume or session/load support"))
@@ -1103,8 +1111,8 @@ func (s *RuntimeSession) handleNotification(_ context.Context, notification Inco
 
 // checkReplayLocked holds an update session/load replays to the loaded
 // session and the replay budget, and stops the load at the first breach. The
-// client dispatches notifications in order, so every replayed update arrives
-// before the load's response.
+// client dispatches messages in order and ends the replay as it reads the
+// load's answer, so only updates sent before the answer are checked.
 func (s *RuntimeSession) checkReplayLocked(size int, sessionID string, decodeErr error) {
 	if s.loadErr != nil {
 		return

@@ -12,7 +12,7 @@ import (
 )
 
 func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T) {
-	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id", "load-success", "load-error", "load-wrong-id", "load-over-budget", "load-silent"} {
+	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id", "load-success", "load-error", "load-wrong-id", "load-over-budget", "load-silent", "load-silent-then-update"} {
 		t.Run(mode, func(t *testing.T) {
 			uid, gid := os.Getuid(), os.Getgid()
 			if uid == 0 {
@@ -58,13 +58,14 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 					t.Fatal("unsupported or failed native resume succeeded")
 				}
 				want := map[string]string{
-					"resume-error":       "restore ACP provider session",
-					"load-error":         "restore ACP provider session",
-					"resume-unsupported": "did not advertise session/resume",
-					"resume-wrong-id":    "bound a different provider session",
-					"load-wrong-id":      "replayed a different provider session",
-					"load-over-budget":   "session/load replayed more than 64 bytes",
-					"load-silent":        "replayed none of the provider session's history",
+					"resume-error":            "restore ACP provider session",
+					"load-error":              "restore ACP provider session",
+					"resume-unsupported":      "did not advertise session/resume",
+					"resume-wrong-id":         "bound a different provider session",
+					"load-wrong-id":           "replayed a different provider session",
+					"load-over-budget":        "session/load replayed more than 64 bytes",
+					"load-silent":             "replayed none of the provider session's history",
+					"load-silent-then-update": "replayed none of the provider session's history",
 				}[mode]
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("native resume error = %v, want %s", err, want)

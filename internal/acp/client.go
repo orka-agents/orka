@@ -83,7 +83,7 @@ type Client struct {
 	nextID  atomic.Int64
 
 	pendingMu sync.Mutex
-	pending   map[string]chan rpcResponse
+	pending   map[string]pendingCall
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -106,6 +106,14 @@ type rpcResponse struct {
 	err    error
 }
 
+// pendingCall is a request awaiting its response. onAnswered, when set, runs
+// on the read loop as the response arrives, before any later message is
+// handled.
+type pendingCall struct {
+	response   chan rpcResponse
+	onAnswered func()
+}
+
 func NewClient(reader io.Reader, writer io.Writer, opts Options) *Client {
 	if opts.MaxMessageBytes <= 0 {
 		opts.MaxMessageBytes = DefaultMaxMessageBytes
@@ -119,7 +127,7 @@ func NewClient(reader io.Reader, writer io.Writer, opts Options) *Client {
 		opts:        opts,
 		requestGate: make(chan struct{}, opts.MaxConcurrentRequests),
 		rejectGate:  make(chan struct{}, opts.MaxConcurrentRequests),
-		pending:     make(map[string]chan rpcResponse),
+		pending:     make(map[string]pendingCall),
 		closed:      make(chan struct{}),
 		done:        make(chan struct{}),
 	}
@@ -142,7 +150,7 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
-	return c.call(ctx, method, params, result, nil)
+	return c.call(ctx, method, params, result, nil, nil)
 }
 
 // CallWithWritten is Call with a non-blocking callback invoked after the complete
@@ -150,10 +158,10 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 // caller's durable ambiguity boundary: after it fires, loss of the response must
 // not be treated as proof that the operation was never accepted.
 func (c *Client) CallWithWritten(ctx context.Context, method string, params, result any, onWritten func()) error {
-	return c.call(ctx, method, params, result, onWritten)
+	return c.call(ctx, method, params, result, onWritten, nil)
 }
 
-func (c *Client) call(ctx context.Context, method string, params, result any, onWritten func()) error {
+func (c *Client) call(ctx context.Context, method string, params, result any, onWritten, onAnswered func()) error {
 	if method == "" {
 		return fmt.Errorf("ACP method is required")
 	}
@@ -172,7 +180,7 @@ func (c *Client) call(ctx context.Context, method string, params, result any, on
 		return c.closedError()
 	default:
 	}
-	c.pending[key] = responseCh
+	c.pending[key] = pendingCall{response: responseCh, onAnswered: onAnswered}
 	c.pendingMu.Unlock()
 
 	request := rpcMessage{JSONRPC: jsonRPCVersion, ID: idRaw, Method: method, Params: paramsRaw}
@@ -321,12 +329,16 @@ func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
 	return c.Call(ctx, MethodSessionClose, CloseSessionRequest{SessionID: sessionID}, &response)
 }
 
-func (c *Client) LoadSession(ctx context.Context, request LoadSessionRequest) (LoadSessionResponse, error) {
+// LoadSession asks the agent to reopen a provider session, which it replays as
+// session/update notifications before it answers. onAnswered, when non-nil,
+// runs on the read loop as the answer arrives, before any later notification
+// is dispatched, so it marks where the replay ends.
+func (c *Client) LoadSession(ctx context.Context, request LoadSessionRequest, onAnswered func()) (LoadSessionResponse, error) {
 	if request.SessionID == "" {
 		return LoadSessionResponse{}, fmt.Errorf("ACP session/load requires sessionId")
 	}
 	var response LoadSessionResponse
-	if err := c.Call(ctx, MethodSessionLoad, request, &response); err != nil {
+	if err := c.call(ctx, MethodSessionLoad, request, &response, nil, onAnswered); err != nil {
 		return LoadSessionResponse{}, err
 	}
 	return response, nil
@@ -397,7 +409,7 @@ func (c *Client) readLoop() {
 func (c *Client) deliverResponse(message rpcMessage) {
 	key := canonicalID(message.ID)
 	c.pendingMu.Lock()
-	responseCh, ok := c.pending[key]
+	call, ok := c.pending[key]
 	if ok {
 		delete(c.pending, key)
 	}
@@ -405,11 +417,14 @@ func (c *Client) deliverResponse(message rpcMessage) {
 	if !ok {
 		return
 	}
+	if call.onAnswered != nil {
+		call.onAnswered()
+	}
 	if message.Error != nil {
-		responseCh <- rpcResponse{err: message.Error}
+		call.response <- rpcResponse{err: message.Error}
 		return
 	}
-	responseCh <- rpcResponse{result: cloneRaw(message.Result)}
+	call.response <- rpcResponse{result: cloneRaw(message.Result)}
 }
 
 // dispatchRequest bounds concurrently handled adapter-initiated requests.
@@ -500,10 +515,10 @@ func (c *Client) fail(err error) {
 
 		c.pendingMu.Lock()
 		pending := c.pending
-		c.pending = make(map[string]chan rpcResponse)
+		c.pending = make(map[string]pendingCall)
 		c.pendingMu.Unlock()
-		for _, responseCh := range pending {
-			responseCh <- rpcResponse{err: err}
+		for _, call := range pending {
+			call.response <- rpcResponse{err: err}
 		}
 	})
 }
