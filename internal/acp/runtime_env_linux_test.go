@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/orka-agents/orka/internal/workspacedelta"
 )
 
 func TestSessionBaseAllowsOnlyPrivateChildAccess(t *testing.T) {
@@ -98,12 +100,17 @@ func TestReadOnlyWorkspaceDeniesChildWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(paths.Workspace, "dir"), 0o755); err != nil {
-		t.Fatal(err)
+	// The supervisor materializes with umask 077. ".claude" is a protected
+	// path whose exact modes workspace validation compares with the baseline.
+	for _, dir := range []string{"dir", ".claude"} {
+		if err := os.Mkdir(filepath.Join(paths.Workspace, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for path, mode := range map[string]os.FileMode{
-		filepath.Join(paths.Workspace, "readme"):          0o644,
-		filepath.Join(paths.Workspace, "dir", "writable"): 0o666,
+		filepath.Join(paths.Workspace, "readme"):                   0o600,
+		filepath.Join(paths.Workspace, ".claude", "settings.json"): 0o600,
+		filepath.Join(paths.Workspace, "dir", "writable"):          0o666,
 	} {
 		if err := os.WriteFile(path, []byte("original"), mode); err != nil {
 			t.Fatal(err)
@@ -111,6 +118,13 @@ func TestReadOnlyWorkspaceDeniesChildWrites(t *testing.T) {
 		if err := os.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := PrepareReadOnlyWorkspaceModes(paths.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := workspacedelta.Capture(paths.Workspace, workspacedelta.Options{})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := FinalizeSessionOwnership(paths.Root, 20010, 20010); err != nil {
 		t.Fatal(err)
@@ -136,6 +150,7 @@ func TestReadOnlyWorkspaceDeniesChildWrites(t *testing.T) {
 	if err := run(20010, `
 cd "$1"
 test "$(cat readme)" = original
+test "$(cat .claude/settings.json)" = original
 test "$(cat dir/writable)" = original
 ls dir >/dev/null
 if printf x > created 2>/dev/null; then exit 11; fi
@@ -160,12 +175,12 @@ if ls "$1" >/dev/null 2>&1; then exit 22; fi
 	if err := ReclaimSessionOwnership(paths.Root); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(paths.Workspace)
+	result, err := workspacedelta.BuildWithLimits(baseline, paths.Workspace, workspacedelta.IntentRead, workspacedelta.BuildLimits{})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read-only protection changed the validated workspace: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("workspace entries changed: %v", entries)
+	if len(result.Changes) != 0 || len(result.Deletions) != 0 {
+		t.Fatalf("read-only workspace changed: %+v", result)
 	}
 	if contents, err := os.ReadFile(filepath.Join(paths.Home, "home-write")); err != nil || string(contents) != "home" {
 		t.Fatalf("child home write = %q, %v", contents, err)

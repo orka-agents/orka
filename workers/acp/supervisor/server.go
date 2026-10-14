@@ -1142,6 +1142,7 @@ func (s *Server) createSession(
 		}
 	}
 	var baseline *workspacedelta.Snapshot
+	readOnly := request.Workspace.Intent == harnessv2.WorkspaceIntentRead
 	if resumedFromCheckpoint {
 		// The preserved checkpoint may carry unpublished pre-suspension
 		// edits (a failed or cancelled Task detaches with Suspend without
@@ -1158,6 +1159,11 @@ func (s *Server) createSession(
 		if err = s.cfg.WorkspaceMaterializer.Materialize(ctx, request, baselineDir); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction materialization", err)
 		}
+		if readOnly {
+			if err = acp.PrepareReadOnlyWorkspaceModes(baselineDir); err != nil {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction read-only modes", err)
+			}
+		}
 		baseline, err = workspacedelta.CaptureContext(ctx, baselineDir, s.baselineCaptureOptions())
 		if err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction capture", err)
@@ -1166,6 +1172,11 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction cleanup", err)
 		}
 	} else {
+		if readOnly {
+			if err = acp.PrepareReadOnlyWorkspaceModes(paths.Workspace); err != nil {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace read-only modes", err)
+			}
+		}
 		baseline, err = workspacedelta.CaptureContext(ctx, paths.Workspace, s.baselineCaptureOptions())
 		if err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
@@ -1248,7 +1259,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
-	if request.Workspace.Intent == harnessv2.WorkspaceIntentRead {
+	if readOnly {
 		if err := acp.ProtectReadOnlySessionWorkspace(paths, uid, gid); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("read-only workspace protection", err)
 		}

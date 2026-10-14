@@ -784,7 +784,8 @@ func FinalizeSessionOwnership(root string, uid, gid int) error {
 // takes back the workspace tree and, when the workspace lives inside the
 // session root, the root itself, so the child can neither modify the tree nor
 // rename it aside. The child's unique group keeps read and search access, which
-// no other child identity shares.
+// no other child identity shares. Directory modes need no baseline preparation:
+// ownership reclaim resets them to 0700 before every validation.
 func ProtectReadOnlySessionWorkspace(paths SessionPaths, uid, gid int) error {
 	root := filepath.Clean(strings.TrimSpace(paths.Root))
 	workspace := filepath.Clean(strings.TrimSpace(paths.Workspace))
@@ -830,18 +831,43 @@ func protectReadOnlySessionWorkspace(
 				return fmt.Errorf("chmod protected workspace directory: %w", err)
 			}
 		case entry.Type().IsRegular():
-			info, err := entry.Info()
-			if err != nil {
-				return fmt.Errorf("inspect protected workspace file: %w", err)
-			}
-			if mode := readOnlyWorkspaceFileMode(info.Mode().Perm()); mode != info.Mode().Perm() {
-				if err := chmod(path, mode); err != nil {
-					return fmt.Errorf("chmod protected workspace file: %w", err)
-				}
-			}
+			// Normally a no-op after PrepareReadOnlyWorkspaceModes; any file it
+			// still changes differs from the baseline and fails validation.
+			return applyReadOnlyWorkspaceFileMode(path, entry, chmod)
 		}
 		return nil
 	})
+}
+
+// PrepareReadOnlyWorkspaceModes applies the read-only file modes to a
+// supervisor-owned workspace before its baseline is captured. Workspace
+// validation compares exact modes for protected paths and ownership reclaim
+// does not restore file modes, so the baseline must already record the modes
+// ProtectReadOnlySessionWorkspace leaves behind.
+func PrepareReadOnlyWorkspaceModes(workspace string) error {
+	workspace = filepath.Clean(strings.TrimSpace(workspace))
+	if !filepath.IsAbs(workspace) {
+		return fmt.Errorf("absolute workspace path is required")
+	}
+	return filepath.WalkDir(workspace, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		return applyReadOnlyWorkspaceFileMode(path, entry, os.Chmod)
+	})
+}
+
+func applyReadOnlyWorkspaceFileMode(path string, entry os.DirEntry, chmod func(string, os.FileMode) error) error {
+	info, err := entry.Info()
+	if err != nil {
+		return fmt.Errorf("inspect protected workspace file: %w", err)
+	}
+	if mode := readOnlyWorkspaceFileMode(info.Mode().Perm()); mode != info.Mode().Perm() {
+		if err := chmod(path, mode); err != nil {
+			return fmt.Errorf("chmod protected workspace file: %w", err)
+		}
+	}
+	return nil
 }
 
 // readOnlyWorkspaceFileMode grants the child's group read access, and execute

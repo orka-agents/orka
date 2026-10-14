@@ -495,3 +495,47 @@ func TestProtectReadOnlySessionWorkspaceNonRootOwnIdentity(t *testing.T) {
 		t.Fatal("non-root supervisor protected a workspace for another identity")
 	}
 }
+
+func TestPrepareReadOnlyWorkspaceModes(t *testing.T) {
+	workspace := t.TempDir()
+	nested := filepath.Join(workspace, ".claude")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]os.FileMode{
+		filepath.Join(workspace, "private"):           {0o600, 0o640},
+		filepath.Join(workspace, "private-tool"):      {0o700, 0o750},
+		filepath.Join(nested, "settings.json"):        {0o600, 0o640},
+		filepath.Join(workspace, "world-writable"):    {0o666, 0o644},
+		filepath.Join(workspace, "already-read-only"): {0o644, 0o644},
+	}
+	for path, modes := range want {
+		if err := os.WriteFile(path, []byte("x"), modes[0]); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, modes[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("private", filepath.Join(workspace, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareReadOnlyWorkspaceModes(workspace); err != nil {
+		t.Fatal(err)
+	}
+	for path, modes := range want {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != modes[1] {
+			t.Fatalf("mode for %s = %o, want %o", path, info.Mode().Perm(), modes[1])
+		}
+	}
+	if info, err := os.Lstat(nested); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("directory mode changed: %v, %v", info, err)
+	}
+	if err := PrepareReadOnlyWorkspaceModes("relative"); err == nil {
+		t.Fatal("relative workspace accepted")
+	}
+}
