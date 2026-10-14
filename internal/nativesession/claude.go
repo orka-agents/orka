@@ -218,10 +218,14 @@ func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string,
 	if err = os.Rename(staged, destination); err != nil {
 		return err
 	}
-	// Until the folder is synced, a failure still removes the published
+	// Until the directories are synced, a failure still removes the published
 	// transcript, so a retry finds no partial install.
 	created[len(created)-1] = destination
-	if err = syncDir(folder); err != nil {
+	synced := []string{folder, projects, dirs.State, filepath.Dir(dirs.State)}
+	if len(bundle.toolResults) > 0 {
+		synced = append([]string{toolResultsDir, filepath.Dir(toolResultsDir)}, synced...)
+	}
+	if err = syncDirs(synced...); err != nil {
 		return err
 	}
 	created = nil

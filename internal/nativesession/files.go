@@ -105,6 +105,18 @@ func syncDir(path string) error {
 	return dir.Sync()
 }
 
+// syncDirs syncs each directory in order. An install lists the directories it
+// wrote into from the deepest up, so every new entry, including a directory
+// it created, is durable before the install reports success.
+func syncDirs(paths ...string) error {
+	for _, path := range paths {
+		if err := syncDir(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // privateTempDir returns a new directory only the current user can enter.
 func privateTempDir() (string, error) {
 	dir, err := os.MkdirTemp("", "orka-native-session-")
