@@ -206,6 +206,10 @@ func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string,
 	if err = mkdir(folder); err != nil {
 		return err
 	}
+	staged := filepath.Join(folder, "."+bundle.manifest.SessionID+".jsonl.restore")
+	if err = reclaimClaudeStaging(staged, filepath.Dir(toolResultsDir), bundle.toolResults); err != nil {
+		return err
+	}
 	if len(bundle.toolResults) > 0 {
 		for _, dir := range []string{filepath.Dir(toolResultsDir), toolResultsDir} {
 			if err = os.Mkdir(dir, 0o700); err != nil {
@@ -221,7 +225,6 @@ func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string,
 			created = append(created, path)
 		}
 	}
-	staged := filepath.Join(folder, "."+bundle.manifest.SessionID+".jsonl.restore")
 	if err = writeNewFile(staged, transcript); err != nil {
 		return err
 	}
@@ -437,6 +440,50 @@ func jsonStringContent(value string) []byte {
 
 // decodeClaudeBundle reads and verifies a bundle holding a manifest, the
 // transcript, and at most maxClaudeToolResults spilled tool results.
+// reclaimClaudeStaging removes what an install killed before it published the
+// transcript left behind: the staged transcript, and a session directory that
+// holds only tool results the bundle carries. Anything else there is not an
+// install's staging, so the install refuses it.
+func reclaimClaudeStaging(staged, sessionDir string, toolResults map[string][]byte) error {
+	if err := os.Remove(staged); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := requireRealPathIfPresent(sessionDir, true); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(sessionDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	occupied := errors.New("the Claude Code state directory already holds the session")
+	var leftovers []string
+	for _, entry := range entries {
+		if entry.Name() != claudeToolResultsDir || !entry.IsDir() {
+			return occupied
+		}
+		toolResultsDir := filepath.Join(sessionDir, claudeToolResultsDir)
+		results, err := os.ReadDir(toolResultsDir)
+		if err != nil {
+			return err
+		}
+		for _, result := range results {
+			if _, carried := toolResults[result.Name()]; !carried || !result.Type().IsRegular() {
+				return occupied
+			}
+			leftovers = append(leftovers, filepath.Join(toolResultsDir, result.Name()))
+		}
+		leftovers = append(leftovers, toolResultsDir)
+	}
+	for _, path := range append(leftovers, sessionDir) {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func decodeClaudeBundle(data []byte, maxBytes int) (claudeBundle, error) {
 	toolResults := 0
 	manifest, files, err := readBundle(data, maxBytes, func(name string) bool {

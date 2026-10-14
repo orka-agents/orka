@@ -132,6 +132,45 @@ func TestClaudeFormatCarriesTheSessionIntoANewHome(t *testing.T) {
 	}
 }
 
+func TestClaudeInstallReclaimsAKilledInstall(t *testing.T) {
+	format, _ := For("claude")
+	data, err := format.Capture(t.Context(), newClaudeFixture(t).dirs, claudeFixtureSession, claudeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := func(t *testing.T, extra string) (Dirs, string) {
+		t.Helper()
+		destination := freshClaudeDirs(t)
+		folder := filepath.Join(destination.State, "projects", claudeProjectFolder(destination.Workspace))
+		toolResults := filepath.Join(folder, claudeFixtureSession, "tool-results")
+		if err := os.MkdirAll(toolResults, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// The install was killed while it wrote the tool result and the
+		// staged transcript, before it published the transcript.
+		writeForTest(t, filepath.Join(toolResults, "toolu_01.txt"), "par")
+		writeForTest(t, filepath.Join(folder, "."+claudeFixtureSession+".jsonl.restore"), `{"type":"us`)
+		if extra != "" {
+			writeForTest(t, filepath.Join(folder, claudeFixtureSession, extra), "not staging")
+		}
+		return destination, toolResults
+	}
+	destination, toolResults := stage(t, "")
+	if err := format.Install(t.Context(), data, destination, realDir(t), claudeFixtureLimit); err != nil {
+		t.Fatalf("a retry must replace a killed install's staging: %v", err)
+	}
+	if spill, err := os.ReadFile(filepath.Join(toolResults, "toolu_01.txt")); err != nil || string(spill) == "par" {
+		t.Fatalf("the retry kept the partial tool result: %v", err)
+	}
+	destination, toolResults = stage(t, "subagents")
+	if err := format.Install(t.Context(), data, destination, realDir(t), claudeFixtureLimit); err == nil {
+		t.Fatal("a retry must not remove session state an install did not stage")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(toolResults), "subagents")); err != nil {
+		t.Fatalf("the refused retry removed state it did not stage: %v", err)
+	}
+}
+
 func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	format, _ := For("claude")
 	for name, test := range map[string]struct {
