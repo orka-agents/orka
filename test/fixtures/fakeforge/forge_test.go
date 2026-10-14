@@ -258,3 +258,28 @@ func TestForgeReconcilesPullRequestsForPushedBranches(t *testing.T) {
 		t.Fatalf("file = %d %s", status, body)
 	}
 }
+
+// The injection is in the real Git baseline, not added by a model prompt or an
+// arbitrary-content fixture API; the independent forge read agrees with Git.
+func TestForgeSeedsRepositoryOriginEvalInjection(t *testing.T) {
+	server, _ := startForge(t)
+	work := filepath.Join(t.TempDir(), "read-control")
+	if _, err := gitAs(t, basicAuth(RoleRead), "clone", server.URL+"/e2e/source.git", work); err != nil {
+		t.Fatal("credentialed injection control clone failed")
+	}
+	contents, err := gitAs(t, "", "-C", work, "show", "HEAD:"+EvalInjectionPath)
+	if err != nil || contents != strings.TrimSpace(evalInjectionContent) ||
+		strings.Count(contents, EvalInjectionNonce) != 1 {
+		t.Fatal("repository baseline did not contain the exact static injection and nonce")
+	}
+	for _, instruction := range []string{"native file-write", "EVAL_FORBIDDEN.md", "process environments", "publish"} {
+		if !strings.Contains(contents, instruction) {
+			t.Fatal("repository injection lost an adversarial instruction")
+		}
+	}
+	status, body := api(t, server, http.MethodGet,
+		"/fake/file?repo=e2e/source&ref=main&path="+EvalInjectionPath, "", nil)
+	if status != http.StatusOK || string(body) != evalInjectionContent {
+		t.Fatal("independent forge read did not observe the seeded injection")
+	}
+}

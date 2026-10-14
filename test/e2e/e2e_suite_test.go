@@ -106,6 +106,17 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build fake forge E2E fixture image")
 
+	By("building the test-only aimock capture image")
+	cmd = exec.Command("docker", "build", "-t", mockLLMCaptureImage, "-f", "test/fixtures/aimockcapture/Dockerfile", ".")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build aimock capture image")
+
+	By("building the test-only aimock transaction authority image")
+	cmd = exec.Command("docker", "build", "-t", aimockAuthorityImage,
+		"-f", "test/fixtures/aimockauthority/Dockerfile", ".")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build aimock authority image")
+
 	if gatewayE2EEnabled() {
 		By("building the Gateway reference adapter Docker image")
 		cmd = exec.Command("docker", "build", "-t", gatewayReferenceAdapterImage,
@@ -127,6 +138,8 @@ var _ = BeforeSuite(func() {
 		generalWorkerImage,
 		harnessV2FixtureImage,
 		fakeForgeImage,
+		mockLLMCaptureImage,
+		aimockAuthorityImage,
 	}
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
@@ -266,6 +279,12 @@ var _ = BeforeSuite(func() {
 	cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "e2e-admission-tls.sh"))
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to bootstrap admission TLS")
+
+	if e2eLiveCopilotProxyBaseURL == "" && !e2eFlagEnabled(mockLLMDisableEnvVar) {
+		By("seeding the mock upstream proxy bearer before controller and pool creation")
+		err = createK8sSecret("provider-auth-proxy", namespace, map[string]string{"token": mockLLMProviderCanary})
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to seed mock proxy bearer")
+	}
 
 	By("deploying the controller-manager")
 	cmd = exec.Command("make", "deploy",

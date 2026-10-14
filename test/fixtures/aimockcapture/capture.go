@@ -73,6 +73,7 @@ type Handler struct {
 	healthURL    string
 	limits       limits
 	idPrefix     string
+	captureReads chan struct{}
 
 	mu        sync.Mutex
 	entries   []Entry
@@ -115,7 +116,7 @@ func newHandler(upstream *url.URL, bounds limits) (*Handler, error) {
 	health.ForceQuery = false
 	h := &Handler{
 		limits: bounds, idPrefix: "orka-eval-" + hex.EncodeToString(seed[:]) + "-",
-		healthURL: health.String(),
+		healthURL: health.String(), captureReads: make(chan struct{}, 1),
 		healthClient: &http.Client{
 			Timeout:       healthTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -163,9 +164,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.health(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(h.snapshot())
+		h.writeCapture(w, r)
 		return
 	}
 	if r.Method != http.MethodPost || inNamespace(r.URL.Path, "/__aimock") ||
@@ -187,6 +186,49 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Flush server-side buffering before declaring a successfully relayed response.
 	_ = writer.FlushError()
 	returned = true
+}
+
+// Only one export may allocate a snapshot or encoding buffer at a time. Waiting
+// readers retain neither, and cancellation does not have to wait for that export.
+func (h *Handler) writeCapture(w http.ResponseWriter, r *http.Request) {
+	select {
+	case h.captureReads <- struct{}{}:
+		defer func() { <-h.captureReads }()
+	case <-r.Context().Done():
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = writeSnapshot(w, h.snapshot())
+}
+
+// Encode one bounded entry at a time rather than buffering the entire capture.
+// The snapshot copies metadata only: immutable body strings are shared with the
+// store. Insignificant newlines from Encode preserve the existing JSON schema.
+func writeSnapshot(w io.Writer, snapshot Capture) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	if _, err := io.WriteString(w, `{"instanceId":`); err != nil {
+		return err
+	}
+	if err := encoder.Encode(snapshot.InstanceID); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, `,"entries":[`); err != nil {
+		return err
+	}
+	for i, entry := range snapshot.Entries {
+		if i != 0 {
+			if _, err := io.WriteString(w, ","); err != nil {
+				return err
+			}
+		}
+		if err := encoder.Encode(entry); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, `],"rejected":`+strconv.FormatUint(snapshot.Rejected, 10)+"}\n")
+	return err
 }
 
 func inNamespace(path, namespace string) bool {
