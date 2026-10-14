@@ -303,9 +303,13 @@ XDG_DATA_HOME=~/.orka/sessions/default/migrated-review/opencode opencode --sessi
 Retain the journal and repeat the same command after an uncertain response;
 a default journal stays until the migration completes. The CLI reuses its saved
 bundle and operation ID. A Codex export also reuses the
-same frozen SessionKit install plan and receipt. A failed OpenCode install
-removes the files it created. Once an export installs its session, a retry with
-the same journal reports it again without reinstalling. Changing the agent,
+same frozen SessionKit install plan and receipt. A failed Claude Code, Copilot
+CLI, or OpenCode install removes the files it created, and a Claude Code or
+Copilot CLI install that finds exactly what it would write treats the session as
+installed. Once an export installs its session, a retry with the same journal
+reports it again without reinstalling. If an OpenCode export is interrupted
+after it installs but before it reports success, remove the destination's
+`opencode` directory before you retry. Changing the agent,
 target, bundle, or cwd with that journal is rejected. The explicitly selected API endpoint must stay
 unchanged across retries. Automatic Kubernetes Service discovery and streaming
 are not available for native migration; use `--server` or a saved trusted API
