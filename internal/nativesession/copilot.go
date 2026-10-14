@@ -151,10 +151,10 @@ func (copilotFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string
 	if err = os.Rename(staged, destination); err != nil {
 		return err
 	}
-	// Until the directory is synced, a failure still removes the published
+	// Until the directories are synced, a failure still removes the published
 	// event log, so a retry finds no partial install.
 	created[len(created)-1] = destination
-	if err = syncDir(sessionDir); err != nil {
+	if err = syncDirs(sessionDir, filepath.Dir(sessionDir), dirs.State, filepath.Dir(dirs.State)); err != nil {
 		return err
 	}
 	created = nil
