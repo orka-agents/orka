@@ -26,8 +26,9 @@ type RuntimeSessionConfig struct {
 	Process        ProcessConfig
 	MCPServers     []MCPServer
 	NewSessionMeta Meta
-	// ResumeSessionID requests an installed native provider session. Failure to
-	// advertise or complete resume must fail creation without session/new.
+	// ResumeSessionID requests an installed native provider session, through
+	// session/resume or, for an agent that cannot resume, session/load. Failure
+	// to advertise or complete either must fail creation without session/new.
 	ResumeSessionID string
 	AuthMethodID    string
 	ClientInfo      Implementation
@@ -286,15 +287,25 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		return nil, initializationFailed(session, err)
 	}
 	if cfg.ResumeSessionID != "" {
-		if !capabilities.SessionCapability(SessionCapabilityResume) {
-			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume support"))
+		switch {
+		case capabilities.SessionCapability(SessionCapabilityResume):
+			_, err = process.Client().ResumeSession(initCtx, ResumeSessionRequest{
+				SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
+				MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
+			})
+		case capabilities.LoadSession:
+			// The agent replays the history as session/update notifications
+			// before it answers. No prompt is active and the provider session
+			// is not yet bound, so handleNotification drops every one.
+			_, err = process.Client().LoadSession(initCtx, LoadSessionRequest{
+				SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
+				MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
+			})
+		default:
+			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume or session/load support"))
 		}
-		_, err := process.Client().ResumeSession(initCtx, ResumeSessionRequest{
-			SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
-			MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
-		})
 		if err != nil {
-			return nil, initializationFailed(session, fmt.Errorf("resume ACP provider session: %w", err))
+			return nil, initializationFailed(session, fmt.Errorf("restore ACP provider session: %w", err))
 		}
 		session.capabilities = capabilities
 		session.providerSessionID = cfg.ResumeSessionID

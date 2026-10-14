@@ -1,6 +1,6 @@
 ---
 title: Native session migration
-description: Move native Claude Code, Codex, and OpenCode conversations between a local agent and Orka Sessions.
+description: Move native Claude Code, Codex, Copilot CLI, and OpenCode conversations between a local agent and Orka Sessions.
 ---
 
 # Native session migration
@@ -13,12 +13,15 @@ the agent, and `--state-dir` names the directory the agent keeps its state in:
 | --- | --- | --- | --- |
 | `claude` | Claude Code 2.1.293; export also to later releases | `CLAUDE_CONFIG_DIR` (`~/.claude` by default) | The session's JSONL transcript, plus the tool results it spilled to files |
 | `codex` | Codex 0.160.0 `codex/paginated` threads | `CODEX_HOME` | The verified SessionKit manifest and the thread's original rollout bytes |
+| `copilot` | Copilot CLI 1.0.96; export also to later releases | `COPILOT_HOME` (`~/.copilot` by default) | The session's `events.jsonl` |
 | `opencode` | OpenCode 1.19.0 | `XDG_DATA_HOME` (`~/.local/share` by default) | A copy of `opencode/opencode.db` holding only the session's rows, plus the output its own tool calls spilled to files |
 
 All run on Linux and macOS. A bundle never contains authentication files,
 provider configuration, or process memory. A Claude bundle excludes
 `.claude.json`, settings, project memory, and every other session. A Codex
-bundle excludes Codex's SQLite databases. An OpenCode bundle excludes every
+bundle excludes Codex's SQLite databases. A Copilot bundle excludes
+`workspace.yaml`, lock files, settings, logs, and every other session. An
+OpenCode bundle excludes every
 other session and project, the database's event log, saved permission grants,
 and its account and credential tables.
 
@@ -28,7 +31,7 @@ limits.
 
 The controller and runtime must both support native Sessions. Use the pinned
 Claude Code 2.1.293 / Claude Agent ACP 0.89.1, Codex 0.160.0 / codex-acp 2.1.1,
-or OpenCode 1.19.0 runtime image. A checkpoint
+Copilot CLI 1.0.96, or OpenCode 1.19.0 runtime image. A checkpoint
 restores only into a runtime of the agent that saved it. Private checkpoints use
 the controller's existing execution-snapshot encryption key with separate
 associated data. Retain that key with the SQLite backup.
@@ -127,6 +130,25 @@ provider access yet; Claude Code resumes anyway. Thinking blocks stay in the
 transcript, but Claude Code drops earlier turns' thinking when it rebuilds the
 request after a resume, so their signatures are never replayed.
 
+## Copilot CLI
+
+Copilot CLI keeps each session as an append-only event log,
+`session-state/<session-id>/events.jsonl`, that begins with the `session.start`
+event naming the session and the release that started it. Copilot cannot resume
+a session, so Orka's runtime restores it with `session/load`, which replays the
+history before the next prompt; Orka discards the replay instead of recording
+it again. Copilot runs tools in the working directory `session/load` names, so
+nothing is rewritten. Large shell output spills to `TMPDIR`, which is not
+carried: a restored conversation keeps the spilled output's preview.
+
+Import accepts a session that Copilot CLI 1.0.96 or an earlier release started,
+and rejects a later release's session, an event log with another schema, a
+second `session.start`, or an unfinished last event. Export accepts a local
+Copilot CLI 1.0.96 or later. Copilot keeps its encrypted reasoning in the
+event log and does not send it again after a load. Every load appends a
+`session.resume` event and a full system message, about 40 KB, so a Session
+restored every turn grows by that much per turn.
+
 ## Bundle size
 
 The default limit is 8 MiB, or 8,388,608 bytes, for the complete encoded bundle.
@@ -208,10 +230,10 @@ Every path has a default:
 
 | Flag | Import default | Export default |
 | --- | --- | --- |
-| `--state-dir` | The agent's own: `$CLAUDE_CONFIG_DIR` or `~/.claude`; `$CODEX_HOME` or `~/.codex`; an absolute `$XDG_DATA_HOME` or `~/.local/share` | A fresh `~/.orka/sessions/<namespace>/<session>/<agent>` |
-| `--cwd` | OpenCode: the directory the session recorded. Claude Code and Codex do not use it | The current directory |
+| `--state-dir` | The agent's own: `$CLAUDE_CONFIG_DIR` or `~/.claude`; `$CODEX_HOME` or `~/.codex`; `$COPILOT_HOME` or `~/.copilot`; an absolute `$XDG_DATA_HOME` or `~/.local/share` | A fresh `~/.orka/sessions/<namespace>/<session>/<agent>` |
+| `--cwd` | OpenCode: the directory the session recorded. Claude Code, Codex, and Copilot CLI do not use it | The current directory |
 | `--journal-dir` | `~/.orka/migrations/<namespace>/<session>/import` | `~/.orka/migrations/<namespace>/<session>/export` |
-| `--agent-bin` | Not used | `claude`, `codex`, or `opencode` on `PATH` |
+| `--agent-bin` | Not used | `claude`, `codex`, `copilot`, or `opencode` on `PATH` |
 
 A default journal is removed once its migration completes, so its private copy
 of the conversation does not linger and the next migration of that Session
@@ -268,6 +290,7 @@ resume the session ID from the same directory:
 ```bash
 CLAUDE_CONFIG_DIR=~/.orka/sessions/default/migrated-review/claude claude --resume 30840f35-9928-4d2d-8785-873a00b244bb
 CODEX_HOME=~/.orka/sessions/default/migrated-review/codex codex resume 01a10020-1222-76e3-977d-d5165792ae72
+COPILOT_HOME=~/.orka/sessions/default/migrated-review/copilot copilot --resume bff1f96a-be09-426e-933b-ec3720e975ac
 XDG_DATA_HOME=~/.orka/sessions/default/migrated-review/opencode opencode --session ses_ec7cc3c6cffejC2X3k579awtpZ
 ```
 

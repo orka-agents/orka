@@ -277,6 +277,8 @@ func TestClaudeInstallBoundsRelocationGrowth(t *testing.T) {
 func TestLocalAcceptsTheReleasesTheFormatResumes(t *testing.T) {
 	codex, _ := For("codex")
 	claude, _ := For("claude")
+	copilot, _ := For("copilot")
+	opencode, _ := For("opencode")
 	for _, test := range []struct {
 		local  Local
 		output string
@@ -292,6 +294,11 @@ func TestLocalAcceptsTheReleasesTheFormatResumes(t *testing.T) {
 		{claude.Local(), "2.1.300 (Other)", false},
 		{claude.Local(), "2.1.x (Claude Code)", false},
 		{claude.Local(), "", false},
+		{copilot.Local(), "GitHub Copilot CLI 1.0.96.\nRun 'copilot update' to check for updates.\n", true},
+		{copilot.Local(), "GitHub Copilot CLI 1.0.120.", true},
+		{copilot.Local(), "GitHub Copilot CLI 1.0.90.", false},
+		{opencode.Local(), "1.19.0\n", true},
+		{opencode.Local(), "1.19.1", false},
 	} {
 		if got := test.local.Accepts(test.output); got != test.want {
 			t.Errorf("%s accepts %q = %v, want %v", test.local.Binary, test.output, got, test.want)

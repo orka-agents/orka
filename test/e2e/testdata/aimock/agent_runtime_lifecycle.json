@@ -1,6 +1,5 @@
 {
   "fixtures": [
-    {"match": {"userMessage": "[e2e:art-copilot-rebuild]"}, "response": {"content": "nonce-art-copilot"}},
     {"match": {"userMessage": "[e2e:art-scale-zero]"}, "response": {"content": "nonce-art-codex"}},
     {"match": {"userMessage": "[e2e:art-replacement]"}, "response": {"content": "nonce-art-codex"}},
     {"match": {"userMessage": "[e2e:art-post-restart]"}, "response": {"content": "restart-art"}},
@@ -13,7 +12,9 @@
     {"match": {"userMessage": "[e2e:art-claude-continue]", "toolResultContains": "MIT License"}, "response": {"content": "nonce-art-claude"}},
     {"match": {"userMessage": "[e2e:art-claude-continue]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "Read", "arguments": {"file_path": "LICENSE"}}]}},
     {"match": {"userMessage": "[e2e:art-copilot-fork]"}, "response": {"content": "nonce-art-copilot"}},
-    {"match": {"userMessage": "[e2e:art-copilot-continue]"}, "response": {"content": "nonce-art-copilot"}},
+    {"match": {"userMessage": "[e2e:art-copilot-continue]", "toolResultContains": "MIT License"}, "response": {"content": "nonce-art-copilot"}},
+    {"match": {"userMessage": "[e2e:art-copilot-continue]", "hasToolResult": true}, "response": {"toolCalls": [{"name": "grep", "arguments": {"pattern": "License", "path": "LICENSE"}}]}},
+    {"match": {"userMessage": "[e2e:art-copilot-continue]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "view", "arguments": {"path": "LICENSE"}}]}},
     {"match": {"userMessage": "[e2e:art-codex-read]", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-art-codex. First LICENSE line: MIT License"}},
     {"match": {"userMessage": "[e2e:art-codex-read]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "exec_command", "arguments": {"cmd": "cat LICENSE"}}]}},
     {"match": {"userMessage": "[e2e:art-concurrent]"}, "latency": 10000, "response": {"content": "Concurrent read summary: the repository is Orka."}},

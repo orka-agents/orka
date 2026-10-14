@@ -170,7 +170,10 @@ type openCodeBundle struct {
 type openCodeFormat struct{}
 
 func (openCodeFormat) Local() Local {
-	return Local{Binary: "opencode", Version: openCodeVersion, StateVar: "XDG_DATA_HOME", HomeState: filepath.Join(".local", "share")}
+	return Local{
+		Binary: "opencode", VersionLine: regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)$`), Release: openCodeVersion,
+		StateVar: "XDG_DATA_HOME", HomeState: filepath.Join(".local", "share"),
+	}
 }
 
 func (openCodeFormat) runtimeState(_, data string) string { return data }

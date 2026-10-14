@@ -176,9 +176,16 @@ spilled tool results' paths. The adapter applies the projected
 `session/resume` sends one "Hi" request to the model; the supervisor resumes
 before granting any prompt provider access, so the provider proxy refuses it.
 
-Codex, OpenCode, and Claude Sessions save a native checkpoint after each turn
-and start the next turn in a fresh RuntimeSession, so the idle-adapter restart
-below applies to Copilot.
+For native Copilot restoration, the supervisor captures the stopped session's
+`$COPILOT_HOME/session-state/<session-id>/events.jsonl` and installs it before
+starting Copilot. Copilot cannot resume, so Orka restores the session with
+`session/load` in the new working directory. Copilot replays the history as
+`session/update` notifications before answering; no prompt is active then, so
+the supervisor discards them.
+
+Every built-in runtime saves a native checkpoint after each turn and starts the
+next turn in a fresh RuntimeSession when the controller keeps native Sessions,
+so the idle-adapter restart below applies only when it does not.
 
 When the agent advertises `sessionCapabilities.close`, Orka sends
 `session/close` before the bounded process stop on deletion. When an adapter

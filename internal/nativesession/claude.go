@@ -34,10 +34,7 @@ const (
 	maxClaudeProjectFolder = 200
 )
 
-var (
-	claudeSessionIDPattern   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	claudeProjectFolderChars = regexp.MustCompile(`[^A-Za-z0-9]`)
-)
+var claudeProjectFolderChars = regexp.MustCompile(`[^A-Za-z0-9]`)
 
 // claudeManifest describes a captured Claude Code conversation.
 type claudeManifest struct {
@@ -65,8 +62,9 @@ type claudeFormat struct{}
 // Later Claude Code releases resume transcripts that earlier ones wrote.
 func (claudeFormat) Local() Local {
 	return Local{
-		Binary: "claude", Version: claudeCodeVersion + " (Claude Code)", NewerReleases: true,
-		StateVar: "CLAUDE_CONFIG_DIR", HomeState: ".claude",
+		Binary: "claude", VersionLine: regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+) \(Claude Code\)$`), Release: claudeCodeVersion,
+		NewerReleases: true,
+		StateVar:      "CLAUDE_CONFIG_DIR", HomeState: ".claude",
 	}
 }
 
@@ -78,7 +76,7 @@ func (claudeFormat) Capture(_ context.Context, dirs Dirs, providerSessionID stri
 	if err != nil {
 		return nil, err
 	}
-	if !claudeSessionIDPattern.MatchString(providerSessionID) {
+	if !uuidSessionIDPattern.MatchString(providerSessionID) {
 		return nil, errors.New("the Claude Code session ID is invalid")
 	}
 	if !absoluteCleanPath(dirs.State) {
@@ -408,7 +406,7 @@ func decodeClaudeBundle(data []byte, maxBytes int) (claudeBundle, error) {
 	if err := decodeManifest(manifest, &bundle.manifest); err != nil {
 		return claudeBundle{}, err
 	}
-	if bundle.manifest.Format != claudeBundleFormat || !claudeSessionIDPattern.MatchString(bundle.manifest.SessionID) ||
+	if bundle.manifest.Format != claudeBundleFormat || !uuidSessionIDPattern.MatchString(bundle.manifest.SessionID) ||
 		!absoluteCleanPath(bundle.manifest.ToolResultsDir) {
 		return claudeBundle{}, errors.New("the Claude Code bundle manifest is invalid")
 	}

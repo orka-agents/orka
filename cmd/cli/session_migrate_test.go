@@ -403,8 +403,8 @@ func TestMigrateSelectsTheAgentFormat(t *testing.T) {
 		require.NoError(t, os.Chmod(dir, 0o700))
 		return dir
 	}
-	err := migrationCommand(t, server.URL, "import", "new", "--agent", "copilot", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", private(), "--source-stopped")
-	require.ErrorContains(t, err, "--agent must be one of: claude, codex, opencode")
+	err := migrationCommand(t, server.URL, "import", "new", "--agent", "agentkit", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", private(), "--source-stopped")
+	require.ErrorContains(t, err, "--agent must be one of: claude, codex, copilot, opencode")
 
 	// OpenCode's own database records where the session ran, so import needs
 	// no --cwd and reads XDG_DATA_HOME/opencode.

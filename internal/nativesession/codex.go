@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 
 	"github.com/orka-agents/sessionkit"
 
@@ -22,7 +23,10 @@ const (
 type codexFormat struct{}
 
 func (codexFormat) Local() Local {
-	return Local{Binary: "codex", Version: "codex-cli " + codexVersion, StateVar: "CODEX_HOME", HomeState: ".codex"}
+	return Local{
+		Binary: "codex", VersionLine: regexp.MustCompile(`^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$`), Release: codexVersion,
+		StateVar: "CODEX_HOME", HomeState: ".codex",
+	}
 }
 
 // The runtime supervisor sets CODEX_HOME to HOME/.codex.

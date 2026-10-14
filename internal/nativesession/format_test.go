@@ -44,28 +44,29 @@ func codexFixtureDirs(t *testing.T) (Dirs, string, []byte) {
 }
 
 func TestForRegistersTheNativeFormats(t *testing.T) {
-	for _, kind := range []string{"claude", "codex", "opencode"} {
+	for _, kind := range []string{"claude", "codex", "copilot", "opencode"} {
 		if !Supported(kind) {
 			t.Fatalf("%s must save and restore native sessions", kind)
 		}
 	}
-	for _, kind := range []string{"", "copilot", "agentkit", "Codex"} {
+	for _, kind := range []string{"", "agentkit", "Codex"} {
 		if _, ok := For(kind); ok || Supported(kind) {
 			t.Fatalf("%q must not have a native session format", kind)
 		}
 	}
-	if kinds := Kinds(); !slices.Equal(kinds, []string{"claude", "codex", "opencode"}) {
+	if kinds := Kinds(); !slices.Equal(kinds, []string{"claude", "codex", "copilot", "opencode"}) {
 		t.Fatalf("kinds: %v", kinds)
 	}
 }
 
 // The runtime supervisor sets CODEX_HOME to HOME/.codex, CLAUDE_CONFIG_DIR to
-// HOME/.claude, and XDG_DATA_HOME to
+// HOME/.claude, COPILOT_HOME to HOME/.copilot, and XDG_DATA_HOME to
 // the session's data directory.
 func TestRuntimeDirsMatchTheRuntimeEnvironment(t *testing.T) {
 	for kind, want := range map[string]Dirs{
 		"codex":    {State: "/s/home/.codex", Workspace: "/s/workspace"},
 		"claude":   {State: "/s/home/.claude", Workspace: "/s/workspace"},
+		"copilot":  {State: "/s/home/.copilot", Workspace: "/s/workspace"},
 		"opencode": {State: "/s/xdg/data", Workspace: "/s/workspace"},
 	} {
 		format, _ := For(kind)

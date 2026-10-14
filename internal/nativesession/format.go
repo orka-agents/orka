@@ -8,6 +8,7 @@ package nativesession
 import (
 	"context"
 	"errors"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,9 +37,11 @@ type Dirs struct {
 type Local struct {
 	// Binary is the agent's executable name.
 	Binary string
-	// Version is what `Binary --version` prints for the release the Format
-	// carries.
-	Version string
+	// VersionLine matches the first line `Binary --version` prints and
+	// captures its MAJOR.MINOR.PATCH release.
+	VersionLine *regexp.Regexp
+	// Release is the agent release the Format carries.
+	Release string
 	// NewerReleases reports whether later releases also resume what the
 	// Format installs.
 	NewerReleases bool
@@ -51,19 +54,13 @@ type Local struct {
 // Accepts reports whether a local agent whose `--version` printed output can
 // resume what the Format installs.
 func (l Local) Accepts(output string) bool {
-	output = strings.TrimSpace(output)
-	if output == l.Version {
-		return true
-	}
-	if !l.NewerReleases {
+	first, _, _ := strings.Cut(strings.TrimSpace(output), "\n")
+	match := l.VersionLine.FindStringSubmatch(strings.TrimSpace(first))
+	if match == nil {
 		return false
 	}
-	got, want := strings.Fields(output), strings.Fields(l.Version)
-	if len(got) == 0 || len(want) == 0 || !slices.Equal(got[1:], want[1:]) {
-		return false
-	}
-	order, ok := compareReleases(got[0], want[0])
-	return ok && order >= 0
+	order, ok := compareReleases(match[1], l.Release)
+	return ok && (order == 0 || l.NewerReleases && order > 0)
 }
 
 // parseRelease parses a MAJOR.MINOR.PATCH release.
@@ -122,6 +119,7 @@ type Format interface {
 var formats = map[string]Format{
 	claudeProviderKind:   claudeFormat{},
 	codexProviderKind:    codexFormat{},
+	copilotProviderKind:  copilotFormat{},
 	openCodeProviderKind: openCodeFormat{},
 }
 
@@ -130,6 +128,10 @@ func For(providerKind string) (Format, bool) {
 	format, ok := formats[providerKind]
 	return format, ok
 }
+
+// uuidSessionIDPattern matches the session IDs Claude Code and Copilot CLI give
+// their sessions.
+var uuidSessionIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Supported reports whether providerKind can save and restore conversations.
 func Supported(providerKind string) bool {
