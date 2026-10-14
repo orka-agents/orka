@@ -1,22 +1,18 @@
 package nativesession
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	_ "embed"
 
@@ -31,7 +27,6 @@ const (
 	openCodeVersion      = "1.19.0"
 	openCodeBundleFormat = "orka/opencode-session-v1"
 
-	openCodeManifestEntry   = "manifest.json"
 	openCodeDatabaseEntry   = "opencode.db"
 	openCodeToolOutputEntry = "tool-output/"
 	openCodeToolOutputDir   = "tool-output"
@@ -41,10 +36,7 @@ const (
 	openCodePartTable    = "part"
 )
 
-var (
-	openCodeSessionIDPattern  = regexp.MustCompile(`^ses_[A-Za-z0-9]{1,64}$`)
-	openCodeToolOutputPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-)
+var openCodeSessionIDPattern = regexp.MustCompile(`^ses_[A-Za-z0-9]{1,64}$`)
 
 // openCodeSchemaSQL is the schema of a database OpenCode 1.19.0 created. A
 // captured database is agent-written, so it must match this schema exactly
@@ -513,7 +505,7 @@ func openCodeToolOutputReferences(ctx context.Context, db *sql.DB, dir string) (
 			continue
 		}
 		name, ok := strings.CutPrefix(part.State.Metadata.OutputPath, prefix)
-		if !ok || !openCodeToolOutputPattern.MatchString(name) {
+		if !ok || !spilledFilePattern.MatchString(name) {
 			continue
 		}
 		names[name] = true
@@ -790,78 +782,37 @@ func readOpenCodeToolOutput(dir string, names []string, limit int) (map[string][
 // encodeOpenCodeBundle fails with ErrUnsupported when the archive exceeds
 // the expanded budget decodeOpenCodeBundle enforces.
 func encodeOpenCodeBundle(limit int, bundle openCodeBundle) ([]byte, error) {
-	manifest, err := json.Marshal(bundle.manifest)
-	if err != nil {
-		return nil, err
+	files := make([]bundleFile, 0, 1+len(bundle.toolOutput))
+	files = append(files, bundleFile{openCodeDatabaseEntry, bundle.database})
+	for _, name := range slices.Sorted(maps.Keys(bundle.toolOutput)) {
+		files = append(files, bundleFile{openCodeToolOutputEntry + name, bundle.toolOutput[name]})
 	}
-	var tarred bytes.Buffer
-	archive := tar.NewWriter(&tarred)
-	write := func(name string, content []byte) error {
-		header := &tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg, Format: tar.FormatPAX, ModTime: time.Unix(0, 0)}
-		if err := archive.WriteHeader(header); err != nil {
-			return err
-		}
-		_, err := archive.Write(content)
-		return err
-	}
-	if err := write(openCodeManifestEntry, manifest); err != nil {
-		return nil, err
-	}
-	if err := write(openCodeDatabaseEntry, bundle.database); err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(bundle.toolOutput))
-	for name := range bundle.toolOutput {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	for _, name := range names {
-		if err := write(openCodeToolOutputEntry+name, bundle.toolOutput[name]); err != nil {
-			return nil, err
-		}
-	}
-	if err := archive.Close(); err != nil {
-		return nil, err
-	}
-	if tarred.Len() > expandedLimit(limit) {
-		return nil, fmt.Errorf("%w: OpenCode conversation exceeds the expanded budget", ErrUnsupported)
-	}
-	var out bytes.Buffer
-	compressed := gzip.NewWriter(&out)
-	if _, err := compressed.Write(tarred.Bytes()); err != nil {
-		return nil, err
-	}
-	if err := compressed.Close(); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
+	return writeBundle(limit, bundle.manifest, files)
 }
 
-// decodeOpenCodeBundle reads a bundle strictly: one gzip member holding a tar
-// of regular files with known names, each at most once, within the limits.
+// decodeOpenCodeBundle reads a bundle holding a manifest, the database, and
+// at most maxOpenCodeToolOutputs spilled tool outputs.
 func decodeOpenCodeBundle(data []byte, maxBytes int) (openCodeBundle, error) {
-	limit, err := normalizeLimit(maxBytes)
+	toolOutputs := 0
+	manifest, files, err := readBundle(data, maxBytes, func(name string) bool {
+		if name == openCodeDatabaseEntry {
+			return true
+		}
+		toolOutput, ok := strings.CutPrefix(name, openCodeToolOutputEntry)
+		toolOutputs++
+		return ok && spilledFilePattern.MatchString(toolOutput) && toolOutputs <= maxOpenCodeToolOutputs
+	})
 	if err != nil {
 		return openCodeBundle{}, err
 	}
-	if len(data) == 0 || len(data) > limit {
-		return openCodeBundle{}, errors.New("OpenCode bundle exceeds its size bounds")
-	}
-	source := bytes.NewReader(data)
-	compressed, err := gzip.NewReader(source)
-	if err != nil {
-		return openCodeBundle{}, errors.New("OpenCode bundle is not gzip data")
-	}
-	compressed.Multistream(false)
-	manifest, bundle, err := readOpenCodeArchive(compressed, int64(expandedLimit(limit)))
-	if err != nil {
-		return openCodeBundle{}, err
-	}
-	if trailing, err := io.Copy(io.Discard, io.LimitReader(compressed, 1)); err != nil || trailing != 0 || source.Len() != 0 {
-		return openCodeBundle{}, errors.New("OpenCode bundle has trailing data")
-	}
-	if manifest == nil || len(bundle.database) == 0 {
+	bundle := openCodeBundle{database: files[openCodeDatabaseEntry], toolOutput: map[string][]byte{}}
+	if len(bundle.database) == 0 {
 		return openCodeBundle{}, errors.New("OpenCode bundle is incomplete")
+	}
+	for name, content := range files {
+		if toolOutput, ok := strings.CutPrefix(name, openCodeToolOutputEntry); ok {
+			bundle.toolOutput[toolOutput] = content
+		}
 	}
 	if bundle.manifest, err = parseOpenCodeManifest(manifest); err != nil {
 		return openCodeBundle{}, err
@@ -869,51 +820,10 @@ func decodeOpenCodeBundle(data []byte, maxBytes int) (openCodeBundle, error) {
 	return bundle, nil
 }
 
-// readOpenCodeArchive reads tar entries until the archive ends, within budget
-// bytes of content.
-func readOpenCodeArchive(compressed io.Reader, budget int64) ([]byte, openCodeBundle, error) {
-	archive := tar.NewReader(io.LimitReader(compressed, budget+1))
-	bundle := openCodeBundle{toolOutput: map[string][]byte{}}
-	var manifest []byte
-	seen := map[string]bool{}
-	var read int64
-	for {
-		header, err := archive.Next()
-		if errors.Is(err, io.EOF) {
-			return manifest, bundle, nil
-		}
-		if err != nil {
-			return nil, openCodeBundle{}, errors.New("OpenCode bundle archive is invalid")
-		}
-		if header.Typeflag != tar.TypeReg || seen[header.Name] || header.Size < 0 || read+header.Size > budget {
-			return nil, openCodeBundle{}, errors.New("OpenCode bundle entry is invalid")
-		}
-		seen[header.Name] = true
-		read += header.Size
-		content, err := io.ReadAll(io.LimitReader(archive, header.Size))
-		if err != nil || int64(len(content)) != header.Size {
-			return nil, openCodeBundle{}, errors.New("OpenCode bundle entry is truncated")
-		}
-		toolOutput, isToolOutput := strings.CutPrefix(header.Name, openCodeToolOutputEntry)
-		switch {
-		case header.Name == openCodeManifestEntry:
-			manifest = content
-		case header.Name == openCodeDatabaseEntry:
-			bundle.database = content
-		case isToolOutput && openCodeToolOutputPattern.MatchString(toolOutput) && len(bundle.toolOutput) < maxOpenCodeToolOutputs:
-			bundle.toolOutput[toolOutput] = content
-		default:
-			return nil, openCodeBundle{}, errors.New("OpenCode bundle has an unknown or excess entry")
-		}
-	}
-}
-
 func parseOpenCodeManifest(content []byte) (openCodeManifest, error) {
 	var manifest openCodeManifest
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil || decoder.More() {
-		return openCodeManifest{}, errors.New("OpenCode bundle manifest is invalid")
+	if err := decodeManifest(content, &manifest); err != nil {
+		return openCodeManifest{}, err
 	}
 	if manifest.Format != openCodeBundleFormat || !openCodeSessionIDPattern.MatchString(manifest.SessionID) ||
 		!absoluteCleanPath(manifest.Workspace) || !absoluteCleanPath(manifest.ToolOutputDir) {

@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
+	"strings"
 )
 
 // ErrUnsupported identifies a stopped conversation outside the provider's
@@ -37,10 +39,58 @@ type Local struct {
 	// Version is what `Binary --version` prints for the release the Format
 	// carries.
 	Version string
+	// NewerReleases reports whether later releases also resume what the
+	// Format installs.
+	NewerReleases bool
 	// StateVar names the environment variable whose value is Dirs.State.
 	StateVar string
 	// HomeState is Dirs.State relative to HOME when StateVar is unset.
 	HomeState string
+}
+
+// Accepts reports whether a local agent whose `--version` printed output can
+// resume what the Format installs.
+func (l Local) Accepts(output string) bool {
+	output = strings.TrimSpace(output)
+	if output == l.Version {
+		return true
+	}
+	if !l.NewerReleases {
+		return false
+	}
+	got, want := strings.Fields(output), strings.Fields(l.Version)
+	if len(got) == 0 || len(want) == 0 || !slices.Equal(got[1:], want[1:]) {
+		return false
+	}
+	order, ok := compareReleases(got[0], want[0])
+	return ok && order >= 0
+}
+
+// parseRelease parses a MAJOR.MINOR.PATCH release.
+func parseRelease(release string) ([3]int, bool) {
+	var parts [3]int
+	fields := strings.Split(release, ".")
+	if len(fields) != len(parts) {
+		return parts, false
+	}
+	for i, field := range fields {
+		n, err := strconv.Atoi(field)
+		if err != nil || n < 0 || strconv.Itoa(n) != field {
+			return parts, false
+		}
+		parts[i] = n
+	}
+	return parts, true
+}
+
+// compareReleases orders two MAJOR.MINOR.PATCH releases.
+func compareReleases(a, b string) (int, bool) {
+	left, okLeft := parseRelease(a)
+	right, okRight := parseRelease(b)
+	if !okLeft || !okRight {
+		return 0, false
+	}
+	return slices.Compare(left[:], right[:]), true
 }
 
 // Summary describes a verified saved conversation.
@@ -70,6 +120,7 @@ type Format interface {
 }
 
 var formats = map[string]Format{
+	claudeProviderKind:   claudeFormat{},
 	codexProviderKind:    codexFormat{},
 	openCodeProviderKind: openCodeFormat{},
 }

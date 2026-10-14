@@ -408,7 +408,7 @@ spec:
 ```
 
 A RuntimeSession is ephemeral. If its Pod is replaced, Orka creates a fresh
-provider process from the verified workspace baseline. Codex and OpenCode
+provider process from the verified workspace baseline. Codex, OpenCode, and Claude
 runtimes advertising native Session support save the agent's own conversation
 after each successful turn and restore that private checkpoint into the next
 turn's isolated home, then resume the original session with current credentials,

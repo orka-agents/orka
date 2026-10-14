@@ -1,7 +1,6 @@
 {
   "fixtures": [
     {"match": {"userMessage": "[e2e:art-copilot-rebuild]"}, "response": {"content": "nonce-art-copilot"}},
-    {"match": {"userMessage": "[e2e:art-claude-after-exit]"}, "response": {"content": "nonce-art-claude"}},
     {"match": {"userMessage": "[e2e:art-scale-zero]"}, "response": {"content": "nonce-art-codex"}},
     {"match": {"userMessage": "[e2e:art-replacement]"}, "response": {"content": "nonce-art-codex"}},
     {"match": {"userMessage": "[e2e:art-post-restart]"}, "response": {"content": "restart-art"}},
@@ -11,7 +10,8 @@
     {"match": {"userMessage": "[e2e:art-opencode-continue]", "toolResultContains": "MIT License"}, "response": {"content": "nonce-art-opencode"}},
     {"match": {"userMessage": "[e2e:art-opencode-continue]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "read", "arguments": {"filePath": "LICENSE"}}]}},
     {"match": {"userMessage": "[e2e:art-claude-fork]"}, "response": {"content": "nonce-art-claude"}},
-    {"match": {"userMessage": "[e2e:art-claude-continue]"}, "response": {"content": "nonce-art-claude"}},
+    {"match": {"userMessage": "[e2e:art-claude-continue]", "toolResultContains": "MIT License"}, "response": {"content": "nonce-art-claude"}},
+    {"match": {"userMessage": "[e2e:art-claude-continue]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "Read", "arguments": {"file_path": "LICENSE"}}]}},
     {"match": {"userMessage": "[e2e:art-copilot-fork]"}, "response": {"content": "nonce-art-copilot"}},
     {"match": {"userMessage": "[e2e:art-copilot-continue]"}, "response": {"content": "nonce-art-copilot"}},
     {"match": {"userMessage": "[e2e:art-codex-read]", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-art-codex. First LICENSE line: MIT License"}},

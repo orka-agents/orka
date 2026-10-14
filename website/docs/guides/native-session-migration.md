@@ -1,6 +1,6 @@
 ---
 title: Native session migration
-description: Move native Codex and OpenCode conversations between a local agent and Orka Sessions.
+description: Move native Claude Code, Codex, and OpenCode conversations between a local agent and Orka Sessions.
 ---
 
 # Native session migration
@@ -11,21 +11,24 @@ the agent, and `--state-dir` names the directory the agent keeps its state in:
 
 | `--agent` | Supported release | `--state-dir` | Bundle |
 | --- | --- | --- | --- |
+| `claude` | Claude Code 2.1.293; export also to later releases | `CLAUDE_CONFIG_DIR` (`~/.claude` by default) | The session's JSONL transcript, plus the tool results it spilled to files |
 | `codex` | Codex 0.160.0 `codex/paginated` threads | `CODEX_HOME` | The verified SessionKit manifest and the thread's original rollout bytes |
 | `opencode` | OpenCode 1.19.0 | `XDG_DATA_HOME` (`~/.local/share` by default) | A copy of `opencode/opencode.db` holding only the session's rows, plus the output its own tool calls spilled to files |
 
-Both run on Linux and macOS. A bundle never contains authentication files,
-provider configuration, or process memory. A Codex bundle excludes Codex's
-SQLite databases. An OpenCode bundle excludes every other session and project,
-the database's event log, saved permission grants, and its account and
-credential tables.
+All run on Linux and macOS. A bundle never contains authentication files,
+provider configuration, or process memory. A Claude bundle excludes
+`.claude.json`, settings, project memory, and every other session. A Codex
+bundle excludes Codex's SQLite databases. An OpenCode bundle excludes every
+other session and project, the database's event log, saved permission grants,
+and its account and credential tables.
 
 Orka defaults to 8 MiB of encoded bundle data, configurable up to 64 MiB.
 This is a consumer transport limit, separate from SessionKit's native storage
 limits.
 
 The controller and runtime must both support native Sessions. Use the pinned
-Codex 0.160.0 / codex-acp 2.1.1 or OpenCode 1.19.0 runtime image. A checkpoint
+Claude Code 2.1.293 / Claude Agent ACP 0.89.1, Codex 0.160.0 / codex-acp 2.1.1,
+or OpenCode 1.19.0 runtime image. A checkpoint
 restores only into a runtime of the agent that saved it. Private checkpoints use
 the controller's existing execution-snapshot encryption key with separate
 associated data. Retain that key with the SQLite backup.
@@ -98,6 +101,31 @@ working directory and rewrite the paths the conversation recorded.
 Export installs into a state directory without an OpenCode database. Use a
 fresh directory: OpenCode also keeps provider credentials there, so
 authenticate again before resuming.
+
+## Claude Code
+
+Claude Code keeps each session as one append-only JSONL transcript,
+`projects/<folder>/<session-id>.jsonl`, and finds it by ID in any project
+folder. Large tool results spill to `<session-id>/tool-results/`, and the
+transcript refers to them by absolute path. Import takes the transcript and
+those files; subagent transcripts and anything else in the session's folder
+stay behind. Export and Orka's runtime restore install the transcript under the
+new working directory's project folder and rewrite only the spilled results'
+paths. Claude Code resumes in whatever directory it is started in.
+
+Claude Code releases often. Import accepts a transcript that Claude Code
+2.1.293 or an earlier release last wrote, because Orka's runtime must be able to
+read it; a transcript from a later release is rejected, since it may hold
+entries 2.1.293 cannot read. Export accepts a local Claude Code 2.1.293 or later,
+since later releases resume what earlier ones wrote. Import also rejects a
+transcript with entries of another session, an unfinished last entry, or more
+than 256 spilled tool results, and a session that two project folders hold.
+
+Answering `session/resume`, Claude Code sends one "Hi" request to its model.
+Inside Orka the provider proxy refuses it, because no prompt has been granted
+provider access yet; Claude Code resumes anyway. Thinking blocks stay in the
+transcript, but Claude Code drops earlier turns' thinking when it rebuilds the
+request after a resume, so their signatures are never replayed.
 
 ## Bundle size
 
@@ -180,10 +208,10 @@ Every path has a default:
 
 | Flag | Import default | Export default |
 | --- | --- | --- |
-| `--state-dir` | The agent's own: `$CODEX_HOME` or `~/.codex`; an absolute `$XDG_DATA_HOME` or `~/.local/share` | A fresh `~/.orka/sessions/<namespace>/<session>/<agent>` |
-| `--cwd` | OpenCode: the directory the session recorded. Codex does not use it | The current directory |
+| `--state-dir` | The agent's own: `$CLAUDE_CONFIG_DIR` or `~/.claude`; `$CODEX_HOME` or `~/.codex`; an absolute `$XDG_DATA_HOME` or `~/.local/share` | A fresh `~/.orka/sessions/<namespace>/<session>/<agent>` |
+| `--cwd` | OpenCode: the directory the session recorded. Claude Code and Codex do not use it | The current directory |
 | `--journal-dir` | `~/.orka/migrations/<namespace>/<session>/import` | `~/.orka/migrations/<namespace>/<session>/export` |
-| `--agent-bin` | Not used | `codex` or `opencode` on `PATH` |
+| `--agent-bin` | Not used | `claude`, `codex`, or `opencode` on `PATH` |
 
 A default journal is removed once its migration completes, so its private copy
 of the conversation does not linger and the next migration of that Session
@@ -238,6 +266,7 @@ Point the agent's state variable at the destination the command printed, and
 resume the session ID from the same directory:
 
 ```bash
+CLAUDE_CONFIG_DIR=~/.orka/sessions/default/migrated-review/claude claude --resume 30840f35-9928-4d2d-8785-873a00b244bb
 CODEX_HOME=~/.orka/sessions/default/migrated-review/codex codex resume 01a10020-1222-76e3-977d-d5165792ae72
 XDG_DATA_HOME=~/.orka/sessions/default/migrated-review/opencode opencode --session ses_ec7cc3c6cffejC2X3k579awtpZ
 ```

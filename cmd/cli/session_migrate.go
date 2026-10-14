@@ -244,7 +244,7 @@ func migrationOperationID() (string, error) {
 }
 
 func newSessionMigrateCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "migrate", Short: "Move agent conversations between local Codex or OpenCode and Orka Sessions"}
+	cmd := &cobra.Command{Use: "migrate", Short: "Move agent conversations between local Claude Code, Codex, or OpenCode and Orka Sessions"}
 	cmd.PersistentFlags().Int("max-bundle-bytes", harnessv2.DefaultMaxNativeSessionBytes, "Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default")
 	cmd.AddCommand(newSessionMigrateImportCmd(), newSessionMigrateExportCmd())
 	return cmd
@@ -280,7 +280,7 @@ func migrationFlagHelp() (agent, stateDir string) {
 		format, _ := nativesession.For(kind)
 		dirs = append(dirs, format.Local().StateVar+" for "+kind)
 	}
-	return "Local agent: " + strings.Join(kinds, " or "), "agent state directory: " + strings.Join(dirs, ", ")
+	return "Local agent: one of " + strings.Join(kinds, ", "), "agent state directory: " + strings.Join(dirs, ", ")
 }
 
 func newSessionMigrateImportCmd() *cobra.Command {
@@ -378,7 +378,7 @@ func newSessionMigrateImportCmd() *cobra.Command {
 	agentHelp, stateDirHelp := migrationFlagHelp()
 	cmd.Flags().StringVar(&agent, "agent", "", agentHelp)
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Source "+stateDirHelp+" (default: the agent's own, from that variable or under HOME)")
-	cmd.Flags().StringVar(&providerSessionID, "session-id", "", "The agent's own session ID: a Codex thread UUID or an OpenCode ses_ ID")
+	cmd.Flags().StringVar(&providerSessionID, "session-id", "", "The agent's own session ID: a Claude Code or Codex session UUID, or an OpenCode ses_ ID")
 	cmd.Flags().StringVar(&cwd, "cwd", "", "Directory the source session ran in (default: the directory the agent recorded)")
 	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory retained for exact retries (default: under ~/.orka/migrations, removed once the import completes)")
 	cmd.Flags().BoolVar(&stopped, "source-stopped", false, "Confirm every local agent process using the state directory has stopped")
@@ -406,8 +406,12 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				binary = local.Binary
 			}
 			version, err := exec.CommandContext(cmd.Context(), binary, "--version").Output()
-			if err != nil || strings.TrimSpace(string(version)) != local.Version {
-				return fmt.Errorf("destination requires %s reporting version %q (--agent-bin)", local.Binary, local.Version)
+			if err != nil || !local.Accepts(string(version)) {
+				later := ""
+				if local.NewerReleases {
+					later = " or later"
+				}
+				return fmt.Errorf("destination requires %s reporting version %q%s (--agent-bin)", local.Binary, local.Version, later)
 			}
 			c, target, cleanup, err := newMigrationClient(cmd)
 			if err != nil {

@@ -165,9 +165,20 @@ OpenCode in the fresh RuntimeSession it installs that database, rewrites
 data directory, because OpenCode resumes in the session's saved directory
 rather than the `cwd` given to `session/resume`, and then resumes the session.
 
-Codex and OpenCode Sessions save a native checkpoint after each turn and start
-the next turn in a fresh RuntimeSession, so the idle-adapter restart below
-applies to the other built-in runtimes.
+For native Claude restoration, the supervisor captures the stopped session's
+transcript, `$CLAUDE_CONFIG_DIR/projects/<folder>/<session-id>.jsonl`, and the
+tool results it spilled to `<session-id>/tool-results/`. Claude Code finds a
+session by ID in any project folder and resumes it in the `cwd` given to
+`session/resume`, so before starting the adapter the supervisor installs the
+transcript under the new workspace's project folder and rewrites only the
+spilled tool results' paths. The adapter applies the projected
+`_meta.claudeCode.options` on resume as on `session/new`. Answering
+`session/resume` sends one "Hi" request to the model; the supervisor resumes
+before granting any prompt provider access, so the provider proxy refuses it.
+
+Codex, OpenCode, and Claude Sessions save a native checkpoint after each turn
+and start the next turn in a fresh RuntimeSession, so the idle-adapter restart
+below applies to Copilot.
 
 When the agent advertises `sessionCapabilities.close`, Orka sends
 `session/close` before the bounded process stop on deletion. When an adapter
