@@ -135,7 +135,14 @@ func (copilotFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string
 			return err
 		}
 	}
+	destination := filepath.Join(sessionDir, copilotEventsEntry)
+	synced := []string{sessionDir, filepath.Dir(sessionDir), dirs.State, filepath.Dir(dirs.State)}
 	if err = os.Mkdir(sessionDir, 0o700); err != nil {
+		// A retry after an install that completed but was not acknowledged
+		// finds exactly what it would write.
+		if errors.Is(err, os.ErrExist) && holdsFile(destination, events) {
+			return syncDirs(synced...)
+		}
 		if errors.Is(err, os.ErrExist) {
 			return errors.New("the Copilot CLI state directory already holds the session")
 		}
@@ -147,14 +154,13 @@ func (copilotFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string
 		return err
 	}
 	created = append(created, staged)
-	destination := filepath.Join(sessionDir, copilotEventsEntry)
 	if err = os.Rename(staged, destination); err != nil {
 		return err
 	}
 	// Until the directories are synced, a failure still removes the published
 	// event log, so a retry finds no partial install.
 	created[len(created)-1] = destination
-	if err = syncDirs(sessionDir, filepath.Dir(sessionDir), dirs.State, filepath.Dir(dirs.State)); err != nil {
+	if err = syncDirs(synced...); err != nil {
 		return err
 	}
 	created = nil

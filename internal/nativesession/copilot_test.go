@@ -83,8 +83,17 @@ func TestCopilotFormatCarriesTheSessionIntoANewHome(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("install must carry only the session: %v %v", entries, err)
 	}
-	if err := format.Install(t.Context(), data, destination, realDir(t), copilotFixtureLimit); err == nil {
-		t.Fatal("install must not overwrite a session the state directory holds")
+	// A retry after an unacknowledged install finds exactly what it wrote.
+	if err := format.Install(t.Context(), data, destination, realDir(t), copilotFixtureLimit); err != nil {
+		t.Fatalf("repeating a completed install must succeed: %v", err)
+	}
+	appendForTest(t, events, `{"type":"user.message","data":{"content":"later turn"},"id":"e5","timestamp":"2026-10-13T04:58:00.000Z","parentId":"e4"}`+"\n")
+	later, err := format.Capture(t.Context(), source, copilotFixtureSession, copilotFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := format.Install(t.Context(), later, destination, realDir(t), copilotFixtureLimit); err == nil {
+		t.Fatal("install must not overwrite another conversation of the session")
 	}
 }
 
