@@ -142,6 +142,12 @@ func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"unparseable release": {reason: `records release "2.1"`, mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1"}`+"\n")
 		}},
+		"entry with trailing data": {reason: "not one JSON object", mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`"}]`+"\n")
+		}},
+		"entry of no session": {reason: "of another session or of none", mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"user","message":"unowned"}`+"\n")
+		}},
 		"another session's entry": {reason: "another session", mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"user","sessionId":"8f1d0c3e-0000-4000-8000-000000000000"}`+"\n")
 		}},
@@ -171,6 +177,11 @@ func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		})
 	}
 	fixture := newClaudeFixture(t)
+	// Claude Code identifies a summary by its leaf and writes no session ID.
+	appendForTest(t, fixture.transcript, `{"type":"summary","summary":"Read LICENSE","leafUuid":"u2"}`+"\n")
+	if _, err := format.Capture(t.Context(), fixture.dirs, claudeFixtureSession, claudeFixtureLimit); err != nil {
+		t.Fatalf("a summary entry must be carried: %v", err)
+	}
 	if _, err := format.Capture(t.Context(), fixture.dirs, "8f1d0c3e-0000-4000-8000-00000000ffff", claudeFixtureLimit); err == nil || errors.Is(err, ErrUnsupported) {
 		t.Fatalf("a missing session is a capture failure, not an unsupported conversation: %v", err)
 	}
@@ -245,6 +256,7 @@ func TestClaudeInspectRejectsTamperedBundles(t *testing.T) {
 		"manifest field": rebuild(func(e map[string][]byte) {
 			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`{`), []byte(`{"extra":1,`), 1)
 		}),
+		"manifest tail": rebuild(func(e map[string][]byte) { e["manifest.json"] = append(e["manifest.json"], ']') }),
 		"trailing data": append(append([]byte(nil), data...), data...),
 		"not gzip":      []byte("plain"),
 	} {

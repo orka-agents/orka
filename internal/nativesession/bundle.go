@@ -130,8 +130,20 @@ func readBundleArchive(compressed io.Reader, budget int64, accept func(name stri
 func decodeManifest(content []byte, manifest any) error {
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(manifest); err != nil || decoder.More() {
+	if err := decodeOnly(decoder, manifest); err != nil {
 		return errors.New("native session bundle manifest is invalid")
+	}
+	return nil
+}
+
+// decodeOnly decodes the one JSON value decoder holds into value; anything
+// after it, even a stray closing bracket, is an error.
+func decodeOnly(decoder *json.Decoder, value any) error {
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		return errors.New("trailing data after the JSON value")
 	}
 	return nil
 }

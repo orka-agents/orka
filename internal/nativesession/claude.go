@@ -340,6 +340,11 @@ var claudeEntryTypes = map[string]bool{
 	"cost-state": true, "queue-operation": true, "observer-ref": true,
 }
 
+// claudeUnownedEntryTypes are the entry types Claude Code identifies by
+// something other than the session: a summary by leafUuid and a file history
+// snapshot by messageId. Every other entry names its session.
+var claudeUnownedEntryTypes = map[string]bool{"summary": true, "file-history-snapshot": true}
+
 // inspectClaudeTranscript checks that transcript is JSON lines of entries of
 // providerSessionID that Claude Code claudeCodeVersion reads, and returns the
 // latest Claude Code release that wrote it. A later release's transcript is
@@ -355,18 +360,18 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 			SessionID *string `json:"sessionId"`
 			Version   string  `json:"version"`
 		}
-		decoder := json.NewDecoder(bytes.NewReader(line))
-		if !bytes.HasPrefix(line, []byte("{")) || decoder.Decode(&entry) != nil || decoder.More() {
+		if !bytes.HasPrefix(line, []byte("{")) || decodeOnly(json.NewDecoder(bytes.NewReader(line)), &entry) != nil {
 			return "", errors.New("the Claude Code transcript holds an entry that is not one JSON object")
 		}
 		if !claudeEntryTypes[entry.Type] && unknown == "" {
 			unknown = entry.Type
 		}
-		if entry.SessionID != nil {
-			if *entry.SessionID != providerSessionID {
-				return "", errors.New("the Claude Code transcript holds entries of another session")
-			}
+		switch {
+		case entry.SessionID != nil && *entry.SessionID == providerSessionID:
 			owned = true
+		case entry.SessionID == nil && claudeUnownedEntryTypes[entry.Type]:
+		default:
+			return "", errors.New("the Claude Code transcript holds an entry of another session or of none")
 		}
 		if entry.Version != "" {
 			if _, ok := parseRelease(entry.Version); !ok {
