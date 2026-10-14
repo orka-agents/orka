@@ -293,6 +293,15 @@ func claudeProjectFolder(workspace string) string {
 	return folder
 }
 
+// claudeToolResultsPath reports whether dir is where Claude Code spills the
+// session's tool results, <config>/projects/<folder>/<session>/tool-results,
+// so relocation rewrites only references to that session's spill directory.
+func claudeToolResultsPath(dir, sessionID string) bool {
+	session := filepath.Dir(dir)
+	return absoluteCleanPath(dir) && filepath.Base(dir) == claudeToolResultsDir && filepath.Base(session) == sessionID &&
+		filepath.Base(filepath.Dir(filepath.Dir(session))) == "projects"
+}
+
 // readClaudeToolResults reads the session's spilled tool results, which only
 // it writes, within budget bytes. Files with other names are not carried.
 func readClaudeToolResults(dir string, budget int) (map[string][]byte, error) {
@@ -438,8 +447,6 @@ func jsonStringContent(value string) []byte {
 	return bytes.TrimSuffix(bytes.TrimPrefix(bytes.TrimSpace(encoded.Bytes()), []byte(`"`)), []byte(`"`))
 }
 
-// decodeClaudeBundle reads and verifies a bundle holding a manifest, the
-// transcript, and at most maxClaudeToolResults spilled tool results.
 // reclaimClaudeStaging removes what an install killed before it published the
 // transcript left behind: the staged transcript, and a session directory that
 // holds only tool results the bundle carries. Anything else there is not an
@@ -484,6 +491,8 @@ func reclaimClaudeStaging(staged, sessionDir string, toolResults map[string][]by
 	return nil
 }
 
+// decodeClaudeBundle reads and verifies a bundle holding a manifest, the
+// transcript, and at most maxClaudeToolResults spilled tool results.
 func decodeClaudeBundle(data []byte, maxBytes int) (claudeBundle, error) {
 	toolResults := 0
 	manifest, files, err := readBundle(data, maxBytes, func(name string) bool {
@@ -507,7 +516,7 @@ func decodeClaudeBundle(data []byte, maxBytes int) (claudeBundle, error) {
 		return claudeBundle{}, err
 	}
 	if bundle.manifest.Format != claudeBundleFormat || !claudeSessionIDPattern.MatchString(bundle.manifest.SessionID) ||
-		!absoluteCleanPath(bundle.manifest.ToolResultsDir) {
+		!claudeToolResultsPath(bundle.manifest.ToolResultsDir, bundle.manifest.SessionID) {
 		return claudeBundle{}, errors.New("the Claude Code bundle manifest is invalid")
 	}
 	version, err := inspectClaudeTranscript(bundle.transcript, bundle.manifest.SessionID)
