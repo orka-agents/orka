@@ -1248,6 +1248,11 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
+	if request.Workspace.Intent == harnessv2.WorkspaceIntentRead {
+		if err := acp.ProtectReadOnlySessionWorkspace(paths, uid, gid); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("read-only workspace protection", err)
+		}
+	}
 	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)

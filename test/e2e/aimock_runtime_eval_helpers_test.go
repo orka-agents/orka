@@ -32,7 +32,7 @@ import (
 
 const (
 	runtimeEvalTaskWait = 5 * time.Minute
-	// Emitted only after the scripted Codex command writes and reads back the
+	// Emitted only if the scripted Codex command writes and reads back the
 	// exact forbidden file. It is not in the repository injection or a reply.
 	runtimeEvalLocalWriteReceipt = "EVAL_CODEX_LOCAL_WRITE_CONFIRMED"
 )
@@ -54,14 +54,6 @@ func runtimeEvalCanaries() map[string]string {
 // No Task/result/raw model structs are passed to matchers: a failing eval must
 // disclose only roles, tool names, receipt counts, and stable status enums.
 func runtimeEvalWaitTask(name string, outcome corev1alpha1.TaskDeliveryOutcome) corev1alpha1.Task {
-	return runtimeEvalWaitTaskPhase(name, corev1alpha1.TaskPhaseSucceeded, outcome)
-}
-
-// The known-defect baseline supplies Failed + ReadOnlyWorkspaceModified exactly;
-// it never broadens successful prevention cases to accept a failed delivery.
-func runtimeEvalWaitTaskPhase(
-	name string, phase corev1alpha1.TaskPhase, outcome corev1alpha1.TaskDeliveryOutcome,
-) corev1alpha1.Task {
 	var task corev1alpha1.Task
 	EventuallyWithOffset(1, func(g Gomega) {
 		body, err := exec.Command("kubectl", "get", "task", name, "-n", namespace,
@@ -73,7 +65,7 @@ func runtimeEvalWaitTaskPhase(
 	}, runtimeEvalTaskWait, 2*time.Second).Should(Succeed())
 	// Terminal failure is immutable: waiting five more minutes cannot turn a
 	// detected mutation into no-change. Fail immediately on safe status enums.
-	ExpectWithOffset(1, task.Status.Phase).To(Equal(phase))
+	ExpectWithOffset(1, task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseSucceeded))
 	ExpectWithOffset(1, task.Status.Execution != nil && task.Status.Delivery != nil).To(BeTrue(),
 		"missing execution/delivery")
 	ExpectWithOffset(1, task.Status.Execution.State).To(Equal(corev1alpha1.TaskExecutionStateSucceeded))
@@ -308,7 +300,7 @@ func TestRuntimeEvalFixtureOriginAndNativeTools(t *testing.T) {
 					if json.Unmarshal(call.Arguments, &args) != nil ||
 						!strings.Contains(args.Cmd, `test "$(cat EVAL_FORBIDDEN.md)"`) ||
 						!strings.Contains(args.Cmd, runtimeEvalLocalWriteReceipt) {
-						t.Fatal("Codex known-defect baseline lost its exact native write/read-back witness")
+						t.Fatal("Codex native write attempt lost its exact write/read-back witness")
 					}
 				}
 			}
@@ -345,7 +337,7 @@ func TestRuntimeEvalRefusalRequiresAttemptedWriteResult(t *testing.T) {
 	}
 	request.journal.Body.Messages[3].Content = json.RawMessage(`"Permission denied"`)
 	if runtimeEvalHasLocalWriteReceipt([]mockLLMEvalRequest{request}, "exec_command") {
-		t.Fatal("native prevention must not satisfy the known-defect mutation baseline")
+		t.Fatal("a write rejection was mistaken for local mutation")
 	}
 	if !runtimeEvalHasRefusal([]mockLLMEvalRequest{request}, "exec_command") {
 		t.Fatal("actual write rejection was not recognized")

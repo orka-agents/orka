@@ -129,7 +129,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/anthropic_compat_test.go` | Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior, on aimock or the live proxy |
 | `test/e2e/coordination_memory_tools_test.go` | Coordination memory tool auto-injection and execution (`search_transcript`, `recall_memory`, `propose_memory`, `remember`) and proposal review without durable writes, on aimock or the live proxy |
 | `test/e2e/agent_runtime_lifecycle_test.go` | Go port of `scripts/agent-runtime-e2e.sh` (label `agent-runtime`): RuntimePool profile projection and execution fences; read, Session continuation, and Task fork for Codex, OpenCode, Claude, and Copilot; an idle adapter killed between prompts, which OpenCode and Claude resume in place under the same RuntimeSession generation (with Claude's resume-time model request refused by the provider proxy) and which Copilot, unable to resume, fails as `RuntimeLost` before rebuilding from the transcript on the next continuation; unsafe workspace URLs; concurrency within capacity; Task timeout and deletion cancellation through the cleanup finalizer; controller restart without replay; Pod replacement and scale-to-zero recovery of the same RuntimeSession; OpenCode read-intent tool policy; and Session archival and RuntimePool cleanup. On aimock it also checks that each continuation, fork, and recovery replayed the prior transcript to the model, except for Copilot: its requests exceed the 64 KB aimock journal cap, so its continuations rely on the RuntimeSession identity checks, as in the bash lane |
-| `test/e2e/aimock_runtime_eval_test.go` | Model-free adversarial evals on the actual Codex, Claude, Copilot, and OpenCode CLIs: consumed SCM/proxy credential containment, governed extraction during Session continuation, and repository-origin read-only mutation checks with independent delivery/publication evidence; Codex retains an explicit known-defect baseline |
+| `test/e2e/aimock_runtime_eval_test.go` | Model-free adversarial evals on the actual Codex, Claude, Copilot, and OpenCode CLIs: consumed SCM/proxy credential containment, governed extraction during Session continuation, and repository-origin read-only mutation checks with independent delivery/publication evidence |
 | `test/e2e/aimock_authorization_eval_test.go` | Deployed broker allowlist, delegation namespace/agent restrictions, and child transaction-scope containment on a supported external runtimeRef; native publication-authority checks, permitted controls, and a synthetic signing/JWKS/TTS fixture |
 | `test/e2e/agent_runtime_matrix_test.go` | Codex against a pinned read workspace, OpenCode read-intent enforcement, and Claude session wiring through the provider proxy (aimock as Vekil, or the live proxy), plus a digest-pinned Copilot image smoke assertion; it is not the canonical ACP release gate |
 | `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
@@ -211,14 +211,11 @@ Run the focused label through the usual isolated E2E bootstrap:
 E2E_GINKGO_LABEL_FILTER=adversarial-eval E2E_ACP_IDLE_POOL_TTL=15m make test-e2e
 ```
 
-Codex currently has an explicit known-defect baseline: under read intent,
-`exec_command` can modify the local workspace without a native refusal. Trusted
-workspace comparison then reports `ReadOnlyWorkspaceModified` and prevents
-publication. This is **delivery containment, not native write prevention**.
-The baseline must reproduce that exact gap and fails once prevention is fixed;
-its report entry is `knownDefect`, never a passing prevention guarantee. The
-credential/non-disclosure controls still apply to Codex. Claude, Copilot, and
-OpenCode must satisfy native refusal plus `ReadValidated` and no publication.
+Every runtime must satisfy native refusal plus `ReadValidated` and no
+publication. Claude, Copilot, and OpenCode refuse the write tool itself. Codex
+reads and writes through one shell tool, so its refusal comes from the
+filesystem: under read intent the supervisor owns the workspace and the
+session root, and the Codex shell's write fails with `Permission denied`.
 
 The capture, signing-fixture, detector, and fixture-contract tests also run
 without a cluster:

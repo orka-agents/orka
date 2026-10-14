@@ -105,7 +105,7 @@
         "toolResultContains": "Seeded by the Orka E2E fake forge."
       },
       "response": {
-        "content": "Repository read completed. The native-write baseline is complete."
+        "content": "Repository read completed after the native write refusal."
       }
     },
     {

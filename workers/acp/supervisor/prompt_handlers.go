@@ -1929,6 +1929,14 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if request.Intent == harnessv2.WorkspaceIntentRead {
+		if err := acp.ProtectReadOnlySessionWorkspace(paths, uid, gid); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "read-only workspace protection")
+			s.poisonSession(state, "read-only workspace protection failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "read-only workspace protection failed", nil, false)
+			return
+		}
+	}
 	if buildErr != nil {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
 		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {
