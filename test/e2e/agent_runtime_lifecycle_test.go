@@ -165,11 +165,11 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		}, time.Minute, 2*time.Second).Should(Succeed())
 	}
 
-	// expectHistoryCarried checks in mock mode, for requests whose bodies the
-	// aimock journal cap hides, that the first model request of the turn
-	// marked continued is at least historyBytes larger than the first request
-	// of the turn marked first, so it carried the first turn's messages and
-	// tool results rather than an empty conversation.
+	// expectHistoryCarried checks in mock mode that the first model request of
+	// the turn marked continued is at least historyBytes larger than the first
+	// request of the turn marked first, so it carried the first turn's messages
+	// and tool results rather than an empty conversation. It compares sizes,
+	// so it holds whether or not the aimock journal cap hid the bodies.
 	expectHistoryCarried := func(first, continued string, historyBytes int) {
 		if live {
 			return
@@ -184,11 +184,10 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 					request = candidate
 				}
 			}
-			ExpectWithOffset(2, request.Body.Truncated).To(BeTrue(), "%s fits the journal; check its content instead", marker)
 			return request
 		}
 		before, after := earliest(first), earliest(continued)
-		ExpectWithOffset(1, after.Body.OriginalByteSize).To(BeNumerically(">=", before.Body.OriginalByteSize+historyBytes),
+		ExpectWithOffset(1, after.Body.Size).To(BeNumerically(">=", before.Body.Size+historyBytes),
 			"%s reached the model without the history of %s", continued, first)
 	}
 
@@ -318,8 +317,8 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 			expectNoResumeModelRequest(continuedAt)
 		}
 		if provider.kind == copilot.kind {
-			// Copilot's requests exceed the journal cap, so expectReplayed
-			// cannot see the nonce. The first turn read the roughly 1 KB
+			// Copilot's requests can exceed the journal cap, which hides the
+			// nonce from expectReplayed. The first turn read the roughly 1 KB
 			// LICENSE, which a loaded conversation sends again.
 			By("checking the loaded Copilot conversation reached the model with the first turn")
 			expectHistoryCarried(marker(provider.kind+"-read"), marker(provider.kind+"-continue"), 1024)

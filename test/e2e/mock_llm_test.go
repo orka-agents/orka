@@ -390,25 +390,41 @@ func (m mockLLMMessage) Text() string {
 }
 
 type mockLLMRequest struct {
-	Timestamp int64  `json:"timestamp"`
-	Path      string `json:"path"`
-	Body      struct {
-		// Truncated is set when the body exceeded aimock's 64 KB journal cap
-		// and was not recorded; OriginalByteSize is then the body's size.
-		Truncated        bool             `json:"__aimock_truncated"`
-		OriginalByteSize int              `json:"originalByteSize"`
-		Model            string           `json:"model"`
-		Messages         []mockLLMMessage `json:"messages"`
-		Tools            []struct {
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
-	} `json:"body"`
-	Response struct {
+	Timestamp int64              `json:"timestamp"`
+	Path      string             `json:"path"`
+	Body      mockLLMRequestBody `json:"body"`
+	Response  struct {
 		Status  int             `json:"status"`
 		Fixture json.RawMessage `json:"fixture"`
 	} `json:"response"`
+}
+
+type mockLLMRequestBody struct {
+	// Truncated is set when the body exceeded aimock's 64 KB journal cap
+	// and was not recorded; OriginalByteSize is then the body's size.
+	Truncated        bool             `json:"__aimock_truncated"`
+	OriginalByteSize int              `json:"originalByteSize"`
+	Model            string           `json:"model"`
+	Messages         []mockLLMMessage `json:"messages"`
+	Tools            []struct {
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	} `json:"tools"`
+	// Size is the body's size in bytes whether or not the journal recorded it.
+	Size int `json:"-"`
+}
+
+func (b *mockLLMRequestBody) UnmarshalJSON(data []byte) error {
+	type fields mockLLMRequestBody
+	if err := json.Unmarshal(data, (*fields)(b)); err != nil {
+		return err
+	}
+	b.Size = len(data)
+	if b.Truncated {
+		b.Size = b.OriginalByteSize
+	}
+	return nil
 }
 
 // Mentions reports whether any user or system message carries marker.
