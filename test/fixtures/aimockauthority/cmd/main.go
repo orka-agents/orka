@@ -18,6 +18,7 @@ import (
 
 func main() {
 	listen := flag.String("listen", ":8080", "fixture HTTP listener")
+	observerListen := flag.String("observer-listen", "127.0.0.1:8081", "loopback-only host observer listener")
 	issuer := flag.String("issuer", "", "canonical, in-cluster fixture issuer URL")
 	flag.Parse()
 	fixture, err := aimockauthority.New(*issuer)
@@ -25,9 +26,18 @@ func main() {
 		log.Print("authority fixture initialization failed")
 		os.Exit(1)
 	}
-	server := &http.Server{Addr: *listen, Handler: fixture.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
-	if server.ListenAndServe() != nil {
-		log.Print("authority fixture stopped")
-		os.Exit(1)
+	stopped := make(chan struct{}, 2)
+	for _, server := range []*http.Server{
+		{Addr: *listen, Handler: fixture.Handler()},
+		{Addr: *observerListen, Handler: fixture.ObserverHandler()},
+	} {
+		server.ReadHeaderTimeout, server.ReadTimeout, server.WriteTimeout = 5*time.Second, 30*time.Second, 30*time.Second
+		go func() {
+			_ = server.ListenAndServe()
+			stopped <- struct{}{}
+		}()
 	}
+	<-stopped
+	log.Print("authority fixture stopped")
+	os.Exit(1)
 }

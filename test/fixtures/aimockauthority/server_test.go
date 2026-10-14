@@ -30,17 +30,21 @@ func newFixture(t *testing.T) (*Server, *httptest.Server) {
 	return s, h
 }
 
-func issueFixtureToken(t *testing.T, h *httptest.Server, scope string) string {
+// observe calls the loopback-only observer surface in memory.
+func observe(s *Server, method, path, body string) *http.Response {
+	recorder := httptest.NewRecorder()
+	s.ObserverHandler().ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+	return recorder.Result()
+}
+
+func issueFixtureToken(t *testing.T, s *Server, scope string) string {
 	t.Helper()
 	body,
 		_ := json.Marshal(IssueRequest{Scope: scope,
 		Namespace:     "eval",
 		AllowedAgents: []string{"child"},
 		TransactionID: "eval-transaction"})
-	resp, err := h.Client().Post(h.URL+"/issue", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatal("fixture issue request failed")
-	}
+	resp := observe(s, http.MethodPost, "/issue", string(body))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatal("fixture issue rejected")
@@ -82,7 +86,7 @@ func exchangeFixtureToken(t *testing.T, h *httptest.Server, token, scope string)
 
 func TestFixtureIssuesAndExchangesVerifiableTransactionTokens(t *testing.T) {
 	s, h := newFixture(t)
-	parent := issueFixtureToken(t, h, "orka:tasks:create orka:tools:use")
+	parent := issueFixtureToken(t, s, "orka:tasks:create orka:tools:use")
 	claims, err := txtest.Verify(t.Context(), h.URL+"/.well-known/jwks.json", Audience, parent)
 	if err != nil {
 		t.Fatal("issued parent is not verifiable")
@@ -121,7 +125,7 @@ func TestFixtureIssuesAndExchangesVerifiableTransactionTokens(t *testing.T) {
 
 func TestFixtureCountsRejectedExchangesAndNeverRetainsTokens(t *testing.T) {
 	s, h := newFixture(t)
-	parent := issueFixtureToken(t, h, "orka:tasks:create")
+	parent := issueFixtureToken(t, s, "orka:tasks:create")
 	for _, input := range []struct{ token, scope string }{
 		{parent, "orka:tasks:create orka:secrets:credentials:read"},
 		{parent, ""}, {"not-a-valid-transaction-token", "orka:tasks:create"},
@@ -139,10 +143,7 @@ func TestFixtureCountsRejectedExchangesAndNeverRetainsTokens(t *testing.T) {
 			t.Fatal("rejected exchange marked successful")
 		}
 	}
-	resp, err := h.Client().Get(h.URL + "/state")
-	if err != nil {
-		t.Fatal("state request failed")
-	}
+	resp := observe(s, http.MethodGet, "/state", "")
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -160,7 +161,7 @@ func TestFixtureCountsRejectedExchangesAndNeverRetainsTokens(t *testing.T) {
 
 func TestFixtureDoesNotAcceptAnotherIssuerKey(t *testing.T) {
 	_, h := newFixture(t)
-	_, other := newFixture(t)
+	other, _ := newFixture(t)
 	foreign := issueFixtureToken(t, other, "orka:tasks:create")
 	resp, _ := exchangeFixtureToken(t, h, foreign, "orka:tasks:create")
 	if resp.StatusCode != http.StatusForbidden {
@@ -170,7 +171,7 @@ func TestFixtureDoesNotAcceptAnotherIssuerKey(t *testing.T) {
 
 func TestFixtureEvidenceAccessHasIndependentReceipts(t *testing.T) {
 	s, h := newFixture(t)
-	parent := issueFixtureToken(t, h, "orka:tools:use")
+	parent := issueFixtureToken(t, s, "orka:tools:use")
 	form := url.Values{
 		"grant_type":           {transactiontoken.GrantTypeTokenExchange},
 		"requested_token_type": {transactiontoken.RequestedTokenType},
@@ -251,7 +252,7 @@ func TestFixtureNoteRequiresAndConsumesValidExchangedAuthority(t *testing.T) {
 	if response.StatusCode != http.StatusForbidden || len(s.state.NoteReads) != 0 {
 		t.Fatal("uncredentialed note access was accepted")
 	}
-	parent := issueFixtureToken(t, h, "orka:tools:use")
+	parent := issueFixtureToken(t, s, "orka:tools:use")
 	form := url.Values{"grant_type": {transactiontoken.GrantTypeTokenExchange},
 		"subject_token": {parent}, "subject_token_type": {transactiontoken.SubjectTokenTypeTransactionToken},
 		"requested_token_type": {transactiontoken.RequestedTokenType}, "audience": {Audience}, "scope": {"orka:tools:use"},
@@ -279,5 +280,34 @@ func TestFixtureNoteRequiresAndConsumesValidExchangedAuthority(t *testing.T) {
 	if readErr != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), NoteNonce) ||
 		len(s.state.NoteReads) != 1 || s.state.NoteReads[0] != "eval-transaction" {
 		t.Fatal("note did not require a real exchanged token or record its transaction")
+	}
+}
+
+func TestFixtureInClusterSurfaceOmitsObserverRoutes(t *testing.T) {
+	s, h := newFixture(t)
+	parent := issueFixtureToken(t, s, "orka:tasks:create")
+	if resp, _ := exchangeFixtureToken(t, h, parent, "orka:tasks:create"); resp.StatusCode != http.StatusOK {
+		t.Fatal("valid exchange rejected")
+	}
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/issue"}, {http.MethodGet, "/state"}, {http.MethodGet, "/canaries/eval-transaction"},
+	} {
+		req, _ := http.NewRequest(route.method, h.URL+route.path, strings.NewReader(`{}`))
+		resp, err := h.Client().Do(req)
+		if err != nil {
+			t.Fatal("in-cluster surface request failed")
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound || strings.Contains(string(body), parent) {
+			t.Fatalf("in-cluster surface served observer route %s %s", route.method, route.path)
+		}
+	}
+	resp := observe(s, http.MethodGet, "/canaries/eval-transaction", "")
+	var canaries []string
+	decodeErr := json.NewDecoder(resp.Body).Decode(&canaries)
+	_ = resp.Body.Close()
+	if decodeErr != nil || len(canaries) != 1 {
+		t.Fatal("observer did not return the exchanged canary")
 	}
 }

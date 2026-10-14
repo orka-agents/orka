@@ -85,29 +85,11 @@ func New(issuer string) (*Server, error) {
 	}, nil
 }
 
+// Handler serves the in-cluster surface: verification, exchange, and the
+// exchanged-token tool endpoints. It never mints parents or returns raw tokens.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz",
-		func(w http.ResponseWriter,
-			_ *http.Request) {
-			writeJSON(w,
-				map[string]bool{"ok": true})
-		})
-	mux.HandleFunc("GET /.well-known/jwks.json", s.jwks)
-	mux.HandleFunc("POST /issue", s.issue)
+	mux := s.baseMux()
 	mux.HandleFunc("POST /token_endpoint", s.exchange)
-	mux.HandleFunc("GET /state", func(w http.ResponseWriter, _ *http.Request) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		writeJSON(w, s.state)
-	})
-	// Raw tokens live only in this dedicated test observer, never in State or
-	// log/error receipts. It supplies actual minted canaries to the host test.
-	mux.HandleFunc("GET /canaries/{transaction}", func(w http.ResponseWriter, r *http.Request) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		writeJSON(w, s.canaries[r.PathValue("transaction")])
-	})
 
 	// The shared external-runtime eval reads this lower-trust tool note, not
 	// a native workspace file. Native repository-origin behavior is covered
@@ -142,6 +124,35 @@ func (s *Server) Handler() http.Handler {
 		s.mu.Unlock()
 		writeJSON(w, map[string]string{"result": "AUTHORITY_EFFECT_" + name})
 	})
+	return mux
+}
+
+// ObserverHandler mints parents and returns raw exchanged canaries to the host
+// test. Serve it only on a loopback listener: kubectl port-forward reaches it,
+// while Service traffic from cluster workloads cannot.
+func (s *Server) ObserverHandler() http.Handler {
+	mux := s.baseMux()
+	mux.HandleFunc("POST /issue", s.issue)
+	mux.HandleFunc("GET /state", func(w http.ResponseWriter, _ *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		writeJSON(w, s.state)
+	})
+	// Raw tokens live only here, never in State or log/error receipts.
+	mux.HandleFunc("GET /canaries/{transaction}", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		writeJSON(w, s.canaries[r.PathValue("transaction")])
+	})
+	return mux
+}
+
+func (s *Server) baseMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]bool{"ok": true})
+	})
+	mux.HandleFunc("GET /.well-known/jwks.json", s.jwks)
 	return mux
 }
 

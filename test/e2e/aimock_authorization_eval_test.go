@@ -668,9 +668,14 @@ func setupAimockAuthorityEval() *aimockAuthorityEval {
 			"metadata": map[string]any{"name": aimockAuthorityName,
 				"namespace": namespace},
 			"spec": map[string]any{"selector": selector,
+				// The observer listens on Pod loopback: port-forward reaches it,
+				// Service traffic does not. kubectl resolves it via this port.
 				"ports": []any{map[string]any{"name": "http",
 					"port":       8080,
-					"targetPort": "http"}}}},
+					"targetPort": "http"},
+					map[string]any{"name": "observer",
+						"port":       8081,
+						"targetPort": 8081}}}},
 	}})).To(Succeed())
 	_,
 		err := utils.Run(exec.Command("kubectl",
@@ -689,7 +694,7 @@ func setupAimockAuthorityEval() *aimockAuthorityEval {
 		err = startHTTPPortForwardAndWait(namespace,
 		aimockAuthorityName,
 		18127,
-		8080,
+		8081,
 		"/healthz")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	DeferCleanup(func() { stopPortForward(cancel, pf) })
