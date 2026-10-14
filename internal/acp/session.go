@@ -70,10 +70,12 @@ type RuntimeSession struct {
 	resuming        *runtimeSessionRestart
 	adapterRestarts int
 	// loading is the provider session a session/load is replaying.
-	// replayBytes counts what it replayed, and the first replay that breaks
-	// a bound sets loadErr and calls stopLoad.
+	// replayBytes counts what it replayed, replayed records an update of
+	// that session, and the first update that breaks a bound sets loadErr
+	// and calls stopLoad.
 	loading     string
 	replayBytes int
+	replayed    bool
 	loadErr     error
 	stopLoad    context.CancelFunc
 	// frozen is set from a workspace freeze attempt until a proven thaw.
@@ -325,8 +327,13 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 			})
 			stopLoad()
 			session.mu.Lock()
-			if session.loadErr != nil {
+			switch {
+			case session.loadErr != nil:
 				err = session.loadErr
+			case err == nil && !session.replayed:
+				// The response names no session, so only the replay shows
+				// that the agent loaded the installed conversation.
+				err = errors.New("ACP session/load replayed none of the provider session's history")
 			}
 			session.loading, session.stopLoad = "", nil
 			session.mu.Unlock()
@@ -1109,6 +1116,7 @@ func (s *RuntimeSession) checkReplayLocked(size int, sessionID string, decodeErr
 	case decodeErr != nil || sessionID != s.loading:
 		s.loadErr = errors.New("ACP session/load replayed a different provider session")
 	default:
+		s.replayed = true
 		return
 	}
 	s.stopLoad()

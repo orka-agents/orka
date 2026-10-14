@@ -12,7 +12,7 @@ import (
 )
 
 func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T) {
-	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id", "load-success", "load-error", "load-wrong-id", "load-over-budget"} {
+	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id", "load-success", "load-error", "load-wrong-id", "load-over-budget", "load-silent"} {
 		t.Run(mode, func(t *testing.T) {
 			uid, gid := os.Getuid(), os.Getgid()
 			if uid == 0 {
@@ -64,6 +64,7 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 					"resume-wrong-id":    "bound a different provider session",
 					"load-wrong-id":      "replayed a different provider session",
 					"load-over-budget":   "session/load replayed more than 64 bytes",
+					"load-silent":        "replayed none of the provider session's history",
 				}[mode]
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("native resume error = %v, want %s", err, want)

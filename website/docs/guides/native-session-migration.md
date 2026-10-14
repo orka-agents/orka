@@ -139,7 +139,8 @@ Copilot CLI keeps each session as an append-only event log,
 event naming the session and the release that started it. Copilot cannot resume
 a session, so Orka's runtime restores it with `session/load`, which replays the
 history before the next prompt; Orka discards the replay instead of recording
-it again. Copilot runs tools in the working directory `session/load` names, so
+it again. The restore fails if Copilot replays nothing, replays another
+session, or replays more than the runtime's byte budget. Copilot runs tools in the working directory `session/load` names, so
 nothing is rewritten. Large shell output spills to `TMPDIR`, which is not
 carried: a restored conversation keeps the spilled output's preview.
 
