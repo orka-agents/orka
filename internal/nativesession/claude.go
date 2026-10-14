@@ -155,6 +155,22 @@ func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string,
 			return err
 		}
 	}
+	projects := filepath.Join(dirs.State, "projects")
+	folder := filepath.Join(projects, claudeProjectFolder(dirs.Workspace))
+	toolResultsDir := filepath.Join(folder, bundle.manifest.SessionID, claudeToolResultsDir)
+	destination := filepath.Join(folder, bundle.manifest.SessionID+".jsonl")
+	carried := len(bundle.transcript)
+	for _, content := range bundle.toolResults {
+		carried += len(content)
+	}
+	transcript, err := relocateClaudeToolResults(bundle.transcript, bundle.manifest.ToolResultsDir, toolResultsDir, expandedLimit(limit)-carried)
+	if err != nil {
+		return err
+	}
+	synced := []string{folder, projects, dirs.State, filepath.Dir(dirs.State)}
+	if len(bundle.toolResults) > 0 {
+		synced = append([]string{toolResultsDir, filepath.Dir(toolResultsDir)}, synced...)
+	}
 	var created []string
 	defer func() {
 		if err != nil {
@@ -171,23 +187,25 @@ func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string,
 		}
 		return requireRealPath(path, true)
 	}
-	projects := filepath.Join(dirs.State, "projects")
 	if err = mkdir(dirs.State); err != nil {
 		return err
 	}
 	if err = mkdir(projects); err != nil {
 		return err
 	}
-	if _, findErr := findClaudeSession(projects, bundle.manifest.SessionID); findErr == nil {
+	if found, findErr := findClaudeSession(projects, bundle.manifest.SessionID); findErr == nil {
+		// A retry after an install that completed but was not acknowledged
+		// finds exactly what it would write.
+		if found == folder && holdsFile(destination, transcript) && holdsFiles(toolResultsDir, bundle.toolResults) {
+			return syncDirs(synced...)
+		}
 		return errors.New("the Claude Code state directory already holds the session")
 	} else if !errors.Is(findErr, os.ErrNotExist) {
 		return findErr
 	}
-	folder := filepath.Join(projects, claudeProjectFolder(dirs.Workspace))
 	if err = mkdir(folder); err != nil {
 		return err
 	}
-	toolResultsDir := filepath.Join(folder, bundle.manifest.SessionID, claudeToolResultsDir)
 	if len(bundle.toolResults) > 0 {
 		for _, dir := range []string{filepath.Dir(toolResultsDir), toolResultsDir} {
 			if err = os.Mkdir(dir, 0o700); err != nil {
@@ -203,30 +221,17 @@ func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string,
 			created = append(created, path)
 		}
 	}
-	carried := len(bundle.transcript)
-	for _, content := range bundle.toolResults {
-		carried += len(content)
-	}
-	transcript, err := relocateClaudeToolResults(bundle.transcript, bundle.manifest.ToolResultsDir, toolResultsDir, expandedLimit(limit)-carried)
-	if err != nil {
-		return err
-	}
 	staged := filepath.Join(folder, "."+bundle.manifest.SessionID+".jsonl.restore")
 	if err = writeNewFile(staged, transcript); err != nil {
 		return err
 	}
 	created = append(created, staged)
-	destination := filepath.Join(folder, bundle.manifest.SessionID+".jsonl")
 	if err = os.Rename(staged, destination); err != nil {
 		return err
 	}
 	// Until the directories are synced, a failure still removes the published
 	// transcript, so a retry finds no partial install.
 	created[len(created)-1] = destination
-	synced := []string{folder, projects, dirs.State, filepath.Dir(dirs.State)}
-	if len(bundle.toolResults) > 0 {
-		synced = append([]string{toolResultsDir, filepath.Dir(toolResultsDir)}, synced...)
-	}
 	if err = syncDirs(synced...); err != nil {
 		return err
 	}

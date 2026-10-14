@@ -118,8 +118,17 @@ func TestClaudeFormatCarriesTheSessionIntoANewHome(t *testing.T) {
 	if err != nil || !bytes.Equal(spill, source.spill) {
 		t.Fatalf("spilled tool result was not carried: %v", err)
 	}
-	if err := format.Install(t.Context(), data, destination, realDir(t), claudeFixtureLimit); err == nil {
-		t.Fatal("install must not overwrite a session the state directory holds")
+	// A retry after an unacknowledged install finds exactly what it wrote.
+	if err := format.Install(t.Context(), data, destination, realDir(t), claudeFixtureLimit); err != nil {
+		t.Fatalf("repeating a completed install must succeed: %v", err)
+	}
+	appendForTest(t, source.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","message":"later turn"}`+"\n")
+	later, err := format.Capture(t.Context(), source.dirs, claudeFixtureSession, claudeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := format.Install(t.Context(), later, destination, realDir(t), claudeFixtureLimit); err == nil {
+		t.Fatal("install must not overwrite another conversation of the session")
 	}
 }
 

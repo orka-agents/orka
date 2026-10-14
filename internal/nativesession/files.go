@@ -1,6 +1,7 @@
 package nativesession
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -103,6 +104,26 @@ func syncDir(path string) error {
 	}
 	defer func() { _ = dir.Close() }()
 	return dir.Sync()
+}
+
+// holdsFile reports whether path is a regular file, reached without a
+// symlink, that holds exactly content.
+func holdsFile(path string, content []byte) bool {
+	if requireRealPath(path, false) != nil {
+		return false
+	}
+	existing, err := readBoundedFile(path, len(content))
+	return err == nil && bytes.Equal(existing, content)
+}
+
+// holdsFiles reports whether dir holds every named file with its content.
+func holdsFiles(dir string, files map[string][]byte) bool {
+	for name, content := range files {
+		if !holdsFile(filepath.Join(dir, name), content) {
+			return false
+		}
+	}
+	return true
 }
 
 // syncDirs syncs each directory in order. An install lists the directories it
