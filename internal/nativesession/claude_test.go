@@ -301,6 +301,15 @@ func TestClaudeInspectRejectsTamperedBundles(t *testing.T) {
 		"relative spills": rebuild(func(e map[string][]byte) {
 			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`"/`), []byte(`"`), 1)
 		}),
+		"spills outside the session": rebuild(func(e map[string][]byte) {
+			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`/tool-results"`), []byte(`"`), 1)
+		}),
+		"another session's spills": rebuild(func(e map[string][]byte) {
+			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(claudeFixtureSession+`/tool-results`), []byte(`8f1d0c3e-0000-4000-8000-000000000000/tool-results`), 1)
+		}),
+		"spills outside a projects folder": rebuild(func(e map[string][]byte) {
+			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`/projects/`), []byte(`/elsewhere/`), 1)
+		}),
 		"manifest field": rebuild(func(e map[string][]byte) {
 			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`{`), []byte(`{"extra":1,`), 1)
 		}),
