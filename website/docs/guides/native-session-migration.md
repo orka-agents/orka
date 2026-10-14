@@ -118,8 +118,10 @@ Claude Code releases often. Import accepts a transcript that Claude Code
 read it; a transcript from a later release is rejected, since it may hold
 entries 2.1.293 cannot read. Export accepts a local Claude Code 2.1.293 or later,
 since later releases resume what earlier ones wrote. Import also rejects a
-transcript with entries of another session, an unfinished last entry, or more
-than 256 spilled tool results, and a session that two project folders hold.
+transcript with an entry type Claude Code 2.1.293 does not read, entries of
+another session, an unfinished last entry, or more than 256 spilled tool
+results, and a session that two project folders hold. At runtime, capture falls
+back to the canonical transcript in the same cases.
 
 Answering `session/resume`, Claude Code sends one "Hi" request to its model.
 Inside Orka the provider proxy refuses it, because no prompt has been granted
