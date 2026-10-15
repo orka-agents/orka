@@ -285,8 +285,9 @@ var mockLLMInjectedFixtures []json.RawMessage
 // fixtures posted at run time after its catch-all, so this clears and reloads
 // the whole ordered set: fixture files, injected fixtures, then the catch-all.
 // Call it while the scripted conversation is parked (for example in a
-// wait_for_tasks on a placeholder Task) so no request lands in the brief
-// window between the clear and the reload.
+// wait_for_tasks on a placeholder Task). Other callers, such as a child Task
+// that is just starting, can still send a request during the swap; aimock
+// answers those with a retryable 429 until the reload completes.
 func injectMockLLMFixtures(fixtures ...map[string]any) {
 	for _, fixture := range fixtures {
 		encoded, err := json.Marshal(fixture)
@@ -331,10 +332,25 @@ func (m mockLLMInstance) reloadFixtures(injected []json.RawMessage) {
 	body, err := json.Marshal(map[string]any{"fixtures": set})
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
+	// aimock has no atomic replace. Between the clear and the reload a request
+	// matches nothing and gets a 404, which model clients do not retry, so
+	// rate-limit every model request (Retry-After: 1) for the whole swap. The
+	// control API is not subject to chaos.
+	hold := m.controlPath("chaos")
+	cmd := exec.Command("kubectl", "create", "--raw", hold, "-f", "-")
+	cmd.Stdin = strings.NewReader(`{"rateLimitRate":1}`)
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to hold aimock model requests")
+	defer func() {
+		// Release even after a failed swap so later specs are not throttled.
+		_, err := utils.Run(exec.Command("kubectl", "delete", "--raw", hold))
+		ExpectWithOffset(2, err).NotTo(HaveOccurred(), "Failed to release aimock model requests")
+	}()
+
 	path := m.controlPath("fixtures")
 	_, err = utils.Run(exec.Command("kubectl", "delete", "--raw", path))
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to clear aimock fixtures")
-	cmd := exec.Command("kubectl", "create", "--raw", path, "-f", "-")
+	cmd = exec.Command("kubectl", "create", "--raw", path, "-f", "-")
 	cmd.Stdin = bytes.NewReader(body)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to reload aimock fixtures")
