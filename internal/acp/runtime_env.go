@@ -786,6 +786,12 @@ func FinalizeSessionOwnership(root string, uid, gid int) error {
 // rename it aside. The child's unique group keeps read and search access, which
 // no other child identity shares. Directory modes need no baseline preparation:
 // ownership reclaim resets them to 0700 before every validation.
+//
+// Like FinalizeSessionOwnership, it is a no-op for a non-root supervisor whose
+// child runs under the supervisor's own identity. That development and test
+// mode has no filesystem isolation to establish: the child could restore any
+// permission the supervisor removed. Read-intent delta validation remains its
+// enforcement. Managed runtime Pods always run the supervisor as root.
 func ProtectReadOnlySessionWorkspace(paths SessionPaths, uid, gid int) error {
 	root := filepath.Clean(strings.TrimSpace(paths.Root))
 	workspace := filepath.Clean(strings.TrimSpace(paths.Workspace))

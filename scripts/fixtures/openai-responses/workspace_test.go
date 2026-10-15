@@ -48,7 +48,7 @@ func TestWorkspaceCanaryVerifiesRefusedWrites(t *testing.T) {
 }
 
 func TestWorkspaceCanaryRejectsWritableOrPlantedWorkspaces(t *testing.T) {
-	for _, scenario := range []string{"writable workspace", "planted file", "failed command"} {
+	for _, scenario := range []string{"writable workspace", "planted file", "planted dangling symlink", "failed command"} {
 		t.Run(scenario, func(t *testing.T) {
 			resetWorkspaceCanary(t, workspaceRestoreMarker)
 			input := make([]any, 1, 3)
@@ -58,9 +58,18 @@ func TestWorkspaceCanaryRejectsWritableOrPlantedWorkspaces(t *testing.T) {
 			switch scenario {
 			case "writable workspace":
 				dir = t.TempDir()
-			case "planted file":
+			case "planted file", "planted dangling symlink":
 				dir = t.TempDir()
-				if err := os.WriteFile(filepath.Join(dir, workspaceCanaryFile), []byte("planted\n"), 0o600); err != nil {
+				path := filepath.Join(dir, workspaceCanaryFile)
+				var err error
+				if scenario == "planted file" {
+					err = os.WriteFile(path, []byte("planted\n"), 0o600)
+				} else {
+					// The target is inside the read-only workspace, so the write
+					// through it is refused and only the symlink check fails.
+					err = os.Symlink("missing", path)
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
 				if err := os.Chmod(dir, 0o555); err != nil {

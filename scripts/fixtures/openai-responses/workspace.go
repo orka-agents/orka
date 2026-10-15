@@ -35,10 +35,12 @@ func workspaceCanaryCommand(marker string) string {
 	case workspaceWriteMarker, workspaceResumeMarker, workspaceRestoreMarker:
 		// Read-intent workspaces are not writable by the provider child. The
 		// probe passes only when no earlier turn or checkpoint left the file
-		// behind and the shell itself is denied a new one.
-		return "set -u; test ! -e " + workspaceCanaryFile + " || exit 3; " +
+		// behind and the shell itself is denied a new one. -L also catches a
+		// dangling symlink, which -e follows.
+		absent := "test ! -e " + workspaceCanaryFile + " && test ! -L " + workspaceCanaryFile
+		return "set -u; " + absent + " || exit 3; " +
 			"if denied=$( (printf x > " + workspaceCanaryFile + ") 2>&1 ); then exit 4; fi; " +
-			"test ! -e " + workspaceCanaryFile + " || exit 5; " +
+			absent + " || exit 5; " +
 			`case "$denied" in *"Permission denied"*) ;; *) exit 6 ;; esac; ` +
 			"printf '%s\\n' '" + workspaceCanaryRefused + "'"
 	case workspaceLifetimeMarker:
