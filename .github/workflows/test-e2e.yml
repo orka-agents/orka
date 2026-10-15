@@ -35,8 +35,10 @@ jobs:
             cluster: orka-test-e2e
             labels: "!agent-runtime"
             idle_ttl: 5s
-            job_timeout: 60
-            test_timeout: 50m
+            # The go test timeout also covers BeforeSuite's ~21m image build;
+            # passing runs already take up to ~50m in total.
+            job_timeout: 80
+            test_timeout: 65m
           # The built-in runtime lifecycle specs restart the controller and
           # park, replace, and scale RuntimePools, so they get their own
           # cluster.
