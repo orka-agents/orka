@@ -12,8 +12,8 @@ var (
 	ErrClientConfiguration = errors.New("harness v2 client configuration error")
 	// ErrClientValidation marks a locally rejected request or identifier.
 	ErrClientValidation = errors.New("harness v2 client validation error")
-	// ErrClientTransport marks an HTTP transport failure before a response was
-	// available.
+	// ErrClientTransport marks request I/O failure or interrupted body reads
+	// for the read-only status operation.
 	ErrClientTransport = errors.New("harness v2 client transport error")
 	// ErrClientProtocol marks a malformed, oversized, version-skewed, or otherwise
 	// contract-incompatible HTTP response.

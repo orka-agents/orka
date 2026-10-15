@@ -9,6 +9,24 @@ import (
 
 const codexMCPContentKey = "content"
 
+// Inspect the original params before borrowing a remembered read-only MCP
+// identity. encoding/json's struct and map decoding can discard duplicate
+// metadata or fold authority keys with different case into the same field.
+func codexMCPPermissionWireMatches(raw json.RawMessage) bool {
+	if _, err := harnessv2.CanonicalJSON(raw); err != nil {
+		return false
+	}
+	fields, valid := codexExactFields(raw, "sessionId", "toolCall", "options", "_meta")
+	if !valid {
+		return false
+	}
+	if len(fields["_meta"]) == 0 {
+		return true // Marker absence never grants the remembered MCP identity.
+	}
+	_, valid = codexExactFields(fields["_meta"], "is_mcp_tool_approval")
+	return valid
+}
+
 func codexMCPOutputStart(envelope codexCommandOutputEnvelope) bool {
 	var mcp bool
 	return json.Unmarshal(envelope.Meta["is_mcp_tool_call"], &mcp) == nil && mcp

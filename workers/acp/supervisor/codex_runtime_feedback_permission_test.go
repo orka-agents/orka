@@ -29,7 +29,18 @@ func codexMCPPermissionFixture(t *testing.T) (acp.SessionNotification, *acp.Perm
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	return fixture.Notification, &acp.PermissionRequestEvent{RequestID: "permission-1", Request: fixture.Permission}
+	event := &acp.PermissionRequestEvent{RequestID: "permission-1", Request: fixture.Permission}
+	setCodexPermissionRawParams(t, event)
+	return fixture.Notification, event
+}
+
+func setCodexPermissionRawParams(t *testing.T, event *acp.PermissionRequestEvent) {
+	t.Helper()
+	var err error
+	event.RawParams, err = json.Marshal(event.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // These frames follow the pinned adapter, including an ID-only permission
@@ -124,6 +135,7 @@ func TestCodexMCPPermissionUsesFrozenStructuredIdentity(t *testing.T) {
 			if tt.missingApprovalMarker {
 				permission.Request.Meta = nil
 			}
+			setCodexPermissionRawParams(t, permission)
 			mapped, err := server.mapRuntimeEvent(state, prompt, acp.PromptEvent{Type: acp.PromptEventUpdate, Timestamp: now, Update: &update})
 			if err == nil {
 				if tt.freshPrompt {
@@ -360,8 +372,16 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 		beforeStart    string
 		afterStart     string
 		permissionWire string
+		paramsFrom     string
+		paramsTo       string
 		wantStatus     int
 	}{
+		{name: "conflicting approval markers", start: "mcp", marker: true, idOnly: true, paramsFrom: `"is_mcp_tool_approval":true`, paramsTo: `"is_mcp_tool_approval":false,"is_mcp_tool_approval":true`, wantStatus: http.StatusGone},
+		{name: "repeated approval markers", start: "mcp", marker: true, idOnly: true, paramsFrom: `"is_mcp_tool_approval":true`, paramsTo: `"is_mcp_tool_approval":true,"is_mcp_tool_approval":true`, wantStatus: http.StatusGone},
+		{name: "repeated outer metadata", start: "mcp", marker: true, idOnly: true, paramsFrom: `"_meta":`, paramsTo: `"_meta":{"is_mcp_tool_approval":false},"_meta":`, wantStatus: http.StatusGone},
+		{name: "outer metadata case alias", start: "mcp", marker: true, idOnly: true, paramsFrom: `"_meta":`, paramsTo: `"_META":`, wantStatus: http.StatusGone},
+		{name: "repeated outer tool call", start: "mcp", marker: true, idOnly: true, paramsFrom: `"toolCall":`, paramsTo: `"toolCall":{"toolCallId":"different-call"},"toolCall":`, wantStatus: http.StatusGone},
+		{name: "outer tool call case alias", start: "mcp", marker: true, idOnly: true, paramsFrom: `"toolCall":`, paramsTo: `"ToolCall":`, wantStatus: http.StatusGone},
 		{name: "unknown markerless call", wantStatus: http.StatusForbidden},
 		{name: "marked update cannot seed identity", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"sessionUpdate": json.RawMessage(`"tool_call_update"`)}, wantStatus: http.StatusForbidden},
 		{name: "marked completion cannot seed identity", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"status": json.RawMessage(`"completed"`)}, wantStatus: http.StatusForbidden},
@@ -382,7 +402,7 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 		{name: "unmarked remembered name with approval marker", start: "direct", marker: true, wantStatus: http.StatusForbidden},
 		{name: "unknown call with approval marker", marker: true, wantStatus: http.StatusForbidden},
 		{name: "known MCP call without approval marker", start: "mcp", wantStatus: http.StatusForbidden},
-		{name: "case-variant approval marker", start: "mcp", marker: true, markerKey: "IS_MCP_TOOL_APPROVAL", wantStatus: http.StatusForbidden},
+		{name: "case-variant approval marker", start: "mcp", marker: true, markerKey: "IS_MCP_TOOL_APPROVAL", wantStatus: http.StatusGone},
 		{name: "string approval marker", start: "mcp", marker: "true", wantStatus: http.StatusForbidden},
 		{name: "false approval marker", start: "mcp", marker: false, wantStatus: http.StatusForbidden},
 		{name: "uppercase start marker", start: "mcp", marker: true, idOnly: true, rawMeta: `{"IS_MCP_TOOL_CALL":true}`, wantStatus: http.StatusForbidden},
@@ -479,9 +499,11 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 			if tt.permissionWire != "" {
 				permission.Request.ToolCall = json.RawMessage(tt.permissionWire)
 			}
-			_, mapErr := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventPermissionRequested, Timestamp: now, Permission: permission})
+			setCodexPermissionRawParams(t, permission)
+			mutateCodexPermissionParams(t, permission, tt.paramsFrom, tt.paramsTo)
+			mapped, mapErr := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventPermissionRequested, Timestamp: now, Permission: permission})
 			if tt.wantStatus == http.StatusGone {
-				if mapErr == nil || len(state.permissions) != 0 {
+				if mapErr == nil || mapped != nil || len(state.permissions) != 0 || len(state.prompt.permissionRequestIDs) != 0 {
 					t.Fatal("ambiguous permission envelope was registered")
 				}
 			} else if mapErr != nil {
@@ -523,6 +545,21 @@ func overrideCodexMCPPermissionStart(t *testing.T, update *acp.SessionNotificati
 	var err error
 	update.Update, err = json.Marshal(wire)
 	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mutateCodexPermissionParams(t *testing.T, permission *acp.PermissionRequestEvent, from, to string) {
+	t.Helper()
+	if from == "" {
+		return
+	}
+	changed := strings.Replace(string(permission.RawParams), from, to, 1)
+	if changed == string(permission.RawParams) {
+		t.Fatal("original permission params mutation did not match")
+	}
+	permission.RawParams = json.RawMessage(changed)
+	if err := json.Unmarshal(permission.RawParams, &permission.Request); err != nil {
 		t.Fatal(err)
 	}
 }

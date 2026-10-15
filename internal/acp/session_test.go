@@ -636,7 +636,7 @@ func TestHandleRequestChargesPermissionEventsToByteBudget(t *testing.T) {
 	session := &RuntimeSession{config: RuntimeSessionConfig{MaxBufferedEvents: 16, MaxBufferedEventBytes: 1 << 20, PermissionTimeout: time.Second, CancelGrace: 50 * time.Millisecond}, providerSessionID: "sess-1"}
 	active := &activePrompt{id: "prompt-perm", events: make(chan PromptEvent, 16), accepted: true, done: make(chan struct{}), permissions: map[string]*pendingPermission{}}
 	session.active = active
-	params := json.RawMessage(`{"sessionId":"sess-1","toolCall":{"title":"` + strings.Repeat("x", 4096) + `"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}`)
+	params := json.RawMessage(`{"sessionId":"sess-1","toolCall":{"title":"` + strings.Repeat("x", 4096) + `"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}],"_meta":{"is_mcp_tool_approval":false,"is_mcp_tool_approval":true}}`)
 	go func() {
 		_, _ = session.handleRequest(context.Background(), IncomingRequest{ID: json.RawMessage(`"req-1"`), Method: MethodRequestPermission, Params: params})
 	}()
@@ -644,6 +644,16 @@ func TestHandleRequestChargesPermissionEventsToByteBudget(t *testing.T) {
 	case event := <-active.events:
 		if event.Type != PromptEventPermissionRequested || event.Size != len(params) {
 			t.Fatalf("event = %+v, want a permission event sized %d", event, len(params))
+		}
+		if string(event.Permission.RawParams) != string(params) {
+			t.Fatal("permission transport discarded the original authority envelope")
+		}
+		if event.Permission.Request.Meta["is_mcp_tool_approval"] != true {
+			t.Fatal("fixture did not exercise duplicate-key collapse before correlation")
+		}
+		params[0] = ' '
+		if event.Permission.RawParams[0] != '{' {
+			t.Fatal("permission transport retained a borrowed params buffer")
 		}
 		session.mu.Lock()
 		buffered := active.bufferedBytes

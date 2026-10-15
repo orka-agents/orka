@@ -429,6 +429,9 @@ func (prompt *promptState) correlatePermissionToolName(event *acp.PermissionRequ
 		// A direct brokered name cannot borrow authority without both the
 		// remembered MCP call identity and the pinned approval marker.
 		if (known && identity.codexMCP) || (allowed && descriptor.Source.Brokered() && descriptor.Effect == harnessv2.MCPToolEffectReadOnly) {
+			if !codexMCPPermissionWireMatches(event.RawParams) {
+				return fmt.Errorf("codex MCP permission has an ambiguous authority envelope")
+			}
 			call, tracked := prompt.codexCompletedOutput.calls[permission.ToolCallID]
 			if !mcpApproval || !known || !identity.codexMCP || !tracked || call.kind != codexCommandOutputMCP || call.invalid || call.finished {
 				permission.ToolName = ""

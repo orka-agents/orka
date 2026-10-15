@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -29,6 +30,17 @@ const (
 )
 
 var runtimeFeedbackContainerID = regexp.MustCompile(`^(containerd|cri-o)://[a-f0-9]{64}$`)
+
+var errRuntimeFeedbackUnavailable = errors.New("runtime feedback preparation is temporarily unavailable")
+
+// Preserve a safe diagnostic and retry classification, never arbitrary API
+// bodies or transport errors. No prompt has been submitted at this boundary.
+func runtimeFeedbackReadError(message string, err error) error {
+	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %w", message, errRuntimeFeedbackUnavailable)
+}
 
 type acpMCPExecutionContextKey struct{}
 
@@ -91,7 +103,7 @@ func resolveRuntimeFeedbackExecution(ctx context.Context, reader client.Reader, 
 	}
 	pool := &corev1alpha1.RuntimePool{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: execution.RuntimePoolName}, pool); err != nil {
-		return runtimeFeedbackExecution{}, nil, errors.New("runtime feedback pool is unavailable")
+		return runtimeFeedbackExecution{}, nil, runtimeFeedbackReadError("runtime feedback pool is unavailable", err)
 	}
 	if !runtimeFeedbackPoolMatches(pool, string(task.UID)) || !pool.DeletionTimestamp.IsZero() ||
 		string(pool.UID) != execution.RuntimePoolUID || string(pool.UID) != string(fence.RuntimePoolUID) || uint64(pool.Generation) != fence.RuntimePoolGeneration {
@@ -115,7 +127,7 @@ func resolveRuntimeFeedbackExecution(ctx context.Context, reader client.Reader, 
 func resolveRuntimeFeedbackWorkload(ctx context.Context, reader client.Reader, active *corev1alpha1.RuntimePoolActiveInstanceStatus) (runtimefeedback.Workload, error) {
 	pod := &corev1.Pod{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: active.PodNamespace, Name: active.PodName}, pod); err != nil {
-		return runtimefeedback.Workload{}, errors.New("runtime feedback worker Pod is unavailable")
+		return runtimefeedback.Workload{}, runtimeFeedbackReadError("runtime feedback worker Pod is unavailable", err)
 	}
 	if string(pod.UID) != active.PodUID || !pod.DeletionTimestamp.IsZero() || pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" ||
 		len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Name != runtimeFeedbackContainerName || len(pod.Spec.EphemeralContainers) != 0 || len(pod.Status.ContainerStatuses) != 1 ||
@@ -147,6 +159,10 @@ func verifyFeedbackRuntime(ctx context.Context, runtimeClient *harnessv2.Client,
 	defer cancel()
 	status, err := runtimeClient.Status(statusCtx)
 	if err != nil {
+		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok &&
+			(clientErr.Kind == harnessv2.ClientErrorTransport || clientErr.Retryable) {
+			return time.Time{}, fmt.Errorf("runtime feedback supervisor status is unavailable: %w", errRuntimeFeedbackUnavailable)
+		}
 		return time.Time{}, errors.New("runtime feedback supervisor status is unavailable")
 	}
 	if harnessv2.CompareFence(execution.Fence, status.Fence, false) != harnessv2.FenceMatch || len(status.Sessions) != 1 {

@@ -102,12 +102,20 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 		}
 		return
 	}
+	n.normalizeTrackedOutput(id, envelope, mapped.ToolCall, identity, call)
+}
+
+func (n *codexCompletedOutputNormalizer) normalizeTrackedOutput(
+	id string, envelope codexCommandOutputEnvelope, mapped *harnessv2.ToolCallUpdate,
+	identity rememberedACPToolCall, call codexCommandOutputCall,
+) {
 	if envelope.Status != harnessv2.ToolCallStatusCompleted && envelope.Status != harnessv2.ToolCallStatusFailed {
 		// The pinned adapter streams only metadata before completion. An
 		// unexpected content snapshot must not later have its omission erased.
 		if len(envelope.Content) > 0 || len(envelope.RawOutput) > 0 {
 			call.invalid = true
 			n.calls[id] = call
+			omitCodexOutput(mapped)
 		}
 		return
 	}
@@ -135,19 +143,19 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 		}
 	}
 	if !ok {
-		omitCodexOutput(mapped.ToolCall)
+		omitCodexOutput(mapped)
 		return
 	}
 	// Do not redact or truncate fragments here. The controller journal must
 	// inspect this entire logical snapshot together with title/kind/history.
 	// Its replacement semantics also clear the start's terminal-reference
 	// omission, but only when this authoritative completion fits all bounds.
-	mapped.ToolCall.Content = nil
+	mapped.Content = nil
 	if text != "" {
-		mapped.ToolCall.Content = []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: text}}
+		mapped.Content = []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: text}}
 	}
-	mapped.ToolCall.ContentReplace = true
-	mapped.ToolCall.ContentOmitted = false
+	mapped.ContentReplace = true
+	mapped.ContentOmitted = false
 }
 
 func omitCodexOutput(call *harnessv2.ToolCallUpdate) {

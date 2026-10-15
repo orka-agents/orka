@@ -505,7 +505,11 @@ func (d *ACPDispatcher) reapStoppedSupersededPlainPool(
 	activeTasks int,
 	now time.Time,
 ) error {
-	if !acpRuntimePoolImageSuperseded(pool, d.ACPRuntimeImages) || activeTasks > 0 ||
+	// Feedback pools have a Task-specific identity and cannot serve unrelated
+	// work. Retire them after the same stopped/idle/finalization grace as an
+	// obsolete image, without waiting for a future image rotation.
+	feedbackPool := pool != nil && runtimeFeedbackPoolMatches(pool, pool.Labels[runtimeFeedbackTaskLabel])
+	if (!acpRuntimePoolImageSuperseded(pool, d.ACPRuntimeImages) && !feedbackPool) || activeTasks > 0 ||
 		pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
 		pool.Status.ObservedGeneration != pool.Generation || pool.Status.ActiveInstance != nil ||
 		pool.Status.Capacity.QueuedTasks > 0 || pool.Status.Capacity.FinalizingSessions > 0 ||
@@ -1801,6 +1805,38 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, openErr)
 	}
+	// Prepare feedback while the durable attempt is still recoverably Planned.
+	// Read failures must never strand an unsent attempt in Submitting.
+	completeFeedback, err := d.startRuntimeFeedback(runtimeCtx, task, runtimeFence, runtimeClient, mcpConfiguration)
+	if err != nil {
+		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
+			return deadlineErr
+		}
+		if errors.Is(err, errRuntimeFeedbackUnavailable) {
+			if sessionExecution == nil {
+				// Durable pre-submission recovery rotates a task-scoped session
+				// generation. Retire this exact unsent session before clearing
+				// its Task binding, so cleanup can record its fenced receipt.
+				if cleanupErr := cleanupRuntimeSession("runtime_feedback_pre_submission_retry"); cleanupErr != nil {
+					return errors.Join(err, cleanupErr)
+				}
+				return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+			}
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(ctx, task, attemptID, fence, err, &sessionExecution.Binding); requeueErr != nil {
+				return errors.Join(err, requeueErr)
+			}
+			sessionExecution.requeued = true
+			return nil
+		}
+		if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "runtime-feedback-preparation-failed"); transitionErr != nil {
+			return transitionErr
+		}
+		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeFeedbackPreparationFailed", err.Error())
+	}
+	var terminal *harnessv2.Event
+	defer func() {
+		completeFeedback(runtimeFeedbackCompletionReason(runtimeCtx, terminal))
+	}()
 	if err := d.openTaskSessionTurn(sessionCtx, task, attemptID, fence, sessionExecution); err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -1831,7 +1867,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		bootstrap = bootstrapPromptText(sessionExecution.Bootstrap)
 		userPrompt = sessionExecution.UserPrompt
 	}
-	var terminal *harnessv2.Event
 	var lastAssistantUpdate *harnessv2.Event
 	var assistant strings.Builder
 	assistantOverflow := false
@@ -1849,13 +1884,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			flushCtx, assistantEvent, assistantOrderSequence, persistableAssistant, assistantContentOmitted,
 		)
 	}
-	completeFeedback, err := d.startRuntimeFeedback(runtimeCtx, task, runtimeFence, runtimeClient, mcpConfiguration)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		completeFeedback(runtimeFeedbackCompletionReason(runtimeCtx, terminal))
-	}()
 	accepted := false
 	var cancellationReason harnessv2.CancelReason
 	admissionRetry := 0

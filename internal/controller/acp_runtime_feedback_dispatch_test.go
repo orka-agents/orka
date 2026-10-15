@@ -3,10 +3,12 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,8 +30,25 @@ import (
 // Kubernetes storage and the HTTP supervisor are fixtures. It proves capture
 // ordering and exact identity on the real dispatcher, not native enforcement.
 func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing.T) {
-	for _, terminal := range []harnessv2.EventType{harnessv2.EventCompleted, harnessv2.EventCancelled} {
-		t.Run(string(terminal), func(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		terminal harnessv2.EventType
+		fault    string
+	}{
+		{name: "completed", terminal: harnessv2.EventCompleted},
+		{name: "cancelled", terminal: harnessv2.EventCancelled},
+		{name: "Pod API failure recovers before submission", terminal: harnessv2.EventCompleted, fault: "pod-read"},
+		{name: "supervisor status failure recovers before submission", terminal: harnessv2.EventCompleted, fault: "status"},
+		{name: "interrupted status body recovers before submission", terminal: harnessv2.EventCompleted, fault: "status-body"},
+		{name: "interrupted status error body recovers before submission", terminal: harnessv2.EventCompleted, fault: "status-error-body"},
+		{name: "empty status fails unsent attempt", terminal: harnessv2.EventCompleted, fault: "status-empty"},
+		{name: "malformed status fails unsent attempt", terminal: harnessv2.EventCompleted, fault: "status-malformed"},
+		{name: "invalid Pod identity fails unsent attempt", terminal: harnessv2.EventCompleted, fault: "identity"},
+		{name: "missing configuration fails unsent attempt", terminal: harnessv2.EventCompleted, fault: "configuration"},
+		{name: "GKR registration unavailable still submits", terminal: harnessv2.EventCompleted, fault: "register"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			terminal := test.terminal
 			scheme := bindingTestScheme(t)
 			if err := coordinationv1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
@@ -40,20 +59,22 @@ func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing
 			plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
 			registered := make(chan runtimefeedback.Query, 1)
 			service := &dispatchFeedbackCapture{registered: registered}
+			if test.fault == "register" {
+				service.registerErr = errors.New("capture unavailable")
+			}
+			var statusUnavailable atomic.Bool
+			statusUnavailable.Store(strings.HasPrefix(test.fault, "status"))
 			submitted := make(chan harnessv2.StartPromptRequest, 1)
 			server := newDispatcherRuntimeServerWithOptions(t, plan.Profile, plan.Digest, dispatcherRuntimeServerOptions{
+				statusBody: func(response harnessv2.StatusResponse) (string, int, int) {
+					return feedbackDispatchStatusBody(response, &statusUnavailable, test.fault)
+				},
+				statusError: func(response harnessv2.StatusResponse) *harnessv2.ErrorResponse {
+					return feedbackDispatchStatusError(response, &statusUnavailable, test.fault)
+				},
 				terminalEvents: map[harnessv2.PromptID]harnessv2.EventType{harnessv2.PromptID("prompt-" + string(task.UID) + "-1"): terminal},
 				onPrompt: func(request harnessv2.StartPromptRequest) {
-					select {
-					case query := <-registered:
-						execution := runtimeFeedbackExecution{TaskUID: string(request.Metadata.TaskUID), TaskAttempt: request.Metadata.TaskAttempt, PromptID: request.Metadata.PromptID, Fence: request.Metadata.Fence, Workload: runtimefeedback.Workload{Namespace: "orka-runtimes", PodName: "runtime-pod", PodUID: "pod-uid", ContainerName: "runtime", ContainerID: "containerd://" + strings.Repeat("a", 64), Node: "node"}}
-						expected, err := execution.query()
-						if err != nil || query != expected {
-							t.Error("dispatcher registration did not retain the submitted prompt and workload identity")
-						}
-					default:
-						t.Error("prompt submitted before capture registration")
-					}
+					verifyFeedbackRegistrationForPrompt(t, registered, request)
 					submitted <- request
 				},
 			})
@@ -103,7 +124,25 @@ func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing
 				t.Fatal(err)
 			}
 			dispatcher := &ACPDispatcher{Client: kube, APIReader: kube, Store: persistence, ResultStore: persistence, Snapshots: persistence, Epochs: epochs, RuntimeFeedback: service, MCPRegistry: registry}
+			if test.fault == "pod-read" {
+				dispatcher.APIReader = &feedbackPodReadFailure{Reader: kube}
+			}
+			if test.fault == "configuration" {
+				dispatcher.RuntimeFeedback = nil
+			}
+			if test.fault == "identity" {
+				if err := kube.Get(ctx, client.ObjectKeyFromObject(pool), pool); err != nil {
+					t.Fatal(err)
+				}
+				pool.Status.ActiveInstance.PodUID = "different-pod-uid"
+				if err := kube.Status().Update(ctx, pool); err != nil {
+					t.Fatal(err)
+				}
+			}
 			dispatchQueuedTask(ctx, t, dispatcher, queued)
+			if verifyFeedbackPreparationAndRetry(t, ctx, dispatcher, task, service, submitted, &statusUnavailable, test.fault) {
+				return
+			}
 			select {
 			case request := <-submitted:
 				if !request.MCPAuthorization.ToolPolicy.Allows(RuntimeFeedbackToolName) {
@@ -135,6 +174,7 @@ func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing
 }
 
 type dispatchFeedbackCapture struct {
+	registerErr error
 	registered  chan runtimefeedback.Query
 	query       runtimefeedback.Query
 	completions []runtimefeedback.Query
@@ -144,7 +184,7 @@ type dispatchFeedbackCapture struct {
 func (s *dispatchFeedbackCapture) Register(_ context.Context, query runtimefeedback.Query) error {
 	s.query = query
 	s.registered <- query
-	return nil
+	return s.registerErr
 }
 func (s *dispatchFeedbackCapture) Complete(_ context.Context, query runtimefeedback.Query, reason string) error {
 	s.completions = append(s.completions, query)
@@ -153,4 +193,88 @@ func (s *dispatchFeedbackCapture) Complete(_ context.Context, query runtimefeedb
 }
 func (*dispatchFeedbackCapture) Report(context.Context, runtimefeedback.Query) (runtimefeedback.Report, error) {
 	return runtimefeedback.Report{}, store.ErrNotFound
+}
+
+type feedbackPodReadFailure struct{ client.Reader }
+
+func (r *feedbackPodReadFailure) Get(ctx context.Context, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+	if _, ok := object.(*corev1.Pod); ok {
+		return errors.New("temporary API failure")
+	}
+	return r.Reader.Get(ctx, key, object, options...)
+}
+
+// Assert both durable/public states before retrying through the real dispatcher.
+func verifyFeedbackPreparationAndRetry(t *testing.T, ctx context.Context, dispatcher *ACPDispatcher, task *corev1alpha1.Task, service *dispatchFeedbackCapture, submitted chan harnessv2.StartPromptRequest, statusUnavailable *atomic.Bool, fault string) bool {
+	t.Helper()
+	if fault != "pod-read" && !strings.HasPrefix(fault, "status") && fault != "identity" && fault != "configuration" {
+		return false
+	}
+	kube := dispatcher.Client
+	current := &corev1alpha1.Task{}
+	if err := kube.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := promptAttemptIDFromTask(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := dispatcher.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(submitted) != 0 || len(service.registered) != 0 || len(service.completions) != 0 {
+		t.Fatal("failed preparation submitted or registered a prompt")
+	}
+	if fault == "identity" || fault == "configuration" || fault == "status-malformed" || fault == "status-empty" {
+		if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.Execution.Reason != "RuntimeFeedbackPreparationFailed" || attempt.ExecutionState != store.PromptExecutionFailed {
+			t.Fatal("definitive feedback preparation failure did not settle the unsent attempt")
+		}
+		return true
+	}
+	if current.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || attempt.ExecutionState != store.PromptExecutionReserved {
+		t.Fatalf("transient preparation failure stranded the unsent durable attempt: Task=%s, attempt=%s", current.Status.Execution.State, attempt.ExecutionState)
+	}
+	dispatcher.APIReader = kube
+	statusUnavailable.Store(false)
+	dispatchQueuedTask(ctx, t, dispatcher, current)
+	return false
+}
+
+func verifyFeedbackRegistrationForPrompt(t *testing.T, registered chan runtimefeedback.Query, request harnessv2.StartPromptRequest) {
+	t.Helper()
+	select {
+	case query := <-registered:
+		execution := runtimeFeedbackExecution{TaskUID: string(request.Metadata.TaskUID), TaskAttempt: request.Metadata.TaskAttempt, PromptID: request.Metadata.PromptID, Fence: request.Metadata.Fence, Workload: runtimefeedback.Workload{Namespace: "orka-runtimes", PodName: "runtime-pod", PodUID: "pod-uid", ContainerName: "runtime", ContainerID: "containerd://" + strings.Repeat("a", 64), Node: "node"}}
+		expected, err := execution.query()
+		if err != nil || query != expected {
+			t.Error("dispatcher registration did not retain the submitted prompt and workload identity")
+		}
+	default:
+		t.Error("prompt submitted before capture registration")
+	}
+}
+
+func feedbackDispatchStatusBody(response harnessv2.StatusResponse, unavailable *atomic.Bool, fault string) (string, int, int) {
+	if len(response.Sessions) != 1 || !unavailable.Load() {
+		return "", 0, 0
+	}
+	switch fault {
+	case "status-body":
+		return "{", 1024, 200 // Real HTTP read ends with unexpected EOF.
+	case "status-error-body":
+		return "{", 1024, 429
+	case "status-empty":
+		return "", 0, 200
+	case "status-malformed":
+		return "{", 1, 200 // Complete body, invalid JSON.
+	default:
+		return "", 0, 0
+	}
+}
+func feedbackDispatchStatusError(response harnessv2.StatusResponse, unavailable *atomic.Bool, fault string) *harnessv2.ErrorResponse {
+	if len(response.Sessions) == 1 && unavailable.Load() && fault == "status" {
+		return &harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion, Code: harnessv2.ErrorCodeRateLimited, Message: "temporarily unavailable", Retryable: true}
+	}
+	return nil
 }

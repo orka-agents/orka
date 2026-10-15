@@ -3977,6 +3977,8 @@ type dispatcherRuntimeServerOptions struct {
 	nativeInstallUnresolved bool
 	onNativeCapture         func(harnessv2.CaptureNativeSessionRequest) error
 	onPrompt                func(harnessv2.StartPromptRequest)
+	statusError             func(harnessv2.StatusResponse) *harnessv2.ErrorResponse
+	statusBody              func(harnessv2.StatusResponse) (string, int, int)
 	workspaceDeltaState     harnessv2.WorkspaceDeltaState
 	workspaceDeltaFailure   *harnessv2.ErrorResponse
 }
@@ -4013,6 +4015,21 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		current := descriptor
 		descriptorMu.Unlock()
 		response := dispatcherRuntimeStatusResponseForPool(digest, poolUID, current)
+		if options.statusBody != nil {
+			if body, length, code := options.statusBody(response); code > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", strconv.Itoa(length))
+				w.WriteHeader(code)
+				_, _ = io.WriteString(w, body)
+				return
+			}
+		}
+		if options.statusError != nil {
+			if failure := options.statusError(response); failure != nil {
+				writeDispatcherJSONStatus(w, http.StatusTooManyRequests, *failure)
+				return
+			}
+		}
 		if options.nativeInstallUnresolved && len(response.Sessions) > 0 {
 			response.Sessions[0].NativeInstallUnresolved = true
 		}

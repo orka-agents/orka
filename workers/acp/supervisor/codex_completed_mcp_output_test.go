@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -10,6 +11,28 @@ import (
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
+
+func TestCodexMCPInterruptedOutputOmitsUnsupportedProgress(t *testing.T) {
+	pipeline := codexMCPOutputTestPipeline(t)
+	start, progress, _ := codexMCPOutputFixture(t)
+	pipeline.update(t, start)
+	progress["content"] = []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "unsupported-intermediate-report"}}}
+	mapped := pipeline.update(t, progress)
+	if mapped == nil || !mapped.Update.ToolCall.ContentOmitted || mapped.Update.ToolCall.ContentReplace || len(mapped.Update.ToolCall.Content) != 0 {
+		t.Fatal("unexpected MCP progress content entered the journal")
+	}
+	if err := pipeline.journal.AppendBufferedStreamsIfNew(context.Background(), nil, 0, "", false); err != nil {
+		t.Fatal(err)
+	}
+	listed, body := pipeline.events(t)
+	if strings.Contains(body, "unsupported-intermediate-report") || len(listed.Events) == 0 {
+		t.Fatal("interrupted prompt published unsupported MCP progress")
+	}
+	last := listed.Events[len(listed.Events)-1]
+	if last.Truncation == nil || !last.Truncation.ContentTextTruncated || last.ContentText != "" {
+		t.Fatal("interrupted tool stream lost its omission metadata")
+	}
+}
 
 // These fixture notifications follow the pinned adapter sources recorded in
 // testdata/codex_mcp_permission.json. The report and negative cases are synthetic
