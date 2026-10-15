@@ -2,7 +2,6 @@ package enforcementprovider
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -23,7 +22,7 @@ func TestExternalProviderEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewFileStore(filepath.Join(t.TempDir(), "orka-enforcement.json"))
+	store, err := NewFileStore(secureStorePath(t, "orka-enforcement.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -40,7 +40,11 @@ func (c *Controller) Start() error {
 	if c.ready {
 		return nil
 	}
-	results := c.orchestrator.Recover(c.store.List())
+	attempts, err := c.store.List()
+	if err != nil {
+		return fmt.Errorf("list enforcement recovery state: %w", err)
+	}
+	results := c.orchestrator.Recover(attempts)
 	failures := make([]string, 0, len(results))
 	for id, err := range results {
 		if err != nil {

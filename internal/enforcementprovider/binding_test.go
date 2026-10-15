@@ -1,7 +1,6 @@
 package enforcementprovider
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -43,7 +42,7 @@ func TestMemoryStoreRejectsAlteredSameAttemptContext(t *testing.T) {
 
 func TestFileStoreRejectsAlteredSameAttemptContextAfterRestart(t *testing.T) {
 	_, _, authorization := newSynthetic()
-	path := filepath.Join(t.TempDir(), "store.json")
+	path := secureStorePath(t, "store.json")
 	store, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +124,7 @@ func TestActivateBindsAuthorizationToAuthenticatedProviderAndEpoch(t *testing.T)
 
 func TestAuthorizeComparesFullAuthorizationAfterActivationAndRestart(t *testing.T) {
 	provider, trust, authorization := newSynthetic()
-	path := filepath.Join(t.TempDir(), "store.json")
+	path := secureStorePath(t, "store.json")
 	store, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)

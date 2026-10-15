@@ -1,14 +1,13 @@
 package enforcementprovider
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestControllerRequiresStartupAndRecoversRelease(t *testing.T) {
 	provider, trust, authorization := newSynthetic()
-	path := filepath.Join(t.TempDir(), "controller.json")
+	path := secureStorePath(t, "controller.json")
 	first, err := NewController(path, provider, trust, time.Now)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +53,7 @@ func TestControllerRequiresStartupAndRecoversRelease(t *testing.T) {
 
 func TestControllerStartupFailurePreventsReadiness(t *testing.T) {
 	provider, trust, authorization := newSynthetic()
-	path := filepath.Join(t.TempDir(), "controller.json")
+	path := secureStorePath(t, "controller.json")
 	first, _ := NewController(path, provider, trust, time.Now)
 	if err := first.Start(); err != nil {
 		t.Fatal(err)
@@ -95,7 +94,7 @@ func TestControllerRetriesExactAdmittedAuthorizationAfterExpiry(t *testing.T) {
 	provider.p.AuthorizationDigest = authorizationDigest(authorization)
 	SignProof(&provider.p, provider.priv)
 	now := admittedAt
-	controller, err := NewController(filepath.Join(t.TempDir(), "controller.json"), provider, trust, func() time.Time { return now })
+	controller, err := NewController(secureStorePath(t, "controller.json"), provider, trust, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}

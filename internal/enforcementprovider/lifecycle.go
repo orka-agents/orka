@@ -177,6 +177,53 @@ func (o Orchestrator) authenticateAttempt(a Attempt) (Descriptor, error) {
 	return a.Descriptor, nil
 }
 
+// verifyPersistedObligations is the single fail-closed gate for persisted
+// state that can authorize provider release, status, or cleanup side effects.
+// Expiry is intentionally not re-applied after proof consumption: the durable
+// obligation remains executable, but every signature, binding, digest, and
+// deterministic identifier must still derive from authenticated source fields.
+func (o Orchestrator) verifyPersistedObligations(a Attempt) error {
+	descriptor, err := o.authenticateAttempt(a)
+	if err != nil {
+		return fmt.Errorf("authenticate persisted attempt: %w", err)
+	}
+	if !proofPhase(a.Phase) {
+		return nil
+	}
+	proof := a.Proof
+	context := a.Authorization.Context
+	if proof.ID == "" || proof.ID != a.ProofID ||
+		proof.AuthorizationID != a.Authorization.ID ||
+		proof.AuthorizationDigest != authorizationDigest(a.Authorization) ||
+		proof.ActivationID == "" || proof.ActivationID != a.ActivationID ||
+		proof.WorkloadID != context.WorkloadID || proof.ProviderID != context.ProviderID ||
+		proof.Audience != context.Audience || proof.Challenge != context.Challenge ||
+		proof.PolicyDigest != context.PolicyDigest || proof.KeyID != descriptor.KeyID ||
+		proof.Epoch != descriptor.Epoch || !proof.ExpiresAt.After(proof.IssuedAt) {
+		return errors.New("persisted proof binding mismatch")
+	}
+	expectedProofDigest := stableID("proof-", string(proofMessage(proof)), string(proof.Signature))
+	if a.ProofDigest != expectedProofDigest {
+		return errors.New("persisted proof digest mismatch")
+	}
+	if !ed25519.Verify(ed25519.PublicKey(descriptor.PublicKey), proofMessage(proof), proof.Signature) {
+		return errors.New("invalid persisted proof signature")
+	}
+	if releasePhase(a.Phase) {
+		expectedReleaseID := stableID("release-", a.Context.AttemptID, a.Authorization.ID, a.ProofID)
+		if a.ReleaseID != expectedReleaseID {
+			return errors.New("persisted release obligation mismatch")
+		}
+	}
+	if a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned {
+		expectedCleanupID := stableID("cleanup-", a.Context.AttemptID, a.ActivationID, a.ReleaseID)
+		if a.CleanupID != expectedCleanupID {
+			return errors.New("persisted cleanup obligation mismatch")
+		}
+	}
+	return nil
+}
+
 func (o Orchestrator) Activate(attemptID string) (Attempt, error) {
 	for {
 		attempt, err := o.Store.Get(attemptID)
@@ -343,6 +390,9 @@ func (o Orchestrator) Release(attemptID string) (Attempt, error) {
 	if a.Phase != PhaseProofConsumed {
 		return a, errors.New("workload remains held: proof is not durably consumed")
 	}
+	if err = o.verifyPersistedObligations(a); err != nil {
+		return a, err
+	}
 	if err = o.Provider.Release(ReleaseRequest{ActivationID: a.ActivationID, AuthorizationID: a.Authorization.ID, ProofID: a.ProofID, ReleaseID: a.ReleaseID}); err != nil {
 		return a, err
 	}
@@ -360,6 +410,9 @@ func (o Orchestrator) Cleanup(attemptID string) (Attempt, error) {
 		case PhaseCleaned:
 			return a, nil
 		case PhaseReleased:
+			if err = o.verifyPersistedObligations(a); err != nil {
+				return a, err
+			}
 			a, err = o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
 				if x.Phase != PhaseReleased {
 					return errors.New("cleanup state changed")
@@ -372,6 +425,9 @@ func (o Orchestrator) Cleanup(attemptID string) (Attempt, error) {
 				return a, err
 			}
 		case PhaseCleanupPending:
+			if err = o.verifyPersistedObligations(a); err != nil {
+				return a, err
+			}
 			err = o.Provider.Cleanup(CleanupRequest{AttemptID: a.Context.AttemptID, ActivationID: a.ActivationID, CleanupID: a.CleanupID})
 			if err != nil && !errors.Is(err, ErrProviderNotFound) {
 				return a, err
@@ -406,7 +462,7 @@ func (o Orchestrator) Recover(attempts []Attempt) map[string]error {
 		case PhaseProofConsumed:
 			_, err = o.Release(id)
 		case PhaseProofIssued:
-			if _, err = o.authenticateAttempt(current); err != nil {
+			if err = o.verifyPersistedObligations(current); err != nil {
 				break
 			}
 			var status Status

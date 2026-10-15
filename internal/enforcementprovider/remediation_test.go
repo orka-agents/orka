@@ -86,7 +86,7 @@ func TestStoreSnapshotsAndFailedCASDoNotAlias(t *testing.T) {
 }
 
 func TestFileStoreExclusiveOwnershipCloseAndAliases(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := secureStorePath(t, "state.json")
 	store, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -122,20 +122,20 @@ func TestFileStoreExclusiveOwnershipCloseAndAliases(t *testing.T) {
 func TestFileStoreRejectsMalformedAndUnknownState(t *testing.T) {
 	for name, makeData := range map[string]func(string) string{
 		"trailing": func(path string) string {
-			return fmt.Sprintf(`{"version":4,"storePath":%q,"attempts":{}} {}`, path)
+			return fmt.Sprintf(`{"version":5,"storePath":%q,"attempts":{}} {}`, path)
 		},
 		"unknown field": func(path string) string {
-			return fmt.Sprintf(`{"version":4,"storePath":%q,"attempts":{},"other":true}`, path)
+			return fmt.Sprintf(`{"version":5,"storePath":%q,"attempts":{},"other":true}`, path)
 		},
 		"duplicate field": func(path string) string {
-			return fmt.Sprintf(`{"version":4,"version":4,"storePath":%q,"attempts":{}}`, path)
+			return fmt.Sprintf(`{"version":5,"version":5,"storePath":%q,"attempts":{}}`, path)
 		},
 		"unknown phase": func(path string) string {
-			return fmt.Sprintf(`{"version":4,"storePath":%q,"attempts":{"a":{"Context":{"AttemptID":"a"},"Phase":"Future","Version":1}}}`, path)
+			return fmt.Sprintf(`{"version":5,"storePath":%q,"attempts":{"a":{"Context":{"AttemptID":"a"},"Phase":"Future","Version":1}}}`, path)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "state.json")
+			path := secureStorePath(t, "state.json")
 			if err := os.WriteFile(path, []byte(makeData(path)), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -244,7 +244,7 @@ func (p *blockingCleanupProvider) Cleanup(request CleanupRequest) error {
 func TestControllerCloseWaitsForInflightOperation(t *testing.T) {
 	base, trust, authorization := newSynthetic()
 	provider := &blockingCleanupProvider{synthetic: base, entered: make(chan struct{}), resume: make(chan struct{})}
-	controller, err := NewController(filepath.Join(t.TempDir(), "state.json"), provider, trust, time.Now)
+	controller, err := NewController(secureStorePath(t, "state.json"), provider, trust, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestFileStoreRejectsPreexistingHardlinkAliases(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("FileStore locking is unsupported on Windows")
 	}
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := secureStorePath(t, "state.json")
 	store, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -353,7 +353,7 @@ func TestFileStoreHardlinkCreatedWhileOpenCannotDiverge(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("FileStore locking is unsupported on Windows")
 	}
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := secureStorePath(t, "state.json")
 	store, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -418,7 +418,7 @@ func TestFileStoreHardlinkAliasRejectedAcrossProcesses(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("FileStore locking is unsupported on Windows")
 	}
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := secureStorePath(t, "state.json")
 	store, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -448,7 +448,7 @@ func TestFileStoreFailsClosedWhenDirectorySyncLeavesDurabilityUncertain(t *testi
 	if runtime.GOOS == "windows" {
 		t.Skip("FileStore locking is unsupported on Windows")
 	}
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := secureStorePath(t, "state.json")
 	store, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -470,8 +470,8 @@ func TestFileStoreFailsClosedWhenDirectorySyncLeavesDurabilityUncertain(t *testi
 	if _, err = store.Get(authorization.Context.AttemptID); !errors.Is(err, syncFailure) {
 		t.Fatalf("Get on uncertain store succeeded: %v", err)
 	}
-	if attempts := store.List(); attempts != nil {
-		t.Fatalf("List exposed uncertain state: %#v", attempts)
+	if attempts, listErr := store.List(); !errors.Is(listErr, syncFailure) || attempts != nil {
+		t.Fatalf("List exposed uncertain state: %#v, %v", attempts, listErr)
 	}
 	if err = store.Close(); err != nil {
 		t.Fatal(err)

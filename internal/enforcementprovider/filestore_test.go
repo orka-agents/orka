@@ -7,8 +7,17 @@ import (
 	"time"
 )
 
+func secureStorePath(t *testing.T, name string) string {
+	t.Helper()
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(directory, name)
+}
+
 func TestFileStoreRejectsVersionWithoutDurableDescriptor(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "enforcement.json")
+	path := secureStorePath(t, "enforcement.json")
 	if err := os.WriteFile(path, []byte(`{"version":1,"attempts":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +28,7 @@ func TestFileStoreRejectsVersionWithoutDurableDescriptor(t *testing.T) {
 
 func TestFileStoreRestartPreservesReleaseObligation(t *testing.T) {
 	p, trust, a := newSynthetic()
-	path := filepath.Join(t.TempDir(), "enforcement.json")
+	path := secureStorePath(t, "enforcement.json")
 	st, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +65,7 @@ func TestFileStoreRestartPreservesReleaseObligation(t *testing.T) {
 
 func TestStartupRecoveryExecutesOnlyDurableReleaseObligation(t *testing.T) {
 	p, trust, a := newSynthetic()
-	path := filepath.Join(t.TempDir(), "enforcement.json")
+	path := secureStorePath(t, "enforcement.json")
 	st, _ := NewFileStore(path)
 	o := Orchestrator{Store: st, Provider: p, Trust: trust, Now: time.Now}
 	if _, err := o.Authorize(a); err != nil {
@@ -72,7 +81,11 @@ func TestStartupRecoveryExecutesOnlyDurableReleaseObligation(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := Orchestrator{Store: reopened, Provider: p, Trust: trust, Now: time.Now}
-	result := restarted.Recover(reopened.List())
+	attempts, listErr := reopened.List()
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	result := restarted.Recover(attempts)
 	if result[a.Context.AttemptID] != nil {
 		t.Fatal(result)
 	}

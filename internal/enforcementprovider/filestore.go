@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	fileStoreVersion = 4
+	fileStoreVersion = 5
 	maxStoreBytes    = 16 << 20
 )
 
@@ -27,6 +27,9 @@ var (
 type FileStore struct {
 	mu            sync.Mutex
 	path          string
+	directoryPath string
+	lockPath      string
+	directoryLock *os.File
 	lock          *os.File
 	stateLocks    []*os.File
 	attempts      map[string]Attempt
@@ -54,7 +57,20 @@ func NewFileStore(path string) (*FileStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve enforcement store directory: %w", err)
 	}
+	if err = validateStoreDirectory(directory); err != nil {
+		return nil, err
+	}
 	absolute = filepath.Join(directory, filepath.Base(absolute))
+	directoryLock, err := acquireStoreDirectoryLock(directory)
+	if err != nil {
+		return nil, err
+	}
+	releaseDirectoryLock := true
+	defer func() {
+		if releaseDirectoryLock {
+			_ = releaseStoreLock(directoryLock)
+		}
+	}()
 	openStoreMu.Lock()
 	if _, exists := openStorePaths[absolute]; exists {
 		openStoreMu.Unlock()
@@ -70,12 +86,16 @@ func NewFileStore(path string) (*FileStore, error) {
 			openStoreMu.Unlock()
 		}
 	}()
-	lock, err := acquireStoreLock(absolute + ".lock")
+	lockPath := absolute + ".lock"
+	lock, err := acquireStoreLock(lockPath)
 	if err != nil {
 		return nil, err
 	}
 	s := &FileStore{
 		path:          absolute,
+		directoryPath: directory,
+		lockPath:      lockPath,
+		directoryLock: directoryLock,
 		lock:          lock,
 		attempts:      map[string]Attempt{},
 		syncDirectory: syncStoreDirectory,
@@ -94,10 +114,23 @@ func NewFileStore(path string) (*FileStore, error) {
 		return nil, err
 	}
 	releaseRegistry = false
+	releaseDirectoryLock = false
 	return s, nil
 }
 
 func strictDecodeStore(data []byte, out *fileStoreDocument) error {
+	if err := strictDecodeJSON(data, out); err != nil {
+		return fmt.Errorf("enforcement store: %w", err)
+	}
+	return nil
+}
+
+// strictDecodeJSON applies the same duplicate-key, nesting, unknown-field, and
+// trailing-data contract to persisted state and every provider result object.
+func strictDecodeJSON(data []byte, out any) error {
+	if len(data) > maxTransportFrame {
+		return errTransportFrameTooLarge
+	}
 	if err := rejectDuplicateJSONKeys(json.NewDecoder(bytes.NewReader(data))); err != nil {
 		return err
 	}
@@ -107,7 +140,7 @@ func strictDecodeStore(data []byte, out *fileStoreDocument) error {
 		return err
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("trailing data in enforcement store")
+		return errors.New("trailing JSON data")
 	}
 	return nil
 }
@@ -183,6 +216,9 @@ func (s *FileStore) load(state *os.File) error {
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return errors.New("enforcement store permissions are too broad")
+	}
+	if !storeStateFileOwnedByCurrentUser(info) {
+		return errors.New("enforcement store is not owned by the current user")
 	}
 	if info.Size() > maxStoreBytes {
 		return errors.New("enforcement store exceeds size limit")
@@ -338,6 +374,14 @@ func (s *FileStore) checkOpen() error {
 	if s.fatalErr != nil {
 		return s.fatalErr
 	}
+	if err := verifyLockedDirectoryPath(s.directoryPath, s.directoryLock); err != nil {
+		s.fatalErr = fmt.Errorf("enforcement store parent ownership lost; close and reopen: %w", err)
+		return s.fatalErr
+	}
+	if err := verifyLockedPath(s.lockPath, s.lock); err != nil {
+		s.fatalErr = fmt.Errorf("enforcement store lock ownership lost; close and reopen: %w", err)
+		return s.fatalErr
+	}
 	return nil
 }
 
@@ -416,18 +460,18 @@ func (s *FileStore) CompareAndSwap(id string, version uint64, mutate func(*Attem
 	}
 	return cloneAttempt(candidate), nil
 }
-func (s *FileStore) List() []Attempt {
+func (s *FileStore) List() ([]Attempt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.fatalErr != nil {
-		return nil
+	if err := s.checkOpen(); err != nil {
+		return nil, err
 	}
 	out := make([]Attempt, 0, len(s.attempts))
 	for _, attempt := range s.attempts {
 		out = append(out, cloneAttempt(attempt))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Context.AttemptID < out[j].Context.AttemptID })
-	return out
+	return out, nil
 }
 func (s *FileStore) Close() error {
 	s.mu.Lock()
@@ -436,13 +480,17 @@ func (s *FileStore) Close() error {
 		return nil
 	}
 	s.closed = true
-	lock, stateLocks, path := s.lock, s.stateLocks, s.path
+	lock, directoryLock, stateLocks, path := s.lock, s.directoryLock, s.stateLocks, s.path
 	s.lock = nil
+	s.directoryLock = nil
 	s.stateLocks = nil
 	s.mu.Unlock()
 	err := releaseStoreStateLocks(stateLocks)
 	if lockErr := releaseStoreLock(lock); err == nil {
 		err = lockErr
+	}
+	if directoryLockErr := releaseStoreLock(directoryLock); err == nil {
+		err = directoryLockErr
 	}
 	openStoreMu.Lock()
 	delete(openStorePaths, path)

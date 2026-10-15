@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
-const ProtocolVersion = "orka.enforcement-provider/v1"
+const (
+	// ProtocolVersion identifies the incompatible canonical transcript and wire contract.
+	ProtocolVersion       = "orka.enforcement-provider/v2"
+	transportFrameVersion = 2
+)
 
 type Descriptor struct {
 	ProviderID          string

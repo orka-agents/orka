@@ -20,7 +20,7 @@ const (
 	maxTrustProfileBytes = 64 << 10
 )
 
-var policyDomain = []byte("orka.enforcement.policy/v1")
+var policyDomain = []byte("orka.enforcement.policy/v2")
 
 type canonicalEncoder struct{ bytes.Buffer }
 
@@ -63,7 +63,7 @@ func PolicyDigest(b []byte) string {
 	return hashTranscript(string(policyDomain), func(e *canonicalEncoder) { e.field(10, b) })
 }
 func descriptorMessage(d Descriptor) []byte {
-	return transcript("orka.enforcement.descriptor/v1", func(e *canonicalEncoder) {
+	return transcript("orka.enforcement.descriptor/v2", func(e *canonicalEncoder) {
 		e.text(10, ProtocolVersion)
 		e.text(11, d.ProviderID)
 		e.text(12, d.EndpointID)
@@ -202,7 +202,7 @@ func ValidateAuthorization(a Authorization, now time.Time) error {
 	return nil
 }
 func authorizationDigest(a Authorization) string {
-	return hashTranscript("orka.enforcement.authorization/v1", func(e *canonicalEncoder) {
+	return hashTranscript("orka.enforcement.authorization/v2", func(e *canonicalEncoder) {
 		c := a.Context
 		e.text(10, a.ID)
 		e.text(11, c.RequestID)
@@ -222,7 +222,7 @@ func authorizationDigest(a Authorization) string {
 	})
 }
 func readbackDigest(r ReadBack) string {
-	return hashTranscript("orka.enforcement.readback/v1", func(e *canonicalEncoder) {
+	return hashTranscript("orka.enforcement.readback/v2", func(e *canonicalEncoder) {
 		e.text(10, r.ActivationID)
 		e.text(11, r.WorkloadID)
 		e.text(12, r.PolicyDigest)
@@ -230,7 +230,7 @@ func readbackDigest(r ReadBack) string {
 	})
 }
 func proofMessage(p Proof) []byte {
-	return transcript("orka.enforcement.proof/v1", func(e *canonicalEncoder) {
+	return transcript("orka.enforcement.proof/v2", func(e *canonicalEncoder) {
 		e.text(10, ProtocolVersion)
 		e.text(11, p.ID)
 		e.text(12, p.AuthorizationID)
@@ -272,7 +272,7 @@ func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, exp
 	return nil
 }
 func stableID(prefix string, parts ...string) string {
-	return prefix + strings.TrimPrefix(hashTranscript("orka.enforcement.id/v1", func(e *canonicalEncoder) { e.text(10, prefix); e.field(11, encodeStrings(parts)) }), "sha256:")[:32]
+	return prefix + strings.TrimPrefix(hashTranscript("orka.enforcement.id/v2", func(e *canonicalEncoder) { e.text(10, prefix); e.field(11, encodeStrings(parts)) }), "sha256:")[:32]
 }
 func sameBytes(a, b []byte) bool { return bytes.Equal(a, b) }
 func ParseTrustProfileJSON(data []byte) (TrustProfile, error) {

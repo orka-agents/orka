@@ -99,7 +99,7 @@ func (p *unixProvider) call(operation string, parameters, result any) error {
 	if err = conn.SetDeadline(deadline); err != nil {
 		return err
 	}
-	req := requestFrame{Version: 1, ID: "1", Operation: operation, Parameters: parameters}
+	req := requestFrame{Version: transportFrameVersion, ID: "1", Operation: operation, Parameters: parameters}
 	frame, err := encodeTransportFrame(req)
 	if err != nil {
 		return err
@@ -123,7 +123,7 @@ func (p *unixProvider) call(operation string, parameters, result any) error {
 	if err = decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("provider response has trailing data")
 	}
-	if resp.Version != 1 || resp.ID != "1" {
+	if resp.Version != transportFrameVersion || resp.ID != "1" {
 		return errors.New("provider response binding mismatch")
 	}
 	if !resp.OK {
@@ -132,15 +132,27 @@ func (p *unixProvider) call(operation string, parameters, result any) error {
 		}
 		return &ProviderError{Code: resp.Error.Code, Message: resp.Error.Message}
 	}
-	return json.Unmarshal(resp.Result, result)
+	if len(resp.Result) == 0 {
+		return errors.New("provider response is missing result")
+	}
+	if err = strictDecodeJSON(resp.Result, result); err != nil {
+		return errors.New("decode provider result: " + err.Error())
+	}
+	return nil
 }
 
 type descriptorWire struct {
-	ProviderID, EndpointID                 string
-	ProtocolVersions, Capabilities         []string
-	Epoch                                  uint64
-	IssuedAt, ExpiresAt                    string
-	KeyID, Algorithm, PublicKey, Signature string
+	ProviderID       string   `json:"providerId"`
+	EndpointID       string   `json:"endpointId"`
+	ProtocolVersions []string `json:"protocolVersions"`
+	Capabilities     []string `json:"capabilities"`
+	Epoch            uint64   `json:"epoch"`
+	IssuedAt         string   `json:"issuedAt"`
+	ExpiresAt        string   `json:"expiresAt"`
+	KeyID            string   `json:"keyId"`
+	Algorithm        string   `json:"algorithm"`
+	PublicKey        string   `json:"publicKey"`
+	Signature        string   `json:"signature"`
 }
 
 func (p *unixProvider) DiscoverDescriptor() (Descriptor, error) {
@@ -193,49 +205,65 @@ func wireAuthorization(a Authorization) authorizationWire {
 	c := a.Context
 	return authorizationWire{a.ID, contextWire{c.RequestID, c.AttemptID, c.WorkloadID, c.ProviderID, c.Audience, c.Challenge, c.IdempotencyKey, c.PolicyDigest, base64.StdEncoding.EncodeToString(c.PolicyBytes), cloneStrings(c.RequiredCapabilities)}, a.IssuedAt.UTC().Format(time.RFC3339Nano), a.NotBefore.UTC().Format(time.RFC3339Nano), a.ExpiresAt.UTC().Format(time.RFC3339Nano), a.Epoch}
 }
+
+type preparationResultWire struct {
+	PreparationID string `json:"preparationId"`
+}
+
+type activationResultWire struct {
+	Proof struct {
+		ActivationID string `json:"activationId"`
+	} `json:"proof"`
+}
+
+type readBackResultWire struct {
+	ActivationID        string `json:"activationId"`
+	TargetID            string `json:"targetId"`
+	PolicyDigest        string `json:"policyDigest"`
+	ConfigurationDigest string `json:"configurationDigest"`
+}
+
+type proofResultWire struct {
+	ID                  string    `json:"proofId"`
+	AuthorizationID     string    `json:"authorizationId"`
+	ActivationID        string    `json:"activationId"`
+	WorkloadID          string    `json:"workloadId"`
+	ProviderID          string    `json:"providerId"`
+	Audience            string    `json:"audience"`
+	Challenge           string    `json:"challenge"`
+	PolicyDigest        string    `json:"policyDigest"`
+	ReadBackDigest      string    `json:"readBackDigest"`
+	AuthorizationDigest string    `json:"authorizationDigest"`
+	KeyID               string    `json:"keyId"`
+	Epoch               uint64    `json:"epoch"`
+	IssuedAt            time.Time `json:"issuedAt"`
+	ExpiresAt           time.Time `json:"expiresAt"`
+	Signature           string    `json:"signature"`
+}
+
+type statusResultWire struct {
+	State string `json:"state"`
+}
+
+type emptyResultWire struct{}
+
 func (p *unixProvider) Prepare(r PrepareRequest) (string, error) {
-	var x struct {
-		PreparationID string `json:"preparationId"`
-	}
+	var x preparationResultWire
 	err := p.call("Prepare", map[string]any{"authorization": wireAuthorization(r.Authorization)}, &x)
 	return x.PreparationID, err
 }
 func (p *unixProvider) Activate(r ActivateRequest) (string, error) {
-	var x struct {
-		Proof struct {
-			ActivationID string `json:"activationId"`
-		} `json:"proof"`
-	}
+	var x activationResultWire
 	err := p.call("Activate", map[string]any{"authorization": wireAuthorization(r.Authorization), "preparationId": r.PreparationID}, &x)
 	return x.Proof.ActivationID, err
 }
 func (p *unixProvider) ReadBack(id string) (ReadBack, error) {
-	var x struct {
-		ActivationID        string `json:"activationId"`
-		TargetID            string `json:"targetId"`
-		PolicyDigest        string `json:"policyDigest"`
-		ConfigurationDigest string `json:"configurationDigest"`
-	}
+	var x readBackResultWire
 	err := p.call("ReadBack", map[string]any{activationIDField: id}, &x)
 	return ReadBack{x.ActivationID, x.TargetID, x.PolicyDigest, x.ConfigurationDigest}, err
 }
 func (p *unixProvider) GetProof(id string) (Proof, error) {
-	var w struct {
-		ID                  string `json:"proofId"`
-		AuthorizationID     string `json:"authorizationId"`
-		ActivationID        string `json:"activationId"`
-		WorkloadID          string `json:"workloadId"`
-		ProviderID          string `json:"providerId"`
-		Audience            string `json:"audience"`
-		Challenge           string `json:"challenge"`
-		PolicyDigest        string `json:"policyDigest"`
-		ReadBackDigest      string `json:"readBackDigest"`
-		AuthorizationDigest string `json:"authorizationDigest"`
-		KeyID               string `json:"keyId"`
-		Epoch               uint64 `json:"epoch"`
-		IssuedAt, ExpiresAt time.Time
-		Signature           string `json:"signature"`
-	}
+	var w proofResultWire
 	err := p.call("GetProof", map[string]any{activationIDField: id}, &w)
 	if err != nil {
 		return Proof{}, err
@@ -244,24 +272,20 @@ func (p *unixProvider) GetProof(id string) (Proof, error) {
 	return Proof{ID: w.ID, AuthorizationID: w.AuthorizationID, ActivationID: w.ActivationID, WorkloadID: w.WorkloadID, ProviderID: w.ProviderID, Audience: w.Audience, Challenge: w.Challenge, PolicyDigest: w.PolicyDigest, ReadBackDigest: w.ReadBackDigest, AuthorizationDigest: w.AuthorizationDigest, KeyID: w.KeyID, Epoch: w.Epoch, IssuedAt: w.IssuedAt, ExpiresAt: w.ExpiresAt, Signature: sig}, err
 }
 func (p *unixProvider) Release(r ReleaseRequest) error {
-	var x any
+	var x emptyResultWire
 	return p.call("Release", map[string]any{activationIDField: r.ActivationID, "authorizationId": r.AuthorizationID, "proofId": r.ProofID, "releaseId": r.ReleaseID}, &x)
 }
 func (p *unixProvider) GetStatus(id string) (Status, error) {
-	var x struct {
-		State string `json:"state"`
-	}
+	var x statusResultWire
 	err := p.call("GetStatus", map[string]any{activationIDField: id}, &x)
 	return Status{State: x.State}, err
 }
 func (p *unixProvider) Reconcile(r ReconcileRequest) (Status, error) {
-	var x struct {
-		State string `json:"state"`
-	}
+	var x statusResultWire
 	err := p.call("Reconcile", map[string]any{activationIDField: r.AttemptID}, &x)
 	return Status{State: x.State}, err
 }
 func (p *unixProvider) Cleanup(r CleanupRequest) error {
-	var x any
+	var x emptyResultWire
 	return p.call("Cleanup", map[string]any{"attemptId": r.AttemptID, activationIDField: r.ActivationID, "cleanupId": r.CleanupID}, &x)
 }
