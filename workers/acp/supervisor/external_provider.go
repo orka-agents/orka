@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -29,11 +31,12 @@ const (
 	agentKitProviderTokenEnv   = "AGENTKIT_ACP_PROVIDER_TOKEN"
 	agentKitModelEnv           = "AGENTKIT_ACP_MODEL"
 	agentKitConfigDigestEnv    = "AGENTKIT_ACP_AGENT_CONFIGURATION_DIGEST"
+	agentKitMCPTimeoutEnv      = "AGENTKIT_MCP_TIMEOUT"
 )
 
 // externalACPAdapter describes an out-of-tree ACP adapter that the supervisor
 // launches with a frozen command line, a digest-pinned adapter identity, and a
-// fixed four-variable environment contract. Every such adapter shares one
+// fixed provider environment contract. Every such adapter shares one
 // profile, projection, and digest implementation; only the table differs.
 type externalACPAdapter struct {
 	kind        string
@@ -98,13 +101,17 @@ func (a externalACPAdapter) profile(model string) (ProviderProfile, error) {
 		ProjectSession: func(request harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, _ ProviderProxyBinding) (ProviderSessionProjection, error) {
 			return a.sessionProjection(request, model)
 		},
-		EnvironmentForSession: func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
-			return map[string]string{
+		EnvironmentForSession: func(request harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
+			environment := map[string]string{
 				a.baseURLEnv:      proxy.BaseURL,
 				a.tokenEnv:        proxy.Credential,
 				a.modelEnv:        model,
 				a.configDigestEnv: requiredEnv(EnvAgentConfigurationDigest),
-			}, nil
+			}
+			if a.kind == providerKindAgentKit && len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 {
+				environment[agentKitMCPTimeoutEnv] = strconv.Itoa(int(harnessv2.MCPApprovalCallTimeout / time.Second))
+			}
+			return environment, nil
 		},
 	}, nil
 }
@@ -118,9 +125,6 @@ func (a externalACPAdapter) sessionProjection(request harnessv2.CreateRuntimeSes
 	}
 	if err := request.MCPConfiguration.ValidateProfile(request.Profile); err != nil {
 		return ProviderSessionProjection{}, fmt.Errorf("%s MCP policy configuration: %w", a.label, err)
-	}
-	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) != 0 {
-		return ProviderSessionProjection{}, fmt.Errorf("%s ACP runtime does not support approval-required MCP tools", a.label)
 	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
 		if !descriptor.Source.Brokered() {

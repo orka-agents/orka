@@ -14,13 +14,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/events"
@@ -31,7 +31,14 @@ import (
 )
 
 const (
-	approvalAuthInjectBody                          = "body"
+	logFieldTool         = "tool"
+	logFieldToolName     = "toolName"
+	logFieldToolCallID   = "toolCallID"
+	logFieldResultLength = "resultLength"
+)
+
+const (
+	approvalAuthInjectBody                          = approvals.AuthInjectBody
 	approvalIdempotencyHeader                       = "Idempotency-Key"
 	approvalAuthRefUIDAnnotation                    = "orka.ai/approval-auth-ref-uid"
 	approvalAuthRefResourceVersionAnnotation        = "orka.ai/approval-auth-ref-resource-version"
@@ -39,7 +46,7 @@ const (
 	approvalOutboundPolicyGenerationAnnotation      = "orka.ai/approval-outbound-policy-generation"
 	approvalOutboundPolicyResourceVersionAnnotation = "orka.ai/approval-outbound-policy-resource-version"
 	approvalOutboundPolicySecretsDigestAnnotation   = "orka.ai/approval-outbound-policy-secrets-digest"
-	approvalTargetURLField                          = "__orkaApprovalURL"
+	approvalTargetURLField                          = approvals.TargetURLField
 )
 
 var approvalMountRoots = []string{"/secrets/task", "/secrets/agent"}
@@ -294,98 +301,16 @@ func (g *approvalGate) targetForCall(
 }
 
 func approvalTargetArguments(args json.RawMessage, customTool *corev1alpha1.Tool) (json.RawMessage, error) {
-	if len(strings.TrimSpace(string(args))) == 0 {
-		return args, nil
+	// The controller executes a connector-backed tool with empty arguments
+	// as the empty object and digests that, so the worker's target must too.
+	if isConnectorBackedTool(customTool) && len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage(`{}`)
 	}
-	var targetArgsObject map[string]json.RawMessage
-	if err := json.Unmarshal(args, &targetArgsObject); err != nil || targetArgsObject == nil {
-		return nil, fmt.Errorf("target arguments must be a JSON object")
-	}
-	if _, ok := targetArgsObject[approvalTargetURLField]; ok {
-		return nil, fmt.Errorf("target arguments contain reserved %s field", approvalTargetURLField)
-	}
-	if authBodyKey := approvalAuthBodyKey(customTool); authBodyKey != "" {
-		delete(targetArgsObject, authBodyKey)
-	}
-	if err := approvalApplyURLInterpolationTarget(args, targetArgsObject, customTool); err != nil {
-		return nil, err
-	}
-	out, err := json.Marshal(targetArgsObject)
-	if err != nil {
-		return nil, fmt.Errorf("sanitize target arguments: %w", err)
-	}
-	return json.RawMessage(out), nil
-}
-
-func approvalApplyURLInterpolationTarget(
-	args json.RawMessage,
-	targetArgsObject map[string]json.RawMessage,
-	customTool *corev1alpha1.Tool,
-) error {
-	if customTool == nil || customTool.Spec.HTTP == nil || strings.TrimSpace(customTool.Spec.HTTP.URL) == "" {
-		return nil
-	}
-	if customTool.Spec.MCP != nil && customTool.Spec.MCP.SubstrateActor != nil {
-		return nil
-	}
-	if authBodyKey := approvalAuthBodyKey(customTool); authBodyKey != "" {
-		if approvalURLUsesPlaceholder(customTool, authBodyKey) {
-			return fmt.Errorf(
-				"approval-gated tool %q URL must not interpolate body auth key %q",
-				customTool.Name,
-				authBodyKey,
-			)
-		}
-	}
-	params, err := approvalDecodeTargetArgumentValues(args)
-	if err != nil {
-		return err
-	}
-	interpolatedParams := map[string]string{}
-	for key, val := range params {
-		placeholder := "{{" + key + "}}"
-		if strings.Contains(customTool.Spec.HTTP.URL, placeholder) {
-			interpolatedParams[key] = neturl.PathEscape(fmt.Sprintf("%v", val))
-			delete(targetArgsObject, key)
-		}
-	}
-	if len(interpolatedParams) == 0 {
-		return nil
-	}
-	targetURL := map[string]any{
-		"template": customTool.Spec.HTTP.URL,
-		"params":   interpolatedParams,
-	}
-	encoded, err := json.Marshal(targetURL)
-	if err != nil {
-		return fmt.Errorf("sanitize target URL: %w", err)
-	}
-	targetArgsObject[approvalTargetURLField] = encoded
-	return nil
-}
-
-func approvalDecodeTargetArgumentValues(args json.RawMessage) (map[string]any, error) {
-	var params map[string]any
-	dec := json.NewDecoder(bytes.NewReader(args))
-	dec.UseNumber()
-	if err := dec.Decode(&params); err != nil || params == nil {
-		return nil, fmt.Errorf("target arguments must be a JSON object")
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return nil, fmt.Errorf("target arguments must be a JSON object")
-	}
-	return params, nil
+	return approvals.TargetArguments(args, customTool)
 }
 
 func approvalAuthBodyKey(customTool *corev1alpha1.Tool) string {
-	if customTool == nil || customTool.Spec.HTTP == nil || customTool.Spec.HTTP.AuthSecretRef == nil {
-		return ""
-	}
-	if strings.TrimSpace(customTool.Spec.HTTP.AuthInject) != approvalAuthInjectBody {
-		return ""
-	}
-	return strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey)
+	return approvals.AuthBodyKey(customTool)
 }
 
 func approvalTTSEndpointIdentity(value string) (string, string) {
@@ -446,6 +371,22 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	}
 	if err := validateApprovalCustomToolCompatibility(customTool); err != nil {
 		return "", err
+	}
+	if isConnectorBackedTool(customTool) {
+		// Executed in the controller, which recomputes this digest from the
+		// live Tool and the Connection frozen with the Job, and refuses a
+		// claim when either changed: a Job re-created after the decision
+		// against a re-linked account needs a fresh approval.
+		var binding corev1alpha1.ConnectionBinding
+		if customTool.Spec.HTTP != nil && customTool.Spec.HTTP.OutboundAccessPolicyRef != nil {
+			binding = connectorBindings[customTool.Spec.HTTP.OutboundAccessPolicyRef.Name]
+		}
+		digest, err := approvals.ConnectorTargetSpecDigest(
+			customTool.Spec, connectorToolPolicies[customTool.Name], binding.UID, binding.Generation, binding.GrantSequence)
+		if err != nil {
+			return "", fmt.Errorf("digest connector tool %q approval target spec: %w", customTool.Name, err)
+		}
+		return digest, nil
 	}
 	uid, resourceVersion := approvalAuthRefVersion(customTool)
 	outboundPolicy := approvalOutboundPolicyVersion(customTool)
@@ -603,8 +544,9 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 			)
 		}
 	}
-	if customTool.Spec.HTTP.AuthSecretRef != nil {
-		if approvalMountedCredentialExists(customTool.Spec.HTTP.AuthSecretRef.Name, customTool.Spec.HTTP.AuthSecretRef.Key) {
+	if authRef := customTool.Spec.HTTP.AuthSecretRef; authRef != nil {
+		// Remote credentials use the exact API Secret selector and never mounted files.
+		if !aitools.IsRemoteMCP(customTool) && approvalMountedCredentialExists(authRef.Name, authRef.Key) {
 			return fmt.Errorf(
 				"approval-gated tool %q mounted credential source cannot be approval-bound",
 				customTool.Name,
@@ -619,11 +561,7 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 }
 
 func approvalURLUsesPlaceholder(customTool *corev1alpha1.Tool, key string) bool {
-	if customTool == nil || customTool.Spec.HTTP == nil {
-		return false
-	}
-	key = strings.TrimSpace(key)
-	return key != "" && strings.Contains(customTool.Spec.HTTP.URL, "{{"+key+"}}")
+	return approvals.URLUsesPlaceholder(customTool, key)
 }
 
 func approvalMountedCredentialExists(secretName, key string) bool {
@@ -752,7 +690,7 @@ func deniedBatchToolResults(
 				decision.TargetTool,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -865,8 +803,10 @@ func injectIdempotencyKey(args json.RawMessage, key string) (json.RawMessage, er
 		return args, nil
 	}
 	params := map[string]any{}
-	if len(strings.TrimSpace(string(args))) > 0 {
-		if err := json.Unmarshal(args, &params); err != nil {
+	if len(bytes.TrimSpace(args)) > 0 {
+		var err error
+		params, err = tools.DecodeToolArgumentObject(args)
+		if err != nil {
 			return nil, fmt.Errorf("parse tool arguments for idempotency key injection: %w", err)
 		}
 	}
@@ -944,6 +884,10 @@ func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.
 	}
 	if baseToolCtxCopy.ApprovalTargetRefresh == nil && baseToolCtxCopy.Client != nil {
 		baseToolCtxCopy.ApprovalTargetRefresh = func(ctx context.Context, _ string, tool *corev1alpha1.Tool) error {
+			if aitools.IsRemoteMCP(tool) {
+				_, err := validateNativeRemoteTool(ctx, &baseToolCtxCopy, tool)
+				return err
+			}
 			bindApprovalAuthRefVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
 			return bindApprovalOutboundAccessPolicyVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
 		}
@@ -968,7 +912,26 @@ func handleExplicitRequestApprovalBatch(
 			return nil, nil
 		}
 		if gate != nil && len(gate.resolved) > 0 {
-			if target, err := explicitApprovalTargetForCall(ctx, call, customTools, baseToolCtx); err == nil {
+			// Validate the original bytes before normalization, including duplicate
+			// keys and Unicode. Execution below still receives the original call.
+			matchingCall := call
+			if tool, ok := tools.DefaultRegistry.Get(strings.TrimSpace(call.Name)); ok {
+				args, err := tools.NormalizeToolArguments(tool, call.Arguments)
+				if err != nil {
+					return &approvalBatchDecision{
+						continueLLM: true,
+						toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
+					}, nil
+				}
+				matchingCall.Arguments = args
+			}
+			var matchingArgs map[string]any
+			_ = json.Unmarshal(matchingCall.Arguments, &matchingArgs)
+			// A declared null is omitted by normalization. Do not let missing
+			// targetArguments inherit the empty-object approval matching default.
+			_, hasTargetArguments := matchingArgs["targetArguments"].(map[string]any)
+			target, err := explicitApprovalTargetForCall(ctx, matchingCall, customTools, baseToolCtx)
+			if hasTargetArguments && err == nil {
 				if decision, found := gate.resolvedDecision(target); found {
 					return &approvalBatchDecision{
 						continueLLM: true,
@@ -979,7 +942,9 @@ func handleExplicitRequestApprovalBatch(
 		}
 		result, err := executeRequestApprovalToolCall(ctx, call, customTools, eventRecorder, baseToolCtx)
 		if err != nil {
-			if _, ok := errors.AsType[*tools.RequestApprovalValidationError](err); ok {
+			_, invalidRequest := errors.AsType[*tools.RequestApprovalValidationError](err)
+			_, invalidArgument := errors.AsType[*tools.ToolArgumentError](err)
+			if invalidRequest || invalidArgument {
 				return &approvalBatchDecision{
 					continueLLM: true,
 					toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
@@ -1009,7 +974,7 @@ func blockingApprovalOverflowBatchToolResults(
 				toolName,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1033,7 +998,7 @@ func staleApprovalBatchToolResults(
 				decision.TargetTool,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1052,7 +1017,7 @@ func approvalValidationBatchToolResults(
 				invalidToolCallID,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1076,6 +1041,12 @@ func explicitApprovalTargetForCall(
 		if err := json.Unmarshal(call.Arguments, &req); err != nil {
 			return approvals.ApprovalTarget{}, err
 		}
+	}
+	// Match RequestApprovalTool.Execute before a resolved decision can bypass it.
+	switch req.Severity {
+	case "", "warning", "critical":
+	default:
+		return approvals.ApprovalTarget{}, fmt.Errorf("invalid severity %q: must be warning or critical", req.Severity)
 	}
 	baseToolCtx = prepareApprovalToolContext(baseToolCtx, nil)
 	if baseToolCtx == nil {
@@ -1127,7 +1098,7 @@ func terminalApprovalBatchToolResults(
 				decision.TargetTool,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1145,9 +1116,9 @@ func executeRequestApprovalToolCall(
 		common.WithEventToolCallID(call.ID),
 		common.WithEventSummary("tool call started"),
 		common.WithEventContent(eventContent(map[string]any{
-			"toolName":      toolName,
-			"toolCallID":    call.ID,
-			"argumentBytes": len(call.Arguments),
+			logFieldToolName:   toolName,
+			logFieldToolCallID: call.ID,
+			"argumentBytes":    len(call.Arguments),
 		})),
 	)
 
@@ -1185,9 +1156,9 @@ func executeRequestApprovalToolCall(
 		common.WithEventToolCallID(call.ID),
 		common.WithEventSummary("tool call completed"),
 		common.WithEventContent(eventContent(map[string]any{
-			"toolName":     toolName,
-			"toolCallID":   call.ID,
-			"resultLength": len(result),
+			logFieldToolName:     toolName,
+			logFieldToolCallID:   call.ID,
+			logFieldResultLength: len(result),
 		})),
 	)
 	return result, nil

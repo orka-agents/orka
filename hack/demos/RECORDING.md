@@ -1,6 +1,6 @@
 # Demo recording design
 
-> **ACP v2 cutover:** the Demo 60/70 storyboards below capture a retired execution-workspace prototype. Current built-in agent Tasks use RuntimePools, top-level `spec.workspace`, and the separate Workspace/Publisher. Keep these storyboards archived until the scripts and manifests are rebuilt around an ACP v2 supervisor; they are not release evidence.
+> **Orka harness v2 cutover:** the Demo 60/70 storyboards below capture a retired execution-workspace prototype. Current built-in agent Tasks use RuntimePools, top-level `spec.workspace`, and the separate Workspace/Publisher. Keep these storyboards archived until the scripts and manifests are rebuilt around an Orka harness v2 supervisor; they are not release evidence.
 
 This is the design doc for turning `hack/demos/` from a presenter rehearsal kit
 into a small, tasteful library of recorded terminal demos. The goal is to
@@ -72,8 +72,8 @@ Six demos total. Four exist; two are new.
 | 30 | Scheduled workflow | `30-cron-workflow.sh` | exists, needs polish | Cron-scheduled stale-PR triage report |
 | 40 | Security remediation | `40-security-scanning.sh` | exists, needs polish | Finding → patch proposal → reviewable PR |
 | 50 | **Kontxt transaction tokens** | `50-kontxt.sh` | **new** | Caller Pod proves identity → kontxt mints TxToken → Orka stamps immutable provenance |
-| 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | archived prototype | Requires a future sandbox-backed ACP v2 supervisor |
-| 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | archived prototype | Requires a future Actor-backed ACP v2 supervisor and clean-room publication |
+| 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | archived prototype | Requires a future sandbox-backed Orka harness v2 supervisor |
+| 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | archived prototype | Requires a future Actor-backed Orka harness v2 supervisor and clean-room publication |
 
 Demos 50 and 60 are designed in [§7](#7-new-scenario-storyboards).
 
@@ -719,7 +719,7 @@ demo-magic cluster. Stand it up with `make demo-substrate-up`
 `scripts/agent-substrate-e2e.sh` standup (`KEEP_CLUSTER=1`) — Substrate control
 plane in `ate-system`, a `WorkerPool` + gVisor `ActorTemplate` (`orka-codex-ci`
 in `ate-demo`), Orka wired with `--substrate-*` flags; (2) builds a
-**prototype codex-capable Actor image** (workspace daemon + Codex CLI + git; not a supported ACP v2 runtime image) and points the ActorTemplate at it; (3) deploys the **vekil**
+**prototype codex-capable Actor image** (workspace daemon + Codex CLI + git; not a supported Orka harness v2 runtime image) and points the ActorTemplate at it; (3) deploys the **vekil**
 model proxy (one-time GitHub **device-code** login — the operator completes it
 from the pod logs, since a plain `gho_` gh token has no Copilot entitlement);
 (4) creates the model Secret (endpoint → vekil) and the git Secret. Requires
@@ -731,7 +731,7 @@ comes from `GIT_TOKEN`/`GITHUB_TOKEN` or the local `gh` CLI.
 
 | # | Beat | What the audience sees |
 |---|------|------------------------|
-| 1 | Cold | Archived prototype: a fresh gVisor Actor hosted the agent. A revived ACP v2 version must start from a sanitized source artifact and leave publication to the Workspace/Publisher. |
+| 1 | Cold | Archived prototype: a fresh gVisor Actor hosted the agent. A revived demo using Orka harness v2 must start from a sanitized source artifact and leave publication to the Workspace/Publisher. |
 | 2 | PR | Future v2 version requires an independently verified publisher receipt and Orka-owned PR reconciliation. |
 | 3 | Warm | Future v2 version must resume one fenced RuntimeSession without replaying a prompt or bypassing validation/publication barriers. |
 
@@ -880,7 +880,7 @@ spec:
 **Tool-name caveat.** Built-in Orka tools verified against
 `internal/tools/common_constants.go` and `workers/ai/main_test.go`:
 `file_read`, `file_write`, `code_exec`, `web_search`, `web_fetch` are
-real. There is *no* `open_pr` built-in tool. Under ACP v2, PR creation is an
+real. There is *no* `open_pr` built-in tool. Under Orka harness v2, PR creation is an
 Orka-owned Workspace/Publisher or governed GitHub-tool operation, never a
 runtime-local `git`/forge action inside the
 sandbox workspace. The scout/builder split is enforced by `file_write` +
@@ -926,7 +926,7 @@ Prompt files in `hack/demos/prompts/`:
   proposal to `/workspace/scout-report.md` with: counter names, where they
   go, test outline. Do not modify any vekil source."*
 - `sandbox-turn-2-builder.txt` — must be rewritten to edit and test only.
-  A future ACP v2 demo supplies a verified workspace artifact and asks the
+  A future Orka harness v2 demo supplies a verified workspace artifact and asks the
   Workspace/Publisher to prepare, publish, verify, and reconcile the PR.
 - `sandbox-turn-3-fixup.txt` — must be rewritten as another fenced write Task
   against the claimed branch baseline; the ACP child must not commit or publish.
@@ -1174,8 +1174,8 @@ and by the payoff cards):
 | 30 | "Scheduled work" | "Recurring AI triage queue — same auditable Task model, just add a `schedule:`." |
 | 40 | "Security remediation" | "Finding → patch proposal → reviewable PR. No human triage required." |
 | 50 | "Kontxt transaction tokens" | "Zero-secret caller, one-shot transaction token, sealed Kubernetes provenance." |
-| 60 | "Warm agent sandboxes" | "Archived until agent-sandbox hosts an ACP v2 RuntimeSession without weakening workspace governance." |
-| 70 | "Agent Substrate workspaces" | "Archived until an Actor-backed ACP v2 supervisor and clean-room publication path are implemented." |
+| 60 | "Warm agent sandboxes" | "Archived until agent-sandbox hosts an Orka harness v2 RuntimeSession without weakening workspace governance." |
+| 70 | "Agent Substrate workspaces" | "Archived until an Actor-backed Orka harness v2 supervisor and clean-room publication path are implemented." |
 
 ---
 
@@ -1263,7 +1263,7 @@ writing the relevant render functions:
    - `install-agent-sandbox.sh` — installs the upstream `agent-sandbox`
      operator via its published manifests, then applies
      `cluster/templates/orka-live-template.yaml` (an archived `SandboxTemplate`;
-     replace it with an ACP v2 supervisor image before reviving the demo).
+     replace it with an Orka harness v2 supervisor image before reviving the demo).
    - `cluster-down.sh` — `kind delete cluster --name orka-demo`.
 - [ ] Makefile — add `demo-record-%`, `demo-record-hero`, `demo-record-all`,
       `demo-diff`, `demo-images`, **`demo-cluster-up`**, **`demo-cluster-down`**

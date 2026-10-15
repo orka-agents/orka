@@ -26,15 +26,13 @@ const (
 )
 
 func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
-	baseArgs := []string{
-		"-c", "credential.helper=",
-		"-c", "core.askPass=",
-	}
+	baseArgs := make([]string, 0, 4+len(args))
+	baseArgs = append(baseArgs, "-c", "credential.helper=", "-c", "core.askPass=")
 	cmd := exec.CommandContext(ctx, wrapperGitBinary, append(baseArgs, args...)...)
 	env := []string{
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_TERMINAL_PROMPT=0",
+		gitTerminalPromptDisabled,
 		"GIT_ASKPASS=/bin/false",
 		"PATH=" + wrapperSafeCommandPath,
 		"SSH_ASKPASS=/bin/false",

@@ -1,6 +1,6 @@
 # RepositoryMonitor PR review and repair
 
-This example focuses on durable PR review, repair, branch update, and optional automerge command labels.
+This example focuses on durable PR review, automatic bounded repair, and GitHub-native auto-merge.
 
 ```bash
 kubectl -n orka-system apply -k examples/repository-monitor-pr-review-repair
@@ -11,10 +11,10 @@ Useful commands:
 ```bash
 orka -n orka-system monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent review --target-sha '<head-sha>'
 orka -n orka-system monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent fix --target-sha '<head-sha>'
-orka -n orka-system monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent automerge --target-sha '<head-sha>'
+orka -n orka-system monitor commands create pr-review-repair --kind pull_request --number '<pr>' --intent update_branch --target-sha '<head-sha>'
 ```
 
-Automerge remains disabled by default. Set `spec.automerge.enabled: true` and configure the controller global merge gate only after validating CI and review gates.
+Require the `orka/<namespace>/<monitor-name>/ready` commit status. The forge credential needs commit-status write permission; no GitHub App is required. GitHub native auto-merge owns merging; Orka never enables it. When disabled, the PR remains open and ready.
 
 ## Secrets
 

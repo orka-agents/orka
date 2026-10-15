@@ -14,12 +14,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	cliListByNameUse      = "list <name>"
+	cliIntentTriage       = "triage"
+	cliIntentResearch     = "research"
+	cliIntentPlan         = "plan"
+	cliIntentImplement    = "implement"
+	cliIntentDecompose    = "decompose"
+	cliIntentStop         = "stop"
+	cliIntentResume       = "resume"
+	cliIntentPatch        = "patch"
+	cliIntentReview       = "review"
+	cliIntentFix          = "fix"
+	cliIntentFixCI        = "fix_ci"
+	cliIntentUpdateBranch = "update_branch"
+)
+
 func newMonitorCmd() *cobra.Command {
 	cmd := newCRUDResourceCmd(crudResourceSpec{
-		Use:      "monitor",
-		Short:    "Manage repository monitors",
-		BasePath: "/api/v1/monitors/repositories",
-		Name:     "repository monitor",
+		Use:          "monitor",
+		Short:        "Manage repository monitors",
+		BasePath:     "/api/v1/monitors/repositories",
+		Name:         "repository monitor",
+		DescribeRows: monitorDescribeRows,
 	})
 	cmd.AddCommand(newMonitorRunCmd())
 	cmd.AddCommand(newMonitorRunsCmd())
@@ -146,7 +163,7 @@ func newMonitorItemsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&state, "state", "", "Filter by state")
 	cmd.Flags().StringVar(&verdict, "verdict", "", "Filter by review verdict")
 	cmd.Flags().StringVar(&repairState, "repair-state", "", "Filter by repair state")
-	cmd.Flags().StringVar(&automergeState, "automerge-state", "", "Filter by automerge state")
+	cmd.Flags().StringVar(&automergeState, "automerge-state", "", "Filter by merge readiness state")
 	return cmd
 }
 
@@ -164,7 +181,7 @@ func newMonitorIssuesListCmd() *cobra.Command {
 	var limit int
 	var cursor, state string
 	cmd := &cobra.Command{
-		Use:   "list <name>",
+		Use:   cliListByNameUse,
 		Short: "List repository monitor issues",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -210,7 +227,7 @@ func newMonitorCommandsListCmd() *cobra.Command {
 	var cursor, kind, intent, status string
 	var number int64
 	cmd := &cobra.Command{
-		Use:   "list <name>",
+		Use:   cliListByNameUse,
 		Short: "List repository monitor commands",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -318,7 +335,7 @@ func newMonitorActionsListCmd() *cobra.Command {
 	var cursor, kind, actionKind, taskName string
 	var number int64
 	cmd := &cobra.Command{
-		Use:   "list <name>",
+		Use:   cliListByNameUse,
 		Short: "List repository monitor actions",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -452,7 +469,7 @@ func newMonitorWorkActionsListCmd() *cobra.Command {
 	var limit int
 	var cursor, kind, intent, desiredAction, status, taskName string
 	var number int64
-	cmd := &cobra.Command{Use: "list <name>", Short: "List repository monitor workflow actions", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: cliListByNameUse, Short: "List repository monitor workflow actions", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		q := mergeQuery(map[string]string{}, "name", args[0], "limit", fmt.Sprintf("%d", limit), "cursor", cursor, "continue", cursor, "kind", kind, "intent", intent, "desiredAction", desiredAction, "status", status, "taskName", taskName)
 		if number > 0 {
 			q["number"] = fmt.Sprintf("%d", number)
@@ -501,7 +518,7 @@ func newMonitorImplementationJobsListCmd() *cobra.Command {
 	var limit int
 	var cursor, phase, taskName string
 	var issueNumber int64
-	cmd := &cobra.Command{Use: "list <name>", Short: "List repository monitor implementation jobs", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: cliListByNameUse, Short: "List repository monitor implementation jobs", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		q := mergeQuery(map[string]string{}, "name", args[0], "limit", fmt.Sprintf("%d", limit), "cursor", cursor, "continue", cursor, "phase", phase, "taskName", taskName)
 		if issueNumber > 0 {
 			q["issueNumber"] = fmt.Sprintf("%d", issueNumber)
@@ -548,7 +565,7 @@ func newMonitorMutationsListCmd() *cobra.Command {
 	var limit int
 	var cursor, kind, operation, status string
 	var number int64
-	cmd := &cobra.Command{Use: "list <name>", Short: "List repository monitor GitHub mutation records", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: cliListByNameUse, Short: "List repository monitor GitHub mutation records", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		q := mergeQuery(map[string]string{}, "name", args[0], "limit", fmt.Sprintf("%d", limit), "cursor", cursor, "continue", cursor, "kind", kind, "operation", operation, "status", status)
 		if number > 0 {
 			q["number"] = fmt.Sprintf("%d", number)
@@ -587,14 +604,13 @@ func newMonitorMutationsGetCmd() *cobra.Command {
 func newMonitorIssueWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "issue", Short: "Control a repository monitor issue workflow"}
 	for _, spec := range []struct{ use, short, intent string }{
-		{"triage <name> <number>", "Queue issue triage", "triage"},
-		{"research <name> <number>", "Queue issue research", "research"},
-		{"plan <name> <number>", "Queue issue planning", "plan"},
-		{"approve-plan <name> <number>", "Approve the current issue plan", "approve_plan"},
-		{"implement <name> <number>", "Queue issue implementation", "implement"},
-		{"decompose <name> <number>", "Queue issue decomposition", "decompose"},
-		{"stop <name> <number>", "Stop issue automation", "stop"},
-		{"resume <name> <number>", "Resume issue automation", "resume"},
+		{"triage <name> <number>", "Queue issue triage", cliIntentTriage},
+		{"research <name> <number>", "Queue issue research", cliIntentResearch},
+		{"plan <name> <number>", "Queue issue planning", cliIntentPlan},
+		{"implement <name> <number>", "Queue issue implementation", cliIntentImplement},
+		{"decompose <name> <number>", "Queue issue decomposition", cliIntentDecompose},
+		{"stop <name> <number>", "Stop issue automation", cliIntentStop},
+		{"resume <name> <number>", "Resume issue automation", cliIntentResume},
 	} {
 		cmd.AddCommand(newMonitorCommandIntentCmd(spec.use, spec.short, "issue", spec.intent))
 	}
@@ -622,7 +638,7 @@ func newMonitorCommandIntentCmd(use, short, kind, intent string) *cobra.Command 
 	addOutputFlag(cmd, outputYAML)
 	if kind == "pull_request" {
 		cmd.Flags().StringVar(&targetSHA, "target-sha", "", "Current pull request head SHA for head-bound commands")
-		if intent != "stop" && intent != "resume" {
+		if intent != cliIntentStop && intent != cliIntentResume {
 			_ = cmd.MarkFlagRequired("target-sha")
 		}
 	}
@@ -665,7 +681,7 @@ func newMonitorIssueImplementationGetCmd() *cobra.Command {
 }
 
 func newMonitorIssuePatchPreviewCmd() *cobra.Command {
-	parent := &cobra.Command{Use: "patch", Short: "Inspect issue patch artifacts"}
+	parent := &cobra.Command{Use: cliIntentPatch, Short: "Inspect issue patch artifacts"}
 	cmd := &cobra.Command{
 		Use:   "preview <name> <number>",
 		Short: "Show safe patch artifact metadata for an issue",
@@ -716,13 +732,12 @@ func monitorFirstListItemID(result any) (string, error) {
 func newMonitorPRWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pr", Short: "Control a repository monitor pull request workflow"}
 	for _, spec := range []struct{ use, short, intent string }{
-		{"review <name> <number>", "Queue exact-head PR review", "review"},
-		{"fix <name> <number>", "Queue PR finding repair", "fix"},
-		{"fix-ci <name> <number>", "Queue PR CI repair", "fix_ci"},
-		{"update-branch <name> <number>", "Queue PR branch update", "update_branch"},
-		{"automerge <name> <number>", "Request head-bound automerge", "automerge"},
-		{"stop <name> <number>", "Stop PR automation", "stop"},
-		{"resume <name> <number>", "Resume PR automation", "resume"},
+		{"review <name> <number>", "Queue exact-head PR review", cliIntentReview},
+		{"fix <name> <number>", "Queue PR finding repair", cliIntentFix},
+		{"fix-ci <name> <number>", "Queue PR CI repair", cliIntentFixCI},
+		{"update-branch <name> <number>", "Queue PR branch update", cliIntentUpdateBranch},
+		{"stop <name> <number>", "Stop PR automation", cliIntentStop},
+		{"resume <name> <number>", "Resume PR automation", cliIntentResume},
 	} {
 		cmd.AddCommand(newMonitorCommandIntentCmd(spec.use, spec.short, "pull_request", spec.intent))
 	}
@@ -770,7 +785,7 @@ func newMonitorPRRepairsCmd() *cobra.Command {
 				for _, raw := range items {
 					item, _ := raw.(map[string]any)
 					switch fmt.Sprint(item["desiredAction"]) {
-					case "repair", "fix_ci", "update_branch":
+					case "repair", cliIntentFixCI, cliIntentUpdateBranch:
 						filtered = append(filtered, raw)
 					}
 				}
@@ -791,7 +806,7 @@ func newMonitorPRRepairsCmd() *cobra.Command {
 func newMonitorPRReadyCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "ready", Short: "Inspect merge-ready PRs"}
 	listCmd := &cobra.Command{
-		Use:   "list <name>",
+		Use:   cliListByNameUse,
 		Short: "List merge-ready pull requests",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -833,10 +848,7 @@ func validateMonitorTriggerLabels(result any) error {
 	triggers, _ := spec["triggers"].(map[string]any)
 	github, _ := triggers["github"].(map[string]any)
 	labels, _ := github["labels"].(map[string]any)
-	groups := map[string][]struct{ field, intent string }{
-		"issues":       {{"triage", "triage"}, {"research", "research"}, {"plan", "plan"}, {"approvePlan", "approve_plan"}, {"implement", "implement"}, {"decompose", "decompose"}, {"stop", "stop"}, {"resume", "resume"}},
-		"pullRequests": {{"review", "review"}, {"fix", "fix"}, {"fixCI", "fix_ci"}, {"updateBranch", "update_branch"}, {"automerge", "automerge"}, {"stop", "stop"}, {"resume", "resume"}},
-	}
+	groups := map[string][]struct{ field, intent string }{"issues": {{cliIntentImplement, cliIntentImplement}}}
 	for groupName, entries := range groups {
 		seen := map[string]string{}
 		group, _ := labels[groupName].(map[string]any)
@@ -844,7 +856,7 @@ func validateMonitorTriggerLabels(result any) error {
 			configured, _ := group[entry.field].(string)
 			label := strings.ToLower(strings.TrimSpace(configured))
 			if label == "" {
-				label = defaultMonitorCommandLabel(entry.intent)
+				label = "orka:implement"
 			}
 			key := groupName + "." + entry.field
 			if previous := seen[label]; previous != "" {
@@ -854,21 +866,6 @@ func validateMonitorTriggerLabels(result any) error {
 		}
 	}
 	return nil
-}
-
-func defaultMonitorCommandLabel(intent string) string {
-	switch intent {
-	case "approve_plan":
-		return "orka:approve-plan"
-	case "fix_ci":
-		return "orka:fix-ci"
-	case "update_branch":
-		return "orka:update-branch"
-	case "decompose":
-		return "orka:to-issues"
-	default:
-		return "orka:" + strings.ReplaceAll(intent, "_", "-")
-	}
 }
 
 func newMonitorDoctorCmd() *cobra.Command {

@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -95,6 +96,9 @@ func (e *KubernetesHarnessV1BrokeredToolExecutor) ExecuteHarnessV1BrokeredTool(
 	tool *corev1alpha1.Tool,
 	request harness.ToolCallRequest,
 ) (json.RawMessage, error) {
+	if aitools.IsRemoteMCP(tool) {
+		return nil, errors.New("remote MCP tools are supported only by native AI Tasks")
+	}
 	if e == nil || e.KubeClient == nil {
 		return nil, errors.New("harness v1 brokered tool executor is not configured")
 	}
@@ -293,6 +297,11 @@ func resolveHarnessV1BrokeredTools(
 		if tool.UID == "" || tool.Generation < 1 || !tool.DeletionTimestamp.IsZero() {
 			return resolvedHarnessV1ToolGovernance{}, fmt.Errorf("brokered harness v1 Tool %q identity is not ready", name)
 		}
+		if aitools.IsRemoteMCP(tool) {
+			return resolvedHarnessV1ToolGovernance{}, permanentHarnessV1Candidate(
+				errors.New("remote MCP tools are supported only by native AI Tasks"),
+			)
+		}
 		class := tool.Spec.BrokeredToolClass
 		if !harness.IsKnownBrokeredToolClass(harness.BrokeredToolClass(class)) {
 			return resolvedHarnessV1ToolGovernance{}, permanentHarnessV1Candidate(
@@ -350,8 +359,8 @@ func harnessV1BrokeredToolDefinitionDigest(tool *corev1alpha1.Tool) (string, err
 		return "", errors.New("brokered harness v1 Tool is required")
 	}
 	return acpDomainDigest("harness-v1-brokered-tool-definition", map[string]any{
-		"uid": string(tool.UID), "generation": tool.Generation, "spec": tool.Spec,
-		"endpoint": tool.Status.Endpoint, "workspace": tool.Status.Workspace, "actor": tool.Status.Actor,
+		"uid": string(tool.UID), generationField: tool.Generation, "spec": tool.Spec,
+		"endpoint": tool.Status.Endpoint, taskWorkspaceVolume: tool.Status.Workspace, "actor": tool.Status.Actor,
 	})
 }
 
@@ -533,8 +542,8 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	}
 	identity := harnessV1BrokeredToolEffectIdentity(task, turn, request.ToolCallID)
 	effectRequest := map[string]any{
-		"taskUID": task.UID, "attempt": attempt.Attempt, "bindingDigest": attempt.BindingDigest,
-		"snapshotDigest": attempt.SnapshotDigest, "toolDefinitionDigest": frozenTool.DefinitionDigest,
+		taskUIDField: task.UID, attemptField: attempt.Attempt, "bindingDigest": attempt.BindingDigest,
+		snapshotDigestField: attempt.SnapshotDigest, "toolDefinitionDigest": frozenTool.DefinitionDigest,
 		"request": request,
 	}
 	result, _, err := runExternalEffectWithReplayCallTimeout(

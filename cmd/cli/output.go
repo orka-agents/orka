@@ -69,21 +69,29 @@ func printStructured(cmd *cobra.Command, value any) error {
 	if err != nil {
 		return err
 	}
+	if format == outputTable {
+		return printGenericTable(cmd, value)
+	}
+	return printStructuredTo(cmd.OutOrStdout(), format, value)
+}
+
+// printStructuredTo encodes value as json or yaml onto w.
+func printStructuredTo(w io.Writer, format string, value any) error {
 	switch format {
 	case outputJSON:
 		out, err := json.MarshalIndent(value, "", "  ")
 		if err != nil {
 			return fmt.Errorf("formatting json output: %w", err)
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(out)) //nolint:errcheck
+		fmt.Fprintln(w, string(out)) //nolint:errcheck
 	case outputYAML:
 		out, err := sigsyaml.Marshal(value)
 		if err != nil {
 			return fmt.Errorf("formatting yaml output: %w", err)
 		}
-		fmt.Fprint(cmd.OutOrStdout(), string(out)) //nolint:errcheck
+		fmt.Fprint(w, string(out)) //nolint:errcheck
 	default:
-		return printGenericTable(cmd, value)
+		return fmt.Errorf("unsupported output format %q", format)
 	}
 	return nil
 }
@@ -210,9 +218,9 @@ func genericRowName(item map[string]any) string {
 }
 
 func genericRowNamespace(item map[string]any) string {
-	namespace := firstString(item, "namespace", "monitorNamespace")
+	namespace := firstString(item, cliNamespaceQuery, "monitorNamespace")
 	if namespace == "" {
-		namespace = nestedString(item, "metadata", "namespace")
+		namespace = nestedString(item, "metadata", cliNamespaceQuery)
 	}
 	return namespace
 }
@@ -318,14 +326,14 @@ func manifestWithNamespaceJSON(cmd *cobra.Command, path, namespace string) ([]by
 	metadata, _ := m["metadata"].(map[string]any)
 	metadataNS := ""
 	if metadata != nil {
-		metadataNS = strings.TrimSpace(anyString(metadata["namespace"]))
+		metadataNS = strings.TrimSpace(anyString(metadata[cliNamespaceQuery]))
 	}
-	topLevelNS := strings.TrimSpace(anyString(m["namespace"]))
+	topLevelNS := strings.TrimSpace(anyString(m[cliNamespaceQuery]))
 	if metadataNS != "" && topLevelNS != "" && metadataNS != topLevelNS {
 		return nil, fmt.Errorf("manifest metadata.namespace %q does not match top-level namespace %q", metadataNS, topLevelNS)
 	}
 	manifestNS := strings.TrimSpace(manifestNamespace(m))
-	flagNS, _ := cmd.Flags().GetString("namespace")
+	flagNS, _ := cmd.Flags().GetString(cliNamespaceQuery)
 	if strings.TrimSpace(flagNS) != "" && manifestNS != "" && manifestNS != flagNS {
 		return nil, fmt.Errorf("manifest namespace %q does not match --namespace %q", manifestNS, flagNS)
 	}
@@ -341,31 +349,31 @@ func ensureManifestNamespace(m map[string]any, namespace string) {
 	if strings.TrimSpace(namespace) == "" || m == nil {
 		return
 	}
-	topLevelNS := strings.TrimSpace(anyString(m["namespace"]))
+	topLevelNS := strings.TrimSpace(anyString(m[cliNamespaceQuery]))
 	metadata, _ := m["metadata"].(map[string]any)
 	if metadata != nil {
-		if strings.TrimSpace(anyString(metadata["namespace"])) == "" {
+		if strings.TrimSpace(anyString(metadata[cliNamespaceQuery])) == "" {
 			if topLevelNS != "" {
-				metadata["namespace"] = topLevelNS
+				metadata[cliNamespaceQuery] = topLevelNS
 			} else {
-				metadata["namespace"] = namespace
+				metadata[cliNamespaceQuery] = namespace
 			}
 		}
 		return
 	}
 	if topLevelNS == "" {
-		m["namespace"] = namespace
+		m[cliNamespaceQuery] = namespace
 	}
 }
 
 func manifestNamespace(m map[string]any) string {
 	metadata, _ := m["metadata"].(map[string]any)
 	if metadata != nil {
-		if ns := strings.TrimSpace(anyString(metadata["namespace"])); ns != "" {
+		if ns := strings.TrimSpace(anyString(metadata[cliNamespaceQuery])); ns != "" {
 			return ns
 		}
 	}
-	return anyString(m["namespace"])
+	return anyString(m[cliNamespaceQuery])
 }
 
 func namespaceQueryForManifest(
@@ -377,14 +385,14 @@ func namespaceQueryForManifest(
 	if manifestNS == "" {
 		return nil, nil
 	}
-	flagNS, _ := cmd.Flags().GetString("namespace")
+	flagNS, _ := cmd.Flags().GetString(cliNamespaceQuery)
 	if strings.TrimSpace(flagNS) != "" && flagNS != manifestNS {
 		return nil, fmt.Errorf("manifest namespace %q does not match --namespace %q", manifestNS, flagNS)
 	}
 	if strings.TrimSpace(clientNamespace) != "" && strings.TrimSpace(flagNS) != "" && clientNamespace != manifestNS {
 		return nil, fmt.Errorf("manifest namespace %q does not match selected namespace %q", manifestNS, clientNamespace)
 	}
-	return map[string]string{"namespace": manifestNS}, nil
+	return map[string]string{cliNamespaceQuery: manifestNS}, nil
 }
 
 func listItems(value any) []map[string]any {

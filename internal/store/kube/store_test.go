@@ -2843,6 +2843,7 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	}
 }
 
+//nolint:gocyclo // The cross-store finalization and publication-baseline assertions form one scenario.
 func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.T) {
 	ctx := context.Background()
 	_, rawClient, fence := newTestStoreWithEpoch(t)
@@ -3140,7 +3141,7 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 	}
 }
 
-func advancePromptAttemptToSuccess(t *testing.T, ctx context.Context, kubeStore *Store, fence controlstore.ControllerEpochFence, attempt *controlstore.PromptAttempt, control *controlstore.SessionControl) *controlstore.PromptAttempt {
+func advancePromptAttemptToSuccess(t *testing.T, ctx context.Context, kubeStore *Store, fence controlstore.ControllerEpochFence, attempt *controlstore.PromptAttempt, control *controlstore.SessionControl, terminal ...controlstore.PromptExecutionState) *controlstore.PromptAttempt {
 	t.Helper()
 	states := []controlstore.PromptExecutionState{
 		controlstore.PromptExecutionReserved,
@@ -3152,11 +3153,17 @@ func advancePromptAttemptToSuccess(t *testing.T, ctx context.Context, kubeStore 
 		controlstore.PromptExecutionSettling,
 		controlstore.PromptExecutionSucceeded,
 	}
+	if len(terminal) > 0 {
+		states[len(states)-1] = terminal[0]
+	}
 	for i, next := range states {
 		transition := controlstore.PromptAttemptExecutionTransition{
 			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
 			NewState: next, OperationID: "advance-" + string(next), OperationDigest: testDigest("advance-" + string(next)),
 			UpdatedAt: testNow.Add(time.Duration(i+1) * time.Minute),
+		}
+		if next == controlstore.PromptExecutionOutcomeUnknown {
+			transition.OutcomeMarker = "outcome_unknown"
 		}
 		if next == controlstore.PromptExecutionSessionStarting {
 			transition.SessionUID = control.SessionUID

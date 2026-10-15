@@ -9,8 +9,11 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// codexCompletedOutputNormalizer understands only the completed command/MCP shapes
-// emitted by codex-acp 1.1.7, commit 307d81018f7cc0c3141ddf71c7532d38310e2cfb:
+// codexCompletedOutputNormalizer validates complete MCP results from pinned
+// codex-acp 2.1.1, commit 68d7d2d5ddfc0ed5746f9f6130892dda685e65dd:
+// src/tool-calls/reporters/McpToolReporter.ts and ToolCallReports.ts. Standard
+// ACP command content keeps its existing projection. Legacy command snapshots
+// below follow the former codex-acp 1.1.7 contract, commit 307d81018f7cc0c3141ddf71c7532d38310e2cfb:
 // src/CodexToolCallMapper.ts:createCommandActionEvent/createTerminalCommandEvent
 // and src/CodexEventHandler.ts:completeCommandExecutionEvent/completeItemEvent. Its caller must
 // additionally verify the configured Codex adapter name and pinned digest.
@@ -63,7 +66,7 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 	// The generic mapper does not project rawOutput. Preserve that omission
 	// even for an unsupported or untracked call; only an exact completion below
 	// may replace it with an authoritative snapshot.
-	if len(envelope.RawOutput) > 0 {
+	if len(envelope.RawOutput) > 0 && (len(envelope.Content) <= 0 || !codexStandardCommandExit(envelope.RawOutput)) {
 		omitCodexOutput(mapped.ToolCall)
 	}
 	id, err := canonicalACPToolCallID(envelope.ToolCallID)
@@ -106,6 +109,15 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 			call.invalid = true
 			n.calls[id] = call
 		}
+		return
+	}
+	// Current CommandReporter emits standard ACP content for read/search
+	// commands when no chunk channel is negotiated. That path is already
+	// bounded by mapACPToolCallContent; it is not a legacy raw snapshot.
+	if call.kind == codexCommandOutputAction && !call.invalid && !call.finished &&
+		len(envelope.Content) > 0 && len(envelope.Meta) == 0 && codexStandardCommandExit(envelope.RawOutput) {
+		call.finished = true
+		n.calls[id] = call
 		return
 	}
 	valid := !call.invalid && !call.finished && len(envelope.Content) == 0
@@ -282,4 +294,16 @@ func codexCommandExitCode(raw json.RawMessage) (string, bool) {
 		return "", false
 	}
 	return strconv.FormatInt(int64(exit), 10), true
+}
+
+// Current standard-client read/search completions carry only the exit code in
+// rawOutput; complete text is in ACP content. Do not reinterpret unknown or
+// legacy raw snapshots as the current producer contract.
+func codexStandardCommandExit(raw json.RawMessage) bool {
+	fields, valid := codexExactFields(raw, "exit_code")
+	if !valid || len(fields) != 1 {
+		return false
+	}
+	_, valid = codexCommandExitCode(fields["exit_code"])
+	return valid
 }

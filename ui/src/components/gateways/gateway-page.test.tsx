@@ -12,6 +12,7 @@ import { render, screen, waitFor } from '@/test/test-utils'
 import { server } from '@/test/mocks/server'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
+import type { Gateway, GatewayDelivery } from '@/schemas/gateway'
 import { GatewayPage } from './gateway-page'
 
 const list = (items: unknown[]) => HttpResponse.json({ items, metadata: {} })
@@ -22,16 +23,25 @@ describe('GatewayPage', () => {
     useUIStore.setState({ namespace: 'default' })
   })
   it('renders switchboard inventory and durable ledgers', async () => {
+    const gateway: Gateway = {
+      metadata: { name: 'chat', namespace: 'default', generation: 1 },
+      spec: { gatewayClassName: 'generic-chat', adapter: { endpoint: 'https://adapter.example' } },
+      status: { ready: true, observedGeneration: 1, resolvedEndpoint: 'https://adapter.example', observedCapabilities: { adapterName: 'adapter', adapterVersion: 'v1', capabilities: { inboundText: true, outboundText: true, idempotentDelivery: true, interimDelivery: true } } },
+    }
+    const delivery: GatewayDelivery = {
+      id: 'gdm-progress', namespace: 'default', gatewayName: 'chat', eventId: 'gev-task',
+      taskName: 'gateway-task', kind: 'message', state: 'Pending', replyTarget: 'room', text: 'Working',
+      attemptCount: 0, maxAttempts: 10, manualRetryCount: 0,
+      nextAttemptAt: '2026-06-01T12:00:00Z', expiresAt: '2026-06-02T12:00:00Z',
+      createdAt: '2026-06-01T12:00:00Z', updatedAt: '2026-06-01T12:00:00Z',
+    }
     server.use(
-      http.get('/api/v1/gateways', () => list([{
-        metadata: { name: 'chat', namespace: 'default', generation: 1 },
-        spec: { gatewayClassName: 'generic-chat', adapter: { endpoint: 'https://adapter.example' } },
-        status: { ready: true, observedGeneration: 1, resolvedEndpoint: 'https://adapter.example', observedCapabilities: { adapterName: 'adapter', adapterVersion: 'v1', capabilities: { inboundText: true, outboundText: true, idempotentDelivery: true } } },
-      }])),
+      http.get('/api/v1/gateways', () => list([gateway])),
       http.get('/api/v1/gatewaybindings', () => list([])),
       http.get('/api/v1/gateway-events', () => list([])),
-      http.get('/api/v1/gateway-deliveries', () => list([])),
+      http.get('/api/v1/gateway-deliveries', () => list([delivery])),
     )
+    const user = userEvent.setup()
     render(<GatewayPage />)
     expect(await screen.findByText('Gateway switchboard')).toBeInTheDocument()
     expect(await screen.findByText('chat')).toBeInTheDocument()
@@ -39,6 +49,10 @@ describe('GatewayPage', () => {
     expect(screen.getByText('Current ledger page sample')).toBeInTheDocument()
     expect(screen.getByText(/not namespace totals/i)).toBeInTheDocument()
     expect(screen.getByText('idempotent delivery')).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Delivery outbox' }))
+    expect(await screen.findByText('gdm-progress')).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: 'message' })).toBeInTheDocument()
+    expect(screen.getByText('Pending', { exact: true })).toBeInTheDocument()
   })
 
   it('navigates gateway event pages explicitly', async () => {

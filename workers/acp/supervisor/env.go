@@ -18,6 +18,20 @@ import (
 )
 
 const (
+	openCodeToolEdit = "edit"
+)
+
+const (
+	openCodeToolBash       = "bash"
+	openCodeToolApplyPatch = "apply_patch"
+	openCodeToolGlob       = "glob"
+	openCodeToolGrep       = "grep"
+	openCodeToolWrite      = "write"
+	noBrowserEnv           = "NO_BROWSER"
+	protocolNameField      = "name"
+)
+
+const (
 	providerKindCodex            = "codex"
 	providerKindClaude           = "claude"
 	providerKindCopilot          = "copilot"
@@ -33,6 +47,7 @@ const (
 	architectureARM64            = "arm64"
 	acpCommandProtocol           = "acp"
 	EnvListenAddress             = "ORKA_ACP_LISTEN_ADDRESS"
+	EnvNativeSessionMaxBytes     = "ORKA_NATIVE_SESSION_MAX_BYTES"
 	EnvRuntimeInstanceID         = "ORKA_ACP_RUNTIME_INSTANCE_ID"
 	EnvSupervisorBootID          = "ORKA_ACP_SUPERVISOR_BOOT_ID"
 	EnvPodUID                    = "ORKA_ACP_POD_UID"
@@ -108,7 +123,21 @@ const (
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
 
+// EnvBrokeredToolApprovalProfileDigest opts an operator-qualified, immutable
+// runtime profile into brokered approvals. Provider identity alone is not proof
+// that the composed adapter and hosted configuration preserve delayed outcomes.
+const EnvBrokeredToolApprovalProfileDigest = "ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST"
+
+// EnvFoundryRecoveryProfileDigest opts a qualified Foundry broker and controller
+// into the recovery wire contract independently of brokered tool approvals.
+const EnvFoundryRecoveryProfileDigest = "ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST"
+
+//nolint:gocyclo // Keep environment defaults, overrides, and derived runtime limits together.
 func LoadConfigFromEnv() (Config, error) {
+	nativeSessionMaxBytes, err := nativeSessionMaxBytesFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	providerKind := requiredEnv(EnvProvider)
 	model := requiredEnv(EnvModel)
 	intent := harnessv2.WorkspaceIntent(requiredEnv(EnvWorkspaceIntent))
@@ -147,7 +176,34 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	limits := defaultProtocolLimits(providerKind)
+	providerCaps := providerCapabilities(providerKind, model)
+	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvBrokeredToolApprovalProfileDigest)); qualifiedDigest != "" {
+		if providerKind != providerKindAgentKit && providerKind != providerKindFoundry {
+			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvBrokeredToolApprovalProfileDigest, providerKind)
+		}
+		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", EnvBrokeredToolApprovalProfileDigest, err)
+		}
+		if qualifiedDigest != string(profileDigest) {
+			return Config{}, fmt.Errorf("%s does not match runtime profile digest", EnvBrokeredToolApprovalProfileDigest)
+		}
+		providerCaps.SupportsBrokeredToolApprovals = true
+	}
+	foundryRecovery := false
+	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvFoundryRecoveryProfileDigest)); qualifiedDigest != "" {
+		if providerKind != providerKindFoundry {
+			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvFoundryRecoveryProfileDigest, providerKind)
+		}
+		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", EnvFoundryRecoveryProfileDigest, err)
+		}
+		if qualifiedDigest != string(profileDigest) {
+			return Config{}, fmt.Errorf("%s does not match runtime profile digest", EnvFoundryRecoveryProfileDigest)
+		}
+		foundryRecovery = true
+	}
+	limits := defaultProtocolLimits()
+	limits.MaxNativeSessionBytes = nativeSessionMaxBytes
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
 	if durableWorkspaceKey != "" {
 		// A stable data key belongs to one dedicated workspace. Enforce its
@@ -258,7 +314,9 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
-		Provider:                          providerCapabilities(providerKind, model),
+		SupportsNativeSessions:            providerKind == providerKindCodex,
+		SupportsFoundryRecovery:           foundryRecovery,
+		Provider:                          providerCaps,
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
@@ -400,6 +458,14 @@ func codexSessionProjection(
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
+	if request.NativeRestore != nil {
+		// Do not inherit imported approval or sandbox settings during resume.
+		// This is a fail-closed fallback for both workspace intents. Every prompt
+		// explicitly applies the orka-external agent mode's externalSandbox;
+		// the RuntimeSession boundary, not this fallback, governs workspace writes.
+		config["approval_policy"] = "on-request"
+		config["sandbox_mode"] = "read-only"
+	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		config["developer_instructions"] = systemPrompt
 	}
@@ -445,7 +511,7 @@ func codexBaseConfig(model, baseURL string) map[string]any {
 // only the immutable HTTP profile, so that attempt failed with 403 and Codex
 // prepended "Warning: Falling back from WebSockets to HTTPS transport" to the
 // first agent message. A custom provider with wire_api=responses uses plain
-// HTTPS from the start (verified against codex-cli 0.145.0).
+// HTTPS from the start (verified against codex-cli 0.160.0).
 const codexProviderID = "orka"
 
 func codexProviderDefinition(baseURL string) map[string]any {
@@ -488,8 +554,9 @@ func claudeSessionProjection(
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
 	} else {
-		// Claude Code 2.1.217 infers high effort for unknown gateway model IDs,
-		// including claude-haiku-4.5, even when the model rejects effort.
+		// Claude Code (verified through 2.1.293) infers high effort for unknown
+		// gateway model IDs, including claude-haiku-4.5, even when the model
+		// rejects effort.
 		// "unset" omits that inferred API field; explicit effort stays in options
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
@@ -507,10 +574,10 @@ func claudeSessionProjection(
 }
 
 var copilotToolIDs = map[string][]string{
-	providerToolBash:      {"bash", "list_bash", "read_bash", "stop_bash", "write_bash"},
-	providerToolEdit:      {"edit", "str_replace_editor", "apply_patch"},
-	providerToolGlob:      {"glob"},
-	providerToolGrep:      {"grep", "rg"},
+	providerToolBash:      {openCodeToolBash, "list_bash", "read_bash", "stop_bash", "write_bash"},
+	providerToolEdit:      {openCodeToolEdit, "str_replace_editor", openCodeToolApplyPatch},
+	providerToolGlob:      {openCodeToolGlob},
+	providerToolGrep:      {openCodeToolGrep, "rg"},
 	providerToolRead:      {"view"},
 	providerToolWebFetch:  {"web_fetch"},
 	providerToolWebSearch: {"web_search"},
@@ -521,11 +588,13 @@ var copilotToolIDs = map[string][]string{
 // session removes from the model's catalog regardless of policy: sub-agent
 // orchestration, skills, SQL, and background task tools have no Orka
 // equivalent and would bypass the RuntimeSession boundary. The list is exactly
-// the set GitHub Copilot CLI 1.0.77 registers under the supervisor's flags
+// the set GitHub Copilot CLI 1.0.96 registers under the supervisor's flags
 // (verified in --acp mode): the CLI prints an "Unknown tool name" diagnostic
 // into the agent message stream for every --excluded-tools name outside its
 // catalog, and names such as ask_user, report_intent, exit_plan_mode, lsp, or
-// code_review are not registered tool names in that build at all. GitHub MCP
+// code_review are not registered tool names in that build at all. That build
+// registers skill only when the workspace contains skills, so it stays listed
+// for repositories that ship them. GitHub MCP
 // tools register as github-mcp-server-<tool> and are removed by
 // --disable-builtin-mcps; the ask_user tool is removed by --no-ask-user.
 var copilotAlwaysExcludedToolIDs = []string{"list_agents", "read_agent", "skill", "sql", "task", "write_agent"}
@@ -559,7 +628,7 @@ func copilotSessionProjection(
 		}
 	}
 	args := []string{"--excluded-tools=" + strings.Join(excluded, ",")}
-	// Copilot 1.0.77 supplies display titles, not structured tool names, in
+	// Copilot 1.0.96 supplies display titles, not structured tool names, in
 	// permission requests. Project the frozen native grants into CLI permission
 	// rules instead of treating those titles as authority. Exclusions above
 	// still remove every native tool outside the effective policy.
@@ -620,7 +689,7 @@ func openCodeSessionProjection(
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(descriptor.Name)) {
-		case "apply_patch", "bash", "edit", "glob", "grep", "read", "write":
+		case openCodeToolApplyPatch, openCodeToolBash, openCodeToolEdit, openCodeToolGlob, openCodeToolGrep, "read", openCodeToolWrite:
 		default:
 			return ProviderSessionProjection{}, fmt.Errorf(
 				"provider-native tool %q is not supported by the opencode projection",
@@ -658,8 +727,9 @@ func providerProfile(
 					return nil, err
 				}
 				return map[string]string{
-					"NO_BROWSER": "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
-					"CODEX_CONFIG": string(config), "INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
+					noBrowserEnv: "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
+					"CODEX_CONFIG": string(config), "MODEL_PROVIDER": codexProviderID,
+					"INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
 				}, nil
 			},
 			PrepareSession: prepareCodexHome,
@@ -674,7 +744,7 @@ func providerProfile(
 			EnvironmentForSession: func(_ harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
 				return map[string]string{
 					"CLAUDE_CONFIG_DIR": filepath.Join(paths.Home, ".claude"), "CLAUDE_CODE_EXECUTABLE": "/opt/claude/bin/claude",
-					"NO_BROWSER": "1", "DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_INSTALLATION_CHECKS": "1",
+					noBrowserEnv: "1", "DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_INSTALLATION_CHECKS": "1",
 					"ANTHROPIC_BASE_URL": proxy.BaseURL, "ANTHROPIC_API_KEY": proxy.Credential, "ANTHROPIC_MODEL": model,
 				}, nil
 			},
@@ -732,7 +802,7 @@ func providerProfile(
 				}
 				return map[string]string{
 					"CI":                                        "true",
-					"NO_BROWSER":                                "1",
+					noBrowserEnv:                                "1",
 					"OPENCODE_AUTH_CONTENT":                     "{}",
 					"OPENCODE_CONFIG_CONTENT":                   string(config),
 					"OPENCODE_CONFIG_DIR":                       filepath.Join(paths.Config, "opencode"),
@@ -817,7 +887,7 @@ func openCodeSessionConfig(
 		"webfetch":           openCodePermissionDeny,
 		"websearch":          openCodePermissionDeny,
 	}
-	for _, permission := range []string{"bash", "glob", "grep", "read"} {
+	for _, permission := range []string{openCodeToolBash, openCodeToolGlob, openCodeToolGrep, "read"} {
 		if openCodeToolPolicyAllows(toolPolicy, permission) {
 			permissions[permission] = openCodePermissionAllow
 		} else {
@@ -828,7 +898,7 @@ func openCodeSessionConfig(
 	if openCodeMutationPolicyAllows(toolPolicy) {
 		mutationAction = openCodePermissionAllow
 	}
-	for _, permission := range []string{"apply_patch", "edit", "write"} {
+	for _, permission := range []string{openCodeToolApplyPatch, openCodeToolEdit, openCodeToolWrite} {
 		permissions[permission] = mutationAction
 	}
 	brokeredPermissions, err := openCodeBrokeredPermissions(toolPolicy)
@@ -851,11 +921,11 @@ func openCodeSessionConfig(
 		}
 	}
 	if intent == harnessv2.WorkspaceIntentRead {
-		permissions["apply_patch"] = openCodePermissionDeny
-		permissions["bash"] = openCodePermissionDeny
-		permissions["edit"] = openCodePermissionDeny
-		permissions["grep"] = openCodePermissionDeny
-		permissions["write"] = openCodePermissionDeny
+		permissions[openCodeToolApplyPatch] = openCodePermissionDeny
+		permissions[openCodeToolBash] = openCodePermissionDeny
+		permissions[openCodeToolEdit] = openCodePermissionDeny
+		permissions[openCodeToolGrep] = openCodePermissionDeny
+		permissions[openCodeToolWrite] = openCodePermissionDeny
 	}
 	return json.Marshal(map[string]any{
 		// Native ACP returns before background title inference settles. Titles
@@ -877,10 +947,10 @@ func openCodeSessionConfig(
 		"subagent_depth":    0,
 		"provider": map[string]any{
 			openCodeProviderID: map[string]any{
-				"env":       []string{},
-				"name":      "Orka session proxy",
-				"npm":       "@ai-sdk/openai-compatible",
-				"whitelist": []string{model},
+				"env":             []string{},
+				protocolNameField: "Orka session proxy",
+				"npm":             "@ai-sdk/openai-compatible",
+				"whitelist":       []string{model},
 				"models": map[string]any{
 					model: map[string]any{
 						"limit": map[string]int64{
@@ -926,7 +996,7 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 // openCodeMutationPolicyAllows consumes the controller-normalized mutation
 // group. Any denied alias closes the entire shared OpenCode edit permission.
 func openCodeMutationPolicyAllows(policy harnessv2.MCPToolPolicy) bool {
-	mutationPermissions := []string{"apply_patch", "edit", "write"}
+	mutationPermissions := []string{openCodeToolApplyPatch, openCodeToolEdit, openCodeToolWrite}
 	for _, denied := range policy.DisallowedToolNames {
 		for _, permission := range mutationPermissions {
 			if strings.EqualFold(denied, permission) {
@@ -1018,14 +1088,31 @@ func copilotAdapterIdentity(goarch string) (string, string, error) {
 	}
 }
 
-func defaultProtocolLimits(provider string) harnessv2.ProtocolLimits {
+func defaultProtocolLimits() harnessv2.ProtocolLimits {
 	maxUpdates := runtimeMaxUpdateEventsPerSecond
 	return harnessv2.ProtocolLimits{
 		MaxResidentSessions: 10, MaxConcurrentPrompts: 4, MaxRequestBytes: 2 << 20,
 		MaxEventLineBytes: 1 << 20, MaxTerminalResultBytes: 1 << 20, MaxBufferedEvents: supervisorMaxBufferedPromptEvents,
 		MaxUpdateEventsPerSecond: maxUpdates, MinPromptLeaseMillis: 5_000, MaxPromptLeaseMillis: 120_000,
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
+		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+func nativeSessionMaxBytesFromEnv() (int, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvNativeSessionMaxBytes))
+	if raw == "" {
+		return harnessv2.DefaultMaxNativeSessionBytes, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", EnvNativeSessionMaxBytes)
+	}
+	limit, err = harnessv2.NormalizeNativeSessionMaxBytes(limit)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", EnvNativeSessionMaxBytes, err)
+	}
+	return limit, nil
 }
 
 func workspaceArtifactDownloadLimitFromEnv() (int64, error) {

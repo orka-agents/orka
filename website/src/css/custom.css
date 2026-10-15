@@ -101,6 +101,31 @@
   max-width: 700px;
 }
 
+/* Video demos */
+.demo-video {
+  margin: 0 0 1.5rem;
+}
+
+.demo-video-frame {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: 8px;
+}
+
+.demo-video figcaption {
+  margin-top: 0.75rem;
+  line-height: 1.5;
+}
+
+.demo-video a:focus-visible,
+.demo-video-frame:focus-visible {
+  outline: 2px solid var(--ifm-color-primary);
+  outline-offset: 3px;
+}
+
 /* Quick Start */
 .quickstart-grid {
   display: grid;
@@ -208,6 +233,9 @@
 
 /* Responsive */
 @media (max-width: 768px) {
+  .quickstart-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .hero-tagline {
     font-size: 1.2rem;
   }

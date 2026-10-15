@@ -10,6 +10,7 @@ resources:
 - core_v1alpha1_agent_codex.yaml
 - core_v1alpha1_agent_opencode.yaml
 - core_v1alpha1_outboundaccesspolicy.yaml
+- core_v1alpha1_connectorprovider.yaml
 - gateway_v1alpha1_gatewayclass.yaml
 - gateway_v1alpha1_gateway.yaml
 - gateway_v1alpha1_gatewaybinding.yaml

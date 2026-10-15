@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -44,6 +43,11 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
+const (
+	apiFieldContent = "content"
+	apiFieldName    = "name"
+)
+
 var chatLog = logf.Log.WithName("chat-handler")
 
 const (
@@ -64,7 +68,10 @@ const (
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
-	Enabled                bool
+	Enabled bool
+	// ConnectorsEnabled mirrors --connectors-enabled: without it the
+	// linked-account surfaces (list_connections) are not offered at all.
+	ConnectorsEnabled      bool
 	Provider               string
 	Model                  string
 	MaxIterations          int
@@ -76,7 +83,15 @@ type ChatConfig struct {
 	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
 	RuntimeAvailability    ACPRuntimeAvailability
 	ExecutionMode          executionmode.Mode
+	// LinkedAccounts builds the linked-account resolver for one signed-in
+	// person's chat turn; nil leaves built-in GitHub tools on their own
+	// credentials. The controller wires it when connectors are enabled.
+	LinkedAccounts LinkedAccountsFactory
 }
+
+// LinkedAccountsFactory returns a resolver for a person's linked accounts
+// in a namespace, or nil when there is nothing to resolve.
+type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) chattools.LinkedAccountCredentials
 
 // ACPRuntimeAvailability identifies built-in profiles backed by configured,
 // digest-pinned RuntimePool images.
@@ -311,6 +326,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Resolve or create session ID
 	sessionID := resolveChatSessionID(req.SessionID)
+	ctx = usageRequestContext(ctx, ch.resultStore, uncachedReaderOr(ch.apiReader, ch.client), namespace, sessionID)
 	if req.SessionID != "" {
 		for _, verb := range []string{"get", "update"} {
 			if err := authorizeKubernetesResourceAction(ctx, ch.kubeClient, userInfo, namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", sessionID); err != nil {
@@ -385,6 +401,21 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
+	promptBuilder.SetChatProvider(providerInfo.Name)
+	// The tool list itself is built later; filter the names the same way now
+	// so the prompt only describes tools this caller is offered.
+	chatToolNames := chattools.ChatToolNames()
+	chatToolStubs := make([]llm.Tool, 0, len(chatToolNames))
+	for _, name := range chatToolNames {
+		chatToolStubs = append(chatToolStubs, llm.Tool{Name: name})
+	}
+	if !ch.config.ConnectorsEnabled {
+		chatToolStubs = filterCompletionToolsExcluding(chatToolStubs, chattools.ListConnectionsToolName)
+	}
+	offeredChatTools := completionToolNames(filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, chatToolStubs))
+	if len(offeredChatTools) < len(chatToolStubs) {
+		promptBuilder.SetAvailableChatTools(offeredChatTools)
+	}
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
@@ -403,40 +434,28 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 	persistedCount := len(messages)
 
-	// Append user message — if an agentRef is set and the agent has a runtime,
-	// prepend context so the LLM knows to use create_agent_task.
+	// Append user message — if an agentRef is set, prepend context so the LLM
+	// knows which agent the user selected and which task tool runs it.
 	userContent := req.Message
 	if req.AgentRef != "" {
 		agentObj := &corev1alpha1.Agent{}
 		if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agentObj); err == nil {
-			if agentObj.Spec.Runtime != nil {
+			switch {
+			case agentObj.Spec.Runtime != nil && slices.Contains(offeredChatTools, "create_agent_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has runtime %q — use create_agent_task with agent=%q for this request.]\n\n%s",
 					req.AgentRef, agentObj.Spec.Runtime.Type, req.AgentRef, req.Message)
+			case agentObj.Spec.Runtime == nil && slices.Contains(offeredChatTools, "create_ai_task"):
+				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
+					req.AgentRef, req.AgentRef, req.Message)
+			default:
+				// The tool that runs this agent is not offered; keep the selection
+				// visible without telling the model to call it.
+				userContent = fmt.Sprintf("[Using agent %q. The tool that runs it is not available in this conversation.]\n\n%s",
+					req.AgentRef, req.Message)
 			}
 		}
 	}
 
-	// Auto-route to dev-coordinator for issue/PR workflows.
-	// Chat just creates the coordinator — the coordinator creates its own specialist agents.
-	if req.AgentRef == "" && looksLikeIssueWorkflow(req.Message) {
-		userContent = fmt.Sprintf("[System: This is an issue workflow. "+
-			"You MUST create a dev-coordinator agent using create_agent with initialPrompt (one-shot pattern). "+
-			"Set coordination.enabled=true, providerRef=\"copilot\", model.name=\"gpt-5.4\", maxDepth=3, maxConcurrentChildren=5. "+
-			"CRITICAL: The dev-coordinator must NOT have a runtime — it must be a plain AI agent with providerRef. "+
-			"The coordinator system prompt must instruct it to: "+
-			"1) Use create_agent to create any specialist agents it needs (coder as copilot runtime, reviewers as copilot runtime with different models like claude-opus-4.6, gpt-5.4, gemini-3-pro). "+
-			"Set allowedAgents to include the agents it creates. "+
-			"2) Follow this adaptive workflow: "+
-			"Phase 1 — ANALYZE: Read the issue and determine what phases are needed. "+
-			"Phase 2 — PLAN & DESIGN: If needed, delegate design/planning to a coder agent, then review with multiple reviewer agents in parallel. "+
-			"Phase 3 — CODE: Delegate implementation to the coder agent with a pushBranch. "+
-			"Phase 4 — VALIDATE: Before review, determine the validation image and command from repository evidence such as CI workflows, toolchain files, Dockerfiles/devcontainers, Makefiles, and docs. Run validation with create_container_task on an immutable ref when available. If the environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED. Allow up to 6 validation repair tasks before reporting VALIDATION_BLOCKED. "+
-			"Phase 5 — REVIEW LOOP: Delegate parallel reviews to reviewer agents, then delegate coder repairs on the same branch until validation passes and all reviewers approve. Bound this to at most 8 review repair tasks. "+
-			"Phase 6 — PR + CI LOOP: After validation passes and reviewers approve, create or update the PR, then call check_pull_request_ci once with wait_timeout=\"30m\" and poll_interval=\"30s\". If checks fail, delegate a focused CI repair task to the coder on the PR branch, then re-run validation and reviewers before re-checking CI. Bound this to at most 3 CI repair tasks; if the CI check times out while still pending, report CI_PENDING. "+
-			"Phase 7 — APPROVE: Post final approval only after validation passes, reviewers approve, and CI is green. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Report VALIDATION_BLOCKED, REVIEW_BLOCKED, CI_BLOCKED, or CI_PENDING when a bounded loop is exhausted. Do not merge unless the user explicitly asks. "+
-			"Use initialPrompt to pass the user's request so the coordinator starts immediately. "+
-			"Include the gitRepo URL in the initialPrompt.]\n\n%s", req.Message)
-	}
 	messages = append(messages, llm.Message{
 		Role:    chatRoleUser,
 		Content: userContent,
@@ -446,11 +465,19 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
 	executor.userInfo = userInfo
 	executor.gatewayEventStore = ch.gatewayEventStore
+	executor.requester = requesterFromUserInfo(userInfo)
+	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
+	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
+	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
+	executor.providerNamespace = providerInfo.Namespace
 	executor.providerType = providerInfo.Type
 	authorizationReader := ch.contextTokenAuthorizationReader()
 	executor.SetPolicyReader(authorizationReader)
+	executor.authorizeAgentReference = func(_ context.Context, agent *corev1alpha1.Agent) error {
+		return authorizeContextTokenAgentTaskReference(contextToken, ch.contextTokenAuthorization, agent.Namespace, agent.Name)
+	}
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
 		return authorizeAndStampToolTaskCreate(ctx, authorizationReader, ch.kubeClient, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
@@ -472,6 +499,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())
+	if !ch.config.ConnectorsEnabled {
+		tools = filterCompletionToolsExcluding(tools, chattools.ListConnectionsToolName)
+	}
 	tools = filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, tools)
 	if err := authorizeContextTokenToolUse(c, ch.contextTokenAuthorization, "chatTools", completionToolNames(tools)); err != nil {
 		return err
@@ -547,6 +577,7 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		trace.ContextWithSpanContext(context.Background(), req.span.SpanContext()),
 		baggage.FromContext(req.parentCtx),
 	)
+	sseParentCtx = llm.CopyUsageRecorder(sseParentCtx, req.parentCtx)
 	var streamOwnership atomic.Uint32
 	finalizeStream := sync.OnceFunc(func() {
 		req.finalizeTurn()
@@ -990,11 +1021,11 @@ func (ch *ChatHandler) runToolLoop(
 			// If so, re-prompt the LLM to keep waiting instead of ending the session.
 			if executor.tasksCreated > 0 && hasRunningTasks(iterCtx, taskClient, namespace, sessionID) {
 				if emitSSE != nil && resp.Content != "" {
-					msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+					msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 					emitSSE("message", string(msgData))
 				}
 				appendTurnMessages(
-					llm.Message{Role: "assistant", Content: resp.Content},
+					llm.Message{Role: chatRoleAssistant, Content: resp.Content},
 					llm.Message{Role: chatRoleUser, Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
 				)
 				// Don't increment iteration here — the for loop's post-statement handles it
@@ -1065,7 +1096,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	usage.InputTokens += resp.InputTokens
 	usage.OutputTokens += resp.OutputTokens
 
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: resp.Content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: resp.Content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1075,7 +1106,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	}
 
 	if emitSSE != nil && resp.Content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 		emitSSE("message", string(msgData))
 	}
 
@@ -1129,7 +1160,7 @@ func (ch *ChatHandler) executeToolCalls(
 	repetitionTracker map[string]int,
 ) ([]llm.Message, []ToolCallInfo, int) {
 	messages := []llm.Message{{
-		Role:      "assistant",
+		Role:      chatRoleAssistant,
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
 	}}
@@ -1141,9 +1172,9 @@ func (ch *ChatHandler) executeToolCalls(
 	for _, tc := range resp.ToolCalls {
 		if emitSSE != nil {
 			tcData, _ := json.Marshal(map[string]any{
-				"id":   tc.ID,
-				"name": tc.Name,
-				"args": tc.Arguments,
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"args":       tc.Arguments,
 			})
 			emitSSE("tool_call", string(tcData))
 		}
@@ -1167,15 +1198,15 @@ func (ch *ChatHandler) executeToolCalls(
 
 		if emitSSE != nil {
 			trData, _ := json.Marshal(map[string]any{
-				"id":     tc.ID,
-				"name":   tc.Name,
-				"result": json.RawMessage(result),
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"result":     json.RawMessage(result),
 			})
 			emitSSE("tool_result", string(trData))
 		}
 
 		messages = append(messages, llm.Message{
-			Role:       "tool",
+			Role:       chatRoleTool,
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
 			Content:    result,
@@ -1213,7 +1244,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	turnID string,
 	start time.Time,
 ) (string, error) {
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1223,7 +1254,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	}
 
 	if emitSSE != nil && content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: content})
 		emitSSE("message", string(msgData))
 	}
 
@@ -1341,6 +1372,12 @@ func (ch *ChatHandler) saveChatSession(
 // HandleChatConfig handles GET /api/v1/chat/config.
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	toolNames := chattools.ChatToolNames()
+	// The advertised set matches what a turn will actually offer: no
+	// list_connections without connectors, or for a delegated token that
+	// may not read linked accounts.
+	if !ch.config.ConnectorsEnabled || !contextTokenAllowsConnectorRead(GetUserInfo(c), ch.contextTokenAuthorization) {
+		toolNames = slices.DeleteFunc(slices.Clone(toolNames), func(name string) bool { return name == chattools.ListConnectionsToolName })
+	}
 
 	// Context-token callers must name a Provider explicitly: the resolver
 	// refuses the implicit server default for them, so the UI must not offer
@@ -1360,6 +1397,7 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 		"maxTasksPerTurn":         ch.config.MaxTasksPerTurn,
 		"maxConcurrent":           ch.config.MaxConcurrent,
 		"availableTools":          toolNames,
+		"connectorsEnabled":       ch.config.ConnectorsEnabled,
 	})
 }
 
@@ -1531,6 +1569,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 		if fbProviderCRD.Spec.Azure != nil {
 			fbConfig.AzureAPIVersion = fbProviderCRD.Spec.Azure.APIVersion
+			fbConfig.AzureDeploymentName = fbProviderCRD.Spec.Azure.DeploymentName
 		}
 
 		fbProvider, err := llm.NewProvider(string(fbProviderCRD.Spec.Type), fbConfig)
@@ -1598,29 +1637,4 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 		}
 	}
 	return false
-}
-
-// looksLikeIssueWorkflow checks if the user message contains patterns suggesting
-// a GitHub issue implementation workflow (fix, implement, create PR).
-// Uses word-boundary matching to avoid false positives from substrings.
-func looksLikeIssueWorkflow(message string) bool {
-	lower := strings.ToLower(message)
-	// Must mention a GitHub issue
-	hasIssue := strings.Contains(lower, "/issues/") ||
-		strings.Contains(lower, "issue #") ||
-		strings.Contains(lower, "issue#")
-	if !hasIssue {
-		return false
-	}
-	// Must suggest implementation work — use multi-word phrases or word boundaries
-	// to avoid false positives (e.g., "pr" in "problem", "fix" in "prefix")
-	actionPhrases := []string{"pick up", "work on", "pull request", "create a pr", "open a pr", "make a pr"}
-	for _, phrase := range actionPhrases {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	// Single-word actions need word boundary checks
-	actionWordsPattern := regexp.MustCompile(`\b(fix|implement|resolve|address)\b`)
-	return actionWordsPattern.MatchString(lower)
 }

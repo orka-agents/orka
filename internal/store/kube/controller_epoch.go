@@ -967,7 +967,7 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 		}
 
 		if !time.Now().Before(deadline) {
-			return store.ControllerEpochFence{}, epochSnapshot{}, lastConflict
+			return store.ControllerEpochFence{}, epochSnapshot{}, fmt.Errorf("%w: %w", store.ErrControllerEpochMutationContention, lastConflict)
 		}
 		wait := retryDelay
 		if remaining := time.Until(deadline); wait > remaining {

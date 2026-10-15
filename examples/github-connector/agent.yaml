@@ -1,0 +1,39 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: github-as-me
+spec:
+  model:
+    name: gpt-5.4
+  runtime:
+    type: codex
+    contractVersion: orka.harness.v2
+    defaultMaxTurns: 40
+    defaultAllowBash: false
+    # The GitHub tools are offered to the agent only when the person who
+    # created the Task has linked GitHub. Write tools also need a readWrite
+    # Connection and ask for approval before they run, which the built-in
+    # codex runtime cannot do: on it only the read tools are offered. Keep
+    # the write tools listed so the same Agent works on an external
+    # AgentKit or Foundry runtime that registers them as approval-required.
+    # With Bash off, codex enforces exactly one restricted native surface:
+    # Read, Glob, and Grep on a read workspace. Without them every Task fails
+    # at dispatch.
+    defaultAllowedTools:
+      - Read
+      - Glob
+      - Grep
+      - list_pull_requests
+      - list_issues
+      - get_issue
+      - review_pull_request
+      - check_pull_request_ci
+      - comment_on_issue
+      - create_pull_request
+      - post_review_comment
+  systemPrompt:
+    inline: |
+      You act on GitHub as the person who created this task, using their
+      linked account. Read before you write. Explain what you are about to
+      change before calling a write tool, because the person will be asked
+      to approve it.

@@ -14,6 +14,10 @@ import (
 const (
 	ProtocolVersion = "orka.workspace-publisher.v1"
 
+	// PullRequestPresentationFeature is opt-in so legacy strict v1 clients do
+	// not receive an unknown field in their capabilities response.
+	PullRequestPresentationFeature = "pull-request-presentation.v1"
+
 	HealthPath                   = "/v1/health"
 	CapabilitiesPath             = "/v1/capabilities"
 	WorkspaceResolvePath         = "/v1/workspaces/resolve"
@@ -279,6 +283,7 @@ type CapabilitiesResponse struct {
 	RedirectsAllowed          bool             `json:"redirectsAllowed"`
 	ProviderOrMCPAccess       bool             `json:"providerOrMcpAccess"`
 	PullRequestReconciliation bool             `json:"pullRequestReconciliation"`
+	PullRequestPresentation   bool             `json:"pullRequestPresentation,omitempty"`
 	Limits                    CapabilityLimits `json:"limits"`
 }
 

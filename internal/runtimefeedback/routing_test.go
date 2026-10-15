@@ -185,7 +185,7 @@ func TestClientRejectsAmbiguousMalformedOrUnboundedNodeRouting(t *testing.T) {
 			t.Fatal("malformed or unbounded mapping accepted")
 		}
 	}
-	for _, origin := range []string{"http://gkr.invalid", "https://gkr.invalid/report", "https://user:pass@gkr.invalid", "https://gkr.invalid?key=value", "https://gkr.invalid?", "https://gkr.invalid#fragment", "https://gkr.invalid/%2F"} {
+	for _, origin := range []string{"http://gkr.invalid", "https://gkr.invalid/report", "https://fixture@gkr.invalid", "https://:@gkr.invalid", "https://gkr.invalid?key=value", "https://gkr.invalid?", "https://gkr.invalid#fragment", "https://gkr.invalid/%2F"} {
 		writeTestNodeURLs(t, config.NodeURLsFile, map[string]string{testRoutingNodeA: "https://valid.invalid", testRoutingNodeB: origin})
 		if _, err := NewClient(config); err == nil {
 			t.Fatalf("invalid origin accepted: %q", origin)

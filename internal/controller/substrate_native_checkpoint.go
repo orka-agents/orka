@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+//nolint:gocyclo // Native drain preserves the order of quiescence, checkpoint, and retirement checks.
 func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, cm *corev1.ConfigMap, record *substrateNativeState, actor *ateapipb.Actor, checkpoint bool) (bool, ctrl.Result, error) {
 	wait := func(message string) (bool, ctrl.Result, error) {
 		poolStatus := r.baseRuntimePoolStatus(pool, 1)
@@ -96,6 +97,22 @@ func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context,
 	}
 	if !probeQuiescent {
 		return wait(runtimePoolMessageDrainSettling)
+	}
+	if !checkpoint && !pool.DeletionTimestamp.IsZero() {
+		if record.Attempt.SettlementWaitStartedAt == nil {
+			startedAt := metav1.NewTime(r.now())
+			record.Attempt.SettlementWaitStartedAt = &startedAt
+			if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
+				return false, ctrl.Result{}, err
+			}
+		}
+		settled, err := r.nativeSubstrateDeletionTasksSettled(ctx, pool, active, record.Attempt.SettlementWaitStartedAt.Time)
+		if err != nil {
+			return false, ctrl.Result{}, err
+		}
+		if !settled {
+			return wait("waiting for controller Task settlement before deleting the quiescent native runtime")
+		}
 	}
 	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
 		return false, ctrl.Result{}, err

@@ -142,6 +142,11 @@ func TestCodexCompletedMCPOutputRejectsUnfrozenIdentity(t *testing.T) {
 			start, _, complete := codexMCPOutputFixture(t)
 			codexMCPOutputTestText(complete, "untrusted-private-report")
 			test.mutate(pipeline, start, complete)
+			switch test.name {
+			case "unknown source", "provider native source", "denied tool", "missing frozen descriptor", "other server", "unrecognized tool", "title cannot supply identity":
+				pipeline.rejectInvalidIdentity(t, start)
+				return
+			}
 			pipeline.update(t, start)
 			mapped := pipeline.update(t, complete)
 			_, body := pipeline.events(t)
@@ -201,7 +206,7 @@ func TestCodexCompletedMCPOutputOmitsUnsupportedSnapshots(t *testing.T) {
 		}},
 		{name: "mismatched terminal server", mutate: func(wire map[string]any) { wire["rawInput"].(map[string]any)["server"] = "other" }},
 		{name: "mismatched terminal tool", mutate: func(wire map[string]any) { wire["rawInput"].(map[string]any)["tool"] = "recall_memory" }},
-		{name: "missing terminal identity", mutate: func(wire map[string]any) { delete(wire, "rawInput") }},
+		{name: "null repeated terminal identity", mutate: func(wire map[string]any) { wire["rawInput"] = nil }},
 		{name: "oversized terminal input", mutate: func(wire map[string]any) {
 			wire["rawInput"].(map[string]any)["arguments"] = strings.Repeat("x", harnessv2.MaxMCPArgumentsBytes+(1<<10))
 		}},
@@ -307,13 +312,25 @@ func TestCodexCompletedMCPOutputRedactsAcrossPriorCommand(t *testing.T) {
 	const suffix = "syntheticfixtureabcdefghijklmnop"
 	pipeline := codexMCPOutputTestPipeline(t)
 	pipeline.update(t, codexOutputTestStart("prior-command", "printf prior"))
-	pipeline.update(t, codexOutputTestComplete("prior-command", "sk-", 0))
+	pipeline.update(t, codexOutputTestComplete("prior-command", "sk", 0))
 	start, _, complete := codexMCPOutputFixture(t)
-	codexMCPOutputTestText(complete, suffix)
+	codexMCPOutputTestText(complete, "-"+suffix)
 	pipeline.update(t, start)
 	pipeline.update(t, complete)
 	listed, body := pipeline.events(t)
 	if strings.Contains(body, suffix) || listed.Events[len(listed.Events)-1].ContentText != executionevents.ExecutionEventRedactedValue {
 		t.Fatal("command-to-MCP output boundaries exposed a reconstructable synthetic secret")
+	}
+}
+
+func TestCodexCompletedMCPOutputAcceptsCompactedInput(t *testing.T) {
+	pipeline := codexMCPOutputTestPipeline(t)
+	start, _, complete := codexMCPOutputFixture(t)
+	delete(complete, "rawInput") // ToolCallReports omits unchanged fields.
+	pipeline.update(t, start)
+	mapped := pipeline.update(t, complete)
+	listed, _ := pipeline.events(t)
+	if mapped.Update.ToolCall.ContentOmitted || !mapped.Update.ToolCall.ContentReplace || listed.Events[len(listed.Events)-1].ContentText != "Available" {
+		t.Fatal("compacted current producer completion lost its frozen start identity")
 	}
 }

@@ -68,9 +68,9 @@ func makeSecret(name, ns, key, value string) *corev1.Secret { //nolint:unparam
 	}
 }
 
-func makeAgent(name, ns string, providerRef *corev1alpha1.ProviderReference, model *corev1alpha1.ModelConfig) *corev1alpha1.Agent {
+func makeAgent(name string, providerRef *corev1alpha1.ProviderReference, model *corev1alpha1.ModelConfig) *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: corev1alpha1.AgentSpec{
 			ProviderRef: providerRef,
 			Model:       model,
@@ -342,7 +342,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			name: "agent ref with provider and model",
 			objects: []runtime.Object{
 				openaiProvider, openaiSecret,
-				makeAgent("my-agent", ns,
+				makeAgent("my-agent",
 					&corev1alpha1.ProviderReference{Name: openaiProviderName},
 					&corev1alpha1.ModelConfig{Name: "gpt-4o"},
 				),
@@ -360,7 +360,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			name: "agent ref without provider falls to config provider",
 			objects: []runtime.Object{
 				openaiProvider, openaiSecret,
-				makeAgent("agent-no-prov", ns, nil, &corev1alpha1.ModelConfig{Name: "gpt-4o"}),
+				makeAgent("agent-no-prov", nil, &corev1alpha1.ModelConfig{Name: "gpt-4o"}),
 			},
 			config: func() ChatConfig {
 				c := DefaultChatConfig()
@@ -407,7 +407,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			name: "runtime agent without providerRef falls back to the sole ready Provider",
 			objects: []runtime.Object{
 				readyProvider(openaiProvider), openaiSecret,
-				makeAgent(testRuntimeAgentName, ns, nil, &corev1alpha1.ModelConfig{Name: testRuntimeAgentModel}),
+				makeAgent(testRuntimeAgentName, nil, &corev1alpha1.ModelConfig{Name: testRuntimeAgentModel}),
 			},
 			config: DefaultChatConfig(),
 			opts: ResolveOpts{
@@ -421,7 +421,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			name: "runtime agent without providerRef and several Providers stays non-enumerating",
 			objects: []runtime.Object{
 				readyProvider(anthropicProvider), anthropicSecret, readyProvider(openaiProvider), openaiSecret,
-				makeAgent(testRuntimeAgentName, ns, nil, &corev1alpha1.ModelConfig{Name: testRuntimeAgentModel}),
+				makeAgent(testRuntimeAgentName, nil, &corev1alpha1.ModelConfig{Name: testRuntimeAgentModel}),
 			},
 			config: DefaultChatConfig(),
 			opts: ResolveOpts{
@@ -434,7 +434,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			name: "runtime agent accepts an explicit provider",
 			objects: []runtime.Object{
 				readyProvider(anthropicProvider), anthropicSecret, readyProvider(openaiProvider), openaiSecret,
-				makeAgent(testRuntimeAgentName, ns, nil, &corev1alpha1.ModelConfig{Name: testRuntimeAgentModel}),
+				makeAgent(testRuntimeAgentName, nil, &corev1alpha1.ModelConfig{Name: testRuntimeAgentModel}),
 			},
 			config: DefaultChatConfig(),
 			opts: ResolveOpts{
@@ -449,7 +449,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			name: "agent bound to a provider rejects a different explicit provider",
 			objects: []runtime.Object{
 				readyProvider(anthropicProvider), anthropicSecret, readyProvider(openaiProvider), openaiSecret,
-				makeAgent("bound-agent", ns, &corev1alpha1.ProviderReference{Name: openaiProviderName}, &corev1alpha1.ModelConfig{Name: "gpt-4o"}),
+				makeAgent("bound-agent", &corev1alpha1.ProviderReference{Name: openaiProviderName}, &corev1alpha1.ModelConfig{Name: "gpt-4o"}),
 			},
 			config: DefaultChatConfig(),
 			opts: ResolveOpts{
@@ -572,7 +572,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			name: "opts.Model overrides agent model",
 			objects: []runtime.Object{
 				openaiProvider, openaiSecret,
-				makeAgent("override-agent", ns,
+				makeAgent("override-agent",
 					&corev1alpha1.ProviderReference{Name: openaiProviderName},
 					&corev1alpha1.ModelConfig{Name: "agent-model"},
 				),

@@ -36,6 +36,13 @@ import (
 )
 
 const (
+	summaryField                      = "summary"
+	issueNumberField                  = "issueNumber"
+	issueImplementationMutationAction = "issue_implementation_mutation"
+	targetField                       = "target"
+)
+
+const (
 	repositoryMonitorIssueActionTriage           = "issue_triage"
 	repositoryMonitorIssueActionResearch         = "issue_research"
 	repositoryMonitorIssueActionPlan             = "issue_plan"
@@ -43,7 +50,6 @@ const (
 	repositoryMonitorIssueActionDecompose        = "issue_decompose"
 	repositoryMonitorIssueActionMutateToPR       = "mutate_to_pr"
 	repositoryMonitorCommandIntentImplement      = "implement"
-	repositoryMonitorCommandIntentApprovePlan    = "approve_plan"
 	repositoryMonitorIssueUnknownValue           = "unknown"
 	repositoryMonitorPatchPathDenied             = "patch_path_denied"
 	repositoryMonitorPatchPathInvalid            = "patch_path_invalid"
@@ -52,7 +58,6 @@ const (
 	repositoryMonitorMutationAuditUpdateFailed   = "mutation_audit_update_failed"
 	repositoryMonitorPatchOldFilePrefix          = "--- "
 	repositoryMonitorPatchNewFilePrefix          = "+++ "
-	repositoryMonitorIssueActionApprove          = "issue_approve_plan"
 	repositoryMonitorIssueVerdictReady           = "ready"
 	repositoryMonitorIssueVerdictSuccess         = "success"
 	repositoryMonitorCommandIntentStop           = "stop"
@@ -69,8 +74,10 @@ const (
 	repositoryMonitorIssuePhasePlanQueued           = "plan_queued"
 	repositoryMonitorIssuePhasePlanning             = "planning"
 	repositoryMonitorIssuePhasePlanReady            = "plan_ready"
-	repositoryMonitorIssuePhaseApprovalRequired     = "approval_required"
-	repositoryMonitorIssuePhaseApproved             = "approved"
+	repositoryMonitorIssuePhasePlanned              = "planned"
+	repositoryMonitorIssuePhasePaused               = "paused"
+	repositoryMonitorIssueSnapshotSuperseded        = "issue_snapshot_superseded"
+	repositoryMonitorIssuePausedTaskMissing         = "paused_task_missing"
 	repositoryMonitorIssuePhaseImplementationQueued = "implementation_queued"
 	repositoryMonitorIssuePhaseImplementing         = "implementing"
 	repositoryMonitorIssuePhasePatchReady           = "patch_ready"
@@ -117,6 +124,9 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		}
 		return 0, err
 	}
+	if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
+		return 0, r.retireRepositoryMonitorCommand(ctx, monitor, command, run, reason)
+	}
 	item.LastCommandID = command.ID
 	item.LastCommandIntent = command.Intent
 	if strings.TrimSpace(command.IssueSnapshotDigest) != "" && command.IssueSnapshotDigest != item.SnapshotDigest &&
@@ -145,7 +155,8 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorIssueKind, item.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
 			return 0, err
 		}
-		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorIssueKind, item.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
+		stopActionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop)
+		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorIssueKind, item.Number, repositoryMonitorIssueSkipStoppedByCommand, stopActionID); err != nil {
 			return 0, err
 		}
 		if err := r.cancelRepositoryMonitorImplementationJobs(ctx, monitor, item.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
@@ -165,50 +176,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		item.SkipReason = ""
 		item.LastVerdict = ""
 		return 0, r.Store.UpsertMonitorItem(ctx, item)
-	case repositoryMonitorCommandIntentApprovePlan:
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorIssueActionApprove); err != nil || cancelled {
-			return 0, err
-		}
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
-			return 0, err
-		}
-		plan, err := r.latestCurrentIssuePlan(ctx, monitor, item)
-		if err != nil {
-			return 0, err
-		}
-		if plan == nil {
-			item.WorkflowPhase = repositoryMonitorIssuePhaseApprovalRequired
-			item.SkipReason = "no_current_plan_to_approve"
-			item.LastVerdict = repositoryMonitorIssuePhaseBlocked
-			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionApprove, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", item.SkipReason); err != nil {
-				return 0, err
-			}
-			return 0, r.Store.UpsertMonitorItem(ctx, item)
-		}
-		item.WorkflowPhase = repositoryMonitorIssuePhaseApproved
-		item.SkipReason = ""
-		item.LastVerdict = repositoryMonitorIssuePhaseApproved
-		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-			return 0, err
-		}
-		if err := r.createIssueApprovalActionRecord(ctx, monitor, command, item, plan.ID); err != nil {
-			return 0, err
-		}
-		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionApprove, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorIssuePhaseApproved, "", ""); err != nil {
-			return 0, err
-		}
-		implementationCommand, err := r.repositoryMonitorImplementationCommandForPlan(ctx, monitor, command, plan)
-		if err != nil {
-			return 0, err
-		}
-		if implementationCommand == nil {
-			return 0, nil
-		}
-		continuingOriginalImplement := implementationCommand.ID != command.ID
-		if !continuingOriginalImplement && (!repositoryMonitorIssuePhaseEnabled(monitor, repositoryMonitorIssueActionImplementation) || monitor.Spec.Agents.Implementer == nil || strings.TrimSpace(monitor.Spec.Agents.Implementer.Name) == "") {
-			return 0, nil
-		}
-		return r.queueRepositoryMonitorIssueImplementation(ctx, monitor, run, implementationCommand, item, owner, repository, plan.ID)
+
 	}
 
 	actionKind, phase, agent := repositoryMonitorIssueActionForIntent(monitor, command.Intent)
@@ -216,16 +184,16 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		return 0, nil
 	}
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorIssueImplementationInProgress(item.WorkflowPhase) {
-		// Plan approval already queued the implementation; a maintainer's
+		// Planning already queued the implementation; a maintainer's
 		// explicit implement label arriving now must not restart planning
-		// (which would discard the approved plan) or start a second job.
+		// (which would discard the ready plan) or start a second job.
 		reason := "implementation_already_active:" + item.WorkflowPhase
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusSucceeded, item.WorkflowPhase, "", reason); err != nil {
 			return 0, err
 		}
 		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_skipped", fmt.Sprintf("Issue #%d implement command skipped: %s", item.Number, reason), map[string]any{repositoryMonitorEventActionKindKey: repositoryMonitorIssueActionImplementation, "phase": item.WorkflowPhase})
 	}
-	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequireApprovedPlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhaseApproved {
+	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequirePlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhasePlanned {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
 	}
 	if !repositoryMonitorIssuePhaseTransitionAllowed(item.WorkflowPhase, phase) {
@@ -233,7 +201,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, actionKind, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", reason); err != nil {
 			return 0, err
 		}
-		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d command blocked: %s", item.Number, reason), map[string]any{"actionKind": actionKind, "fromPhase": item.WorkflowPhase, "toPhase": phase})
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d command blocked: %s", item.Number, reason), map[string]any{repositoryMonitorEventActionKindKey: actionKind, "fromPhase": item.WorkflowPhase, "toPhase": phase})
 	}
 	if !repositoryMonitorIssuePhaseEnabled(monitor, actionKind) {
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
@@ -247,7 +215,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return 0, err
 		}
-		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{"actionKind": actionKind})
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
 	}
 	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, actionKind); err != nil || cancelled {
 		return 0, err
@@ -278,7 +246,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return 0, err
 		}
-		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: no agent configured for %s", item.Number, actionKind), map[string]any{"actionKind": actionKind})
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: no agent configured for %s", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
 	}
 	taskName, created, err := r.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, owner, repository, actionKind, phase, agent)
 	if err != nil {
@@ -298,7 +266,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return 0, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_task_created", fmt.Sprintf("Issue #%d %s task queued", item.Number, actionKind), map[string]any{"taskName": taskName, "created": created, "actionKind": actionKind}); err != nil {
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_task_created", fmt.Sprintf("Issue #%d %s task queued", item.Number, actionKind), map[string]any{eventTaskNameField: taskName, acpSessionOutcomeCreated: created, repositoryMonitorEventActionKindKey: actionKind}); err != nil {
 		return 0, err
 	}
 	if created {
@@ -367,11 +335,11 @@ func repositoryMonitorIssueImplementationInProgress(phase string) bool {
 	return false
 }
 
-func repositoryMonitorRequireApprovedPlan(monitor *corev1alpha1.RepositoryMonitor) bool {
-	if monitor == nil || monitor.Spec.IssueWorkflow.Implementation.RequireApprovedPlan == nil {
+func repositoryMonitorRequirePlan(monitor *corev1alpha1.RepositoryMonitor) bool {
+	if monitor == nil || monitor.Spec.IssueWorkflow.Implementation.RequirePlan == nil {
 		return true
 	}
-	return *monitor.Spec.IssueWorkflow.Implementation.RequireApprovedPlan
+	return *monitor.Spec.IssueWorkflow.Implementation.RequirePlan
 }
 
 func (r *RepositoryMonitorReconciler) queueRepositoryMonitorIssueImplementation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, item *store.MonitorItem, owner, repository, planID string) (int, error) {
@@ -420,7 +388,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorIssueImplementation(
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return 0, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_task_created", fmt.Sprintf("Issue #%d implementation task queued", item.Number), map[string]any{"taskName": taskName, "created": created, "actionKind": repositoryMonitorIssueActionImplementation}); err != nil {
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_task_created", fmt.Sprintf("Issue #%d implementation task queued", item.Number), map[string]any{eventTaskNameField: taskName, acpSessionOutcomeCreated: created, repositoryMonitorEventActionKindKey: repositoryMonitorIssueActionImplementation}); err != nil {
 		return 0, err
 	}
 	if created {
@@ -445,38 +413,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandIntentForID(ctx co
 		return command.Intent
 	}
 	return fallback
-}
-
-func (r *RepositoryMonitorReconciler) repositoryMonitorImplementationCommandForPlan(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, fallback *store.CommandEvent, plan *store.ActionRecord) (*store.CommandEvent, error) {
-	if plan == nil || strings.TrimSpace(plan.CommandEventID) == "" {
-		return fallback, nil
-	}
-	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, plan.CommandEventID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fallback, nil
-		}
-		return nil, err
-	}
-	if command.Intent != repositoryMonitorCommandIntentImplement {
-		return fallback, nil
-	}
-	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fallback, nil
-		}
-		return nil, err
-	}
-	if repositoryMonitorImplementationActionAlreadyStarted(action) {
-		return nil, nil
-	}
-	switch action.Status {
-	case repositoryMonitorWorkActionStatusQueued, "leased", repositoryMonitorWorkActionStatusRunning:
-		return command, nil
-	default:
-		return fallback, nil
-	}
 }
 
 func repositoryMonitorImplementationActionAlreadyStarted(action *store.WorkAction) bool {
@@ -578,8 +514,8 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 			Name:      taskName,
 			Namespace: monitor.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:           "true",
-				labels.LabelCreatedBy:         "repository-monitor",
+				labels.LabelManaged:           booleanTrueValue,
+				labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
 				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
 				labels.LabelMonitorRun:        labels.SelectorValue(run.ID),
 				labels.LabelGitHubRepository:  labels.SelectorValue(owner + "/" + repository),
@@ -606,6 +542,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return "", false, err
 	}
+	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, owner+"/"+repository, repositoryMonitorIssueKind, item.Number)
+	if err != nil {
+		return "", false, err
+	}
 	if err := r.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			var existing corev1alpha1.Task
@@ -615,7 +555,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 			if validationErr := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); validationErr != nil {
 				return "", false, validationErr
 			}
-			return taskName, false, nil
+			return taskName, false, r.retainMonitorUsageTask(ctx, &existing, usageWorkID, actionKind, 0)
 		}
 		var persisted corev1alpha1.Task
 		getErr := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &persisted)
@@ -623,14 +563,14 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 			if validationErr := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &persisted); validationErr != nil {
 				return "", false, validationErr
 			}
-			return taskName, false, nil
+			return taskName, false, r.retainMonitorUsageTask(ctx, &persisted, usageWorkID, actionKind, 0)
 		}
 		if !apierrors.IsNotFound(getErr) {
 			return "", false, fmt.Errorf("create issue action Task: %w; additionally failed to verify persistence: %v", err, getErr)
 		}
 		return "", false, err
 	}
-	return taskName, true, nil
+	return taskName, true, r.retainMonitorUsageTask(ctx, task, usageWorkID, actionKind, 0)
 }
 
 func validateRepositoryMonitorRecoveredIssueActionTask(monitor *corev1alpha1.RepositoryMonitor, expected, actual *corev1alpha1.Task) error {
@@ -665,10 +605,10 @@ func repositoryMonitorIssuePromptPriorActions(records []store.ActionRecord) []ma
 	out := make([]map[string]any, 0, len(records))
 	for _, record := range records {
 		entry := map[string]any{
-			"actionKind": record.ActionKind,
-			"verdict":    record.Verdict,
-			"summary":    record.Summary,
-			"createdAt":  record.CreatedAt,
+			repositoryMonitorEventActionKindKey: record.ActionKind,
+			eventVerdictField:                   record.Verdict,
+			summaryField:                        record.Summary,
+			"createdAt":                         record.CreatedAt,
 		}
 		if payload := repositoryMonitorIssuePromptPriorActionPayload(record); payload != "" {
 			entry["payloadJSON"] = payload
@@ -682,7 +622,7 @@ func repositoryMonitorIssuePromptPriorActionPayload(record store.ActionRecord) s
 	switch record.ActionKind {
 	case repositoryMonitorIssueActionPlan:
 		return boundedString(record.PayloadJSON, 6000)
-	case repositoryMonitorIssueActionApprove, repositoryMonitorIssueActionTriage, repositoryMonitorIssueActionResearch:
+	case repositoryMonitorIssueActionTriage, repositoryMonitorIssueActionResearch:
 		return boundedString(record.PayloadJSON, 1000)
 	case repositoryMonitorIssueActionImplementation, repositoryMonitorIssueActionMutateToPR:
 		return ""
@@ -709,18 +649,18 @@ func repositoryMonitorIssueImplementationBranch(monitor *corev1alpha1.Repository
 
 func buildRepositoryMonitorIssueActionPrompt(monitor *corev1alpha1.RepositoryMonitor, owner, repository string, item *store.MonitorItem, actionKind, phase string, priorActions []store.ActionRecord) string {
 	payload := map[string]any{
-		"schemaVersion":  "orka.issueAction.input.v1",
-		"repoURL":        monitor.Spec.RepoURL,
-		"repo":           owner + "/" + repository,
-		"issueNumber":    item.Number,
-		"title":          item.Title,
-		"body":           item.Body,
-		"htmlURL":        item.HTMLURL,
-		"labelsJSON":     item.LabelsJSON,
-		"snapshotDigest": item.SnapshotDigest,
-		"actionKind":     actionKind,
-		"phase":          phase,
-		"priorActions":   repositoryMonitorIssuePromptPriorActions(priorActions),
+		schemaVersionField:                  "orka.issueAction.input.v1",
+		"repoURL":                           monitor.Spec.RepoURL,
+		repoField:                           owner + "/" + repository,
+		issueNumberField:                    item.Number,
+		repositoryScanPullRequestTitleField: item.Title,
+		repositoryScanPullRequestBodyField:  item.Body,
+		"htmlURL":                           item.HTMLURL,
+		"labelsJSON":                        item.LabelsJSON,
+		snapshotDigestField:                 item.SnapshotDigest,
+		repositoryMonitorEventActionKindKey: actionKind,
+		"phase":                             phase,
+		"priorActions":                      repositoryMonitorIssuePromptPriorActions(priorActions),
 	}
 	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
 	instruction := ""
@@ -733,10 +673,10 @@ func buildRepositoryMonitorIssueActionPrompt(monitor *corev1alpha1.RepositoryMon
 		instruction = "Research the codebase for this issue. Do not edit files, post comments, push, or mutate GitHub."
 		schema = `{"schemaVersion":"orka.issueResearch.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","confidence":"low|medium|high","problemStatement":"...","evidence":[],"affectedFiles":[],"recommendedTests":[],"needsHuman":false}`
 	case repositoryMonitorIssueActionPlan:
-		instruction = "Create an implementation plan from the issue text and existing prior action context. Do not edit files, post comments, push, or mutate GitHub. Avoid tool use unless absolutely necessary; do not perform an exhaustive repository review. Keep the plan concise and actionable so implementation can inspect the actual code later. Current Orka patch artifacts are text-only: do not plan binary/generated assets (for example .ico, screenshots, archives, compiled outputs, or vendored blobs). If a binary asset would be useful, leave it out of allowedFiles and document a follow-up/manual asset step instead."
-		schema = `{"schemaVersion":"orka.issuePlan.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","status":"ready|blocked|needs_human","summary":"...","acceptanceCriteria":[],"steps":[],"validationCommands":[],"allowedFiles":["text/source/docs files only; no binary/generated assets"],"risk":"low|medium|high","categories":["security|database-migration|other"],"requiresHumanApproval":true}`
+		instruction = "Create an implementation plan from the issue text and existing prior action context. Do not edit files, post comments, push, or mutate GitHub. Avoid tool use unless absolutely necessary; do not perform an exhaustive repository review. Keep the plan concise and actionable so implementation can inspect the actual code later. Current Orka patch artifacts are text-only: do not plan binary artifacts (for example .ico, screenshots, archives, compiled outputs, or vendored blobs). If a binary asset would be useful, leave it out of allowedFiles and document a follow-up/manual asset step instead."
+		schema = `{"schemaVersion":"orka.issuePlan.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","status":"ready|blocked|needs_human","summary":"...","acceptanceCriteria":[],"steps":[],"validationCommands":[],"allowedFiles":["text source/docs and generated text files; no binary artifacts"],"risk":"low|medium|high","categories":["security|database-migration|other"]}`
 	case repositoryMonitorIssueActionImplementation:
-		instruction = "Implement the approved plan for this issue as a tracer-bullet vertical slice. Keep scope tight and prefer the smallest reviewable source/docs patch that proves the intended route. Make the planned code/documentation changes first; do not run tests before making changes. If the approved plan is too broad for one bounded agent turn, do not keep iterating indefinitely: return a blocked or needs_human JSON result that says the issue should be decomposed with orka:to-issues. Current Orka patch artifacts are text-only: do not create or modify binary/generated assets (for example .ico, screenshots, archives, compiled outputs, or vendored blobs), even if they appear in the plan; use text/source/docs changes and mention any omitted binary asset as a follow-up. After edits, run focused validation only for the files/packages you changed; avoid long full-repository test suites inside this task because CI/Orka repair will run broad validation after the PR is opened. Set proposedPullRequestTitle to a concise title describing the implemented change without an issue number. Leave final changes for Orka to commit and push through the configured push branch. Do not open a pull request yourself. Never write realistic secret values (API keys, tokens, passwords) into any file, including docs, examples, and tests; use placeholders such as ${env:VAR} or <your-api-key>, because a workspace delta containing secret-like content is rejected before publication."
+		instruction = "Implement the ready plan for this issue as a tracer-bullet vertical slice. Keep scope tight and prefer the smallest reviewable source/docs patch that proves the intended route. Make the planned code/documentation changes first; do not run tests before making changes. If the ready plan is too broad for one bounded agent turn, do not keep iterating indefinitely: return a blocked or needs_human JSON result that says the issue should be decomposed using the monitor decompose API/CLI operation. Run repository generators for required generated text; never hand-edit generated files. Current Orka patch artifacts are text-only: do not create or modify binary artifacts (for example .ico, screenshots, archives, compiled outputs, or vendored blobs), even if they appear in the plan; use text/source/docs changes and mention any omitted binary asset as a follow-up. After edits, run focused validation only for the files/packages you changed; avoid long full-repository test suites inside this task because CI/Orka repair will run broad validation after the PR is opened. Set proposedPullRequestTitle to a concise title describing the implemented change without an issue number. Leave final changes for Orka to commit and push through the configured push branch. Do not open a pull request yourself. Never write realistic secret values (API keys, tokens, passwords) into any file, including docs, examples, and tests; use placeholders such as ${env:VAR} or <your-api-key>, because a workspace delta containing secret-like content is rejected before publication."
 		schema = `{"schemaVersion":"orka.issueImplementation.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","status":"patch_ready|blocked|needs_human","summary":"...","proposedPullRequestTitle":"feat(scope): describe the implemented change","validation":[]}`
 	case repositoryMonitorIssueActionDecompose:
 		instruction = "Decompose this issue into small, independently implementable child issue drafts. Do not create issues or mutate GitHub; return drafts only."
@@ -783,7 +723,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTasks
 
 func repositoryMonitorIssuePhaseAwaitingTask(phase string) bool {
 	switch phase {
-	case repositoryMonitorIssuePhaseTriageQueued, repositoryMonitorIssuePhaseTriaging,
+	case repositoryMonitorIssuePhasePaused, repositoryMonitorIssuePhaseTriageQueued, repositoryMonitorIssuePhaseTriaging,
 		repositoryMonitorIssuePhaseResearchQueued, repositoryMonitorIssuePhaseResearching,
 		repositoryMonitorIssuePhasePlanQueued, repositoryMonitorIssuePhasePlanning,
 		repositoryMonitorIssuePhaseImplementationQueued, repositoryMonitorIssuePhaseImplementing,
@@ -792,6 +732,102 @@ func repositoryMonitorIssuePhaseAwaitingTask(phase string) bool {
 	default:
 		return false
 	}
+}
+
+func (r *RepositoryMonitorReconciler) settleRepositoryMonitorPausedIssue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, existing *store.MonitorItem, reason string) error {
+	if existing == nil || existing.WorkflowPhase != repositoryMonitorIssuePhasePaused || existing.LastActionID == "" {
+		return nil
+	}
+	// Paused items retain a completed ActionRecord. Settle its attempt before
+	// inventory retires it; failures leave that identity available to retry.
+	record, err := r.Store.GetActionRecord(ctx, monitor.Namespace, existing.LastActionID)
+	if err != nil {
+		return err
+	}
+	jobs, _, err := r.Store.ListImplementationJobs(ctx, store.ImplementationJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, TaskName: record.TaskName, Limit: 1})
+	if err != nil {
+		return err
+	}
+	if len(jobs) > 0 && repositoryMonitorImplementationJobActive(jobs[0].Phase) {
+		job := &jobs[0]
+		now := time.Now()
+		job.Phase = repositoryMonitorIssuePhaseBlocked
+		job.ValidationState = repositoryMonitorReviewVerdictStale
+		job.Error = reason
+		job.CompletedAt = &now
+		if err := r.Store.UpdateImplementationJob(ctx, job); err != nil {
+			return err
+		}
+	}
+	if record.CommandEventID == "" {
+		return nil
+	}
+	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, record.CommandEventID)
+	if err != nil {
+		return err
+	}
+	if store.RepositoryMonitorDesiredActionForActionKind(record.ActionKind) != store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorCommandActionKind(command.Intent)) {
+		// An implement command can be waiting on its completed plan action.
+		actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(record.ActionKind))
+		action, lookupErr := r.Store.GetWorkAction(ctx, monitor.Namespace, actionID)
+		if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+			return lookupErr
+		}
+		terminal := false
+		if action != nil {
+			switch action.Status {
+			case repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorWorkActionStatusFailed, repositoryMonitorWorkActionStatusBlocked:
+				terminal = true
+			}
+		}
+		if !terminal {
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, existing.Kind, existing.Number, "", existing.SnapshotDigest, record.ActionKind, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRunFailurePermanent, record.TaskName, reason); err != nil {
+				return err
+			}
+		}
+	}
+	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, nil, reason); err != nil {
+		return err
+	}
+	if command.Status == "accepted" {
+		_, err = r.repositoryMonitorCommandWorkActionTerminal(ctx, monitor, *command)
+	}
+	return err
+}
+
+func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem) error {
+	if item.WorkflowPhase != repositoryMonitorIssuePhasePaused {
+		return nil
+	}
+	if strings.TrimSpace(item.LastActionTaskName) == "" {
+		item.WorkflowPhase = repositoryMonitorIssuePhaseDiscovered
+		item.SkipReason = ""
+		return nil
+	}
+	if r.ResultStore == nil {
+		return nil
+	}
+	var task corev1alpha1.Task
+	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: item.LastActionTaskName}, &task); err != nil {
+		if !apierrors.IsNotFound(err) || item.LastActionID == "" {
+			return client.IgnoreNotFound(err)
+		}
+		// The retained result cannot advance without its Task receipt. Release
+		// the completed attempt, retaining its audit identity on the blocked item.
+		if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, item, repositoryMonitorIssuePausedTaskMissing); err != nil {
+			return err
+		}
+		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
+		item.SkipReason = repositoryMonitorIssuePausedTaskMissing
+		item.LastVerdict = repositoryMonitorReviewVerdictFailed
+		return nil
+	}
+	if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		return nil
+	}
+	// Apply the retained result before a new command can restart its workflow.
+	_, err := r.ingestCompletedRepositoryMonitorIssueTask(ctx, monitor, item, &task)
+	return err
 }
 
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task) (bool, error) {
@@ -808,7 +844,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(
 			}
 		}
 		handled, applyErr := r.applyIssueActionRecord(ctx, monitor, item, record, task)
-		if applyErr == nil && actionKind == repositoryMonitorIssueActionImplementation {
+		if applyErr == nil && actionKind == repositoryMonitorIssueActionImplementation && item.WorkflowPhase != repositoryMonitorIssuePhasePaused {
 			applyErr = r.cleanupRepositoryMonitorRuntimeAuthSnapshot(ctx, monitor, task)
 		}
 		return handled, applyErr
@@ -830,10 +866,10 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(
 		}
 	} else {
 		payload := map[string]any{
-			"issueNumber":    item.Number,
-			"snapshotDigest": item.SnapshotDigest,
-			"summary":        repositoryMonitorIssueFailedTaskSummary(actionKind, task),
-			"verdict":        repositoryMonitorReviewVerdictFailed,
+			issueNumberField:    item.Number,
+			snapshotDigestField: item.SnapshotDigest,
+			summaryField:        repositoryMonitorIssueFailedTaskSummary(actionKind, task),
+			eventVerdictField:   repositoryMonitorReviewVerdictFailed,
 		}
 		raw, _ = json.Marshal(payload)
 	}
@@ -856,7 +892,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(
 		}
 	}
 	handled, err := r.applyIssueActionRecord(ctx, monitor, item, record, task)
-	if err == nil && actionKind == repositoryMonitorIssueActionImplementation {
+	if err == nil && actionKind == repositoryMonitorIssueActionImplementation && item.WorkflowPhase != repositoryMonitorIssuePhasePaused {
 		err = r.cleanupRepositoryMonitorRuntimeAuthSnapshot(ctx, monitor, task)
 	}
 	return handled, err
@@ -913,7 +949,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorRuntimeAuthSnapsho
 		}
 		return err
 	}
-	if snapshot.Labels[labels.LabelCreatedBy] != "repository-monitor" || snapshot.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue(monitor.Name) || !metav1.IsControlledBy(&snapshot, monitor) {
+	if snapshot.Labels[labels.LabelCreatedBy] != repositoryMonitorTaskCreatedBy || snapshot.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue(monitor.Name) || !metav1.IsControlledBy(&snapshot, monitor) {
 		return nil
 	}
 	if err := r.Delete(ctx, &snapshot); err != nil && !apierrors.IsNotFound(err) {
@@ -930,11 +966,24 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 	if err := r.List(ctx, &snapshots,
 		client.InNamespace(monitor.Namespace),
 		client.MatchingLabels{
-			labels.LabelCreatedBy:         "repository-monitor",
+			labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
 			labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
 		},
 	); err != nil {
 		return err
+	}
+	if len(snapshots.Items) == 0 {
+		return nil
+	}
+	items, err := r.listRepositoryMonitorIssueItems(ctx, monitor)
+	if err != nil {
+		return err
+	}
+	awaitingTasks := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if repositoryMonitorIssuePhaseAwaitingTask(item.WorkflowPhase) {
+			awaitingTasks[item.LastActionTaskName] = struct{}{}
+		}
 	}
 	for i := range snapshots.Items {
 		snapshot := &snapshots.Items[i]
@@ -943,7 +992,20 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 			continue
 		}
 		var task corev1alpha1.Task
-		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &task); err != nil {
+		err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &task)
+		if err == nil {
+			if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+				continue
+			}
+			if _, awaiting := awaitingTasks[taskName]; awaiting {
+				continue
+			}
+			// A settled result no longer needs this credential. Sweep it again
+			// after transient cleanup failures even while its Task is retained.
+			if err := r.cleanupRepositoryMonitorRuntimeAuthSnapshotReference(ctx, monitor, snapshot.Namespace, snapshot.Name); err != nil {
+				return err
+			}
+		} else {
 			if !apierrors.IsNotFound(err) {
 				return err
 			}
@@ -990,16 +1052,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorImplementationContentRequ
 
 func repositoryMonitorSafeBlockedImplementationResult(item *store.MonitorItem) []byte {
 	payload := map[string]any{
-		"schemaVersion":  "orka.issueImplementation.v1",
-		"status":         repositoryMonitorIssuePhaseBlocked,
-		"verdict":        repositoryMonitorPatchSensitiveContentReason,
-		"summary":        "Implementation result was blocked because it could not be safely accepted.",
-		"issueNumber":    int64(0),
-		"snapshotDigest": "",
+		schemaVersionField:  "orka.issueImplementation.v1",
+		"status":            repositoryMonitorIssuePhaseBlocked,
+		eventVerdictField:   repositoryMonitorPatchSensitiveContentReason,
+		summaryField:        "Implementation result was blocked because it could not be safely accepted.",
+		issueNumberField:    int64(0),
+		snapshotDigestField: "",
 	}
 	if item != nil {
-		payload["issueNumber"] = item.Number
-		payload["snapshotDigest"] = item.SnapshotDigest
+		payload[issueNumberField] = item.Number
+		payload[snapshotDigestField] = item.SnapshotDigest
 	}
 	data, _ := json.Marshal(payload)
 	return data
@@ -1115,11 +1177,11 @@ func repositoryMonitorActionRecordFromTask(monitor *corev1alpha1.RepositoryMonit
 			payload = string(data)
 		}
 	}
-	summary := stringField(body, "summary")
+	summary := stringField(body, summaryField)
 	if summary == "" {
 		summary = sr.Summary
 	}
-	verdict := firstNonEmptyString(stringField(body, "verdict"), stringField(body, "status"), sr.Verdict)
+	verdict := firstNonEmptyString(stringField(body, eventVerdictField), stringField(body, "status"), sr.Verdict)
 	if verdict == "" && boolField(payload, "needsHuman") {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 	}
@@ -1172,17 +1234,17 @@ func repositoryMonitorImplementationResultBody(envelope map[string]any, sr *comm
 			maps.Copy(agentBody, parsed)
 		}
 	}
-	for _, key := range []string{"schemaVersion", "status", "verdict", "summary", repositoryMonitorIssueProposedPRTitleField, "validation", "needsHuman", "confidence"} {
+	for _, key := range []string{schemaVersionField, "status", eventVerdictField, summaryField, repositoryMonitorIssueProposedPRTitleField, "validation", "needsHuman", "confidence"} {
 		if value, ok := agentBody[key]; ok {
 			body[key] = value
 		}
 	}
 	if item != nil {
-		body["issueNumber"] = item.Number
-		body["snapshotDigest"] = item.SnapshotDigest
+		body[issueNumberField] = item.Number
+		body[snapshotDigestField] = item.SnapshotDigest
 	}
-	if stringField(body, "schemaVersion") == "" {
-		body["schemaVersion"] = "orka.issueImplementation.v1"
+	if stringField(body, schemaVersionField) == "" {
+		body[schemaVersionField] = "orka.issueImplementation.v1"
 	}
 	return body
 }
@@ -1195,13 +1257,29 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 	if item.LastActionID == record.ID && !repositoryMonitorIssuePhaseAwaitingTask(item.WorkflowPhase) {
 		return false, nil
 	}
+	wasPaused := item.WorkflowPhase == repositoryMonitorIssuePhasePaused && item.LastActionID == record.ID
 	item.LastActionID = record.ID
 	item.LastActionKind = record.ActionKind
 	item.LastActionTaskName = record.TaskName
 	item.LastVerdict = record.Verdict
 	item.SkipReason = ""
-	planNeedsHumanApproval := record.ActionKind == repositoryMonitorIssueActionPlan && strings.EqualFold(strings.TrimSpace(record.Verdict), repositoryMonitorReviewVerdictNeedsHuman)
-	recordBlocksProgress := repositoryMonitorActionRecordBlocksProgress(record.Verdict) && !planNeedsHumanApproval
+	recordBlocksProgress := repositoryMonitorActionRecordBlocksProgress(record.Verdict)
+	if !recordBlocksProgress {
+		var currentLabels []string
+		if item.LabelsJSON != "" {
+			if err := json.Unmarshal([]byte(item.LabelsJSON), &currentLabels); err != nil {
+				return false, fmt.Errorf("invalid stored issue labels: %w", err)
+			}
+		}
+		if repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), currentLabels) != "" {
+			item.WorkflowPhase = repositoryMonitorIssuePhasePaused
+			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
+			if wasPaused {
+				return false, nil
+			}
+			return true, r.Store.UpsertMonitorItem(ctx, item)
+		}
+	}
 	if recordBlocksProgress {
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 		item.SkipReason = record.Verdict
@@ -1221,16 +1299,12 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 		case repositoryMonitorIssueActionResearch:
 			item.WorkflowPhase = repositoryMonitorIssuePhaseResearched
 		case repositoryMonitorIssueActionPlan:
-			if !repositoryMonitorPlanApprovableVerdict(record.Verdict) {
+			if !repositoryMonitorPlanReadyVerdict(record.Verdict) {
 				item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 				item.SkipReason = firstNonEmptyString(record.Verdict, "invalid_plan_result")
 				break
 			}
-			if planNeedsHumanApproval || boolField(record.PayloadJSON, "requiresHumanApproval") || repositoryMonitorPlanRiskRequiresApproval(monitor, record.PayloadJSON) {
-				item.WorkflowPhase = repositoryMonitorIssuePhaseApprovalRequired
-			} else {
-				item.WorkflowPhase = repositoryMonitorIssuePhaseApproved
-			}
+			item.WorkflowPhase = repositoryMonitorIssuePhasePlanned
 		case repositoryMonitorIssueActionDecompose:
 			item.WorkflowPhase = repositoryMonitorIssuePhasePlanReady
 		case repositoryMonitorIssueActionImplementation:
@@ -1274,8 +1348,11 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 			if prNumber > 0 {
 				item.LinkedPRNumber = int64(prNumber)
 			}
-		case repositoryMonitorIssueActionApprove:
-			item.WorkflowPhase = repositoryMonitorIssuePhaseApproved
+		}
+	}
+	if item.WorkflowPhase == repositoryMonitorIssuePhasePROpened {
+		if err := r.queueRepositoryMonitorLinkedPullRequest(ctx, monitor, item.LinkedPRNumber); err != nil {
+			return false, err
 		}
 	}
 	workStatus := repositoryMonitorWorkActionStatusSucceeded
@@ -1305,7 +1382,25 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 			return false, err
 		}
 	}
-	return true, r.createMonitorEvent(ctx, monitor, "", repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_recorded", fmt.Sprintf("Issue #%d %s completed", item.Number, record.ActionKind), map[string]any{"actionRecordID": record.ID, "verdict": record.Verdict})
+	return true, r.createMonitorEvent(ctx, monitor, "", repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_recorded", fmt.Sprintf("Issue #%d %s completed", item.Number, record.ActionKind), map[string]any{"actionRecordID": record.ID, eventVerdictField: record.Verdict})
+}
+
+func (r *RepositoryMonitorReconciler) queueRepositoryMonitorLinkedPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64) error {
+	if !repositoryMonitorPullRequestsEnabled(monitor.Spec) || number <= 0 {
+		return nil
+	}
+	// Continue accepted implementation work independently of opened webhooks or
+	// schedules. Targeted inventory verifies current PR scope and head itself.
+	id := "issue-pr-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, number))
+	err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
+		Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now(),
+	})
+	if errors.Is(err, store.ErrConflict) {
+		return nil
+	}
+	return err
 }
 
 func (r *RepositoryMonitorReconciler) advanceRepositoryMonitorImplementAfterPlan(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, plan *store.ActionRecord, task *corev1alpha1.Task) error {
@@ -1323,7 +1418,7 @@ func (r *RepositoryMonitorReconciler) advanceRepositoryMonitorImplementAfterPlan
 		return nil
 	}
 	switch item.WorkflowPhase {
-	case repositoryMonitorIssuePhaseApproved:
+	case repositoryMonitorIssuePhasePlanned:
 		owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 		if err != nil {
 			return err
@@ -1337,8 +1432,6 @@ func (r *RepositoryMonitorReconciler) advanceRepositoryMonitorImplementAfterPlan
 		}
 		_, err = r.queueRepositoryMonitorIssueImplementation(ctx, monitor, &store.MonitorRun{ID: runID}, command, item, owner, repository, plan.ID)
 		return err
-	case repositoryMonitorIssuePhaseApprovalRequired:
-		return r.recordRepositoryMonitorPrerequisiteImplementState(ctx, monitor, nil, command, item, repositoryMonitorWorkActionStatusRunning, item.WorkflowPhase, plan.TaskName, "")
 	case repositoryMonitorIssuePhaseBlocked:
 		return r.recordRepositoryMonitorPrerequisiteImplementState(ctx, monitor, nil, command, item, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, plan.TaskName, item.SkipReason)
 	default:
@@ -1355,43 +1448,9 @@ func repositoryMonitorActionRecordBlocksProgress(verdict string) bool {
 	}
 }
 
-func repositoryMonitorPlanRiskRequiresApproval(monitor *corev1alpha1.RepositoryMonitor, payload string) bool {
-	if monitor == nil || len(monitor.Spec.IssueWorkflow.Planning.RequireHumanApprovalFor) == 0 {
-		return false
-	}
-	var body map[string]any
-	if err := json.Unmarshal([]byte(payload), &body); err != nil {
-		return false
-	}
-	signals := map[string]struct{}{}
-	for _, value := range []string{stringField(body, "risk"), stringField(body, "category")} {
-		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
-			signals[value] = struct{}{}
-		}
-	}
-	_, categoriesPresent := body["categories"]
-	for _, value := range anySliceField(body, "categories") {
-		if category, ok := value.(string); ok {
-			if category = strings.ToLower(strings.TrimSpace(category)); category != "" {
-				signals[category] = struct{}{}
-			}
-		}
-	}
-	for _, required := range monitor.Spec.IssueWorkflow.Planning.RequireHumanApprovalFor {
-		required = strings.ToLower(strings.TrimSpace(required))
-		if _, ok := signals[required]; ok {
-			return true
-		}
-		if !categoriesPresent && required != repositoryMonitorReviewConfidenceLow && required != repositoryMonitorReviewConfidenceMedium && required != repositoryMonitorReviewConfidenceHigh {
-			return true
-		}
-	}
-	return false
-}
-
-func repositoryMonitorPlanApprovableVerdict(verdict string) bool {
+func repositoryMonitorPlanReadyVerdict(verdict string) bool {
 	switch strings.ToLower(strings.TrimSpace(verdict)) {
-	case repositoryMonitorIssueVerdictReady, repositoryMonitorReviewVerdictNeedsHuman:
+	case repositoryMonitorIssueVerdictReady:
 		return true
 	default:
 		return false
@@ -1595,11 +1654,11 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 		}
 		patchArtifact := repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID)
 		deliverySummary, _ := json.Marshal(map[string]any{
-			"schemaVersion": "orka.issueImplementation.delivery.v1",
-			"branch":        branch, "headSHA": headSHA,
-			"artifactDigest":  task.Status.Delivery.ArtifactDigest,
-			"maxChangedFiles": task.Spec.Workspace.MaxChangedFiles,
-			"allowedPaths":    task.Spec.Workspace.AllowedPaths,
+			schemaVersionField: "orka.issueImplementation.delivery.v1",
+			"branch":           branch, repositoryMonitorFieldHeadSHA: headSHA,
+			artifactDigestField: task.Status.Delivery.ArtifactDigest,
+			"maxChangedFiles":   task.Spec.Workspace.MaxChangedFiles,
+			"allowedPaths":      task.Spec.Workspace.AllowedPaths,
 		})
 		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, patchArtifact, "application/json", deliverySummary); err != nil {
 			return repositoryMonitorIssuePhaseBlocked, "", "patch_summary_artifact_save_failed", nil
@@ -1700,7 +1759,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	patchDigest := repositoryMonitorIssuePatchDigest(sr.Diff)
 	pushBranch := repositoryMonitorIssueImplementationBranch(monitor, item, mutationCommand)
 	pushMutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"-push-"+pushBranch)
-	if _, err := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: record.CommandEventID, Operation: "push_branch", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: "issue_implementation_mutation", GitHubURL: pushBranch}); err != nil {
+	if _, err := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: record.CommandEventID, Operation: "push_branch", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: issueImplementationMutationAction, GitHubURL: pushBranch}); err != nil {
 		return repositoryMonitorIssuePhaseBlocked, "", "mutation_audit_create_failed", nil
 	}
 	mutationTaskName, err = r.createRepositoryMonitorIssueMutationTask(ctx, monitor, item, record, task, patchDigest)
@@ -1738,11 +1797,12 @@ func (r *RepositoryMonitorReconciler) ensureRepositoryMonitorGitHubMutationStart
 	return mutation, nil
 }
 
+//nolint:gocyclo // Push and PR reconciliation retain their ordered audit and retry boundaries.
 func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task, proposedPullRequestTitle string) (string, int, string, error) {
 	sr := common.ParseStructuredResult(record.PayloadJSON)
 	configuredBranch := repositoryMonitorIssueTaskPushBranch(task)
 	pushMutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"-push-"+configuredBranch)
-	pushMutation, auditErr := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: record.CommandEventID, Operation: "push_branch", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: "issue_implementation_mutation", GitHubURL: configuredBranch})
+	pushMutation, auditErr := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: record.CommandEventID, Operation: "push_branch", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: issueImplementationMutationAction, GitHubURL: configuredBranch})
 	if auditErr != nil {
 		return "", 0, "", auditErr
 	}
@@ -1795,15 +1855,19 @@ func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, m
 		return "", 0, "", err
 	}
 	createMutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"-create-pr")
-	createMutation, auditErr := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: createMutationID, CommandEventID: record.CommandEventID, Operation: "create_pr", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: "issue_implementation_mutation", GitHubURL: configuredBranch})
+	createMutation, auditErr := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: createMutationID, CommandEventID: record.CommandEventID, Operation: "create_pr", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: issueImplementationMutationAction, GitHubURL: configuredBranch})
 	if auditErr != nil {
 		return "", 0, "", auditErr
 	}
 	prURL := createMutation.GitHubURL
 	prNumber, _ := strconv.Atoi(createMutation.ExternalID)
+	prOrigin := store.UsagePRAssisted
+	if createMutation.Reason == usagePRCreatedMutationReason {
+		prOrigin = store.UsagePRCreated
+	}
 	if createMutation.Status != repositoryMonitorRunPhaseSucceeded {
 		var err error
-		prURL, prNumber, err = r.createIssueImplementationPullRequest(ctx, monitor, item, task, configuredBranch, proposedPullRequestTitle)
+		prURL, prNumber, prOrigin, err = r.createIssueImplementationPullRequest(ctx, monitor, item, task, configuredBranch, proposedPullRequestTitle)
 		if err != nil {
 			createMutation.Status = repositoryMonitorRunPhaseFailed
 			createMutation.Error = err.Error()
@@ -1824,9 +1888,26 @@ func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, m
 		createMutation.Error = ""
 		createMutation.GitHubURL = prURL
 		createMutation.ExternalID = strconv.Itoa(prNumber)
+		createMutation.Reason = usagePRAssistedMutationReason
+		if prOrigin == store.UsagePRCreated {
+			createMutation.Reason = usagePRCreatedMutationReason
+		}
 		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, createMutation); err != nil {
 			return "", 0, "", err
 		}
+	}
+	// Persist the confirmed creation outcome before the separately fallible
+	// usage projection. A retry reuses this receipt without reclassifying an
+	// Orka-created PR as assistance when its usage link was not stored.
+	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
+	if err != nil {
+		return "", 0, "", err
+	}
+	if !validUsagePullRequestURL(prURL, owner+"/"+repository, int64(prNumber)) {
+		return "", 0, "", fmt.Errorf("retained PR mutation does not match the repository")
+	}
+	if err := r.recordMonitorUsagePRLink(ctx, monitor, item.Number, task, owner+"/"+repository, int64(prNumber), prOrigin); err != nil {
+		return "", 0, "", err
 	}
 	if task.Spec.PriorTaskRef != nil {
 		if err := r.updateImplementationJobForTask(ctx, monitor, task.Spec.PriorTaskRef.Name, func(job *store.ImplementationJob) {
@@ -2139,16 +2220,16 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		planID = jobs[0].PlanID
 	}
 	summary := map[string]any{
-		"schemaVersion":   repositoryMonitorIssuePatchSchemaVersion,
-		"repo":            repositoryMonitorCanonicalRepo(monitor),
-		"baseBranch":      effectiveRepositoryMonitorBranch(monitor),
-		"baseSHA":         sr.BaseSHA,
-		"target":          map[string]any{"kind": repositoryMonitorIssueKind, "number": item.Number, "snapshotDigest": item.SnapshotDigest},
-		"planID":          planID,
-		"format":          "git-diff",
-		"patchArtifactID": diffName,
-		"patchDigest":     repositoryMonitorIssuePatchDigest(sr.Diff),
-		"changedFiles":    sr.Files,
+		schemaVersionField: repositoryMonitorIssuePatchSchemaVersion,
+		repoField:          repositoryMonitorCanonicalRepo(monitor),
+		"baseBranch":       effectiveRepositoryMonitorBranch(monitor),
+		"baseSHA":          sr.BaseSHA,
+		targetField:        map[string]any{"kind": repositoryMonitorIssueKind, "number": item.Number, snapshotDigestField: item.SnapshotDigest},
+		"planID":           planID,
+		"format":           "git-diff",
+		"patchArtifactID":  diffName,
+		"patchDigest":      repositoryMonitorIssuePatchDigest(sr.Diff),
+		"changedFiles":     sr.Files,
 	}
 	data, _ := json.Marshal(summary)
 	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), "application/json", data); err != nil {
@@ -2274,8 +2355,8 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueMutationTask(c
 			Name:      taskName,
 			Namespace: monitor.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:           "true",
-				labels.LabelCreatedBy:         "repository-monitor",
+				labels.LabelManaged:           booleanTrueValue,
+				labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
 				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
 				labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorIssueKind),
 				labels.LabelGitHubNumber:      labels.SelectorValue(strconv.FormatInt(item.Number, 10)),
@@ -2388,36 +2469,36 @@ func repositoryMonitorIssueTaskPullRequestTitle(task *corev1alpha1.Task) string 
 	return task.Annotations[repositoryMonitorIssueAnnotationPullRequestTitle]
 }
 
-func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, headBranch, proposedPullRequestTitle string) (string, int, error) {
+func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, headBranch, proposedPullRequestTitle string) (string, int, string, error) {
 	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
 	if prURL, prNumber, err := r.findIssueImplementationPullRequest(ctx, token, baseURL, owner, repository, headBranch); err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	} else if prNumber > 0 {
-		return prURL, prNumber, nil
+		return prURL, prNumber, store.UsagePRAssisted, nil
 	}
 	body := map[string]any{
-		"title": repositoryMonitorImplementationPullRequestTitle(proposedPullRequestTitle, item.Title, item.Number),
-		"head":  headBranch,
-		"base":  effectiveRepositoryMonitorBranch(monitor),
-		"body":  renderRepositoryMonitorIssuePRBody(item, task),
+		repositoryScanPullRequestTitleField: repositoryMonitorImplementationPullRequestTitle(proposedPullRequestTitle, item.Title, item.Number),
+		"head":                              headBranch,
+		"base":                              effectiveRepositoryMonitorBranch(monitor),
+		repositoryScanPullRequestBodyField:  renderRepositoryMonitorIssuePRBody(item, task),
 	}
 	data, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/repos/%s/%s/pulls", baseURL, url.PathEscape(owner), url.PathEscape(repository)), bytes.NewReader(data))
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -2427,24 +2508,27 @@ func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx c
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, repositoryMonitorGitHubResponseLimit))
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, &repositoryMonitorGitHubAPIError{Operation: "create issue pull request", StatusCode: resp.StatusCode, Body: string(respBody)}
+		return "", 0, "", &repositoryMonitorGitHubAPIError{Operation: "create issue pull request", StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var parsed struct {
 		Number  int    `json:"number"`
 		HTMLURL string `json:"html_url"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
-	return parsed.HTMLURL, parsed.Number, nil
+	if !validUsagePullRequestURL(parsed.HTMLURL, owner+"/"+repository, int64(parsed.Number)) {
+		return "", 0, "", fmt.Errorf("GitHub returned an invalid pull request identity")
+	}
+	return parsed.HTMLURL, parsed.Number, store.UsagePRCreated, nil
 }
 
 func (r *RepositoryMonitorReconciler) findIssueImplementationPullRequest(ctx context.Context, token, baseURL, owner, repository, headBranch string) (string, int, error) {
@@ -2456,7 +2540,7 @@ func (r *RepositoryMonitorReconciler) findIssueImplementationPullRequest(ctx con
 	if err != nil {
 		return "", 0, err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	httpClient := r.HTTPClient
@@ -2496,7 +2580,7 @@ func repositoryMonitorIssueActionUpdatesStatusComment(actionKind, workflowPhase 
 	switch actionKind {
 	case repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionMutateToPR, repositoryMonitorIssueActionDecompose,
 		repositoryMonitorIssueActionResearch:
-		// Research is user-triggered (orka:research); without a status-comment
+		// Research is requested through the API; without a status-comment
 		// update its result would be stored only as internal planning context
 		// and the requester would see nothing on the issue.
 		return true
@@ -2529,7 +2613,7 @@ func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(
 		}
 	}
 	body := renderRepositoryMonitorIssueStatusComment(item, record)
-	payload, _ := json.Marshal(map[string]string{"body": body})
+	payload, _ := json.Marshal(map[string]string{repositoryScanPullRequestBodyField: body})
 	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
@@ -2619,15 +2703,9 @@ func renderRepositoryMonitorIssueStatusComment(item *store.MonitorItem, record *
 	if state == "" {
 		state = "discovered"
 	}
-	approval := "not required"
-	if state == repositoryMonitorIssuePhaseApprovalRequired {
-		approval = "required"
-	} else if state == repositoryMonitorIssuePhaseApproved || item.LastVerdict == repositoryMonitorIssuePhaseApproved {
-		approval = "approved"
-	}
 	var payload map[string]any
 	_ = json.Unmarshal([]byte(record.PayloadJSON), &payload)
-	planSummary := sanitizeRepositoryMonitorPublicCommentText(firstNonEmptyString(stringField(payload, "summary"), stringField(payload, "problemStatement"), record.Summary))
+	planSummary := sanitizeRepositoryMonitorPublicCommentText(firstNonEmptyString(stringField(payload, summaryField), stringField(payload, "problemStatement"), record.Summary))
 	if planSummary == "" {
 		planSummary = "No summary provided."
 	}
@@ -2637,7 +2715,6 @@ func renderRepositoryMonitorIssueStatusComment(item *store.MonitorItem, record *
 		"## Orka Issue Status",
 		"",
 		fmt.Sprintf("**State:** %s", state),
-		fmt.Sprintf("**Approval:** %s", approval),
 		"",
 		"### Latest update",
 		"",
@@ -2646,7 +2723,7 @@ func renderRepositoryMonitorIssueStatusComment(item *store.MonitorItem, record *
 	if reason := strings.TrimSpace(item.SkipReason); reason != "" {
 		lines = append(lines, "", fmt.Sprintf("**Blocked reason:** %s", sanitizeRepositoryMonitorPublicCommentText(reason)))
 		if reason == "implementation_plan_requires_decomposition" {
-			lines = append(lines, "", "Next suggested command: `orka:to-issues`.")
+			lines = append(lines, "", "Use the monitor decompose API/CLI operation to split this issue.")
 		}
 	}
 	if item.LinkedPRNumber > 0 {
@@ -2666,31 +2743,11 @@ func (r *RepositoryMonitorReconciler) latestCurrentIssuePlan(ctx context.Context
 	}
 	for i := range records {
 		record := records[i]
-		if record.SnapshotDigest == item.SnapshotDigest && repositoryMonitorPlanApprovableVerdict(record.Verdict) {
+		if record.SnapshotDigest == item.SnapshotDigest && repositoryMonitorPlanReadyVerdict(record.Verdict) {
 			return &record, nil
 		}
 	}
 	return nil, nil
-}
-
-func (r *RepositoryMonitorReconciler) createIssueApprovalActionRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, item *store.MonitorItem, planID string) error {
-	payload := map[string]any{"commandEventID": command.ID, "intent": command.Intent, "planID": planID}
-	payloadJSON, _ := json.Marshal(payload)
-	return r.Store.CreateActionRecord(ctx, &store.ActionRecord{
-		ID:                "act-" + repositoryMonitorShortHash(command.ID+"-approval"),
-		MonitorNamespace:  monitor.Namespace,
-		MonitorName:       monitor.Name,
-		Kind:              repositoryMonitorIssueKind,
-		Number:            item.Number,
-		ActionKind:        repositoryMonitorIssueActionApprove,
-		SnapshotDigest:    item.SnapshotDigest,
-		CommandEventID:    command.ID,
-		MonitorGeneration: monitor.Generation,
-		Verdict:           "approved",
-		Summary:           "Plan approved by command label",
-		PayloadJSON:       string(payloadJSON),
-		CreatedAt:         time.Now(),
-	})
 }
 
 func repositoryMonitorIssueActionMissingRequiredResult(actionKind string, body map[string]any) bool {
@@ -2699,9 +2756,9 @@ func repositoryMonitorIssueActionMissingRequiredResult(actionKind string, body m
 	}
 	switch actionKind {
 	case repositoryMonitorIssueActionTriage:
-		return stringField(body, "verdict") == ""
+		return stringField(body, eventVerdictField) == ""
 	case repositoryMonitorIssueActionPlan:
-		if stringField(body, "status") == "" && stringField(body, "verdict") == "" {
+		if stringField(body, "status") == "" && stringField(body, eventVerdictField) == "" {
 			return true
 		}
 		switch strings.ToLower(strings.TrimSpace(stringField(body, "risk"))) {
@@ -2721,10 +2778,9 @@ func repositoryMonitorIssueActionMissingRequiredResult(actionKind string, body m
 				}
 			}
 		}
-		_, ok := body["requiresHumanApproval"].(bool)
-		return !ok
+		return false
 	case repositoryMonitorIssueActionImplementation, repositoryMonitorIssueActionDecompose:
-		return stringField(body, "status") == "" && stringField(body, "verdict") == ""
+		return stringField(body, "status") == "" && stringField(body, eventVerdictField) == ""
 	case repositoryMonitorIssueActionResearch:
 		return stringField(body, "confidence") == "" && stringField(body, "problemStatement") == "" && !boolFieldFromMap(body, "needsHuman")
 	default:
@@ -2747,14 +2803,14 @@ func repositoryMonitorIssueActionResultMismatch(item *store.MonitorItem, body ma
 	if body == nil {
 		return "issue action result is not a JSON object"
 	}
-	gotIssue := numberField(body, "issueNumber")
+	gotIssue := numberField(body, issueNumberField)
 	if gotIssue == 0 {
 		return "issue action result is missing issueNumber"
 	}
 	if gotIssue != item.Number {
 		return fmt.Sprintf("issue action result targets issue #%d, want #%d", gotIssue, item.Number)
 	}
-	gotDigest := stringField(body, "snapshotDigest")
+	gotDigest := stringField(body, snapshotDigestField)
 	if gotDigest == "" {
 		return "issue action result is missing snapshotDigest"
 	}

@@ -66,6 +66,7 @@ const (
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
 type RepositoryMonitorReconciler struct {
 	client.Client
+	APIReader                 client.Reader
 	Scheme                    *runtime.Scheme
 	Store                     store.RepositoryMonitorStore
 	ResultStore               store.ResultStore
@@ -118,7 +119,26 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err := r.refreshMonitorUsageOutcomes(ctx, monitor); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.queueRepositoryMonitorWorkflowPoll(ctx, monitor); err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err = r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err == nil && !state.suspended && repositoryMonitorPullRequestsEnabled(monitor.Spec) && repositoryMonitorManagedWorkflow(monitor) && (result.RequeueAfter == 0 || result.RequeueAfter > repositoryMonitorWorkflowPollInterval) {
+		result.RequeueAfter = repositoryMonitorWorkflowPollInterval
+	}
+	if err == nil && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeBacklogInterval) {
+		next, pollErr := r.usageOutcomeRequeueAfter(ctx, monitor)
+		if pollErr != nil {
+			return result, pollErr
+		}
+		if next > 0 && (result.RequeueAfter == 0 || next < result.RequeueAfter) {
+			result.RequeueAfter = next
+		}
+	}
+	return result, err
 }
 
 type repositoryMonitorReconcileState struct {
@@ -263,40 +283,28 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 }
 
 func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorSpec) error {
-	labels := spec.Triggers.GitHub.Labels
-	groups := [][]struct{ intent, label string }{
-		{{"triage", labels.Issues.Triage}, {"research", labels.Issues.Research}, {"plan", labels.Issues.Plan}, {"approve_plan", labels.Issues.ApprovePlan}, {"implement", labels.Issues.Implement}, {repositoryMonitorCommandIntentDecompose, labels.Issues.Decompose}, {"stop", labels.Issues.Stop}, {"resume", labels.Issues.Resume}},
-		{{repositoryMonitorCommandIntentReview, labels.PullRequests.Review}, {"fix", labels.PullRequests.Fix}, {repositoryMonitorCommandIntentFixCI, labels.PullRequests.FixCI}, {repositoryMonitorCommandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {repositoryMonitorCommandIntentAutomerge, labels.PullRequests.Automerge}, {"stop", labels.PullRequests.Stop}, {"resume", labels.PullRequests.Resume}},
+	if !spec.Targets.Issues.Enabled || !spec.Triggers.GitHub.Labels.Enabled {
+		return nil
 	}
-	for _, group := range groups {
-		seen := map[string]string{}
-		for _, entry := range group {
-			label := strings.ToLower(strings.TrimSpace(entry.label))
-			if label == "" {
-				label = defaultRepositoryMonitorCommandLabel(entry.intent)
+	label := strings.TrimSpace(spec.Triggers.GitHub.Labels.Issues.Implement)
+	if label == "" {
+		label = "orka:implement"
+	}
+	guards := append([]string(nil), spec.Policy.ProtectedLabels...)
+	guards = append(guards, repositoryMonitorPauseLabels(spec)...)
+	for _, guard := range guards {
+		if strings.EqualFold(strings.TrimSpace(guard), label) {
+			return fmt.Errorf("implementation label must not also be a pause or protected label")
+		}
+	}
+	if spec.Targets.Issues.Enabled && spec.Triggers.GitHub.Labels.Enabled && spec.Triggers.GitHub.Labels.ConsumeCommandLabels {
+		for _, required := range spec.Targets.Issues.IncludeLabels {
+			if strings.EqualFold(strings.TrimSpace(required), label) {
+				return fmt.Errorf("spec.targets.issues.includeLabels must not contain the implementation label when command labels are consumed")
 			}
-			if previous := seen[label]; previous != "" {
-				return fmt.Errorf("command label %q is configured for both %s and %s", label, previous, entry.intent)
-			}
-			seen[label] = entry.intent
 		}
 	}
 	return nil
-}
-
-func defaultRepositoryMonitorCommandLabel(intent string) string {
-	switch intent {
-	case "approve_plan":
-		return "orka:approve-plan"
-	case repositoryMonitorCommandIntentFixCI:
-		return "orka:fix-ci"
-	case repositoryMonitorCommandIntentUpdateBranch:
-		return "orka:update-branch"
-	case repositoryMonitorCommandIntentDecompose:
-		return "orka:to-issues"
-	default:
-		return "orka:" + strings.ReplaceAll(intent, "_", "-")
-	}
 }
 
 // resolveRepositoryMonitorAgent resolves a spec.agents.<role> reference to its
@@ -424,19 +432,19 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgen
 	}
 	if agent.Spec.Runtime == nil {
 		runtimeType := corev1alpha1.AgentRuntimeType("")
-		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude or opencode", field, ref.Name, runtimeType), nil
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude, codex, or opencode", field, ref.Name, runtimeType), nil
 	}
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
-		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude or opencode", field, ref.Name), nil
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude, codex, or opencode", field, ref.Name), nil
 	}
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeOpencode:
 		if err := ValidateOpenCodeAgentSpec(agent); err != nil {
 			return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q has an invalid OpenCode configuration: %v", field, ref.Name, err), nil
 		}
-	case corev1alpha1.AgentRuntimeClaude:
+	case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCodex:
 	default:
-		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude or opencode", field, ref.Name, agent.Spec.Runtime.Type), nil
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude, codex, or opencode", field, ref.Name, agent.Spec.Runtime.Type), nil
 	}
 	if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
 		return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", field, ref.Name), nil
@@ -452,7 +460,7 @@ func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
 	if secret == nil {
 		return false
 	}
-	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
+	for _, key := range []string{defaultACPWorkspaceCredentialKey, "password", workerenv.GitHubToken} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return true
 		}
@@ -511,7 +519,8 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 
 	var queuedRun *store.MonitorRun
 	requeueAfter := time.Duration(0)
-	if pendingReviews {
+	// Completed reviews still need publication retries while scheduled runs are suspended.
+	if pendingReviews || publishedReviews {
 		requeueAfter = repositoryMonitorValidationRetry
 	}
 	if state.suspended {
@@ -766,7 +775,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	if processErr != nil {
 		failureState := repositoryMonitorRunFailureState(processErr)
 		if strings.TrimSpace(run.CommandEventID) == "" && repositoryMonitorFailedCommandRunRetryable("["+failureState+"]") {
-			events, _, listErr := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: "run_failed", Limit: repositoryMonitorCommandMaxRetries})
+			events, _, listErr := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: repositoryMonitorRunFailurePermanent, Limit: repositoryMonitorCommandMaxRetries})
 			if listErr != nil {
 				return nil, 0, listErr
 			}
@@ -778,7 +787,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 					return nil, 0, err
 				}
-				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{"state": failureState}); eventErr != nil {
+				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{stateField: failureState}); eventErr != nil {
 					return nil, 0, eventErr
 				}
 				return &run, repositoryMonitorCommandRetryDelay, nil
@@ -792,7 +801,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 			return nil, 0, err
 		}
 		metrics.RecordRepositoryMonitorBlock(failureState)
-		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{"state": failureState}); eventErr != nil {
+		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{stateField: failureState}); eventErr != nil {
 			return nil, 0, eventErr
 		}
 		return &run, 0, nil
@@ -837,9 +846,9 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", run.Error, map[string]any{
-		"reason":  "stale_running_run",
-		"timeout": repositoryMonitorRunningRunTimeout.String(),
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, run.Error, map[string]any{
+		eventReasonField: "stale_running_run",
+		"timeout":        repositoryMonitorRunningRunTimeout.String(),
 	}); err != nil {
 		run.Error = fmt.Sprintf("%s; additionally failed to record recovery event: %v", run.Error, err)
 	}
@@ -867,7 +876,7 @@ func repositoryMonitorRunFailureState(err error) string {
 			return repositoryMonitorRunRetryScheduled
 		}
 		if ghErr.StatusCode >= 400 && ghErr.StatusCode < 500 {
-			return "run_failed"
+			return repositoryMonitorRunFailurePermanent
 		}
 	}
 	if errors.Is(err, io.EOF) {
@@ -914,7 +923,7 @@ func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Co
 		m.Status.ObservedGeneration = m.Generation
 
 		condition := metav1.Condition{
-			Type:               "Ready",
+			Type:               conditionReasonReady,
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: m.Generation,
 		}
@@ -959,7 +968,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 			continue
 		}
 		counts.openPullRequests++
-		if item.LastVerdict == repositoryMonitorReviewVerdictPassed && item.LastReviewedHeadSHA == item.HeadSHA && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) && item.SkipReason == "" {
+		if item.AutomergeState == repositoryMonitorAutomergeStateMergeReady {
 			counts.mergeReadyItems++
 		}
 		if item.RepairState == repositoryMonitorRepairPhaseQueued {
@@ -982,7 +991,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 		switch item.WorkflowPhase {
 		case "triage_queued", "research_queued", "plan_queued", "implementation_queued", "mutation_queued":
 			counts.pendingIssueActions++
-		case repositoryMonitorIssuePhaseBlocked, repositoryMonitorIssuePhaseApprovalRequired:
+		case repositoryMonitorIssuePhaseBlocked, repositoryMonitorIssuePhasePaused:
 			counts.blockedIssues++
 		default:
 			if repositoryMonitorItemVerdictBlocked(item.LastVerdict) {
@@ -1028,6 +1037,9 @@ func (r *RepositoryMonitorReconciler) updateStatusWithRetry(ctx context.Context,
 
 // SetupWithManager sets up the controller with the manager.
 func (r *RepositoryMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.RepositoryMonitor{}).
 		Owns(&corev1alpha1.Task{}).

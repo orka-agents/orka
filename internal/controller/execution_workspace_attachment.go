@@ -29,6 +29,10 @@ import (
 )
 
 const (
+	epochField = "epoch"
+)
+
+const (
 	workspaceAttachmentTokenKey             = "token"
 	workspaceAttachmentLabel                = labels.LabelWorkspaceAttachment
 	workspaceAttachmentLeaseEpochAnnotation = "workspace.orka.ai/attachment-epoch"
@@ -152,6 +156,8 @@ func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
 
 // Attach rotates authority and writes attachment intent. Bearer token text
 // exists only in the created Secret and this function's short-lived buffer.
+//
+//nolint:gocyclo // Lease acquisition, epoch fencing, Secret creation, and rollback must remain ordered.
 func (m WorkspaceAttachmentManager) Attach(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -238,8 +244,8 @@ func (m WorkspaceAttachmentManager) Attach(
 		Data: map[string][]byte{
 			workspaceAttachmentTokenKey: append([]byte(nil), bearer...),
 			"workspaceUID":              []byte(current.UID),
-			"taskUID":                   []byte(task.UID),
-			"epoch":                     []byte(strconv.FormatInt(epoch, 10)),
+			taskUIDField:                []byte(task.UID),
+			epochField:                  []byte(strconv.FormatInt(epoch, 10)),
 		},
 	}
 	if err := controllerutil.SetControllerReference(current, secret, m.Client.Scheme()); err != nil {
@@ -385,8 +391,8 @@ func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
 		secret.Type == corev1.SecretTypeOpaque &&
 		secret.Labels[workspaceAttachmentLabel] == string(workspace.UID) &&
 		string(secret.Data["workspaceUID"]) == string(workspace.UID) &&
-		len(secret.Data["taskUID"]) > 0 &&
-		string(secret.Data["epoch"]) == strconv.FormatInt(epoch, 10)
+		len(secret.Data[taskUIDField]) > 0 &&
+		string(secret.Data[epochField]) == strconv.FormatInt(epoch, 10)
 	decodedBearer := make([]byte, base64.RawURLEncoding.DecodedLen(len(bearer)))
 	decodedLen, decodeErr := base64.RawURLEncoding.Decode(decodedBearer, bearer)
 	validBearer := decodeErr == nil && decodedLen == workspaceAttachmentTokenEntropyBytes
@@ -698,7 +704,7 @@ func attachmentLeaseName(workspaceName string) string {
 func boundedWorkspaceChildName(workspaceName, suffix string) string {
 	workspaceName = strings.Trim(strings.ToLower(strings.TrimSpace(workspaceName)), "-")
 	if workspaceName == "" {
-		workspaceName = "workspace"
+		workspaceName = taskWorkspaceVolume
 	}
 	name := workspaceName + "-" + suffix
 	if len(name) <= workspaceChildNameMaxLength {

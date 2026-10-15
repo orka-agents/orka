@@ -1,4 +1,4 @@
-# ACP v2 CRD hard cutover
+# Orka harness v2 CRD hard cutover
 
 `scripts/upgrade-orka-crds.sh` is the only supported helper for replacing a
 cluster that may still contain `orka.harness.v1` AgentRuntime state. It is a

@@ -76,6 +76,10 @@ type ExecutionWorkspaceClassStatus struct {
 // +kubebuilder:resource:categories=orka,shortName=ewc
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.status.providerRef.name`
+// +kubebuilder:printcolumn:name="On Detach",type=string,JSONPath=`.spec.lifecycle.defaultOnDetach`
+// +kubebuilder:printcolumn:name="Idle Timeout",type=string,JSONPath=`.spec.lifecycle.idleTimeout`
+// +kubebuilder:printcolumn:name="Max Lifetime",type=string,JSONPath=`.spec.lifecycle.maxLifetime`
+// +kubebuilder:printcolumn:name="Detach Timeout",type=string,JSONPath=`.spec.lifecycle.detachTimeout`,priority=1
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

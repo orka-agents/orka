@@ -113,8 +113,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     task?.metadata.uid,
     traceRefetchInterval,
   )
-  // Poll approvals while live so a new blocking approval surfaces in the runtime
-  // health panel; stops once terminal (matches TaskApprovalPanel semantics).
+  // Poll approvals while live and until execution recovery settles after termination.
   const approvalRefetchInterval = following ? 5000 : undefined
   const { data: approvalsResp } = useTaskApprovals(
     taskId,

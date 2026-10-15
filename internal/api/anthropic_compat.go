@@ -25,6 +25,13 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
+const (
+	apiObjectList     = "list"
+	chatRoleTool      = "tool"
+	chatRoleAssistant = "assistant"
+	apiFieldMessage   = "message"
+)
+
 var anthropicLog = logf.Log.WithName("anthropic-compat")
 
 // AnthropicCompatHandler implements Anthropic-compatible /v1/messages endpoints.
@@ -273,10 +280,11 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
 			return anthropicContextTokenAuthorizationError(c, err)
 		}
-		anthropicLog.Error(err, "failed to resolve provider", "model", req.Model)
+		anthropicLog.Error(err, "failed to resolve provider", chatModelKey, req.Model)
 		return anthropicError(c, 400, "invalid_request_error", "failed to resolve provider: "+err.Error())
 	}
 
+	ctx = usageRequestContext(ctx, h.resultStore, uncachedReaderOr(h.apiReader, h.client), namespace, "")
 	provider = llm.NewTracingProvider(provider)
 
 	messages, err := convertAnthropicMessages(req.Messages)
@@ -309,6 +317,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		Namespace:           namespace,
 		ToolUseAction:       "anthropicTools",
 		AuthorizationConfig: h.contextTokenAuthorization,
+		ConnectorsEnabled:   h.config.ConnectorsEnabled,
 	})
 	if err != nil {
 		return anthropicContextTokenAuthorizationError(c, err)
@@ -332,6 +341,8 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			AuthContext:               contextToken,
 			AuthorizationConfig:       h.contextTokenAuthorization,
 			UserInfo:                  userInfo,
+			LinkedAccounts:            h.config.LinkedAccounts,
+			ConnectorsEnabled:         h.config.ConnectorsEnabled,
 		})
 	}
 
@@ -373,8 +384,8 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		user = ui.Username
 	}
 	anthropicLog.Info("messages completed",
-		"user", user,
-		"model", model,
+		chatRoleUser, user,
+		chatModelKey, model,
 		"input_tokens", resp.InputTokens,
 		"output_tokens", resp.OutputTokens,
 		"stop_reason", resp.StopReason,
@@ -421,7 +432,7 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 			if !seen[modelID] {
 				models = append(models, OAIModel{
 					ID:      modelID,
-					Object:  "model",
+					Object:  chatModelKey,
 					Created: now,
 					OwnedBy: string(p.Spec.Type),
 				})
@@ -430,7 +441,7 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 			if !seen[p.Spec.DefaultModel] {
 				models = append(models, OAIModel{
 					ID:      p.Spec.DefaultModel,
-					Object:  "model",
+					Object:  chatModelKey,
 					Created: now,
 					OwnedBy: string(p.Spec.Type),
 				})
@@ -440,7 +451,7 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 	}
 
 	return c.JSON(OAIModelList{
-		Object: "list",
+		Object: apiObjectList,
 		Data:   models,
 	})
 }
@@ -456,7 +467,7 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 		}
 
 		switch m.Role {
-		case "user":
+		case chatRoleUser:
 			// Separate tool_result blocks from other content
 			var textParts []string
 			for _, b := range blocks {
@@ -482,27 +493,27 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 						}
 					}
 					messages = append(messages, llm.Message{
-						Role:       "tool",
+						Role:       chatRoleTool,
 						ToolCallID: b.ToolUseID,
 						Content:    resultContent,
 					})
-				case "text":
+				case oaiContentTypeText:
 					textParts = append(textParts, b.Text)
 				}
 			}
 			if len(textParts) > 0 {
 				messages = append(messages, llm.Message{
-					Role:    "user",
+					Role:    chatRoleUser,
 					Content: strings.Join(textParts, "\n"),
 				})
 			}
 
-		case "assistant":
-			msg := llm.Message{Role: "assistant"}
+		case chatRoleAssistant:
+			msg := llm.Message{Role: chatRoleAssistant}
 			var textParts []string
 			for _, b := range blocks {
 				switch b.Type {
-				case "text":
+				case oaiContentTypeText:
 					textParts = append(textParts, b.Text)
 				case oaiStopReasonToolUse:
 					msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
@@ -584,8 +595,8 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 
 	return AnthropicResponse{
 		ID:         id,
-		Type:       "message",
-		Role:       "assistant",
+		Type:       apiFieldMessage,
+		Role:       chatRoleAssistant,
 		Content:    content,
 		Model:      model,
 		StopReason: &stopReason,
@@ -599,7 +610,7 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 // anthropicError returns an error in Anthropic API format.
 func anthropicError(c fiber.Ctx, status int, errType, message string) error {
 	return c.Status(status).JSON(AnthropicError{
-		Type: "error",
+		Type: apiFieldError,
 		Error: AnthropicErrorDetail{
 			Type:    errType,
 			Message: message,
@@ -613,11 +624,11 @@ func stripClientToolMessages(messages []llm.Message) []llm.Message {
 	filtered := make([]llm.Message, 0, len(messages))
 	for _, m := range messages {
 		// Skip tool result messages (from client tool execution)
-		if m.Role == "tool" {
+		if m.Role == chatRoleTool {
 			continue
 		}
 		// For assistant messages, strip tool calls but keep text content
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+		if m.Role == chatRoleAssistant && len(m.ToolCalls) > 0 {
 			if m.Content == "" {
 				continue
 			}

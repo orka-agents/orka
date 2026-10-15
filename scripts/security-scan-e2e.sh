@@ -593,7 +593,7 @@ build_fake_runtime() {
   local dockerfile="${work_dir}/security-scan-fake-runtime.Dockerfile"
   cat >"${dockerfile}" <<'DOCKERFILE'
 # syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -624,7 +624,7 @@ STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/orka-acp-runtime"]
 DOCKERFILE
 
-  log "Building deterministic ACP v2 runtime ${fake_runtime_image}"
+  log "Building deterministic Orka harness v2 runtime ${fake_runtime_image}"
   run docker build -t "${fake_runtime_image}" -f "${dockerfile}" .
 }
 
@@ -757,7 +757,7 @@ reset_e2e_resources() {
 }
 
 apply_authority_resources() {
-  log "Creating deterministic ACP v2 custom Tool authority fixtures"
+  log "Creating deterministic Orka harness v2 custom Tool authority fixtures"
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: OutboundAccessPolicy
@@ -777,7 +777,7 @@ metadata:
   name: ${authority_tool_name}
   namespace: ${test_namespace}
 spec:
-  description: Deterministic ACP v2 transaction-authority probe
+  description: Deterministic Orka harness v2 transaction-authority probe
   brokeredToolClass: read
   parameters:
     type: object
@@ -815,7 +815,7 @@ YAML
 }
 
 wait_authority_resources() {
-  log "Waiting for ACP v2 authority policy and Tool readiness"
+  log "Waiting for Orka harness v2 authority policy and Tool readiness"
   run kubectl -n "${test_namespace}" wait \
     --for=condition=Accepted=true "outboundaccesspolicy/${authority_policy_name}" --timeout=2m
   run kubectl -n "${test_namespace}" wait \
@@ -843,7 +843,7 @@ reset_authority_observer() {
 create_authority_task() {
   local task_name="$1"
 
-  log "Creating transactionless ACP v2 authority Task/${task_name}"
+  log "Creating transactionless Orka harness v2 authority Task/${task_name}"
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
@@ -908,7 +908,7 @@ assert_transactionless_authority_task() {
     (.status.execution.runtimeSessionUID | length) > 0 and
     (.status.execution.promptID | length) > 0 and
     .status.resultRef.available == true
-  ' >/dev/null || die "transactionless authority Task/${task_name} did not complete through ACP v2"
+  ' >/dev/null || die "transactionless authority Task/${task_name} did not complete through Orka harness v2"
 }
 
 assert_transactionless_authority_stats() {
@@ -939,7 +939,7 @@ run_acp_authority_gate() {
   wait_authority_task_phase "${authority_service_account_task}" "Succeeded"
   assert_transactionless_authority_task "${authority_service_account_task}"
   assert_transactionless_authority_stats service-account
-  log "ACP v2 custom Tool transactionless TTS-isolation gate passed"
+  log "Orka harness v2 custom Tool transactionless TTS-isolation gate passed"
 }
 
 apply_agent() {
@@ -1267,12 +1267,13 @@ main() {
   local manager_ref publisher_ref fake_runtime_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+  general_worker_image="$(orka_kind_registry_push "${general_worker_image}" "orka/general-worker")"
   fake_runtime_ref="$(orka_kind_registry_push "${fake_runtime_image}" "orka/acp-security-fixture")"
 
   log "Bootstrapping test-only admission TLS"
   orka_e2e_bootstrap_admission_tls
 
-  log "Deploying Orka manager with the deterministic digest-pinned ACP v2 fixture"
+  log "Deploying Orka manager with the deterministic digest-pinned Orka harness v2 fixture"
   local placeholder_digest
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   run make deploy \
@@ -1302,7 +1303,7 @@ main() {
   wait_repo_phase "${bad_scan_name}" "Error"
   log "Verifying malformed terminal results fail closed after successful ACP execution"
   assert_malformed_result_gate
-  log "SecurityScan and ACP v2 custom Tool authority gates passed"
+  log "SecurityScan and Orka harness v2 custom Tool authority gates passed"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

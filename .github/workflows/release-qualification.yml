@@ -53,6 +53,10 @@ jobs:
       # Publication coverage uses local Git and GitHub API fixtures. The
       # optional local live canary must never receive credentials in this job.
       ACP_E2E_WRITE_CREATE_PR: "0"
+      # Agent execution runs against aimock deployed as vekil-system/vekil and
+      # scripted by scripts/fixtures/agent-runtime-aimock, so qualification
+      # needs no model-provider credential.
+      ACP_E2E_MODEL_BACKEND: aimock
       ACP_E2E_OPENCODE_CONTEXT_WINDOW: "32768"
       ACP_E2E_OPENCODE_MAX_TOKENS: "4096"
       ACP_E2E_OPENCODE_MODEL: "openai/gpt-5.4-mini"
@@ -172,14 +176,13 @@ jobs:
         env:
           # Transfer cluster teardown to the post-upload step below.
           ACP_E2E_KEEP_CLUSTER: "1"
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           # Only observes the candidate repository; no GitHub write authority.
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/agent-runtime-kind-e2e.sh
 
       - name: Upload evidence before cluster teardown
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-qualification-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-qualification/acceptance.json
@@ -221,7 +224,7 @@ jobs:
 
       - name: Upload final acceptance report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-qualification-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-qualification/acceptance.json

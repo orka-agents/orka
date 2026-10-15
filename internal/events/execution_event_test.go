@@ -25,6 +25,7 @@ func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 		ExecutionEventTypeModelContextUpdated,
 		ExecutionEventTypeModelMessage,
 		ExecutionEventTypeContextTruncated,
+		ExecutionEventTypeNativeSessionCaptureSkipped,
 		ExecutionEventTypeToolCallStarted,
 		ExecutionEventTypeToolCallCompleted,
 		ExecutionEventTypeToolCallFailed,
@@ -47,6 +48,7 @@ func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 		ExecutionEventTypeApprovalDeclined,
 		ExecutionEventTypeApprovalExpired,
 		ExecutionEventTypeApprovalCancelled,
+		ExecutionEventTypeApprovalExecutionUpdated,
 		ExecutionEventTypePlanUpdated,
 	}
 	got := executionEventTypes

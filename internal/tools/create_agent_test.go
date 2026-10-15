@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -65,6 +66,51 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	description, _ := systemPrompt[jsonSchemaDescriptionField].(string)
 	if !ok || !strings.Contains(description, "Required unless runtime.type is opencode") {
 		t.Fatalf("systemPrompt schema = %#v, want OpenCode omission guidance", systemPrompt)
+	}
+}
+
+func TestCreateAgentTool_ParametersRequireNonblankAllowedAgentNames(t *testing.T) {
+	tool := NewCreateAgentTool(newFakeClient(), executionmode.HarnessV2)
+	assertCreateAgentAllowedAgentNameSchema(t, tool.Parameters())
+}
+
+func assertCreateAgentAllowedAgentNameSchema(t *testing.T, params json.RawMessage) {
+	t.Helper()
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("failed to unmarshal parameters schema: %v", err)
+	}
+	for _, key := range []string{jsonSchemaPropertiesField, "coordination", jsonSchemaPropertiesField, "allowedAgents", itemsField, jsonSchemaPropertiesField, nameField} {
+		child, ok := schema[key].(map[string]any)
+		if !ok {
+			t.Fatalf("allowed agent name schema missing object %q: %#v", key, schema)
+		}
+		schema = child
+	}
+	if schema[jsonSchemaTypeField] != jsonSchemaTypeString || schema[jsonSchemaMinLengthField] != float64(1) {
+		t.Errorf("allowed agent name schema = %#v, want string with minLength 1", schema)
+	}
+	pattern, _ := schema[jsonSchemaPatternField].(string)
+	if pattern != `\S` {
+		t.Fatalf("allowed agent name pattern = %q, want %q", pattern, `\S`)
+	}
+	nonblank := regexp.MustCompile(pattern)
+	for _, tc := range []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "empty", value: "", valid: false},
+		{name: "spaces", value: "   ", valid: false},
+		{name: "mixed whitespace", value: " \t\r\n ", valid: false},
+		{name: "agent name", value: "coder", valid: true},
+		{name: "padded agent name", value: " coder \t", valid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nonblank.MatchString(tc.value); got != tc.valid {
+				t.Errorf("allowed agent name pattern matches %q = %t, want %t", tc.value, got, tc.valid)
+			}
+		})
 	}
 }
 

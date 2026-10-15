@@ -8,7 +8,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	chattools "github.com/orka-agents/orka/internal/tools"
 )
 
 func TestNewSystemPromptBuilder(t *testing.T) {
@@ -118,7 +122,7 @@ func TestBuildTaskTypesSection(t *testing.T) {
 			}
 			for _, want := range []string{
 				"Use create_agent_task only for Agents that have runtime listed",
-				"use create_ai_task with agentRef and providerRef instead",
+				"use create_ai_task with agentRef instead",
 				"Do NOT use create_agent_task for non-runtime agents",
 				"OpenCode is supported there as a built-in ACP RuntimePool profile when its image is configured",
 				"does not use runtime.secretRef",
@@ -187,7 +191,7 @@ func TestBuildCoordinationSection(t *testing.T) {
 				for _, want := range []string{
 					"use create_agent_task only when the",
 					"coordinator has runtime listed",
-					"use create_ai_task with agentRef and providerRef",
+					"use create_ai_task with agentRef",
 				} {
 					if !strings.Contains(s, want) {
 						t.Errorf("missing %q", want)
@@ -246,7 +250,7 @@ func TestBuildRulesSection(t *testing.T) {
 		`if "dev-coordinator" exists, prefer it`,
 		`chosen coordinator has "runtime" listed`,
 		`chosen coordinator has no "runtime" listed`,
-		"create_ai_task using agentRef and providerRef",
+		"create_ai_task using agentRef",
 		"code → validate → review repair loop → PR → CI repair loop → validate + re-review → approve",
 		"at most 8 review repair tasks",
 		"at most 3 repair tasks",
@@ -753,5 +757,427 @@ func TestBuildDynamicContextSkillListError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "listing skills") {
 		t.Errorf("error = %q, expected 'listing skills' message", err.Error())
+	}
+}
+
+func TestBuildSystemPromptDistinguishesWorkerCatalogFromChatTools(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(
+		&corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "namespace-tool", Namespace: "default"},
+			Spec:       corev1alpha1.ToolSpec{Description: "Useful agent attachment metadata"},
+		},
+		&corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "other-namespace-tool", Namespace: "other"},
+		},
+	).Build()
+	_, toolsSection, _, _, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).buildDynamicContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name  string
+		tools []string
+	}{
+		{name: "unscoped"},
+		{name: "read-only", tools: []string{"list_tools"}},
+		{name: "task creator", tools: []string{"create_ai_task"}},
+		{name: "tool-less", tools: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			if tt.tools != nil {
+				b.SetAvailableChatTools(tt.tools)
+			}
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, after, ok := strings.Cut(prompt, "<available_tools>\n")
+			if !ok {
+				t.Fatal("missing worker tool catalog")
+			}
+			catalog, _, ok := strings.Cut(after, "</available_tools>")
+			if !ok {
+				t.Fatal("missing worker tool catalog closing tag")
+			}
+			for _, want := range append(slices.Clone(builtinProxyTools), "namespace-tool - Useful agent attachment metadata") {
+				if !strings.Contains(catalog, want) {
+					t.Errorf("catalog lost %q", want)
+				}
+			}
+			if strings.Contains(catalog, "other-namespace-tool") {
+				t.Error("catalog includes a tool from another namespace")
+			}
+			if tt.tools == nil {
+				if catalog != toolsSection {
+					t.Error("unscoped worker tool catalog changed")
+				}
+				return
+			}
+			for _, want := range []string{"Agent/worker attachment catalog", "not directly callable chat API tools", "only the tools in <available_chat_tools>"} {
+				if !strings.Contains(catalog, want) {
+					t.Errorf("scoped catalog is missing %q", want)
+				}
+			}
+			if !strings.HasSuffix(catalog, toolsSection) {
+				t.Error("scoped worker tool catalog metadata changed")
+			}
+		})
+	}
+}
+
+func TestBuildSystemPromptActionMandateIncludesPRMonitor(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	for _, tt := range []struct {
+		name         string
+		tools        []string
+		wantMandate  bool
+		wantSequence bool
+	}{
+		{name: "unscoped", wantMandate: true, wantSequence: true},
+		{name: "Agent-only", tools: []string{"create_agent"}, wantMandate: true},
+		{name: "Tool-only", tools: []string{"create_tool"}, wantMandate: true},
+		{name: "monitor-only", tools: []string{"create_pr_monitor"}, wantMandate: true},
+		{name: "monitor with polling", tools: []string{"create_pr_monitor", "wait_for_task", "fetch_task_output"}, wantMandate: true},
+		{name: "task creator with polling", tools: []string{"create_container_task", "wait_for_task", "fetch_task_output"}, wantMandate: true, wantSequence: true},
+		{name: "read-only", tools: []string{"list_tasks"}},
+		{name: "polling-only", tools: []string{"wait_for_task", "fetch_task_output"}},
+		{name: "tool-less", tools: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			if tt.tools != nil {
+				b.SetAvailableChatTools(tt.tools)
+			}
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(prompt, "you MUST include the tool\ncall in the SAME response."); got != tt.wantMandate {
+				t.Errorf("action-call mandate present = %v, want %v", got, tt.wantMandate)
+			}
+			if got := strings.Contains(prompt, "call create_*_task, then wait_for_task, then fetch_task_output all in sequence"); got != tt.wantSequence {
+				t.Errorf("task result sequence present = %v, want %v", got, tt.wantSequence)
+			}
+			if slices.Equal(tt.tools, []string{"create_pr_monitor"}) {
+				for _, unwanted := range []string{"create_*_task", "wait_for_task", "fetch_task_output", "<scheduling>"} {
+					if strings.Contains(prompt, unwanted) {
+						t.Errorf("monitor-only prompt contains task guidance %q", unwanted)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBuildSystemPromptActionMandateCoversRegisteredCreators(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	for _, name := range chattools.ChatToolNames() {
+		if !strings.HasPrefix(name, "create_") {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			b.SetAvailableChatTools([]string{name})
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(prompt, "you MUST include the tool\ncall in the SAME response.") {
+				t.Fatalf("registered creator %s lost the action-call mandate", name)
+			}
+		})
+	}
+}
+
+func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	full, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(full, "<available_chat_tools>") || !strings.Contains(full, "<capabilities>") {
+		t.Error("unrestricted prompt must keep the capabilities section and not list available chat tools")
+	}
+
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetAvailableChatTools([]string{"create_container_task", "wait_for_task", "fetch_task_output"})
+	limited, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(limited, "<capabilities>") {
+		t.Error("limited prompt must not claim the unrestricted capabilities")
+	}
+	if !strings.Contains(limited, "- container:") || !strings.Contains(limited, "Writable paths") {
+		t.Error("container guidance must stay when create_container_task is offered")
+	}
+	for _, unavailable := range []string{"create_ai_task", "create_agent_task", "create_agent"} {
+		if regexp.MustCompile(`\b` + unavailable + `\b`).MatchString(limited) {
+			t.Errorf("limited prompt names unavailable tool %s", unavailable)
+		}
+	}
+	if !strings.Contains(limited, "only these Orka tools: create_container_task, fetch_task_output, wait_for_task") {
+		t.Error("limited prompt must list the offered chat tools")
+	}
+}
+
+func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	build := func(allowed ...string) string {
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+		b.SetAvailableChatTools(allowed)
+		prompt, err := b.BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return prompt
+	}
+
+	agentOnly := build("create_agent_task")
+	for _, want := range []string{"- agent:", "ALWAYS include workspace.gitRepo", "Set timeout to at least 15m", "Do NOT use create_agent_task for non-runtime agents"} {
+		if !strings.Contains(agentOnly, want) {
+			t.Errorf("agent-task-only prompt is missing %q", want)
+		}
+	}
+	containerOnly := build("create_container_task")
+	if !strings.Contains(containerOnly, "you MUST include the tool\ncall in the SAME response.") || !strings.Contains(containerOnly, "Act first, summarize after.") {
+		t.Error("prompt without polling tools must keep the rule to call tools in the same response")
+	}
+	// Whole words, so the coordinator's own wait_for_tasks tool does not count.
+	unoffered := regexp.MustCompile(`\b(?:wait_for_task|create_ai_task)\b`)
+	for _, prompt := range []string{agentOnly, containerOnly} {
+		if unoffered.MatchString(prompt) {
+			t.Error("limited prompt names a tool that is not offered")
+		}
+	}
+	// Coordination guidance for create_agent survives without the other task tools.
+	coordinator := build("create_agent", "create_ai_task")
+	for _, want := range []string{"PREFERRED (one-shot)", "initialPrompt=", "use create_ai_task.", "use the one-shot coordinator pattern above"} {
+		if !strings.Contains(coordinator, want) {
+			t.Errorf("create_agent prompt is missing %q", want)
+		}
+	}
+	if aiOnly := build("create_ai_task"); !strings.Contains(aiOnly, "use create_ai_task.") || strings.Contains(aiOnly, "one-shot coordinator") {
+		t.Error("prompt without create_agent must keep the create_ai_task fallback and drop the one-shot pattern")
+	}
+	// Without a task creation tool, the model must not be told to create tasks.
+	for _, prompt := range []string{build("wait_for_task", "fetch_task_output"), build("list_agents"), build()} {
+		if strings.Contains(prompt, "create_*_task") || strings.Contains(prompt, "CRITICAL RULE") {
+			t.Error("prompt without a task creation tool still tells the model to create tasks")
+		}
+		if !strings.Contains(prompt, "<behavior>\nAct first, summarize after.") {
+			t.Error("prompt without a task creation tool must keep the act-first rule")
+		}
+	}
+}
+
+// TestPromptPartsDeclareTheChatToolsTheyName keeps each guidance part's
+// declared requirements in step with its text: a part that names a chat tool
+// must require it, and a part that refers to create_*_task must need a task
+// creation tool.
+func TestPromptPartsDeclareTheChatToolsTheyName(t *testing.T) {
+	for section, parts := range promptSections() {
+		for i, part := range parts {
+			for _, name := range chattools.ChatToolNames() {
+				if regexp.MustCompile(`\b`+name+`\b`).MatchString(part.text) && !slices.Contains(part.requires, name) {
+					t.Errorf("%s part %d names %s but does not require it", section, i, name)
+				}
+			}
+			if strings.Contains(part.text, "create_*_task") && !slices.Equal(part.anyOf, promptTaskCreators) {
+				t.Errorf("%s part %d refers to create_*_task but does not need a task creation tool", section, i)
+			}
+		}
+	}
+}
+
+// A scoped caller keeps the general rules even when it lacks tools that other
+// rules name, and the kept rules are numbered without gaps.
+func TestBuildSystemPromptKeepsGeneralRulesForScopedCallers(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetAvailableChatTools([]string{"list_agents", "list_tasks"})
+	prompt, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<rules>\n1. Use the current namespace (namespace in the Runtime line)",
+		"2. Provide clear summaries of what you did",
+		"4. Do not create more tasks than necessary.",
+		"<tool_call_style>",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("scoped prompt is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"<examples>", "<scheduling>", "<validation>", "create_*_task"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Errorf("scoped prompt without task tools contains %q", unwanted)
+		}
+	}
+}
+
+func TestBuildSystemPromptKeepsSingleCreatorRouting(t *testing.T) {
+	for _, tool := range []string{"create_ai_task", "create_container_task", "create_agent_task"} {
+		t.Run(tool, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			b.SetAvailableChatTools([]string{tool})
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, other := range []string{"create_ai_task", "create_container_task", "create_agent_task"} {
+				if other != tool && strings.Contains(prompt, other) {
+					t.Errorf("prompt for %s names unavailable %s", tool, other)
+				}
+			}
+			if tool == "create_agent_task" {
+				if !strings.Contains(prompt, "ALWAYS use create_agent_task") || !strings.Contains(prompt, "Do NOT use create_agent_task for non-runtime agents") {
+					t.Error("agent-only prompt lost runtime routing")
+				}
+			} else if !strings.Contains(prompt, "Do NOT use "+tool+" for runtime agents") {
+				t.Error("non-runtime creator lost the runtime prohibition")
+			}
+		})
+	}
+}
+
+func TestSystemPromptChatProviderMustBeVisible(t *testing.T) {
+	for _, visible := range []bool{false, true} {
+		t.Run(fmt.Sprint(visible), func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			if visible {
+				if err := c.Create(context.Background(), &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "visible-provider", Namespace: "default"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			b.SetChatProvider("visible-provider")
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(prompt, "chat_provider=visible-provider") != visible {
+				t.Fatalf("chat provider visibility differs from discovery: visible=%v", visible)
+			}
+		})
+	}
+}
+
+func TestScopedAIProviderGuidanceKeepsExplicitOverrides(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetAvailableChatTools([]string{"create_ai_task"})
+	prompt, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"omit providerRef to use the selected Agent's configured provider", "unless the user explicitly requests another provider"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("provider selection lost explicit override: %q", want)
+		}
+	}
+}
+
+func TestSystemPromptAgentProviderPrecedence(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	prompt, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"omit providerRef to use the selected Agent's configured provider", "For tasks without agentRef, use this chat session's provider", "unless the user explicitly requests another provider"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("missing provider-precedence guidance %q", want)
+		}
+	}
+	for _, contradiction := range []string{
+		"with agentRef and providerRef", "using agentRef and providerRef", "with agentRef/providerRef",
+		"Use create_ai_task with a providerRef", `providerRef: "openai"`,
+	} {
+		if strings.Contains(prompt, contradiction) {
+			t.Errorf("provider precedence contradicted by %q", contradiction)
+		}
+	}
+	if strings.Contains(prompt, "always set providerRef to an available provider name") {
+		t.Error("generic Provider rule can override an Agent's configured provider")
+	}
+}
+
+func TestSystemPromptCoordinatorCreationRequiresCreateAgent(t *testing.T) {
+	for _, canCreate := range []bool{false, true} {
+		t.Run(fmt.Sprint(canCreate), func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+			b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			tools := []string{"create_agent_task", "create_ai_task"}
+			if canCreate {
+				tools = append(tools, "create_agent")
+			}
+			b.SetAvailableChatTools(tools)
+			prompt, err := b.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{`chosen coordinator has "runtime" listed`, `chosen coordinator has no "runtime" listed`} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("existing coordinator routing lost %q", want)
+				}
+			}
+			if strings.Contains(prompt, "If no coordinator candidate exists") != canCreate {
+				t.Fatalf("coordinator creation guidance does not match create_agent availability: %v", canCreate)
+			}
+		})
+	}
+}
+
+func TestSystemPromptAgentTaskExamplesMatchSchema(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	var schema map[string]any
+	if err := json.Unmarshal((&chattools.CreateAgentTaskTool{}).Parameters(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties := schema["properties"].(map[string]any)
+	workspaceProperties := properties["workspace"].(map[string]any)["properties"].(map[string]any)
+	for _, scoped := range []bool{false, true} {
+		t.Run(fmt.Sprint(scoped), func(t *testing.T) {
+			builder := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+			if scoped {
+				builder.SetAvailableChatTools([]string{"create_agent_task", "wait_for_task", "fetch_task_output"})
+			}
+			prompt, err := builder.BuildSystemPrompt(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			examples := regexp.MustCompile(`create_agent_task\s*\(([^\n]*)\)`).FindAllStringSubmatch(prompt, -1)
+			if len(examples) != 3 {
+				t.Fatalf("agent-task examples = %d, want 3", len(examples))
+			}
+			for _, example := range examples {
+				var args map[string]any
+				if err := json.Unmarshal([]byte(example[1]), &args); err != nil {
+					t.Fatalf("agent-task example is not valid JSON: %s: %v", example[1], err)
+				}
+				for name := range args {
+					if _, ok := properties[name]; !ok {
+						t.Errorf("example uses undeclared argument %q", name)
+					}
+				}
+				for _, name := range schema["required"].([]any) {
+					if value, ok := args[name.(string)].(string); !ok || value == "" {
+						t.Errorf("example lacks required argument %q", name)
+					}
+				}
+				workspace, ok := args["workspace"].(map[string]any)
+				if !ok || workspace["gitRepo"] == nil {
+					t.Fatalf("repository example lacks workspace.gitRepo: %s", example[1])
+				}
+				for name := range workspace {
+					if _, ok := workspaceProperties[name]; !ok {
+						t.Errorf("example uses undeclared workspace argument %q", name)
+					}
+				}
+			}
+		})
 	}
 }

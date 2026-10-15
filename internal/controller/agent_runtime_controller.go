@@ -101,6 +101,8 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 
 // Reconcile validates one exact external runtime and publishes condition-ready status.
+//
+//nolint:gocyclo // Registration, conformance, and readiness are reconciled as one lifecycle.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	runtime := &corev1alpha1.AgentRuntime{}

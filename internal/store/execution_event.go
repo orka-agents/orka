@@ -197,6 +197,9 @@ type ExecutionEventStore interface {
 	ListExecutionEvents(ctx context.Context, filter ExecutionEventFilter) ([]ExecutionEvent, error)
 	ListSessionExecutionEvents(ctx context.Context, filter SessionExecutionEventFilter) ([]SessionExecutionEvent, int64, error)
 	GetLatestExecutionEventSeq(ctx context.Context, namespace, streamType, streamID string) (int64, error)
+	// GetLatestExecutionEventSeqs reads only the requested streams in bounded
+	// batches. Keys are trimmed stream IDs; absent streams have sequence zero.
+	GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error)
 	DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error
 }
 

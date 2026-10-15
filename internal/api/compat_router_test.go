@@ -121,7 +121,7 @@ func TestCompatRouterRoutesUsingAuthenticatedCredential(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Request-Id", "fixture-request")
-			_, _ = fmt.Fprintf(w, `{"namespace":%q}`, namespace)
+			_, _ = fmt.Fprintf(w, `{"namespace":%q,"path":%q}`, namespace, r.URL.Path)
 		}))
 		t.Cleanup(upstream.Close)
 		routes[namespace] = upstream.URL
@@ -136,6 +136,7 @@ func TestCompatRouterRoutesUsingAuthenticatedCredential(t *testing.T) {
 	for _, namespace := range []string{"team-a", "team-b"} {
 		for _, tc := range []struct{ path, method, header string }{
 			{"/openai/v1/chat/completions", http.MethodPost, AuthHeader},
+			{"/openai/v1/responses", http.MethodPost, AuthHeader},
 			{"/openai/v1/models", http.MethodGet, AuthHeader},
 			{"/anthropic/v1/messages", http.MethodPost, XAPIKeyHeader},
 			{"/anthropic/v1/models", http.MethodGet, XAPIKeyHeader},
@@ -169,12 +170,12 @@ func TestCompatRouterRoutesUsingAuthenticatedCredential(t *testing.T) {
 				require.NoError(t, resp.Body.Close())
 				require.NoError(t, err)
 				require.Equal(t, http.StatusOK, resp.StatusCode, "%s %s", tc.path, data)
-				require.JSONEq(t, fmt.Sprintf(`{"namespace":%q}`, namespace), string(data))
+				require.JSONEq(t, fmt.Sprintf(`{"namespace":%q,"path":%q}`, namespace, tc.path), string(data))
 				require.Equal(t, "fixture-request", resp.Header.Get("Request-Id"))
 			}
 		}
 	}
-	require.EqualValues(t, 24, calls.Load())
+	require.EqualValues(t, 28, calls.Load())
 }
 
 func TestCompatRouterDenialsNeverReachInstallation(t *testing.T) {
@@ -193,7 +194,7 @@ func TestCompatRouterDenialsNeverReachInstallation(t *testing.T) {
 	router, err := NewCompatRouter(compatRouterTokenClient(t, identities), map[string]string{"team-a": upstream.URL})
 	require.NoError(t, err)
 	t.Cleanup(router.Close)
-	for _, path := range []string{"/openai/v1/chat/completions", "/anthropic/v1/messages", "/openai/v1/models", "/anthropic/v1/models"} {
+	for _, path := range []string{"/openai/v1/chat/completions", "/openai/v1/responses", "/anthropic/v1/messages", "/openai/v1/models", "/anthropic/v1/models"} {
 		for _, tc := range []struct {
 			name, token, query, transaction string
 			status                          int
@@ -264,7 +265,7 @@ func TestCompatRouterUnavailableAndRedirects(t *testing.T) {
 }
 
 func TestCompatRouterStreamingAndCancellation(t *testing.T) {
-	for _, path := range []string{"/openai/v1/chat/completions", "/anthropic/v1/messages"} {
+	for _, path := range []string{"/openai/v1/chat/completions", "/openai/v1/responses", "/anthropic/v1/messages"} {
 		t.Run(path, func(t *testing.T) {
 			canceled := make(chan struct{})
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -421,4 +422,43 @@ func TestCompatRouterRequestBodyLimit(t *testing.T) {
 		require.Equal(t, http.StatusRequestEntityTooLarge, response.Code, response.Body.String())
 	}
 	require.Zero(t, completeBodies.Load())
+}
+
+func TestCompatRouterResponsesPreflight(t *testing.T) {
+	t.Setenv("ORKA_CORS_ALLOWED_ORIGINS", "https://chat.example.test")
+	var forwarded atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		forwarded.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	router, err := NewCompatRouter(compatRouterTokenClient(t, nil), map[string]string{"team-a": upstream.URL})
+	require.NoError(t, err)
+	t.Cleanup(router.Close)
+	for _, path := range []string{"/openai/v1/responses", "/OPENAI/v1/responses/"} {
+		for _, method := range []string{http.MethodPost, http.MethodGet} {
+			t.Run(method+path, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodOptions, path, nil)
+				req.Header.Set("Origin", "https://chat.example.test")
+				req.Header.Set("Access-Control-Request-Method", method)
+				req.Header.Set("Access-Control-Request-Headers", "authorization, content-type, x-orka-tools, x-stainless-lang")
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, req)
+				if method == http.MethodGet {
+					require.Equal(t, http.StatusNotFound, response.Code, "Responses route must remain POST-only")
+					require.Empty(t, response.Header().Get("Access-Control-Allow-Methods"))
+					return
+				}
+				require.Equal(t, http.StatusNoContent, response.Code)
+				require.Equal(t, "https://chat.example.test", response.Header().Get("Access-Control-Allow-Origin"))
+				require.Equal(t, http.MethodPost, response.Header().Get("Access-Control-Allow-Methods"))
+				allowedHeaders := strings.ToLower(response.Header().Get("Access-Control-Allow-Headers"))
+				for _, header := range []string{"authorization", "content-type", "x-orka-tools", "x-stainless-lang"} {
+					require.Contains(t, allowedHeaders, header)
+				}
+				require.Empty(t, response.Body.String(), "preflight must not reveal tenant data")
+			})
+		}
+	}
+	require.Zero(t, forwarded.Load(), "preflight must not contact an installation")
 }

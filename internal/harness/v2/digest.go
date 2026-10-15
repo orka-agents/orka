@@ -82,13 +82,40 @@ func CanonicalRequestDigest(request any) (RequestDigest, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal request for digest: %w", err)
 	}
-	return CanonicalRequestDigestJSON(raw)
+	limit := MaxCanonicalJSONBytes
+	var native *CreateRuntimeSessionRequest
+	switch typed := request.(type) {
+	case CreateRuntimeSessionRequest:
+		native = &typed
+	case *CreateRuntimeSessionRequest:
+		native = typed
+	}
+	if native != nil && native.NativeRestore != nil {
+		// Only bundle bytes receive the larger digest budget; all other
+		// control metadata retains the ordinary canonical JSON bound.
+		ordinary := *native
+		restore := *native.NativeRestore
+		restore.Snapshot.Data = nil
+		ordinary.NativeRestore = &restore
+		if _, err := CanonicalValue(ordinary); err != nil {
+			return "", fmt.Errorf("native restore metadata: %w", err)
+		}
+		if len(native.NativeRestore.Snapshot.Data) > MaxNativeSessionBytes {
+			return "", fmt.Errorf("native restore bundle exceeds absolute size limit")
+		}
+		limit = NativeSessionJSONLimit(MaxNativeSessionBytes)
+	}
+	return canonicalRequestDigestJSON(raw, limit)
 }
 
 // CanonicalRequestDigestJSON is the raw JSON variant of
 // CanonicalRequestDigest. It rejects duplicate keys before digesting.
 func CanonicalRequestDigestJSON(raw []byte) (RequestDigest, error) {
-	value, err := parseCanonicalJSON(raw)
+	return canonicalRequestDigestJSON(raw, MaxCanonicalJSONBytes)
+}
+
+func canonicalRequestDigestJSON(raw []byte, limit int) (RequestDigest, error) {
+	value, err := parseCanonicalJSONWithLimit(raw, limit)
 	if err != nil {
 		return "", err
 	}
@@ -192,11 +219,15 @@ func validateSHA256Digest(value string) error {
 }
 
 func parseCanonicalJSON(raw []byte) (any, error) {
+	return parseCanonicalJSONWithLimit(raw, MaxCanonicalJSONBytes)
+}
+
+func parseCanonicalJSONWithLimit(raw []byte, limit int) (any, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, fmt.Errorf("canonical JSON is empty")
 	}
-	if len(raw) > MaxCanonicalJSONBytes {
-		return nil, fmt.Errorf("canonical JSON exceeds %d bytes", MaxCanonicalJSONBytes)
+	if len(raw) > limit {
+		return nil, fmt.Errorf("canonical JSON exceeds %d bytes", limit)
 	}
 	if !utf8.Valid(raw) {
 		return nil, fmt.Errorf("canonical JSON contains invalid UTF-8")

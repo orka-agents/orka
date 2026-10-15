@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/gateway/referenceadapter"
 )
 
@@ -67,14 +69,14 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 		}},
 		Data: map[string][]byte{"token": []byte("outbound-token")},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&gatewayv1alpha1.Gateway{}).
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&gatewayv1alpha1.Gateway{}).
 		WithObjects(class, object, inbound, outbound).Build()
-	reconciler := &GatewayReconciler{Client: client, Scheme: scheme, HTTPClient: server.Client(), AllowInsecureLoopback: true}
+	reconciler := &GatewayReconciler{Client: k8sClient, Scheme: scheme, HTTPClient: server.Client(), AllowInsecureLoopback: true}
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "chat"}}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	updated := &gatewayv1alpha1.Gateway{}
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "chat"}, updated); err != nil {
+	if err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "chat"}, updated); err != nil {
 		t.Fatal(err)
 	}
 	if !updated.Status.Ready || !updated.Status.Connected || updated.Status.ObservedCapabilities == nil {
@@ -82,6 +84,34 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 	}
 	if updated.Status.ResolvedEndpoint != server.URL {
 		t.Fatalf("resolved endpoint = %q, want %q", updated.Status.ResolvedEndpoint, server.URL)
+	}
+}
+
+func TestGatewayInterimCapabilityProjectionAndRequirement(t *testing.T) {
+	var response protocol.CapabilitiesResponse
+	if err := json.Unmarshal([]byte(`{"capabilities":{"interimDelivery":true}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	observed := observedGatewayCapabilities(&response)
+	encoded, err := json.Marshal(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"interimDelivery":true`) {
+		t.Fatalf("observed capability lost: %s", encoded)
+	}
+	var required gatewayv1alpha1.GatewayCapabilities
+	if err := json.Unmarshal([]byte(`{"interimDelivery":true}`), &required); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequiredGatewayCapabilities(required, gatewayv1alpha1.GatewayCapabilities{}); err == nil {
+		t.Fatal("missing required interimDelivery accepted")
+	}
+	if err := validateRequiredGatewayCapabilities(required, observed.Capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequiredGatewayCapabilities(gatewayv1alpha1.GatewayCapabilities{}, gatewayv1alpha1.GatewayCapabilities{}); err != nil {
+		t.Fatal(err)
 	}
 }
 

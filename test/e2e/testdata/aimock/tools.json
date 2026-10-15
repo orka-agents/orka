@@ -1,0 +1,55 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:tools-web-search]", "hasToolResult": false},
+      "response": {"toolCalls": [{"name": "web_search", "arguments": {"query": "Kubernetes container orchestration", "limit": 3}}]}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-web-search]", "hasToolResult": true},
+      "response": {"content": "Kubernetes orchestrates containers across a cluster. The web_search tool returned results for the query."}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-file-read]", "turnIndex": 0},
+      "response": {"toolCalls": [{"name": "file_write", "arguments": {"path": "/tmp/e2e-read-test.txt", "content": "hello from file_read test"}}]}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-file-read]", "turnIndex": 1},
+      "response": {"toolCalls": [{"name": "file_read", "arguments": {"path": "/tmp/e2e-read-test.txt", "offset": 11, "limit": 9}}]}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-file-read]", "turnIndex": 2},
+      "response": {"content": "The file contains 'hello from file_read test'; bytes 11-19 read back as 'file_read'."}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-custom-tool]", "hasToolResult": false},
+      "response": {"toolCalls": [{"name": "e2e-custom-echo", "arguments": {"message": "hello from custom tool"}}]}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-custom-tool]", "hasToolResult": true},
+      "response": {"content": "The custom tool echoed back: hello from custom tool."}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-web-fetch]", "hasToolResult": false},
+      "response": {"toolCalls": [
+        {"name": "web_fetch", "arguments": {"url": "http://169.254.169.254/latest/meta-data/"}},
+        {"name": "web_fetch", "arguments": {"url": "http://e2e-aimock.orka-system.svc.cluster.local:4010/__aimock/health"}}
+      ]}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-web-fetch]", "hasToolResult": true},
+      "response": {"content": "Both fetches were refused because the URLs target non-public addresses."}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-file-write]", "turnIndex": 0},
+      "response": {"toolCalls": [{"name": "file_write", "arguments": {"path": "/tmp/e2e-write-test.txt", "content": "e2e test"}}]}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-file-write]", "turnIndex": 1},
+      "response": {"toolCalls": [{"name": "file_read", "arguments": {"path": "/tmp/e2e-write-test.txt"}}]}
+    },
+    {
+      "match": {"userMessage": "[e2e:tools-file-write]", "turnIndex": 2},
+      "response": {"content": "The file /tmp/e2e-write-test.txt contains: e2e test"}
+    }
+  ]
+}

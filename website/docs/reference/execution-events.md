@@ -210,22 +210,26 @@ orka task fork '<task>' --after 5 --agent reviewer --prompt "Continue from here"
 
 ## Durable approvals MVP
 
-Workers emit only the `ApprovalRequested` event. The internal event submission
+Workers and the v2 tool broker emit `ApprovalRequested`. The internal event submission
 endpoint (`SubmitExecutionEvent`) rejects worker-submitted terminal approval
 events with `403 Forbidden` ("terminal task and approval events must use
 controller-owned paths").
 
 The approval lifecycle event types carried on the task stream are:
 
-- `ApprovalRequested` — emitted by workers,
+- `ApprovalRequested`,
 - `ApprovalApproved`,
 - `ApprovalDeclined`,
 - `ApprovalExpired`,
-- `ApprovalCancelled`.
+- `ApprovalCancelled`,
+- `ApprovalExecutionUpdated`.
 
 The four terminal types (`ApprovalApproved`, `ApprovalDeclined`,
 `ApprovalExpired`, `ApprovalCancelled`) are appended only by controller-owned
 paths — for example the decision endpoint below — never by worker submissions.
+The v2 broker also owns `ApprovalExecutionUpdated`, which records execution
+separately from the reviewer decision. Worker submissions of this event are
+rejected.
 
 Pending/current approvals are derived from the event stream:
 
@@ -250,7 +254,8 @@ orka task approve '<task>' '<approvalID>' --reason "looks safe"
 orka task decline '<task>' '<approvalID>' --reason "not safe"
 ```
 
-The first recommended high-risk action to integrate with these events is PR creation/merge. The API/read model is in place before broad worker policy integration.
+See [human approval for v2 tools](../guides/human-approval-v2.md) for the
+AgentKit and Foundry flow, bounded waiting, safe previews, and recovery.
 
 ## Redaction and truncation
 

@@ -52,7 +52,7 @@ not a per-Task routing decision. Consequently, this plan does not introduce:
 - cross-protocol Task binding, classification, quarantine, or adjudication;
 - transcript-bootstrap migration or cross-protocol Session lineage.
 
-Harness-specific safety remains within each path. In particular, ACP v2 keeps
+Harness-specific safety remains within each path. In particular, Orka harness v2 keeps
 its RuntimeSession fencing, prompt-attempt, publication, external-effect, and
 `OutcomeUnknown` rules. Harness v1 must not replay an ambiguously accepted
 turn.

@@ -1878,7 +1878,8 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 		runtimePoolNamespaceLabel: pool.Namespace,
 		runtimePoolNameLabel:      pool.Name,
 	}
-	objects := []client.Object{
+	objects := make([]client.Object, 0, 14)
+	objects = append(objects,
 		pool,
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: base, Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: base, Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
@@ -1886,7 +1887,7 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runtime-pod", Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "runtime-rs", Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(base, "pdb"), Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
-	}
+	)
 	for _, suffix := range []string{
 		"deny-all", "control-in", "dns-egress", "provider-proxy-egress", "controller-egress",
 		"control-plane-egress", "artifact-api-egress",

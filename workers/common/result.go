@@ -90,6 +90,8 @@ type retryWaitFunc func(context.Context, time.Duration) error
 
 // doPostWithRetry posts data with bounded exponential backoff. A nil wait uses
 // the real timer; authorize, when set, signs each attempt (including retries).
+//
+//nolint:unparam // Results and artifacts supply independent retry budgets, which currently have the same limit.
 func doPostWithRetry(
 	ctx context.Context,
 	operation, endpoint string,

@@ -106,6 +106,25 @@ func ensureRealDirectory(path string, mode os.FileMode) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("session base directory must be a real directory")
 	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open session base directory: %w", err)
+	}
+	defer directory.Close() //nolint:errcheck
+	opened, err := directory.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened session base directory: %w", err)
+	}
+	if !opened.IsDir() || !os.SameFile(info, opened) {
+		return fmt.Errorf("session base directory changed while opening")
+	}
+	// MkdirAll applies the supervisor's private umask. Identity-state setup
+	// may also have created this directory with the masked mode already.
+	// Child UIDs need traversal to their own private trees, without being
+	// able to list or write the parent. Chmod the verified directory handle.
+	if err := directory.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod session base directory: %w", err)
+	}
 	return nil
 }
 

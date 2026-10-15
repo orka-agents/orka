@@ -99,6 +99,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0012](0012-gateway-inbox-outbox-semantics.md) | Durable at-least-once inbox and outbox semantics | Accepted |
 | [0013](0013-stage-gateway-resource-rollout.md) | Stage the generic gateway resource rollout | Accepted |
 | [0020](0020-gateway-session-canonical-history.md) | Keep external conversation history in Orka Sessions | Accepted |
+| [0032](0032-gateway-interim-delivery.md) | Bounded, capability-gated nonterminal gateway deliveries | Accepted |
 
 ### Governance and telemetry
 
@@ -107,6 +108,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0010](0010-genai-metrics-export.md) | Export GenAI metrics through OTLP push | Accepted |
 | [0011](0011-vendor-neutral-transaction-and-outbound-access.md) | Separate transaction governance from outbound resource access | Accepted |
 | [0019](0019-genai-semconv-constants-strategy.md) | Hand-roll GenAI semantic-convention constants | Accepted |
+| [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
 
 ## Writing a new one
 

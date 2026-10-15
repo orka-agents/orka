@@ -142,8 +142,16 @@ func (r *AgentRuntimeReconciler) validateRecoveryAdmissionWitness(ctx context.Co
 	}
 	observed := backend.witness
 	observed.Fence = witness.Fence
+	observed.FoundryBroker = witness.FoundryBroker
 	observed.ControllerAuthUID, observed.ControllerAuthVersion = witness.ControllerAuthUID, witness.ControllerAuthVersion
 	observed.CapabilityAuthUID, observed.CapabilityAuthVersion = witness.CapabilityAuthUID, witness.CapabilityAuthVersion
+	if recoveryProviderKind(runtime.Spec) == agentRuntimeFoundryProvider {
+		authenticated, err := r.authenticateRecoveryBoot(ctx, runtime, backend)
+		if err != nil {
+			return err
+		}
+		observed = authenticated.witness
+	}
 	if !reflect.DeepEqual(observed, witness) || !controllerutil.ContainsFinalizer(backend.pod, agentRuntimeRecoveryPodFinalizer) {
 		return errors.New("runtime admission Kubernetes container witness changed")
 	}

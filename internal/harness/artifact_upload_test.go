@@ -47,5 +47,5 @@ func TestArtifactUploadCapabilityScope(t *testing.T) {
 		Method: operation.Method(), Path: operation.Path(), ObjectDigest: operation.ObjectDigest,
 		ContentLength: operation.ContentLength, MediaType: operation.MediaType, RequestDigest: authorization.RequestDigest,
 	}, now)
-	require.ErrorIs(t, err, artifactcap.ErrUnauthorized, "v1 capabilities must not authorize ACP v2 uploads")
+	require.ErrorIs(t, err, artifactcap.ErrUnauthorized, "v1 capabilities must not authorize Orka harness v2 uploads")
 }

@@ -36,12 +36,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
+	toolConditionAvailable = "Available"
+
 	// toolHealthCheckInterval is how often tools are re-checked.
 	toolHealthCheckInterval = 5 * time.Minute
 
@@ -73,6 +77,11 @@ type ToolReconciler struct {
 
 	// SkipSSRFValidation disables SSRF protection for testing. Do NOT set to true in production.
 	SkipSSRFValidation bool
+
+	// AllowPrivateConnectorEndpoints mirrors --connectors-allow-private-endpoints:
+	// a Tool behind a connection-mode outbound access policy may target a
+	// private or cluster-local endpoint. Local fixtures only.
+	AllowPrivateConnectorEndpoints bool
 
 	// SubstrateEnabled enables durable MCP tool actors.
 	SubstrateEnabled            bool
@@ -116,13 +125,27 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.finalizeSubstrateMCPTool(ctx, tool)
 	}
 
+	// Accepted is remote-only, including while a new actor backend is still being provisioned.
+	if !aitools.IsRemoteMCP(tool) && meta.RemoveStatusCondition(&tool.Status.Conditions, "Accepted") {
+		if err := r.Status().Update(ctx, tool); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Validate the tool configuration
 	if err := r.validateTool(ctx, tool); err != nil {
 		logger.Error(err, "Tool validation failed")
+		if aitools.IsRemoteMCP(tool) {
+			return r.updateRemoteMCPStatus(ctx, tool, err)
+		}
 		return r.updateStatus(ctx, tool, false, err.Error())
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
 		return r.reconcileSubstrateMCPTool(ctx, tool)
+	}
+
+	if aitools.IsRemoteMCP(tool) {
+		return r.updateRemoteMCPStatus(ctx, tool, nil)
 	}
 
 	// Perform health check on the HTTP endpoint
@@ -135,17 +158,58 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return r.updateStatus(ctx, tool, true, "")
 }
 
+func (r *ToolReconciler) updateRemoteMCPStatus(ctx context.Context, tool *corev1alpha1.Tool, validationErr error) (ctrl.Result, error) {
+	// A controller-wide HEAD request cannot establish Task-authorized MCP readiness.
+	previous := tool.Status.DeepCopy()
+	tool.Status.Available = false
+	tool.Status.LastCheck = nil
+	tool.Status.Error = ""
+	tool.Status.Endpoint = ""
+	tool.Status.Actor = nil
+	tool.Status.Workspace = nil
+	accepted := metav1.Condition{
+		Type: "Accepted", Status: metav1.ConditionTrue, Reason: "RemoteConfigurationAccepted",
+		Message: "Remote configuration accepted; discovery is verified under Task authority", ObservedGeneration: tool.Generation,
+	}
+	available := metav1.Condition{
+		Type: toolConditionAvailable, Status: metav1.ConditionUnknown, Reason: "TaskVerificationRequired",
+		Message: "Authenticated MCP readiness is verified by the native worker", ObservedGeneration: tool.Generation,
+	}
+	if validationErr != nil {
+		tool.Status.Error = validationErr.Error()
+		accepted.Status, accepted.Reason, accepted.Message = metav1.ConditionFalse, "InvalidConfiguration", validationErr.Error()
+		available.Status, available.Reason, available.Message = metav1.ConditionFalse, "InvalidConfiguration", validationErr.Error()
+	}
+	meta.SetStatusCondition(&tool.Status.Conditions, accepted)
+	meta.SetStatusCondition(&tool.Status.Conditions, available)
+	if reflect.DeepEqual(*previous, tool.Status) {
+		return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, r.Status().Update(ctx, tool)
+}
+
 // validateTool validates the Tool spec.
 func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.Tool) error {
 	// Validate description
 	if tool.Spec.Description == "" {
 		return fmt.Errorf("description is required")
 	}
+	if aitools.IsRemoteMCP(tool) {
+		if err := aitools.ValidateRemoteMCPConfiguration(tool); err != nil {
+			return err
+		}
+		if err := r.validateToolHTTPURL(tool.Spec.MCP.Remote.URL, false); err != nil {
+			return err
+		}
+	}
 	if err := r.validateToolHTTPAuth(ctx, tool); err != nil {
 		return err
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
 		return r.validateSubstrateMCPTool(ctx, tool)
+	}
+	if aitools.IsRemoteMCP(tool) {
+		return nil
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.Workspace != nil {
 		if !r.WorkspaceProviderAPIEnabled {
@@ -156,16 +220,53 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
-	return r.validateToolHTTPURL(tool.Spec.HTTP.URL)
+	// Only a Tool behind a connection-mode outbound access policy is
+	// called with a linked account, so only such a Tool may point at a
+	// private endpoint under the fixture allowance.
+	allowPrivate := false
+	if r.AllowPrivateConnectorEndpoints {
+		connectionMode, err := r.toolPolicyIsConnectionMode(ctx, tool)
+		if err != nil {
+			return err
+		}
+		allowPrivate = connectionMode
+	}
+	if allowPrivate {
+		// The allowance relaxes where a linked-account call may go, never
+		// how: execution refuses plain http for credential-injecting
+		// policies, so a private endpoint is accepted only over HTTPS and
+		// the Tool's status matches what can actually run.
+		if parsed, err := url.Parse(strings.TrimSpace(tool.Spec.HTTP.URL)); err != nil || !strings.EqualFold(parsed.Scheme, "https") {
+			return fmt.Errorf("a private connector endpoint requires an HTTPS Tool URL")
+		}
+	}
+	return r.validateToolHTTPURL(tool.Spec.HTTP.URL, allowPrivate)
 }
 
-func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
+// toolPolicyIsConnectionMode reports whether the Tool's outbound access
+// policy injects a linked-account credential.
+func (r *ToolReconciler) toolPolicyIsConnectionMode(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
+	ref := tool.Spec.HTTP.OutboundAccessPolicyRef
+	if ref == nil {
+		return false, nil
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: tool.Namespace}, policy); err != nil {
+		return false, fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
+	}
+	return policy.Spec.Connection != nil, nil
+}
+
+// validateToolHTTPURL checks the Tool's endpoint. With allowPrivate the
+// private, loopback, and link-local address rules are skipped, for local
+// fixtures only; the fixed metadata and API server hosts stay blocked.
+func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) error {
 	// Validate URL
 	if rawURL == "" {
 		return fmt.Errorf("http.url is required")
 	}
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != urlSchemeHTTP && parsedURL.Scheme != "https") {
 		return fmt.Errorf("invalid http.url")
 	}
 	if parsedURL.User != nil {
@@ -183,15 +284,17 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 
 	// Block private/internal network targets (unless in test mode)
 	if !r.SkipSSRFValidation {
-		host := parsedURL.Hostname()
-		blockedHosts := []string{
-			"169.254.169.254",
-			"metadata.google.internal",
-			"kubernetes.default",
-			"kubernetes.default.svc",
-		}
-		if slices.Contains(blockedHosts, host) {
+		// DNS names are case-insensitive and a trailing dot names the
+		// same host, so the fixed block list compares canonical forms.
+		host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
+		// The same infrastructure block list the connector validator keeps
+		// under the fixture allowance: metadata services and the Kubernetes
+		// API service under any cluster domain, by name or address.
+		if connectors.InfrastructureHostDenied(host) {
 			return fmt.Errorf("tool URL host %q is not allowed", host)
+		}
+		if allowPrivate {
+			return nil
 		}
 		if ip := net.ParseIP(host); ip != nil {
 			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
@@ -245,9 +348,12 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("outbound access policy %q is not accepted with resolved references", ref.Name)
 			}
 		}
-		if policy.Spec.Direct != nil {
+		if aitools.IsRemoteMCP(tool) && (policy.Spec.Gateway == nil || policy.Spec.Direct != nil || policy.Spec.Connection != nil) {
+			return fmt.Errorf("remote MCP requires a gateway outbound access policy")
+		}
+		if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
 			if tool.Spec.HTTP.AuthSecretRef != nil {
-				return fmt.Errorf("direct outbound access policy %q cannot coexist with authSecretRef", ref.Name)
+				return fmt.Errorf("credential-injecting outbound access policy %q cannot coexist with authSecretRef", ref.Name)
 			}
 			targetURL := strings.TrimSpace(tool.Spec.HTTP.URL)
 			if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
@@ -271,16 +377,19 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 			}
 			return fmt.Errorf("failed to get auth secret %q: %w", tool.Spec.HTTP.AuthSecretRef.Name, err)
 		}
+		if aitools.IsRemoteMCP(tool) && strings.TrimSpace(string(secret.Data[tool.Spec.HTTP.AuthSecretRef.Key])) == "" {
+			return fmt.Errorf("remote MCP auth Secret key is empty or missing")
+		}
 		if _, ok := secret.Data[tool.Spec.HTTP.AuthSecretRef.Key]; !ok {
 			return fmt.Errorf("key %q not found in auth secret %q", tool.Spec.HTTP.AuthSecretRef.Key, tool.Spec.HTTP.AuthSecretRef.Name)
 		}
 	}
 
 	// Validate authInject + authBodyKey combination
-	if tool.Spec.HTTP.AuthInject == "body" && tool.Spec.HTTP.AuthBodyKey == "" {
+	if tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField && tool.Spec.HTTP.AuthBodyKey == "" {
 		return fmt.Errorf("authBodyKey is required when authInject is 'body'")
 	}
-	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == "body" {
+	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField {
 		return fmt.Errorf("MCP tools do not support authInject=body")
 	}
 
@@ -338,6 +447,7 @@ func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *E
 	}
 }
 
+//nolint:gocyclo // Tool admission and Actor lifecycle checks must complete before publishing readiness.
 func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
 	actorSpec := tool.Spec.MCP.SubstrateActor
 	templateRequest := r.substrateMCPTemplateRequest(tool)
@@ -1508,6 +1618,13 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 		if policy.Spec.Gateway != nil {
 			return nil
 		}
+		// Under the fixture allowance a connection-mode Tool skipped the
+		// DNS-based private-address rule, so its probe dials through the
+		// hardened private-endpoint dialer (infrastructure addresses
+		// refused, no proxy, no redirect hops) rather than the plain one.
+		if r.AllowPrivateConnectorEndpoints && policy.Spec.Connection != nil {
+			httpClient = privateEndpointHealthClient(httpClient.Timeout)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, tool.Spec.HTTP.URL, nil)
@@ -1555,7 +1672,7 @@ func sensitiveURLParameter(name string) bool {
 		strings.Contains(normalized, "apikey") {
 		return true
 	}
-	if normalized == "token" {
+	if normalized == defaultACPWorkspaceCredentialKey {
 		return true
 	}
 	if !strings.HasSuffix(normalized, "-token") {
@@ -1624,6 +1741,24 @@ func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint s
 }
 
 // getHTTPClient returns the HTTP client for health checks.
+// privateEndpointHealthClient probes a private connection-mode endpoint
+// without ever following a hop the validator did not see.
+func privateEndpointHealthClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = toolHealthCheckTimeout
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:             nil,
+			DialContext:       connectors.PrivateEndpointDialContext,
+			DisableKeepAlives: true,
+			TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 func (r *ToolReconciler) getHTTPClient() *http.Client {
 	if r.HTTPClient != nil {
 		return r.HTTPClient
@@ -1664,7 +1799,7 @@ func (r *ToolReconciler) updateStatusWithActor(
 	tool.Status.Actor = actor
 
 	condition := metav1.Condition{
-		Type:               "Available",
+		Type:               toolConditionAvailable,
 		LastTransitionTime: now,
 		ObservedGeneration: tool.Generation,
 	}

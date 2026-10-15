@@ -28,6 +28,7 @@ import (
 const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 
 var errStreamUnavailable = errors.New("stream unavailable before output")
+var errCompletionRefused = errors.New("LLM returned refused completion outcome")
 
 // truncateForLog returns s clipped to max runes, appending "…" if clipped.
 // Used so log lines stay scannable when the model dumps a long progress
@@ -51,7 +52,7 @@ func hasGoalStateSentinelPrefix(s string) bool {
 // timeout (typically 10 minutes for Copilot/Anthropic). The error string is
 // the only reliable signal — upstream returns 400 without a typed error code.
 func isStreamingRequiredErr(err error) bool {
-	if err == nil {
+	if err == nil || llm.IsUsagePersistenceError(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
@@ -65,33 +66,53 @@ func isStreamingRequiredErr(err error) bool {
 // The aggregation is intentionally simple: concatenate text content and append
 // each tool call exactly once. A terminal chunk with an explicit stop reason
 // is required so truncated streams cannot be mistaken for completion.
-func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest, options ...toolLoopOptions) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
+		if llm.IsUsagePersistenceError(err) {
+			return nil, fmt.Errorf("open stream: %w", err)
+		}
 		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
 	}
 
 	resp := &llm.CompletionResponse{}
+	if req.ResponsesInput {
+		resp.OutputItems = []llm.AssistantOutputItem{}
+	}
+	textItemOpen := false
 	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
-			if resp.Content == "" && len(resp.ToolCalls) == 0 {
+			if !llm.IsUsagePersistenceError(chunk.Error) && resp.Content == "" && len(resp.ToolCalls) == 0 {
 				return nil, fmt.Errorf("%w: chunk: %w", errStreamUnavailable, chunk.Error)
 			}
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
 		}
 		if chunk.Content != "" {
 			resp.Content += chunk.Content
+			if req.ResponsesInput {
+				if !textItemOpen {
+					resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{})
+				}
+				resp.OutputItems[len(resp.OutputItems)-1].Content += chunk.Content
+				textItemOpen = true
+			}
 		}
 		if chunk.ToolCall != nil {
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
+			if req.ResponsesInput {
+				call := *chunk.ToolCall
+				resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{ToolCall: &call})
+				textItemOpen = false
+			}
 		}
-		if chunk.InputTokens > 0 {
-			resp.InputTokens = chunk.InputTokens
+		if chunk.OutputItemDone {
+			if req.ResponsesInput && textItemOpen {
+				resp.OutputItems[len(resp.OutputItems)-1].Status = chunk.OutputItemStatus
+			}
+			textItemOpen = false
 		}
-		if chunk.OutputTokens > 0 {
-			resp.OutputTokens = chunk.OutputTokens
-		}
+		retainStreamUsage(resp, chunk)
 		if chunk.Model != "" {
 			resp.Model = chunk.Model
 		}
@@ -107,27 +128,30 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 	if !terminalSeen {
 		return nil, fmt.Errorf("stream closed without a terminal chunk")
 	}
-	if err := validateToolLoopCompletion(resp); err != nil {
+	if err := validateToolLoopCompletion(resp, options...); err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
-func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
+func validateToolLoopCompletion(resp *llm.CompletionResponse, options ...toolLoopOptions) error {
 	outcome := llm.NormalizeCompletionOutcome(resp)
 	switch outcome {
 	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
 		return nil
+	case llm.CompletionOutcomeRefused:
+		return fmt.Errorf("%w with stop reason %q", errCompletionRefused, strings.TrimSpace(resp.StopReason))
 	case llm.CompletionOutcomeIncomplete:
 		// A text response truncated by the caller's max_tokens budget is a
 		// valid terminal outcome for the compatibility APIs: Anthropic and
 		// OpenAI clients expect the partial text with stop_reason "max_tokens"
 		// / finish_reason "length" (and typically raise the budget and retry).
 		// Every other incomplete reason (pause_turn, response.incomplete, a
-		// bare "incomplete", or no reason at all), an empty truncated body,
+		// bare "incomplete", or no reason at all), an empty truncated body
+		// (unless the Responses transport explicitly permits it),
 		// and a truncated tool call (its arguments are unusable and must not
 		// be executed) keep failing.
-		if isTokenBudgetTruncatedText(resp) {
+		if isTokenBudgetTruncatedText(resp, options...) {
 			return nil
 		}
 		reason := strings.TrimSpace(resp.StopReason)
@@ -154,8 +178,9 @@ func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
 // off by the caller's output token budget ("max_tokens" / "length"). Such a
 // response is returned to the client as-is: the loop must not discard the
 // partial text and keep calling the model.
-func isTokenBudgetTruncatedText(resp *llm.CompletionResponse) bool {
-	if resp == nil || len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.Content) == "" {
+func isTokenBudgetTruncatedText(resp *llm.CompletionResponse, options ...toolLoopOptions) bool {
+	allowEmpty := len(options) > 0 && options[0].allowEmptyTokenBudget
+	if resp == nil || len(resp.ToolCalls) > 0 || (!allowEmpty && strings.TrimSpace(resp.Content) == "") {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(resp.StopReason)) {
@@ -602,6 +627,7 @@ var coordinatorProxyTools = []string{
 	"cancel_task",
 	"list_agents",
 	"list_tasks",
+	"list_connections",
 }
 
 // injectOrkaTools appends the built-in and coordinator tools that the registry can execute.
@@ -633,7 +659,7 @@ func executeToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration
 
 	result, err := registryForExternalToolCall(toolCtxOpt, tc.Name).Execute(toolCtx, tc.Name, tc.Arguments)
 	if err != nil {
-		errResult, _ := json.Marshal(map[string]any{"success": false, "error": err.Error()})
+		errResult, _ := json.Marshal(map[string]any{"success": false, apiFieldError: err.Error()})
 		return string(errResult)
 	}
 	return result
@@ -643,12 +669,21 @@ func executeExposedToolCall(ctx context.Context, tc llm.ToolCall, timeout time.D
 	name := strings.TrimSpace(tc.Name)
 	if _, ok := exposedToolNames[name]; !ok {
 		errResult, _ := json.Marshal(map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("tool %q is not available in this request", tc.Name),
+			"success":     false,
+			apiFieldError: fmt.Sprintf("tool %q is not available in this request", tc.Name),
 		})
 		return string(errResult)
 	}
 	return executeToolCall(ctx, tc, timeout, toolCtxOpt)
+}
+
+// toolLoopOptions selects transport-specific terminal outcome requirements.
+// Existing compatibility clients retain their iteration-limit fallback; Responses
+// must not label a failed final provider call as a completed response.
+type toolLoopOptions struct {
+	requireFinalCompletion bool
+	// Responses permits output:[] when the output token budget is exhausted.
+	allowEmptyTokenBudget bool
 }
 
 // runNonStreamingToolLoop runs the agentic tool loop using non-streaming Complete() calls.
@@ -661,10 +696,58 @@ func runNonStreamingToolLoop(
 	model string,
 	config ChatConfig,
 	toolCtx *tools.ToolContext,
+	options ...toolLoopOptions,
 ) (*llm.CompletionResponse, error) {
-	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil)
+	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil, options...)
 }
 
+// addResponsesToolLoopUsage returns a request-visible usage snapshot without
+// changing the provider's per-call response. Persisted accounting owns probes
+// and failed attempts; this total includes only successful completion rounds.
+func addResponsesToolLoopUsage(total, resp *llm.CompletionResponse) *llm.CompletionResponse {
+	result := *resp
+	if resp.CachedInputTokens != nil {
+		result.CachedInputTokens = new(*resp.CachedInputTokens)
+	}
+	if resp.CacheWriteInputTokens != nil {
+		result.CacheWriteInputTokens = new(*resp.CacheWriteInputTokens)
+	}
+	if total == nil {
+		// A single completion retains its original usage representation.
+		return &result
+	}
+	result.InputTokens += total.InputTokens
+	result.OutputTokens += total.OutputTokens
+	result.UsageReported = result.UsageReported || total.UsageReported
+	// Normalize each round before adding its cache breakdown, since providers
+	// may use different input/cache conventions. Aggregates are cache-inclusive.
+	for _, usage := range []*llm.CompletionResponse{total, resp} {
+		if usage.InputExcludesCache {
+			if usage.CachedInputTokens != nil {
+				result.InputTokens += int(*usage.CachedInputTokens)
+			}
+			if usage.CacheWriteInputTokens != nil {
+				result.InputTokens += int(*usage.CacheWriteInputTokens)
+			}
+		}
+	}
+	if total.CachedInputTokens != nil {
+		if result.CachedInputTokens == nil {
+			result.CachedInputTokens = new(int64)
+		}
+		*result.CachedInputTokens += *total.CachedInputTokens
+	}
+	if total.CacheWriteInputTokens != nil {
+		if result.CacheWriteInputTokens == nil {
+			result.CacheWriteInputTokens = new(int64)
+		}
+		*result.CacheWriteInputTokens += *total.CacheWriteInputTokens
+	}
+	result.InputExcludesCache = false
+	return &result
+}
+
+//nolint:gocyclo // Tool calls, observer events, and stop conditions form one turn loop.
 func runToolLoopWithObserver(
 	ctx context.Context,
 	provider llm.Provider,
@@ -673,12 +756,15 @@ func runToolLoopWithObserver(
 	config ChatConfig,
 	toolCtx *tools.ToolContext,
 	observer *toolLoopObserver,
+	options ...toolLoopOptions,
 ) (*llm.CompletionResponse, error) {
+	requireFinalCompletion := len(options) > 0 && options[0].requireFinalCompletion
 	repetitionTracker := make(map[string]int)
 	exposedToolNames := completionToolNameSet(req.Tools)
 	messages := make([]llm.Message, len(req.Messages))
 	copy(messages, req.Messages)
 	prematureEndRetries := 0
+	var responsesUsage *llm.CompletionResponse
 
 	for iteration := 0; ; iteration++ {
 		// Check context cancellation
@@ -686,7 +772,7 @@ func runToolLoopWithObserver(
 		case <-ctx.Done():
 			resp := &llm.CompletionResponse{
 				Content:    "Request timed out during tool execution.",
-				StopReason: "end_turn",
+				StopReason: oaiStopReasonEndTurn,
 			}
 			observer.finalContent(resp.Content)
 			return resp, nil
@@ -696,26 +782,37 @@ func runToolLoopWithObserver(
 		// Check iteration limit — do one final call without tools
 		if iteration >= config.MaxIterations {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
 			})
-			resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-				Model:        model,
-				Messages:     messages,
-				SystemPrompt: req.SystemPrompt,
-				MaxTokens:    req.MaxTokens,
-				Temperature:  req.Temperature,
-			})
+			finalReq := *req
+			finalReq.Model = model
+			finalReq.Messages = messages
+			finalReq.Tools = nil
+			resp, err := provider.Complete(ctx, &finalReq)
+			if err != nil && isStreamingRequiredErr(err) {
+				resp, err = completeViaStream(ctx, provider, &finalReq, options...)
+			}
 			if err != nil {
+				if requireFinalCompletion || llm.IsUsagePersistenceError(err) {
+					return nil, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
+				}
 				resp := &llm.CompletionResponse{
 					Content:    "Reached iteration limit.",
-					StopReason: "end_turn",
+					StopReason: oaiStopReasonEndTurn,
 				}
 				observer.finalContent(resp.Content)
 				return resp, nil
 			}
-			if err := validateToolLoopCompletion(resp); err != nil {
+			if err := validateToolLoopCompletion(resp, options...); err != nil {
 				return nil, err
+			}
+			if requireFinalCompletion && len(resp.ToolCalls) != 0 {
+				return nil, fmt.Errorf("tools-free final completion returned tool calls")
+			}
+			if req.ResponsesInput {
+				responsesUsage = addResponsesToolLoopUsage(responsesUsage, resp)
+				resp = responsesUsage
 			}
 			observer.finalContent(resp.Content)
 			return resp, nil
@@ -728,14 +825,10 @@ func runToolLoopWithObserver(
 		}
 
 		// Call LLM with tools
-		compReq := &llm.CompletionRequest{
-			Model:        model,
-			Messages:     messages,
-			SystemPrompt: req.SystemPrompt,
-			Tools:        req.Tools,
-			MaxTokens:    req.MaxTokens,
-			Temperature:  req.Temperature,
-		}
+		compReqCopy := *req
+		compReq := &compReqCopy
+		compReq.Model = model
+		compReq.Messages = messages
 
 		resp, err := provider.Complete(ctx, compReq)
 		if err != nil && isStreamingRequiredErr(err) {
@@ -744,7 +837,7 @@ func runToolLoopWithObserver(
 			// aggregate the chunks into a synthesized CompletionResponse so
 			// our tool loop can continue as if Complete had worked.
 			anthropicLog.Info("upstream refused non-streaming, retrying via Stream and aggregating")
-			resp, err = completeViaStream(ctx, provider, compReq)
+			resp, err = completeViaStream(ctx, provider, compReq, options...)
 		}
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
@@ -755,21 +848,34 @@ func runToolLoopWithObserver(
 			compReq.Messages = messages
 			resp, err = provider.Complete(ctx, compReq)
 			if err != nil && isStreamingRequiredErr(err) {
-				resp, err = completeViaStream(ctx, provider, compReq)
+				resp, err = completeViaStream(ctx, provider, compReq, options...)
 			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
 		}
-		if err := validateToolLoopCompletion(resp); err != nil {
+		if err := validateToolLoopCompletion(resp, options...); err != nil {
 			return nil, err
+		}
+		if req.ResponsesInput {
+			// Enforce the Responses function contract after any provider
+			// translation, including the Chat Completions fallback.
+			seenCalls := make(map[string]bool, len(resp.ToolCalls))
+			for _, call := range resp.ToolCalls {
+				if !validResponsesFunction(call) || seenCalls[call.ID] {
+					return nil, fmt.Errorf("provider returned an invalid function call")
+				}
+				seenCalls[call.ID] = true
+			}
+			responsesUsage = addResponsesToolLoopUsage(responsesUsage, resp)
+			resp = responsesUsage
 		}
 
 		// A text response cut off by the output token budget is terminal:
 		// return the partial text with its max_tokens/length stop reason
 		// instead of treating it as a premature end of turn, which would
 		// discard the text and issue more model calls.
-		if isTokenBudgetTruncatedText(resp) {
+		if isTokenBudgetTruncatedText(resp, options...) {
 			anthropicLog.Info("response truncated by output token budget — returning partial text",
 				"iteration", iteration,
 				"stop_reason", resp.StopReason,
@@ -808,11 +914,12 @@ func runToolLoopWithObserver(
 			)
 			observer.prematureEndRetry()
 			messages = append(messages, llm.Message{
-				Role:    "assistant",
-				Content: resp.Content,
+				Role:        chatRoleAssistant,
+				Content:     resp.Content,
+				OutputItems: resp.OutputItems,
 			})
 			messages = append(messages, llm.Message{
-				Role: "user",
+				Role: chatRoleUser,
 				Content: fmt.Sprintf(
 					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done — child Tasks you created are still in flight or pending follow-up. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
 					goalStateSentinel, goalStateSentinel,
@@ -829,9 +936,10 @@ func runToolLoopWithObserver(
 
 		// Append assistant message with tool calls
 		messages = append(messages, llm.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Role:        chatRoleAssistant,
+			Content:     resp.Content,
+			ToolCalls:   resp.ToolCalls,
+			OutputItems: resp.OutputItems,
 		})
 
 		// Execute each tool and append results
@@ -849,7 +957,7 @@ func runToolLoopWithObserver(
 			observer.toolResult(tc, result)
 
 			messages = append(messages, llm.Message{
-				Role:       "tool",
+				Role:       chatRoleTool,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 				Content:    result,
@@ -859,7 +967,7 @@ func runToolLoopWithObserver(
 		// Append repetition warning if triggered
 		if repetitionWarning != "" {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: repetitionWarning,
 			})
 		}
@@ -870,7 +978,7 @@ func runToolLoopWithObserver(
 			for {
 				select {
 				case <-ctx.Done():
-					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: "end_turn"}
+					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: oaiStopReasonEndTurn}
 					observer.finalContent(resp.Content)
 					return resp, nil
 				default:
@@ -882,7 +990,7 @@ func runToolLoopWithObserver(
 				for _, tc := range resp.ToolCalls {
 					result := executeExposedToolCall(ctx, tc, config.ToolTimeout, toolCtx, exposedToolNames)
 					messages = append(messages, llm.Message{
-						Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: result,
+						Role: chatRoleTool, ToolCallID: tc.ID, Name: tc.Name, Content: result,
 					})
 					if !isTaskStillRunning(result) {
 						allStillRunning = false

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
@@ -127,7 +128,80 @@ func staticChartDefaultArgs() []string {
 		"--set-string", "webhooks.tls.existingSecret=controller-webhook-tls",
 		"--set-string", "webhooks.caBundle=Y2E=",
 		"--set-string", "publisher.image.digest=" + digest,
+		"--set-string", "workers.ai.image.digest=" + digest,
+		"--set-string", "workers.general.image.digest=" + digest,
 		"--set", "providerProxy.enabled=true",
+	}
+}
+
+func TestStaticChartGatewayInterimMessagesPerTask(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "--gateway-interim-messages-per-task=10"},
+		{
+			"override", []string{"--set", "controller.gateway.interimMessagesPerTask=3"},
+			"--gateway-interim-messages-per-task=3",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{"--show-only", "templates/deployment.yaml"}, tt.args...)
+			rendered := requireHelmRender(t, args...)
+			count := strings.Count(rendered, "--gateway-interim-messages-per-task=")
+			if !strings.Contains(rendered, tt.want+"\n") || count != 1 {
+				t.Fatalf("rendered controller must have exactly one %q argument", tt.want)
+			}
+		})
+	}
+}
+
+func TestStaticChartConnectorsFlags(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Contains(rendered, "--connectors-enabled") || strings.Contains(rendered, "--connector-callback-base-url") {
+		t.Fatalf("connectors must be off by default:\n%s", rendered)
+	}
+	output, err := helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.connectors.enabled=true")
+	if err == nil || !strings.Contains(output, "callbackBaseUrl is required") {
+		t.Fatalf("enabling connectors without a callback base URL must fail: %v\n%s", err, output)
+	}
+	// Linked-account tokens live only in the controller store; both
+	// controller modes already refuse an ephemeral store outright, so the
+	// combination cannot render.
+	output, err = helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.connectors.enabled=true",
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=false")
+	if err == nil || !strings.Contains(output, "store.persistence.enabled must be true") {
+		t.Fatalf("enabling connectors on an ephemeral store must fail: %v\n%s", err, output)
+	}
+	output, err = helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
+		"--set-string", "controller.mode=harness-v1",
+		"--set-string", "harnessV1.image.digest=sha256:"+strings.Repeat("1", 64),
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
+		"--set-string", "harnessV1.tls.rolloutNonce=certificate-1",
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+		"--set", "controller.connectors.enabled=true",
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=false")
+	if err == nil || !strings.Contains(output, "store.persistence.enabled must be true when controller.mode=harness-v1") {
+		t.Fatalf("enabling connectors on an ephemeral harness-v1 store must fail: %v\n%s", err, output)
+	}
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.connectors.enabled=true",
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=true")
+	for _, want := range []string{
+		"- --connectors-enabled=true\n",
+		"- \"--connector-callback-base-url=https://orka.example.test\"\n",
+	} {
+		if strings.Count(rendered, want) != 1 {
+			t.Fatalf("rendered controller must have exactly one %q argument:\n%s", want, rendered)
+		}
 	}
 }
 
@@ -157,7 +231,7 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 		clientRole = clientRole[:end]
 	}
 	const wantClient = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n" +
-		"    verbs: [\"get\", \"list\", \"update\", \"delete\"]"
+		"    verbs: [\"get\", \"list\", \"create\", \"update\", \"delete\"]"
 	if !strings.Contains(clientRole, wantClient) {
 		t.Fatalf("client Role is missing the Session API rule %q:\n%s", wantClient, clientRole)
 	}
@@ -200,7 +274,7 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 			for resource, verbs := range map[string][]string{
 				"tasks":                           {"get", "list", "create", "delete", "patch"},
 				"tasks/approvals":                 {"update"},
-				"sessions":                        {"get", "list", "update", "delete"},
+				"sessions":                        {"get", "list", "create", "update", "delete"},
 				"chats":                           {"create"},
 				"chats/config":                    {"get"},
 				"memories":                        {"get", "list"},
@@ -259,6 +333,24 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStaticChartGrantsConnectorProvidersLeastPrivilege(t *testing.T) {
+	output := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
+	start := strings.Index(output, "# Controller tenant Role.")
+	if start < 0 {
+		t.Fatal("rendered RBAC is missing the controller tenant Role")
+	}
+	controllerRole := output[start:]
+	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
+		controllerRole = controllerRole[:end]
+	}
+	// The controller reads providers and manages their finalizer; it never
+	// creates or deletes one.
+	const want = "resources: [\"connectorproviders\"]\n    verbs: [\"get\", \"list\", \"watch\", \"update\", \"patch\"]"
+	if !strings.Contains(controllerRole, want) || strings.Count(controllerRole, `"connectorproviders"`) != 1 {
+		t.Fatalf("controller tenant Role must grant connectorproviders only %q:\n%s", want, controllerRole)
 	}
 }
 
@@ -660,6 +752,8 @@ func TestStaticChartProviderProxyUsesOperatorGateway(t *testing.T) {
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "controller.image.digest=" + digest,
 		"--set-string", "publisher.image.digest=" + digest,
+		"--set-string", "workers.ai.image.digest=" + digest,
+		"--set-string", "workers.general.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",
@@ -1037,11 +1131,26 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 			t.Fatalf("controller deployment is missing rotation marker %q:\n%s", marker, deployment)
 		}
 	}
-	// cert-controller writes only the Secret; the kubelet must project it into
-	// the cert directory, so generated mode mounts the whole generated Secret.
 	volume := renderedVolume(t, deployment, "webhook-tls")
-	if !strings.Contains(volume, `secretName: "test-orka-webhook-tls"`) || strings.Contains(volume, "items:") {
-		t.Fatalf("generated webhook TLS must mount the whole generated Secret:\n%s", volume)
+	if !strings.Contains(volume, "emptyDir:") || !strings.Contains(volume, "medium: Memory") ||
+		strings.Contains(volume, "secret:") {
+		t.Fatalf("generated webhook TLS needs API-synchronized memory storage, not Secret projection:\n%s", volume)
+	}
+	var decoded appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(deployment), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	mounts := 0
+	for _, mount := range decoded.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "webhook-tls" {
+			mounts++
+			if mount.MountPath != "/var/run/orka/webhook/tls" || mount.ReadOnly {
+				t.Fatal("generated webhook TLS storage must be writable at /var/run/orka/webhook/tls")
+			}
+		}
+	}
+	if mounts != 1 {
+		t.Fatalf("generated webhook TLS needs exactly one mount, got %d", mounts)
 	}
 
 	webhook := requireRenderedDocument(t, rendered,

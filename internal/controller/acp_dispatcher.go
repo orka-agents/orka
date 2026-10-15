@@ -42,6 +42,17 @@ import (
 )
 
 const (
+	terminalStateValue  = "terminal"
+	attemptField        = "attempt"
+	publicationIDField  = "publicationID"
+	versionField        = "version"
+	transitionFromField = "from"
+	operationField      = "operation"
+	terminalReasonField = "terminalReason"
+	attemptIDField      = "attemptID"
+)
+
+const (
 	DefaultACPDispatchInterval               = time.Second
 	DefaultACPDispatchWorkers                = 4
 	DefaultACPIdlePoolTTL                    = 15 * time.Minute
@@ -97,6 +108,7 @@ type ACPDispatcher struct {
 	ArtifactReservations     artifactcap.CapabilityReservationRecorder
 	MCPRegistry              *tools.Registry
 	RuntimeFeedback          runtimefeedback.Service
+	PromptLeases             *ACPMCPPromptLeaseRegistry
 	Interval                 time.Duration
 	MaxConcurrent            int
 	IdlePoolTTL              time.Duration
@@ -118,6 +130,9 @@ type ACPDispatcher struct {
 	runtimeSessions map[string]ACPRuntimeSessionBinding
 	finalizedTurns  map[types.UID]string
 	staleRecoveryMu sync.Mutex
+
+	approvalRecoveryMu sync.Mutex
+	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
 
 	substrateRouteOnce  sync.Once
 	substrateRouteHTTP  *http.Client
@@ -209,11 +224,11 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 }
 
 func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
-	if err := d.reconcileExpiredExternalEffects(ctx); err != nil {
-		return err
-	}
 	var tasks corev1alpha1.TaskList
 	if err := d.Client.List(ctx, &tasks); err != nil {
+		return err
+	}
+	if err := d.reconcileExpiredExternalEffects(ctx, tasks.Items); err != nil {
 		return err
 	}
 	d.pruneFinalizedSessionTurns(tasks.Items)
@@ -324,7 +339,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 			}
 		case store.PromptExecutionFailed, store.PromptExecutionCancelled, store.PromptExecutionOutcomeUnknown:
 			if corev1alpha1.TaskExecutionState(attempt.ExecutionState) != task.Status.Execution.State || task.Status.Execution.Outcome == "" {
-				recoveryKind = "terminal"
+				recoveryKind = terminalStateValue
 			}
 		}
 		if recoveryKind == "" {
@@ -333,7 +348,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 				return turnErr
 			}
 			if needsTurnRecovery {
-				recoveryKind = "terminal"
+				recoveryKind = terminalStateValue
 			}
 		}
 		cleanupPending := !taskScopedRuntimeSessionCleanupComplete(task)
@@ -596,6 +611,8 @@ func (d *ACPDispatcher) runtimePoolIdlePolicy(
 // stayed idle for another TTL. Recovery treats a missing pool as proof of
 // RuntimeSession cleanup, and fresh demand deterministically recreates the pool
 // by name. Plain pools are never deleted here; they are shared infrastructure.
+//
+//nolint:gocyclo // Reaping checks every retention, resume, attachment, and ownership fence before deletion.
 func (d *ACPDispatcher) reapStoppedWorkspacePool(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1036,6 +1053,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
 	}
+	if _, err := d.pullRequestPresentationCapability(runtimeCtx, task); err != nil {
+		return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, err)
+	}
 	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(
 		runtimeCtx, target, bound.mcpConfiguration, true,
 	)
@@ -1045,11 +1065,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetryRuntimeClient, authErr)
 	}
+	nativeSessionsSupported := false
 	if target.pool != nil {
 		capabilities, capabilityErr := runtimeClient.Capabilities(runtimeCtx)
 		if capabilityErr != nil {
 			return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, capabilityErr)
 		}
+		nativeSessionsSupported = capabilities.SupportsNativeSessions && profile.ProviderKind == runtimePoolProviderCodex && d.nativeSessionStore() != nil
 		if !capabilities.SupportsAgentSessionConfiguration {
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
@@ -1059,6 +1081,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryProfile, errors.New("runtime profile does not match the immutable execution snapshot"))
 	}
 	profile = bound.plan.Profile
+	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
+		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) || errors.Is(nativeErr, errNativeSessionHistoryBoundary) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, nativeErr)
+		}
+		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, nativeErr)
+	}
 	promptLimits := harnessv2.DefaultProtocolLimits()
 	if bound.body.ExternalRuntime != nil {
 		promptLimits = bound.body.ExternalRuntime.Limits
@@ -1103,10 +1131,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	defer func() { endSessionTrace(retErr) }()
 	sessionExecution, err = d.prepareTaskSession(
 		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
-		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage,
+		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage, nativeSessionsSupported,
 	)
 	if err != nil {
 		endSessionTrace(err)
+		if errors.Is(err, errNativeSessionRuntimeUnsupported) || errors.Is(err, errNativeSessionHistoryBoundary) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, err)
+		}
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
 			if cleanupErr != nil {
@@ -1158,7 +1189,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return nil
 		}
 	}
-	leaseGeneration := int64(1)
+	var leaseGeneration int64
 	if sessionExecution != nil {
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(sessionExecution.Binding.SessionUID)
 		runtimeFence.RuntimeSessionGeneration = sessionExecution.Binding.Generation
@@ -1387,19 +1418,30 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		Profile:          profile, AgentConfiguration: agentConfigurationRef, MCPConfiguration: mcpConfiguration,
 		Workspace: workspace, WorkspaceArtifactAuthorization: workspaceAuthorization,
 	}
+	nativeRestore, nativeRestoreErr := nativeRestoreForTask(sessionExecution, createRequest, nativeSessionsSupported)
+	if nativeRestoreErr != nil {
+		return nativeRestoreErr
+	}
+	createRequest.NativeRestore = nativeRestore
 	if err := sealMutation(&createRequest.Metadata.RequestDigest, createRequest); err != nil {
 		return err
 	}
 	if err := d.recordKubernetesRuntimeExposure(ctx, task, target.external, runtimeFence, fence); err != nil {
 		return fmt.Errorf("persist pre-admission Kubernetes runtime witness: %w", err)
 	}
-	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite
+	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported
 	runtimeSessionCleanupPending := taskScopedRuntimeSessionReused ||
-		sessionExecution != nil && workspace.Intent == harnessv2.WorkspaceIntentWrite
+		sessionExecution != nil && (workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported)
 	runtimeSessionSettlementRequired := false
 	runtimePublicationFinalizationRequired := false
 	runtimePublicationFinalized := false
 	var runtimePublicationFinalization *runtimeSessionPublicationFinalization
+	captureSuccessfulRuntimeSession := func() error {
+		if !nativeCaptureEligible(sessionExecution, nativeSessionsSupported) {
+			return nil
+		}
+		return d.captureTaskNativeSession(context.WithoutCancel(ctx), runtimeClient, task, runtimeFence, sessionExecution)
+	}
 	finalizePreparedRuntimeSession := func() error {
 		if !runtimePublicationFinalizationRequired || runtimePublicationFinalized {
 			return nil
@@ -1416,14 +1458,32 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return nil
 	}
 	cleanupRuntimeSession := func(reason string) error {
+		if task.Annotations[nativeInstallUnresolvedAnnotation] != "" || errors.Is(retErr, errNativeSessionInstallUnresolved) {
+			return errNativeSessionInstallUnresolved
+		}
 		if !runtimeSessionCleanupPending {
 			return nil
+		}
+		if err := d.guardNativeSessionSettlement(context.WithoutCancel(ctx), task, sessionExecution, nil); err != nil {
+			return err
 		}
 		if err := finalizePreparedRuntimeSession(); err != nil {
 			return err
 		}
+		if task.Annotations[nativeCaptureIntentAnnotation] != "" && sessionExecution != nil && !sessionExecution.finalized {
+			return fmt.Errorf("%w: native Session capture and canonical result must commit before runtime deletion", store.ErrNotReady)
+		}
 		if runtimeSessionSettlementRequired && sessionExecution != nil && sessionExecution.Turn != nil && !sessionExecution.finalized {
 			return fmt.Errorf("%w: RuntimeSession deletion requires durable Session terminal settlement", store.ErrNotReady)
+		}
+		if nativeSessionsSupported && sessionExecution != nil && !task.Status.Execution.RuntimeSessionRecreationPending {
+			sessionExecution.Binding.RecreationRequired = true
+			d.setRuntimeSessionBinding(sessionExecution.Binding)
+			if err := d.patchExecution(context.WithoutCancel(ctx), task, func(execution *corev1alpha1.TaskExecutionStatus) {
+				execution.RuntimeSessionRecreationPending = true
+			}); err != nil {
+				return err
+			}
 		}
 		cleanupErr := d.deleteRuntimeSession(
 			context.WithoutCancel(ctx), runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, reason,
@@ -1469,6 +1529,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		created := false
 		if _, err := runtimeClient.CreateRuntimeSession(sessionCtx, createRequest); err != nil {
+			if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok && createRequest.NativeRestore != nil && clientErr.Code == harnessv2.ErrorCodeCleanupUnproven {
+				retainErr := d.retainNativeSessionInstall(context.WithoutCancel(ctx), task, createRequest.Metadata)
+				return errors.Join(errNativeSessionInstallUnresolved, err, retainErr)
+			}
 			if runtimeSessionRetirementRequired && runtimeSessionCreationMayHaveApplied(err) {
 				runtimeSessionCleanupPending = true
 			}
@@ -1629,6 +1693,18 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 		}
 	}
+	if sessionExecution != nil && sessionExecution.NativeSession != nil {
+		_, observed, observeErr := runtimeSessionStatusForUID(sessionCtx, runtimeClient, runtimeFence.RuntimeSessionUID)
+		if observeErr != nil {
+			return observeErr
+		}
+		if observed == nil || observed.Generation != runtimeFence.RuntimeSessionGeneration || observed.RuntimeSessionID != createRequest.RuntimeSessionID {
+			return fmt.Errorf("%w: native Session restoration lost its exact runtime", store.ErrConflict)
+		}
+		if err := verifyTaskNativeRestoration(sessionExecution, observed.NativeRestoration); err != nil {
+			return err
+		}
+	}
 	if sessionExecution == nil {
 		if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 			status.RuntimeSessionSupervisorBootID = string(runtimeFence.SupervisorBootID)
@@ -1738,6 +1814,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 		status.State = corev1alpha1.TaskExecutionStateSubmitting
+		if nativeSessionsSupported && sessionExecution != nil {
+			status.RuntimeSessionRecreationPending = true
+		}
 		status.LastTransitionTime = nowMeta()
 	}); err != nil {
 		return err
@@ -1778,6 +1857,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		completeFeedback(runtimeFeedbackCompletionReason(runtimeCtx, terminal))
 	}()
 	accepted := false
+	var cancellationReason harnessv2.CancelReason
 	admissionRetry := 0
 	for {
 		promptRequest, err := d.buildPromptRequest(
@@ -1789,14 +1869,20 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if err := sealMutation(&promptRequest.Metadata.RequestDigest, promptRequest); err != nil {
 			return err
 		}
-		leaseCtx, stopLease := context.WithCancel(runtimeCtx)
+		leaseCtx, stopLease, cancelOnLeaseFailure := newPromptLeaseContext(runtimeCtx, cancelRuntime)
+		promptLease, err := d.PromptLeases.register(leaseCtx, task.Namespace, promptRequest)
+		if err != nil {
+			stopLease()
+			return err
+		}
 		admitted := make(chan struct{})
 		var admitOnce sync.Once
 		go d.renewPromptLeaseLoop(
-			leaseCtx, admitted, cancelRuntime, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
+			leaseCtx, admitted, cancelOnLeaseFailure, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
 			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
+			promptLease,
 		)
-		summary, streamErr := runtimeClient.StreamPrompt(runtimeCtx, createRequest.RuntimeSessionID, promptRequest, func(event harnessv2.Event) error {
+		emit := func(event harnessv2.Event) error {
 			switch event.Type {
 			case harnessv2.EventAccepted:
 				admitOnce.Do(func() { close(admitted) })
@@ -1812,8 +1898,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						return err
 					}
 					accepted = true
+					if nativeSessionsSupported && sessionExecution != nil {
+						sessionExecution.Binding.RecreationRequired = true
+						d.setRuntimeSessionBinding(sessionExecution.Binding)
+					}
 					if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 						status.State = corev1alpha1.TaskExecutionStateRunning
+						if nativeSessionsSupported && sessionExecution != nil {
+							status.RuntimeSessionRecreationPending = true
+						}
 						status.Reason = ""
 						status.Message = ""
 						status.LastTransitionTime = nowMeta()
@@ -1878,8 +1971,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				terminal = &copy
 			}
 			return nil
-		})
+		}
+		summary, cancellation, streamErr := streamACPPromptWithCancellation(
+			runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, promptRequest, task, runtimeFence,
+			acpPromptCancellationTimeout, emit,
+		)
+		if cancellation != nil {
+			cancellationReason = cancellation.reason
+		}
 		stopLease()
+		promptLease.release()
 		runtimeContextErr := runtimeContextError(runtimeCtx)
 		if retryableUnsentPromptCanRequeue(accepted, summary, runtimeContextErr, streamErr) {
 			var runtimeBinding *ACPRuntimeSessionBinding
@@ -1958,10 +2059,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			streamErr = acpUpdatePersistenceError(persistErr, nil)
 		}
 		cancel()
-		return d.handlePromptStreamError(
+		settlementErr := d.handlePromptStreamError(
 			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence, journalState,
-			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextErr, streamErr,
+			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextErr, streamErr, cancellation,
 		)
+		if runtimeContextErr == nil {
+			return settlementErr
+		}
+		// A proven cancellation can settle the PromptAttempt without the
+		// in-memory SessionTurn. Commit its marker and carried checkpoint before
+		// the runtime cleanup defer runs; the earlier Session finalization defer
+		// otherwise executes only after cleanup has already failed closed.
+		settlementCtx, cancelSettlement := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
+		defer cancelSettlement()
+		if finalizeErr := d.reconcileUnfinalizedTaskSession(settlementCtx, task, fence, sessionExecution, settlementErr); finalizeErr != nil {
+			return errors.Join(settlementErr, finalizeErr)
+		}
+		return settlementErr
 	}
 	if terminal == nil {
 		if err := flushInterruptedOutput(ctx); err != nil {
@@ -2034,7 +2148,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return recordACPPromptOutcomeIfSettled(
 			ctx, promptTrace, outcome,
-			d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal),
+			d.finishNonSuccessWithCancellationReason(ctx, task, attemptID, fence, sessionExecution, *terminal, cancellationReason),
 		)
 	}
 	settlement := harnessv2.PromptSettlement{TerminalEvent: terminal.Type, Outcome: harnessv2.PromptOutcomeSucceeded, StopReason: harnessv2.ACPStopReasonEndTurn, SettledAt: terminal.Identity.Timestamp}
@@ -2092,9 +2206,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := sealMutation(&deltaRequest.Metadata.RequestDigest, deltaRequest); err != nil {
 		return err
 	}
+	// A completed prompt still needs workspace validation when cancellation
+	// ends its execution context. Retain the frozen cleanup authority and the
+	// operation's own deadline; publication below remains cancellable.
+	validationCtx, cancelValidation := context.WithDeadline(context.WithoutCancel(ctx), deltaRequest.Metadata.ExpiresAt)
 	delta, err := createWorkspaceDeltaWithRetry(
-		runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, deltaRequest,
+		validationCtx, runtimeClient, createRequest.RuntimeSessionID, deltaRequest,
 	)
+	cancelValidation()
 	if err != nil {
 		httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
 		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
@@ -2131,6 +2250,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			Reason: "WorkspaceValidationFailed", Message: validationMessage, LastTransitionTime: nowMeta(),
 		}
 		_ = d.patchDeliveryStatus(ctx, task, status)
+		if err := d.guardNativeSessionSettlement(ctx, task, sessionExecution, nil); err != nil {
+			return err
+		}
 		_ = cleanupRuntimeSession("workspace_validation_failed")
 		if sessionExecution != nil {
 			d.forgetRuntimeSessionBinding(sessionExecution.Binding.SessionUID)
@@ -2240,6 +2362,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if err := finalizePreparedRuntimeSession(); err != nil {
 				return err
 			}
+			if err := captureSuccessfulRuntimeSession(); err != nil {
+				return err
+			}
 			if err := d.finalizeTaskSessionResult(
 				ctx, task, fence, sessionExecution, resultText, publicationID, projectionPhase, deliveryStatus,
 			); err != nil {
@@ -2278,12 +2403,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := finalizePreparedRuntimeSession(); err != nil {
 		return err
 	}
+	if err := captureSuccessfulRuntimeSession(); err != nil {
+		return err
+	}
 	if err := d.finalizeTaskSessionResult(
 		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,
 	); err != nil {
 		return err
 	}
-	if sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite {
+	if runtimeSessionRetirementRequired {
 		if cleanupErr := cleanupRuntimeSession("task_finalized"); cleanupErr != nil {
 			return cleanupErr
 		}
@@ -2495,8 +2623,8 @@ func runtimeSessionDeltaAbandonmentFinalizationForTaskUID(
 	}
 	syntheticPublicationID := publicationIDForTaskUID(task, taskUID)
 	digest, err := acpDomainDigest("runtime-session-delta-abandonment-receipt", map[string]any{
-		"taskUID": taskUID, "attempt": task.Status.Execution.Attempt, "deltaID": deltaID,
-		"publicationID": syntheticPublicationID, "terminal": terminal, "delivery": delivery,
+		taskUIDField: taskUID, attemptField: task.Status.Execution.Attempt, "deltaID": deltaID,
+		publicationIDField: syntheticPublicationID, terminalStateValue: terminal, "delivery": delivery,
 	})
 	if err != nil {
 		return runtimeSessionPublicationFinalization{}, err
@@ -2528,7 +2656,7 @@ func (d *ACPDispatcher) runtimeSessionPublicationFinalization(
 		Verification: publication.VerificationReceipt, PullRequest: publication.PullRequestReceipt,
 	}
 	digest, err := acpDomainDigest("runtime-session-publication-finalization-receipt", map[string]any{
-		"publication": receipt, "version": publication.Version,
+		"publication": receipt, versionField: publication.Version,
 	})
 	if err != nil {
 		return runtimeSessionPublicationFinalization{}, err
@@ -2740,6 +2868,9 @@ func waitForRuntimeSessionAdmissionState(
 		} else if observed == nil && absentIsFinal {
 			return false, nil
 		} else if observed != nil {
+			if observed.NativeInstallUnresolved {
+				return false, errNativeSessionInstallUnresolved
+			}
 			if observed.RuntimeSessionID != sessionID || observed.Generation != generation {
 				return false, fmt.Errorf("%w: RuntimeSession status resolved to a different generation", store.ErrConflict)
 			}
@@ -2819,6 +2950,9 @@ func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 		}
 		session.requeued = true
 		return true, nil
+	}
+	if observed != nil && observed.NativeInstallUnresolved {
+		return false, errNativeSessionInstallUnresolved
 	}
 	expectedID := harnessv2.RuntimeSessionID(runtimeSessionID(*runtimeFence))
 	if observed == nil {
@@ -2959,6 +3093,9 @@ func (d *ACPDispatcher) reconcilePlannedTaskScopedRuntimeSession(
 	if observed == nil {
 		return false, false, nil
 	}
+	if observed.NativeInstallUnresolved {
+		return false, false, errNativeSessionInstallUnresolved
+	}
 	expectedID := harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence))
 	if observed.RuntimeSessionID == expectedID && observed.Generation == runtimeFence.RuntimeSessionGeneration {
 		if observed.State.CanAdmitPrompt() {
@@ -3066,6 +3203,9 @@ func (d *ACPDispatcher) deleteRuntimeSessionReconciled(
 	if observed == nil || observed.RuntimeSessionID != sessionID || observed.Generation != runtimeFence.RuntimeSessionGeneration {
 		return nil
 	}
+	if observed.NativeInstallUnresolved {
+		return errNativeSessionInstallUnresolved
+	}
 	if observed.State != harnessv2.RuntimeSessionStateDeleting {
 		if err := d.deleteRuntimeSession(ctx, runtimeClient, sessionID, task, runtimeFence, reason); err == nil {
 			return nil
@@ -3154,7 +3294,7 @@ func (l *acpRuntimePoolReservationLease) startRenewal(ctx context.Context) {
 			case <-ticker.C:
 				if err := l.renew(renewCtx); err != nil {
 					if !errors.Is(err, context.Canceled) {
-						logf.FromContext(renewCtx).Error(err, "ACP RuntimePool reservation renewal stopped", "namespace", l.identity.PoolKey.Namespace, "pool", l.identity.PoolKey.Name, "taskUID", l.identity.TaskUID, "attempt", l.identity.Attempt)
+						logf.FromContext(renewCtx).Error(err, "ACP RuntimePool reservation renewal stopped", "namespace", l.identity.PoolKey.Namespace, "pool", l.identity.PoolKey.Name, taskUIDField, l.identity.TaskUID, attemptField, l.identity.Attempt)
 					}
 					return
 				}
@@ -3755,6 +3895,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	return true, nil
 }
 
+//nolint:gocyclo // Reservation and its rollback paths form one fenced state transition.
 func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Task) (*corev1alpha1.Task, acpDispatchTarget, error) {
 	task := &corev1alpha1.Task{}
 	reader := uncachedReader(d.APIReader, d.Client)
@@ -3992,9 +4133,9 @@ func (d *ACPDispatcher) settleFrozenWorkspaceCredentialBlocked(
 			return fmt.Errorf("%w: credential-blocked PromptAttempt already has a runtime or session binding", store.ErrConflict)
 		}
 		digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{
-			"id": attemptID, "from": attempt.ExecutionState, "to": store.PromptExecutionFailed,
-			"operation": acpCredentialBlockedOperation, "version": attempt.Version,
-			"terminalReason": acpCredentialBlockedOperation, "credentialRole": blocked.role,
+			"id": attemptID, transitionFromField: attempt.ExecutionState, "to": store.PromptExecutionFailed,
+			operationField: acpCredentialBlockedOperation, versionField: attempt.Version,
+			terminalReasonField: acpCredentialBlockedOperation, "credentialRole": blocked.role,
 		})
 		if digestErr != nil {
 			return digestErr
@@ -4182,7 +4323,7 @@ func (d *ACPDispatcher) transitionAttempt(ctx context.Context, id string, fence 
 	if attempt.ExecutionState != from {
 		return fmt.Errorf("prompt attempt %s state is %s, want %s", id, attempt.ExecutionState, from)
 	}
-	digest, err := acpDomainDigest("attempt-transition", map[string]any{"id": id, "from": from, "to": to, "operation": operation, "version": attempt.Version})
+	digest, err := acpDomainDigest("attempt-transition", map[string]any{"id": id, transitionFromField: from, "to": to, operationField: operation, versionField: attempt.Version})
 	if err != nil {
 		return err
 	}
@@ -4205,8 +4346,8 @@ func acpPromptResultDigest(result []byte) string {
 
 func acpSettlingTransitionDigest(id string, version int64, result []byte) (string, error) {
 	return acpDomainDigest("attempt-transition", map[string]any{
-		"id": id, "from": store.PromptExecutionRunning, "to": store.PromptExecutionSettling,
-		"operation": acpSettlingOperation, "version": version, "resultDigest": acpPromptResultDigest(result),
+		"id": id, transitionFromField: store.PromptExecutionRunning, "to": store.PromptExecutionSettling,
+		operationField: acpSettlingOperation, versionField: version, "resultDigest": acpPromptResultDigest(result),
 	})
 }
 
@@ -4270,7 +4411,7 @@ func (d *ACPDispatcher) transitionDelivery(ctx context.Context, id string, fence
 	if attempt.DeliveryState == to {
 		return nil
 	}
-	digest, err := acpDomainDigest("delivery-transition", map[string]any{"id": id, "from": from, "to": to, "operation": operation, "version": attempt.Version})
+	digest, err := acpDomainDigest("delivery-transition", map[string]any{"id": id, transitionFromField: from, "to": to, operationField: operation, versionField: attempt.Version})
 	if err != nil {
 		return err
 	}
@@ -4587,7 +4728,8 @@ func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
 
 func externalRuntimeCleanupMutationAllowed(authority *externalRuntimeCleanupAuthority, operation string) bool {
 	if authority != nil && authority.sessionCleanup != nil {
-		return operation == externalRuntimeDeleteSessionOperation
+		return operation == externalRuntimeDeleteSessionOperation ||
+			(authority.sessionCleanup.allowPublicationFinalization && operation == "finalize_runtime_session_publication")
 	}
 	return externalRuntimeMutationUsesFrozenCleanupAuthority(operation)
 }
@@ -4990,7 +5132,12 @@ func validateExternalRuntimeCapabilities(
 		observed.AdapterDigest != registered.Profile.AdapterDigest {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime adapter capability drifted after conformance")
 	}
-	if capabilities.Limits != limits || observedLimits != limits {
+	registeredLiveLimits := capabilities.Limits
+	// Native bundle policy is an additive negotiated capability, not a field
+	// in the AgentRuntime registration. The complete capability envelope is
+	// still frozen and revalidated before each mutation.
+	registeredLiveLimits.MaxNativeSessionBytes = limits.MaxNativeSessionBytes
+	if registeredLiveLimits != limits || observedLimits != limits {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime protocol limits drifted after conformance")
 	}
 	if capabilities.WorkspaceGovernance != governance || observedGovernance != governance || !governance.Strict() {
@@ -5011,10 +5158,14 @@ func validateExternalRuntimeCapabilities(
 		(requiresPermissions && !capabilities.Provider.SupportsPermissions) {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime provider capability drifted after conformance")
 	}
+	if registered.MCPPolicy != nil && len(registered.MCPPolicy.ApprovalRequiredTools) > 0 &&
+		!capabilities.Provider.SupportsBrokeredToolApprovals {
+		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime brokered tool approval capability drifted after conformance")
+	}
 	if profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite && !capabilities.SupportsPublicationFinalization {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime does not support controller-owned RuntimeSession publication finalization required for write workspaces")
 	}
-	return profile, limits, nil
+	return profile, capabilities.Limits, nil
 }
 
 func validateExternalRuntimeStatus(
@@ -5277,7 +5428,7 @@ func emptyRuntimeWorkspace(task *corev1alpha1.Task, scope string) (harnessv2.Wor
 	if strings.TrimSpace(scope) == "" {
 		scope = string(task.UID)
 	}
-	digest, err := acpDomainDigest("empty-workspace", map[string]any{"taskUID": scope})
+	digest, err := acpDomainDigest("empty-workspace", map[string]any{taskUIDField: scope})
 	if err != nil {
 		return harnessv2.WorkspaceBaseline{}, harnessv2.WorkspaceSpec{}, err
 	}
@@ -5402,12 +5553,12 @@ func runtimeSessionID(fence harnessv2.Fence) string {
 func exactPodEndpoint(address string) string {
 	address = strings.TrimSpace(address)
 	if parsed := net.ParseIP(address); parsed != nil {
-		return (&url.URL{Scheme: "http", Host: net.JoinHostPort(address, "8080")}).String()
+		return (&url.URL{Scheme: urlSchemeHTTP, Host: net.JoinHostPort(address, "8080")}).String()
 	}
 	if _, _, err := net.SplitHostPort(address); err == nil {
-		return (&url.URL{Scheme: "http", Host: address}).String()
+		return (&url.URL{Scheme: urlSchemeHTTP, Host: address}).String()
 	}
-	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(address, "8080")}).String()
+	return (&url.URL{Scheme: urlSchemeHTTP, Host: net.JoinHostPort(address, "8080")}).String()
 }
 
 func promptAttemptIDFromTask(task *corev1alpha1.Task) (string, error) {
@@ -5474,6 +5625,28 @@ func (d *ACPDispatcher) publishTaskResultReference(ctx context.Context, task *co
 	})
 }
 
+// newPromptLeaseContext serializes renewal shutdown with failure cancellation.
+// The runtime context is still needed for delivery after the prompt stream ends:
+// once stopLease returns, even a renewal past its ctx.Err check cannot cancel it.
+// A failure that wins the lock first still cancels the active runtime normally.
+func newPromptLeaseContext(parent context.Context, cancelRuntime context.CancelFunc) (leaseCtx context.Context, stopLease, cancelOnFailure context.CancelFunc) {
+	leaseCtx, cancelLease := context.WithCancel(parent)
+	var mu sync.Mutex
+	stopLease = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		cancelLease()
+	}
+	cancelOnFailure = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if leaseCtx.Err() == nil {
+			cancelRuntime()
+		}
+	}
+	return leaseCtx, stopLease, cancelOnFailure
+}
+
 func (d *ACPDispatcher) renewPromptLeaseLoop(
 	ctx context.Context,
 	admitted <-chan struct{},
@@ -5485,6 +5658,7 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	lease harnessv2.PromptLease,
 	authorization harnessv2.PromptMCPAuthorization,
 	limits harnessv2.ProtocolLimits,
+	promptLease *acpMCPPromptLease,
 ) {
 	log := logf.FromContext(ctx).WithValues("namespace", task.Namespace, "task", task.Name)
 	select {
@@ -5500,6 +5674,9 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	// digest_conflict on a rebuilt request with fresh timestamps.
 	var pending *harnessv2.RenewPromptLeaseRequest
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		now := time.Now().UTC()
 		remaining := lease.ExpiresAt.Sub(now)
 		if remaining <= 0 {
@@ -5567,7 +5744,18 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 		}
 		proposed := request.Lease
 		response, err := runtimeClient.RenewPromptLease(ctx, sessionID, request)
+		// Stream completion stops renewal while the runtime context remains
+		// live for delivery. A cancelled in-flight renewal must not abort it.
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil && response.Lease.Generation == proposed.Generation {
+			if err := promptLease.renew(request); err != nil {
+				if ctx.Err() == nil {
+					cancelRuntime()
+				}
+				return
+			}
 			pending = nil
 			lease = response.Lease
 			continue
@@ -5733,14 +5921,14 @@ func frozenMCPPermissionDecision(
 		return cancelled
 	}
 	toolPolicy := configuration.ToolPolicy
-	_, allowed := toolPolicy.Descriptor(permission.ToolName)
+	descriptor, allowed := toolPolicy.Descriptor(permission.ToolName)
 	if toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash {
-		allowed = acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
+		allowed = allowed || acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
 	}
-	// A provider asking to invoke an already-granted MCP tool does not grant
-	// an Orka approval. Approval-required tools stay closed until review is
-	// available; every brokered invocation still crosses the MCP authority gate.
-	if allowed && !configuration.ApprovalPolicy.Requires(permission.ToolName) {
+	// A local permission callback may let the provider reach an allowed brokered
+	// tool. The broker still requires the controller's exact-call approval before
+	// executing it; this allow-once response grants no approval authority.
+	if allowed && (!configuration.ApprovalPolicy.Requires(permission.ToolName) || descriptor.Source.Brokered()) {
 		for _, option := range permission.Options {
 			if option.Kind == harnessv2.PermissionOptionAllowOnce {
 				return harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}
@@ -5800,7 +5988,7 @@ func (d *ACPDispatcher) requeuePreSubmissionTaskWithRuntimeBinding(
 	case store.PromptExecutionReserved:
 	case store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
 		digest, err := acpDomainDigest("pre-admission-reconciliation", map[string]any{
-			"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
+			attemptIDField: attempt.ID, stateField: attempt.ExecutionState, versionField: attempt.Version, epochField: fence.Epoch,
 		})
 		if err != nil {
 			return err
@@ -5857,7 +6045,7 @@ func (d *ACPDispatcher) requeueProvenNotAcceptedPromptAdmission(
 		message = "runtime prompt submission was not sent and will be retried"
 	}
 	digest, err := acpDomainDigest("proven-unaccepted-prompt-admission-recovery", map[string]any{
-		"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
+		attemptIDField: attempt.ID, stateField: attempt.ExecutionState, versionField: attempt.Version, epochField: fence.Epoch,
 		"statusCode": clientErr.StatusCode, "code": clientErr.Code, acpCancelLogKeyKind: clientErr.Kind,
 		"retryable": clientErr.Retryable, "writeState": clientErr.WriteEvidence.State, "proof": proof,
 	})
@@ -6197,6 +6385,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	writeEvidence harnessv2.RequestWriteEvidence,
 	runtimeContextErr error,
 	err error,
+	cancellation *acpPromptCancellationResult,
 ) error {
 	httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
 	if streamClientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
@@ -6221,7 +6410,23 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			"journalFailed", persistenceErr.journalFailed(),
 		)
 		return d.handlePromptUpdatePersistenceFailure(
-			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, journalState, accepted, persistenceErr,
+			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, journalState, accepted, persistenceErr, cancellation,
+		)
+	}
+	if rejection, ok := errors.AsType[*harnessv2.ClientError](err); !accepted && ok &&
+		rejection.Kind == harnessv2.ClientErrorHTTP && rejection.Operation == "start_prompt" &&
+		rejection.StatusCode == http.StatusConflict && rejection.Code == harnessv2.ErrorCodePromptNotAccepted &&
+		!rejection.Retryable && rejection.Classification == nil {
+		// The HTTP body was written, but the supervisor proved idle recovery
+		// failed before submitting an ACP prompt. Record a terminal failure;
+		// this does not turn transport evidence into permission to replay.
+		const message = "ACP adapter could not resume while idle; prompt was not accepted"
+		if transitionErr := d.transitionAttemptToFailed(ctx, attemptID, fence, "prompt-not-accepted", "RuntimeLost", message); transitionErr != nil {
+			return transitionErr
+		}
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeLost", message),
 		)
 	}
 	if runtimeContextErr != nil {
@@ -6240,7 +6445,6 @@ func (d *ACPDispatcher) handlePromptStreamError(
 				d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, terminalReason, message),
 			)
 		}
-		now := time.Now().UTC()
 		reason := harnessv2.CancelReasonControllerShutdown
 		terminalReason := corev1alpha1.TaskExecutionReason("Cancelled")
 		terminalMessage := "prompt cancellation settled"
@@ -6249,61 +6453,55 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			terminalReason = acpTaskTimeoutReason
 			terminalMessage = acpTaskTimeoutCancellationSettledMessage
 		}
-		cancelRequest := harnessv2.CancelPromptRequest{
-			Protocol: harnessv2.ProtocolVersion,
-			Metadata: mutationMetadata(runtimeFence, task, "cancel-prompt", true, now.Add(30*time.Second)),
-			Reason:   reason, SettlementDeadline: now.Add(20 * time.Second),
+		if cancellation == nil {
+			cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptCancellationTimeout)
+			cancellation = requestACPPromptCancellation(cancelCtx, runtimeClient, sessionID, task, runtimeFence, reason)
+			cancel()
 		}
-		if sealErr := sealMutation(&cancelRequest.Metadata.RequestDigest, cancelRequest); sealErr == nil {
-			cancelCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-			defer cancel()
-			response, cancelErr := cancelPromptWithUnsentRetry(cancelCtx, runtimeClient, sessionID, cancelRequest)
-			if cancelErr == nil && response.SettlementProven {
-				if lifecycleErr := appendPromptSettlementLifecycleDetached(
-					ctx, journalState, response.Settlement, reason,
-				); lifecycleErr != nil {
-					logf.FromContext(ctx).Error(lifecycleErr, "persist proven ACP prompt settlement", "namespace", task.Namespace, "task", task.Name)
-					return recordACPPromptOutcomeIfSettled(
-						ctx, promptTrace, acpPromptOutcomeFailed,
-						d.failPromptForExecutionEventPersistence(
-							ctx, task, attemptID, fence, "proven prompt settlement lifecycle persistence failed",
-						),
-					)
-				}
-				switch response.Settlement.TerminalEvent {
-				case harnessv2.EventCancelled:
-					operation := acpCancelledOperation
-					if terminalReason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
-						operation = "timeout-cancelled"
-					}
-					if transitionErr := d.transitionAttemptToCancelled(
-						ctx, attemptID, fence, operation, terminalReason, terminalMessage,
-					); transitionErr != nil {
-						return transitionErr
-					}
-					return recordACPPromptOutcomeIfSettled(
-						ctx, promptTrace, acpPromptOutcomeCancelled,
-						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, terminalReason, terminalMessage),
-					)
-				case harnessv2.EventFailed:
-					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "cancel-failed"); transitionErr != nil {
-						return transitionErr
-					}
-					return recordACPPromptOutcomeIfSettled(
-						ctx, promptTrace, acpPromptOutcomeFailed,
-						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation"),
-					)
-				default:
-					return recordACPPromptOutcomeIfSettled(
-						ctx, promptTrace, acpPromptOutcomeUnknown,
-						d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settled without a recoverable task result"),
-					)
-				}
+		response, cancelErr := cancellation.response, cancellation.err
+		if cancelErr == nil && response.SettlementProven {
+			if lifecycleErr := appendPromptSettlementLifecycleDetached(
+				ctx, journalState, response.Settlement, reason,
+			); lifecycleErr != nil {
+				logf.FromContext(ctx).Error(lifecycleErr, "persist proven ACP prompt settlement", "namespace", task.Namespace, "task", task.Name)
+				return recordACPPromptOutcomeIfSettled(
+					ctx, promptTrace, acpPromptOutcomeFailed,
+					d.failPromptForExecutionEventPersistence(
+						ctx, task, attemptID, fence, "proven prompt settlement lifecycle persistence failed",
+					),
+				)
 			}
-			logACPCancelSettlementUnknown(ctx, task, reason, response, cancelErr)
-		} else {
-			logf.FromContext(ctx).Error(sealErr, "seal ACP prompt cancellation request", "namespace", task.Namespace, "task", task.Name)
+			switch response.Settlement.TerminalEvent {
+			case harnessv2.EventCancelled:
+				operation := acpCancelledOperation
+				if terminalReason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
+					operation = "timeout-cancelled"
+				}
+				if transitionErr := d.transitionAttemptToCancelled(
+					ctx, attemptID, fence, operation, terminalReason, terminalMessage,
+				); transitionErr != nil {
+					return transitionErr
+				}
+				return recordACPPromptOutcomeIfSettled(
+					ctx, promptTrace, acpPromptOutcomeCancelled,
+					d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, terminalReason, terminalMessage),
+				)
+			case harnessv2.EventFailed:
+				if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "cancel-failed"); transitionErr != nil {
+					return transitionErr
+				}
+				return recordACPPromptOutcomeIfSettled(
+					ctx, promptTrace, acpPromptOutcomeFailed,
+					d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation"),
+				)
+			default:
+				return recordACPPromptOutcomeIfSettled(
+					ctx, promptTrace, acpPromptOutcomeUnknown,
+					d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settled without a recoverable task result"),
+				)
+			}
 		}
+		logACPCancelSettlementUnknown(ctx, task, cancellation.reason, response, cancelErr)
 		if lifecycleErr := appendPromptStreamFailureLifecycleDetached(ctx, journalState, err); lifecycleErr != nil {
 			logf.FromContext(ctx).Error(lifecycleErr, "persist unknown ACP prompt settlement", "namespace", task.Namespace, "task", task.Name)
 			return recordACPPromptOutcomeIfSettled(
@@ -6354,6 +6552,7 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 	journalState *v2eventjournal.State,
 	accepted bool,
 	persistenceErr *acpExecutionUpdatePersistenceError,
+	cancellation *acpPromptCancellationResult,
 ) error {
 	if !accepted {
 		return d.failPromptForExecutionEventPersistence(
@@ -6361,33 +6560,28 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 		)
 	}
 
-	now := time.Now().UTC()
-	cancelRequest := harnessv2.CancelPromptRequest{
-		Protocol: harnessv2.ProtocolVersion,
-		Metadata: mutationMetadata(runtimeFence, task, "cancel-prompt", true, now.Add(30*time.Second)),
-		Reason:   harnessv2.CancelReasonStreamDisconnected, SettlementDeadline: now.Add(20 * time.Second),
+	if cancellation == nil {
+		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptCancellationTimeout)
+		cancellation = requestACPPromptCancellation(cancelCtx, runtimeClient, sessionID, task, runtimeFence, harnessv2.CancelReasonStreamDisconnected)
+		cancel()
 	}
-	if sealErr := sealMutation(&cancelRequest.Metadata.RequestDigest, cancelRequest); sealErr == nil {
-		cancelCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-		defer cancel()
-		response, cancelErr := cancelPromptWithUnsentRetry(cancelCtx, runtimeClient, sessionID, cancelRequest)
-		if cancelErr == nil && response.SettlementProven {
-			if !persistenceErr.journalFailed() {
-				if lifecycleErr := appendPromptSettlementLifecycleDetached(
-					ctx, journalState, response.Settlement, cancelRequest.Reason,
-				); lifecycleErr != nil {
-					logf.FromContext(ctx).Error(lifecycleErr, "persist ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
-					return d.failPromptForExecutionEventPersistence(
-						ctx, task, attemptID, fence, "prompt settlement lifecycle persistence failed after plan persistence failure",
-					)
-				}
+	response, cancelErr := cancellation.response, cancellation.err
+	if cancelErr == nil && response.SettlementProven {
+		if !persistenceErr.journalFailed() {
+			if lifecycleErr := appendPromptSettlementLifecycleDetached(
+				ctx, journalState, response.Settlement, cancellation.reason,
+			); lifecycleErr != nil {
+				logf.FromContext(ctx).Error(lifecycleErr, "persist ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
+				return d.failPromptForExecutionEventPersistence(
+					ctx, task, attemptID, fence, "prompt settlement lifecycle persistence failed after plan persistence failure",
+				)
 			}
-			return d.failPromptForExecutionEventPersistence(
-				ctx, task, attemptID, fence, "prompt was settled after execution update persistence failed",
-			)
 		}
-		logACPCancelSettlementUnknown(ctx, task, cancelRequest.Reason, response, cancelErr)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "prompt was settled after execution update persistence failed",
+		)
 	}
+	logACPCancelSettlementUnknown(ctx, task, cancellation.reason, response, cancelErr)
 	if !persistenceErr.journalFailed() {
 		if lifecycleErr := appendPromptStreamFailureLifecycleDetached(ctx, journalState, persistenceErr); lifecycleErr != nil {
 			logf.FromContext(ctx).Error(lifecycleErr, "persist unknown ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
@@ -6580,7 +6774,7 @@ func (d *ACPDispatcher) persistOutcomeUnknown(ctx context.Context, attemptID str
 		if err != nil {
 			return err
 		}
-		digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{"id": attemptID, "from": from, "to": store.PromptExecutionOutcomeUnknown, "operation": "outcome-unknown", "version": attempt.Version, "marker": message})
+		digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{"id": attemptID, transitionFromField: from, "to": store.PromptExecutionOutcomeUnknown, operationField: "outcome-unknown", versionField: attempt.Version, "marker": message})
 		if digestErr != nil {
 			return digestErr
 		}
@@ -6641,7 +6835,7 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateOutcomeUnknown, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, "RuntimeLost", "prompt outcome is unknown")
 	default:
-		message := acpPromptFailureMessage(terminal)
+		message := acpPromptFailedMessage
 		if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "failed", acpPromptFailedReason, message); err != nil {
 			return err
 		}
@@ -6657,43 +6851,17 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 	}
 }
 
-// acpPromptFailedReason classifies a prompt that the runtime settled as
-// failed; the message carries the runtime's bounded failure code and detail.
+// acpPromptFailedReason classifies a prompt that the runtime settled as failed.
 const acpPromptFailedReason corev1alpha1.TaskExecutionReason = "PromptFailed"
 
-// acpPromptFailureMessageLimit bounds the projected Task failure message so a
-// runtime-supplied detail can never bloat Task status.
-const acpPromptFailureMessageLimit = 512
+// Runtime diagnostics stay in the journal, whose redaction accounts for prior
+// prompt fields. Repeating them in status, Session outcomes, or TaskFailed
+// events would bypass that redaction and introduce additional public copies.
+const acpPromptFailedMessage = "prompt failed"
 
-// acpPromptFailureMessage projects the runtime's terminal Failed event into a
-// human-readable Task message. The generic "prompt failed" text is kept when
-// the runtime reported no code or detail; otherwise the runtime's bounded
-// failure code and message are appended so operators can distinguish provider
-// upstream errors, turn limits, and refusals without reading runtime logs.
-func acpPromptFailureMessage(terminal harnessv2.Event) string {
-	const generic = "prompt failed"
-	if terminal.Failed == nil {
-		return generic
-	}
-	// Both fields are runtime-controlled (only bounded by the harness).
-	// Controls are stripped before redaction so a control byte cannot split a
-	// credential-shaped value past the redactor, and the composed logical
-	// value is redacted as one string: a credential assignment split across
-	// the code and the message ("password" / "hunter2") is only recognizable
-	// once they are joined, so redacting the fields separately would persist
-	// the raw value in Task status, the PromptAttempt, and the Session turn.
-	detail := strings.TrimSpace(stripACPControlRunes(terminal.Failed.Message))
-	code := strings.TrimSpace(stripACPControlRunes(terminal.Failed.Code))
-	switch {
-	case detail == "" && code == "":
-		return generic
-	case detail == "":
-		detail = code
-	case code != "" && code != "acp_prompt_failed" && !strings.HasPrefix(detail, code):
-		detail = code + ": " + detail
-	}
-	return boundACPStatusMessage(generic + ": " + redact.SensitiveText(detail))
-}
+// acpPromptFailureMessageLimit bounds runtime-derived status messages so a
+// supervisor-supplied detail can never bloat Task status.
+const acpPromptFailureMessageLimit = 512
 
 // boundACPStatusMessage truncates a runtime-derived status message to
 // acpPromptFailureMessageLimit bytes on a rune boundary so the persisted
@@ -6739,8 +6907,8 @@ func (d *ACPDispatcher) transitionAttemptToFailed(
 		return err
 	}
 	digest, err := acpDomainDigest("attempt-transition", map[string]any{
-		"id": id, "from": attempt.ExecutionState, "to": target, "operation": operation,
-		"version": attempt.Version, "terminalReason": reason, "outcomeMarker": message,
+		"id": id, transitionFromField: attempt.ExecutionState, "to": target, operationField: operation,
+		versionField: attempt.Version, terminalReasonField: reason, "outcomeMarker": message,
 	})
 	if err != nil {
 		return err
@@ -6793,8 +6961,8 @@ func (d *ACPDispatcher) transitionAttemptToCancelled(
 		return err
 	}
 	digest, err := acpDomainDigest("attempt-transition", map[string]any{
-		"id": id, "from": attempt.ExecutionState, "to": target, "operation": operation,
-		"version": attempt.Version, "terminalReason": reason, "outcomeMarker": message,
+		"id": id, transitionFromField: attempt.ExecutionState, "to": target, operationField: operation,
+		versionField: attempt.Version, terminalReasonField: reason, "outcomeMarker": message,
 	})
 	if err != nil {
 		return err
@@ -6863,6 +7031,7 @@ func (d *ACPDispatcher) failTaskWithProjection(
 		latest.Status.Execution.Message = message
 		latest.Status.Execution.LastTransitionTime = &now
 		latest.Status.Phase = phase
+		latest.Status.Message = message
 		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
 	})
 }

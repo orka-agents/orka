@@ -13,7 +13,6 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 security_script="${root}/scripts/security-scan-e2e.sh"
 substrate_script="${root}/scripts/agent-substrate-e2e.sh"
 substrate_helper="${root}/scripts/lib/substrate-orka-local.sh"
-label_script="${root}/scripts/live-github-label-trigger-e2e.sh"
 e2e_suite="${root}/test/e2e/e2e_suite_test.go"
 tls_helper="${root}/scripts/lib/e2e-admission-tls.sh"
 
@@ -25,8 +24,6 @@ grep -Fq '[[ "${test_namespace}" == "${orka_namespace}" ]]' "${security_script}"
 grep -Fq 'ORKA_NAMESPACE=orka-system' "${substrate_script}"
 grep -Fq 'source "${ROOT_DIR}/scripts/lib/e2e-admission-tls.sh"' "${substrate_script}"
 grep -Fq 'source "${ROOT_DIR}/scripts/lib/substrate-orka-local.sh"' "${substrate_script}"
-grep -Fq 'ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE="${orka_namespace}"' "${label_script}"
-grep -Fq 'namespace: ${orka_namespace}' "${label_script}"
 grep -Fq 'scripts", "lib", "ensure-static-mode-namespace.sh"' "${e2e_suite}"
 if grep -Fq 'exec.Command("kubectl", "create", "ns", namespace)' "${e2e_suite}"; then
   echo 'Go E2E must not pre-create an unlabeled controller namespace' >&2
@@ -59,8 +56,8 @@ if [[ ! "${admission_endpoints_line}" =~ ^[0-9]+$ || ! "${admission_smoke_line}"
   exit 1
 fi
 
-if [[ "$(grep -c '^/validate-' <<<"${admission_deploy}")" -ne 9 ]]; then
-  echo 'E2E admission smoke must cover all nine checked-in handlers' >&2
+if [[ "$(grep -c '^/validate-' <<<"${admission_deploy}")" -ne 8 ]]; then
+  echo 'E2E admission smoke must cover all eight checked-in handlers' >&2
   exit 1
 fi
 
@@ -89,11 +86,6 @@ webhooks:
       name: orka-admission
       namespace: orka-system
       path: /validate-v1-secret-workspace-attachment
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -203,7 +195,6 @@ while IFS= read -r handler; do
   grep -Fxq "smoke:${handler}" "${admission_test_log}"
 done <<'EOF_EXPECTED_HANDLERS'
 validate-v1-secret-workspace-attachment
-validate-coordination-k8s-io-v1-acp-suspend-quota-lease
 validate-core-orka-ai-v1alpha1-task-provenance
 validate-core-orka-ai-v1alpha1-task-workspace-class-use
 validate-core-orka-ai-v1alpha1-tool-workspace-class-use
@@ -215,7 +206,7 @@ EOF_EXPECTED_HANDLERS
 
 last_smoke_line="$(grep -n '^smoke:' "${admission_test_log}" | tail -1 | cut -d: -f1)"
 webhooks_applied_line="$(grep -n '^webhooks-applied$' "${admission_test_log}" | cut -d: -f1)"
-if [[ "$(grep -c '^smoke:' "${admission_test_log}")" -ne 9 ]] ||
+if [[ "$(grep -c '^smoke:' "${admission_test_log}")" -ne 8 ]] ||
   ((last_smoke_line >= webhooks_applied_line)); then
   echo 'E2E admission deployment did not smoke all handlers before applying webhooks' >&2
   exit 1
@@ -269,7 +260,7 @@ if [[ ! "${live_tls_line}" =~ ^[0-9]+$ || ! "${live_runtime_line}" =~ ^[0-9]+$ |
   exit 1
 fi
 
-grep -Fq 'agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v1.0.0}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v1.0.3}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'e2e_kubeconfig="${work_dir}/kubeconfig"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'export KUBECONFIG="${e2e_kubeconfig}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'run kind export kubeconfig --name "${kind_cluster}" --kubeconfig "${e2e_kubeconfig}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
@@ -309,7 +300,7 @@ if [[ ! "${namespace_create_line}" =~ ^[0-9]+$ || ! "${secret_line}" =~ ^[0-9]+$
   exit 1
 fi
 
-for script in "${security_script}" "${substrate_script}" "${substrate_helper}" "${label_script}"; do
+for script in "${security_script}" "${substrate_script}" "${substrate_helper}"; do
   if grep -Eq '(^|[[:space:]])-n[[:space:]]+default([[:space:]]|$)|^[[:space:]]*namespace:[[:space:]]+default([[:space:]]|$)|^[[:space:]]*value:[[:space:]]+default([[:space:]]|$)' "${script}"; then
     echo "${script#"${root}/"} still places controller-owned resources in the pre-isolation default namespace" >&2
     exit 1

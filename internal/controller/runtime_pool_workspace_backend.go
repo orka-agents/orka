@@ -1421,7 +1421,7 @@ func runtimePoolWorkspaceBootstrapTemplate(
 		}
 	}
 	env = append(env,
-		corev1.EnvVar{Name: "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE", Value: nonce},
+		corev1.EnvVar{Name: runtimePoolBootstrapNonceEnv, Value: nonce},
 		corev1.EnvVar{Name: harnessv2.CredentialBootstrapPublicKeyEnv, Value: publicKey},
 	)
 	container.Env = env

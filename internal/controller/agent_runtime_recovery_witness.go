@@ -49,6 +49,7 @@ type agentRuntimeBootWitness struct {
 	RuntimeGeneration     int64                                 `json:"runtimeGeneration"`
 	Spec                  corev1alpha1.AgentRuntimeRegistrySpec `json:"spec"`
 	Fence                 harnessv2.Fence                       `json:"fence"`
+	FoundryBroker         *harnessv2.FoundryBrokerIdentity      `json:"foundryBroker,omitempty"`
 	DeploymentName        string                                `json:"deploymentName"`
 	DeploymentUID         types.UID                             `json:"deploymentUID"`
 	TemplateDigest        string                                `json:"templateDigest"`

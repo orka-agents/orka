@@ -29,6 +29,10 @@ func TestCodexCompletedMCPOutputRejectsDuplicateInputIdentity(t *testing.T) {
 					complete["rawInput"] = json.RawMessage(input.raw)
 				}
 				codexMCPOutputTestText(complete, "ambiguous-private-report")
+				if stage == "start" {
+					pipeline.rejectInvalidIdentity(t, start)
+					return
+				}
 				pipeline.update(t, start)
 				mapped := pipeline.update(t, complete)
 				listed, body := pipeline.events(t)
@@ -125,6 +129,10 @@ func TestCodexMCPOutputRequiresExactInputKeys(t *testing.T) {
 				} else {
 					complete["rawInput"] = json.RawMessage(tt.raw)
 				}
+				if stage == "start" && !tt.accepted {
+					pipeline.rejectInvalidIdentity(t, start)
+					return
+				}
 				pipeline.update(t, start)
 				mapped := pipeline.update(t, complete)
 				listed, _ := pipeline.events(t)
@@ -152,6 +160,10 @@ func TestCodexMCPOutputRejectsAmbiguousStartMarker(t *testing.T) {
 			pipeline := codexMCPOutputTestPipeline(t)
 			start, _, complete := codexMCPOutputFixture(t)
 			start["_meta"] = json.RawMessage(meta)
+			if meta == `{"is_mcp_tool_call":true,"is_mcp_tool_call":null}` {
+				pipeline.rejectInvalidIdentity(t, start)
+				return
+			}
 			pipeline.update(t, start)
 			mapped := pipeline.update(t, complete)
 			listed, _ := pipeline.events(t)

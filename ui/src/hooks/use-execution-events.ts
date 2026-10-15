@@ -91,13 +91,9 @@ export function useTaskTrace(
   })
 }
 
-// Poll while an approval is still pending OR the task can still emit new
-// approvals (it is not in a terminal phase). Polling stops once the task has
-// reached a terminal phase, OR nothing is pending and the task isn't running —
-// so a settled panel doesn't refetch forever while a still-running task's first
-// ApprovalRequested is never missed. A terminal task is the key stop condition:
-// its pending approvals render read-only (the backend rejects decisions), and no
-// further events will flip their status, so polling them would never terminate.
+// Poll for new decisions while the task is active and for unresolved v2 tool
+// execution even after the task finishes. Recovery can still settle those calls.
+// Legacy pending approvals have no execution outcome to recover after termination.
 // Pass pollIntervalMs to enable polling; omit it to never poll.
 export function useTaskApprovals(
   taskId: string,
@@ -119,12 +115,17 @@ export function useTaskApprovals(
     refetchInterval: (query) => {
       if (query.state.error instanceof ApiError && query.state.error.status === 501) return false
       if (!pollIntervalMs) return false
-      // A settled task won't change a pending approval (it's read-only), so stop
-      // polling instead of refetching the same pending row indefinitely.
-      if (taskTerminal) return false
       const approvals = query.state.data?.approvals ?? []
+      // A v2 request starts at not_started with no reason. A denial supplies a
+      // reason; succeeded, failed and unknown are also settled execution outcomes.
+      const hasUnsettledExecution = approvals.some((a) =>
+        a.executionOutcome === 'running' ||
+        (a.executionOutcome === 'not_started' && !a.executionReason),
+      )
       const hasPending = approvals.some((a) => a.status === 'pending')
-      return hasPending || taskRunning ? pollIntervalMs : false
+      return hasUnsettledExecution || (!taskTerminal && (hasPending || taskRunning))
+        ? pollIntervalMs
+        : false
     },
   })
 }

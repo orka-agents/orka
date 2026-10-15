@@ -47,6 +47,11 @@ import (
 )
 
 const (
+	externalEventConflictMessage = "externalEventId already identifies a different gateway event"
+	eventIDField                 = "eventId"
+)
+
+const (
 	ingressStatusAccepted     = "accepted"
 	ingressStatusDuplicate    = "duplicate"
 	ingressStatusRejected     = "rejected"
@@ -87,6 +92,7 @@ type Config struct {
 	TerminalRetention            time.Duration
 	DeliveryTimeout              time.Duration
 	DeliveryMaxAttempts          int
+	InterimMessagesPerTask       int
 	ClaimLease                   time.Duration
 	PollInterval                 time.Duration
 	BatchSize                    int
@@ -99,7 +105,7 @@ func DefaultConfig() Config {
 		Enabled: true, PendingPerSession: 100, MaxRecordsPerGateway: 1_000, MaxRejectedRecordsPerGateway: 250, EventExpiry: 24 * time.Hour,
 		TerminalRetention: 30 * 24 * time.Hour, DeliveryTimeout: 15 * time.Second,
 		DeliveryMaxAttempts: 10, ClaimLease: time.Minute, PollInterval: 500 * time.Millisecond,
-		BatchSize: 25,
+		BatchSize: 25, InterimMessagesPerTask: 10,
 	}
 }
 
@@ -306,6 +312,7 @@ func (s *Service) cleanupRetainedGatewaySessions(ctx context.Context, now, termi
 	return errors.Join(errs...)
 }
 
+//nolint:gocyclo // Reclamation verifies event, Task, and Session ownership before each destructive step.
 func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutoff time.Time) error {
 	if s == nil || s.Client == nil || s.EventStore == nil {
 		return nil
@@ -637,7 +644,7 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 	if existing, err := s.EventStore.GetGatewayEventDuplicate(ctx, &baseEvent, now); err == nil {
 		return s.acknowledgeDuplicateEvent(ctx, existing, &baseEvent)
 	} else if errors.Is(err, store.ErrDuplicateMismatch) {
-		return nil, &HTTPError{Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event"}
+		return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("look up gateway event duplicate: %w", err)
 	}
@@ -698,7 +705,7 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 			return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "the previous Gateway Session is being reclaimed; retry this event"}
 		}
 		if errors.Is(err, store.ErrDuplicateMismatch) {
-			return nil, &HTTPError{Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event"}
+			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
 		}
 		if errors.Is(err, store.ErrConflict) {
 			return s.admitRejectedEvent(ctx, baseEvent, "the selected Session is owned by another source")
@@ -736,7 +743,7 @@ func (s *Service) admitRejectedEvent(
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDuplicateMismatch) {
-			return nil, &HTTPError{Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event"}
+			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
 		}
 		if errors.Is(err, store.ErrCapacity) {
 			gatewayIngressTotal.WithLabelValues("capacity").Inc()
@@ -764,7 +771,7 @@ func (s *Service) acknowledgeDuplicateEvent(
 ) (*protocol.IngressResponse, error) {
 	if !matchingGatewayEventEnvelope(existing, candidate) {
 		return nil, &HTTPError{
-			Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event",
+			Code: http.StatusConflict, Message: externalEventConflictMessage,
 		}
 	}
 	if existing.State == store.GatewayEventRejected || existing.State == store.GatewayEventDeadLettered {
@@ -863,7 +870,7 @@ func (s *Service) DispatchOnce(ctx context.Context) error {
 		gatewayDispatchTotal.WithLabelValues("namespace_limit").Inc()
 		return nil
 	}
-	linkedTask, _, ready, err := s.createOrFindGatewayTask(ctx, renewed, binding, agent, freshNow)
+	linkedTask, ready, err := s.createOrFindGatewayTask(ctx, renewed, binding, agent, freshNow)
 	if err != nil || !ready {
 		return err
 	}
@@ -1096,7 +1103,7 @@ func (s *Service) expireGatewayEvent(
 		createdAt = event.CompletedAt.Add(time.Duration(event.TranscriptOrder) * time.Nanosecond)
 	}
 	taskName := ""
-	metadata := map[string]string{"eventId": event.ID}
+	metadata := map[string]string{eventIDField: event.ID}
 	if taskIdentityVerified && event.TaskUID != "" {
 		taskName = event.TaskName
 		metadata["taskName"] = event.TaskName
@@ -1160,28 +1167,28 @@ func (s *Service) createOrFindGatewayTask(
 	binding *gatewayv1alpha1.GatewayBinding,
 	agent *corev1alpha1.Agent,
 	now time.Time,
-) (*corev1alpha1.Task, bool, bool, error) {
+) (*corev1alpha1.Task, bool, error) {
 	taskType := corev1alpha1.TaskTypeAgent
 	if agent.Spec.Runtime == nil {
 		taskType = corev1alpha1.TaskTypeAI
 	}
 	task, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, taskType, now)
 	if err != nil {
-		return nil, false, false, err
+		return nil, false, err
 	}
 	if !event.TaskPolicyFrozen && task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
 		frozen, freezeErr := s.EventStore.FreezeGatewayEventTaskRuntimeAllowedTools(
 			ctx, event.Namespace, event.ID, s.Owner, task.Spec.AgentRuntime.AllowedTools, now,
 		)
 		if freezeErr != nil {
-			return nil, false, false, fmt.Errorf("freeze Gateway Task runtime policy: %w", freezeErr)
+			return nil, false, fmt.Errorf("freeze Gateway Task runtime policy: %w", freezeErr)
 		}
 		*event = *frozen
 	}
 	orkatracing.StampTaskTraceContext(ctx, task)
 	createErr := s.Client.Create(ctx, task)
 	if createErr == nil {
-		return s.refreshGatewayTaskUID(ctx, event, task, true)
+		return s.refreshGatewayTaskUID(ctx, event, task)
 	}
 	existing := &corev1alpha1.Task{}
 	lookupErr := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, existing)
@@ -1189,14 +1196,14 @@ func (s *Service) createOrFindGatewayTask(
 		if !gatewayTaskMatchesExpected(existing, task, event, binding) {
 			s.retryEvent(ctx, event, "deterministic task name collision", eventBackoff(event.AttemptCount))
 			gatewayDispatchTotal.WithLabelValues("name_collision").Inc()
-			return nil, false, false, nil
+			return nil, false, nil
 		}
 		// The Create response may be ambiguous even though the API server committed
 		// the deterministic Task. Treat the fresh read as authoritative and link it.
-		return s.refreshGatewayTaskUID(ctx, event, existing, false)
+		return s.refreshGatewayTaskUID(ctx, event, existing)
 	}
 	if !apierrors.IsNotFound(lookupErr) {
-		return nil, false, false, errors.Join(createErr, fmt.Errorf("read deterministic gateway Task after create: %w", lookupErr))
+		return nil, false, errors.Join(createErr, fmt.Errorf("read deterministic gateway Task after create: %w", lookupErr))
 	}
 	if definitiveGatewayTaskCreateFailure(createErr) {
 		reason := "The message could not start because the configured task is invalid."
@@ -1206,12 +1213,12 @@ func (s *Service) createOrFindGatewayTask(
 			event.StateMessage = reason
 		}
 		gatewayDispatchTotal.WithLabelValues("create_rejected").Inc()
-		return nil, false, false, expireErr
+		return nil, false, expireErr
 	}
 	// Unknown transport/server errors may be returned after the API server commits.
 	// Keep the Dispatching claim intact so lease recovery reconciles before requeue.
 	gatewayDispatchTotal.WithLabelValues("create_ambiguous").Inc()
-	return nil, false, false, fmt.Errorf("gateway Task create outcome is ambiguous: %w", createErr)
+	return nil, false, fmt.Errorf("gateway Task create outcome is ambiguous: %w", createErr)
 }
 
 func definitiveGatewayTaskCreateFailure(err error) bool {
@@ -1220,19 +1227,19 @@ func definitiveGatewayTaskCreateFailure(err error) bool {
 }
 
 func (s *Service) refreshGatewayTaskUID(
-	ctx context.Context, event *store.GatewayEvent, task *corev1alpha1.Task, created bool,
-) (*corev1alpha1.Task, bool, bool, error) {
+	ctx context.Context, event *store.GatewayEvent, task *corev1alpha1.Task,
+) (*corev1alpha1.Task, bool, error) {
 	if task.UID == "" {
 		refreshed := &corev1alpha1.Task{}
 		if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, refreshed); err != nil {
-			return nil, created, false, err
+			return nil, false, err
 		}
 		task = refreshed
 	}
 	if task.UID == "" {
-		return nil, created, false, fmt.Errorf("linked gateway Task UID is unavailable")
+		return nil, false, fmt.Errorf("linked gateway Task UID is unavailable")
 	}
-	return task, created, true, nil
+	return task, true, nil
 }
 
 func deleteGatewayTaskWithUID(ctx context.Context, kubeClient client.Client, task *corev1alpha1.Task) error {
@@ -1400,7 +1407,7 @@ func (s *Service) projectTerminal(
 	}
 	messageMetadata := map[string]string{
 		"gateway": event.GatewayName, "binding": event.BindingName,
-		"eventId": event.ID, "taskName": task.Name, "deliveryId": deliveryID,
+		eventIDField: event.ID, "taskName": task.Name, "deliveryId": deliveryID,
 	}
 	deliveryTrace := orkatracing.InjectContext(ctx)
 	deliveryExpiresAt := gatewayDeliveryExpiresAt(event.ExpiresAt, now, s.Config)
@@ -1410,7 +1417,7 @@ func (s *Service) projectTerminal(
 		GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID, TaskName: task.Name,
 		SessionName: event.SessionName, Kind: kind, AccountID: event.AccountID, ContextID: event.ContextID,
 		ThreadID: event.ThreadID, ReplyTarget: replyTarget, Text: text,
-		Metadata:    map[string]string{"eventId": event.ID, "taskName": task.Name},
+		Metadata:    map[string]string{eventIDField: event.ID, "taskName": task.Name},
 		TraceParent: boundedTraceValue(deliveryTrace.Get("traceparent"), 256),
 		TraceState:  boundedTraceValue(deliveryTrace.Get("tracestate"), 1024),
 		State:       store.GatewayDeliveryPending, MaxAttempts: s.Config.DeliveryMaxAttempts,
@@ -1515,6 +1522,19 @@ func (s *Service) DeliverOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Eligibility reads must finish before starting the adapter request timeout.
+	if delivery.Kind == protocol.DeliveryKindMessage {
+		if err := s.validateMessageDelivery(ctx, delivery); err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.Code != http.StatusServiceUnavailable {
+				gatewayDeliveryTotal.WithLabelValues("non_retryable_error").Inc()
+				gatewayDeadLettersTotal.WithLabelValues("delivery").Inc()
+				return s.DeliveryStore.MarkGatewayDeliveryTerminal(ctx, delivery.Namespace, delivery.ID, s.Owner,
+					store.GatewayDeliveryDeadLettered, httpErr.Message, time.Now().UTC())
+			}
+			return s.retryOrDeadLetterDelivery(ctx, delivery, "gateway message eligibility is unavailable", time.Now().UTC())
+		}
+	}
 	deliveryWindow := delivery.ExpiresAt.Sub(time.Now().UTC())
 	if deliveryWindow <= 0 {
 		return s.DeliveryStore.MarkGatewayDeliveryTerminal(
@@ -1587,8 +1607,10 @@ func (s *Service) completeGatewayDelivery(
 	// Correlate the Task before committing the delivery as terminal. If the patch fails,
 	// the Sending lease expires and the same idempotent delivery is replayed, allowing
 	// correlation to converge without creating a second provider-side send.
-	if err := s.markTaskDeliveryCorrelation(ctx, delivery, providerMessageID); err != nil {
-		return err
+	if delivery.Kind != protocol.DeliveryKindMessage {
+		if err := s.markTaskDeliveryCorrelation(ctx, delivery, providerMessageID); err != nil {
+			return err
+		}
 	}
 	if err := s.DeliveryStore.MarkGatewayDeliveryDelivered(
 		ctx, delivery.Namespace, delivery.ID, s.Owner, providerMessageID, outcomeAt,
@@ -1935,7 +1957,7 @@ func (s *Service) ensureDenialDelivery(ctx context.Context, event *store.Gateway
 		GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
 		Kind: protocol.DeliveryKindError, State: store.GatewayDeliveryPending,
 		AccountID: event.AccountID, ContextID: event.ContextID, ThreadID: event.ThreadID,
-		ReplyTarget: replyTarget, Text: text, Metadata: map[string]string{"eventId": event.ID},
+		ReplyTarget: replyTarget, Text: text, Metadata: map[string]string{eventIDField: event.ID},
 		TraceParent: event.TraceParent, TraceState: event.TraceState,
 		MaxAttempts: s.Config.DeliveryMaxAttempts, NextAttemptAt: now, ExpiresAt: event.ExpiresAt,
 		CreatedAt: now, UpdatedAt: now,
@@ -2116,6 +2138,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.DeliveryMaxAttempts <= 0 {
 		config.DeliveryMaxAttempts = defaults.DeliveryMaxAttempts
+	}
+	if config.InterimMessagesPerTask <= 0 {
+		config.InterimMessagesPerTask = defaults.InterimMessagesPerTask
 	}
 	if config.ClaimLease <= 0 {
 		config.ClaimLease = defaults.ClaimLease

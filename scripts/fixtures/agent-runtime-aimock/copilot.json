@@ -1,0 +1,7 @@
+{
+  "fixtures": [
+    {"match": {"userMessage": "Remember the session nonce nonce-aimock-copilot", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-aimock-copilot. First non-empty LICENSE line: MIT License"}},
+    {"match": {"userMessage": "Remember the session nonce nonce-aimock-copilot", "hasToolResult": true}, "response": {"toolCalls": [{"name": "grep", "arguments": {"pattern": "License", "path": "LICENSE"}}]}},
+    {"match": {"userMessage": "Remember the session nonce nonce-aimock-copilot", "hasToolResult": false}, "response": {"toolCalls": [{"name": "view", "arguments": {"path": "LICENSE"}}]}}
+  ]
+}

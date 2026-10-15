@@ -49,10 +49,12 @@ func codexMCPStartMatches(envelope codexCommandOutputEnvelope) bool {
 // completeItemEvent(mcpToolCall), after the prompt has recorded the exact frozen
 // brokered read-only identity. It neither grants permission nor authenticates a
 // broker result; broker execution and permission checks retain their own fences.
-// Only one complete text block enters the existing logical-text redaction path.
+// ToolCallReports omits rawInput when unchanged from the recorded start. A
+// repeated input must still match exactly. Only one complete text block enters
+// the existing logical-text redaction path.
 func codexCompletedMCPText(envelope codexCommandOutputEnvelope, name string) (string, bool) {
 	if envelope.Status != harnessv2.ToolCallStatusCompleted || len(envelope.Meta) != 0 ||
-		!codexMCPOutputInputMatches(envelope.RawInput, name) {
+		(len(envelope.RawInput) != 0 && !codexMCPOutputInputMatches(envelope.RawInput, name)) {
 		return "", false
 	}
 	// Reject duplicate keys throughout the result before interpreting any field.

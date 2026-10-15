@@ -26,6 +26,7 @@ type agentRuntimeBootRetirement struct {
 	Kind                 string                           `json:"kind"`
 	ContainerTermination *corev1.ContainerStateTerminated `json:"containerTermination,omitempty"`
 	DrainedStatus        *harnessv2.StatusResponse        `json:"drainedStatus,omitempty"`
+	FoundryRetirement    *agentRuntimeFoundryRetirement   `json:"foundryRetirement,omitempty"`
 }
 
 func runtimeWitnessDigest(witness agentRuntimeBootWitness) (string, error) {
@@ -66,6 +67,9 @@ func validateAgentRuntimeBootWitness(witness agentRuntimeBootWitness, namespace 
 		capabilities == nil || capabilities.Profile == nil || !capabilities.SupportsDrain ||
 		capabilities.RuntimeInstanceID != string(witness.Fence.RuntimeInstanceID) || capabilities.Profile.Digest != string(witness.Fence.RuntimeProfileDigest) {
 		return fmt.Errorf("%w: enrolled boot ownership and runtime fences are inconsistent", store.ErrConflict)
+	}
+	if witness.FoundryBroker != nil && (capabilities.Profile.ProviderKind != agentRuntimeFoundryProvider || witness.FoundryBroker.Validate() != nil) {
+		return fmt.Errorf("%w: enrolled Foundry broker identity is invalid", store.ErrConflict)
 	}
 	return nil
 }
@@ -114,14 +118,18 @@ func loadAgentRuntimeBootRetirement(ctx context.Context, effects store.ExternalE
 	}
 	switch proof.Kind {
 	case "authenticated-drain":
-		if proof.ContainerTermination != nil || proof.DrainedStatus == nil ||
+		if proof.ContainerTermination != nil || proof.FoundryRetirement != nil || proof.DrainedStatus == nil ||
 			harnessv2.CompareFence(witness.Fence, proof.DrainedStatus.Fence, false) != harnessv2.FenceMatch || !upgradeDrainSupervisorIsQuiescent(*proof.DrainedStatus) {
 			return false, fmt.Errorf("%w: exact supervisor drain evidence is invalid", store.ErrConflict)
 		}
 	case "kubernetes-container-termination":
-		if proof.DrainedStatus != nil || !validWitnessContainerTermination(witness, proof.ContainerTermination) ||
+		if proof.DrainedStatus != nil || proof.FoundryRetirement != nil || !validWitnessContainerTermination(witness, proof.ContainerTermination) ||
 			witness.Spec.Capabilities == nil || witness.Spec.Capabilities.Profile == nil || !agentRuntimeLocalContainerRetirementAllowed(witness.Spec.Capabilities.Profile.ProviderKind) {
 			return false, fmt.Errorf("%w: exact local container termination evidence is invalid", store.ErrConflict)
+		}
+	case "foundry-broker-retirement":
+		if err := validateAgentRuntimeFoundryRetirement(witness, proof); err != nil {
+			return false, err
 		}
 	default:
 		return false, fmt.Errorf("%w: unsupported AgentRuntime retirement proof", store.ErrConflict)
@@ -176,7 +184,8 @@ func (r *AgentRuntimeReconciler) observeContainerRetirement(ctx context.Context,
 	if retired, err := loadAgentRuntimeBootRetirement(ctx, r.ControlStore, witness); retired || err != nil {
 		return retired, err
 	}
-	if witness.Spec.Capabilities == nil || witness.Spec.Capabilities.Profile == nil || !agentRuntimeLocalContainerRetirementAllowed(witness.Spec.Capabilities.Profile.ProviderKind) {
+	provider := recoveryProviderKind(witness.Spec)
+	if !agentRuntimeLocalContainerRetirementAllowed(provider) && provider != agentRuntimeFoundryProvider {
 		return false, nil
 	}
 	pod := &corev1.Pod{}
@@ -193,6 +202,9 @@ func (r *AgentRuntimeReconciler) observeContainerRetirement(ctx context.Context,
 	}
 	if err := r.validateAgentRuntimeRecoveryPodSpec(ctx, witness.Namespace, pod.Spec, witness.ContainerName, recoveryProviderKind(witness.Spec)); err != nil {
 		return false, err
+	}
+	if provider == agentRuntimeFoundryProvider {
+		return r.observeFoundryContainerRetirement(ctx, witness, terminal, fence)
 	}
 	if err := r.persistBootRetirement(ctx, witness, agentRuntimeBootRetirement{Kind: "kubernetes-container-termination", ContainerTermination: terminal}, fence); err != nil {
 		return false, err
@@ -305,6 +317,7 @@ func (r *AgentRuntimeReconciler) resumeRecoveryBootRetention(ctx context.Context
 	}
 	observed := backend.witness
 	observed.Fence = witness.Fence
+	observed.FoundryBroker = witness.FoundryBroker
 	observed.ControllerAuthUID, observed.ControllerAuthVersion = auth.controllerSecretUID, auth.controllerResourceVersion
 	observed.CapabilityAuthUID, observed.CapabilityAuthVersion = auth.capabilitySecretUID, auth.capabilityResourceVersion
 	if !reflect.DeepEqual(observed, witness) {
@@ -368,40 +381,89 @@ func runtimeStatusIdle(status *harnessv2.StatusResponse) bool {
 		len(status.Sessions) == 0 && len(status.ActivePrompts) == 0 && len(status.PendingPermissions) == 0
 }
 
-func (r *AgentRuntimeReconciler) observeRecoveryBoot(ctx context.Context, runtime *corev1alpha1.AgentRuntime, backend *agentRuntimeRecoveryBackend, fence store.ControllerEpochFence) (agentRuntimeBootWitness, error) {
+type agentRuntimeBootObservation struct {
+	witness agentRuntimeBootWitness
+	status  *harnessv2.StatusResponse
+	auth    agentRuntimeAuthMaterial
+}
+
+func recoveryFoundryBrokerIdentity(ctx context.Context, provider, registeredConfigurationDigest string, probe *harnessv2.Client, status *harnessv2.StatusResponse) (*harnessv2.FoundryBrokerIdentity, error) {
+	if provider != agentRuntimeFoundryProvider {
+		return nil, nil
+	}
+	capabilities, err := probe.Capabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if capabilities.RuntimeProfileDigest != status.Fence.RuntimeProfileDigest || capabilities.ProfileDigestSchemaVersion != status.Fence.ProfileDigestSchemaVersion {
+		return nil, errors.New("authenticated runtime profile does not match its recovery capabilities")
+	}
+	// Unqualified Foundry boots retain their existing enrollment and live
+	// drain contract, but cannot grant remote retirement authority.
+	if !capabilities.SupportsFoundryRecovery {
+		return nil, nil
+	}
+	if status.FoundryBroker == nil || status.FoundryBroker.Validate() != nil {
+		return nil, errors.New("foundry recovery enrollment requires authenticated broker identity before admission")
+	}
+	// The broker ledger must partition sessions under the registered agent
+	// configuration; a different partition could certify retirement of sessions
+	// that never belonged to this profile.
+	if status.FoundryBroker.AgentConfigurationDigest != registeredConfigurationDigest {
+		return nil, errors.New("foundry broker configuration does not match the registered runtime profile")
+	}
+	identity := *status.FoundryBroker
+	return &identity, nil
+}
+
+func (r *AgentRuntimeReconciler) authenticateRecoveryBoot(ctx context.Context, runtime *corev1alpha1.AgentRuntime, backend *agentRuntimeRecoveryBackend) (*agentRuntimeBootObservation, error) {
 	witness := backend.witness
 	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {
-		return witness, err
+		return nil, err
 	}
 	probe, err := harnessv2.NewClient(runtime.Spec.Deployment.Endpoint,
 		harnessv2.WithControllerBearerToken(auth.controllerBearerToken), harnessv2.WithOperationCapabilitySecret(auth.operationCapabilitySecret),
 		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{RuntimeInstanceID: harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID), RuntimeProfileDigest: harnessv2.ProfileDigest(runtime.Spec.Capabilities.Profile.Digest)}),
 		harnessv2.WithHTTPClient(externalRuntimeHTTPClient(PinnedBackendDialTransport(witness.Pins))), harnessv2.WithControlTimeout(10*time.Second))
 	if err != nil {
-		return witness, err
+		return nil, err
 	}
 	status, err := probe.Status(ctx)
 	if err != nil {
-		return witness, err
+		return nil, err
+	}
+	brokerIdentity, err := recoveryFoundryBrokerIdentity(ctx, recoveryProviderKind(runtime.Spec), runtime.Spec.Capabilities.Profile.AgentConfigurationDigest, probe, status)
+	if err != nil {
+		return nil, err
 	}
 	if err := r.revalidateRecoveryBackend(ctx, runtime, backend); err != nil {
-		return witness, err
+		return nil, err
 	}
 	if err := r.requireCurrentAgentRuntimeAuthMaterial(ctx, runtime, auth); err != nil {
-		return witness, err
+		return nil, err
 	}
 	_, templateEpoch, err := recoveryTemplateDigest(backend.deployment.Spec.Template, witness.ContainerName)
 	if err != nil {
-		return witness, err
+		return nil, err
 	}
 	if status.Fence.Validate(false) != nil || status.Fence.ControllerEpoch != templateEpoch ||
 		string(status.Fence.RuntimeInstanceID) != runtime.Spec.Capabilities.RuntimeInstanceID || string(status.Fence.RuntimeProfileDigest) != runtime.Spec.Capabilities.Profile.Digest {
-		return witness, errors.New("authenticated runtime does not match its Deployment epoch and registration")
+		return nil, errors.New("authenticated runtime does not match its Deployment epoch and registration")
 	}
 	witness.Fence = status.Fence
+	witness.FoundryBroker = brokerIdentity
 	witness.ControllerAuthUID, witness.ControllerAuthVersion = auth.controllerSecretUID, auth.controllerResourceVersion
 	witness.CapabilityAuthUID, witness.CapabilityAuthVersion = auth.capabilitySecretUID, auth.capabilityResourceVersion
+	return &agentRuntimeBootObservation{witness: witness, status: status, auth: auth}, nil
+}
+
+func (r *AgentRuntimeReconciler) observeRecoveryBoot(ctx context.Context, runtime *corev1alpha1.AgentRuntime, backend *agentRuntimeRecoveryBackend, fence store.ControllerEpochFence) (agentRuntimeBootWitness, error) {
+	observation, err := r.authenticateRecoveryBoot(ctx, runtime, backend)
+	if err != nil {
+		return backend.witness, err
+	}
+	witness, status, auth := observation.witness, observation.status, observation.auth
 	existing, err := loadAgentRuntimeBootWitness(ctx, r.ControlStore, runtime.Namespace, runtime.UID, status.Fence.SupervisorBootID)
 	witnessPublished := err == nil
 	if err == nil {

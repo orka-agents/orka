@@ -185,7 +185,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 						"items": {
 							"type": "object",
 							"properties": {
-								"name": {"type": "string"},
+								"name": {"type": "string", "minLength": 1, "pattern": "\\S"},
 								"namespace": {"type": "string"}
 							},
 							"required": ["name"]
@@ -303,6 +303,8 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 }
 
 // Execute creates an Agent CRD dynamically
+//
+//nolint:gocyclo // Keep Agent construction and coordination-policy validation in one flow.
 func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a CreateAgentArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -328,6 +330,14 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	} else if strings.TrimSpace(a.SystemPrompt) == "" {
 		return "", fmt.Errorf("systemPrompt is required")
+	}
+	if a.Model != nil {
+		if a.Model.ContextWindow != nil && *a.Model.ContextWindow < 1 {
+			return "", fmt.Errorf("model.contextWindow must be at least 1")
+		}
+		if a.Model.MaxTokens != nil && *a.Model.MaxTokens < 1 {
+			return "", fmt.Errorf("model.maxTokens must be at least 1")
+		}
 	}
 	effectiveModel := a.Model
 	if runtimeType != string(corev1alpha1.AgentRuntimeOpencode) &&
@@ -446,7 +456,10 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			MaxDepth:              a.Coordination.MaxDepth,
 			MaxConcurrentChildren: a.Coordination.MaxConcurrentChildren,
 		}
-		for _, aa := range a.Coordination.AllowedAgents {
+		for i, aa := range a.Coordination.AllowedAgents {
+			if strings.TrimSpace(aa.Name) == "" {
+				return "", fmt.Errorf("coordination.allowedAgents[%d].name is required", i)
+			}
 			coord.AllowedAgents = append(coord.AllowedAgents, corev1alpha1.AllowedAgent{
 				Name:      aa.Name,
 				Namespace: aa.Namespace,

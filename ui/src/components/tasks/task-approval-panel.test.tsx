@@ -43,6 +43,26 @@ describe('TaskApprovalPanel', () => {
     expect(screen.getByRole('button', { name: 'Decline' })).toBeInTheDocument()
   })
 
+  it('shows the wrapped operation, safe inputs, and an unknown execution outcome', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval({
+        action: 'Execute create_work_order via call-tool',
+        targetTool: 'call-tool',
+        targetArgsPreview: { name: 'create_work_order', inputs: { machine: 'simulated-1', token: '[REDACTED]' } },
+        status: 'approved',
+        executionOutcome: 'unknown',
+        executionReason: 'The action may have run. Do not repeat it automatically.',
+      })]))),
+    )
+    render(<TaskApprovalPanel taskId="tk" taskPhase="Running" />)
+    await waitFor(() => expect(screen.getByText('Execute create_work_order via call-tool')).toBeInTheDocument())
+    expect(screen.getByText('Proposed inputs for call-tool')).toBeInTheDocument()
+    expect(screen.getByText(/simulated-1/)).toHaveTextContent('[REDACTED]')
+    expect(screen.getByText('Execution: unknown')).toBeInTheDocument()
+    expect(screen.getByText('The action may have run. Check its outcome before trying again.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
   it('approve sends the correct request and updates the UI', async () => {
     let capturedBody: unknown = null
     let capturedPath = ''
@@ -62,11 +82,44 @@ describe('TaskApprovalPanel', () => {
     const user = userEvent.setup()
     render(<TaskApprovalPanel taskId="tk" />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument())
+    expect(screen.getByText('fetch an external URL')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(capturedBody).toEqual({ decision: 'approve' }))
     expect(capturedPath).toBe('/api/v1/tasks/tk/approvals/ap-1/decision')
     // After invalidation the card reloads as approved (no more action buttons).
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
+    expect(screen.queryByText('fetch an external URL')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    { status: 'pending', executionOutcome: 'not_started' },
+    { status: 'approved', executionOutcome: 'executing' },
+    { status: 'approved', executionOutcome: 'succeeded' },
+    { status: 'approved', executionOutcome: 'failed' },
+    { status: 'approved', executionOutcome: 'unknown' },
+    { status: 'declined', executionOutcome: 'not_started' },
+    { status: 'cancelled', executionOutcome: 'not_started' },
+    { status: 'cancelled', executionOutcome: 'unknown' },
+    { status: 'expired', executionOutcome: 'not_started' },
+  ])('shows current execution state for $status/$executionOutcome', async ({ status, executionOutcome }) => {
+    const riskSummary = 'Review this exact operation and its inputs. The tool has not run.'
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval({
+        riskSummary, status, executionOutcome,
+        targetTool: 'create-work-order', targetArgsPreview: { asset: 'pump-1' },
+      })]))),
+    )
+    render(<TaskApprovalPanel taskId="tk" taskPhase="Running" />)
+    await waitFor(() => expect(screen.getByText(`Execution: ${executionOutcome.replace(/_/g, ' ')}`)).toBeInTheDocument())
+    expect(screen.getByText('Proposed inputs for create-work-order')).toBeInTheDocument()
+    expect(screen.getByText(/pump-1/)).toBeInTheDocument()
+    if (status === 'pending') {
+      expect(screen.getByText(riskSummary)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    } else {
+      expect(screen.queryByText(riskSummary)).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    }
   })
 
   it('decline sends the decline decision with an optional reason', async () => {

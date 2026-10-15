@@ -22,24 +22,22 @@ import (
 )
 
 const (
-	defaultGitHubAPIBaseURL          = "https://api.github.com"
-	defaultGitHubRequestTimeout      = 15 * time.Second
-	defaultGitHubMaxResponseBytes    = int64(4 << 20)
-	maxGitHubRequestTimeout          = 2 * time.Minute
-	maxGitHubResponseBytes           = int64(16 << 20)
-	maxGitHubAuthBytes               = int64(32 << 10)
-	maxGitHubRequestBytes            = int64(32 << 10)
-	maxGitHubReceiptURLBytes         = 2048
-	maxGitHubPullRequestCandidates   = 100
-	githubAPIVersion                 = "2026-03-10"
-	githubProvider                   = "github"
-	githubPullRequestStateOpen       = "open"
-	githubPullRequestStateClosed     = "closed"
-	githubIntentMarkerPrefix         = "<!-- orka.publisher.pr-intent.v1 key="
-	githubSessionMarkerPrefix        = "<!-- orka.publisher.pr-session.v1 key="
-	githubIntentMarkerSuffix         = " -->"
-	githubPullRequestTitlePrefix     = "Orka publication generation "
-	githubPullRequestBodyDescription = "Created by the Orka clean-room workspace publisher."
+	defaultGitHubAPIBaseURL        = "https://api.github.com"
+	defaultGitHubRequestTimeout    = 15 * time.Second
+	defaultGitHubMaxResponseBytes  = int64(4 << 20)
+	maxGitHubRequestTimeout        = 2 * time.Minute
+	maxGitHubResponseBytes         = int64(16 << 20)
+	maxGitHubAuthBytes             = int64(32 << 10)
+	maxGitHubRequestBytes          = int64(256 << 10)
+	maxGitHubReceiptURLBytes       = 2048
+	maxGitHubPullRequestCandidates = 100
+	githubAPIVersion               = "2026-03-10"
+	githubProvider                 = "github"
+	githubPullRequestStateOpen     = "open"
+	githubPullRequestStateClosed   = "closed"
+	githubIntentMarkerPrefix       = publisher.PullRequestMarkerPrefix + "intent.v1 key="
+	githubSessionMarkerPrefix      = publisher.PullRequestMarkerPrefix + "session.v1 key="
+	githubIntentMarkerSuffix       = " -->"
 )
 
 var githubRepositoryComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
@@ -559,10 +557,13 @@ func (r *githubPRReconciler) create(
 		return githubPullRequest{}, err
 	}
 	request := githubCreatePullRequest{
-		Title: githubPullRequestTitlePrefix + strconv.FormatInt(intent.PublicationGeneration, 10),
-		Body:  githubPullRequestBody(intent.PublicationGeneration, intentKey, sessionKey),
+		Title: intent.Title,
+		Body:  githubPullRequestBody(intent, intentKey, sessionKey),
 		Head:  head.intent.owner + ":" + head.intent.branch,
 		Base:  base.intent.branch, Draft: false, MaintainerCanModify: false,
+	}
+	if request.Title == "" {
+		request.Title = publisher.DefaultPullRequestTitle("", intent.PublicationGeneration)
 	}
 	if base.api.ID != head.api.ID {
 		request.HeadRepository = head.intent.name
@@ -598,8 +599,8 @@ func githubBodyHasReconciliationMarker(body, marker string) bool {
 	return !strings.HasPrefix(marker, githubSessionMarkerPrefix) || strings.Count(body, githubSessionMarkerPrefix) == 1
 }
 
-func githubPullRequestBody(generation int64, intentKey, sessionKey string) string {
-	body := githubPullRequestBodyDescription + "\n\nPublication generation: " + strconv.FormatInt(generation, 10) + "\n\n" + githubIntentMarker(intentKey)
+func githubPullRequestBody(intent publisher.PullRequestIntent, intentKey, sessionKey string) string {
+	body := intent.Description() + "\n\n" + githubIntentMarker(intentKey)
 	if sessionKey != "" {
 		body += "\n\n" + githubSessionMarkerPrefix + sessionKey + githubIntentMarkerSuffix
 	}

@@ -322,7 +322,7 @@ type acpToolCallIdentity struct {
 	Title      string          `json:"title"`
 	RawInput   json.RawMessage `json:"rawInput"`
 	Meta       struct {
-		IsMCPToolCall bool `json:"is_mcp_tool_call"`
+		IsMCPToolCall json.RawMessage `json:"is_mcp_tool_call"`
 		ClaudeCode    struct {
 			ToolName string `json:"toolName"`
 		} `json:"claudeCode"`
@@ -353,28 +353,20 @@ func pinnedCodexACPProvider(provider ProviderProfile) bool {
 		provider.AdapterDigest == "sha256:"+acp.CodexACPOrkaDistSHA256
 }
 
-// Codex's pinned adapter identifies MCP calls in rawInput, never in the display
-// title. Only retain the configured Orka server's frozen read-only descriptor;
-// arguments and other provider fields are neither authority nor retained state.
-func codexMCPToolName(raw json.RawMessage, policy harnessv2.MCPToolPolicy) string {
-	descriptor, allowed := policy.Descriptor(codexMCPInputToolName(raw))
-	if !allowed || !descriptor.Source.Brokered() || descriptor.Effect != harnessv2.MCPToolEffectReadOnly {
-		return ""
-	}
-	return descriptor.Name
-}
-
 // rememberToolCallName retains structured identities only for this prompt.
-// Claude and Codex emit structured names in preceding updates; their permission
-// requests can contain only a toolCallId. Codex MCP correlation also retains the
-// source marker so an unrelated human-input request cannot borrow that identity.
-func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification, codex bool, policy harnessv2.MCPToolPolicy) error {
+// Claude and Codex can identify a tool in a preceding update while their
+// permission request carries only the toolCallId, never an authoritative title.
+func (prompt *promptState) rememberToolCallName(
+	notification *acp.SessionNotification, provider string, policy harnessv2.MCPToolPolicy,
+) error {
 	if notification == nil {
 		return nil
 	}
 	var call struct {
 		acpToolCallIdentity
-		SessionUpdate string `json:"sessionUpdate"`
+		SessionUpdate string          `json:"sessionUpdate"`
+		Kind          string          `json:"kind"`
+		RawInput      json.RawMessage `json:"rawInput"`
 	}
 	if err := json.Unmarshal(notification.Update, &call); err != nil {
 		return fmt.Errorf("decode ACP tool identity: %w", err)
@@ -387,13 +379,19 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 		return err
 	}
 	identity := rememberedACPToolCall{name: name}
-	if codex && call.Meta.IsMCPToolCall {
-		identity = rememberedACPToolCall{codexMCP: true}
-		if envelope, valid := decodeCodexOutputEnvelope(notification.Update); valid && codexMCPStartMatches(envelope) {
-			identity.name = codexMCPToolName(envelope.RawInput, policy)
+	if provider == providerKindCodex {
+		name, err = codexMCPPermissionToolName(call.Meta.IsMCPToolCall, call.Kind, call.RawInput, name, policy)
+		if err != nil {
+			return err
 		}
-		if name != "" && name != identity.name {
-			return fmt.Errorf("ACP tool call has conflicting tool identities")
+		identity.name = name
+		mcpCall, _ := codexMCPToolCallMarker(call.Meta.IsMCPToolCall)
+		descriptor, allowed := policy.Descriptor(name)
+		if mcpCall && allowed && descriptor.Effect == harnessv2.MCPToolEffectReadOnly {
+			identity.codexMCP = true
+			if envelope, valid := decodeCodexOutputEnvelope(notification.Update); !valid || !codexMCPStartMatches(envelope) {
+				identity.name = ""
+			}
 		}
 	}
 	if identity.name == "" && !identity.codexMCP {
@@ -430,7 +428,7 @@ func (prompt *promptState) correlatePermissionToolName(event *acp.PermissionRequ
 		descriptor, allowed := policy.Descriptor(name)
 		// A direct brokered name cannot borrow authority without both the
 		// remembered MCP call identity and the pinned approval marker.
-		if mcpApproval || (known && identity.codexMCP) || (allowed && descriptor.Source.Brokered()) {
+		if (known && identity.codexMCP) || (allowed && descriptor.Source.Brokered() && descriptor.Effect == harnessv2.MCPToolEffectReadOnly) {
 			call, tracked := prompt.codexCompletedOutput.calls[permission.ToolCallID]
 			if !mcpApproval || !known || !identity.codexMCP || !tracked || call.kind != codexCommandOutputMCP || call.invalid || call.finished {
 				permission.ToolName = ""
@@ -449,6 +447,43 @@ func (prompt *promptState) correlatePermissionToolName(event *acp.PermissionRequ
 		permission.ToolName = identity.name
 	}
 	return nil
+}
+
+// The pinned Codex adapter marks MCP updates and supplies structured server/tool
+// fields instead of name. Only the configured Orka server and a frozen brokered
+// descriptor can supply an identity; titles and native-tool collisions cannot.
+func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput json.RawMessage, name string, policy harnessv2.MCPToolPolicy) (string, error) {
+	mcpCall, err := codexMCPToolCallMarker(marker)
+	if err != nil {
+		return "", err
+	}
+	if !mcpCall {
+		if descriptor, allowed := policy.Descriptor(name); allowed && descriptor.Source.Brokered() {
+			return "", fmt.Errorf("codex brokered tool identity requires an MCP marker")
+		}
+		return name, nil
+	}
+	descriptor, allowed := policy.Descriptor(codexMCPInputToolName(rawInput))
+	if kind != acpToolKindExecute || !allowed || !descriptor.Source.Brokered() {
+		return "", fmt.Errorf("codex MCP tool identity is outside the frozen broker policy")
+	}
+	if name != "" && name != descriptor.Name {
+		return "", fmt.Errorf("codex MCP tool update has conflicting structured identities")
+	}
+	return descriptor.Name, nil
+}
+
+// Omitted markers are valid on ID-only permission callbacks. A present Codex
+// marker must be a JSON boolean on both updates and permission callbacks.
+func codexMCPToolCallMarker(marker json.RawMessage) (bool, error) {
+	if len(marker) == 0 {
+		return false, nil
+	}
+	var mcpCall *bool
+	if err := json.Unmarshal(marker, &mcpCall); err != nil || mcpCall == nil {
+		return false, fmt.Errorf("codex MCP tool call has invalid identity marker")
+	}
+	return *mcpCall, nil
 }
 
 func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy, name string) string {
@@ -481,11 +516,16 @@ func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Dur
 	if err := json.Unmarshal(event.Request.ToolCall, &toolCall); err != nil {
 		return nil, fmt.Errorf("decode ACP permission tool call: %w", err)
 	}
+	if provider == providerKindCodex {
+		if _, err := codexMCPToolCallMarker(toolCall.Meta.IsMCPToolCall); err != nil {
+			return nil, err
+		}
+	}
 	toolName, err := toolCall.name()
 	if err != nil {
 		return nil, err
 	}
-	// Copilot CLI 1.0.77 omits name on its native shell permission request.
+	// Copilot CLI 1.0.96 omits name on its native shell permission request.
 	// Recognize its command envelope only for this provider; titles and the
 	// generic execute kind alone cannot identify an authorized tool. The
 	// controller and supervisor still require Bash in the frozen tool policy.

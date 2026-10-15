@@ -71,3 +71,34 @@ func TestMCPProxyPreservesToolErrorsWithoutHidingBrokerFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestMCPProxyPreservesBrokeredApprovalOutcomes(t *testing.T) {
+	for _, code := range []string{"approval_declined", "approval_expired", "approval_cancelled", "approval_stale", "tool_execution_failed", "tool_outcome_unknown"} {
+		t.Run(code, func(t *testing.T) {
+			broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+				result, err := json.Marshal(map[string]any{"isError": true, "code": code, "message": "controller tool outcome"})
+				return harnessv2.MCPBrokerCallResponse{
+					Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: result, IsError: true,
+				}, err
+			})
+			session, endpoint := newTestMCPProxySession(t, broker, true)
+			now := time.Now().UTC()
+			authorization, lease := testMCPAuthorization(t, session.fence, now, true)
+			if err := session.activate(t.Context(), authorization, lease, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := session.markRunning(authorization.PromptID, now); err != nil {
+				t.Fatal(err)
+			}
+			response := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", `{"jsonrpc":"2.0","id":"action","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
+			result, ok := response.Result.(map[string]any)
+			if response.Error != nil || !ok || result["isError"] != true {
+				t.Fatalf("controller outcome did not return as a tool result: %#v", response)
+			}
+			structured, ok := result["structuredContent"].(map[string]any)
+			if !ok || structured["code"] != code || structured["isError"] != true {
+				t.Fatalf("controller outcome was changed in structuredContent: %#v", result)
+			}
+		})
+	}
+}

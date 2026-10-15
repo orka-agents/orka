@@ -308,7 +308,7 @@ func TestRuntimeFeedbackToolRegistrationIsExplicitAndReadOnly(t *testing.T) {
 	if err := RegisterRuntimeFeedbackTool(registry, f.reader, &feedbackTestService{}); err != nil {
 		t.Fatal(err)
 	}
-	descriptors, err := buildCanonicalMCPToolDescriptors(context.Background(), f.reader, "default", "opencode", []string{RuntimeFeedbackToolName}, nil, false, registry)
+	descriptors, err := buildCanonicalMCPToolDescriptors(context.Background(), f.reader, "default", "opencode", []string{RuntimeFeedbackToolName}, nil, false, harnessv2.MCPApprovalPolicy{}, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +444,7 @@ func TestRuntimeFeedbackSnapshotAndMaterializedPoolPreserveTaskIsolation(t *test
 	if _, _, _, err := validateAgentExecutionSnapshot(other, snapshot, body); err == nil {
 		t.Fatal("snapshot rebound to another Task")
 	}
-	pool, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "", "", "")
+	pool, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +505,7 @@ func TestRuntimeFeedbackOptOutPreservesExecutionModesAndSnapshot(t *testing.T) {
 				if (plan.Workspace != nil) != (mode == "workspace") {
 					t.Fatal("feedback denial changed the execution workspace binding")
 				}
-				pool, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "", "", "")
+				pool, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -568,7 +568,7 @@ func TestRuntimeFeedbackCannotFallbackToCustomToolWhenDisabled(t *testing.T) {
 	if err := f.reader.Create(context.Background(), custom); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildCanonicalMCPToolDescriptors(context.Background(), f.reader, f.task.Namespace, "codex", []string{RuntimeFeedbackToolName}, nil, true, tools.NewRegistry()); err == nil || !strings.Contains(err.Error(), "not configured") {
+	if _, err := buildCanonicalMCPToolDescriptors(context.Background(), f.reader, f.task.Namespace, "codex", []string{RuntimeFeedbackToolName}, nil, true, harnessv2.MCPApprovalPolicy{}, tools.NewRegistry()); err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Fatal("disabled feedback fell back to custom Tool")
 	}
 }
@@ -579,7 +579,7 @@ func TestRuntimeFeedbackCodexPermissionUsesFrozenDescriptor(t *testing.T) {
 	if err := RegisterRuntimeFeedbackTool(registry, f.reader, &feedbackTestService{}); err != nil {
 		t.Fatal(err)
 	}
-	descriptors, err := buildCanonicalMCPToolDescriptors(t.Context(), f.reader, "default", "codex", []string{RuntimeFeedbackToolName}, nil, false, registry)
+	descriptors, err := buildCanonicalMCPToolDescriptors(t.Context(), f.reader, "default", "codex", []string{RuntimeFeedbackToolName}, nil, false, harnessv2.MCPApprovalPolicy{}, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +596,7 @@ func TestRuntimeFeedbackCodexPermissionUsesFrozenDescriptor(t *testing.T) {
 		{name: "display name is not canonical identity", tool: "mcp.orka.runtime_feedback", want: "decline"},
 		{name: "ungranted mutating tool", tool: "mutate", want: "decline"},
 		{name: "disallowed feedback", tool: RuntimeFeedbackToolName, disallowed: true, want: "decline"},
-		{name: "human-required feedback", tool: RuntimeFeedbackToolName, required: true, want: "decline"},
+		{name: "broker retains human approval authority", tool: RuntimeFeedbackToolName, required: true, want: "allow_once"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			configuration := harnessv2.MCPPolicyConfiguration{ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{RuntimeFeedbackToolName}, Tools: descriptors}}

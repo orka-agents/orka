@@ -232,3 +232,18 @@ mappings, invalid origins, file and entry bounds, and startup-frozen routing.
 They use real broker/status HTTP and Kubernetes/store fixtures. Live
 integration validation requires an actual native runtime request, matching
 GKR evidence, and recovery within the Task's existing authority.
+
+The Task-dispatch tests enter frozen planning, queue reservation, RuntimeSession
+creation and prompt submission, and verify capture registration happens first.
+They compare the registration's workload/run binding with the submitted prompt
+and verify exact completion for completed and cancelled prompts. Kubernetes
+storage and the HTTP supervisor are fixtures.
+
+`TestPinnedNativeCodexRuntimeFeedback` runs the pinned production Codex CLI and
+ACP adapter in the native Codex CI job. It discovers and calls the supervisor's
+MCP proxy, checks the frozen read-only task/prompt fence at the broker, returns a
+scripted denial report to the model continuation, and verifies the completed
+feedback event. Inference and the controller result are local fixtures; this
+proves protocol compatibility and attribution propagation, not kernel
+network enforcement or autonomous policy recovery. It also covers the current
+adapter's omission of unchanged input fields in completion frames.

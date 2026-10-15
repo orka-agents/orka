@@ -700,6 +700,75 @@ func TestACPDispatcherRetriesResultReferenceForSucceededAttempt(t *testing.T) {
 	}
 }
 
+// TestACPDispatcherRecoveryPreservesCompletionTimeThroughOutboxProjection is the
+// acceptance test for the completionTime rewrite bug: same-incarnation durable
+// recovery re-settlement must not replace an already authoritative historical
+// Task.status.completionTime with a fresh value, and the queued harness-v2
+// terminal outbox projection delivered afterward must not undo that either.
+func TestACPDispatcherRecoveryPreservesCompletionTimeThroughOutboxProjection(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionSucceeded)
+	defer fixture.close(t)
+
+	task := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, types.NamespacedName{Namespace: "default", Name: "task"}, task); err != nil {
+		t.Fatal(err)
+	}
+	historical := metav1.NewTime(time.Date(2024, 9, 17, 8, 0, 0, 0, time.UTC))
+	task.Status.CompletionTime = &historical
+	if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	const result = "recovered result must preserve historical completion time"
+	if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte(result)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	afterRecovery := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), afterRecovery); err != nil {
+		t.Fatal(err)
+	}
+	if afterRecovery.Status.Phase != corev1alpha1.TaskPhaseSucceeded ||
+		afterRecovery.Status.Execution == nil ||
+		afterRecovery.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
+		afterRecovery.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded ||
+		afterRecovery.Status.Delivery == nil ||
+		afterRecovery.Status.Delivery.State != corev1alpha1.TaskDeliveryStateNotRequested {
+		t.Fatalf("recovered Task status = %#v, want succeeded execution and NotRequested delivery", afterRecovery.Status)
+	}
+	if afterRecovery.Status.CompletionTime == nil || !afterRecovery.Status.CompletionTime.Time.Equal(historical.Time) {
+		t.Fatalf("recovery rewrote completion time: got %v, want %v", afterRecovery.Status.CompletionTime, historical)
+	}
+
+	// Deliver the queued harness-v2 terminal projection through the real
+	// outbox projector; it is a later status writer and must not compete with
+	// the preserved historical completion time either.
+	projector := &ACPOutboxProjector{
+		Client: fixture.kubeClient, Store: fixture.controlStore, Epochs: fixture.dispatcher.Epochs, WorkerID: "worker",
+	}
+	if err := projector.projectOnce(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	afterProjection := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), afterProjection); err != nil {
+		t.Fatal(err)
+	}
+	if afterProjection.Status.Phase != corev1alpha1.TaskPhaseSucceeded ||
+		afterProjection.Status.Execution == nil ||
+		afterProjection.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
+		afterProjection.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded {
+		t.Fatalf("projected Task status = %#v, want succeeded execution preserved", afterProjection.Status)
+	}
+	if afterProjection.Status.CompletionTime == nil || !afterProjection.Status.CompletionTime.Time.Equal(historical.Time) {
+		t.Fatalf("outbox projection rewrote completion time: got %v, want %v", afterProjection.Status.CompletionTime, historical)
+	}
+}
+
 func TestACPDispatcherRecoversSettlingResultReceipt(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -810,13 +879,13 @@ func TestACPDispatcherRecoversJournaledFailureClassification(t *testing.T) {
 	if attempt.ExecutionState != store.PromptExecutionFailed {
 		t.Fatalf("recovered attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionFailed)
 	}
-	// The journaled failure classification must survive the restart instead
-	// of degrading to the generic default the recovery projection falls back to.
+	// Recovery retains the failure classification without copying journal
+	// diagnostics into another durable or public message.
 	if attempt.TerminalReason != string(acpPromptFailedReason) {
 		t.Fatalf("recovered terminal reason = %q, want %q", attempt.TerminalReason, acpPromptFailedReason)
 	}
-	if !strings.Contains(attempt.OutcomeMarker, "prompt_failed") || !strings.Contains(attempt.OutcomeMarker, acpRecoveryPromptFailedMessage) {
-		t.Fatalf("recovered outcome marker = %q, want the journaled code and message", attempt.OutcomeMarker)
+	if attempt.OutcomeMarker != acpRecoveryPromptFailedMessage {
+		t.Fatalf("recovered outcome marker = %q, want the fixed safe failure message", attempt.OutcomeMarker)
 	}
 }
 

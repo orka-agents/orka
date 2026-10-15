@@ -94,6 +94,62 @@ func TestConstantTimeBearerEqual(t *testing.T) {
 	}
 }
 
+func TestInterimDeliveryCapabilitiesAreOptionalAndStrict(t *testing.T) {
+	for _, tc := range []struct {
+		name, field string
+		wantError   bool
+	}{
+		{"absent", "", false},
+		{"enabled", `,"interimDelivery":true`, false},
+		{"disabled", `,"interimDelivery":false`, false},
+		{"unknown", `,"futureDelivery":true`, true},
+		{"wrong type", `,"interimDelivery":"true"`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"protocolVersion":"orka.gateway.v1","adapterName":"test","capabilities":{"idempotentDelivery":true` + tc.field + `}}`)
+			response, err := DecodeCapabilities(body)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("DecodeCapabilities() error = %v", err)
+			}
+			if err == nil {
+				encoded, err := json.Marshal(response)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(encoded), `"interimDelivery":true`) != (tc.name == "enabled") {
+					t.Fatalf("capability round trip = %s", encoded)
+				}
+			}
+		})
+	}
+}
+
+func TestDeliveryKindSpecificTextBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, text string
+		wantError        bool
+	}{
+		{"message", "message", "working", false},
+		{"message boundary", "message", strings.Repeat("é", (16<<10)/2), false},
+		{"message overflow", "message", strings.Repeat("x", (16<<10)+1), true},
+		{"final boundary", "final", strings.Repeat("x", 64<<10), false},
+		{"error boundary", "error", strings.Repeat("x", 64<<10), false},
+		{"final overflow", "final", strings.Repeat("x", (64<<10)+1), true},
+		{"error overflow", "error", strings.Repeat("x", (64<<10)+1), true},
+		{"unknown kind", "progress", "working", true},
+		{"invalid UTF8", "message", "\xff", true},
+		{"control", "message", "work\x00ing", true},
+		{"empty", "message", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := &DeliveryRequest{ProtocolVersion: Version, DeliveryID: "delivery", IdempotencyID: "operation", OriginatingEvent: "event", AccountID: "account", ContextID: "context", ReplyTarget: "reply", Kind: tc.kind, Text: tc.text}
+			if err := ValidateDeliveryRequest(request); (err != nil) != tc.wantError {
+				t.Fatalf("ValidateDeliveryRequest() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestSanitizeMessageRedactsCredentials(t *testing.T) {
 	message := SanitizeMessage("Authorization: Bearer secret-token and token is abc123", 1024)
 	if strings.Contains(message, "secret-token") || strings.Contains(message, "abc123") {

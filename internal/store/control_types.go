@@ -584,6 +584,7 @@ type SessionTurn struct {
 	TerminalKind          SessionTurnTerminalKind `json:"terminalKind,omitempty"`
 	TerminalContent       string                  `json:"terminalContent,omitempty"`
 	FinalizationDigest    string                  `json:"finalizationDigest,omitempty"`
+	NativeSessionDigest   string                  `json:"nativeSessionDigest,omitempty"`
 	PublicationID         string                  `json:"publicationId,omitempty"`
 	PublicationReceipt    *PublicationReceipt     `json:"publicationReceipt,omitempty"`
 	ProjectionID          string                  `json:"projectionId,omitempty"`
@@ -623,6 +624,10 @@ type FinalizeSessionTurnRequest struct {
 	BlockReason            string                  `json:"blockReason,omitempty"`
 	Projection             OutboxProjection        `json:"projection"`
 	FinalizedAt            time.Time               `json:"finalizedAt"`
+	NativeSession          *NativeSessionRecord    `json:"-"`
+	// NativeSessionCarried marks NativeSession as the Session's existing checkpoint
+	// carried across a non-success outcome marker, not a fresh capture.
+	NativeSessionCarried bool `json:"-"`
 }
 
 // ResumeSessionTurnFinalizationRequest resumes only the Kubernetes and outbox
@@ -1047,6 +1052,12 @@ type ReserveExternalEffectRequest struct {
 	RequestDigest string                 `json:"requestDigest"`
 	Fence         ControllerEpochFence   `json:"fence"`
 	CreatedAt     time.Time              `json:"createdAt"`
+	// ApprovalTaskUID is an immutable Kubernetes Task binding, with a discovery
+	// label for approval recovery, when Tasks share a RuntimeSession aggregate.
+	// Legacy records receive only the discovery label, preserving their spec.
+	// Other backends may ignore it. It does not change the canonical identity,
+	// grant execution authority, or make the record subject to Task garbage collection.
+	ApprovalTaskUID string `json:"approvalTaskUid,omitempty"`
 }
 
 // ExternalEffectTransition performs a version/state CAS.

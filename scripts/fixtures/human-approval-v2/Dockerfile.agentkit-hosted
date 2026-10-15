@@ -1,0 +1,9 @@
+FROM python:3.12-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1
+COPY runtimes/common /src/common
+RUN python -m venv /opt/agentkit && /opt/agentkit/bin/pip install /src/common \
+    && useradd --uid 1000 --create-home agentkit
+COPY --chown=0:0 agent-hosted.yaml /agent/agent.yaml
+RUN chmod 0444 /agent/agent.yaml
+USER 1000
+ENTRYPOINT ["/opt/agentkit/bin/agentkit-foundry-brokered", "--host", "127.0.0.1", "--port", "8088", "--config", "/agent/agent.yaml"]

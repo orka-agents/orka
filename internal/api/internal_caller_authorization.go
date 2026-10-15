@@ -176,6 +176,25 @@ func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo
 	return nil
 }
 
+func (a internalCallerAuthorizer) verifyUsageWriter(ctx context.Context, userInfo *UserInfo, task *corev1alpha1.Task) error {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || task.Spec.Image != "" {
+		return fiber.NewError(fiber.StatusForbidden, "only managed AI workers may submit model accounting")
+	}
+	pod, err := a.resolveCallerPod(ctx, userInfo, task.Namespace)
+	if err != nil {
+		return err
+	}
+	// Check the immutable Pod command as well as the current Task spec. A
+	// container Task must not gain accounting authority through a type change.
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "worker" && slices.Equal(container.Command, []string{"/worker"}) &&
+			slices.Equal(container.Args, []string{"--mode=ai"}) {
+			return nil
+		}
+	}
+	return fiber.NewError(fiber.StatusForbidden, "caller is not a managed AI worker")
+}
+
 func (a internalCallerAuthorizer) resolveCallerPod(
 	ctx context.Context,
 	userInfo *UserInfo,
@@ -519,6 +538,31 @@ func (a internalCallerAuthorizer) verifiedCoordinationParent(
 		return nil, fiber.NewError(fiber.StatusForbidden, "message parent is outside caller coordination scope")
 	}
 	return parent, nil
+}
+
+// verifiedCoordinationChild returns childName when it is a live child of
+// callerTask whose parent link is protected by Task provenance admission.
+func (a internalCallerAuthorizer) verifiedCoordinationChild(
+	ctx context.Context,
+	callerTask *corev1alpha1.Task,
+	childName string,
+) (*corev1alpha1.Task, error) {
+	if !a.taskProvenanceProtected {
+		return nil, fiber.NewError(fiber.StatusForbidden, "coordination requires Task provenance admission")
+	}
+	child := &corev1alpha1.Task{}
+	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: callerTask.Namespace, Name: childName}, child); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusForbidden, "task is outside caller coordination scope")
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load child task")
+	}
+	parentName, parentUID, hasParent, valid := coordinationParentIdentity(child)
+	if child.UID == "" || !child.DeletionTimestamp.IsZero() || !valid || !hasParent ||
+		parentName != callerTask.Name || parentUID != callerTask.UID {
+		return nil, fiber.NewError(fiber.StatusForbidden, "task is outside caller coordination scope")
+	}
+	return child, nil
 }
 
 func serviceAccountNameFromUsername(username string) string {

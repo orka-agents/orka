@@ -64,9 +64,9 @@ func TestCodexCompletedMCPContractFromProxy(t *testing.T) {
 }
 
 // Run the real Orka MCP proxy with the exact frozen read-only grant. The pinned
-// codex-acp 307d81018f7cc0c3141ddf71c7532d38310e2cfb generated McpToolCallResult
-// keeps content, structuredContent and _meta (nullable), and createMcpRawOutput
-// returns that result unchanged. This envelope seam is synthetic, not a native
+// codex-acp 68d7d2d5ddfc0ed5746f9f6130892dda685e65dd McpToolReporter
+// keeps content, structuredContent and _meta (nullable), and opaqueResult
+// retains that result unchanged. This envelope seam is synthetic, not a native
 // model invocation or a reconstruction of a private provider stream.
 func codexMCPContractProxyResult(t *testing.T, text string, replayed bool) map[string]any {
 	t.Helper()

@@ -24,7 +24,7 @@ const (
 )
 
 // copilotStartupDiagnostic recognizes the tool-exclusion report GitHub Copilot
-// CLI 1.0.77 emits as agent_message_chunk updates at the start of a prompt in
+// CLI 1.0.96 emits as agent_message_chunk updates at the start of a prompt in
 // --acp mode; --log-level none does not silence it. Each line arrives as its
 // own chunk, ahead of the CLI's first inference request, so a chunk is
 // recognized only when its entire text is one of:

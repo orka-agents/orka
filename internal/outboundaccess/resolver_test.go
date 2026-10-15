@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -409,5 +410,46 @@ func TestKubernetesResolverEnforcesGatewayTLSCredentialAuthority(t *testing.T) {
 	req.CredentialSecret = "different"
 	if _, err := resolver.Resolve(context.Background(), req); err == nil || !containsFold(err.Error(), "does not match") {
 		t.Fatalf("constraint error = %v", err)
+	}
+}
+
+// The policy a caller checked against the dispatched configuration is the
+// only one resolution may inject under; any other object or generation is
+// refused rather than executed under a configuration never checked.
+func TestKubernetesResolverRefusesPolicyChangedAfterCheck(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Grant:         corev1alpha1.OutboundGrantTokenExchange,
+		TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{URL: "https://issuer.example.test/token"},
+		Subject: corev1alpha1.OutboundTokenSource{
+			Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+			TokenType: "urn:example:assertion",
+			SecretRef: secretRef("subject", "token"),
+		},
+		Scopes:                  []string{"api.read"},
+		RequestedTokenType:      "urn:example:resource",
+		ExpectedIssuedTokenType: "urn:example:resource",
+	}})
+	policy.UID = "policy-uid"
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "subject", Namespace: "tenant"}, Data: map[string][]byte{"token": []byte("subject-assertion")}}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, secret).Build()
+	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource-credential", IssuedTokenType: "urn:example:resource", TokenType: "Bearer"}}
+	resolver := &KubernetesResolver{Reader: reader, Exchanger: exchanger}
+	request := func(checked *PolicyIdentity) ResolveRequest {
+		return ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https", CredentialScopeAllowed: true, CheckedPolicy: checked}
+	}
+	for name, checked := range map[string]*PolicyIdentity{
+		"replaced object":  {UID: "other-policy-uid", Generation: policy.Generation},
+		"later generation": {UID: "policy-uid", Generation: policy.Generation + 1},
+	} {
+		if _, err := resolver.Resolve(context.Background(), request(checked)); err == nil || !strings.Contains(err.Error(), "changed since it was checked") {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+	}
+	if _, err := resolver.Resolve(context.Background(), request(&PolicyIdentity{UID: "policy-uid", Generation: policy.Generation})); err != nil {
+		t.Fatalf("the checked policy must resolve: %v", err)
+	}
+	if _, err := resolver.Resolve(context.Background(), request(nil)); err != nil {
+		t.Fatalf("a caller without a check is not fenced: %v", err)
 	}
 }

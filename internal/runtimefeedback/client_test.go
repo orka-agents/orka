@@ -276,7 +276,7 @@ func TestClientRequiresConfiguredHTTPSOrigin(t *testing.T) {
 	if _, err := NewClient(config); err != nil {
 		t.Fatalf("valid fixed origin rejected: %v", err)
 	}
-	for _, endpoint := range []string{"http://gkr.invalid", "https://gkr.invalid/report", "https://user:pass@gkr.invalid", "https://gkr.invalid?key=value", "https://gkr.invalid#fragment"} {
+	for _, endpoint := range []string{"http://gkr.invalid", "https://gkr.invalid/report", "https://fixture@gkr.invalid", "https://:@gkr.invalid", "https://gkr.invalid?key=value", "https://gkr.invalid#fragment"} {
 		config.URL = endpoint
 		if _, err := NewClient(config); err == nil {
 			t.Fatalf("unsafe endpoint accepted: %q", endpoint)

@@ -183,7 +183,7 @@ func TestCodexCompletedOutputPublicEventsRedactCompleteLogicalText(t *testing.T)
 		{name: "secret split across streamed deltas", title: "printf hello", output: "sk-" + suffix, wantHidden: suffix},
 		{name: "title to output boundary", title: "sk-", output: suffix, wantHidden: suffix},
 		{name: "output to title boundary", title: suffix, output: "sk-", wantHidden: suffix},
-		{name: "prior output to next output", title: "printf hello", output: suffix, prior: "sk-", wantHidden: suffix},
+		{name: "prior output to next output", title: "printf hello", output: "-" + suffix, prior: "sk", wantHidden: suffix},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pipeline := newCodexOutputTestPipeline(t)
@@ -263,5 +263,60 @@ func TestCodexCompletedOutputRuntimeProviderGate(t *testing.T) {
 				t.Fatal("a different provider or adapter gained raw output projection")
 			}
 		})
+	}
+}
+
+// Current Codex checks brokered identity before the output normalizer. Negative
+// fixtures accept that earlier boundary only when nothing was registered or
+// published. Valid frames still use update and require their normal projection.
+func (p *codexOutputTestPipeline) rejectInvalidIdentity(t *testing.T, wire map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped, err := p.server.mapRuntimeEvent(p.session, p.prompt, acp.PromptEvent{
+		Type: acp.PromptEventUpdate, Timestamp: time.Now().UTC(),
+		Update: &acp.SessionNotification{SessionID: "codex-session", Update: raw},
+	})
+	if err == nil {
+		t.Fatal("identity rejection probe unexpectedly accepted the frame")
+	}
+	listed, _ := p.events(t)
+	if mapped != nil || len(p.session.permissions) != 0 || len(listed.Events) != 0 {
+		t.Fatal("rejected identity acquired a permission or published output")
+	}
+}
+
+// Current CommandReporter uses standard ACP content and an exit-only rawOutput
+// for read/search actions when no output chunk channel is negotiated.
+func TestCodexCompletedOutputPreservesCurrentCommandContent(t *testing.T) {
+	for _, kind := range []string{"read", "search"} {
+		for _, test := range []struct {
+			name string
+			raw  json.RawMessage
+			want bool
+		}{
+			{name: "current producer", raw: json.RawMessage(`{"exit_code":0}`), want: true},
+			{name: "unknown exit", raw: json.RawMessage(`{"exit_code":null}`), want: true},
+			{name: "case alias", raw: json.RawMessage(`{"EXIT_CODE":0}`)},
+			{name: "duplicate exit", raw: json.RawMessage(`{"exit_code":7,"exit_code":0}`)},
+			{name: "unknown field", raw: json.RawMessage(`{"exit_code":0,"truncated":true}`)},
+		} {
+			t.Run(kind+"/"+test.name, func(t *testing.T) {
+				pipeline := newCodexOutputTestPipeline(t)
+				pipeline.update(t, map[string]any{"sessionUpdate": "tool_call", "toolCallId": "current-command", "kind": kind, "status": "in_progress", "title": "inspect workspace"})
+				mapped := pipeline.update(t, map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "current-command", "status": "completed", "rawOutput": test.raw, "content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "current command output"}}}})
+				listed, body := pipeline.events(t)
+				last := listed.Events[len(listed.Events)-1]
+				if test.want {
+					if !mapped.Update.ToolCall.ContentReplace || mapped.Update.ToolCall.ContentOmitted || last.ContentText != "current command output" || last.Truncation != nil {
+						t.Fatal("current standard command output was suppressed by legacy snapshot parsing")
+					}
+				} else if mapped.Update.ToolCall.ContentReplace || !mapped.Update.ToolCall.ContentOmitted || strings.Contains(body, "current command output") {
+					t.Fatal("ambiguous raw exit fields bypassed command-output omission")
+				}
+			})
+		}
 	}
 }

@@ -492,12 +492,12 @@ func nativeSubstrateControlAuthenticationRejected(err error) bool {
 }
 
 func (r *RuntimePoolReconciler) nativeSubstrateDesiredTemplate(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, record *substrateNativeState, auth *corev1.Secret) (*unstructured.Unstructured, substrateRuntimeTemplateRender, error) {
-	store := r.substrateTemplates()
-	previous, err := store.Get(ctx, record.Atespace, runtimePoolSubstrateTemplateName(cfg.baseName))
+	templateStore := r.substrateTemplates()
+	previous, err := templateStore.Get(ctx, record.Atespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 	if err != nil {
 		return nil, substrateRuntimeTemplateRender{}, err
 	}
-	base, err := store.Get(ctx, record.Atespace, pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName)
+	base, err := templateStore.Get(ctx, record.Atespace, pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName)
 	if err != nil {
 		return nil, substrateRuntimeTemplateRender{}, err
 	}

@@ -341,7 +341,7 @@ func (w *workflow) buildPages(commit string) error {
 }
 
 func (w *workflow) verifyServedChart(data candidateBundle, indexHash string) error {
-	expected := []chartArtifact{data.Chart, {File: "index.yaml", SHA256: indexHash}}
+	expected := []releaseArtifact{data.Chart, {File: "index.yaml", SHA256: indexHash}}
 	deadline := w.now().Add(120 * time.Second)
 	for {
 		matched := true
@@ -385,7 +385,7 @@ func metadataFor(data candidateBundle, proof qualificationProof) releaseMetadata
 		Prerelease: strings.Contains(data.Version, "-"), Body: fmt.Sprintf("Release candidate `%s`.\n\n"+
 			"[Build and approval](https://github.com/%s/actions/runs/%s).\n"+
 			"[Release qualification evidence](https://github.com/%s/actions/runs/%s).\n\n"+
-			"Attached manifests bind the exact chart, images, and qualification evidence.",
+			"Attached manifests bind the exact chart, images, CLI archives, and qualification evidence.",
 			data.CandidateSHA, repository, data.BuildRunID, repository, proof.RunID)}
 }
 
@@ -431,7 +431,11 @@ func (w *workflow) archiveRelease(data candidateBundle, directory string) error 
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{candidateFile, qualificationFile, acceptanceFile, data.Chart.File} {
+	assets := []string{candidateFile, qualificationFile, acceptanceFile, data.Chart.File}
+	for _, asset := range data.CLI {
+		assets = append(assets, asset.File)
+	}
+	for _, name := range assets {
 		if err := w.archiveAsset(release.ID, data.Version, filepath.Join(directory, name)); err != nil {
 			return err
 		}

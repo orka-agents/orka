@@ -1,0 +1,588 @@
+//go:build e2e
+// +build e2e
+
+package e2e
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/tasktrace"
+	"github.com/orka-agents/orka/test/utils"
+)
+
+const (
+	liveRuntimeRepoURL      = "https://github.com/octocat/Hello-World.git"
+	liveRuntimeRepoRef      = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"
+	liveRuntimeRepoSentinel = "Hello World!"
+	liveRuntimeTimeout      = 8 * time.Minute
+
+	// Mock-mode models. aimock answers by the prompt markers, so the names
+	// only need the shapes each runtime expects.
+	runtimeMatrixMockCodexModel    = "gpt-5.4-mini"
+	runtimeMatrixMockOpenCodeModel = "openai/gpt-4.1"
+	runtimeMatrixMockClaudeModel   = "claude-sonnet-4.5"
+)
+
+// The built-in runtimes run against the live Copilot proxy when
+// E2E_LIVE_COPILOT_PROXY_BASE_URL is set. Otherwise aimock stands in for Vekil
+// behind the production provider proxy and replays agent_runtime_matrix.json.
+var _ = Describe("Agent Runtime Matrix", Ordered, func() {
+	const (
+		codexAgentName         = "e2e-live-runtime-codex-agent"
+		codexTaskReadName      = "e2e-live-runtime-codex-read"
+		opencodeAgentName      = "e2e-live-runtime-opencode-agent"
+		opencodeTaskReadName   = "e2e-live-runtime-opencode-read"
+		claudeAgentName        = "e2e-live-runtime-claude-agent"
+		claudeTaskName         = "e2e-live-runtime-claude-task"
+		claudeExpectedResponse = "ORKA_LIVE_CLAUDE_OK"
+	)
+
+	var (
+		apiBaseURL              string
+		cancelControllerPF      context.CancelFunc
+		controllerPFCmd         *exec.Cmd
+		token                   string
+		gptModel                string
+		gptModelSkipReason      string
+		opencodeModel           string
+		opencodeModelSkipReason string
+		claudeModel             string
+		claudeSessionName       string
+		live                    bool
+	)
+
+	BeforeAll(func() {
+		live = strings.TrimSpace(e2eLiveCopilotProxyBaseURL) != ""
+		if !live && e2eFlagEnabled(mockLLMDisableEnvVar) {
+			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set and " + mockLLMDisableEnvVar + " is set")
+		}
+
+		var err error
+
+		By("setting up port-forward to the controller API")
+		apiBaseURL, cancelControllerPF, controllerPFCmd, err = startControllerAPIPortForward(18088)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("getting a service account token")
+		token, err = serviceAccountToken()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(token).NotTo(BeEmpty())
+
+		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
+		if !live {
+			By("deploying aimock as the Vekil stand-in behind the provider proxy")
+			projectDir, err := utils.GetProjectDir()
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(providerProxyMockLLM.delete)
+			providerProxyMockLLM.deploy(projectDir)
+			gptModel = runtimeMatrixMockCodexModel
+			opencodeModel = runtimeMatrixMockOpenCodeModel
+			claudeModel = runtimeMatrixMockClaudeModel
+			return
+		}
+
+		By("verifying the live proxy is ready")
+		ready := waitForProxyReadyViaServiceProxy(
+			liveACPProviderProxyServiceNamespace(),
+			liveACPProviderProxyServiceName(),
+			liveACPProviderProxyServicePort(),
+		)
+		Expect(ready.Status).To(Equal("ready"))
+		Expect(ready.Error).To(BeEmpty())
+
+		By("discovering live runtime models by family")
+		runtimeCatalog, err := fetchProxyModelCatalogViaServiceProxy(
+			liveACPProviderProxyServiceNamespace(),
+			liveACPProviderProxyServiceName(),
+			liveACPProviderProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		gptModel = strings.TrimSpace(os.Getenv("E2E_LIVE_CODEX_RUNTIME_MODEL"))
+		if gptModel != "" {
+			if !runtimeCatalog.modelSupportsEndpoint(gptModel, "/responses") {
+				gptModelSkipReason = "configured E2E_LIVE_CODEX_RUNTIME_MODEL does not advertise /responses support"
+				gptModel = ""
+			}
+		} else {
+			gptModel = firstPreferredProxyCodexModelSupportingEndpoint(
+				runtimeCatalog,
+				"/responses",
+				liveCopilotProxyCodexModelPreferences,
+				liveCopilotProxyCodexModelPrefixes...,
+			)
+			if gptModel == "" {
+				gptModelSkipReason = "no Codex-family GPT model with /responses support exposed"
+			}
+		}
+		opencodeModel = strings.TrimSpace(os.Getenv("E2E_LIVE_OPENCODE_RUNTIME_MODEL"))
+		if opencodeModel != "" {
+			if !openCodeModelSupportsEndpoint(runtimeCatalog, opencodeModel, "/chat/completions") {
+				opencodeModelSkipReason = "configured E2E_LIVE_OPENCODE_RUNTIME_MODEL does not advertise /chat/completions support"
+				opencodeModel = ""
+			}
+		} else {
+			opencodeModel = firstPreferredProxyModelSupportingEndpoint(
+				runtimeCatalog,
+				"/chat/completions",
+				liveCopilotProxyChatGPTModelPreferences,
+				liveCopilotProxyGPTModelPrefixes...,
+			)
+			if opencodeModel == "" {
+				opencodeModelSkipReason = "no GPT-family model with /chat/completions support exposed"
+			}
+		}
+
+		if opencodeModel != "" && !strings.Contains(opencodeModel, "/") {
+			opencodeModel = "openai/" + opencodeModel
+		}
+
+		claudeModel = firstPreferredProxyModel(
+			runtimeCatalog,
+			liveCopilotProxyClaudeModelPreferences,
+			liveCopilotProxyClaudeModelPrefixes...,
+		)
+		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a Claude-family model")
+	})
+
+	AfterAll(func() {
+		stopPortForward(cancelControllerPF, controllerPFCmd)
+	})
+
+	AfterEach(func() {
+		dumpDebugInfo(
+			codexTaskReadName,
+			opencodeTaskReadName,
+			claudeTaskName,
+		)
+		dumpLiveCopilotProxyDebugInfo()
+	})
+
+	It("should run Codex through Orka harness v2 against a pinned read workspace", func() {
+		if gptModel == "" {
+			Skip("Skipping Codex runtime live proxy check: " + gptModelSkipReason)
+		}
+
+		DeferCleanup(func() {
+			cleanupLiveRuntimeTask(apiBaseURL, token, codexTaskReadName, codexAgentName)
+		})
+
+		By("creating a Codex agent backed by the discovered GPT-family model")
+		err := applyManifestJSON(runtimeAgentManifest(codexAgentName, "codex", gptModel, 5, nil))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating a Codex task against a pinned public repo/ref")
+		err = applyManifestJSON(runtimeAgentTaskManifest(
+			codexTaskReadName,
+			codexAgentName,
+			"Use a tool to read README in the repository root. "+
+				"Wait for the read to succeed, then reply with the exact file contents and nothing else. "+
+				"[e2e:runtime-codex-read]",
+			4,
+			nil,
+			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
+			"",
+			nil,
+			nil,
+		))
+		Expect(err).NotTo(HaveOccurred())
+
+		// This Codex case verifies the requested runtime projection. The OpenCode
+		// case below is the adversarial read-intent check: it requests Bash and
+		// mutation tools, then asserts the derived deny policy and ReadValidated.
+		verifyACPTaskRuntimeForTask(codexTaskReadName, acpTaskExpectation{
+			ProviderKind:    "codex",
+			Model:           gptModel,
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(4),
+			Workspace: &acpWorkspaceExpectation{
+				Intent:  "read",
+				GitRepo: liveRuntimeRepoURL,
+				Ref:     liveRuntimeRepoRef,
+			},
+		}, 2*time.Minute)
+		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		verifyResultAvailable(codexTaskReadName)
+		summary := strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))
+		Expect(summary).To(HaveSuffix(liveRuntimeRepoSentinel))
+		verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, codexTaskReadName)
+	})
+
+	It("should run OpenCode through Orka harness v2 and enforce read intent", func() {
+		if opencodeModel == "" {
+			Skip("Skipping OpenCode runtime live proxy check: " + opencodeModelSkipReason)
+		}
+
+		DeferCleanup(func() {
+			cleanupLiveRuntimeTask(apiBaseURL, token, opencodeTaskReadName, opencodeAgentName)
+		})
+
+		By("creating an OpenCode agent with native mutation and shell tools requested")
+		err := applyManifestJSON(runtimeAgentManifest(opencodeAgentName, "opencode", opencodeModel, 5, new(true)))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating a read-intent OpenCode task that attempts forbidden mutation before reading")
+		err = applyManifestJSON(runtimeAgentTaskManifest(
+			opencodeTaskReadName,
+			opencodeAgentName,
+			fmt.Sprintf("Attempt to use Bash and a mutation tool to create SHOULD_NOT_EXIST.txt; those tools must be unavailable. Then read README and include exactly %s in the response without modifying files. [e2e:runtime-opencode-read]", liveRuntimeRepoSentinel),
+			4,
+			new(true),
+			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
+			"",
+			nil,
+			nil,
+		))
+		Expect(err).NotTo(HaveOccurred())
+
+		verifyACPTaskRuntimeForTask(opencodeTaskReadName, acpTaskExpectation{
+			ProviderKind: "opencode",
+			Model:        opencodeModel,
+			ModelLimits: &corev1alpha1.ModelTokenLimits{
+				Context: 32768,
+				Output:  4096,
+			},
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(4),
+			AllowBash:       acpBool(true),
+			ToolPolicy: &acpToolPolicyExpectation{
+				AllowedTools:    []string{"glob", "read"},
+				DisallowedTools: []string{"apply_patch", "bash", "edit", "grep", "write"},
+				AllowBash:       false,
+			},
+			Workspace: &acpWorkspaceExpectation{
+				Intent:  "read",
+				GitRepo: liveRuntimeRepoURL,
+				Ref:     liveRuntimeRepoRef,
+			},
+		}, 2*time.Minute)
+		Expect(waitForTaskCompletion(opencodeTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		verifyACPTaskRuntimeForTask(opencodeTaskReadName, acpTaskExpectation{
+			DeliveryState:   acpDeliveryState("ReadValidated"),
+			DeliveryOutcome: acpDeliveryOutcome("ReadValidated"),
+		}, 2*time.Minute)
+		verifyResultAvailable(opencodeTaskReadName)
+		Expect(fetchTaskResultSummaryViaAPI(apiBaseURL, token, opencodeTaskReadName)).To(ContainSubstring(liveRuntimeRepoSentinel))
+		if !live {
+			By("verifying OpenCode offered only read tools and refused the scripted bash call")
+			requests, err := providerProxyMockLLM.requestsFor("[e2e:runtime-opencode-read]")
+			Expect(err).NotTo(HaveOccurred())
+			var withTools int
+			var bashResults []string
+			for _, request := range requests {
+				// Requests without tools, such as title generation, are skipped.
+				if len(request.Body.Tools) == 0 {
+					continue
+				}
+				withTools++
+				var offered []string
+				for _, tool := range request.Body.Tools {
+					offered = append(offered, tool.Function.Name)
+				}
+				Expect(offered).To(ContainElement("read"))
+				Expect(offered).NotTo(ContainElement(BeElementOf("apply_patch", "bash", "edit", "grep", "write")))
+				bashResults = append(bashResults, request.ToolResults("bash")...)
+			}
+			Expect(withTools).To(BeNumerically(">", 0), "OpenCode sent no tool-enabled request")
+			Expect(bashResults).NotTo(BeEmpty(), "OpenCode never answered the scripted bash call")
+			Expect(bashResults[0]).To(ContainSubstring("unavailable tool"))
+		}
+	})
+
+	It("should run Claude Code through the provider proxy with session wiring and exact output", func() {
+		DeferCleanup(func() {
+			cleanupLiveRuntimeTask(apiBaseURL, token, claudeTaskName, claudeAgentName)
+		})
+
+		By("creating a Claude agent backed by the discovered Claude-family model")
+		err := applyManifestJSON(runtimeAgentManifest(claudeAgentName, "claude", claudeModel, 5, new(false)))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating a Claude task with sessionRef wiring")
+		err = applyManifestJSON(runtimeAgentTaskManifest(
+			claudeTaskName,
+			claudeAgentName,
+			fmt.Sprintf("Reply with exactly %s and nothing else. [e2e:runtime-claude]", claudeExpectedResponse),
+			3,
+			new(false),
+			nil,
+			claudeSessionName,
+			new(true),
+			new(true),
+		))
+		Expect(err).NotTo(HaveOccurred())
+
+		verifyACPTaskRuntimeForTask(claudeTaskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			Model:           claudeModel,
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			SessionName:     claudeSessionName,
+		}, 2*time.Minute)
+
+		By("waiting for the Claude task to return the exact sentinel")
+		Expect(waitForTaskCompletion(claudeTaskName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		verifyResultAvailable(claudeTaskName)
+		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, claudeTaskName))).To(Equal(claudeExpectedResponse))
+		Expect(fetchSessionViaAPI(apiBaseURL, token, claudeSessionName)).To(ContainSubstring(claudeExpectedResponse))
+	})
+
+	It("should publish a digest-pinned Copilot ACP image for admission coverage", func() {
+		Expect(acpCopilotRuntimeRef).To(MatchRegexp(`@sha256:[a-f0-9]{64}$`))
+	})
+})
+
+func cleanupLiveRuntimeTask(apiBaseURL, token, taskName, agentName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cleanup, err := newE2ECleanup(apiBaseURL, token)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, cleanup.tasks(ctx, []string{taskName}, false)).To(Succeed())
+	cmd := exec.CommandContext(ctx, "kubectl", "delete", "agent", agentName,
+		"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=30s", "--request-timeout=10s")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to delete live runtime test Agent")
+}
+
+func openCodeModelSupportsEndpoint(catalog proxyModelCatalog, model, endpoint string) bool {
+	model = strings.TrimSpace(model)
+	if catalog.modelSupportsEndpoint(model, endpoint) {
+		return true
+	}
+	_, bare, ok := strings.Cut(model, "/")
+	return ok && strings.TrimSpace(bare) != "" && catalog.modelSupportsEndpoint(strings.TrimSpace(bare), endpoint)
+}
+
+type runtimeWorkspaceConfig struct {
+	GitRepo string
+	Ref     string
+}
+
+func runtimeAgentManifest(name, runtimeType, modelName string, defaultMaxTurns int, defaultAllowBash *bool) map[string]any {
+	runtime := map[string]any{
+		"type":            runtimeType,
+		"contractVersion": corev1alpha1.AgentRuntimeContractHarnessV2,
+		"defaultMaxTurns": defaultMaxTurns,
+	}
+	if defaultAllowBash != nil {
+		runtime["defaultAllowBash"] = *defaultAllowBash
+	}
+	spec := map[string]any{
+		"runtime": runtime,
+	}
+	if runtimeType == "opencode" {
+		spec["runtime"].(map[string]any)["defaultAllowedTools"] = []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
+	}
+	if modelName != "" {
+		model := map[string]any{"name": modelName}
+		if runtimeType == "opencode" {
+			model["contextWindow"] = 32768
+			model["maxTokens"] = 4096
+		}
+		spec["model"] = model
+	}
+
+	return map[string]any{
+		"apiVersion": "core.orka.ai/v1alpha1",
+		"kind":       "Agent",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+}
+
+func runtimeAgentTaskManifest(
+	name, agentName, prompt string,
+	maxTurns int,
+	allowBash *bool,
+	workspace *runtimeWorkspaceConfig,
+	sessionName string,
+	sessionCreate, sessionAppend *bool,
+) map[string]any {
+	agentRuntime := map[string]any{
+		"maxTurns": maxTurns,
+	}
+	if allowBash != nil {
+		agentRuntime["allowBash"] = *allowBash
+	}
+	spec := map[string]any{
+		"type":         "agent",
+		"prompt":       prompt,
+		"agentRef":     map[string]any{"name": agentName},
+		"agentRuntime": agentRuntime,
+	}
+	if workspace != nil {
+		spec["workspace"] = map[string]any{
+			"intent":  "read",
+			"gitRepo": workspace.GitRepo,
+			"ref":     workspace.Ref,
+		}
+	}
+	if sessionName != "" {
+		sessionRef := map[string]any{"name": sessionName}
+		if sessionCreate != nil {
+			sessionRef["create"] = *sessionCreate
+		}
+		if sessionAppend != nil {
+			sessionRef["append"] = *sessionAppend
+		}
+		spec["sessionRef"] = sessionRef
+	}
+
+	return map[string]any{
+		"apiVersion": "core.orka.ai/v1alpha1",
+		"kind":       "Task",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+}
+
+func applyManifestJSON(manifest any) error {
+	payload, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(string(payload))
+	_, err = utils.Run(cmd)
+	return err
+}
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+type liveACPTaskEventsResponse struct {
+	LatestSeq int64 `json:"latestSeq"`
+	Events    []struct {
+		Seq         int64           `json:"seq"`
+		Type        string          `json:"type"`
+		Content     json.RawMessage `json:"content"`
+		ContentText string          `json:"contentText"`
+	} `json:"events"`
+}
+
+// Keep CI diagnostics to known metadata and error markers. Titles, arguments,
+// tool output and arbitrary error messages can contain credentials.
+func liveACPToolFailureDiagnostics(listed liveACPTaskEventsResponse) string {
+	var failures []map[string]any
+	for _, event := range listed.Events {
+		if event.Type != events.ExecutionEventTypeToolCallFailed {
+			continue
+		}
+		if len(failures) == 10 {
+			break
+		}
+		var content struct {
+			JournalKind           string          `json:"journalKind"`
+			ToolKind              string          `json:"toolKind"`
+			Outcome               string          `json:"outcome"`
+			ControllerSynthesized bool            `json:"controllerSynthesized"`
+			ContentOmitted        json.RawMessage `json:"contentOmitted"`
+		}
+		diagnostic := map[string]any{"seq": event.Seq, "textPresent": event.ContentText != ""}
+		if err := json.Unmarshal(event.Content, &content); err == nil {
+			diagnostic["controllerSynthesized"] = content.ControllerSynthesized
+			diagnostic["outcomeUnknown"] = content.Outcome == "outcome_unknown"
+			diagnostic["contentOmitted"] = len(content.ContentOmitted) > 0
+			switch content.JournalKind {
+			case "tool_terminal", "tool_stream_closure":
+				diagnostic["journalKind"] = content.JournalKind
+			}
+			switch content.ToolKind {
+			case "read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other":
+				diagnostic["toolKind"] = content.ToolKind
+			}
+		} else {
+			diagnostic["metadataUnavailable"] = true
+		}
+		// These are text matches, not a diagnosis. Never copy matching lines or
+		// unknown values into the report, even if the API already redacted them.
+		lower := strings.ToLower(event.ContentText)
+		var markers []string
+		for _, marker := range []string{
+			"failed to create unified exec process", "permission denied", "operation not permitted",
+			"sandbox", "no such file or directory", "command not found", "timed out",
+			"context canceled", "connection refused", "mcp session is at capacity",
+			"rejected", "unknown tool", "not allowed",
+		} {
+			if strings.Contains(lower, marker) {
+				markers = append(markers, marker)
+			}
+		}
+		diagnostic["errorTextMarkers"] = markers
+		failures = append(failures, diagnostic)
+	}
+	encoded, _ := json.Marshal(failures)
+	return string(encoded)
+}
+
+func verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, taskName string) {
+	By("verifying the live ACP task persisted rich execution updates")
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodGet,
+		fmt.Sprintf("%s/api/v1/tasks/%s/events?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusOK), strings.TrimSpace(body))
+	var listed liveACPTaskEventsResponse
+	Expect(json.Unmarshal([]byte(body), &listed)).To(Succeed())
+	Expect(listed.LatestSeq).To(BeNumerically(">", 0))
+	typeCounts := map[string]int{}
+	for _, event := range listed.Events {
+		typeCounts[event.Type]++
+	}
+	if typeCounts[events.ExecutionEventTypeToolCallFailed] > 0 {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Live ACP failed-tool diagnostics: %s\n", liveACPToolFailureDiagnostics(listed))
+	}
+	for _, eventType := range []string{
+		events.ExecutionEventTypeModelRequestStarted,
+		events.ExecutionEventTypeModelMessage,
+		events.ExecutionEventTypeToolCallStarted,
+		events.ExecutionEventTypeToolCallCompleted,
+		events.ExecutionEventTypeModelRequestCompleted,
+	} {
+		Expect(typeCounts[eventType]).To(BeNumerically(">", 0), "missing live ACP event type %s in %#v", eventType, typeCounts)
+	}
+
+	By("verifying the live ACP event stream builds a completed trace")
+	body, statusCode, err = doAuthorizedJSONRequest(
+		http.MethodGet,
+		fmt.Sprintf("%s/api/v1/tasks/%s/trace?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusOK), strings.TrimSpace(body))
+	var trace tasktrace.TaskTrace
+	Expect(json.Unmarshal([]byte(body), &trace)).To(Succeed())
+	Expect(trace.LatestSeq).To(BeNumerically(">", 0))
+	Expect(trace.ModelRequests).NotTo(BeEmpty())
+	lastModelRequest := trace.ModelRequests[len(trace.ModelRequests)-1]
+	Expect(lastModelRequest.Status).To(Equal(tasktrace.StatusCompleted))
+	Expect(lastModelRequest.Model).NotTo(BeEmpty(), "trace model request has no model: %#v", lastModelRequest)
+	Expect(lastModelRequest.Provider).NotTo(BeEmpty(), "trace model request has no provider: %#v", lastModelRequest)
+	Expect(trace.ToolCalls).NotTo(BeEmpty())
+	Expect(trace.ToolCalls[len(trace.ToolCalls)-1].Status).To(Equal(tasktrace.StatusCompleted))
+}

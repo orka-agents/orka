@@ -87,6 +87,8 @@ LLM-visible parameter schema:
         "publicationCredentialRef": {"type": "string", "description": "Secret used only by the Workspace/Publisher"},
         "pushBranch":               {"type": "string", "description": "Publication branch"},
         "prBaseBranch":             {"type": "string", "description": "Pull-request base branch"},
+        "prTitle":                  {"type": "string", "maxLength": 256, "description": "Optional Task-authored PR title. Supply descriptive text when createPR is true; omitted or empty text uses the prompt-derived fallback."},
+        "prBody":                   {"type": "string", "maxLength": 32768, "description": "Optional Task-authored PR body describing the change and validation plan. Omitted or empty text uses the publisher's default body."},
         "createPR":                 {"type": "boolean", "description": "Request PR reconciliation after verified publication"}
       }
     },
@@ -100,6 +102,15 @@ LLM-visible parameter schema:
   "required": ["agent", "prompt"]
 }
 ```
+
+Both `delegate_task` and `create_agent_task` accept optional `workspace.prTitle`
+and `workspace.prBody` strings. When requesting a PR, the Task-creating agent
+should author descriptive text from the request before execution, not from the
+executing sandbox's output. Omitting either field or supplying an empty string
+keeps its fallback. Metadata alone does not enable `createPR` or write intent.
+Nonempty whitespace-only titles are invalid. Both fields reject secret-like
+text, and bodies reject reserved publisher reconciliation comments. Validation
+also applies when `createPR` is false.
 
 Implementation (`internal/tools/delegate_task.go`):
 1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE`, `ORKA_COORDINATION_DEPTH` from env
@@ -173,18 +184,19 @@ LLM-visible parameter schema:
   "properties": {
     "task_name":  {"type": "string", "description": "Name of the child task to cancel"},
     "namespace":  {"type": "string", "description": "Namespace (defaults to current)"},
-    "reason":     {"type": "string", "description": "Reason for cancellation"}
+    "reason":     {"type": "string", "description": "Reason for cancellation", "maxLength": 512}
   },
   "required": ["task_name"]
 }
 ```
 
-Implementation (`internal/tools/cancel_task.go`):
-1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE` from env
-2. Validates the target task is a child of the calling task via `orka.ai/parent-task` label
-3. Only cancels tasks in `Pending` or `Running` phase
-4. Sets the task phase to `Cancelled` via status subresource update
-5. Returns confirmation with task name and cancellation reason
+Implementation (`internal/tools/cancel_task.go` and the controller endpoint
+`POST /internal/v1/tasks/{namespace}/{taskName}/children/{child}/cancel`):
+1. The worker calls the controller as its Task. The endpoint checks that the caller is the parent Task's current worker Pod and that its Job still holds result authority.
+2. The child must carry the provenance-protected parent link (the `orka.ai/parent-task` label plus a controller owner reference with the parent's UID), so Task provenance admission is required.
+3. Only `Pending` or `Running` children can be cancelled. Children running on an agent runtime are refused.
+4. The endpoint records the `orka.ai/cancel-requested` annotation on the child. Only controller identities may set it. The Task controller then completes the child as `Cancelled` through its normal terminal path: it revokes and deletes the worker Job, releases any session lock, and records the outcome.
+5. Returns `{"taskName": ..., "status": "cancellation requested"}`, or the child's phase when it has already finished.
 
 #### `send_message` Tool
 
@@ -582,7 +594,7 @@ For the request above, a failed child's result includes:
 
 Orka supports iterative multi-agent workflows where a coordinator orchestrates coding, review, and feedback loops until code is approved.
 
-The current ACP core runtime does not accept `priorTaskRef`; use `sessionRef` for runtime continuity in direct ACP manifests. Existing `prior_task` coordination examples describe the older diff-handoff loop and are not an ACP v2 release gate.
+The current ACP core runtime does not accept `priorTaskRef`; use `sessionRef` for runtime continuity in direct ACP manifests. Existing `prior_task` coordination examples describe the older diff-handoff loop and are not an Orka harness v2 release gate.
 
 ### Flow
 

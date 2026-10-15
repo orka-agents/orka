@@ -252,8 +252,7 @@ func TestBuildRequestParams(t *testing.T) {
 			Model:    "claude-3",
 			Messages: []llm.Message{{Role: "user", Content: "hi"}},
 		}
-		msgs := buildMessages(req.Messages)
-		params := buildRequestParams(req, msgs)
+		params := buildRequestParams(req)
 		if params.MaxTokens != 4096 {
 			t.Errorf("expected default MaxTokens 4096, got %d", params.MaxTokens)
 		}
@@ -268,8 +267,7 @@ func TestBuildRequestParams(t *testing.T) {
 			MaxTokens: 1000,
 			Messages:  []llm.Message{{Role: "user", Content: "hi"}},
 		}
-		msgs := buildMessages(req.Messages)
-		params := buildRequestParams(req, msgs)
+		params := buildRequestParams(req)
 		if params.MaxTokens != 1000 {
 			t.Errorf("expected MaxTokens 1000, got %d", params.MaxTokens)
 		}
@@ -281,8 +279,7 @@ func TestBuildRequestParams(t *testing.T) {
 			SystemPrompt: "be helpful",
 			Messages:     []llm.Message{{Role: "user", Content: "hi"}},
 		}
-		msgs := buildMessages(req.Messages)
-		params := buildRequestParams(req, msgs)
+		params := buildRequestParams(req)
 		if len(params.System) != 1 {
 			t.Fatalf("expected 1 system block, got %d", len(params.System))
 		}
@@ -297,8 +294,7 @@ func TestBuildRequestParams(t *testing.T) {
 			Temperature: 0.7,
 			Messages:    []llm.Message{{Role: "user", Content: "hi"}},
 		}
-		msgs := buildMessages(req.Messages)
-		params := buildRequestParams(req, msgs)
+		params := buildRequestParams(req)
 		// Temperature should be set (non-zero value)
 		_ = params
 	})
@@ -311,8 +307,7 @@ func TestBuildRequestParams(t *testing.T) {
 				{Name: testToolNameSearch, Description: "desc", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)},
 			},
 		}
-		msgs := buildMessages(req.Messages)
-		params := buildRequestParams(req, msgs)
+		params := buildRequestParams(req)
 		if len(params.Tools) != 1 {
 			t.Errorf("expected 1 tool, got %d", len(params.Tools))
 		}
@@ -688,10 +683,13 @@ func TestHandleStreamEvent_MessageStartUsageCarriesToDone(t *testing.T) {
 	handleStreamEvent(startEvent, send, &tc, &toolCallArgs, &hasToolCalls, &usage)
 	handleStreamEvent(deltaEvent, send, &tc, &toolCallArgs, &hasToolCalls, &usage)
 
-	if len(chunks) != 1 {
-		t.Fatalf("expected only terminal chunk, got %d", len(chunks))
+	if len(chunks) != 2 {
+		t.Fatalf("expected initial usage and terminal chunks, got %d", len(chunks))
 	}
-	chunk := chunks[0]
+	if chunks[0].Done || !chunks[0].UsageReported || chunks[0].InputTokens != 12 || chunks[0].OutputTokens != 1 {
+		t.Fatalf("initial usage = %+v", chunks[0])
+	}
+	chunk := chunks[1]
 	if chunk.InputTokens != 12 || chunk.OutputTokens != 10 {
 		t.Fatalf("usage = input:%d output:%d, want input:12 output:10", chunk.InputTokens, chunk.OutputTokens)
 	}

@@ -172,6 +172,7 @@ describe('executionEventCategory', () => {
     expect(executionEventCategory('WorkspacePreparationStarted')).toBe('workspace')
     expect(executionEventCategory('ArtifactUploadCompleted')).toBe('artifacts')
     expect(executionEventCategory('ApprovalRequested')).toBe('approvals')
+    expect(executionEventCategory('ApprovalExecutionUpdated')).toBe('approvals')
     expect(executionEventCategory('TaskForkCreated')).toBe('fork')
     expect(executionEventCategory('WorkerStarted')).toBe('worker')
     // Agent-runtime lifecycle, including cancellation, groups under worker.

@@ -3,8 +3,10 @@
 This example configures a `RepositoryMonitor` for the durable `orka:*` workflow:
 
 ```text
-issue label -> command event -> triage/research/plan -> approval -> implementation -> PR -> exact-head review -> repair/readiness
+orka:implement issue label -> command event -> plan (when requirePlan is true) -> implementation -> PR -> exact-head review -> repair/readiness
 ```
+
+Triage and research are ad hoc API/CLI operations.
 
 ## Secrets
 
@@ -39,7 +41,7 @@ Configure your GitHub webhook to send `issues` and `pull_request` events to `/we
 
 1. Update `repoURL` in `repository-monitor.yaml`.
 2. Apply the example: `kubectl -n orka-system apply -k examples/github-label-triggered-issue-loop`.
-3. Add `orka:plan` or `orka:implement` to an issue.
+3. Add `orka:implement` to an issue.
 4. Inspect state:
 
 ```bash
@@ -48,4 +50,4 @@ orka -n orka-system monitor actions list issue-to-pr-loop --kind issue --number 
 orka -n orka-system monitor issues list issue-to-pr-loop
 ```
 
-Automerge is intentionally disabled in this example. Enable `spec.automerge.enabled` only after validating review, CI, and merge-gate behavior in your environment.
+Require the `orka/<namespace>/<monitor-name>/ready` commit status. The forge credential needs commit-status write permission; no GitHub App is required. GitHub native auto-merge owns merging; Orka never enables it. When disabled, the PR remains open and ready.

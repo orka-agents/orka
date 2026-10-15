@@ -7,6 +7,10 @@ description: "The chat endpoint: describe what you want in plain language and le
 
 The chat endpoint provides an agentic conversational interface where an LLM orchestrator can create and manage Kubernetes resources on the user's behalf. It accepts natural language, reasons about what tasks to create, and autonomously executes them using the platform.
 
+:::tip[Video demo]
+Watch [From chat to a GitHub pull request](https://www.youtube.com/watch?v=FlLgdh2lKMk).
+:::
+
 ## Try it
 
 With the API [port-forwarded and a client token in `ORKA_TOKEN`](../getting-started.md#connect-to-the-api)

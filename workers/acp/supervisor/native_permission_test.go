@@ -30,9 +30,9 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 		{name: "disallowed native tool", toolName: providerToolBash, disallowed: true},
 		{name: "disabled Bash", toolName: providerToolBash, bashDisabled: true},
 		{name: "brokered tool without additional approval", toolName: providerToolBash, brokered: true, wantAllowed: true},
-		{name: "brokered reusable permission needs approval", toolName: providerToolBash, brokered: true, kind: harnessv2.PermissionOptionAllowAlways},
-		{name: "brokered approval preserved", toolName: providerToolBash, brokered: true, requireApproval: true, wantAllowed: true},
-		{name: "brokered reusable approval preserved", toolName: providerToolBash, brokered: true, requireApproval: true, kind: harnessv2.PermissionOptionAllowAlways, wantAllowed: true},
+		{name: "brokered reusable permission denied", toolName: providerToolBash, brokered: true, kind: harnessv2.PermissionOptionAllowAlways},
+		{name: "brokered tool reaches controller approval", toolName: providerToolBash, brokered: true, requireApproval: true, wantAllowed: true},
+		{name: "brokered reusable approval denied", toolName: providerToolBash, brokered: true, requireApproval: true, kind: harnessv2.PermissionOptionAllowAlways},
 		{name: "expired prompt", toolName: providerToolBash, inactive: "authorization"},
 		{name: "expired lease", toolName: providerToolBash, inactive: "lease"},
 		{name: "expired permission", toolName: providerToolBash, inactive: "permission"},
@@ -139,15 +139,6 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 			}
 			if response.Code != wantStatus || mutations.resolveCalls.Load() != wantCalls {
 				t.Fatalf("resolution status=%d calls=%d, want status=%d calls=%d; body=%s", response.Code, mutations.resolveCalls.Load(), wantStatus, wantCalls, response.Body.String())
-			}
-			proxy.mu.Lock()
-			grants := proxy.approvals[providerToolBash]
-			proxy.mu.Unlock()
-			if !test.requireApproval && len(grants) != 0 {
-				t.Fatal("permission created unrequested brokered MCP approval evidence")
-			}
-			if test.wantAllowed && test.requireApproval && (len(grants) != 1 || grants[0].evidence.Reusable != (optionKind == harnessv2.PermissionOptionAllowAlways)) {
-				t.Fatalf("brokered approval evidence = %#v", grants)
 			}
 			if test.wantAllowed {
 				replayed := performMutation(t, server.Handler(), http.MethodPut, path, request, cfg)
