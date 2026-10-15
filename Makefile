@@ -197,8 +197,12 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG)
+	$(MAKE) test-e2e-run
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-run
+test-e2e-run: ## Run only the e2e suite on an existing Kind cluster: no regeneration, fmt, vet, or teardown.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG)
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests

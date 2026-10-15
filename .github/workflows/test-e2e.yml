@@ -59,6 +59,9 @@ jobs:
 
       - name: Free disk space for Docker-heavy E2E
         uses: ./.github/actions/free-disk-space
+        with:
+          # The runner starts with ~86G free; the space is needed only later.
+          background: "true"
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -78,7 +81,8 @@ jobs:
           go mod tidy
           . scripts/lib/e2e-cleanup.sh
           status=0
-          if make test-e2e; then
+          # make test-e2e would also run fmt and vet, which lint covers.
+          if make setup-test-e2e manifests generate test-e2e-run; then
             :
           else
             status=$?
