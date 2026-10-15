@@ -27,6 +27,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -1622,13 +1623,16 @@ func (r *TaskReconciler) checkExternalConnectorTools(
 }
 
 // brokeredCustomCandidates keeps the names that would resolve to brokered
-// custom Tools, mirroring buildCanonicalMCPToolDescriptors: a registered
-// built-in or a provider-native tool takes precedence over a same-named Tool
+// custom Tools, mirroring buildCanonicalMCPToolDescriptors: a runtime-local,
+// registered built-in, or provider-native tool takes precedence over a same-named Tool
 // CR, which is then never exposed and cannot make a Task connector-backed.
 func brokeredCustomCandidates(names []string, providerKind string, registry *tools.Registry) []string {
 	native := providerNativeTools[strings.ToLower(providerKind)]
 	kept := make([]string, 0, len(names))
 	for _, name := range names {
+		if name == acp.SandboxExecToolName {
+			continue
+		}
 		if registry != nil {
 			if _, builtin := registry.Get(name); builtin {
 				continue

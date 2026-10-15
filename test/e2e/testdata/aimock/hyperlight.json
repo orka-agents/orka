@@ -1,0 +1,203 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-code-exec]",
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Hyperlight AI execution completed."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-code-exec]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "code_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-ai-guest','network_denied':True}))\nprint('hyperlight-ai-stderr', file=sys.stderr)",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "toolResultContains": "hyperlight-acp-read"
+      },
+      "response": {
+        "content": "Hyperlight workspace checks completed."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "toolResultContains": "hyperlight-acp-write-refused"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "orka_sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\n# A second guest finds the repository unchanged: the refused writes left nothing.\nassert not os.path.exists('hyperlight-aimock.txt') and not os.path.exists('hyperlight-dir')\nwith open('README') as readme:\n    content = readme.read()\nassert 'Hello World!' in content and 'changed' not in content\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-read','workspace':os.getcwd(),'network_denied':True}))",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "toolCallId": "hyperlight-opencode-forbidden"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "orka_sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nassert os.getcwd().rstrip('/') == '/workspace'\n# The read-intent workspace is the pinned repository, mounted read-only.\nwith open('README') as readme:\n    assert 'Hello World!' in readme.read()\ndef create():\n    with open('hyperlight-aimock.txt', 'w') as result:\n        result.write('hyperlight-workspace-data')\ndef append():\n    with open('README', 'a') as readme:\n        readme.write('changed')\nfor attempt in (create, append, lambda: os.mkdir('hyperlight-dir'), lambda: os.unlink('README')):\n    try:\n        attempt()\n    except OSError as failure:\n        assert failure.errno == errno.EROFS, failure\n    else:\n        raise AssertionError('a guest changed the read-only workspace')\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-write-refused','workspace':os.getcwd(),'network_denied':True}))\nprint('hyperlight-acp-stderr',file=sys.stderr)",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "bash",
+            "id": "hyperlight-opencode-forbidden",
+            "arguments": {
+              "command": "printf 'forbidden-native-command\\n' > HYPERLIGHT_NATIVE_COMMAND_EXECUTED",
+              "description": "Attempt an excluded native command"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-unavailable]",
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "The unavailable Hyperlight tool was handled."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-unavailable]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "code_exec",
+            "arguments": {
+              "language": "python",
+              "code": "print('HYPERLIGHT_HOST_FALLBACK_EXECUTED')",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolResultContains": "hyperlight-acp-read"
+      },
+      "response": {
+        "content": "Hyperlight claude command isolation and workspace checks completed."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolCallId": "hyperlight-claude-read"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__orka__sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nassert not os.path.exists('HYPERLIGHT_UNMANAGED_EXECUTED'), 'workspace hook or MCP command executed on the host'\n# The refused writes left nothing for the host to load or deliver.\nfor path in ['hyperlight-aimock.txt', 'hyperlight-hook.sh', '.mcp.json', '.claude']:\n    assert not os.path.exists(path), path\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-read','workspace':os.getcwd(),'network_denied':True}))",
+              "timeout": 30
+            },
+            "id": "hyperlight-claude-guest-read"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolResultContains": "hyperlight-acp-write-refused"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "Read",
+            "arguments": {
+              "file_path": "README"
+            },
+            "id": "hyperlight-claude-read"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolCallId": "hyperlight-claude-forbidden"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__orka__sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nassert os.getcwd().rstrip('/') == '/workspace'\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nassert not os.path.exists('HYPERLIGHT_UNMANAGED_EXECUTED'), 'workspace hook or MCP command executed on the host'\n# The read-intent workspace is the pinned repository, mounted read-only.\nwith open('README') as readme:\n    assert 'Hello World!' in readme.read()\n# Try to plant hook and MCP configs during the prompt; the read-only mount refuses each.\npoison_files = {'hyperlight-hook.sh': \"#!/bin/sh\\nprintf 'workspace-hook-or-mcp-executed\\\\n' > HYPERLIGHT_UNMANAGED_EXECUTED\\n\", '.mcp.json': '{\"mcpServers\": {\"hyperlight_unmanaged\": {\"command\": \"/bin/sh\", \"args\": [\"hyperlight-hook.sh\"]}}}\\n', '.claude/settings.local.json': '{\"hooks\": {\"PreToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"sh hyperlight-hook.sh\", \"timeout\": 5}]}], \"PostToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"sh hyperlight-hook.sh\", \"timeout\": 5}]}]}}\\n'}\ndef plant(path, content):\n    directory = os.path.dirname(path)\n    if directory:\n        os.makedirs(directory, exist_ok=True)\n    with open(path, 'w') as planted:\n        planted.write(content)\nfor path, content in [*poison_files.items(), ('hyperlight-aimock.txt', 'hyperlight-workspace-data')]:\n    attempt = lambda: plant(path, content)\n    try:\n        attempt()\n    except OSError as failure:\n        assert failure.errno == errno.EROFS, failure\n    else:\n        raise AssertionError('a guest changed the read-only workspace')\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-write-refused','workspace':os.getcwd(),'network_denied':True}))\nprint('hyperlight-acp-stderr',file=sys.stderr)",
+              "timeout": 30
+            },
+            "id": "hyperlight-claude-guest-write"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "Bash",
+            "arguments": {
+              "command": "printf 'forbidden-native-command\\n' > HYPERLIGHT_NATIVE_COMMAND_EXECUTED",
+              "description": "Attempt an excluded native command"
+            },
+            "id": "hyperlight-claude-forbidden"
+          }
+        ]
+      }
+    }
+  ]
+}

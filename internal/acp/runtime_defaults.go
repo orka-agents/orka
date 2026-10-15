@@ -80,6 +80,25 @@ func BuiltInRuntimeNativePolicyUnrestricted(provider string, allowed, disallowed
 	return true
 }
 
+// CodexHyperlightNativePolicy permits only the full non-command native surface
+// alongside sandbox_exec. Arbitrary native allowlists remain unsupported: disabling
+// Codex's shell does not implement its other independent native-tool restrictions.
+func CodexHyperlightNativePolicy(allowed, disallowed []string, allowBash bool) bool {
+	effective := BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed, false)
+	if allowBash || !slices.Contains(effective, SandboxExecToolName) {
+		return false
+	}
+	for _, name := range BuiltInRuntimeNativeToolNames("codex") {
+		if name == nativeToolBash {
+			continue
+		}
+		if !slices.ContainsFunc(effective, func(candidate string) bool { return strings.EqualFold(candidate, name) }) {
+			return false
+		}
+	}
+	return true
+}
+
 // NormalizeBuiltInRuntimeToolPolicy expands an implicit provider-native tool
 // surface only when deny-only metadata or the Bash gate narrows it. Explicit
 // allowlists, including an explicit empty deny-all list, remain authoritative.

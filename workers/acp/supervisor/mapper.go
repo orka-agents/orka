@@ -401,8 +401,8 @@ func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput js
 		return "", err
 	}
 	if !mcpCall {
-		if descriptor, allowed := policy.Descriptor(name); allowed && descriptor.Source.Brokered() {
-			return "", fmt.Errorf("codex brokered tool identity requires an MCP marker")
+		if descriptor, allowed := policy.Descriptor(name); allowed && descriptor.Source.MCPServed() {
+			return "", fmt.Errorf("codex MCP-served tool identity requires an MCP marker")
 		}
 		return name, nil
 	}
@@ -414,8 +414,8 @@ func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput js
 		return "", fmt.Errorf("codex MCP tool update has invalid structured identity")
 	}
 	descriptor, allowed := policy.Descriptor(input.Tool)
-	if kind != "execute" || input.Server != supervisorMCPServerName || !allowed || !descriptor.Source.Brokered() {
-		return "", fmt.Errorf("codex MCP tool identity is outside the frozen broker policy")
+	if kind != "execute" || input.Server != supervisorMCPServerName || !allowed || !descriptor.Source.MCPServed() {
+		return "", fmt.Errorf("codex MCP tool identity is outside the frozen MCP-served policy")
 	}
 	if name != "" && name != descriptor.Name {
 		return "", fmt.Errorf("codex MCP tool update has conflicting structured identities")
@@ -441,7 +441,7 @@ func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy
 	// tool. Display titles and another MCP server's names never grant authority.
 	if provider == providerKindClaude {
 		if tool, prefixed := strings.CutPrefix(name, "mcp__orka__"); prefixed {
-			if descriptor, allowed := policy.Descriptor(tool); allowed && descriptor.Source.Brokered() {
+			if descriptor, allowed := policy.Descriptor(tool); allowed && descriptor.Source.MCPServed() {
 				return descriptor.Name
 			}
 			return name

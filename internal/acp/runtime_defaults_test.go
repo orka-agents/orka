@@ -126,3 +126,29 @@ func TestNormalizeBuiltInRuntimeToolPolicy(t *testing.T) {
 		t.Fatalf("bare Bash deny effective tools = %#v, want scoped Bash removed", got)
 	}
 }
+
+func TestCodexHyperlightNativePolicy(t *testing.T) {
+	full := append(BuiltInRuntimeNativeToolNames("codex"), SandboxExecToolName)
+	withoutBash := BuiltInRuntimeEffectiveAllowedTools(full, nil, false)
+	for _, tc := range []struct {
+		name            string
+		allowed, denied []string
+		allowBash, want bool
+	}{
+		{name: "full surface with command gate", allowed: full, want: true},
+		{name: "full non-shell surface", allowed: withoutBash, want: true},
+		{name: "explicit shell denial", allowed: full, denied: []string{"Bash"}, want: true},
+		{name: "native shell allowed", allowed: full, allowBash: true},
+		{name: "no sandbox tool", allowed: BuiltInRuntimeNativeToolNames("codex")},
+		{name: "arbitrary empty native surface", allowed: []string{SandboxExecToolName}},
+		{name: "other restriction", allowed: full, denied: []string{"Write"}},
+		{name: "sandbox denied", allowed: full, denied: []string{SandboxExecToolName}},
+		{name: "implicit surface"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CodexHyperlightNativePolicy(tc.allowed, tc.denied, tc.allowBash); got != tc.want {
+				t.Fatalf("policy = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

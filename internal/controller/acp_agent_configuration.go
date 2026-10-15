@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -199,6 +200,9 @@ func validateACPProviderNativePolicy(provider string, intent corev1alpha1.Worksp
 	case string(corev1alpha1.AgentRuntimeClaude):
 		return nil
 	case string(corev1alpha1.AgentRuntimeCodex):
+		if acp.CodexHyperlightNativePolicy(allowed, disallowed, allowBash) {
+			return nil
+		}
 		if acp.BuiltInRuntimeNativePolicyUnrestricted(provider, allowed, disallowed, allowBash) {
 			return nil
 		}
@@ -207,6 +211,9 @@ func validateACPProviderNativePolicy(provider string, intent corev1alpha1.Worksp
 		}
 		return fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	case string(corev1alpha1.AgentRuntimeCopilot):
+		if !allowBash && slices.Contains(acp.BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed, false), acp.SandboxExecToolName) {
+			return fmt.Errorf("copilot ACP runtime cannot enforce Hyperlight-only commands: immutable hook and unmanaged MCP controls are not verified")
+		}
 		if acp.BuiltInRuntimeNativePolicyUnrestricted(provider, allowed, disallowed, allowBash) {
 			return nil
 		}

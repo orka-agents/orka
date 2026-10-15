@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -288,27 +287,12 @@ func waitForOTelDeploymentAvailable(name string, timeout time.Duration) {
 }
 
 func waitForOTelControllerAPIReady() {
-	// Rollout readiness probes the manager directly on 8081. Workers use the
-	// API Service on 8080, whose routes can lag a Recreate rollout. Probe that
-	// path from an existing Pod, not through an API-server proxy or port-forward.
-	endpoint := fmt.Sprintf("http://%s.%s.svc:8080/readyz", controllerAPIService, namespace)
 	const probe = `import sys, urllib.request
 with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
     print(response.read().decode("utf-8"))
 `
-	Eventually(func(g Gomega) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "kubectl", "exec", "deployment/"+otelFakeOpenAIName,
-			"-n", namespace, "-c", "fake-openai", "--", "python", "-c", probe, endpoint)
-		output, err := utils.Run(cmd)
-		g.Expect(err).NotTo(HaveOccurred(), "controller API Service is not ready from the task network")
-		var ready struct {
-			Status string `json:"status"`
-		}
-		g.Expect(json.Unmarshal([]byte(output), &ready)).To(Succeed())
-		g.Expect(ready.Status).To(Equal("ok"))
-	}, 30*time.Second, time.Second).Should(Succeed())
+	waitForControllerAPIServiceReady("deployment/"+otelFakeOpenAIName,
+		"-n", namespace, "-c", "fake-openai", "--", "python", "-c", probe)
 }
 
 func createOTelSecretOrFail(name string, data map[string]string) {

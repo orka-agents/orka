@@ -443,6 +443,9 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		_ = proxy.close(closeCtx)
 		return nil, err
 	}
+	if executor := newSandboxExecutor(cfg.SandboxExec); executor != nil {
+		mcp.sandbox = executor
+	}
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	cfg.MCPBroker = nil
 	server := &Server{
@@ -790,6 +793,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// must still match the current supervisor before allocating an identity.
 	if mismatch := harnessv2.CompareFence(expected, request.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
 		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
+		return
+	}
+
+	if tool, allowed := request.MCPConfiguration.ToolPolicy.Descriptor(acp.SandboxExecToolName); allowed &&
+		tool.Source == harnessv2.MCPToolSourceRuntimeLocal && s.cfg.SandboxExec == nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "sandbox_exec requires a runtime with --acp-sandbox-exec enabled; workspace-backed runtimes do not support it", nil, false)
 		return
 	}
 
@@ -1201,6 +1210,7 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
 	}
+	mcpProxy.bindSandboxWorkspace(paths.Workspace, uid, gid, request.Workspace.Intent)
 	cleanupMCPProxy := true
 	defer func() {
 		if cleanupMCPProxy {
@@ -1250,6 +1260,9 @@ func (s *Server) createSession(
 	}
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
+	}
+	if err := s.protectSandboxSessionRoot(paths.Root, uid, gid); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("sandbox workspace parent", err)
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The durable workspace lives outside the session root, and each cold

@@ -204,6 +204,14 @@ func validateAgentRuntimeMCPPolicyClaims(
 			return fmt.Errorf("external AgentRuntime MCP policy %s must be sorted, unique, and non-empty by item", field.name)
 		}
 	}
+	// sandbox_exec is runtime-local: only an Orka-managed supervisor runs it,
+	// in a Hyperlight guest. An external runtime cannot provide that contract.
+	toolPolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: policy.AllowedTools, DisallowedToolNames: policy.DisallowedTools, AllowBash: policy.AllowBash,
+	}
+	if toolPolicy.Allows(acp.SandboxExecToolName) {
+		return fmt.Errorf("external AgentRuntime MCP policy cannot grant %s: it runs only in Orka-managed RuntimePools", acp.SandboxExecToolName)
+	}
 	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(
 		policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
 	)
@@ -406,6 +414,15 @@ func buildCanonicalMCPToolDescriptors(
 	descriptors := make([]harnessv2.MCPToolDescriptor, 0, len(allowed))
 	for _, name := range allowed {
 		if !policy.Allows(name) {
+			continue
+		}
+		if name == acp.SandboxExecToolName {
+			// The runtime Pod runs it in a Hyperlight micro-VM under the
+			// prompt grant; it never reaches the broker.
+			descriptors = append(descriptors, harnessv2.MCPToolDescriptor{
+				Name: name, Description: acp.SandboxExecDescription, InputSchema: json.RawMessage(acp.SandboxExecInputSchema),
+				Source: harnessv2.MCPToolSourceRuntimeLocal, Effect: harnessv2.MCPToolEffectConsequential,
+			})
 			continue
 		}
 		if registry != nil {

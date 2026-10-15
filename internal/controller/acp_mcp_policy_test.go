@@ -36,6 +36,25 @@ func TestDeterministicProfileMatchesExplicitEmptyExternalMCPPolicy(t *testing.T)
 	}
 }
 
+func TestExternalMCPPolicyCannotGrantSandboxExec(t *testing.T) {
+	profile, err := conformancetest.DeterministicProfile("fixture-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.AgentRuntimeMCPPolicySpec{
+		AllowedTools:          []string{acp.SandboxExecToolName},
+		DisallowedTools:       []string{},
+		ApprovalRequiredTools: []string{},
+	}
+	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err == nil || !strings.Contains(err.Error(), acp.SandboxExecToolName) {
+		t.Fatalf("external sandbox_exec grant error = %v, want rejection", err)
+	}
+	policy.DisallowedTools = []string{acp.SandboxExecToolName}
+	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err != nil && strings.Contains(err.Error(), acp.SandboxExecToolName) {
+		t.Fatalf("denied sandbox_exec was treated as granted: %v", err)
+	}
+}
+
 func TestBuildRuntimeSessionMCPConfigurationInjectsJournaledChildMessagingTools(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewSendMessageTool())
@@ -1056,5 +1075,38 @@ func TestCustomACPMCPToolDescriptorRejectsUnaccountableConsequentialTimeout(t *t
 	}
 	if _, err := customACPMCPToolDescriptor(newTool(corev1alpha1.AgentRuntimeBrokeredToolClassRead, 10*time.Minute)); err != nil {
 		t.Fatalf("read-only long timeout error = %v, want acceptance (read calls bypass the effect ledger)", err)
+	}
+}
+
+func TestValidateACPCodexHyperlightNativePolicy(t *testing.T) {
+	allowed := append(acp.BuiltInRuntimeNativeToolNames("codex"), acp.SandboxExecToolName)
+	for _, intent := range []corev1alpha1.WorkspaceIntent{corev1alpha1.WorkspaceIntentRead, corev1alpha1.WorkspaceIntentWrite} {
+		if err := validateACPProviderNativePolicy("codex", intent, allowed, nil, false); err != nil {
+			t.Fatalf("Hyperlight command policy rejected: %v", err)
+		}
+	}
+	for _, tc := range []struct{ allowed, denied []string }{
+		{allowed: []string{acp.SandboxExecToolName}},
+		{allowed: acp.BuiltInRuntimeNativeToolNames("codex")},
+		{allowed: allowed, denied: []string{"Write"}},
+	} {
+		if err := validateACPProviderNativePolicy("codex", corev1alpha1.WorkspaceIntentWrite, tc.allowed, tc.denied, false); err == nil {
+			t.Fatalf("unsupported native restrictions accepted: %+v", tc)
+		}
+	}
+}
+
+func TestValidateACPCopilotHyperlightCommandPolicyFailsClosed(t *testing.T) {
+	if err := validateACPProviderNativePolicy("copilot", corev1alpha1.WorkspaceIntentRead, []string{"Read", acp.SandboxExecToolName}, nil, false); err == nil || !strings.Contains(err.Error(), "cannot enforce Hyperlight-only commands") {
+		t.Fatalf("unverified strict Copilot policy = %v", err)
+	}
+	if err := validateACPProviderNativePolicy("copilot", corev1alpha1.WorkspaceIntentRead, []string{"Read"}, nil, false); err != nil {
+		t.Fatalf("ordinary read-only Copilot changed: %v", err)
+	}
+}
+
+func TestDeniedSandboxDoesNotEnableCopilotExclusiveMode(t *testing.T) {
+	if err := validateACPProviderNativePolicy("copilot", corev1alpha1.WorkspaceIntentRead, []string{"Read", acp.SandboxExecToolName}, []string{acp.SandboxExecToolName}, false); err != nil {
+		t.Fatalf("effectively ordinary policy was rejected: %v", err)
 	}
 }

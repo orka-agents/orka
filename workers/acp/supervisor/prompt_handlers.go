@@ -1929,6 +1929,12 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err := s.protectSandboxSessionRoot(paths.Root, uid, gid); err != nil {
+		slog.Error("ACP workspace validation failed", "stage", "sandbox parent protection")
+		s.poisonSession(state, "sandbox workspace parent protection failed")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "sandbox workspace parent protection failed", nil, false)
+		return
+	}
 	if request.Intent == harnessv2.WorkspaceIntentRead {
 		if err := acp.ProtectReadOnlySessionWorkspace(paths, uid, gid); err != nil {
 			slog.Error("ACP workspace validation failed", "stage", "read-only workspace protection")
@@ -2013,6 +2019,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		descriptor.State = harnessv2.WorkspaceDeltaNoChange
 		descriptor.PublicationSafe = true
 		if err := runtimeSession.Thaw(); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "thaw", "error", err)
 			s.poisonSession(state, "workspace thaw failed")
 			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace thaw failed", nil, false)
 			return
@@ -2162,8 +2169,8 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			policy := state.mcpProxy.configuration.ToolPolicy
 			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, policy, permission.ToolName)
 			if state.profile.ProviderKind == providerKindCodex && !known {
-				if descriptor, allowed := policy.Descriptor(permission.ToolName); allowed && descriptor.Source.Brokered() {
-					return nil, fmt.Errorf("codex brokered permission lacks a correlated MCP tool identity")
+				if descriptor, allowed := policy.Descriptor(permission.ToolName); allowed && descriptor.Source.MCPServed() {
+					return nil, fmt.Errorf("codex MCP-served permission lacks a correlated MCP tool identity")
 				}
 			}
 		}

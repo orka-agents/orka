@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -156,7 +157,8 @@ type connectorScope struct {
 	// strictPolicies retries on a missing policy instead of skipping the
 	// Tool; see classifyConnectorTools.
 	strictPolicies bool
-	// builtins classifies catalog built-ins a ConnectorProvider declares.
+	// builtins applies ACP runtime-local precedence and classifies catalog
+	// built-ins a ConnectorProvider declares.
 	// Only paths that execute built-ins in the controller (the ACP broker)
 	// set it: a native worker runs built-ins itself and never holds a
 	// linked account, so for it they stay on the Task's own credentials.
@@ -277,6 +279,11 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 			continue
 		}
 		seen[name] = struct{}{}
+		// ACP runs sandbox_exec locally before resolving any Tool resource.
+		// Native AI Jobs can still execute a custom Tool with this name.
+		if scope.builtins && name == acp.SandboxExecToolName {
+			continue
+		}
 		// A built-in tool wins over a Tool resource of the same name in every
 		// runtime, so such a resource is never the implementation here.
 		if _, builtin := registry.Get(name); builtin {

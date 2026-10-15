@@ -81,6 +81,14 @@ var _ = BeforeSuite(func() {
 	earlyEnvProjectDir, _ := utils.GetProjectDir()
 	loadEnvFile(filepath.Join(earlyEnvProjectDir, "test", "e2e", ".env"))
 
+	if hyperlightE2EEnabled() {
+		_, err := hyperlightE2EDeviceGID()
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		device, err := os.Stat("/dev/kvm")
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Hyperlight deployment E2E requires real KVM")
+		ExpectWithOffset(1, device.Mode()&os.ModeCharDevice).NotTo(BeZero(), "/dev/kvm must be a character device")
+	}
+
 	By("building all Docker images")
 	cmd := exec.Command("make", "docker-build-all",
 		fmt.Sprintf("IMG=%s", managerImage),
@@ -94,6 +102,13 @@ var _ = BeforeSuite(func() {
 	)
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
+
+	if hyperlightE2EEnabled() {
+		By("building the pinned production Hyperlight bundle")
+		cmd = exec.Command("make", "docker-build-hyperlight-bundle", "HYPERLIGHT_BUNDLE_IMG="+hyperlightE2EBundleImage())
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	}
 
 	By("building the harness-v2 E2E fixture image")
 	cmd = exec.Command("docker", "build", "-t", harnessV2FixtureImage,
@@ -144,6 +159,9 @@ var _ = BeforeSuite(func() {
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
 	}
+	if hyperlightE2EEnabled() {
+		images = append(images, hyperlightE2EBundleImage())
+	}
 	for _, img := range images {
 		err = utils.LoadImageToKindClusterWithName(img)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))
@@ -175,6 +193,13 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish OpenCode ACP runtime image")
 	workspacePublisherRef, err = pushImageToLocalRegistry(registry, workspacePublisherImage, "orka/workspace-publisher:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish workspace publisher image")
+
+	if hyperlightE2EEnabled() {
+		hyperlightBundleRef, err = pushImageToLocalRegistry(
+			registry, hyperlightE2EBundleImage(), "orka/hyperlight-bundle:e2e",
+		)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish Hyperlight bundle")
+	}
 
 	By("loading e2e environment configuration")
 	projectDir, _ := utils.GetProjectDir()
@@ -352,6 +377,11 @@ var _ = BeforeSuite(func() {
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")
+
+	if hyperlightE2EEnabled() {
+		By("enabling Hyperlight delivery for real AI workers and ACP RuntimePools")
+		configureHyperlightE2EController(controllerManagerDeployment, hyperlightBundleRef)
+	}
 
 	By("waiting for controller-manager to be ready")
 	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+controllerManagerDeployment,

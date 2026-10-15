@@ -588,7 +588,7 @@ func TestConnectorToolsForWaitsForAMissingPolicy(t *testing.T) {
 }
 
 // TestBrokeredCustomCandidatesFollowDescriptorPrecedence covers a Tool CR
-// that shares a name with a registered built-in or a provider-native tool:
+// that shares a name with a runtime-local, registered built-in, or provider-native tool:
 // those take precedence and the CR is never exposed, so it cannot make the
 // Task connector-backed.
 func TestBrokeredCustomCandidatesFollowDescriptorPrecedence(t *testing.T) {
@@ -598,8 +598,40 @@ func TestBrokeredCustomCandidatesFollowDescriptorPrecedence(t *testing.T) {
 	}
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWebSearchTool())
-	got := brokeredCustomCandidates([]string{native[0], "web_search", "gh_search"}, "codex", registry)
+	got := brokeredCustomCandidates([]string{acp.SandboxExecToolName, native[0], "web_search", "gh_search"}, "codex", registry)
 	if len(got) != 1 || got[0] != "gh_search" {
 		t.Fatalf("candidates = %v, want only the custom Tool", got)
+	}
+}
+
+func TestExternalConnectorToolsSkipSandboxExec(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	shadow := f.writeTool.DeepCopy()
+	shadow.Name = acp.SandboxExecToolName
+	task := f.task.DeepCopy()
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{acp.SandboxExecToolName}}
+	registration := &corev1alpha1.AgentRuntime{
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{AllowedTools: []string{acp.SandboxExecToolName}},
+			},
+		},
+	}
+	r := &TaskReconciler{}
+	for _, provider := range []string{"copilot", "codex", "claude", "opencode", "agentkit"} {
+		t.Run(provider, func(t *testing.T) {
+			if got := brokeredCustomCandidates([]string{acp.SandboxExecToolName, "gh_write"}, provider, nil); len(got) != 1 || got[0] != "gh_write" {
+				t.Fatalf("custom candidates = %v, want only gh_write", got)
+			}
+			linked, err := r.checkExternalConnectorTools(context.Background(), f.reader(shadow), task, nil, registration, provider, nil)
+			if err != nil || len(linked) != 0 {
+				t.Fatalf("sandbox_exec: linked = %v err = %v", linked, err)
+			}
+			customTask := task.DeepCopy()
+			customTask.Spec.AgentRuntime.AllowedTools = []string{"gh_write"}
+			if _, err := r.checkExternalConnectorTools(context.Background(), f.reader(shadow), customTask, nil, registration, provider, nil); err == nil {
+				t.Fatal("a real connector-backed custom Tool must still be rejected")
+			}
+		})
 	}
 }

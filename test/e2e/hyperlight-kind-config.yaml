@@ -1,0 +1,20 @@
+# Dedicated deployment E2E cluster. kindctl supplies its repo-scoped name.
+# No host ports: the suite uses an API port-forward.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    labels:
+      hyperlight.dev/enabled: "true"
+    extraMounts:
+      - hostPath: /dev/kvm
+        containerPath: /dev/kvm
+# The upstream device plugin allocates CDI devices, not legacy DeviceSpecs.
+# kind's v2 containerd config is migrated by containerd when necessary.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri"]
+      enable_cdi = true
+      cdi_spec_dirs = ["/var/run/cdi", "/etc/cdi"]
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"

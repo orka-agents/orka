@@ -738,6 +738,28 @@ func startServicePortForward(serviceNamespace, serviceName string, localPort, re
 	return startHTTPPortForwardAndWait(serviceNamespace, serviceName, localPort, remotePort, "/readyz")
 }
 
+// waitForControllerAPIServiceReady waits until the controller API Service
+// answers /readyz from the network Task Pods use. Rollout readiness probes the
+// manager directly on 8081, while workers call the API Service on 8080, whose
+// routes can lag a Recreate rollout; an API-server proxy or port-forward would
+// skip that path. client runs in an existing Pod through kubectl exec and
+// prints the body of the URL appended to it.
+func waitForControllerAPIServiceReady(client ...string) {
+	endpoint := fmt.Sprintf("http://%s.%s.svc:8080/readyz", controllerAPIService, namespace)
+	EventuallyWithOffset(1, func(g Gomega) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		args := append(append([]string{"exec"}, client...), endpoint)
+		output, err := utils.Run(exec.CommandContext(ctx, "kubectl", args...))
+		g.Expect(err).NotTo(HaveOccurred(), "controller API Service is not ready from the task network")
+		var ready struct {
+			Status string `json:"status"`
+		}
+		g.Expect(json.Unmarshal([]byte(output), &ready)).To(Succeed())
+		g.Expect(ready.Status).To(Equal("ok"))
+	}, time.Minute, time.Second).Should(Succeed())
+}
+
 func startHTTPPortForwardAndWait(serviceNamespace, serviceName string, localPort, remotePort int, readyPath string) (string, context.CancelFunc, *exec.Cmd, error) {
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)

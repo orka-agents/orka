@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
@@ -574,5 +576,133 @@ func TestNativeWorkerToolRegistryLeavesProxyPRToolsToCoordination(t *testing.T) 
 		if _, ok := coordinating.Get(name); !ok {
 			t.Errorf("%s is not a built-in for a coordinating native worker", name)
 		}
+	}
+}
+
+func TestConnectorToolsSkipSandboxExecOnlyForACP(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	shadow := f.writeTool.DeepCopy()
+	shadow.Name = acp.SandboxExecToolName
+	names := []string{acp.SandboxExecToolName}
+	registry := NativeWorkerToolRegistry(f.task, nil)
+	reader := f.reader(shadow, f.connection(corev1alpha1.ConnectionModeReadWrite, true))
+	if _, builtin := registry.Get(acp.SandboxExecToolName); builtin {
+		t.Fatal("sandbox_exec must not shadow a native worker's custom Tool")
+	}
+	for _, acpScope := range []bool{false, true} {
+		scopeName := "native"
+		if acpScope {
+			scopeName = "acp"
+		}
+		t.Run(scopeName, func(t *testing.T) {
+			scope := connectorScope{builtins: acpScope, strictPolicies: true}
+			infos, err := classifyConnectorTools(ctx, reader, registry, f.task.Namespace, names, scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frozen, err := freezeRequesterConnectionsForTools(ctx, reader, registry, f.task, names, scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if acpScope {
+				if len(infos) != 0 || len(frozen) != 0 {
+					t.Fatalf("ACP runtime-local tool: infos = %v frozen = %+v", infos, frozen)
+				}
+			} else if len(infos) != 1 || infos[acp.SandboxExecToolName].Class != corev1alpha1.AgentRuntimeBrokeredToolClassWrite || len(frozen) != 1 || frozen[0].UID != "conn-uid" {
+				t.Fatalf("native custom Tool: infos = %v frozen = %+v", infos, frozen)
+			}
+		})
+	}
+	visible, write, err := FilterConnectorToolsForRequester(ctx, reader, registry, f.task, names)
+	if err != nil || !reflect.DeepEqual(visible, names) || !reflect.DeepEqual(write, names) {
+		t.Fatalf("native readWrite: visible = %v write = %v err = %v", visible, write, err)
+	}
+	visible, write, err = FilterConnectorToolsForRequester(ctx, f.reader(shadow, f.connection(corev1alpha1.ConnectionModeReadOnly, true)), registry, f.task, names)
+	if err != nil || len(visible) != 0 || len(write) != 0 {
+		t.Fatalf("native readOnly: visible = %v write = %v err = %v", visible, write, err)
+	}
+	digests, err := FrozenConnectorToolDigests(ctx, reader, f.task.Namespace, names)
+	if err != nil || len(digests) != 1 || digests[acp.SandboxExecToolName] == "" {
+		t.Fatalf("native digests = %v err = %v", digests, err)
+	}
+	// Strict ACP planning must not load even a missing policy for the shadow.
+	shadow.Spec.HTTP.OutboundAccessPolicyRef.Name = "missing"
+	missing := f.reader(shadow)
+	if _, err := classifyConnectorTools(ctx, missing, registry, f.task.Namespace, names, connectorScope{builtins: true, strictPolicies: true}); err != nil {
+		t.Fatalf("ACP loaded the shadow's policy: %v", err)
+	}
+	if _, err := classifyConnectorTools(ctx, missing, registry, f.task.Namespace, names, connectorScope{strictPolicies: true}); err == nil {
+		t.Fatal("native custom Tool must still require its missing policy")
+	}
+}
+
+func TestAdjustInputsForConnectorToolsSkipsSandboxExec(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	shadow := f.writeTool.DeepCopy()
+	shadow.Name = acp.SandboxExecToolName
+	task := f.task.DeepCopy()
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
+		AllowedTools: []string{acp.SandboxExecToolName}, AllowBash: new(true),
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "tenant", UID: "agent-uid", Generation: 1},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCopilot, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
+		},
+	}
+	images := ACPRuntimeImages{Copilot: "docker.io/example/copilot@sha256:" + strings.Repeat("a", 64)}
+	baselinePlan, err := PlanACPRuntime(task, agent, images)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := buildRuntimeSessionMCPConfiguration(ctx, f.reader(), task, agent, baselinePlan.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"", corev1alpha1.ConnectionModeReadOnly, corev1alpha1.ConnectionModeReadWrite} {
+		t.Run("connection_"+mode, func(t *testing.T) {
+			extra := []ctrlclient.Object{shadow}
+			if mode != "" {
+				extra = append(extra, f.connection(mode, true))
+			}
+			reader := f.reader(extra...)
+			for _, provider := range []corev1alpha1.AgentRuntimeType{corev1alpha1.AgentRuntimeCopilot, "agentkit", "foundry"} {
+				planAgent := agent.DeepCopy()
+				planAgent.Spec.Runtime.Type = provider
+				adjustedTask, adjustedAgent, infos, err := adjustInputsForConnectorTools(ctx, reader, nil, task, planAgent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if adjustedTask != task || adjustedAgent != planAgent || len(infos) != 0 {
+					t.Fatalf("%s: runtime-local tool changed visibility, approvals, or classification: task = %+v agent = %+v infos = %v", provider, adjustedTask.Spec.AgentRuntime, adjustedAgent.Spec.Coordination, infos)
+				}
+				if provider != corev1alpha1.AgentRuntimeCopilot {
+					continue
+				}
+				plan, err := PlanACPRuntime(adjustedTask, adjustedAgent, images)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := buildRuntimeSessionMCPConfiguration(ctx, reader, adjustedTask, adjustedAgent, plan.Profile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if plan.Digest != baselinePlan.Digest || !reflect.DeepEqual(cfg, baseline) {
+					t.Fatalf("same-named Tool changed the runtime or MCP policy/digests: plan = %s cfg = %+v", plan.Digest, cfg)
+				}
+				if err := cfg.ValidateProfile(plan.Profile); err != nil {
+					t.Fatal(err)
+				}
+				frozen, infos, names, err := freezeRequesterConnectionsClassified(ctx, reader, nil, adjustedTask, cfg)
+				if err != nil || len(frozen) != 0 || len(infos) != 0 || len(names) != 0 {
+					t.Fatalf("runtime-local tool froze connector credentials: frozen = %+v infos = %v names = %v err = %v", frozen, infos, names, err)
+				}
+			}
+		})
 	}
 }

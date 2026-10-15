@@ -127,7 +127,7 @@ func (a externalACPAdapter) sessionProjection(request harnessv2.CreateRuntimeSes
 		return ProviderSessionProjection{}, fmt.Errorf("%s MCP policy configuration: %w", a.label, err)
 	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
-		if !descriptor.Source.Brokered() {
+		if !descriptor.Source.MCPServed() {
 			return ProviderSessionProjection{}, fmt.Errorf("%s ACP runtime forbids provider-native tool %q; tools must use the Orka session MCP server", a.label, descriptor.Name)
 		}
 	}

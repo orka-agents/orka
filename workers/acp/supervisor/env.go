@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -344,6 +345,9 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
+	if cfg.SandboxExec, err = sandboxExecConfigFromEnv(); err != nil {
+		return Config{}, err
+	}
 	if providerKind == providerKindFoundry {
 		// Remote Hosted Agent stop/delete must complete before settlement.
 		cfg.CancelGrace = foundryCleanupTimeout
@@ -454,10 +458,21 @@ func codexSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) {
+	strict := hyperlightOnlyCommandPolicy(request)
+	toolPolicy := request.MCPConfiguration.ToolPolicy
+	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) &&
+		(!strict || !acp.CodexHyperlightNativePolicy(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)) {
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
+	if strict {
+		config["notify"] = []string{}
+		config["features"] = map[string]any{
+			"shell_tool": false, "hooks": false, "plugins": false,
+			"multi_agent": false, "multi_agent_v2": false,
+			"code_mode": false, "code_mode_host": false,
+		}
+	}
 	if request.NativeRestore != nil {
 		// Do not inherit imported approval or sandbox settings during resume.
 		// This is a fail-closed fallback for both workspace intents. Every prompt
@@ -487,7 +502,17 @@ func codexSessionProjection(
 	// unconditionally by the controller, the supervisor owns the read-intent
 	// workspace so shell writes fail with EACCES, and the read-intent
 	// workspace delta classification fails any turn that modifies it anyway.
-	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
+	environment := map[string]string{"CODEX_CONFIG": string(encoded)}
+	if strict {
+		environment["ORKA_CODEX_HYPERLIGHT_ONLY"] = "1"
+	}
+	if sandboxExecGranted(toolPolicy) {
+		// codex-acp gives Orka's MCP server only its URL and headers, so Codex
+		// (0.160.0) would stop waiting for a tool call after 300 s. The patched
+		// adapter adds this as the server's tool_timeout_sec.
+		environment["ORKA_CODEX_MCP_TOOL_TIMEOUT_SEC"] = strconv.FormatInt(int64(acp.SandboxExecClientTimeout.Seconds()), 10)
+	}
+	return ProviderSessionProjection{Environment: environment}, nil
 }
 
 // codexBaseConfig is the Codex configuration every session starts from. The
@@ -561,11 +586,22 @@ func claudeSessionProjection(
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
+	if sandboxExecGranted(request.MCPConfiguration.ToolPolicy) {
+		// Claude Code (verified on 2.1.293) otherwise aborts an HTTP MCP call
+		// after 60 s without response headers, or 300 s without progress.
+		if environment == nil {
+			environment = map[string]string{}
+		}
+		timeout := strconv.FormatInt(acp.SandboxExecClientTimeout.Milliseconds(), 10)
+		environment["MCP_TOOL_TIMEOUT"] = timeout
+		environment["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"] = timeout
+	}
 	if !policy.unrestricted {
 		allowed, disallowed := providerNativePolicyLists(policy)
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
 	}
+	maps.Copy(options, claudeHyperlightCommandOptions(request))
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		meta["systemPrompt"] = systemPrompt
@@ -609,6 +645,9 @@ func copilotSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
+	if err := validateCopilotHyperlightCommandPolicy(request); err != nil {
+		return ProviderSessionProjection{}, err
+	}
 	if request.AgentConfiguration.SystemPrompt != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot exactly enforce Agent systemPrompt")
 	}
@@ -639,7 +678,7 @@ func copilotSessionProjection(
 		args = append(args, "--allow-tool=write")
 	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
-		if descriptor.Source.Brokered() {
+		if descriptor.Source.MCPServed() {
 			// This grants access only to the configured Orka MCP server. The
 			// proxy checks each call against its prompt grant and independently
 			// requires Orka approval evidence for approval-required tools.
@@ -927,7 +966,7 @@ func openCodeSessionConfig(
 		permissions[openCodeToolGrep] = openCodePermissionDeny
 		permissions[openCodeToolWrite] = openCodePermissionDeny
 	}
-	return json.Marshal(map[string]any{
+	config := map[string]any{
 		// Native ACP returns before background title inference settles. Titles
 		// must not consume prompt quota or outlive the governed prompt.
 		"agent":             map[string]any{"title": map[string]bool{"disable": true}},
@@ -965,14 +1004,19 @@ func openCodeSessionConfig(
 				},
 			},
 		},
-	})
+	}
+	if sandboxExecGranted(toolPolicy) {
+		// OpenCode (1.19.0) otherwise stops waiting for an MCP tool call after 60 s.
+		config["experimental"] = map[string]any{"mcp_timeout": acp.SandboxExecClientTimeout.Milliseconds()}
+	}
+	return json.Marshal(config)
 }
 
 func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]bool, error) {
 	permissions := make(map[string]bool)
 	owners := make(map[string]string)
 	for _, descriptor := range policy.Tools {
-		if !descriptor.Source.Brokered() {
+		if !descriptor.Source.MCPServed() {
 			continue
 		}
 		// OpenCode prefixes tools from the controller MCP server with `orka_`,

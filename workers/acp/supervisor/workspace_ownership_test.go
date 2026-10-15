@@ -1,6 +1,8 @@
 package supervisor
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/acp"
@@ -47,5 +49,30 @@ func TestDurableResumeTransitionAuthorized(t *testing.T) {
 	}
 	if !durableResumeTransitionAuthorized("github.com/O/Source", "abc", "github.com/o/source") {
 		t.Fatal("GitHub identities compare case-insensitively")
+	}
+}
+
+func TestSandboxSessionRootRejectsSupervisorIdentity(t *testing.T) {
+	root := t.TempDir()
+	server := &Server{cfg: Config{SandboxExec: &SandboxExecConfig{}}}
+	if err := server.protectSandboxSessionRoot(root, os.Geteuid(), os.Getegid()); err == nil {
+		t.Fatal("shared supervisor/session UID cannot protect the workspace parent")
+	}
+	// Disabled runtimes keep their existing ownership behavior.
+	server.cfg.SandboxExec = nil
+	if err := server.protectSandboxSessionRoot(root, os.Geteuid(), os.Getegid()); err != nil {
+		t.Fatalf("disabled sandbox changed session behavior: %v", err)
+	}
+}
+
+func TestSandboxSessionRootRejectsSymlink(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "session")
+	if err := os.Symlink(t.TempDir(), root); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{cfg: Config{SandboxExec: &SandboxExecConfig{}}}
+	if err := server.protectSandboxSessionRoot(root, os.Geteuid()+1, os.Getegid()+1); err == nil {
+		t.Fatal("a symlink was accepted as the protected session root")
 	}
 }
