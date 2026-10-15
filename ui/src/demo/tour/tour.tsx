@@ -1,0 +1,197 @@
+import { Link, useNavigate } from '@tanstack/react-router'
+import { ChevronDown, ChevronUp, Compass, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { useSendMessage } from '@/hooks/use-chat'
+import { useMediaQuery } from '@/hooks/use-media-query'
+import { cn } from '@/lib/utils'
+import { useChatStore } from '@/stores/chat'
+import { TOUR_STEPS, TOUR_STOPS, type TourStep } from './steps'
+import { useTourStore } from './store'
+
+/**
+ * From Tailwind's xl breakpoint the tour is a rail beside the page, below it a
+ * panel under the page. Either way it takes its own space, so it never covers
+ * the controls a step asks the visitor to use.
+ */
+const RAIL_MEDIA_QUERY = '(min-width: 1280px)'
+
+function useTour() {
+  const { step, goTo, close } = useTourStore()
+  const navigate = useNavigate()
+  const go = (index: number) => {
+    goTo(index)
+    const route = TOUR_STEPS[index]?.route
+    if (route) void navigate(route)
+  }
+  return { step, current: TOUR_STEPS[step], go, close }
+}
+
+function Progress({ step }: { step: TourStep }) {
+  const index = TOUR_STOPS.indexOf(step)
+  if (index < 0) return null
+  return (
+    <div className="flex items-center gap-3">
+      <span className="shrink-0 text-xs font-medium text-muted-foreground">
+        Step {index + 1} of {TOUR_STOPS.length}
+      </span>
+      <div className="flex flex-1 gap-1" aria-hidden="true">
+        {TOUR_STOPS.map((stop, i) => (
+          <span key={stop.title} className={cn('h-1 flex-1 rounded-full', i <= index ? 'bg-primary' : 'bg-muted')} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function StepBody({ step }: { step: TourStep }) {
+  const navigate = useNavigate()
+  const sendMessage = useSendMessage()
+  const streaming = useChatStore((s) => s.isStreaming)
+  return (
+    <div className="space-y-3">
+      <p aria-live="polite" className="text-sm leading-relaxed text-muted-foreground">{step.body}</p>
+      {step.prompts && (
+        <div className="flex flex-col gap-2">
+          {step.prompts.map((prompt) => (
+            <Button
+              key={prompt}
+              variant="outline"
+              size="sm"
+              className="h-auto justify-start whitespace-normal py-1.5 text-left"
+              disabled={streaming}
+              onClick={() => {
+                void navigate({ to: '/chat' })
+                void sendMessage(prompt)
+              }}
+            >
+              {prompt}
+            </Button>
+          ))}
+        </div>
+      )}
+      {step.links && (
+        <ul className="space-y-2">
+          {step.links.map((link) => (
+            <li key={link.label}>
+              <Link to={link.to} className="block rounded-md border border-border px-3 py-2 transition-colors hover:bg-accent">
+                <span className="text-sm font-medium">{link.label}</span>
+                <span className="block text-xs text-muted-foreground">{link.description}</span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function StepNav() {
+  const { step, go, close } = useTour()
+  if (step === 0) {
+    return (
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={close}>Explore on my own</Button>
+        <Button size="sm" onClick={() => go(1)}>Start the tour</Button>
+      </div>
+    )
+  }
+  const last = step === TOUR_STEPS.length - 1
+  return (
+    <div className="flex justify-between gap-2">
+      <Button variant="ghost" size="sm" onClick={() => go(step - 1)}>Back</Button>
+      {last
+        ? <Button size="sm" onClick={close}>Finish</Button>
+        : <Button size="sm" onClick={() => go(step + 1)}>Next</Button>}
+    </div>
+  )
+}
+
+function TourRail() {
+  const { current, close } = useTour()
+  return (
+    <aside aria-label="Demo tour" className="flex w-80 shrink-0 flex-col border-l border-border bg-card/80 backdrop-blur-md">
+      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
+        <span className="flex items-center gap-2 text-sm font-semibold">
+          <Compass className="h-4 w-4 text-primary" aria-hidden="true" />
+          Demo tour
+        </span>
+        <Button variant="ghost" size="icon-sm" onClick={close} aria-label="Close the tour">
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
+      <div className="flex-1 space-y-4 overflow-y-auto p-5">
+        <Progress step={current} />
+        <h2 className="text-base font-semibold">{current.title}</h2>
+        <StepBody step={current} />
+        <StepNav />
+      </div>
+    </aside>
+  )
+}
+
+function TourSheet() {
+  const { current, close } = useTour()
+  const { collapsed, setCollapsed } = useTourStore()
+  return (
+    <aside aria-label="Demo tour" className="shrink-0 border-t border-border bg-card px-4 py-3 md:px-6">
+      <div className="mx-auto max-w-3xl">
+        <div className="flex items-center gap-2">
+          <Compass className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+          <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{current.title}</h2>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setCollapsed(!collapsed)}
+            aria-label={collapsed ? 'Expand the tour' : 'Collapse the tour'}
+            aria-expanded={!collapsed}
+          >
+            {collapsed ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </Button>
+          <Button variant="ghost" size="icon-sm" onClick={close} aria-label="Close the tour">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        {!collapsed && (
+          <div className="mt-2 max-h-[45vh] space-y-3 overflow-y-auto">
+            <Progress step={current} />
+            <StepBody step={current} />
+            <StepNav />
+          </div>
+        )}
+      </div>
+    </aside>
+  )
+}
+
+/** The guided tour, placed by RootLayout in both slots; only the one for the current width renders. */
+export function TourPanel({ slot }: { slot: 'rail' | 'bottom' }) {
+  const open = useTourStore((s) => s.open)
+  const wide = useMediaQuery(RAIL_MEDIA_QUERY)
+  if (!open || (slot === 'rail') !== wide) return null
+  return slot === 'rail' ? <TourRail /> : <TourSheet />
+}
+
+/** Sidebar entry that (re)starts the tour. */
+export function TourLauncher({ collapsed, onSelect }: { collapsed: boolean; onSelect?: () => void }) {
+  const start = useTourStore((s) => s.start)
+  return (
+    <div className="border-t border-border p-2">
+      <button
+        type="button"
+        onClick={() => {
+          start()
+          onSelect?.()
+        }}
+        aria-label={collapsed ? 'Take the tour' : undefined}
+        title={collapsed ? 'Take the tour' : undefined}
+        className={cn(
+          'flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
+          collapsed && 'justify-center px-2',
+        )}
+      >
+        <Compass className="h-4 w-4 shrink-0" />
+        {!collapsed && <span>Take the tour</span>}
+      </button>
+    </div>
+  )
+}

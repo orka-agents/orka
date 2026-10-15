@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2 } from 'lucide-react'
@@ -26,6 +26,11 @@ const NAV_ITEMS = [
   { to: '/tools', label: 'Tools', icon: Wrench },
   { to: '/settings/connectors', label: 'Connectors', icon: Link2 },
 ] as const
+
+// The demo build's tour entry; other builds drop it (static mode check).
+const DemoTourLauncher = import.meta.env.MODE === 'demo'
+  ? lazy(() => import('@/demo/tour/tour').then((m) => ({ default: m.TourLauncher })))
+  : null
 
 export function Sidebar() {
   const location = useLocation()
@@ -171,6 +176,11 @@ export function Sidebar() {
           )
         })}
       </nav>
+      {DemoTourLauncher && (
+        <Suspense fallback={null}>
+          <DemoTourLauncher collapsed={sidebarCollapsed} onSelect={() => { if (overlayOpen) closeOverlay() }} />
+        </Suspense>
+      )}
     </aside>
     </>
   )
