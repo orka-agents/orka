@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -31,6 +32,39 @@ func TestCodexMCPInterruptedOutputOmitsUnsupportedProgress(t *testing.T) {
 	last := listed.Events[len(listed.Events)-1]
 	if last.Truncation == nil || !last.Truncation.ContentTextTruncated || last.ContentText != "" {
 		t.Fatal("interrupted tool stream lost its omission metadata")
+	}
+}
+
+func TestCodexMCPInterruptedOutputOmitsInvalidStart(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		t.Run("tracking-full="+strconv.FormatBool(full), func(t *testing.T) {
+			pipeline := codexMCPOutputTestPipeline(t)
+			start, _, _ := codexMCPOutputFixture(t)
+			if full {
+				pipeline.prompt.codexCompletedOutput.calls = make(map[string]codexCommandOutputCall)
+				for index := range harnessv2.MaxRuntimeSessionTombstoneOperations {
+					pipeline.prompt.codexCompletedOutput.calls["earlier-"+strconv.Itoa(index)] = codexCommandOutputCall{}
+				}
+			}
+			start["content"] = []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "unsupported-start-report"}}}
+			delete(start, "rawOutput")
+			mapped := pipeline.update(t, start)
+			if mapped == nil || !mapped.Update.ToolCall.ContentOmitted || mapped.Update.ToolCall.ContentReplace || len(mapped.Update.ToolCall.Content) != 0 {
+				t.Error("invalid MCP start retained unsupported content before interruption")
+			}
+			// End the prompt before a completion could replace or omit output.
+			if err := pipeline.journal.AppendBufferedStreamsIfNew(context.Background(), nil, 0, "", false); err != nil {
+				t.Fatal(err)
+			}
+			listed, body := pipeline.events(t)
+			if strings.Contains(body, "unsupported-start-report") || len(listed.Events) == 0 {
+				t.Fatal("interrupted prompt published unsupported MCP start content")
+			}
+			last := listed.Events[len(listed.Events)-1]
+			if last.Truncation == nil || !last.Truncation.ContentTextTruncated || last.ContentText != "" {
+				t.Fatal("interrupted invalid start lost its output omission marker")
+			}
+		})
 	}
 }
 

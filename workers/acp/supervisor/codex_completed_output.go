@@ -81,12 +81,19 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 			return
 		}
 		if len(n.calls) >= harnessv2.MaxRuntimeSessionTombstoneOperations {
+			if codexMCPOutputStart(envelope) {
+				omitCodexOutput(mapped.ToolCall)
+			}
 			return
 		}
 		if n.calls == nil {
 			n.calls = make(map[string]codexCommandOutputCall)
 		}
-		n.calls[id] = newCodexOutputCall(envelope, identity)
+		call := newCodexOutputCall(envelope, identity)
+		n.calls[id] = call
+		if call.invalid {
+			omitCodexOutput(mapped.ToolCall)
+		}
 		return
 	}
 	if envelope.SessionUpdate != acpUpdateToolCallUpdate {
