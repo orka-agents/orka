@@ -394,7 +394,7 @@ export const slices: ReviewSlice[] = [
 type FindingSeed = Omit<SecurityFinding, 'namespace' | 'fingerprint' | 'createdAt' | 'updatedAt' | 'id'> & { createdAgo: number; updatedAgo?: number; key: string }
 
 /** Stable finding ID for a fixture key. */
-const findingID = (key: string) => `fnd_${digest(`finding:${key}`, 12)}`
+export const findingID = (key: string) => `fnd_${digest(`finding:${key}`, 12)}`
 
 function finding(seed: FindingSeed): SecurityFinding {
   const { createdAgo, updatedAgo, key, ...rest } = seed

@@ -106,7 +106,8 @@ reload. The mode check is static, so `bun run build` contains none of it.
 
 A guided tour (`src/demo/tour/`) opens on a visitor's first visit and from **Take the tour**
 in the sidebar. It follows one incident Task through its trace and approval, then visits
-Chat, a repository monitor and Usage. Its steps name sample objects, and
+Chat, a repository monitor and Usage; visitors who keep going also see a security finding,
+the Slack gateway and the runtime pools. Its steps name sample objects, and
 `src/demo/tour/steps.test.ts` fails if they are renamed or the incident stops waiting on its
 approval.
 

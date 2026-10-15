@@ -1,25 +1,28 @@
-import type { LinkProps, NavigateOptions } from '@tanstack/react-router'
+import type { NavigateOptions } from '@tanstack/react-router'
+import { findingID } from '../data/security'
 
-export interface TourLink {
-  label: string
-  description: string
-  to: LinkProps['to']
-}
+export type TourPart = 'basics' | 'more'
 
 export interface TourStep {
   title: string
   body: string
-  /** The page this step shows. The welcome and closing steps leave the visitor where they are. */
+  /** The page this step shows. The welcome, checkpoint and closing steps leave the visitor where they are. */
   route?: NavigateOptions
+  /** Which part of the tour this stop belongs to; progress counts stops within it. */
+  part?: TourPart
   /** Chat prompts the visitor can send from the step. */
   prompts?: string[]
-  /** Pages to explore after the tour. */
-  links?: TourLink[]
+  /** The end of the basics, where the visitor can finish or keep going. */
+  checkpoint?: boolean
 }
 
 /** The incident Task the tour follows; it waits on a rollback approval when the demo loads. */
 export const INCIDENT_TASK = 'checkout-latency-investigation-7k2qp'
 export const TOUR_MONITOR = 'checkout-service'
+/** The critical finding whose patch is pull request #1486, the one the chat stop offers to review. */
+export const TOUR_FINDING = findingID('checkout-refund-idor')
+/** The gateway that created the incident Task from a Slack message. */
+export const TOUR_GATEWAY = 'slack-northwind'
 
 const incident = (tab?: string): NavigateOptions => ({
   to: '/tasks/$taskId',
@@ -30,7 +33,8 @@ const incident = (tab?: string): NavigateOptions => ({
 /**
  * One story through the dashboard: an agent works an incident, its trace shows
  * what it did, a person approves the risky step, and then the ways work starts
- * and what it costs. The rest is listed at the end rather than toured.
+ * and what it costs. Security, gateways and runtimes follow for visitors who
+ * keep going; the rest of the sidebar is left to explore.
  */
 export const TOUR_STEPS: TourStep[] = [
   {
@@ -41,43 +45,67 @@ export const TOUR_STEPS: TourStep[] = [
     title: 'An agent handles an incident',
     body: 'Checkout latency spiked in production. Someone asked for help in the #incidents Slack channel, and Orka started this Task for the incident-responder agent. All work in Orka is a Task with a phase, events, logs and a result.',
     route: incident(),
+    part: 'basics',
   },
   {
     title: 'See what it did',
     body: 'The Trace tab lists every model request and tool call in order. The agent read latency and error rates from Datadog, found the merged pull request that shrank the database connection pool, and posted its findings to PagerDuty and Slack.',
     route: incident('trace'),
+    part: 'basics',
   },
   {
     title: 'You make the call',
     body: 'Risky steps wait for a person. The agent wants to roll production back, and the Task stays paused until someone decides. Approve or decline it: either way the agent carries on and finishes about a minute later.',
     route: incident('approvals'),
+    part: 'basics',
   },
   {
     title: 'Ask for work in chat',
     body: 'Chat is the quickest way to start work. Ask in plain language: the assistant answers from the cluster and starts Tasks for you. Try one of these:',
     route: { to: '/chat' },
+    part: 'basics',
     prompts: ["What's running right now?", 'Review PR #1486 in checkout-service'],
   },
   {
     title: 'Monitors find work on their own',
     body: 'A repository monitor watches checkout-service on GitHub. It implements issues labeled for Orka, reviews new pull requests and repairs failing ones, each as a Task. Right now it is fixing issue #2214.',
     route: { to: '/monitors/$monitorId', params: { monitorId: TOUR_MONITOR } },
+    part: 'basics',
   },
   {
     title: 'See what each change cost',
     body: 'Usage follows model tokens from the original issue through review to the merged pull request, so you see how many tokens each shipped change took, including attempts that failed along the way.',
     route: { to: '/usage' },
+    part: 'basics',
   },
   {
-    title: "That's the tour",
-    body: 'Keep exploring on your own. You can reopen this tour from Take the tour in the sidebar.',
-    links: [
-      { label: 'Security', description: 'Findings from scan agents, with evidence and fixes', to: '/security' },
-      { label: 'Gateways', description: 'Slack and GitHub conversations that start Tasks', to: '/gateways' },
-      { label: 'Runtimes', description: 'The agent runtimes Tasks run on', to: '/runtimes' },
-    ],
+    title: "That's the basics",
+    body: 'Finish here, or keep going for three more stops: security findings, the gateways that bring in Slack and GitHub, and the runtimes agents run on.',
+    checkpoint: true,
+  },
+  {
+    title: 'Agents find and fix vulnerabilities',
+    body: "Security scans run agents over each repository and report findings with evidence. This one lets a merchant refund another merchant's payment. An agent reproduced it to confirm it, then wrote a patch and opened it as pull request #1486, the one chat offered to review.",
+    route: { to: '/security/findings/$findingId', params: { findingId: TOUR_FINDING } },
+    part: 'more',
+  },
+  {
+    title: 'Gateways bring in Slack and GitHub',
+    body: 'A gateway connects a chat or code platform to agents. This Slack gateway turned the #incidents message into the incident Task from the start of the tour. Its event timeline shows each message: accepted, queued behind a running turn, or rejected because the sender is not allowed.',
+    route: { to: '/gateways/$gatewayId', params: { gatewayId: TOUR_GATEWAY } },
+    part: 'more',
+  },
+  {
+    title: 'Where agents run',
+    body: 'Coding agents such as Claude Code, Codex, Copilot and OpenCode run in runtime pools that Orka manages. Each pool is pinned to an exact image, drains its sessions before an upgrade replaces it, and scales to zero when idle. Agents hosted elsewhere register under External runtimes.',
+    route: { to: '/runtimes' },
+    part: 'more',
+  },
+  {
+    title: "That's the full tour",
+    body: 'The sidebar has the rest: agents and tools, chat sessions, and the board and live views of running work. You can reopen this tour from Take the tour in the sidebar.',
   },
 ]
 
-/** Steps that show a page, which the progress indicator counts. */
-export const TOUR_STOPS = TOUR_STEPS.filter((step) => step.route)
+/** The stops in one part of the tour, which its progress indicator counts. */
+export const stopsIn = (part: TourPart) => TOUR_STEPS.filter((step) => step.part === part)

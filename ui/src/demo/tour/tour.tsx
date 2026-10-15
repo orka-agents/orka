@@ -1,11 +1,11 @@
-import { Link, useNavigate } from '@tanstack/react-router'
+import { useNavigate } from '@tanstack/react-router'
 import { ChevronDown, ChevronUp, Compass, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useSendMessage } from '@/hooks/use-chat'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '@/stores/chat'
-import { TOUR_STEPS, TOUR_STOPS, type TourStep } from './steps'
+import { stopsIn, TOUR_STEPS, type TourStep } from './steps'
 import { useTourStore } from './store'
 
 /**
@@ -27,15 +27,16 @@ function useTour() {
 }
 
 function Progress({ step }: { step: TourStep }) {
-  const index = TOUR_STOPS.indexOf(step)
-  if (index < 0) return null
+  if (!step.part) return null
+  const stops = stopsIn(step.part)
+  const index = stops.indexOf(step)
   return (
     <div className="flex items-center gap-3">
       <span className="shrink-0 text-xs font-medium text-muted-foreground">
-        Step {index + 1} of {TOUR_STOPS.length}
+        {step.part === 'more' && 'More: '}Step {index + 1} of {stops.length}
       </span>
       <div className="flex flex-1 gap-1" aria-hidden="true">
-        {TOUR_STOPS.map((stop, i) => (
+        {stops.map((stop, i) => (
           <span key={stop.title} className={cn('h-1 flex-1 rounded-full', i <= index ? 'bg-primary' : 'bg-muted')} />
         ))}
       </div>
@@ -69,18 +70,6 @@ function StepBody({ step }: { step: TourStep }) {
           ))}
         </div>
       )}
-      {step.links && (
-        <ul className="space-y-2">
-          {step.links.map((link) => (
-            <li key={link.label}>
-              <Link to={link.to} className="block rounded-md border border-border px-3 py-2 transition-colors hover:bg-accent">
-                <span className="text-sm font-medium">{link.label}</span>
-                <span className="block text-xs text-muted-foreground">{link.description}</span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   )
 }
@@ -95,13 +84,17 @@ function StepNav() {
       </div>
     )
   }
+  const { checkpoint } = TOUR_STEPS[step]
   const last = step === TOUR_STEPS.length - 1
   return (
     <div className="flex justify-between gap-2">
       <Button variant="ghost" size="sm" onClick={() => go(step - 1)}>Back</Button>
-      {last
-        ? <Button size="sm" onClick={close}>Finish</Button>
-        : <Button size="sm" onClick={() => go(step + 1)}>Next</Button>}
+      <div className="flex gap-2">
+        {checkpoint && <Button variant="ghost" size="sm" onClick={close}>Finish</Button>}
+        {last
+          ? <Button size="sm" onClick={close}>Finish</Button>
+          : <Button size="sm" onClick={() => go(step + 1)}>{checkpoint ? 'Keep going' : 'Next'}</Button>}
+      </div>
     </div>
   )
 }

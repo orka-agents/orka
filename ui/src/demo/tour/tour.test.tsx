@@ -12,7 +12,7 @@ vi.mock('@tanstack/react-router', async () => ({
 
 vi.mock('@/hooks/use-chat', () => ({ useSendMessage: () => mockSend }))
 
-import { TOUR_STEPS, TOUR_STOPS, INCIDENT_TASK } from './steps'
+import { INCIDENT_TASK, stopsIn, TOUR_FINDING, TOUR_STEPS } from './steps'
 import { useTourStore } from './store'
 import { TourLauncher, TourPanel } from './tour'
 
@@ -64,7 +64,7 @@ describe('demo tour', () => {
     render(<TourPanel slot="bottom" />)
     fireEvent.click(screen.getByRole('button', { name: 'Start the tour' }))
     expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: INCIDENT_TASK }, search: {} })
-    expect(screen.getByText(`Step 1 of ${TOUR_STOPS.length}`)).toBeInTheDocument()
+    expect(screen.getByText(`Step 1 of ${stopsIn('basics').length}`)).toBeInTheDocument()
 
     next()
     expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: INCIDENT_TASK }, search: { tab: 'trace' } })
@@ -83,13 +83,27 @@ describe('demo tour', () => {
     expect(mockSend).toHaveBeenCalledWith('Review PR #1486 in checkout-service')
   })
 
-  it('finishes on the closing step and remembers it', () => {
-    useTourStore.setState({ step: TOUR_STEPS.length - 1 })
+  it('lets the visitor finish after the basics', () => {
+    useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.checkpoint) })
     render(<TourPanel slot="bottom" />)
-    expect(screen.getByRole('link', { name: /Security/ })).toHaveAttribute('href', '/security')
     fireEvent.click(screen.getByRole('button', { name: 'Finish' }))
     expect(useTourStore.getState().open).toBe(false)
     expect(localStorage.getItem(seenKey)).not.toBeNull()
+  })
+
+  it('keeps going past the basics into security, gateways and runtimes', () => {
+    useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.checkpoint) })
+    render(<TourPanel slot="bottom" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Keep going' }))
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/security/findings/$findingId', params: { findingId: TOUR_FINDING } })
+    expect(screen.getByText(`More: Step 1 of ${stopsIn('more').length}`)).toBeInTheDocument()
+    next()
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/gateways/$gatewayId', params: { gatewayId: 'slack-northwind' } })
+    next()
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/runtimes' })
+    next()
+    fireEvent.click(screen.getByRole('button', { name: 'Finish' }))
+    expect(useTourStore.getState().open).toBe(false)
   })
 
   it('folds the narrow-screen panel to its title', () => {
