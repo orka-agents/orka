@@ -5,7 +5,8 @@ ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.sum ./
 COPY test/fixtures/fakeforge ./test/fixtures/fakeforge
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /fakeforge ./test/fixtures/fakeforge/cmd
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /fakeforge ./test/fixtures/fakeforge/cmd
 
 # The forge serves Git smart HTTP through the git binary's http-backend.
 FROM docker.io/library/debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818

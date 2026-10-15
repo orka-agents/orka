@@ -5,7 +5,8 @@ ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.sum ./
 COPY test/fixtures/aimockcapture ./test/fixtures/aimockcapture
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /capture ./test/fixtures/aimockcapture/cmd
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /capture ./test/fixtures/aimockcapture/cmd
 FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7
 COPY --from=builder /capture /capture
 USER 65532:65532
