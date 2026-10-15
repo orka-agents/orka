@@ -23,36 +23,46 @@ permissions:
 
 jobs:
   test-e2e:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.name }} (${{ matrix.part }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.job_timeout }}
     strategy:
       fail-fast: false
       matrix:
+        lane: [general, agent-runtime]
+        # Each lane runs as two jobs with their own clusters: part 1 runs the
+        # spec files that match split, and part 2 runs the rest.
+        part: [1, 2]
         include:
-          - name: Run on Ubuntu
-            suite: general
+          - lane: general
+            name: Run on Ubuntu
             cluster: orka-test-e2e
             labels: "!agent-runtime"
+            # About half of the lane's spec time.
+            split: '/(scheduled_task|coordination_advanced|fake_forge)_test\.go'
             idle_ttl: 5s
-            # The go test timeout also covers BeforeSuite's ~21m image build;
-            # passing runs already take up to ~50m in total.
-            job_timeout: 80
-            test_timeout: 65m
+            # The go test timeout also covers BeforeSuite's image build;
+            # passing runs take about 30m in total.
+            job_timeout: 60
+            test_timeout: 45m
           # The built-in runtime lifecycle specs restart the controller and
           # park, replace, and scale RuntimePools, so they get their own
           # cluster.
-          - name: Agent runtime lifecycle
-            suite: agent-runtime
+          - lane: agent-runtime
+            name: Agent runtime lifecycle
             cluster: orka-test-e2e-agent-runtime
             labels: agent-runtime
+            # One Ordered container with about 60% of the lane's spec time.
+            split: '/agent_runtime_lifecycle_test\.go'
             idle_ttl: 15m
-            job_timeout: 90
-            test_timeout: 75m
+            job_timeout: 75
+            test_timeout: 60m
     env:
       KIND_CLUSTER: ${{ matrix.cluster }}
-      E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/${{ matrix.suite }}
+      E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/${{ matrix.lane }}-${{ matrix.part }}
       E2E_GINKGO_LABEL_FILTER: ${{ matrix.labels }}
+      E2E_GINKGO_FOCUS_FILE: ${{ matrix.part == 1 && matrix.split || '' }}
+      E2E_GINKGO_SKIP_FILE: ${{ matrix.part == 2 && matrix.split || '' }}
       E2E_ACP_IDLE_POOL_TTL: ${{ matrix.idle_ttl }}
       E2E_GO_TEST_TIMEOUT: ${{ matrix.test_timeout }}
     steps:
@@ -103,7 +113,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-cleanup-evidence-${{ matrix.suite }}
+          name: e2e-cleanup-evidence-${{ matrix.lane }}-${{ matrix.part }}
           path: ${{ env.E2E_CLEANUP_REPORT_DIR }}/
           if-no-files-found: error
           retention-days: 7

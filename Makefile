@@ -180,6 +180,11 @@ E2E_GINKGO_FOCUS ?=
 E2E_GINKGO_FOCUS_ARG = $(if $(E2E_GINKGO_FOCUS),-ginkgo.focus="$(E2E_GINKGO_FOCUS)",)
 E2E_GINKGO_LABEL_FILTER ?=
 E2E_GINKGO_LABEL_FILTER_ARG = $(if $(E2E_GINKGO_LABEL_FILTER),-ginkgo.label-filter="$(E2E_GINKGO_LABEL_FILTER)",)
+# Regular expressions matched against spec file paths, without "$" or ":".
+E2E_GINKGO_FOCUS_FILE ?=
+E2E_GINKGO_FOCUS_FILE_ARG = $(if $(E2E_GINKGO_FOCUS_FILE),-ginkgo.focus-file="$(E2E_GINKGO_FOCUS_FILE)",)
+E2E_GINKGO_SKIP_FILE ?=
+E2E_GINKGO_SKIP_FILE_ARG = $(if $(E2E_GINKGO_SKIP_FILE),-ginkgo.skip-file="$(E2E_GINKGO_SKIP_FILE)",)
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -202,7 +207,8 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 
 .PHONY: test-e2e-run
 test-e2e-run: ## Run only the e2e suite on an existing Kind cluster: no regeneration, fmt, vet, or teardown.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG)
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG) \
+		$(E2E_GINKGO_FOCUS_FILE_ARG) $(E2E_GINKGO_SKIP_FILE_ARG)
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
