@@ -779,6 +779,113 @@ func FinalizeSessionOwnership(root string, uid, gid int) error {
 	return assignSessionOwnership(entries, uid, gid, os.Chmod, os.Lchown)
 }
 
+// ProtectReadOnlySessionWorkspace removes the child's write access to a
+// read-intent workspace. It runs after FinalizeSessionOwnership: the supervisor
+// takes back the workspace tree and, when the workspace lives inside the
+// session root, the root itself, so the child can neither modify the tree nor
+// rename it aside. The child's unique group keeps read and search access, which
+// no other child identity shares. Directory modes need no baseline preparation:
+// ownership reclaim resets them to 0700 before every validation.
+//
+// Like FinalizeSessionOwnership, it is a no-op for a non-root supervisor whose
+// child runs under the supervisor's own identity. That development and test
+// mode has no filesystem isolation to establish: the child could restore any
+// permission the supervisor removed. Read-intent delta validation remains its
+// enforcement. Managed runtime Pods always run the supervisor as root.
+func ProtectReadOnlySessionWorkspace(paths SessionPaths, uid, gid int) error {
+	root := filepath.Clean(strings.TrimSpace(paths.Root))
+	workspace := filepath.Clean(strings.TrimSpace(paths.Workspace))
+	if !filepath.IsAbs(root) || !filepath.IsAbs(workspace) || uid <= 0 || gid <= 0 {
+		return fmt.Errorf("absolute session paths and non-root UID/GID are required")
+	}
+	if os.Geteuid() != 0 {
+		if uid == os.Getuid() && gid == os.Getgid() {
+			return nil
+		}
+		return fmt.Errorf("non-root supervisor cannot protect a read-only workspace")
+	}
+	return protectReadOnlySessionWorkspace(root, workspace, os.Geteuid(), gid, os.Lchown, os.Chmod)
+}
+
+func protectReadOnlySessionWorkspace(
+	root, workspace string,
+	supervisorUID, gid int,
+	lchown func(string, int, int) error,
+	chmod func(string, os.FileMode) error,
+) error {
+	if strings.HasPrefix(workspace, root+string(filepath.Separator)) {
+		// The child owns every other entry under the root, but must not own the
+		// workspace's parent: that would let it rename the workspace aside.
+		if err := lchown(root, supervisorUID, gid); err != nil {
+			return fmt.Errorf("protect session root: %w", err)
+		}
+		if err := chmod(root, 0o710); err != nil {
+			return fmt.Errorf("chmod protected session root: %w", err)
+		}
+	}
+	// Parents are protected before WalkDir descends into the child-owned tree.
+	return filepath.WalkDir(workspace, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := lchown(path, supervisorUID, gid); err != nil {
+			return fmt.Errorf("protect workspace path: %w", err)
+		}
+		switch {
+		case entry.IsDir():
+			if err := chmod(path, 0o750); err != nil {
+				return fmt.Errorf("chmod protected workspace directory: %w", err)
+			}
+		case entry.Type().IsRegular():
+			// Normally a no-op after PrepareReadOnlyWorkspaceModes; any file it
+			// still changes differs from the baseline and fails validation.
+			return applyReadOnlyWorkspaceFileMode(path, entry, chmod)
+		}
+		return nil
+	})
+}
+
+// PrepareReadOnlyWorkspaceModes applies the read-only file modes to a
+// supervisor-owned workspace before its baseline is captured. Workspace
+// validation compares exact modes for protected paths and ownership reclaim
+// does not restore file modes, so the baseline must already record the modes
+// ProtectReadOnlySessionWorkspace leaves behind.
+func PrepareReadOnlyWorkspaceModes(workspace string) error {
+	workspace = filepath.Clean(strings.TrimSpace(workspace))
+	if !filepath.IsAbs(workspace) {
+		return fmt.Errorf("absolute workspace path is required")
+	}
+	return filepath.WalkDir(workspace, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		return applyReadOnlyWorkspaceFileMode(path, entry, os.Chmod)
+	})
+}
+
+func applyReadOnlyWorkspaceFileMode(path string, entry os.DirEntry, chmod func(string, os.FileMode) error) error {
+	info, err := entry.Info()
+	if err != nil {
+		return fmt.Errorf("inspect protected workspace file: %w", err)
+	}
+	if mode := readOnlyWorkspaceFileMode(info.Mode().Perm()); mode != info.Mode().Perm() {
+		if err := chmod(path, mode); err != nil {
+			return fmt.Errorf("chmod protected workspace file: %w", err)
+		}
+	}
+	return nil
+}
+
+// readOnlyWorkspaceFileMode grants the child's group read access, and execute
+// access for owner-executable files, and drops every group and other write bit.
+func readOnlyWorkspaceFileMode(perm os.FileMode) os.FileMode {
+	mode := perm&^0o022 | 0o040
+	if perm&0o100 != 0 {
+		mode |= 0o010
+	}
+	return mode
+}
+
 // ReclaimSessionOwnership returns a frozen session tree to the supervisor so it
 // can validate workspace state without requiring DAC_OVERRIDE. Parent
 // directories are reclaimed before WalkDir descends into their children.

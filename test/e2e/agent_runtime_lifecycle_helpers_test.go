@@ -380,17 +380,19 @@ func taskSessionIdentity(g Gomega, name string) (string, int64) {
 }
 
 // runtimeSessionProcessesScript prints the owner of one RuntimeSession's
-// private tree, then the status of every process in the runtime container.
+// private home, then the status of every process in the runtime container.
+// The home stays child-owned even when a read-intent workspace protects the
+// session root and workspace.
 const runtimeSessionProcessesScript = `set -- /sessions/session-"$1"-*
 if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then echo "no single RuntimeSession tree $1" >&2; exit 3; fi
-echo "Owner: $(stat -c %u "$1")"
+echo "Owner: $(stat -c %u "$1/home")"
 cat /proc/[0-9]*/status 2>/dev/null
 exit 0`
 
 // runtimeSessionAdapters returns the PIDs of the adapters the supervisor (PID
 // 1 in the runtime container) runs for RuntimeSession uid/generation. The
 // supervisor starts each adapter as the leader of its own process group under
-// the session's private UID, which also owns the session's private tree.
+// the session's private UID, which also owns the session's private home.
 func runtimeSessionAdapters(g Gomega, snapshot runtimePoolSnapshot, uid string, generation int64) []int {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%s:%d", uid, generation))
 	output, err := utils.Run(exec.Command("kubectl", "exec", "-n", snapshot.PodNamespace, snapshot.PodName,
@@ -398,12 +400,12 @@ func runtimeSessionAdapters(g Gomega, snapshot runtimePoolSnapshot, uid string, 
 	g.Expect(err).NotTo(HaveOccurred())
 	owner, adapters, err := parseRuntimeSessionAdapters(output)
 	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(owner).NotTo(BeElementOf("", "0"), "RuntimeSession %s generation %d has no child-owned tree", uid, generation)
+	g.Expect(owner).NotTo(BeElementOf("", "0"), "RuntimeSession %s generation %d has no child-owned home", uid, generation)
 	return adapters
 }
 
 // parseRuntimeSessionAdapters reads runtimeSessionProcessesScript output: the
-// tree owner, then the processes that are children of PID 1, run as that
+// home owner, then the processes that are children of PID 1, run as that
 // owner, and lead their own process group.
 func parseRuntimeSessionAdapters(output string) (string, []int, error) {
 	owner := ""

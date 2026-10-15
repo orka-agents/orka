@@ -95,9 +95,15 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 	call, exists := n.calls[id]
 	if !exists {
 		n.invalidate(id)
+		// A full table cannot retain the pre-start tombstone. Withhold
+		// output rather than letting an untrackable call use the fallback.
+		if _, retained := n.calls[id]; !retained {
+			omitCodexOutput(mapped.ToolCall)
+			return
+		}
 	}
 	if !exists || call.kind == codexCommandOutputUnknown {
-		if !mapped.ToolCall.ContentReplace && len(mapped.ToolCall.Content) == 0 {
+		if call.invalid || identity.codexMCP || (!mapped.ToolCall.ContentReplace && len(mapped.ToolCall.Content) == 0) {
 			omitCodexOutput(mapped.ToolCall)
 		}
 		return

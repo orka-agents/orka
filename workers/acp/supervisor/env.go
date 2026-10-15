@@ -484,9 +484,9 @@ func codexSessionProjection(
 	// own sandbox needs unprivileged user namespaces that the runtime Pod
 	// forbids, so the RuntimeSession boundary enforces the surface instead —
 	// safe read commands execute, every elevation request is rejected
-	// unconditionally by the controller, file writes are mediated by the
-	// supervisor, and the read-intent workspace delta classification fails
-	// any turn that modifies the workspace.
+	// unconditionally by the controller, the supervisor owns the read-intent
+	// workspace so shell writes fail with EACCES, and the read-intent
+	// workspace delta classification fails any turn that modifies it anyway.
 	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
 }
 

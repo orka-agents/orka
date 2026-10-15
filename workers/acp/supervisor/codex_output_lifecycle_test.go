@@ -209,6 +209,41 @@ func TestCodexOutputLifecycleBoundsPreStartTombstones(t *testing.T) {
 	assertCodexLifecycleOutputOmitted(t, pipeline, pipeline.update(t, complete))
 }
 
+func TestCodexOutputLifecycleInvalidCallsWithholdStandardContent(t *testing.T) {
+	for _, kind := range []string{"read", "search", "mcp"} {
+		for _, history := range []string{"mapped pre-start", "suppressed pre-start", "tracking overflow"} {
+			t.Run(kind+"/"+history, func(t *testing.T) {
+				pipeline, start, complete := codexLifecycleFixture(t, kind)
+				if history == "tracking overflow" {
+					pipeline.prompt.codexCompletedOutput.calls = make(map[string]codexCommandOutputCall)
+					for index := range harnessv2.MaxRuntimeSessionTombstoneOperations {
+						pipeline.prompt.codexCompletedOutput.calls["previous-"+strconv.Itoa(index)] = codexCommandOutputCall{}
+					}
+				} else {
+					before := map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": start["toolCallId"]}
+					if history == "mapped pre-start" {
+						before["status"] = "in_progress"
+					}
+					mapped := pipeline.update(t, before)
+					if history == "mapped pre-start" {
+						assertCodexLifecycleOutputOmitted(t, pipeline, mapped)
+					} else if mapped != nil {
+						t.Fatal("suppressed pre-start frame fabricated a public event")
+					}
+				}
+				pipeline.update(t, start)
+				complete["content"] = []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "lifecycle-private-output"}}}
+				if kind == "mcp" {
+					delete(complete, "rawOutput")
+				} else {
+					complete["rawOutput"] = map[string]any{"exit_code": 0}
+				}
+				assertCodexLifecycleOutputOmitted(t, pipeline, pipeline.update(t, complete))
+			})
+		}
+	}
+}
+
 func TestCodexOutputLifecycleInvalidatesEveryAmbiguousID(t *testing.T) {
 	for _, routing := range []string{"mapped", "suppressed", "other mapped kind"} {
 		for _, alias := range []string{"toolCallId", "TOOLCALLID"} {
