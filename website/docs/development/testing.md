@@ -415,11 +415,14 @@ rotation, lost responses, source identity changes, reference races, and explicit
 recovery. Tests do not supply fork-only lifecycle preconditions.
 
 The ACP file scenario uses the real Codex runtime with a deterministic Responses
-fixture. It writes a file, exports a checkpoint, changes and deletes the source
-workspace, then restores the checkpoint and checks the original bytes through a
-shell read. The fixture requires successful tool output from the current turn.
-The file Tasks retain read-only intent, so the suite requires successful
-execution and `ReadOnlyWorkspaceModified` delivery rejection. The workflow also
+fixture. The file Tasks have read-only intent, so each one runs a shell probe
+that must find no canary file and be denied creating one. The scenario probes,
+exports a checkpoint, probes again in the same session, deletes the source
+workspace, then restores the checkpoint and probes the restored workspace. The
+fixture requires successful probe output from the current turn, and the suite
+requires successful execution and `ReadValidated` delivery. Because read-intent
+Tasks cannot write, this scenario does not compare file bytes across a
+checkpoint. The workflow also
 runs a Linux regression as root to verify durable file ownership after session
 deletion, drain, and supervisor shutdown.
 
