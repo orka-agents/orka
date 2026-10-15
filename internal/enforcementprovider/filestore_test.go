@@ -1,10 +1,21 @@
 package enforcementprovider
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestFileStoreRejectsVersionWithoutDurableDescriptor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "enforcement.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"attempts":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewFileStore(path); err == nil {
+		t.Fatal("accepted obsolete enforcement store schema")
+	}
+}
 
 func TestFileStoreRestartPreservesReleaseObligation(t *testing.T) {
 	p, trust, a := newSynthetic(t)

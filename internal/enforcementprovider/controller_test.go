@@ -72,3 +72,36 @@ func TestControllerStartupFailurePreventsReadiness(t *testing.T) {
 		t.Fatal("unready controller released work")
 	}
 }
+
+func TestControllerRetriesExactAdmittedAuthorizationAfterExpiry(t *testing.T) {
+	provider, trust, authorization := newSynthetic(t)
+	admittedAt := time.Now().UTC()
+	authorization.IssuedAt = admittedAt.Add(-time.Second)
+	authorization.NotBefore = admittedAt.Add(-time.Second)
+	authorization.ExpiresAt = admittedAt.Add(time.Second)
+	provider.a = authorization
+	provider.d.ExpiresAt = admittedAt.Add(time.Hour)
+	SignDescriptor(&provider.d, provider.priv)
+	provider.p.ExpiresAt = admittedAt.Add(time.Hour)
+	SignProof(&provider.p, provider.priv)
+	now := admittedAt
+	controller, err := NewController(filepath.Join(t.TempDir(), "controller.json"), provider, trust, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = controller.Start(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := controller.Hold(authorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = admittedAt.Add(2 * time.Second)
+	retried, err := controller.Hold(authorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Phase != PhaseProofIssued || retried.Version != first.Version {
+		t.Fatalf("retry changed admitted attempt: first=%#v retry=%#v", first, retried)
+	}
+}

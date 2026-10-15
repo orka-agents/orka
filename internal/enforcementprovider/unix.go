@@ -2,17 +2,21 @@ package enforcementprovider
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"syscall"
 	"time"
 )
 
 const maxTransportFrame = 1 << 20
+
+var errTransportFrameTooLarge = errors.New("provider frame exceeds limit")
 
 type unixProvider struct {
 	path       string
@@ -39,6 +43,39 @@ type responseFrame struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+func readTransportFrame(reader io.Reader) ([]byte, error) {
+	line, err := bufio.NewReaderSize(reader, maxTransportFrame+1).ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) || len(line) > maxTransportFrame {
+		return nil, errTransportFrameTooLarge
+	}
+	if err != nil {
+		return nil, err
+	}
+	return line, nil
+}
+
+type boundedFrameBuffer struct {
+	bytes.Buffer
+}
+
+func (b *boundedFrameBuffer) Write(data []byte) (int, error) {
+	if len(data) > maxTransportFrame-b.Len() {
+		return 0, errTransportFrameTooLarge
+	}
+	return b.Buffer.Write(data)
+}
+
+func encodeTransportFrame(value any) ([]byte, error) {
+	var buffer boundedFrameBuffer
+	if err := json.NewEncoder(&buffer).Encode(value); err != nil {
+		if errors.Is(err, errTransportFrameTooLarge) {
+			return nil, errTransportFrameTooLarge
+		}
+		return nil, err
+	}
+	return buffer.Bytes(), nil
 }
 
 func (p *unixProvider) call(operation string, parameters, result any) error {
@@ -74,15 +111,16 @@ func (p *unixProvider) call(operation string, parameters, result any) error {
 	deadline := time.Now().Add(p.timeout)
 	_ = conn.SetDeadline(deadline)
 	req := requestFrame{Version: 1, ID: "1", Operation: operation, Parameters: parameters}
-	if err = json.NewEncoder(conn).Encode(req); err != nil {
-		return err
-	}
-	line, err := bufio.NewReaderSize(conn, maxTransportFrame+1).ReadBytes('\n')
+	frame, err := encodeTransportFrame(req)
 	if err != nil {
 		return err
 	}
-	if len(line) > maxTransportFrame {
-		return errors.New("provider response exceeds frame limit")
+	if _, err = io.Copy(conn, bytes.NewReader(frame)); err != nil {
+		return err
+	}
+	line, err := readTransportFrame(conn)
+	if err != nil {
+		return err
 	}
 	var resp responseFrame
 	if err = json.Unmarshal(line, &resp); err != nil {

@@ -34,7 +34,7 @@ func descriptorMessage(d Descriptor) []byte {
 func SignDescriptor(d *Descriptor, key ed25519.PrivateKey) {
 	d.Signature = ed25519.Sign(key, descriptorMessage(*d))
 }
-func AuthenticateDescriptor(d Descriptor, trust TrustProfile, now time.Time) error {
+func authenticateDescriptorContract(d Descriptor, trust TrustProfile) error {
 	if trust.ProviderID == "" || trust.EndpointID == "" || trust.Algorithm != "ed25519" || trust.KeyID == "" || len(trust.PublicKey) != ed25519.PublicKeySize {
 		return errors.New("invalid provider trust profile")
 	}
@@ -47,11 +47,40 @@ func AuthenticateDescriptor(d Descriptor, trust TrustProfile, now time.Time) err
 	if !ed25519.Verify(ed25519.PublicKey(trust.PublicKey), descriptorMessage(d), d.Signature) {
 		return errors.New("invalid descriptor signature")
 	}
+	return nil
+}
+func AuthenticateDescriptor(d Descriptor, trust TrustProfile, now time.Time) error {
+	if err := authenticateDescriptorContract(d, trust); err != nil {
+		return err
+	}
 	if now.Before(d.IssuedAt) || !now.Before(d.ExpiresAt) {
 		return errors.New("stale descriptor")
 	}
 	return nil
 }
+
+func negotiateCapabilities(d Descriptor, required []string) error {
+	ok := false
+	for _, v := range d.ProtocolVersions {
+		if v == ProtocolVersion {
+			ok = true
+		}
+	}
+	if !ok {
+		return errors.New("unsupported protocol")
+	}
+	have := map[string]bool{}
+	for _, c := range d.Capabilities {
+		have[c] = true
+	}
+	for _, c := range required {
+		if !have[c] {
+			return fmt.Errorf("unsupported capability %q", c)
+		}
+	}
+	return nil
+}
+
 func validateRequiredCapabilities(required []string) error {
 	if len(required) == 0 {
 		return errors.New("required capabilities must not be empty")
@@ -75,28 +104,16 @@ func Negotiate(d Descriptor, trust TrustProfile, required []string, now time.Tim
 	if err := AuthenticateDescriptor(d, trust, now); err != nil {
 		return err
 	}
-	if now.Before(d.IssuedAt) || !now.Before(d.ExpiresAt) {
-		return errors.New("stale descriptor")
+	return negotiateCapabilities(d, required)
+}
+func negotiateAdmittedDescriptor(d Descriptor, trust TrustProfile, required []string) error {
+	if err := validateRequiredCapabilities(required); err != nil {
+		return err
 	}
-	ok := false
-	for _, v := range d.ProtocolVersions {
-		if v == ProtocolVersion {
-			ok = true
-		}
+	if err := authenticateDescriptorContract(d, trust); err != nil {
+		return err
 	}
-	if !ok {
-		return errors.New("unsupported protocol")
-	}
-	have := map[string]bool{}
-	for _, c := range d.Capabilities {
-		have[c] = true
-	}
-	for _, c := range required {
-		if !have[c] {
-			return fmt.Errorf("unsupported capability %q", c)
-		}
-	}
-	return nil
+	return negotiateCapabilities(d, required)
 }
 func equalStringSlice(left, right []string) bool {
 	if len(left) != len(right) {
@@ -137,7 +154,7 @@ func validatePolicyCapabilityContract(policy []byte, required []string) error {
 	}
 	return nil
 }
-func ValidateAuthorization(a Authorization, now time.Time) error {
+func validateAuthorizationContract(a Authorization) error {
 	c := a.Context
 	if err := validateRequiredCapabilities(c.RequiredCapabilities); err != nil {
 		return err
@@ -150,6 +167,12 @@ func ValidateAuthorization(a Authorization, now time.Time) error {
 	}
 	if PolicyDigest(c.PolicyBytes) != c.PolicyDigest {
 		return errors.New("policy digest mismatch")
+	}
+	return nil
+}
+func ValidateAuthorization(a Authorization, now time.Time) error {
+	if err := validateAuthorizationContract(a); err != nil {
+		return err
 	}
 	if now.Before(a.NotBefore) || now.Before(a.IssuedAt) || !now.Before(a.ExpiresAt) {
 		return errors.New("authorization is not fresh")
@@ -166,11 +189,11 @@ func proofMessage(p Proof) []byte {
 	return []byte(strings.Join(parts, "\x00"))
 }
 func SignProof(p *Proof, key ed25519.PrivateKey) { p.Signature = ed25519.Sign(key, proofMessage(*p)) }
-func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, rb ReadBack, now time.Time) error {
-	if err := AuthenticateDescriptor(d, trust, now); err != nil {
+func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, expectedActivationID string, rb ReadBack, now time.Time) error {
+	if err := authenticateDescriptorContract(d, trust); err != nil {
 		return err
 	}
-	if err := ValidateAuthorization(a, now); err != nil {
+	if err := validateAuthorizationContract(a); err != nil {
 		return err
 	}
 	c := a.Context
@@ -180,7 +203,7 @@ func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, rb 
 	if p.Epoch != d.Epoch || p.KeyID != d.KeyID || now.Before(p.IssuedAt) || !now.Before(p.ExpiresAt) {
 		return errors.New("stale or revoked proof")
 	}
-	if rb.ActivationID != p.ActivationID || rb.WorkloadID != c.WorkloadID || rb.PolicyDigest != c.PolicyDigest || p.ReadBackDigest != readbackDigest(rb) {
+	if expectedActivationID == "" || p.ActivationID != expectedActivationID || rb.ActivationID != expectedActivationID || rb.WorkloadID != c.WorkloadID || rb.PolicyDigest != c.PolicyDigest || p.ReadBackDigest != readbackDigest(rb) {
 		return errors.New("independent readback mismatch")
 	}
 	if !ed25519.Verify(ed25519.PublicKey(d.PublicKey), proofMessage(p), p.Signature) {

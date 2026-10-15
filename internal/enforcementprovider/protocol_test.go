@@ -23,11 +23,11 @@ func fixture(t *testing.T) (Descriptor, TrustProfile, Authorization, ReadBack, P
 }
 func TestProofAndReadback(t *testing.T) {
 	d, trust, a, rb, p := fixture(t)
-	if e := VerifyProof(p, a, d, trust, rb, time.Now()); e != nil {
+	if e := VerifyProof(p, a, d, trust, rb.ActivationID, rb, time.Now()); e != nil {
 		t.Fatal(e)
 	}
 	rb.ConfigurationDigest = "changed"
-	if VerifyProof(p, a, d, trust, rb, time.Now()) == nil {
+	if VerifyProof(p, a, d, trust, rb.ActivationID, rb, time.Now()) == nil {
 		t.Fatal("accepted mismatched readback")
 	}
 }
@@ -44,7 +44,7 @@ func TestNegotiationFailsClosed(t *testing.T) {
 func TestProofBinding(t *testing.T) {
 	d, trust, a, rb, p := fixture(t)
 	p.Audience = "other"
-	if VerifyProof(p, a, d, trust, rb, time.Now()) == nil {
+	if VerifyProof(p, a, d, trust, rb.ActivationID, rb, time.Now()) == nil {
 		t.Fatal("accepted altered proof")
 	}
 }

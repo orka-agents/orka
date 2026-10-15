@@ -10,6 +10,8 @@ import (
 	"sync"
 )
 
+const fileStoreVersion = 2
+
 // FileStore is a crash-safe local Store implementation. Controllers may use
 // the same Store interface with another transactional database adapter.
 type FileStore struct {
@@ -41,7 +43,7 @@ func (s *FileStore) load() error {
 	if err = json.Unmarshal(b, &d); err != nil {
 		return fmt.Errorf("decode enforcement store: %w", err)
 	}
-	if d.Version != 1 || d.Attempts == nil {
+	if d.Version != fileStoreVersion || d.Attempts == nil {
 		return errors.New("unsupported enforcement store")
 	}
 	s.attempts = d.Attempts
@@ -51,7 +53,7 @@ func (s *FileStore) persist() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err
 	}
-	b, err := json.Marshal(fileStoreDocument{Version: 1, Attempts: s.attempts})
+	b, err := json.Marshal(fileStoreDocument{Version: fileStoreVersion, Attempts: s.attempts})
 	if err != nil {
 		return err
 	}
@@ -106,7 +108,7 @@ func (s *FileStore) Get(id string) (Attempt, error) {
 	defer s.mu.Unlock()
 	a, ok := s.attempts[id]
 	if !ok {
-		return a, errors.New("attempt not found")
+		return a, ErrAttemptNotFound
 	}
 	return a, nil
 }

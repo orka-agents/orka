@@ -57,10 +57,13 @@ type CleanupRequest struct{ AttemptID, ActivationID string }
 
 type Provider interface {
 	DiscoverDescriptor() (Descriptor, error)
+	// Prepare and Activate must be idempotent for the same authorization and
+	// preparation ID so recovery can close provider-success/store-failure gaps.
 	Prepare(PrepareRequest) (string, error)
 	Activate(ActivateRequest) (string, error)
 	ReadBack(string) (ReadBack, error)
 	GetProof(string) (Proof, error)
+	// Release must be idempotent for an unchanged ReleaseID.
 	Release(ReleaseRequest) error
 	GetStatus(string) (Status, error)
 	Reconcile(ReconcileRequest) (Status, error)
