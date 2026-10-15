@@ -61,7 +61,7 @@ func (m mockLLMInstance) captureJournal() (mockLLMCaptureState, error) {
 
 func (m mockLLMInstance) captureJournalWithin(ctx context.Context) (mockLLMCaptureState, error) {
 	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", m.namespace, "deployment/"+m.name, "-c", "aimock",
-		"--", "node", "-e", mockLLMCaptureScript(m.port, mockLLMCaptureFetchTimeout))
+		"--", "node", "-e", mockLLMReadScript(m.port, "/__orka_eval/capture", mockLLMCaptureFetchTimeout))
 	// Bound inherited pipe waits as well as kubectl itself. Neither failure
 	// path may expose captured output through a subprocess error formatter.
 	cmd.WaitDelay = time.Second
@@ -79,19 +79,21 @@ func (m mockLLMInstance) captureJournalWithin(ctx context.Context) (mockLLMCaptu
 	return state, nil
 }
 
-func mockLLMCaptureScript(port int, timeout time.Duration) string {
+// mockLLMReadScript streams one aimock pod-loopback endpoint to stdout. The
+// whole read, including the final stdout flush, ends by the remote deadline.
+func mockLLMReadScript(port int, path string, timeout time.Duration) string {
 	return fmt.Sprintf(`const deadline = setTimeout(() => process.exit(1), %d);
-		fetch("http://127.0.0.1:%d/__orka_eval/capture", {
+		fetch("http://127.0.0.1:%d%s", {
 			signal: AbortSignal.timeout(%d)
 		}).then(async r => {
-			if (!r.ok) throw Error("capture HTTP " + r.status);
+			if (!r.ok) throw Error("HTTP " + r.status);
 			for await (const chunk of r.body) {
 				await new Promise((resolve, reject) => {
 					process.stdout.write(Buffer.from(chunk), err => err ? reject(err) : resolve());
 				});
 			}
 		}).catch(() => process.exit(1)).finally(() => clearTimeout(deadline))`,
-		timeout.Milliseconds(), port, timeout.Milliseconds())
+		timeout.Milliseconds(), port, path, timeout.Milliseconds())
 }
 
 // evalSnapshot isolates a sequential case without clearing another case's

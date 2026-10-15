@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -510,12 +511,23 @@ func (r mockLLMRequest) ToolResults(toolName string) []string {
 // journal reads every request aimock has served from inside its Pod, which
 // works behind ingress NetworkPolicies such as the one guarding Vekil.
 func (m mockLLMInstance) journal() ([]mockLLMRequest, error) {
-	cmd := exec.Command("kubectl", "exec", "-n", m.namespace, "deployment/"+m.name, "-c", "aimock", "--", "node", "-e",
-		fmt.Sprintf(`fetch("http://127.0.0.1:%d/__aimock/journal").then(r => r.text()).then(t => process.stdout.write(t))`, m.port))
+	ctx, cancel := context.WithTimeout(context.Background(), mockLLMCaptureReadTimeout)
+	defer cancel()
+	return m.journalWithin(ctx)
+}
+
+func (m mockLLMInstance) journalWithin(ctx context.Context) ([]mockLLMRequest, error) {
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", m.namespace, "deployment/"+m.name, "-c", "aimock",
+		"--", "node", "-e", mockLLMReadScript(m.port, "/__aimock/journal", mockLLMCaptureFetchTimeout))
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
+	// Bound inherited pipe waits as well as kubectl itself.
+	cmd.WaitDelay = time.Second
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("read %s/%s journal expired: %w", m.namespace, m.name, ctx.Err())
+		}
 		return nil, fmt.Errorf("read %s/%s journal: %w: %s", m.namespace, m.name, err, stderr.String())
 	}
 	var requests []mockLLMRequest

@@ -606,10 +606,10 @@ func authorizationExpectForgeUnchanged(before fakeforge.State) {
 	unchangedPulls := reflect.DeepEqual(after.Pulls, before.Pulls)
 	ExpectWithOffset(1, unchangedPulls).To(BeTrue(), "denied call changed pull requests")
 	for _, receipt := range after.Requests[len(before.Requests):] {
-		ExpectWithOffset(1,
-			receipt.Surface).NotTo(BeElementOf("push",
-			"create-pull"),
-			"denied call contacted a forge mutation surface")
+		// A rejected push leaves branches unchanged, so the receipt is the
+		// evidence. The API check below covers pull-request creation.
+		ExpectWithOffset(1, receipt.Surface).NotTo(Equal(fakeforge.SurfaceGitPush),
+			"denied call contacted the Git push surface")
 		ExpectWithOffset(1,
 			receipt.Method == http.MethodPost &&
 				receipt.Surface == fakeforge.SurfaceAPI).To(BeFalse(),

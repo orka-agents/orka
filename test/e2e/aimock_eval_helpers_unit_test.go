@@ -192,12 +192,7 @@ func TestAimockEvalNoRequestsPreservesCaptureIntegrity(t *testing.T) {
 }
 
 func TestAimockEvalCaptureReadDeadline(t *testing.T) {
-	bin := t.TempDir()
-	stub := "#!/bin/sh\nexec \"$E2E_CAPTURE_STALL_BINARY\" -test.run=^TestAimockEvalCaptureStallHelper$\n"
-	require.NoError(t, os.WriteFile(filepath.Join(bin, "kubectl"), []byte(stub), 0o700))
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("E2E_CAPTURE_STALL_BINARY", os.Args[0])
-	t.Setenv("E2E_CAPTURE_STALL_HELPER", "1")
+	stallKubectl(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	started := time.Now()
@@ -205,6 +200,28 @@ func TestAimockEvalCaptureReadDeadline(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, time.Since(started), 2*time.Second)
 	require.NotContains(t, err.Error(), "SYNTHETIC_TIMEOUT_CANARY")
+}
+
+func TestAimockEvalJournalReadDeadline(t *testing.T) {
+	stallKubectl(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := suiteMockLLM.journalWithin(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 2*time.Second)
+	require.NotContains(t, err.Error(), "SYNTHETIC_TIMEOUT_CANARY")
+}
+
+// stallKubectl puts a kubectl on PATH that writes partial output, then hangs.
+func stallKubectl(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	stub := "#!/bin/sh\nexec \"$E2E_CAPTURE_STALL_BINARY\" -test.run=^TestAimockEvalCaptureStallHelper$\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "kubectl"), []byte(stub), 0o700))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("E2E_CAPTURE_STALL_BINARY", os.Args[0])
+	t.Setenv("E2E_CAPTURE_STALL_HELPER", "1")
 }
 
 func TestAimockEvalCaptureStallHelper(t *testing.T) {
@@ -239,7 +256,7 @@ func TestAimockEvalCaptureFinalFlushDeadline(t *testing.T) {
 	// does: a local kill reports -1.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, node, "-e", blocked+mockLLMCaptureScript(port, 100*time.Millisecond))
+	cmd := exec.CommandContext(ctx, node, "-e", blocked+mockLLMReadScript(port, "/", 100*time.Millisecond))
 	cmd.WaitDelay = time.Second
 	err = cmd.Run()
 	var exit *exec.ExitError
