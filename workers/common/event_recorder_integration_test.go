@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,6 +129,40 @@ func TestEventRecorderHTTPIntegrationPostsToInternalAPI(t *testing.T) {
 	if strings.Contains(content, secret) || !strings.Contains(content, events.ExecutionEventRedactedValue) {
 		t.Fatalf("persisted content was not redacted: %s", listed[0].Content)
 	}
+}
+
+func TestEventRecorderHTTPIntegrationRefusedThenUpRecordsOneEvent(t *testing.T) {
+	eventStore := newWorkerSQLiteExecutionEventStore(t)
+	const bearerToken = "event-recorder-recovery-fixture"
+	app := setupWorkerInternalEventAPI(t, eventStore, bearerToken, nil)
+	controllerURL := startFiberAppForWorkerTest(t, app)
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	refusedAddress := closed.Addr().String()
+	require.NoError(t, closed.Close())
+
+	var attempts atomic.Int32
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if attempts.Add(1) == 1 {
+			address = refusedAddress
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+	recorder := common.NewHTTPEventRecorder(common.HTTPEventRecorderConfig{
+		ControllerURL: controllerURL, Namespace: "default", TaskName: "task-worker",
+		BearerPath: writeWorkerTestSAToken(t, bearerToken), Client: &http.Client{Transport: transport},
+	})
+	err = common.RecordEventStrict(t.Context(), recorder, events.ExecutionEventTypeWorkerStarted)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, attempts.Load())
+	listed, err := eventStore.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-worker", Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, int64(1), listed[0].Seq)
 }
 
 func TestEventRecorderHTTPIntegrationBearerTokenRequired(t *testing.T) {
