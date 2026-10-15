@@ -44,6 +44,13 @@ controller:
   # Health probe port
   healthPort: 8082
 
+  # Allow about ten minutes for initialization before /healthz is available.
+  # Increase this budget for large SQLite migrations or slow persistent volumes.
+  startupProbe:
+    failureThreshold: 60
+    periodSeconds: 10
+    timeoutSeconds: 1
+
   # Leader election is mandatory for the singleton SQLite controller.
   leaderElect: true
 

@@ -5,8 +5,10 @@ description: "Back up Orka, update its Kubernetes resource definitions, and chec
 
 # Upgrading
 
-Orka currently supports new installations only. Upgrades between versions are
-not yet supported. Follow [Install Orka](installation.md) for setup.
+Orka supports in-place SQLite upgrades from the exact layouts listed below.
+This is a narrow database compatibility guarantee, not support for every older
+release, controller mode, or deployment topology. Follow
+[Install Orka](installation.md) for new installations.
 
 ## What release checks cover {#release-checks}
 
@@ -16,8 +18,8 @@ confirm that tasks still work, and check that Helm blocks a change to
 `controller.mode`. Results are in the release's `acceptance.json`.
 
 These checks do not test Helm's automatic CRD and Secret creation.
-Tests for upgrades between versions and restoring a lost installation from
-backups are tracked in
+Broader coverage for upgrades between versions and restoring a lost installation
+from backups is tracked in
 [#499](https://github.com/orka-agents/orka/issues/499) and
 [#505](https://github.com/orka-agents/orka/issues/505).
 
@@ -26,8 +28,81 @@ backups are tracked in
 Orka creates its SQLite database on first startup. Restarts reuse that database
 and keep its records. Keep the data volume and encryption key together.
 
-If startup reports `unsupported SQLite schema`, preserve the database and stop.
-Orka does not convert, reset, or replace an incompatible database.
+The controller compares the complete schema, including every table and index
+definition, before upgrading. These immutable main-branch revisions identify
+supported source layouts; they are **unreleased baselines**, not release-version
+compatibility promises. Other commits with the exact same layout are equivalent.
+Object counts alone do not establish compatibility.
+
+| Source layout | Representative revision | Transition |
+| --- | --- | --- |
+| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes. |
+| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes. |
+| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables. |
+| 166 objects (current) | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Validate only; no migration or automatic backup. |
+
+### Unsupported intermediate connector layout
+
+The **161-object layout from #700**, introduced at
+[`b5265055`](https://github.com/orka-agents/orka/commit/b526505518fa139848cc610f6055b33e919ce594),
+is explicitly unsupported. The subsequent #701 changes the existing
+`connector_credentials` and `connector_retired_credentials` table definitions as
+well as adding a table. This cannot be handled by adding new empty tables alone.
+The controller refuses this exact layout even if its connector tables are empty,
+names #700 and its revision in the error, and points here. **No rewrite path is
+provided.** Do not change the schema or delete custody records to force acceptance.
+
+Unknown, partially modified, and newer layouts are also refused. If startup
+reports `unsupported SQLite schema`, preserve the database and stop. Orka does
+not reset or replace it. In-memory initialization and the low-level `NewDB`
+constructor do not migrate; production startup uses `OpenLockedStore` to hold the
+exclusive controller lock throughout backup and upgrade.
+
+### Automatic pre-upgrade backup
+
+For a recognized older layout, startup creates a consistent SQLite backup beside
+the database before applying any DDL. With the default `--store-path`, its name is
+`/data/orka.db.pre-upgrade-<random>.db`. Startup logs the exact path. The backup
+includes committed WAL records, retains the original schema and rows, is created
+with owner-only permissions (`0600`), and is verified and synced before migration.
+If backup creation or verification fails, startup stops without changing schema.
+Only an incomplete backup created by that attempt is removed.
+
+All additive steps run in one `BEGIN IMMEDIATE` transaction under the controller
+lock. Each resulting layout is checked exactly, and integrity and foreign-key
+checks must pass before commit. A process interrupted before commit leaves the
+old schema; retry takes a new backup and repeats the migration. A committed
+current layout only validates on reopen. Completed backups remain available even
+if a later migration step fails; they are not overwritten or automatically
+pruned, so allow disk space for them and manage retention explicitly.
+
+Backups contain the same sensitive records as the live database. Keep them
+protected with the original encryption key, include them in your backup policy,
+and account for retained credential material when deleting old backups. The
+adjacent backup is **not** a replacement for the independent volume, Kubernetes
+state, and Secret backups below.
+
+Migration is forward-only. An older image cannot necessarily open the upgraded
+store. Rolling back an installation requires a coordinated, offline restoration
+of the database, original key, configuration, and Kubernetes state—not just an
+image downgrade. This page does not qualify a general restore procedure.
+
+### Controller startup allowance
+
+Database backup, integrity checks, and migration run before the controller starts
+serving `/healthz`. Both deployment sources include a startup probe that allows
+about ten minutes for the entire initialization (60 failed probes, ten seconds
+apart, with a one-second request timeout). Kubernetes holds off the existing
+liveness and readiness probes until startup succeeds; their checks are unchanged.
+
+Before upgrading a large database or a slow persistent volume, increase the
+budget as needed. Helm exposes `controller.startupProbe.failureThreshold`,
+`periodSeconds`, and `timeoutSeconds`; for example,
+`--set controller.startupProbe.failureThreshold=120` allows about twenty minutes
+at the default ten-second interval. For Kustomize, patch the manager container's
+`startupProbe` timing fields in your overlay. The allowance is bounded: exceeding
+it can restart initialization and create another retained backup, so size the
+budget and free disk space before the upgrade.
 
 ## Update CRDs first {#the-one-thing-that-will-bite-you}
 

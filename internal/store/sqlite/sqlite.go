@@ -32,8 +32,13 @@ func init() {
 }
 
 // NewDB opens a SQLite database with recommended pragmas for WAL mode,
-// busy timeout, synchronous mode, and foreign keys.
+// busy timeout, synchronous mode, and foreign keys. It creates or validates the
+// current schema; upgrades require OpenLockedStore's exclusive controller lock.
 func NewDB(path string) (*sql.DB, error) {
+	return newDB(path, false)
+}
+
+func newDB(path string, allowMigration bool) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -64,9 +69,13 @@ func NewDB(path string) (*sql.DB, error) {
 		}
 	}
 
-	if err := initializeSchema(db); err != nil {
+	schemaErr := initializeSchema(db)
+	if schemaErr != nil && allowMigration {
+		schemaErr = upgradeSchema(db, path, schemaErr)
+	}
+	if schemaErr != nil {
 		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", err)
+		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", schemaErr)
 	}
 
 	return db, nil
@@ -1016,7 +1025,7 @@ func OpenLockedStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := NewDB(path)
+	db, err := newDB(path, true)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err

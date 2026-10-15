@@ -2850,6 +2850,13 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /healthz
+            port: 8081
+          periodSeconds: 10
+          timeoutSeconds: 1
         volumeMounts:
         - mountPath: /data
           name: store

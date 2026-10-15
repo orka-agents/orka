@@ -330,6 +330,10 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		}
 		recoveryKind := ""
 		switch attempt.ExecutionState {
+		case store.PromptExecutionPlanned, store.PromptExecutionReserved:
+			if runtimeFeedbackPreSubmissionCleanupCandidate(task) {
+				recoveryKind = runtimeFeedbackPreSubmissionCleanup
+			}
 		case store.PromptExecutionSucceeded:
 			terminalPhase := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
 				task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled
@@ -373,6 +377,8 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 				}()
 				var err error
 				switch kind {
+				case runtimeFeedbackPreSubmissionCleanup:
+					err = d.recoverRuntimeFeedbackPreSubmission(ctx, task, fence)
 				case "stale-terminal":
 					err = d.recoverStaleTask(ctx, task, fence)
 				case acpSucceededOperation:
@@ -1818,6 +1824,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				// generation. Retire this exact unsent session before clearing
 				// its Task binding, so cleanup can record its fenced receipt.
 				if cleanupErr := cleanupRuntimeSession("runtime_feedback_pre_submission_retry"); cleanupErr != nil {
+					// Keep the durable Planned binding for the current-epoch
+					// cleanup scan, even if the deferred retry later succeeds.
 					return errors.Join(err, cleanupErr)
 				}
 				return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)

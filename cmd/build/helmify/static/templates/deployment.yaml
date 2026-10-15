@@ -9,6 +9,7 @@
 {{- include "orka.validateRuntimeFeedback" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $runtimeFeedback := .Values.controller.runtimeFeedback | default dict -}}
+{{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if $harnessV2 }}
 {{- if not .Values.publisher.enabled }}
 {{- fail "publisher must be enabled when controller.mode=harness-v2" }}
@@ -475,6 +476,13 @@ spec:
                   - {{ printf "--acp-upgrade-drain-trigger-url=http://127.0.0.1:%v%s" .Values.controller.acpRuntime.upgradeDrain.port "/acp/upgrade-drain" | quote }}
                   - {{ printf "--acp-upgrade-drain-trigger-timeout=%s" .Values.controller.acpRuntime.upgradeDrain.triggerTimeout | quote }}
           {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: {{ $startupProbe.failureThreshold | default 60 }}
+            periodSeconds: {{ $startupProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ $startupProbe.timeoutSeconds | default 1 }}
           livenessProbe:
             httpGet:
               path: /healthz
