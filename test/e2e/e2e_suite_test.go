@@ -13,12 +13,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,53 +85,7 @@ var _ = BeforeSuite(func() {
 	loadEnvFile(filepath.Join(earlyEnvProjectDir, "test", "e2e", ".env"))
 
 	By("building all Docker images")
-	cmd := exec.Command("make", "docker-build-all",
-		fmt.Sprintf("IMG=%s", managerImage),
-		fmt.Sprintf("AI_WORKER_IMG=%s", aiWorkerImage),
-		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerImage),
-		fmt.Sprintf("ACP_CODEX_RUNTIME_IMG=%s", acpCodexRuntimeImage),
-		fmt.Sprintf("ACP_CLAUDE_RUNTIME_IMG=%s", acpClaudeRuntimeImage),
-		fmt.Sprintf("ACP_COPILOT_RUNTIME_IMG=%s", acpCopilotRuntimeImage),
-		fmt.Sprintf("ACP_OPENCODE_RUNTIME_IMG=%s", acpOpencodeRuntimeImage),
-		fmt.Sprintf("WORKSPACE_PUBLISHER_IMG=%s", workspacePublisherImage),
-	)
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
-
-	By("building the harness-v2 E2E fixture image")
-	cmd = exec.Command("docker", "build", "-t", harnessV2FixtureImage,
-		"-f", "cmd/orka-harness-v2-e2e-fixture/Dockerfile", ".")
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build harness-v2 E2E fixture image")
-
-	By("building the fake forge E2E fixture image")
-	cmd = exec.Command("docker", "build", "-t", fakeForgeImage, "-f", "test/fixtures/fakeforge/Dockerfile", ".")
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build fake forge E2E fixture image")
-
-	By("building the test-only aimock capture image")
-	cmd = exec.Command("docker", "build", "-t", mockLLMCaptureImage, "-f", "test/fixtures/aimockcapture/Dockerfile", ".")
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build aimock capture image")
-
-	By("building the test-only aimock transaction authority image")
-	cmd = exec.Command("docker", "build", "-t", aimockAuthorityImage,
-		"-f", "test/fixtures/aimockauthority/Dockerfile", ".")
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build aimock authority image")
-
-	if gatewayE2EEnabled() {
-		By("building the Gateway reference adapter Docker image")
-		cmd = exec.Command("docker", "build", "-t", gatewayReferenceAdapterImage,
-			"-f", "cmd/orka-gateway-reference-adapter/Dockerfile", ".")
-		_, err = utils.Run(cmd)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Gateway reference adapter image")
-		By("building the test-only Gateway native worker image")
-		cmd = exec.Command("docker", "build", "-t", gatewayNativeWorkerImage,
-			"-f", "cmd/orka-gateway-e2e-worker/Dockerfile", ".")
-		_, err = utils.Run(cmd)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Gateway native worker fixture image")
-	}
+	buildE2EImages(e2eImageBuilds())
 
 	By("loading all images into Kind cluster")
 
@@ -145,7 +102,7 @@ var _ = BeforeSuite(func() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
 	}
 	for _, img := range images {
-		err = utils.LoadImageToKindClusterWithName(img)
+		err := utils.LoadImageToKindClusterWithName(img)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))
 	}
 
@@ -194,7 +151,7 @@ var _ = BeforeSuite(func() {
 	configureMockLLMCredentials()
 
 	By("bootstrapping manager namespace identity")
-	cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "ensure-static-mode-namespace.sh"),
+	cmd := exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "ensure-static-mode-namespace.sh"),
 		"kubectl", namespace, "harness-v2")
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to bootstrap manager namespace identity")
@@ -654,6 +611,77 @@ func sanitizeDockerName(value string) string {
 	}
 	return strings.Trim(b.String(), "-_.")
 
+}
+
+// e2eImageBuild is one image the suite builds before any spec runs.
+type e2eImageBuild struct {
+	image string
+	args  []string
+}
+
+// e2eImageBuilds lists exactly the images the suite loads. Platform images use
+// their Makefile targets so the Dockerfile and build flags stay in one place.
+func e2eImageBuilds() []e2eImageBuild {
+	makeTarget := func(target, variable, image string) e2eImageBuild {
+		return e2eImageBuild{image: image, args: []string{"make", target, variable + "=" + image}}
+	}
+	dockerBuild := func(image, dockerfile string) e2eImageBuild {
+		return e2eImageBuild{image: image, args: []string{"docker", "build", "-t", image, "-f", dockerfile, "."}}
+	}
+	builds := []e2eImageBuild{
+		makeTarget("docker-build", "IMG", managerImage),
+		makeTarget("docker-build-ai-worker", "AI_WORKER_IMG", aiWorkerImage),
+		makeTarget("docker-build-general-worker", "GENERAL_WORKER_IMG", generalWorkerImage),
+		makeTarget("docker-build-acp-codex-runtime", "ACP_CODEX_RUNTIME_IMG", acpCodexRuntimeImage),
+		makeTarget("docker-build-acp-claude-runtime", "ACP_CLAUDE_RUNTIME_IMG", acpClaudeRuntimeImage),
+		makeTarget("docker-build-acp-copilot-runtime", "ACP_COPILOT_RUNTIME_IMG", acpCopilotRuntimeImage),
+		makeTarget("docker-build-acp-opencode-runtime", "ACP_OPENCODE_RUNTIME_IMG", acpOpencodeRuntimeImage),
+		makeTarget("docker-build-workspace-publisher", "WORKSPACE_PUBLISHER_IMG", workspacePublisherImage),
+		dockerBuild(harnessV2FixtureImage, "cmd/orka-harness-v2-e2e-fixture/Dockerfile"),
+		dockerBuild(fakeForgeImage, "test/fixtures/fakeforge/Dockerfile"),
+		dockerBuild(mockLLMCaptureImage, "test/fixtures/aimockcapture/Dockerfile"),
+		dockerBuild(aimockAuthorityImage, "test/fixtures/aimockauthority/Dockerfile"),
+	}
+	if gatewayE2EEnabled() {
+		builds = append(builds,
+			dockerBuild(gatewayReferenceAdapterImage, "cmd/orka-gateway-reference-adapter/Dockerfile"),
+			dockerBuild(gatewayNativeWorkerImage, "cmd/orka-gateway-e2e-worker/Dockerfile"),
+		)
+	}
+	return builds
+}
+
+// buildE2EImages runs the builds E2E_IMAGE_BUILD_JOBS at a time (default 3).
+// Concurrent builds overlap their downloads, and BuildKit cache mounts let
+// later Go builds reuse modules and packages compiled by earlier ones.
+func buildE2EImages(builds []e2eImageBuild) {
+	jobs := 3
+	if value := strings.TrimSpace(os.Getenv("E2E_IMAGE_BUILD_JOBS")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "E2E_IMAGE_BUILD_JOBS must be an integer")
+		ExpectWithOffset(1, parsed).To(BeNumerically(">=", 1), "E2E_IMAGE_BUILD_JOBS must be at least 1")
+		jobs = parsed
+	}
+	start := time.Now()
+	slots := make(chan struct{}, jobs)
+	errs := make([]error, len(builds))
+	var wg sync.WaitGroup
+	for i, build := range builds {
+		wg.Go(func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			began := time.Now()
+			if _, err := utils.Run(exec.Command(build.args[0], build.args[1:]...)); err != nil {
+				errs[i] = fmt.Errorf("build %s: %w", build.image, err)
+				return
+			}
+			_, _ = fmt.Fprintf(GinkgoWriter, "built %s in %s\n", build.image, time.Since(began).Round(time.Second))
+		})
+	}
+	wg.Wait()
+	_, _ = fmt.Fprintf(GinkgoWriter, "built %d images in %s with %d jobs\n",
+		len(builds), time.Since(start).Round(time.Second), jobs)
+	ExpectWithOffset(1, errors.Join(errs...)).NotTo(HaveOccurred(), "Failed to build Docker images")
 }
 
 func gatewayE2EEnabled() bool {
