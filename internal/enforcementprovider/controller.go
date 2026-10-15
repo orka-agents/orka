@@ -3,22 +3,21 @@ package enforcementprovider
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Controller is the production integration seam for a provider transaction.
-// It owns the durable store, runs startup recovery before becoming ready, and
-// exposes phase-specific methods so callers cannot collapse proof consumption
-// and external workload release into an in-memory callback.
+// Controller owns durable state and serializes startup, close, and readiness.
 type Controller struct {
+	mu           sync.RWMutex
 	store        *FileStore
 	orchestrator Orchestrator
 	ready        bool
+	closed       bool
 }
 
-// NewController opens durable state and binds a provider plus
-// operator-controlled trust. It performs no provider operation until Start.
 func NewController(statePath string, provider Provider, trust TrustProfile, now func() time.Time) (*Controller, error) {
 	if provider == nil {
 		return nil, errors.New("enforcement provider is required")
@@ -32,34 +31,42 @@ func NewController(statePath string, provider Provider, trust TrustProfile, now 
 	}
 	return &Controller{store: store, orchestrator: Orchestrator{Store: store, Provider: provider, Trust: trust, Now: now}}, nil
 }
-
-// Start recovers every durable attempt. Any unresolved attempt prevents
-// readiness; callers must continue holding affected workloads.
 func (c *Controller) Start() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errors.New("enforcement controller is closed")
+	}
+	if c.ready {
+		return nil
+	}
 	results := c.orchestrator.Recover(c.store.List())
-	var failures []string
+	failures := make([]string, 0, len(results))
 	for id, err := range results {
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", id, err))
 		}
 	}
+	sort.Strings(failures)
 	if len(failures) != 0 {
-		c.ready = false
 		return fmt.Errorf("enforcement recovery failed: %s", strings.Join(failures, "; "))
 	}
 	c.ready = true
 	return nil
 }
-func (c *Controller) requireReady() error {
+func (c *Controller) requireReadyLocked() error {
+	if c.closed {
+		return errors.New("enforcement controller is closed")
+	}
 	if !c.ready {
 		return errors.New("enforcement controller is not ready")
 	}
 	return nil
 }
-
-// Hold authorizes and activates enforcement while the external workload stays held.
 func (c *Controller) Hold(a Authorization) (Attempt, error) {
-	if err := c.requireReady(); err != nil {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.requireReadyLocked(); err != nil {
 		return Attempt{}, err
 	}
 	if _, err := c.orchestrator.Authorize(a); err != nil {
@@ -67,21 +74,45 @@ func (c *Controller) Hold(a Authorization) (Attempt, error) {
 	}
 	return c.orchestrator.Activate(a.Context.AttemptID)
 }
-
-// ConsumeProof durably records verified proof and the exact release obligation.
 func (c *Controller) ConsumeProof(attemptID, proofID string) (Attempt, error) {
-	if err := c.requireReady(); err != nil {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.requireReadyLocked(); err != nil {
 		return Attempt{}, err
 	}
 	return c.orchestrator.ConsumeProof(attemptID, proofID)
 }
-
-// Release executes only a previously durable exact release obligation.
 func (c *Controller) Release(attemptID string) (Attempt, error) {
-	if err := c.requireReady(); err != nil {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.requireReadyLocked(); err != nil {
 		return Attempt{}, err
 	}
 	return c.orchestrator.Release(attemptID)
 }
-
-func (c *Controller) Attempt(attemptID string) (Attempt, error) { return c.store.Get(attemptID) }
+func (c *Controller) Cleanup(attemptID string) (Attempt, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.requireReadyLocked(); err != nil {
+		return Attempt{}, err
+	}
+	return c.orchestrator.Cleanup(attemptID)
+}
+func (c *Controller) Attempt(id string) (Attempt, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.requireReadyLocked(); err != nil {
+		return Attempt{}, err
+	}
+	return c.store.Get(id)
+}
+func (c *Controller) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	c.ready = false
+	return c.store.Close()
+}

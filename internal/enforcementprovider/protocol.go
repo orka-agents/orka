@@ -11,25 +11,71 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"time"
 )
 
-var policyDomain = []byte("agentsuite-effective-policy\x00v1\x00")
+const (
+	maxPolicyBytes       = 1 << 20
+	maxTrustProfileBytes = 64 << 10
+)
 
+var policyDomain = []byte("orka.enforcement.policy/v1")
+
+type canonicalEncoder struct{ bytes.Buffer }
+
+func (e *canonicalEncoder) field(tag uint16, value []byte) {
+	var h [10]byte
+	binary.BigEndian.PutUint16(h[:2], tag)
+	binary.BigEndian.PutUint64(h[2:], uint64(len(value)))
+	e.Write(h[:])
+	e.Write(value)
+}
+func (e *canonicalEncoder) text(tag uint16, value string) { e.field(tag, []byte(value)) }
+func (e *canonicalEncoder) number(tag uint16, value uint64) {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], value)
+	e.field(tag, b[:])
+}
+func (e *canonicalEncoder) instant(tag uint16, value time.Time) {
+	e.text(tag, value.UTC().Format(time.RFC3339Nano))
+}
+func encodeStrings(values []string) []byte {
+	var e canonicalEncoder
+	e.number(1, uint64(len(values)))
+	for _, value := range values {
+		e.text(2, value)
+	}
+	return e.Bytes()
+}
+func transcript(domain string, fields func(*canonicalEncoder)) []byte {
+	var e canonicalEncoder
+	e.text(1, domain)
+	e.number(2, 1)
+	fields(&e)
+	return e.Bytes()
+}
+func hashTranscript(domain string, fields func(*canonicalEncoder)) string {
+	h := sha256.Sum256(transcript(domain, fields))
+	return "sha256:" + hex.EncodeToString(h[:])
+}
 func PolicyDigest(b []byte) string {
-	h := sha256.New()
-	h.Write(policyDomain)
-	var n [8]byte
-	binary.BigEndian.PutUint64(n[:], uint64(len(b)))
-	h.Write(n[:])
-	h.Write(b)
-	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+	return hashTranscript(string(policyDomain), func(e *canonicalEncoder) { e.field(10, b) })
 }
 func descriptorMessage(d Descriptor) []byte {
-	parts := []string{ProtocolVersion, d.ProviderID, d.EndpointID, d.Algorithm, d.KeyID, base64.StdEncoding.EncodeToString(d.PublicKey), fmt.Sprint(d.Epoch), d.IssuedAt.UTC().Format(time.RFC3339Nano), d.ExpiresAt.UTC().Format(time.RFC3339Nano), strings.Join(d.ProtocolVersions, ","), strings.Join(d.Capabilities, ",")}
-	return []byte(strings.Join(parts, "\x00"))
+	return transcript("orka.enforcement.descriptor/v1", func(e *canonicalEncoder) {
+		e.text(10, ProtocolVersion)
+		e.text(11, d.ProviderID)
+		e.text(12, d.EndpointID)
+		e.text(13, d.Algorithm)
+		e.text(14, d.KeyID)
+		e.field(15, d.PublicKey)
+		e.number(16, d.Epoch)
+		e.instant(17, d.IssuedAt)
+		e.instant(18, d.ExpiresAt)
+		e.field(19, encodeStrings(d.ProtocolVersions))
+		e.field(20, encodeStrings(d.Capabilities))
+	})
 }
 func SignDescriptor(d *Descriptor, key ed25519.PrivateKey) {
 	d.Signature = ed25519.Sign(key, descriptorMessage(*d))
@@ -58,7 +104,6 @@ func AuthenticateDescriptor(d Descriptor, trust TrustProfile, now time.Time) err
 	}
 	return nil
 }
-
 func negotiateCapabilities(d Descriptor, required []string) error {
 	ok := false
 	for _, v := range d.ProtocolVersions {
@@ -80,20 +125,19 @@ func negotiateCapabilities(d Descriptor, required []string) error {
 	}
 	return nil
 }
-
 func validateRequiredCapabilities(required []string) error {
 	if len(required) == 0 {
 		return errors.New("required capabilities must not be empty")
 	}
-	seen := make(map[string]bool, len(required))
-	for _, capability := range required {
-		if capability == "" || strings.TrimSpace(capability) != capability {
+	seen := map[string]bool{}
+	for _, c := range required {
+		if c == "" || strings.TrimSpace(c) != c || len(c) > 256 || strings.ContainsRune(c, '\x00') {
 			return errors.New("required capability is invalid")
 		}
-		if seen[capability] {
-			return fmt.Errorf("duplicate required capability %q", capability)
+		if seen[c] {
+			return fmt.Errorf("duplicate required capability %q", c)
 		}
-		seen[capability] = true
+		seen[c] = true
 	}
 	return nil
 }
@@ -115,50 +159,28 @@ func negotiateAdmittedDescriptor(d Descriptor, trust TrustProfile, required []st
 	}
 	return negotiateCapabilities(d, required)
 }
-func equalStringSlice(left, right []string) bool {
-	if len(left) != len(right) {
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
 		return false
 	}
-	for i := range left {
-		if left[i] != right[i] {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
 	return true
 }
-
 func validatePolicyCapabilityContract(policy []byte, required []string) error {
-	// Orka keeps policy bytes opaque for execution, but validates the published
-	// AgentSuite v1 envelope so callers cannot omit or alter its mandatory set.
-	var envelope struct {
-		Version              string   `json:"version"`
-		DenyWritePaths       []string `json:"denyWritePaths"`
-		RequiredCapabilities []string `json:"requiredCapabilities"`
+	if len(policy) == 0 {
+		return errors.New("effective policy must not be empty")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(policy))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil {
-		return fmt.Errorf("invalid effective policy envelope: %w", err)
+	if len(policy) > maxPolicyBytes {
+		return errors.New("effective policy exceeds limit")
 	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return errors.New("effective policy has trailing data")
-	}
-	if envelope.Version != "agentsuite.policy/v1" || len(envelope.DenyWritePaths) == 0 {
-		return errors.New("unsupported or empty effective policy")
-	}
-	if !equalStringSlice(envelope.RequiredCapabilities, required) {
-		return errors.New("authorization capabilities differ from effective policy")
-	}
-	if len(required) != 1 || required[0] != "filesystem/deny-write/v1" {
-		return errors.New("effective policy capability contract is unsupported")
-	}
-	return nil
+	return validateRequiredCapabilities(required)
 }
 func validateAuthorizationContract(a Authorization) error {
 	c := a.Context
-	if err := validateRequiredCapabilities(c.RequiredCapabilities); err != nil {
-		return err
-	}
 	if err := validatePolicyCapabilityContract(c.PolicyBytes, c.RequiredCapabilities); err != nil {
 		return err
 	}
@@ -179,17 +201,55 @@ func ValidateAuthorization(a Authorization, now time.Time) error {
 	}
 	return nil
 }
+func authorizationDigest(a Authorization) string {
+	return hashTranscript("orka.enforcement.authorization/v1", func(e *canonicalEncoder) {
+		c := a.Context
+		e.text(10, a.ID)
+		e.text(11, c.RequestID)
+		e.text(12, c.AttemptID)
+		e.text(13, c.WorkloadID)
+		e.text(14, c.ProviderID)
+		e.text(15, c.Audience)
+		e.text(16, c.Challenge)
+		e.text(17, c.IdempotencyKey)
+		e.text(18, c.PolicyDigest)
+		e.field(19, c.PolicyBytes)
+		e.field(20, encodeStrings(c.RequiredCapabilities))
+		e.instant(21, a.IssuedAt)
+		e.instant(22, a.NotBefore)
+		e.instant(23, a.ExpiresAt)
+		e.number(24, a.Epoch)
+	})
+}
 func readbackDigest(r ReadBack) string {
-	parts := []string{r.ActivationID, r.WorkloadID, r.PolicyDigest, r.ConfigurationDigest}
-	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "sha256:" + hex.EncodeToString(h[:])
+	return hashTranscript("orka.enforcement.readback/v1", func(e *canonicalEncoder) {
+		e.text(10, r.ActivationID)
+		e.text(11, r.WorkloadID)
+		e.text(12, r.PolicyDigest)
+		e.text(13, r.ConfigurationDigest)
+	})
 }
 func proofMessage(p Proof) []byte {
-	parts := []string{ProtocolVersion, p.ID, p.AuthorizationID, p.ActivationID, p.WorkloadID, p.ProviderID, p.Audience, p.Challenge, p.PolicyDigest, p.ReadBackDigest, p.KeyID, fmt.Sprint(p.Epoch), p.IssuedAt.UTC().Format(time.RFC3339Nano), p.ExpiresAt.UTC().Format(time.RFC3339Nano)}
-	return []byte(strings.Join(parts, "\x00"))
+	return transcript("orka.enforcement.proof/v1", func(e *canonicalEncoder) {
+		e.text(10, ProtocolVersion)
+		e.text(11, p.ID)
+		e.text(12, p.AuthorizationID)
+		e.text(13, p.AuthorizationDigest)
+		e.text(14, p.ActivationID)
+		e.text(15, p.WorkloadID)
+		e.text(16, p.ProviderID)
+		e.text(17, p.Audience)
+		e.text(18, p.Challenge)
+		e.text(19, p.PolicyDigest)
+		e.text(20, p.ReadBackDigest)
+		e.text(21, p.KeyID)
+		e.number(22, p.Epoch)
+		e.instant(23, p.IssuedAt)
+		e.instant(24, p.ExpiresAt)
+	})
 }
 func SignProof(p *Proof, key ed25519.PrivateKey) { p.Signature = ed25519.Sign(key, proofMessage(*p)) }
-func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, expectedActivationID string, rb ReadBack, now time.Time) error {
+func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, expected string, rb ReadBack, now time.Time) error {
 	if err := authenticateDescriptorContract(d, trust); err != nil {
 		return err
 	}
@@ -197,13 +257,13 @@ func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, exp
 		return err
 	}
 	c := a.Context
-	if p.AuthorizationID != a.ID || p.WorkloadID != c.WorkloadID || p.ProviderID != c.ProviderID || p.Audience != c.Audience || p.Challenge != c.Challenge || p.PolicyDigest != c.PolicyDigest {
+	if p.AuthorizationID != a.ID || p.AuthorizationDigest != authorizationDigest(a) || p.WorkloadID != c.WorkloadID || p.ProviderID != c.ProviderID || p.Audience != c.Audience || p.Challenge != c.Challenge || p.PolicyDigest != c.PolicyDigest {
 		return errors.New("proof binding mismatch")
 	}
 	if p.Epoch != d.Epoch || p.KeyID != d.KeyID || now.Before(p.IssuedAt) || !now.Before(p.ExpiresAt) {
 		return errors.New("stale or revoked proof")
 	}
-	if expectedActivationID == "" || p.ActivationID != expectedActivationID || rb.ActivationID != expectedActivationID || rb.WorkloadID != c.WorkloadID || rb.PolicyDigest != c.PolicyDigest || p.ReadBackDigest != readbackDigest(rb) {
+	if expected == "" || p.ActivationID != expected || rb.ActivationID != expected || rb.WorkloadID != c.WorkloadID || rb.PolicyDigest != c.PolicyDigest || p.ReadBackDigest != readbackDigest(rb) {
 		return errors.New("independent readback mismatch")
 	}
 	if !ed25519.Verify(ed25519.PublicKey(d.PublicKey), proofMessage(p), p.Signature) {
@@ -212,15 +272,14 @@ func VerifyProof(p Proof, a Authorization, d Descriptor, trust TrustProfile, exp
 	return nil
 }
 func stableID(prefix string, parts ...string) string {
-	sort.Strings(parts[:0])
-	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return prefix + hex.EncodeToString(h[:16])
+	return prefix + strings.TrimPrefix(hashTranscript("orka.enforcement.id/v1", func(e *canonicalEncoder) { e.text(10, prefix); e.field(11, encodeStrings(parts)) }), "sha256:")[:32]
 }
 func sameBytes(a, b []byte) bool { return bytes.Equal(a, b) }
-
-// ParseTrustProfileJSON loads operator-controlled trust. PublicKey is base64.
 func ParseTrustProfileJSON(data []byte) (TrustProfile, error) {
-	var wire struct {
+	if len(data) > maxTrustProfileBytes {
+		return TrustProfile{}, errors.New("provider trust profile exceeds size limit")
+	}
+	var w struct {
 		ProviderID   string `json:"providerId"`
 		EndpointID   string `json:"endpointId"`
 		Algorithm    string `json:"algorithm"`
@@ -228,16 +287,24 @@ func ParseTrustProfileJSON(data []byte) (TrustProfile, error) {
 		PublicKey    string `json:"publicKey"`
 		MinimumEpoch uint64 `json:"minimumEpoch"`
 	}
-	if err := json.Unmarshal(data, &wire); err != nil {
+	if err := rejectDuplicateJSONKeys(json.NewDecoder(bytes.NewReader(data))); err != nil {
 		return TrustProfile{}, fmt.Errorf("decode provider trust: %w", err)
 	}
-	key, err := base64.StdEncoding.DecodeString(wire.PublicKey)
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&w); err != nil {
+		return TrustProfile{}, fmt.Errorf("decode provider trust: %w", err)
+	}
+	if err := d.Decode(&struct{}{}); err != io.EOF {
+		return TrustProfile{}, errors.New("decode provider trust: trailing data")
+	}
+	key, err := base64.StdEncoding.DecodeString(w.PublicKey)
 	if err != nil {
 		return TrustProfile{}, fmt.Errorf("decode provider trust key: %w", err)
 	}
-	profile := TrustProfile{ProviderID: wire.ProviderID, EndpointID: wire.EndpointID, Algorithm: wire.Algorithm, KeyID: wire.KeyID, PublicKey: key, MinimumEpoch: wire.MinimumEpoch}
-	if profile.ProviderID == "" || profile.EndpointID == "" || profile.Algorithm != "ed25519" || profile.KeyID == "" || len(profile.PublicKey) != ed25519.PublicKeySize {
+	r := TrustProfile{w.ProviderID, w.EndpointID, w.Algorithm, w.KeyID, key, w.MinimumEpoch}
+	if r.ProviderID == "" || r.EndpointID == "" || r.Algorithm != "ed25519" || r.KeyID == "" || len(r.PublicKey) != ed25519.PublicKeySize {
 		return TrustProfile{}, errors.New("invalid provider trust profile")
 	}
-	return profile, nil
+	return r, nil
 }

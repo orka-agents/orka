@@ -2,7 +2,10 @@
 // Package enforcementprovider defines enforcement-provider orchestration.
 package enforcementprovider
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 const ProtocolVersion = "orka.enforcement-provider/v1"
 
@@ -39,10 +42,10 @@ type Authorization struct {
 }
 type ReadBack struct{ ActivationID, WorkloadID, PolicyDigest, ConfigurationDigest string }
 type Proof struct {
-	ID, AuthorizationID, ActivationID, WorkloadID, ProviderID, Audience, Challenge, PolicyDigest, ReadBackDigest, KeyID string
-	Epoch                                                                                                               uint64
-	IssuedAt, ExpiresAt                                                                                                 time.Time
-	Signature                                                                                                           []byte
+	ID, AuthorizationID, ActivationID, WorkloadID, ProviderID, Audience, Challenge, PolicyDigest, ReadBackDigest, AuthorizationDigest, KeyID string
+	Epoch                                                                                                                                    uint64
+	IssuedAt, ExpiresAt                                                                                                                      time.Time
+	Signature                                                                                                                                []byte
 }
 type Status struct{ State, Detail string }
 
@@ -53,7 +56,16 @@ type ActivateRequest struct {
 }
 type ReleaseRequest struct{ ActivationID, AuthorizationID, ProofID, ReleaseID string }
 type ReconcileRequest struct{ AttemptID string }
-type CleanupRequest struct{ AttemptID, ActivationID string }
+type CleanupRequest struct{ AttemptID, ActivationID, CleanupID string }
+
+var ErrProviderNotFound = errors.New("provider resource not found")
+
+type ProviderError struct{ Code, Message string }
+
+func (e *ProviderError) Error() string { return "provider " + e.Code + ": " + e.Message }
+func (e *ProviderError) Is(target error) bool {
+	return target == ErrProviderNotFound && e.Code == "not_found"
+}
 
 type Provider interface {
 	DiscoverDescriptor() (Descriptor, error)
@@ -67,5 +79,6 @@ type Provider interface {
 	Release(ReleaseRequest) error
 	GetStatus(string) (Status, error)
 	Reconcile(ReconcileRequest) (Status, error)
+	// Cleanup must be idempotent for an unchanged CleanupID and treat an already-absent resource as success.
 	Cleanup(CleanupRequest) error
 }

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func fixture(t *testing.T) (Descriptor, TrustProfile, Authorization, ReadBack, Proof) {
+func fixture() (Descriptor, TrustProfile, Authorization, ReadBack, Proof) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	now := time.Now().UTC()
 	ctx := Context{RequestID: "req", AttemptID: "attempt", WorkloadID: "workload", ProviderID: "fixture/v1", Audience: "orka", Challenge: "challenge", IdempotencyKey: "key", PolicyBytes: []byte(`{"version":"agentsuite.policy/v1","denyWritePaths":["/workspace"],"requiredCapabilities":["filesystem/deny-write/v1"]}`), RequiredCapabilities: []string{"filesystem/deny-write/v1"}}
@@ -18,11 +18,12 @@ func fixture(t *testing.T) (Descriptor, TrustProfile, Authorization, ReadBack, P
 	SignDescriptor(&d, priv)
 	trust := TrustProfile{ProviderID: d.ProviderID, EndpointID: d.EndpointID, Algorithm: d.Algorithm, KeyID: d.KeyID, PublicKey: pub, MinimumEpoch: d.Epoch}
 	p := Proof{ID: "proof", AuthorizationID: a.ID, ActivationID: rb.ActivationID, WorkloadID: ctx.WorkloadID, ProviderID: ctx.ProviderID, Audience: ctx.Audience, Challenge: ctx.Challenge, PolicyDigest: ctx.PolicyDigest, ReadBackDigest: readbackDigest(rb), KeyID: d.KeyID, Epoch: d.Epoch, IssuedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute)}
+	p.AuthorizationDigest = authorizationDigest(a)
 	SignProof(&p, priv)
 	return d, trust, a, rb, p
 }
 func TestProofAndReadback(t *testing.T) {
-	d, trust, a, rb, p := fixture(t)
+	d, trust, a, rb, p := fixture()
 	if e := VerifyProof(p, a, d, trust, rb.ActivationID, rb, time.Now()); e != nil {
 		t.Fatal(e)
 	}
@@ -32,7 +33,7 @@ func TestProofAndReadback(t *testing.T) {
 	}
 }
 func TestNegotiationFailsClosed(t *testing.T) {
-	d, trust, _, _, _ := fixture(t)
+	d, trust, _, _, _ := fixture()
 	if Negotiate(d, trust, []string{"missing/v1"}, time.Now()) == nil {
 		t.Fatal("accepted unsupported capability")
 	}
@@ -42,7 +43,7 @@ func TestNegotiationFailsClosed(t *testing.T) {
 	}
 }
 func TestProofBinding(t *testing.T) {
-	d, trust, a, rb, p := fixture(t)
+	d, trust, a, rb, p := fixture()
 	p.Audience = "other"
 	if VerifyProof(p, a, d, trust, rb.ActivationID, rb, time.Now()) == nil {
 		t.Fatal("accepted altered proof")
@@ -50,7 +51,7 @@ func TestProofBinding(t *testing.T) {
 }
 
 func TestDescriptorTrustRejectsSubstitution(t *testing.T) {
-	d, trust, _, _, _ := fixture(t)
+	d, trust, _, _, _ := fixture()
 	_, attacker, _ := ed25519.GenerateKey(rand.Reader)
 	d.PublicKey = attacker.Public().(ed25519.PublicKey)
 	SignDescriptor(&d, attacker)
@@ -59,12 +60,12 @@ func TestDescriptorTrustRejectsSubstitution(t *testing.T) {
 	}
 }
 func TestDescriptorTrustRejectsWrongEndpointAndAlgorithm(t *testing.T) {
-	d, trust, _, _, _ := fixture(t)
+	d, trust, _, _, _ := fixture()
 	d.EndpointID = "unix:other"
 	if AuthenticateDescriptor(d, trust, time.Now()) == nil {
 		t.Fatal("accepted wrong endpoint identity")
 	}
-	d, trust, _, _, _ = fixture(t)
+	d, trust, _, _, _ = fixture()
 	d.Algorithm = "other"
 	if AuthenticateDescriptor(d, trust, time.Now()) == nil {
 		t.Fatal("accepted wrong algorithm")
@@ -72,7 +73,7 @@ func TestDescriptorTrustRejectsWrongEndpointAndAlgorithm(t *testing.T) {
 }
 
 func TestAuthorizationRejectsNilEmptyAndInvalidCapabilities(t *testing.T) {
-	_, _, authorization, _, _ := fixture(t)
+	_, _, authorization, _, _ := fixture()
 	cases := map[string][]string{
 		"nil":        nil,
 		"empty":      {},
@@ -92,7 +93,7 @@ func TestAuthorizationRejectsNilEmptyAndInvalidCapabilities(t *testing.T) {
 }
 
 func TestNegotiationRejectsNilAndEmptyCapabilities(t *testing.T) {
-	descriptor, trust, _, _, _ := fixture(t)
+	descriptor, trust, _, _, _ := fixture()
 	for name, required := range map[string][]string{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
 			if Negotiate(descriptor, trust, required, time.Now()) == nil {
@@ -102,26 +103,35 @@ func TestNegotiationRejectsNilAndEmptyCapabilities(t *testing.T) {
 	}
 }
 
-func TestAuthorizationCapabilitiesMustMatchKnownPolicyContract(t *testing.T) {
-	_, _, authorization, _, _ := fixture(t)
-	cases := map[string]func(*Authorization){
-		"declared differs": func(a *Authorization) { a.Context.RequiredCapabilities = []string{"other/v1"} },
-		"policy omits mandatory": func(a *Authorization) {
-			a.Context.PolicyBytes = []byte(`{"version":"agentsuite.policy/v1","denyWritePaths":["/workspace"],"requiredCapabilities":[]}`)
-			a.Context.PolicyDigest = PolicyDigest(a.Context.PolicyBytes)
-		},
-		"unknown policy version": func(a *Authorization) {
-			a.Context.PolicyBytes = []byte(`{"version":"future/v2","denyWritePaths":["/workspace"],"requiredCapabilities":["filesystem/deny-write/v1"]}`)
-			a.Context.PolicyDigest = PolicyDigest(a.Context.PolicyBytes)
-		},
+func TestAuthorizationTreatsPolicyAsOpaqueAndCapabilitiesAsGeneric(t *testing.T) {
+	_, _, authorization, _, _ := fixture()
+	authorization.Context.PolicyBytes = []byte("provider-owned\x00opaque,policy")
+	authorization.Context.PolicyDigest = PolicyDigest(authorization.Context.PolicyBytes)
+	authorization.Context.RequiredCapabilities = []string{"network/isolation/v2", "audit/events/v1"}
+	if err := ValidateAuthorization(authorization, time.Now()); err != nil {
+		t.Fatalf("generic opaque policy rejected: %v", err)
 	}
-	for name, mutate := range cases {
-		t.Run(name, func(t *testing.T) {
-			changed := authorization
-			mutate(&changed)
-			if ValidateAuthorization(changed, time.Now()) == nil {
-				t.Fatal("accepted capability set divergent from known policy contract")
-			}
-		})
+}
+
+func TestCanonicalTranscriptsPreserveBoundaries(t *testing.T) {
+	d, _, a, _, p := fixture()
+	left := d
+	left.Capabilities = []string{"a,b"}
+	right := d
+	right.Capabilities = []string{"a", "b"}
+	if string(descriptorMessage(left)) == string(descriptorMessage(right)) {
+		t.Fatal("descriptor array boundaries collide")
+	}
+	p1 := p
+	p1.Audience, p1.Challenge = "orka\x00extra", "nonce"
+	p2 := p
+	p2.Audience, p2.Challenge = "orka", "extra\x00nonce"
+	if string(proofMessage(p1)) == string(proofMessage(p2)) {
+		t.Fatal("proof field boundaries collide")
+	}
+	changed := a
+	changed.Context.RequestID = "other"
+	if authorizationDigest(a) == authorizationDigest(changed) {
+		t.Fatal("authorization digest omitted request ID")
 	}
 }

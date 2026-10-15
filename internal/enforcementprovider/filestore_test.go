@@ -18,7 +18,7 @@ func TestFileStoreRejectsVersionWithoutDurableDescriptor(t *testing.T) {
 }
 
 func TestFileStoreRestartPreservesReleaseObligation(t *testing.T) {
-	p, trust, a := newSynthetic(t)
+	p, trust, a := newSynthetic()
 	path := filepath.Join(t.TempDir(), "enforcement.json")
 	st, err := NewFileStore(path)
 	if err != nil {
@@ -37,6 +37,9 @@ func TestFileStoreRestartPreservesReleaseObligation(t *testing.T) {
 		t.Fatal(err)
 	}
 	releaseID := x.ReleaseID
+	if err = st.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -52,14 +55,22 @@ func TestFileStoreRestartPreservesReleaseObligation(t *testing.T) {
 }
 
 func TestStartupRecoveryExecutesOnlyDurableReleaseObligation(t *testing.T) {
-	p, trust, a := newSynthetic(t)
+	p, trust, a := newSynthetic()
 	path := filepath.Join(t.TempDir(), "enforcement.json")
 	st, _ := NewFileStore(path)
 	o := Orchestrator{Store: st, Provider: p, Trust: trust, Now: time.Now}
-	o.Authorize(a)
+	if _, err := o.Authorize(a); err != nil {
+		t.Fatal(err)
+	}
 	x, _ := o.Activate(a.Context.AttemptID)
 	x, _ = o.ConsumeProof(a.Context.AttemptID, x.ProofID)
-	reopened, _ := NewFileStore(path)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	restarted := Orchestrator{Store: reopened, Provider: p, Trust: trust, Now: time.Now}
 	result := restarted.Recover(reopened.List())
 	if result[a.Context.AttemptID] != nil {

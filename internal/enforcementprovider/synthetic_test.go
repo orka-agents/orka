@@ -18,21 +18,24 @@ type synthetic struct {
 	releaseFailures  int
 	released         map[string]ReleaseRequest
 	statusState      string
+	cleanupErr       error
 	prepareRequests  []PrepareRequest
 	activateRequests []ActivateRequest
 	readBackIDs      []string
 	proofIDs         []string
 	releaseRequests  []ReleaseRequest
+	cleanupRequests  []CleanupRequest
 }
 
-func newSynthetic(t *testing.T) (*synthetic, TrustProfile, Authorization) {
-	d, trust, a, rb, p := fixture(t)
+func newSynthetic() (*synthetic, TrustProfile, Authorization) {
+	d, trust, a, rb, p := fixture()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
 	d.PublicKey = pub
 	trust.PublicKey = pub
 	SignDescriptor(&d, priv)
 	p.KeyID = d.KeyID
+	p.AuthorizationDigest = authorizationDigest(a)
 	SignProof(&p, priv)
 	return &synthetic{d: d, priv: priv, a: a, rb: rb, p: p, released: map[string]ReleaseRequest{}}, trust, a
 }
@@ -75,9 +78,12 @@ func (s *synthetic) GetStatus(string) (Status, error) {
 	return Status{State: "active"}, nil
 }
 func (s *synthetic) Reconcile(ReconcileRequest) (Status, error) { return Status{State: "active"}, nil }
-func (s *synthetic) Cleanup(CleanupRequest) error               { return nil }
+func (s *synthetic) Cleanup(r CleanupRequest) error {
+	s.cleanupRequests = append(s.cleanupRequests, r)
+	return s.cleanupErr
+}
 func TestHeldUntilDurableProofConsumption(t *testing.T) {
-	p, trust, a := newSynthetic(t)
+	p, trust, a := newSynthetic()
 	o := Orchestrator{Store: NewMemoryStore(), Provider: p, Trust: trust, Now: time.Now}
 	if _, e := o.Authorize(a); e != nil {
 		t.Fatal(e)
@@ -105,10 +111,12 @@ func TestHeldUntilDurableProofConsumption(t *testing.T) {
 	}
 }
 func TestReleaseRecoveryAndReplay(t *testing.T) {
-	p, trust, a := newSynthetic(t)
+	p, trust, a := newSynthetic()
 	p.releaseFailures = 1
 	o := Orchestrator{Store: NewMemoryStore(), Provider: p, Trust: trust, Now: time.Now}
-	o.Authorize(a)
+	if _, err := o.Authorize(a); err != nil {
+		t.Fatal(err)
+	}
 	x, _ := o.Activate(a.Context.AttemptID)
 	x, _ = o.ConsumeProof(a.Context.AttemptID, x.ProofID)
 	if _, e := o.Release(a.Context.AttemptID); e == nil {
@@ -123,10 +131,12 @@ func TestReleaseRecoveryAndReplay(t *testing.T) {
 	}
 }
 func TestCrashRecoveryPreservesObligation(t *testing.T) {
-	p, trust, a := newSynthetic(t)
+	p, trust, a := newSynthetic()
 	st := NewMemoryStore()
 	o := Orchestrator{Store: st, Provider: p, Trust: trust, Now: time.Now}
-	o.Authorize(a)
+	if _, err := o.Authorize(a); err != nil {
+		t.Fatal(err)
+	}
 	x, _ := o.Activate(a.Context.AttemptID)
 	x, _ = o.ConsumeProof(a.Context.AttemptID, x.ProofID)
 	restarted := Orchestrator{Store: st, Provider: p, Trust: trust, Now: time.Now}
@@ -137,7 +147,7 @@ func TestCrashRecoveryPreservesObligation(t *testing.T) {
 }
 
 func TestUnsupportedCapabilityRejectedBeforePrepare(t *testing.T) {
-	p, trust, a := newSynthetic(t)
+	p, trust, a := newSynthetic()
 	a.Context.RequiredCapabilities = []string{"missing/v1"}
 	o := Orchestrator{Store: NewMemoryStore(), Provider: p, Trust: trust, Now: time.Now}
 	if _, err := o.Authorize(a); err == nil {
@@ -168,7 +178,7 @@ func (p *countingProvider) Prepare(request PrepareRequest) (string, error) {
 func TestNilAndEmptyCapabilitiesFailBeforePersistenceOrProviderCalls(t *testing.T) {
 	for name, required := range map[string][]string{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
-			base, trust, authorization := newSynthetic(t)
+			base, trust, authorization := newSynthetic()
 			provider := &countingProvider{synthetic: base}
 			authorization.Context.RequiredCapabilities = required
 			store := NewMemoryStore()
@@ -186,7 +196,7 @@ func TestNilAndEmptyCapabilitiesFailBeforePersistenceOrProviderCalls(t *testing.
 	}
 }
 func TestActivationRevalidatesMandatoryCapabilitiesBeforeProviderCalls(t *testing.T) {
-	base, trust, authorization := newSynthetic(t)
+	base, trust, authorization := newSynthetic()
 	provider := &countingProvider{synthetic: base}
 	store := NewMemoryStore()
 	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
@@ -260,7 +270,7 @@ func (p *durablePhaseProvider) GetProof(id string) (Proof, error) {
 }
 
 func TestProviderEffectsFollowDurablePhase(t *testing.T) {
-	base, trust, authorization := newSynthetic(t)
+	base, trust, authorization := newSynthetic()
 	store := NewMemoryStore()
 	provider := &durablePhaseProvider{synthetic: base, store: store}
 	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
@@ -281,7 +291,7 @@ func (p *substitutedActivationProvider) Activate(ActivateRequest) (string, error
 }
 
 func TestActivationBindsExactProviderResult(t *testing.T) {
-	base, trust, authorization := newSynthetic(t)
+	base, trust, authorization := newSynthetic()
 	store := NewMemoryStore()
 	orchestrator := Orchestrator{
 		Store:    store,
@@ -298,7 +308,7 @@ func TestActivationBindsExactProviderResult(t *testing.T) {
 }
 
 func TestRecoveryRejectsReleasedHeldAttempt(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	store := NewMemoryStore()
 	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 	if _, err := orchestrator.Authorize(authorization); err != nil {
@@ -322,7 +332,7 @@ type failOnceStore struct {
 }
 
 func (s *failOnceStore) CompareAndSwap(id string, version uint64, mutate func(*Attempt) error) (Attempt, error) {
-	current, err := s.Store.Get(id)
+	current, err := s.Get(id)
 	if err != nil {
 		return Attempt{}, err
 	}
@@ -380,7 +390,7 @@ func TestActivationRetriesProviderSuccessAfterPersistenceFailure(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			provider, trust, authorization := newSynthetic(t)
+			provider, trust, authorization := newSynthetic()
 			store := &failOnceStore{Store: NewMemoryStore(), fail: test.fail}
 			orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 			if _, err := orchestrator.Authorize(authorization); err != nil {
@@ -402,7 +412,7 @@ func TestActivationRetriesProviderSuccessAfterPersistenceFailure(t *testing.T) {
 }
 
 func TestReleaseRetriesExactDurableObligationAfterPersistenceFailure(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	store := &failOnceStore{
 		Store: NewMemoryStore(),
 		fail:  func(a Attempt) bool { return a.Phase == PhaseReleased },
@@ -430,7 +440,7 @@ func TestReleaseRetriesExactDurableObligationAfterPersistenceFailure(t *testing.
 }
 
 func TestRecoveryResumesAdmittedAttemptAfterAuthorizationExpiry(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	admittedAt := time.Now().UTC()
 	authorization.IssuedAt = admittedAt.Add(-time.Second)
 	authorization.NotBefore = admittedAt.Add(-time.Second)
@@ -439,6 +449,7 @@ func TestRecoveryResumesAdmittedAttemptAfterAuthorizationExpiry(t *testing.T) {
 	provider.d.ExpiresAt = admittedAt.Add(time.Hour)
 	SignDescriptor(&provider.d, provider.priv)
 	provider.p.ExpiresAt = admittedAt.Add(time.Hour)
+	provider.p.AuthorizationDigest = authorizationDigest(authorization)
 	SignProof(&provider.p, provider.priv)
 	store := NewMemoryStore()
 	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: func() time.Time { return admittedAt }}
@@ -462,7 +473,7 @@ func TestRecoveryResumesAdmittedAttemptAfterAuthorizationExpiry(t *testing.T) {
 }
 
 func TestRecoveryUsesAdmittedDescriptorAcrossProviderRollover(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	store := NewMemoryStore()
 	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 	attempt, err := orchestrator.Authorize(authorization)
@@ -488,7 +499,7 @@ func TestRecoveryUsesAdmittedDescriptorAcrossProviderRollover(t *testing.T) {
 }
 
 func TestRecoveryRejectsRevokedAdmittedDescriptor(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	store := NewMemoryStore()
 	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 	attempt, err := orchestrator.Authorize(authorization)
@@ -523,7 +534,7 @@ func TestProofIssuedAttemptHonorsOperatorRevocation(t *testing.T) {
 	}
 	for name, revoke := range tests {
 		t.Run(name, func(t *testing.T) {
-			provider, trust, authorization := newSynthetic(t)
+			provider, trust, authorization := newSynthetic()
 			store := NewMemoryStore()
 			orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 			if _, err := orchestrator.Authorize(authorization); err != nil {
@@ -560,7 +571,7 @@ func TestProofConsumptionHonorsOperatorRevocation(t *testing.T) {
 	}
 	for name, revoke := range tests {
 		t.Run(name, func(t *testing.T) {
-			provider, trust, authorization := newSynthetic(t)
+			provider, trust, authorization := newSynthetic()
 			store := NewMemoryStore()
 			orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 			if _, err := orchestrator.Authorize(authorization); err != nil {
@@ -578,8 +589,8 @@ func TestProofConsumptionHonorsOperatorRevocation(t *testing.T) {
 	}
 }
 
-func TestRecoveryRequiresReleasedProviderState(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+func TestRecoveryCleansReleasedAttemptAndRetainsTombstone(t *testing.T) {
+	provider, trust, authorization := newSynthetic()
 	store := NewMemoryStore()
 	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 	if _, err := orchestrator.Authorize(authorization); err != nil {
@@ -597,9 +608,16 @@ func TestRecoveryRequiresReleasedProviderState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider.statusState = "active"
 	result := orchestrator.Recover([]Attempt{attempt})
-	if result[authorization.Context.AttemptID] == nil {
-		t.Fatal("accepted active provider state for durably released attempt")
+	if result[authorization.Context.AttemptID] != nil {
+		t.Fatal(result)
+	}
+	cleaned, err := store.Get(authorization.Context.AttemptID)
+	if err != nil || cleaned.Phase != PhaseCleaned || cleaned.CleanupID == "" || cleaned.ProofDigest == "" {
+		t.Fatalf("cleanup lost replay tombstone: %#v, %v", cleaned, err)
+	}
+	result = orchestrator.Recover([]Attempt{cleaned})
+	if result[authorization.Context.AttemptID] != nil {
+		t.Fatal(result)
 	}
 }

@@ -7,7 +7,7 @@ import (
 )
 
 func TestControllerRequiresStartupAndRecoversRelease(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	path := filepath.Join(t.TempDir(), "controller.json")
 	first, err := NewController(path, provider, trust, time.Now)
 	if err != nil {
@@ -33,6 +33,9 @@ func TestControllerRequiresStartupAndRecoversRelease(t *testing.T) {
 
 	// Simulate a crash before the releaser runs. A new controller executes the
 	// durable release obligation during Start and becomes ready only afterwards.
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
+	}
 	restarted, err := NewController(path, provider, trust, time.Now)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +53,7 @@ func TestControllerRequiresStartupAndRecoversRelease(t *testing.T) {
 }
 
 func TestControllerStartupFailurePreventsReadiness(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	path := filepath.Join(t.TempDir(), "controller.json")
 	first, _ := NewController(path, provider, trust, time.Now)
 	if err := first.Start(); err != nil {
@@ -64,7 +67,13 @@ func TestControllerStartupFailurePreventsReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider.releaseFailures = 1
-	restarted, _ := NewController(path, provider, trust, time.Now)
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewController(path, provider, trust, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err = restarted.Start(); err == nil {
 		t.Fatal("controller became ready despite failed recovery")
 	}
@@ -74,7 +83,7 @@ func TestControllerStartupFailurePreventsReadiness(t *testing.T) {
 }
 
 func TestControllerRetriesExactAdmittedAuthorizationAfterExpiry(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	admittedAt := time.Now().UTC()
 	authorization.IssuedAt = admittedAt.Add(-time.Second)
 	authorization.NotBefore = admittedAt.Add(-time.Second)
@@ -83,6 +92,7 @@ func TestControllerRetriesExactAdmittedAuthorizationAfterExpiry(t *testing.T) {
 	provider.d.ExpiresAt = admittedAt.Add(time.Hour)
 	SignDescriptor(&provider.d, provider.priv)
 	provider.p.ExpiresAt = admittedAt.Add(time.Hour)
+	provider.p.AuthorizationDigest = authorizationDigest(authorization)
 	SignProof(&provider.p, provider.priv)
 	now := admittedAt
 	controller, err := NewController(filepath.Join(t.TempDir(), "controller.json"), provider, trust, func() time.Time { return now })

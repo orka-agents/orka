@@ -1,6 +1,7 @@
 package enforcementprovider
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"sync"
@@ -17,18 +18,21 @@ const (
 	PhaseProofIssued          Phase = "ProofIssued"
 	PhaseProofConsumed        Phase = "ProofConsumed"
 	PhaseReleased             Phase = "Released"
+	PhaseCleanupPending       Phase = "CleanupPending"
+	PhaseCleaned              Phase = "Cleaned"
 	PhaseQuarantined          Phase = "Quarantined"
 )
 
 // Attempt is durable orchestration state. ReleaseID is written atomically with proof consumption.
 type Attempt struct {
-	Context                                                      Context
-	Authorization                                                Authorization
-	Descriptor                                                   Descriptor
-	Phase                                                        Phase
-	PreparationID, ActivationID, ProofID, ProofDigest, ReleaseID string
-	Version                                                      uint64
-	LastError                                                    string
+	Context                                                                 Context
+	Authorization                                                           Authorization
+	Descriptor                                                              Descriptor
+	Phase                                                                   Phase
+	PreparationID, ActivationID, ProofID, ProofDigest, ReleaseID, CleanupID string
+	Proof                                                                   Proof
+	Version                                                                 uint64
+	LastError                                                               string
 }
 
 var ErrAttemptNotFound = errors.New("attempt not found")
@@ -49,15 +53,16 @@ func NewMemoryStore() *MemoryStore { return &MemoryStore{attempts: map[string]At
 func (s *MemoryStore) Create(c Context) (Attempt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	c = cloneContext(c)
 	if old, ok := s.attempts[c.AttemptID]; ok {
 		if !equalContext(old.Context, c) {
 			return Attempt{}, errors.New("attempt identity conflict")
 		}
-		return old, nil
+		return cloneAttempt(old), nil
 	}
 	a := Attempt{Context: c, Phase: PhaseRequested, Version: 1}
-	s.attempts[c.AttemptID] = a
-	return a, nil
+	s.attempts[c.AttemptID] = cloneAttempt(a)
+	return cloneAttempt(a), nil
 }
 func (s *MemoryStore) Get(id string) (Attempt, error) {
 	s.mu.Lock()
@@ -66,7 +71,7 @@ func (s *MemoryStore) Get(id string) (Attempt, error) {
 	if !ok {
 		return a, ErrAttemptNotFound
 	}
-	return a, nil
+	return cloneAttempt(a), nil
 }
 func (s *MemoryStore) CompareAndSwap(id string, v uint64, fn func(*Attempt) error) (Attempt, error) {
 	s.mu.Lock()
@@ -78,12 +83,19 @@ func (s *MemoryStore) CompareAndSwap(id string, v uint64, fn func(*Attempt) erro
 	if a.Version != v {
 		return a, errors.New("attempt version conflict")
 	}
-	if err := fn(&a); err != nil {
+	candidate := cloneAttempt(a)
+	if err := fn(&candidate); err != nil {
 		return Attempt{}, err
 	}
-	a.Version++
-	s.attempts[id] = a
-	return a, nil
+	candidate = cloneAttempt(candidate)
+	candidate.Version++
+	prospective := cloneAttempts(s.attempts)
+	prospective[id] = candidate
+	if err := validateAttempts(prospective); err != nil {
+		return Attempt{}, err
+	}
+	s.attempts[id] = candidate
+	return cloneAttempt(candidate), nil
 }
 
 type Orchestrator struct {
@@ -167,100 +179,111 @@ func (o Orchestrator) authenticateAttempt(a Attempt) (Descriptor, error) {
 
 func (o Orchestrator) Activate(attemptID string) (Attempt, error) {
 	for {
-		a, err := o.Store.Get(attemptID)
+		attempt, err := o.Store.Get(attemptID)
 		if err != nil {
-			return a, err
+			return attempt, err
 		}
-		switch a.Phase {
-		case PhaseProofIssued:
-			if _, err = o.authenticateAttempt(a); err != nil {
-				return a, err
-			}
-			return a, nil
-		case PhaseProofConsumed, PhaseReleased:
-			return a, nil
-		case PhaseAuthorized:
-			if _, err = o.authenticateAttempt(a); err != nil {
-				return a, err
-			}
-			if _, err = o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
-				if x.Phase != PhaseAuthorized {
-					return fmt.Errorf("cannot start provisioning from %s", x.Phase)
-				}
-				x.Phase = PhaseProvisioning
-				return nil
-			}); err != nil {
-				return a, err
-			}
-		case PhaseProvisioning:
-			if _, err = o.authenticateAttempt(a); err != nil {
-				return a, err
-			}
-			if a.PreparationID == "" {
-				preparationID, prepareErr := o.Provider.Prepare(PrepareRequest{Authorization: a.Authorization})
-				if prepareErr != nil {
-					return a, prepareErr
-				}
-				if preparationID == "" {
-					return a, errors.New("provider returned empty preparation ID")
-				}
-				if _, err = o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
-					if x.Phase != PhaseProvisioning || x.PreparationID != "" {
-						return errors.New("provisioning preparation state changed")
-					}
-					x.PreparationID = preparationID
-					return nil
-				}); err != nil {
-					return a, err
-				}
-				continue
-			}
-			activationID, activateErr := o.Provider.Activate(ActivateRequest{Authorization: a.Authorization, PreparationID: a.PreparationID})
-			if activateErr != nil {
-				return a, activateErr
-			}
-			if activationID == "" {
-				return a, errors.New("provider returned empty activation ID")
-			}
-			if _, err = o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
-				if x.Phase != PhaseProvisioning || x.PreparationID != a.PreparationID || x.ActivationID != "" {
-					return errors.New("provisioning activation state changed")
-				}
-				x.ActivationID = activationID
-				x.Phase = PhaseActivatedAndReadBack
-				return nil
-			}); err != nil {
-				return a, err
-			}
-		case PhaseActivatedAndReadBack:
-			descriptor, authErr := o.authenticateAttempt(a)
-			if authErr != nil {
-				return a, authErr
-			}
-			readback, readErr := o.Provider.ReadBack(a.ActivationID)
-			if readErr != nil {
-				return a, readErr
-			}
-			proof, proofErr := o.Provider.GetProof(a.ActivationID)
-			if proofErr != nil {
-				return a, proofErr
-			}
-			if err = VerifyProof(proof, a.Authorization, descriptor, o.Trust, a.ActivationID, readback, o.now()); err != nil {
-				return a, err
-			}
-			return o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
-				if x.Phase != PhaseActivatedAndReadBack || x.ActivationID != a.ActivationID {
-					return errors.New("activation verification state changed")
-				}
-				x.ProofID = proof.ID
-				x.ProofDigest = stableID("proof-", string(proof.Signature))
-				x.Phase = PhaseProofIssued
-				return nil
-			})
-		default:
-			return a, fmt.Errorf("cannot activate from %s", a.Phase)
+		done, result, err := o.activateStep(attempt)
+		if err != nil || done {
+			return result, err
 		}
 	}
+}
+
+func (o Orchestrator) activateStep(attempt Attempt) (bool, Attempt, error) {
+	switch attempt.Phase {
+	case PhaseProofIssued:
+		_, err := o.authenticateAttempt(attempt)
+		return true, attempt, err
+	case PhaseProofConsumed, PhaseReleased, PhaseCleanupPending, PhaseCleaned:
+		return true, attempt, nil
+	case PhaseAuthorized:
+		if _, err := o.authenticateAttempt(attempt); err != nil {
+			return true, attempt, err
+		}
+		_, err := o.Store.CompareAndSwap(attempt.Context.AttemptID, attempt.Version, func(candidate *Attempt) error {
+			if candidate.Phase != PhaseAuthorized {
+				return fmt.Errorf("cannot start provisioning from %s", candidate.Phase)
+			}
+			candidate.Phase = PhaseProvisioning
+			return nil
+		})
+		return false, attempt, err
+	case PhaseProvisioning:
+		return o.activateProvisioning(attempt)
+	case PhaseActivatedAndReadBack:
+		return o.activateReadBack(attempt)
+	default:
+		return true, attempt, fmt.Errorf("cannot activate from %s", attempt.Phase)
+	}
+}
+
+func (o Orchestrator) activateProvisioning(attempt Attempt) (bool, Attempt, error) {
+	if _, err := o.authenticateAttempt(attempt); err != nil {
+		return true, attempt, err
+	}
+	if attempt.PreparationID == "" {
+		preparationID, err := o.Provider.Prepare(PrepareRequest{Authorization: attempt.Authorization})
+		if err != nil {
+			return true, attempt, err
+		}
+		if preparationID == "" {
+			return true, attempt, errors.New("provider returned empty preparation ID")
+		}
+		_, err = o.Store.CompareAndSwap(attempt.Context.AttemptID, attempt.Version, func(candidate *Attempt) error {
+			if candidate.Phase != PhaseProvisioning || candidate.PreparationID != "" {
+				return errors.New("provisioning preparation state changed")
+			}
+			candidate.PreparationID = preparationID
+			return nil
+		})
+		return false, attempt, err
+	}
+	activationID, err := o.Provider.Activate(ActivateRequest{Authorization: attempt.Authorization, PreparationID: attempt.PreparationID})
+	if err != nil {
+		return true, attempt, err
+	}
+	if activationID == "" {
+		return true, attempt, errors.New("provider returned empty activation ID")
+	}
+	_, err = o.Store.CompareAndSwap(attempt.Context.AttemptID, attempt.Version, func(candidate *Attempt) error {
+		if candidate.Phase != PhaseProvisioning || candidate.PreparationID != attempt.PreparationID || candidate.ActivationID != "" {
+			return errors.New("provisioning activation state changed")
+		}
+		candidate.ActivationID = activationID
+		candidate.Phase = PhaseActivatedAndReadBack
+		return nil
+	})
+	return false, attempt, err
+}
+
+func (o Orchestrator) activateReadBack(attempt Attempt) (bool, Attempt, error) {
+	descriptor, err := o.authenticateAttempt(attempt)
+	if err != nil {
+		return true, attempt, err
+	}
+	readback, err := o.Provider.ReadBack(attempt.ActivationID)
+	if err != nil {
+		return true, attempt, err
+	}
+	proof, err := o.Provider.GetProof(attempt.ActivationID)
+	if err != nil {
+		return true, attempt, err
+	}
+	if err = VerifyProof(proof, attempt.Authorization, descriptor, o.Trust, attempt.ActivationID, readback, o.now()); err != nil {
+		return true, attempt, err
+	}
+	result, err := o.Store.CompareAndSwap(attempt.Context.AttemptID, attempt.Version, func(candidate *Attempt) error {
+		if candidate.Phase != PhaseActivatedAndReadBack || candidate.ActivationID != attempt.ActivationID {
+			return errors.New("activation verification state changed")
+		}
+		candidate.ProofID = proof.ID
+		candidate.Proof = cloneProof(proof)
+		candidate.ProofDigest = stableID("proof-", string(proofMessage(proof)), string(proof.Signature))
+		candidate.Phase = PhaseProofIssued
+		return nil
+	})
+	return true, result, err
 }
 
 // ConsumeProof atomically records both consumption and the immutable release obligation.
@@ -269,7 +292,7 @@ func (o Orchestrator) ConsumeProof(attemptID, proofID string) (Attempt, error) {
 	if err != nil {
 		return a, err
 	}
-	if a.Phase == PhaseProofConsumed || a.Phase == PhaseReleased {
+	if a.Phase == PhaseProofConsumed || a.Phase == PhaseReleased || a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned {
 		if a.ProofID == proofID {
 			return a, nil
 		}
@@ -281,7 +304,29 @@ func (o Orchestrator) ConsumeProof(attemptID, proofID string) (Attempt, error) {
 	if _, err = o.authenticateAttempt(a); err != nil {
 		return a, err
 	}
+	now := o.now()
 	return o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
+		descriptor, verifyErr := o.authenticateAttempt(*x)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		if x.Phase != PhaseProofIssued || x.ProofID != proofID {
+			return errors.New("proof consumption state changed")
+		}
+		proof := x.Proof
+		context := x.Authorization.Context
+		if proof.ID != proofID || proof.AuthorizationID != x.Authorization.ID || proof.AuthorizationDigest != authorizationDigest(x.Authorization) ||
+			proof.ActivationID != x.ActivationID || proof.WorkloadID != context.WorkloadID || proof.ProviderID != context.ProviderID ||
+			proof.Audience != context.Audience || proof.Challenge != context.Challenge || proof.PolicyDigest != context.PolicyDigest ||
+			proof.KeyID != descriptor.KeyID || proof.Epoch != descriptor.Epoch || now.Before(proof.IssuedAt) || !now.Before(proof.ExpiresAt) {
+			return errors.New("proof is stale or no longer bound to authorization")
+		}
+		if x.ProofDigest != stableID("proof-", string(proofMessage(proof)), string(proof.Signature)) {
+			return errors.New("persisted proof digest mismatch")
+		}
+		if !ed25519.Verify(ed25519.PublicKey(descriptor.PublicKey), proofMessage(proof), proof.Signature) {
+			return errors.New("invalid persisted proof signature")
+		}
 		x.ReleaseID = stableID("release-", x.Context.AttemptID, x.Authorization.ID, x.ProofID)
 		x.Phase = PhaseProofConsumed
 		return nil
@@ -292,7 +337,7 @@ func (o Orchestrator) Release(attemptID string) (Attempt, error) {
 	if err != nil {
 		return a, err
 	}
-	if a.Phase == PhaseReleased {
+	if a.Phase == PhaseReleased || a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned {
 		return a, nil
 	}
 	if a.Phase != PhaseProofConsumed {
@@ -302,6 +347,46 @@ func (o Orchestrator) Release(attemptID string) (Attempt, error) {
 		return a, err
 	}
 	return o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error { x.Phase = PhaseReleased; return nil })
+}
+
+// Cleanup durably records an idempotent cleanup obligation and retains a replay-safe tombstone.
+func (o Orchestrator) Cleanup(attemptID string) (Attempt, error) {
+	for {
+		a, err := o.Store.Get(attemptID)
+		if err != nil {
+			return a, err
+		}
+		switch a.Phase {
+		case PhaseCleaned:
+			return a, nil
+		case PhaseReleased:
+			a, err = o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
+				if x.Phase != PhaseReleased {
+					return errors.New("cleanup state changed")
+				}
+				x.CleanupID = stableID("cleanup-", x.Context.AttemptID, x.ActivationID, x.ReleaseID)
+				x.Phase = PhaseCleanupPending
+				return nil
+			})
+			if err != nil {
+				return a, err
+			}
+		case PhaseCleanupPending:
+			err = o.Provider.Cleanup(CleanupRequest{AttemptID: a.Context.AttemptID, ActivationID: a.ActivationID, CleanupID: a.CleanupID})
+			if err != nil && !errors.Is(err, ErrProviderNotFound) {
+				return a, err
+			}
+			return o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
+				if x.Phase != PhaseCleanupPending || x.CleanupID != a.CleanupID {
+					return errors.New("cleanup obligation changed")
+				}
+				x.Phase = PhaseCleaned
+				return nil
+			})
+		default:
+			return a, errors.New("attempt is not released for cleanup")
+		}
+	}
 }
 
 // Recover resumes durable release obligations and verifies active held attempts.
@@ -329,12 +414,16 @@ func (o Orchestrator) Recover(attempts []Attempt) map[string]error {
 			if err == nil && status.State != "active" {
 				err = fmt.Errorf("provider state %q for held attempt", status.State)
 			}
-		case PhaseReleased:
-			var status Status
-			status, err = o.Provider.GetStatus(current.ActivationID)
-			if err == nil && status.State != "released" {
-				err = fmt.Errorf("provider lost released activation: %q", status.State)
-			}
+		case PhaseReleased, PhaseCleanupPending:
+			_, err = o.Cleanup(id)
+		case PhaseCleaned:
+			// Replay-safe terminal tombstone; no provider query is required.
+		case PhaseRequested:
+			// No provider side effect exists yet; authorization may be retried.
+		case PhaseQuarantined:
+			err = errors.New("quarantined attempt requires operator reconciliation")
+		default:
+			err = fmt.Errorf("unsupported persisted phase %q", current.Phase)
 		}
 		results[id] = err
 	}

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func contextMutations(base Context) map[string]func(*Context) {
+func contextMutations() map[string]func(*Context) {
 	return map[string]func(*Context){
 		"request":      func(c *Context) { c.RequestID = "changed-request" },
 		"workload":     func(c *Context) { c.WorkloadID = "changed-workload" },
@@ -23,12 +23,12 @@ func contextMutations(base Context) map[string]func(*Context) {
 }
 
 func TestMemoryStoreRejectsAlteredSameAttemptContext(t *testing.T) {
-	_, _, authorization := newSynthetic(t)
+	_, _, authorization := newSynthetic()
 	store := NewMemoryStore()
 	if _, err := store.Create(authorization.Context); err != nil {
 		t.Fatal(err)
 	}
-	for name, mutate := range contextMutations(authorization.Context) {
+	for name, mutate := range contextMutations() {
 		t.Run(name, func(t *testing.T) {
 			changed := authorization.Context
 			changed.PolicyBytes = append([]byte(nil), changed.PolicyBytes...)
@@ -42,7 +42,7 @@ func TestMemoryStoreRejectsAlteredSameAttemptContext(t *testing.T) {
 }
 
 func TestFileStoreRejectsAlteredSameAttemptContextAfterRestart(t *testing.T) {
-	_, _, authorization := newSynthetic(t)
+	_, _, authorization := newSynthetic()
 	path := filepath.Join(t.TempDir(), "store.json")
 	store, err := NewFileStore(path)
 	if err != nil {
@@ -51,7 +51,10 @@ func TestFileStoreRejectsAlteredSameAttemptContextAfterRestart(t *testing.T) {
 	if _, err = store.Create(authorization.Context); err != nil {
 		t.Fatal(err)
 	}
-	for name, mutate := range contextMutations(authorization.Context) {
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range contextMutations() {
 		t.Run(name, func(t *testing.T) {
 			restarted, openErr := NewFileStore(path)
 			if openErr != nil {
@@ -64,12 +67,15 @@ func TestFileStoreRejectsAlteredSameAttemptContextAfterRestart(t *testing.T) {
 			if _, createErr := restarted.Create(changed); createErr == nil {
 				t.Fatal("accepted altered same-attempt context after restart")
 			}
+			if closeErr := restarted.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
 		})
 	}
 }
 
 func TestAuthorizeRejectsAlteredSameIDAuthorization(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	orchestrator := Orchestrator{Store: NewMemoryStore(), Provider: provider, Trust: trust, Now: time.Now}
 	if _, err := orchestrator.Authorize(authorization); err != nil {
 		t.Fatal(err)
@@ -103,7 +109,7 @@ func TestActivateBindsAuthorizationToAuthenticatedProviderAndEpoch(t *testing.T)
 		{"epoch", func(a *Authorization) { a.Epoch++ }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			provider, trust, authorization := newSynthetic(t)
+			provider, trust, authorization := newSynthetic()
 			test.mutate(&authorization)
 			store := NewMemoryStore()
 			orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
@@ -118,7 +124,7 @@ func TestActivateBindsAuthorizationToAuthenticatedProviderAndEpoch(t *testing.T)
 }
 
 func TestAuthorizeComparesFullAuthorizationAfterActivationAndRestart(t *testing.T) {
-	provider, trust, authorization := newSynthetic(t)
+	provider, trust, authorization := newSynthetic()
 	path := filepath.Join(t.TempDir(), "store.json")
 	store, err := NewFileStore(path)
 	if err != nil {
@@ -129,6 +135,9 @@ func TestAuthorizeComparesFullAuthorizationAfterActivationAndRestart(t *testing.
 		t.Fatal(err)
 	}
 	if _, err = orchestrator.Activate(authorization.Context.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	restartedStore, err := NewFileStore(path)

@@ -7,14 +7,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
-	"syscall"
 	"time"
 )
 
-const maxTransportFrame = 1 << 20
+const (
+	maxTransportFrame = 1 << 20
+	activationIDField = "activationId"
+)
 
 var errTransportFrameTooLarge = errors.New("provider frame exceeds limit")
 
@@ -86,30 +87,18 @@ func (p *unixProvider) call(operation string, parameters, result any) error {
 	if err != nil {
 		return err
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	conn, ok := raw.(*net.UnixConn)
 	if !ok {
 		return errors.New("provider transport is not Unix")
 	}
-	sys, err := conn.SyscallConn()
-	if err != nil {
+	if err = authenticateUnixPeer(conn, p.allowedUID); err != nil {
 		return err
-	}
-	var cred *syscall.Ucred
-	var sockErr error
-	if err = sys.Control(func(fd uintptr) {
-		cred, sockErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	}); err != nil {
-		return err
-	}
-	if sockErr != nil {
-		return sockErr
-	}
-	if cred.Uid != p.allowedUID {
-		return fmt.Errorf("provider peer uid %d is not trusted", cred.Uid)
 	}
 	deadline := time.Now().Add(p.timeout)
-	_ = conn.SetDeadline(deadline)
+	if err = conn.SetDeadline(deadline); err != nil {
+		return err
+	}
 	req := requestFrame{Version: 1, ID: "1", Operation: operation, Parameters: parameters}
 	frame, err := encodeTransportFrame(req)
 	if err != nil {
@@ -123,8 +112,16 @@ func (p *unixProvider) call(operation string, parameters, result any) error {
 		return err
 	}
 	var resp responseFrame
-	if err = json.Unmarshal(line, &resp); err != nil {
+	if err = rejectDuplicateJSONKeys(json.NewDecoder(bytes.NewReader(line))); err != nil {
 		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&resp); err != nil {
+		return err
+	}
+	if err = decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("provider response has trailing data")
 	}
 	if resp.Version != 1 || resp.ID != "1" {
 		return errors.New("provider response binding mismatch")
@@ -133,7 +130,7 @@ func (p *unixProvider) call(operation string, parameters, result any) error {
 		if resp.Error == nil {
 			return errors.New("provider error")
 		}
-		return fmt.Errorf("provider %s: %s", resp.Error.Code, resp.Error.Message)
+		return &ProviderError{Code: resp.Error.Code, Message: resp.Error.Message}
 	}
 	return json.Unmarshal(resp.Result, result)
 }
@@ -186,15 +183,15 @@ type contextWire struct {
 type authorizationWire struct {
 	AuthorizationID string      `json:"authorizationId"`
 	Context         contextWire `json:"context"`
-	IssuedAt        float64     `json:"issuedAt"`
-	NotBefore       float64     `json:"notBefore"`
-	ExpiresAt       float64     `json:"expiresAt"`
+	IssuedAt        string      `json:"issuedAt"`
+	NotBefore       string      `json:"notBefore"`
+	ExpiresAt       string      `json:"expiresAt"`
 	Epoch           uint64      `json:"epoch"`
 }
 
 func wireAuthorization(a Authorization) authorizationWire {
 	c := a.Context
-	return authorizationWire{a.ID, contextWire{c.RequestID, c.AttemptID, c.WorkloadID, c.ProviderID, c.Audience, c.Challenge, c.IdempotencyKey, c.PolicyDigest, base64.StdEncoding.EncodeToString(c.PolicyBytes), c.RequiredCapabilities}, float64(a.IssuedAt.UnixNano()) / 1e9, float64(a.NotBefore.UnixNano()) / 1e9, float64(a.ExpiresAt.UnixNano()) / 1e9, a.Epoch}
+	return authorizationWire{a.ID, contextWire{c.RequestID, c.AttemptID, c.WorkloadID, c.ProviderID, c.Audience, c.Challenge, c.IdempotencyKey, c.PolicyDigest, base64.StdEncoding.EncodeToString(c.PolicyBytes), cloneStrings(c.RequiredCapabilities)}, a.IssuedAt.UTC().Format(time.RFC3339Nano), a.NotBefore.UTC().Format(time.RFC3339Nano), a.ExpiresAt.UTC().Format(time.RFC3339Nano), a.Epoch}
 }
 func (p *unixProvider) Prepare(r PrepareRequest) (string, error) {
 	var x struct {
@@ -219,7 +216,7 @@ func (p *unixProvider) ReadBack(id string) (ReadBack, error) {
 		PolicyDigest        string `json:"policyDigest"`
 		ConfigurationDigest string `json:"configurationDigest"`
 	}
-	err := p.call("ReadBack", map[string]any{"activationId": id}, &x)
+	err := p.call("ReadBack", map[string]any{activationIDField: id}, &x)
 	return ReadBack{x.ActivationID, x.TargetID, x.PolicyDigest, x.ConfigurationDigest}, err
 }
 func (p *unixProvider) GetProof(id string) (Proof, error) {
@@ -233,37 +230,38 @@ func (p *unixProvider) GetProof(id string) (Proof, error) {
 		Challenge           string `json:"challenge"`
 		PolicyDigest        string `json:"policyDigest"`
 		ReadBackDigest      string `json:"readBackDigest"`
+		AuthorizationDigest string `json:"authorizationDigest"`
 		KeyID               string `json:"keyId"`
 		Epoch               uint64 `json:"epoch"`
 		IssuedAt, ExpiresAt time.Time
 		Signature           string `json:"signature"`
 	}
-	err := p.call("GetProof", map[string]any{"activationId": id}, &w)
+	err := p.call("GetProof", map[string]any{activationIDField: id}, &w)
 	if err != nil {
 		return Proof{}, err
 	}
 	sig, err := base64.StdEncoding.DecodeString(w.Signature)
-	return Proof{w.ID, w.AuthorizationID, w.ActivationID, w.WorkloadID, w.ProviderID, w.Audience, w.Challenge, w.PolicyDigest, w.ReadBackDigest, w.KeyID, w.Epoch, w.IssuedAt, w.ExpiresAt, sig}, err
+	return Proof{ID: w.ID, AuthorizationID: w.AuthorizationID, ActivationID: w.ActivationID, WorkloadID: w.WorkloadID, ProviderID: w.ProviderID, Audience: w.Audience, Challenge: w.Challenge, PolicyDigest: w.PolicyDigest, ReadBackDigest: w.ReadBackDigest, AuthorizationDigest: w.AuthorizationDigest, KeyID: w.KeyID, Epoch: w.Epoch, IssuedAt: w.IssuedAt, ExpiresAt: w.ExpiresAt, Signature: sig}, err
 }
 func (p *unixProvider) Release(r ReleaseRequest) error {
 	var x any
-	return p.call("Release", map[string]any{"activationId": r.ActivationID, "authorizationId": r.AuthorizationID, "proofId": r.ProofID, "releaseId": r.ReleaseID}, &x)
+	return p.call("Release", map[string]any{activationIDField: r.ActivationID, "authorizationId": r.AuthorizationID, "proofId": r.ProofID, "releaseId": r.ReleaseID}, &x)
 }
 func (p *unixProvider) GetStatus(id string) (Status, error) {
 	var x struct {
 		State string `json:"state"`
 	}
-	err := p.call("GetStatus", map[string]any{"activationId": id}, &x)
+	err := p.call("GetStatus", map[string]any{activationIDField: id}, &x)
 	return Status{State: x.State}, err
 }
 func (p *unixProvider) Reconcile(r ReconcileRequest) (Status, error) {
 	var x struct {
 		State string `json:"state"`
 	}
-	err := p.call("Reconcile", map[string]any{"activationId": r.AttemptID}, &x)
+	err := p.call("Reconcile", map[string]any{activationIDField: r.AttemptID}, &x)
 	return Status{State: x.State}, err
 }
 func (p *unixProvider) Cleanup(r CleanupRequest) error {
 	var x any
-	return p.call("Cleanup", map[string]any{"activationId": r.ActivationID}, &x)
+	return p.call("Cleanup", map[string]any{"attemptId": r.AttemptID, activationIDField: r.ActivationID, "cleanupId": r.CleanupID}, &x)
 }
