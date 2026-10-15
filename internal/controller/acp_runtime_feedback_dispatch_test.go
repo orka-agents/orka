@@ -44,6 +44,7 @@ func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing
 		cleanupFault     string
 		deferredRecovery bool
 		rotatedImage     bool
+		deletedPool      bool
 	}{
 		{name: "completed", terminal: harnessv2.EventCompleted},
 		{name: "cancelled", terminal: harnessv2.EventCancelled},
@@ -62,6 +63,7 @@ func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing
 		{name: "deferred cleanup receipt succeeds and still requeues", terminal: harnessv2.EventCompleted, fault: "pod-read", cleanupFault: "receipt", deferredRecovery: true},
 		{name: "rotated image deletion failure recovers", terminal: harnessv2.EventCompleted, fault: "pod-read", cleanupFault: "delete", rotatedImage: true},
 		{name: "rotated image receipt failure recovers", terminal: harnessv2.EventCompleted, fault: "pod-read", cleanupFault: "receipt", rotatedImage: true},
+		{name: "deleted pool without cleanup receipt recovers", terminal: harnessv2.EventCompleted, fault: "pod-read", cleanupFault: "delete", deletedPool: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			terminal := test.terminal
@@ -207,7 +209,7 @@ func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing
 				if err := dispatcher.executeReservedTask(ctx, reserved, target); err == nil {
 					t.Fatal("cleanup failure was not observed")
 				}
-				verifyFeedbackCleanupRecovery(t, ctx, dispatcher, task, submitted, service, &cleanupFailures, &cleanupDeletes, test.deferredRecovery)
+				verifyFeedbackCleanupRecovery(t, ctx, dispatcher, task, submitted, service, &cleanupFailures, &cleanupDeletes, test.deferredRecovery, test.deletedPool)
 				deletesMu.Lock()
 				for _, request := range deletes {
 					if request.Metadata.Fence.RuntimeSessionUID != harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task)) || request.Metadata.Fence.RuntimeSessionGeneration != deletes[0].Metadata.Fence.RuntimeSessionGeneration {
@@ -215,6 +217,9 @@ func TestRuntimeFeedbackDispatchRegistersBeforeSubmissionAndCompletes(t *testing
 					}
 				}
 				deletesMu.Unlock()
+				if test.deletedPool {
+					return // Recovery must requeue even before a replacement pool exists.
+				}
 			}
 			if verifyFeedbackPreparationAndRetry(t, ctx, dispatcher, task, service, submitted, &statusUnavailable, test.fault) {
 				return
@@ -315,7 +320,7 @@ func (w feedbackCleanupReceiptWriter) Update(ctx context.Context, object client.
 	return w.SubResourceWriter.Update(ctx, object, options...)
 }
 
-func verifyFeedbackCleanupRecovery(t *testing.T, ctx context.Context, dispatcher *ACPDispatcher, task *corev1alpha1.Task, submitted chan harnessv2.StartPromptRequest, service *dispatchFeedbackCapture, failures, deletes *atomic.Int32, deferredRecovery bool) {
+func verifyFeedbackCleanupRecovery(t *testing.T, ctx context.Context, dispatcher *ACPDispatcher, task *corev1alpha1.Task, submitted chan harnessv2.StartPromptRequest, service *dispatchFeedbackCapture, failures, deletes *atomic.Int32, deferredRecovery, deletedPool bool) {
 	t.Helper()
 	current := &corev1alpha1.Task{}
 	if err := dispatcher.Client.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
@@ -383,15 +388,37 @@ func verifyFeedbackCleanupRecovery(t *testing.T, ctx context.Context, dispatcher
 		runRecovery()
 		assertRetained()
 	}
+	deletesBeforePoolLoss := deletes.Load()
+	if deletedPool {
+		pool := &corev1alpha1.RuntimePool{}
+		if err := dispatcher.Client.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: current.Status.Execution.RuntimePoolName}, pool); err != nil {
+			t.Fatal(err)
+		}
+		if err := dispatcher.Client.Delete(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		if taskScopedRuntimeSessionCleanupComplete(current) {
+			t.Fatal("deleted-pool control already had a cleanup receipt")
+		}
+	}
 	failures.Store(0)
+	verifyFeedbackCleanupReset(t, ctx, recovery, task, attempt, runRecovery)
+	if deletedPool && deletes.Load() != deletesBeforePoolLoss {
+		t.Fatal("missing-pool recovery addressed a runtime without its pool authority")
+	}
+}
+
+func verifyFeedbackCleanupReset(t *testing.T, ctx context.Context, recovery *ACPDispatcher, task *corev1alpha1.Task, attempt *store.PromptAttempt, runRecovery func()) {
+	t.Helper()
+	current := &corev1alpha1.Task{}
 	resetFailure := &feedbackCleanupResetFailure{Client: recovery.Client}
 	resetFailure.remaining.Store(1)
 	recovery.Client = resetFailure
 	runRecovery()
-	if err := dispatcher.Client.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+	if err := recovery.Client.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := dispatcher.Store.GetPromptAttempt(ctx, attemptID)
+	stored, err := recovery.Store.GetPromptAttempt(ctx, attempt.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,10 +427,10 @@ func verifyFeedbackCleanupRecovery(t *testing.T, ctx context.Context, dispatcher
 		t.Fatal("failed reset status write lost its recoverable cleanup proof")
 	}
 	runRecovery()
-	if err := dispatcher.Client.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+	if err := recovery.Client.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
 		t.Fatal(err)
 	}
-	stored, err = dispatcher.Store.GetPromptAttempt(ctx, attemptID)
+	stored, err = recovery.Store.GetPromptAttempt(ctx, attempt.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

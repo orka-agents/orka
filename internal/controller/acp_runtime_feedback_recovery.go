@@ -6,6 +6,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -58,21 +59,26 @@ func (d *ACPDispatcher) recoverRuntimeFeedbackPreSubmission(ctx context.Context,
 	e := task.Status.Execution
 	if !taskScopedRuntimeSessionCleanupComplete(task) {
 		pool := &corev1alpha1.RuntimePool{}
-		if err := d.APIReader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: e.RuntimePoolName}, pool); err != nil {
+		err := d.APIReader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: e.RuntimePoolName}, pool)
+		if err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
-		// A queued attempt can have admitted a newer image while preserving
-		// its frozen profile. Cleanup must address that exact selected pool.
-		deliveryPlan, err := acpRuntimeDeliveryPlanForBoundPool(bound.plan, e, pool)
-		if err != nil {
-			return err
+		if err == nil {
+			// A queued attempt can have admitted a newer image while preserving
+			// its frozen profile. Cleanup must address that exact selected pool.
+			deliveryPlan, err := acpRuntimeDeliveryPlanForBoundPool(bound.plan, e, pool)
+			if err != nil {
+				return err
+			}
+			if err := validateFrozenACPDispatchTarget(task, acpDispatchTarget{pool: pool}, bound, deliveryPlan); err != nil {
+				return err
+			}
+			if !runtimeFeedbackPoolMatches(pool, string(task.UID)) {
+				return fmt.Errorf("%w: runtime feedback cleanup pool is not dedicated", store.ErrConflict)
+			}
 		}
-		if err := validateFrozenACPDispatchTarget(task, acpDispatchTarget{pool: pool}, bound, deliveryPlan); err != nil {
-			return err
-		}
-		if !runtimeFeedbackPoolMatches(pool, string(task.UID)) {
-			return fmt.Errorf("%w: runtime feedback cleanup pool is not dedicated", store.ErrConflict)
-		}
+		// A missing pool follows the existing task-scoped cleanup path below;
+		// it must still persist the exact retirement receipt before requeueing.
 	}
 	ready, err := d.reconcileRecoveredTaskScopedRuntimeSession(ctx, task, task.UID, true)
 	if err != nil || !ready {

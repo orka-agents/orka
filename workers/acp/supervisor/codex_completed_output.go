@@ -81,7 +81,7 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 			return
 		}
 		if len(n.calls) >= harnessv2.MaxRuntimeSessionTombstoneOperations {
-			if codexMCPOutputStart(envelope) {
+			if identity.codexMCP || codexMCPOutputStart(envelope) {
 				omitCodexOutput(mapped.ToolCall)
 			}
 			return
@@ -215,7 +215,7 @@ func (n *codexCompletedOutputNormalizer) invalidateUnmappedOutput(notification *
 
 func newCodexOutputCall(envelope codexCommandOutputEnvelope, identity rememberedACPToolCall) codexCommandOutputCall {
 	call := codexCommandOutputCall{kind: codexCommandStartKind(envelope)}
-	if codexMCPOutputStart(envelope) {
+	if identity.codexMCP || codexMCPOutputStart(envelope) {
 		call.kind = codexCommandOutputMCP
 		call.mcpName = identity.name
 		call.invalid = !identity.codexMCP || identity.name == "" ||
