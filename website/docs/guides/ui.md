@@ -5,7 +5,30 @@ description: "The dashboard built into the controller: what each page shows and 
 
 # Web dashboard
 
-Orka includes a built-in web dashboard served by the controller. Nothing extra to deploy.
+Orka includes a web dashboard built into the controller. There is nothing extra to
+deploy, but it is off by default: the API and the `orka` CLI work without it, and
+a signed-in browser keeps its token in localStorage on the same origin as every API,
+so leave it off where nobody needs a browser UI.
+
+## Turn it on
+
+With Helm, set `controller.dashboard.enabled`:
+
+```bash
+helm upgrade orka orka/orka --namespace orka-system --reuse-values \
+  --set controller.dashboard.enabled=true
+```
+
+Without Helm, start the controller with `--dashboard-enabled`, or set its
+`ORKA_DASHBOARD_ENABLED` environment variable:
+
+```bash
+kubectl -n orka-system set env deployment/orka-controller-manager ORKA_DASHBOARD_ENABLED=true
+```
+
+While it is off, paths outside the APIs answer with a JSON 404, `orka login` stops
+with an error, and connector consent finishes with `orka connection complete` (see
+[Connectors](connectors.md#3-link-an-account)).
 
 ## Open it
 

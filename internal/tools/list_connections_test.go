@@ -107,11 +107,12 @@ func TestListConnectionsTool(t *testing.T) {
 	github, slack, pending, linked, foreign, retained := f.github, f.slack, f.pending, f.linked, f.foreign, f.retained
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, slack, pending, linked, foreign, retained).Build()
 	tool := &ListConnectionsTool{}
-	if tool.Name() != ListConnectionsToolName || !strings.Contains(tool.Description(), ConnectorSettingsPath) {
+	if tool.Name() != ListConnectionsToolName || !strings.Contains(tool.Description(), "orka connect <provider>") ||
+		!strings.Contains(tool.Description(), "settingsPath") {
 		t.Fatalf("name = %q description = %q", tool.Name(), tool.Description())
 	}
 
-	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: reader, Requester: requester})
+	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: reader, Requester: requester, DashboardEnabled: true})
 	out, err := tool.Execute(ctx, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +192,59 @@ func TestListConnectionsToolReportsUnusableLinks(t *testing.T) {
 	if len(deletingResult.Connections) != 1 || !deletingResult.Connections[0].Deleting || deletingResult.Connections[0].Ready ||
 		deletingResult.Connections[0].State != "Disconnecting" {
 		t.Fatalf("deleting connections = %+v", deletingResult.Connections)
+	}
+}
+
+// TestListConnectionsToolGuidanceFollowsDashboard covers where the tool
+// sends the person to fix a link: the dashboard page only when the
+// controller serves one, the CLI otherwise.
+func TestListConnectionsToolGuidanceFollowsDashboard(t *testing.T) {
+	f := newListConnectionsFixture()
+	retargeted := f.github.DeepCopy()
+	retargeted.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/access_token"
+	duplicate := f.linked.DeepCopy()
+	duplicate.Name = "my-second-github-link"
+	for _, tt := range []struct {
+		name      string
+		dashboard bool
+		objects   []client.Object
+		want      []string
+	}{
+		{"relink without dashboard", false, []client.Object{retargeted, f.linked}, []string{"relink it with `orka connect github --mode readWrite`"}},
+		{"relink with dashboard", true, []client.Object{retargeted, f.linked}, []string{"relink it under " + ConnectorSettingsPath}},
+		{"duplicates without dashboard", false, []client.Object{f.github, f.linked, duplicate}, []string{"with `orka connection delete <name>`"}},
+		{"duplicates with dashboard", true, []client.Object{f.github, f.linked, duplicate}, []string{"disconnect the extra ones under " + ConnectorSettingsPath}},
+		{"removed provider without dashboard", false, []client.Object{f.retained}, []string{"should be disconnected with `orka connection delete <name>`"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := fake.NewClientBuilder().WithScheme(f.scheme).WithObjects(tt.objects...).Build()
+			out, err := (&ListConnectionsTool{}).Execute(WithToolContext(context.Background(),
+				&ToolContext{Namespace: "tenant", PolicyReader: reader, Requester: f.requester, DashboardEnabled: tt.dashboard}), json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Data ListConnectionsResult `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatalf("decode %s: %v", out, err)
+			}
+			if tt.dashboard != (envelope.Data.SettingsPath == ConnectorSettingsPath) {
+				t.Fatalf("settingsPath = %q with dashboard %t", envelope.Data.SettingsPath, tt.dashboard)
+			}
+			if !tt.dashboard && strings.Contains(out, ConnectorSettingsPath) {
+				t.Fatalf("result names the dashboard page the controller does not serve: %s", out)
+			}
+			messages := make([]string, 0, len(envelope.Data.Connections))
+			for _, connection := range envelope.Data.Connections {
+				messages = append(messages, connection.Message)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(strings.Join(messages, "\n"), want) {
+					t.Fatalf("messages lack %q: %q", want, messages)
+				}
+			}
+		})
 	}
 }
 

@@ -64,6 +64,8 @@ type ToolExecutor struct {
 	linkedAccounts tools.LinkedAccountCredentials
 	// authorizeConnectorRead gates list_connections for delegated tokens.
 	authorizeConnectorRead func() *tools.ChatToolError
+	// dashboardEnabled lets list_connections name the dashboard page.
+	dashboardEnabled bool
 	// createdTasks is shared by every tool call of this turn.
 	createdTasks            *tools.CreatedTasks
 	registry                *tools.Registry
@@ -242,6 +244,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		Requester:              e.requester,
 		LinkedAccounts:         e.linkedAccounts,
 		AuthorizeConnectorRead: e.authorizeConnectorRead,
+		DashboardEnabled:       e.dashboardEnabled,
 		CreatedTasks:           e.createdTasks,
 		AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeTaskDelete, ctx, task, "Use a task authorized by the context token")

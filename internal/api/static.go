@@ -14,14 +14,36 @@ import (
 	"github.com/orka-agents/orka/internal/uiembed"
 )
 
-// setupStaticFiles serves the embedded SPA frontend.
-// All non-API, non-health routes fall back to index.html for client-side routing.
+// dashboardStateKey marks an app that serves the embedded dashboard. The
+// error handler and the telemetry middleware both read it, so the status a
+// client receives for an unrouted path and the one recorded always agree.
+const dashboardStateKey = "orka.dashboard"
+
+// dashboardServed reports whether the app serving c answers unrouted
+// non-API paths with the dashboard's index page.
+func dashboardServed(c fiber.Ctx) bool {
+	served, _ := c.App().State().GetBool(dashboardStateKey)
+	return served
+}
+
+// setupStaticFiles serves the embedded SPA frontend when the dashboard is
+// enabled. All non-API, non-health routes fall back to index.html for
+// client-side routing. Without the dashboard, connector consent still needs
+// somewhere to land, so its redirect target gets a plain completion page.
 func (s *Server) setupStaticFiles() {
+	if !s.config.DashboardEnabled {
+		if s.config.Connectors.Enabled {
+			s.app.Get(connectorSettingsPath, s.handlers.ConnectorCompletionPage)
+		}
+		return
+	}
+
 	distFS, err := uiembed.FS()
 	if err != nil {
 		log.Error(err, "failed to load embedded UI assets")
 		return
 	}
+	s.app.State().Set(dashboardStateKey, true)
 
 	serveFile := func(c fiber.Ctx, filePath, contentType string) error {
 		data, readErr := fs.ReadFile(distFS, filePath)

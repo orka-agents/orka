@@ -157,6 +157,18 @@ func TestStaticChartGatewayInterimMessagesPerTask(t *testing.T) {
 	}
 }
 
+func TestStaticChartDashboardFlag(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Contains(rendered, "--dashboard-enabled") {
+		t.Fatalf("the dashboard must be off by default:\n%s", rendered)
+	}
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.dashboard.enabled=true")
+	if strings.Count(rendered, "- --dashboard-enabled=true\n") != 1 {
+		t.Fatalf("enabling the dashboard must render exactly one --dashboard-enabled=true:\n%s", rendered)
+	}
+}
+
 func TestStaticChartConnectorsFlags(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
 	if strings.Contains(rendered, "--connectors-enabled") || strings.Contains(rendered, "--connector-callback-base-url") {

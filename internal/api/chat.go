@@ -71,7 +71,10 @@ type ChatConfig struct {
 	Enabled bool
 	// ConnectorsEnabled mirrors --connectors-enabled: without it the
 	// linked-account surfaces (list_connections) are not offered at all.
-	ConnectorsEnabled      bool
+	ConnectorsEnabled bool
+	// DashboardEnabled mirrors --dashboard-enabled, so linked-account
+	// guidance names the dashboard page only when this controller serves it.
+	DashboardEnabled       bool
 	Provider               string
 	Model                  string
 	MaxIterations          int
@@ -468,6 +471,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.requester = requesterFromUserInfo(userInfo)
 	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
 	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
+	executor.dashboardEnabled = ch.config.DashboardEnabled
 	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name

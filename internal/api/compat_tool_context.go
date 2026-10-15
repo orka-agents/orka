@@ -65,6 +65,7 @@ type compatProxyToolContextConfig struct {
 	UserInfo                  *UserInfo
 	LinkedAccounts            LinkedAccountsFactory
 	ConnectorsEnabled         bool
+	DashboardEnabled          bool
 }
 
 func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolContext {
@@ -77,6 +78,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		Requester:                 requester,
 		LinkedAccounts:            scopedLinkedAccounts(cfg.LinkedAccounts, cfg.Namespace, requester, cfg.UserInfo, cfg.AuthorizationConfig),
 		AuthorizeConnectorRead:    connectorReadToolAuthorizer(cfg.UserInfo, cfg.AuthorizationConfig, cfg.ConnectorsEnabled),
+		DashboardEnabled:          cfg.DashboardEnabled,
 		CreatedTasks:              tools.NewCreatedTasks(),
 		KubeClient:                cfg.KubeClient,
 		Namespace:                 cfg.Namespace,

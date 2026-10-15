@@ -5,10 +5,86 @@ package main
 import (
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 )
+
+// stubDashboardProbe reports a served dashboard without the network.
+func stubDashboardProbe(t *testing.T) {
+	t.Helper()
+	orig := dashboardAbsentFunc
+	dashboardAbsentFunc = func(string) bool { return false }
+	t.Cleanup(func() { dashboardAbsentFunc = orig })
+}
+
+func TestDashboardAbsent(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		want   bool
+	}{
+		{"dashboard served", http.StatusOK, false},
+		{"no dashboard", http.StatusNotFound, true},
+		{"sign-in proxy", http.StatusUnauthorized, false},
+		{"server error", http.StatusBadGateway, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/login" {
+					t.Errorf("probe path = %q, want /login", r.URL.Path)
+				}
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+			if got := dashboardAbsent(server.URL); got != tt.want {
+				t.Fatalf("dashboardAbsent = %t, want %t", got, tt.want)
+			}
+		})
+	}
+	// An unreachable server says nothing either way.
+	if dashboardAbsent("http://127.0.0.1:1") {
+		t.Fatal("an unreachable server must not count as one without a dashboard")
+	}
+}
+
+func TestNewLoginCmd_RefusesServerWithoutDashboard(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	minted := false
+	origCreate := serviceAccountLoginFunc
+	serviceAccountLoginFunc = func(string, string) (string, error) {
+		minted = true
+		return "opaque-login-value-000", nil
+	}
+	t.Cleanup(func() { serviceAccountLoginFunc = origCreate })
+	opened := false
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(string) error {
+		opened = true
+		return nil
+	}
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+
+	root := newRootCmd()
+	root.SetArgs([]string{"login", "--server", server.URL})
+	stdout, err := captureOutput(t, root.Execute)
+	if err == nil || !strings.Contains(err.Error(), "does not serve the dashboard") || !strings.Contains(err.Error(), "--dashboard-enabled") {
+		t.Fatalf("Execute() error = %v, want a missing-dashboard error", err)
+	}
+	if minted || opened {
+		t.Fatalf("token minted = %t, browser opened = %t; neither may happen without a dashboard", minted, opened)
+	}
+	if strings.Contains(stdout, "Login URL") {
+		t.Fatalf("stdout = %q, must not print a login URL", stdout)
+	}
+}
 
 func TestNewLoginCmd_Structure(t *testing.T) {
 	cmd := newLoginCmd()
@@ -39,6 +115,7 @@ func TestNewLoginCmd_ServiceAccountFlag(t *testing.T) {
 func TestNewLoginCmd_WithTokenFlag(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
 
 	// Stub out the browser opener so we never launch a real browser.
 	orig := openBrowserFunc
@@ -63,6 +140,7 @@ func TestNewLoginCmd_WithTokenFlag(t *testing.T) {
 func TestNewLoginCmd_WithoutToken(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
 
 	cmd := newLoginCmd()
 	root := newRootCmd()
@@ -82,6 +160,7 @@ func TestNewLoginCmd_WithoutToken(t *testing.T) {
 func TestNewLoginCmd_DefaultServerFromConfig(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
 
 	// Stub out the browser opener so we never launch a real browser.
 	orig := openBrowserFunc
@@ -108,6 +187,7 @@ func TestNewLoginCmd_DefaultServerFromConfig(t *testing.T) {
 func TestNewLoginCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
 
 	cfg := orkaConfig{Server: "http://configured-server:9090", Namespace: "orka-system"}
 	if err := saveConfig(cfg); err != nil {
@@ -144,6 +224,7 @@ func TestNewLoginCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 func TestNewLoginCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
 
 	opened := false
 	orig := openBrowserFunc
@@ -186,6 +267,7 @@ func TestNewLoginCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
 func TestNewLoginCmd_RedactsOutputButOpensFullURL(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
 
 	var openedURL string
 	orig := openBrowserFunc
@@ -221,6 +303,7 @@ func TestNewLoginCmd_RedactsOutputButOpensFullURL(t *testing.T) {
 func TestNewLoginCmd_RedactedBrowserFailureExplainsURLIsNotUsable(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
 
 	orig := openBrowserFunc
 	openBrowserFunc = func(string) error { return errors.New("browser unavailable") }

@@ -339,7 +339,7 @@ orka run --agent reviewer "review this diff"
 
 It may depend on live provider credentials, model configuration, and server-side chat support.
 
-`orka login` creates a ServiceAccount token and opens the dashboard with that token in the URL fragment:
+`orka login` creates a ServiceAccount token and opens the dashboard with that token in the URL fragment. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
 
 ```bash
 orka login --service-account orka-client --namespace orka-system
@@ -373,7 +373,7 @@ orka connection list
 orka connection get github-<digest>
 orka connection delete github-<digest>
 orka connection providers
-orka connection complete github-<digest> --completion <value>   # when the dashboard is not signed in as you
+orka connection complete github-<digest> --completion <value>   # when no dashboard signed in as you finishes the link
 ```
 
 These commands need a personal identity (OIDC or context token). A

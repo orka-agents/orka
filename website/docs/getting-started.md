@@ -6,7 +6,7 @@ description: "Install Orka on a Kubernetes cluster and run your first agent task
 
 Orka runs AI agents on Kubernetes. You describe work as a **Task**, and Orka runs it in
 a Pod, keeps a durable record of what happened, and gives you the result over a REST API,
-a CLI, or a built-in web dashboard.
+a CLI, or an optional built-in web dashboard.
 
 The point is that the API keys stay in the cluster. Developers get a ServiceAccount token,
 not an LLM key, and the platform team decides which models and providers are allowed.
@@ -309,9 +309,11 @@ the result the same way as before, at `/api/v1/tasks/code-review/result`.
 
 ## The dashboard
 
-With the [API port forwarded](#connect-to-the-api), open
+The dashboard is built into the controller but off by default. Turn it on with the
+Helm value `controller.dashboard.enabled=true` (see
+[Web dashboard](guides/ui.md#turn-it-on)), then, with the
+[API port forwarded](#connect-to-the-api), open
 [http://localhost:8080](http://localhost:8080) and sign in with your client token.
-The dashboard is included in Orka. See [Web dashboard](guides/ui.md).
 
 ## The CLI
 
@@ -325,7 +327,7 @@ Run `orka version` to confirm that the local CLI matches your Helm/controller re
 
 ```bash
 orka version
-orka login                                  # reads your kubeconfig, opens a browser
+orka login                                  # reads your kubeconfig, opens the dashboard
 orka login --server https://orka.example.com
 orka login --token '<token>'
 ```

@@ -1137,7 +1137,7 @@ Global Flags:
 ## `orka login`
 
 ```text
-Generate a ServiceAccount token and open the Orka dashboard in your browser.
+Generate a ServiceAccount token and open the Orka dashboard in your browser. The controller serves the dashboard only when it runs with --dashboard-enabled; every other orka command works without it.
 
 Usage:
   orka login [flags]

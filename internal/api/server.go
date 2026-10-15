@@ -101,6 +101,10 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
+	// port serve the embedded web dashboard and answer unrouted non-API
+	// paths with its index page.
+	DashboardEnabled bool
 }
 
 // Server is the REST API server
@@ -128,6 +132,7 @@ type Server struct {
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
+	config.Chat.DashboardEnabled = config.DashboardEnabled
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -695,7 +700,7 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	}
 
 	// For 404s on non-API paths, serve the SPA index.html
-	if code == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
+	if code == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
 		if data, ok := spaIndexHTML(); ok {
 			c.Set("Content-Type", "text/html; charset=utf-8")
 			return c.Status(fiber.StatusOK).Send(data)

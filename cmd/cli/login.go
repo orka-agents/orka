@@ -3,11 +3,37 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// dashboardAbsentFunc reports whether a server definitively serves no
+// dashboard. Tests replace it to stay off the network.
+var dashboardAbsentFunc = dashboardAbsent
+
+// dashboardAbsent asks server for the dashboard's login page. Only a 404 is
+// an answer: the controller serves that page whenever its dashboard is
+// enabled, while an unreachable server or a proxy that wants its own sign-in
+// first says nothing either way and keeps the URL flow as it was.
+func dashboardAbsent(server string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server+"/login", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	return resp.StatusCode == http.StatusNotFound
+}
 
 func newLoginCmd() *cobra.Command {
 	var serviceAccount string
@@ -16,7 +42,8 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate with the Orka dashboard",
-		Long:  "Generate a ServiceAccount token and open the Orka dashboard in your browser.",
+		Long: "Generate a ServiceAccount token and open the Orka dashboard in your browser. The controller serves the " +
+			"dashboard only when it runs with --dashboard-enabled; every other orka command works without it.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			server, _ := cmd.Flags().GetString("server")
 			token, _ := cmd.Flags().GetString("token")
@@ -34,6 +61,13 @@ func newLoginCmd() *cobra.Command {
 			}
 			if ns == "" {
 				ns = "default"
+			}
+
+			// Checked before a token is minted, so a server without the
+			// dashboard never gets a credential that has nowhere to go.
+			if dashboardAbsentFunc(server) {
+				return fmt.Errorf("%s does not serve the dashboard: start the controller with --dashboard-enabled "+
+					"(Helm: controller.dashboard.enabled=true), or use the orka CLI, which works without it", server)
 			}
 
 			if token == "" {
