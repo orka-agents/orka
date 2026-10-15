@@ -95,17 +95,9 @@ var _ = Describe("OpenTelemetry GenAI export", Ordered, Serial, func() {
 			otelResource{kind: "secret", name: otelProviderAuthRefName},
 		)
 
-		By("restoring controller telemetry settings")
-		restoreOTelControllerSnapshot(controllerSnapshot)
-		if controllerTelemetryPatched {
-			// Restoring restarts the controller just as enabling did, so the
-			// next spec's workers need the same API readiness. The probe runs
-			// in the fake OpenAI Pod, which is therefore deleted afterwards.
-			By("waiting for the restored controller API Service to be ready from a task-network Pod")
-			waitForOTelControllerAPIReady()
-		}
-
-		deleteOTelResources(
+		// The readiness probe below runs in the fake OpenAI Pod, so delete these
+		// last, and also when the restore or the probe fails.
+		defer deleteOTelResources(
 			otelResource{kind: "deployment", name: otelCollectorName},
 			otelResource{kind: "service", name: otelCollectorName},
 			otelResource{kind: "configmap", name: otelCollectorName + "-config"},
@@ -113,6 +105,15 @@ var _ = Describe("OpenTelemetry GenAI export", Ordered, Serial, func() {
 			otelResource{kind: "service", name: otelFakeOpenAIName},
 			otelResource{kind: "configmap", name: otelFakeOpenAIName + "-server"},
 		)
+
+		By("restoring controller telemetry settings")
+		restoreOTelControllerSnapshot(controllerSnapshot)
+		if controllerTelemetryPatched {
+			// Restoring restarts the controller just as enabling did, so the
+			// next spec's workers need the same API readiness.
+			By("waiting for the restored controller API Service to be ready from a task-network Pod")
+			waitForOTelControllerAPIReady()
+		}
 	})
 
 	AfterEach(func() {
