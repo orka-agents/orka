@@ -7,6 +7,11 @@ description: "The dashboard built into the controller: what each page shows and 
 
 Orka includes a built-in web dashboard served by the controller. Nothing extra to deploy.
 
+:::tip Try it without a cluster
+The [dashboard demo](pathname:///demo/) runs in your browser on sample data, with a
+guided tour of the main pages. Nothing in it reaches a cluster or a model.
+:::
+
 ## Open it
 
 Forward the API port if it is not already forwarded, and have a client token ready

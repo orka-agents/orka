@@ -11,7 +11,9 @@ import DemoVideo from '@site/src/components/DemoVideo';
 Watch Orka workflows on Kubernetes, grouped by feature. Each demo links to the
 documentation for its setup and behavior.
 
-[Watch the full playlist on YouTube](https://www.youtube.com/playlist?list=PLR43VQQvpyY8).
+[Watch the full playlist on YouTube](https://www.youtube.com/playlist?list=PLR43VQQvpyY8),
+or [click through the dashboard yourself](pathname:///demo/): it runs in your browser on
+sample data, with a guided tour.
 
 ## Chat and pull requests
 

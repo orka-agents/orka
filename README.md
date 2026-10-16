@@ -20,7 +20,8 @@ Orka lets you hand a piece of work to an AI agent and get the result back, with
 Kubernetes doing what it is good at: running the work somewhere isolated, keeping a
 record of what happened, and cleaning up afterwards. You write a small YAML **Task**,
 Orka runs it in a Pod, and you read the answer from a REST API, a CLI, or the dashboard
-that comes built in.
+that comes built in ([try the demo](https://orka-agents.github.io/orka/demo/), which runs
+in your browser on sample data).
 
 Three kinds of work fit in a Task:
 

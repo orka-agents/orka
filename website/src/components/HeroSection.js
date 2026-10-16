@@ -27,6 +27,12 @@ export default function HeroSection() {
           Get Started
         </Link>
         <Link
+          to="pathname:///demo/"
+          className="button button--secondary button--lg"
+        >
+          Try the dashboard
+        </Link>
+        <Link
           to="/docs/demos"
           className="button button--secondary button--lg"
         >
