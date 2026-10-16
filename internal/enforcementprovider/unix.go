@@ -282,7 +282,7 @@ func (p *unixProvider) GetStatus(id string) (Status, error) {
 }
 func (p *unixProvider) Reconcile(r ReconcileRequest) (Status, error) {
 	var x statusResultWire
-	err := p.call("Reconcile", map[string]any{activationIDField: r.AttemptID}, &x)
+	err := p.call("Reconcile", map[string]any{"attemptId": r.AttemptID}, &x)
 	return Status{State: x.State}, err
 }
 func (p *unixProvider) Cleanup(r CleanupRequest) error {
