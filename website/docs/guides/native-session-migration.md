@@ -236,7 +236,7 @@ Every path has a default:
 
 | Flag | Import default | Export default |
 | --- | --- | --- |
-| `--state-dir` | The agent's own: `$CLAUDE_CONFIG_DIR` or `~/.claude`; `$CODEX_HOME` or `~/.codex`; `$COPILOT_HOME` or `~/.copilot`; an absolute `$XDG_DATA_HOME` or `~/.local/share` | A fresh `~/.orka/sessions/<namespace>/<session>/<agent>` |
+| `--state-dir` | The agent's own: `$CLAUDE_CONFIG_DIR` or `~/.claude`; `$CODEX_HOME` or `~/.codex`; `$COPILOT_HOME` or `~/.copilot`; `$XDG_DATA_HOME` or `~/.local/share`. A relative value is resolved against the current directory, as the agent resolves it | A fresh `~/.orka/sessions/<namespace>/<session>/<agent>` |
 | `--cwd` | OpenCode: the directory the session recorded. Claude Code, Codex, and Copilot CLI do not use it | The current directory |
 | `--journal-dir` | `~/.orka/migrations/<namespace>/<session>/import` | `~/.orka/migrations/<namespace>/<session>/export` |
 | `--agent-bin` | Not used | `claude`, `codex`, `copilot`, or `opencode` on `PATH` |

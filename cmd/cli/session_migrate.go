@@ -42,11 +42,13 @@ type migrationState struct {
 // migration.
 const migrationRetryHint = "retry the same command"
 
-// localStateDir returns where a developer's agent keeps its state: the
-// absolute value of its state variable, or its default under HOME.
+// localStateDir returns where a developer's agent keeps its state: the value
+// of its state variable, or its default under HOME. Every supported agent
+// resolves a relative value against its working directory, so this resolves
+// it against the current one.
 func localStateDir(local nativesession.Local) (string, error) {
-	if dir := os.Getenv(local.StateVar); filepath.IsAbs(dir) {
-		return dir, nil
+	if dir := os.Getenv(local.StateVar); dir != "" {
+		return filepath.Abs(dir)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
