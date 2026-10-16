@@ -73,12 +73,15 @@ function StepBody({ step }: { step: TourStep }) {
   }, [namespace, chatNamespace, sendMessage])
   return (
     <div className="space-y-3">
-      <p aria-live="polite" className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">{step.body}</p>
-      {step.points && (
-        <ul className="list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-primary">
-          {step.points.map((point) => <li key={point}>{point}</li>)}
-        </ul>
-      )}
+      {/* One live region, so a screen reader announces the points with the body. */}
+      <div aria-live="polite" className="space-y-3 text-sm leading-relaxed text-muted-foreground">
+        <p className="whitespace-pre-line">{step.body}</p>
+        {step.points && (
+          <ul className="list-disc space-y-1.5 pl-5 marker:text-primary">
+            {step.points.map((point) => <li key={point}>{point}</li>)}
+          </ul>
+        )}
+      </div>
       {step.prompts && (
         <div className="flex flex-col gap-2">
           {step.prompts.map((prompt) => (
