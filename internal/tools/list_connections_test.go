@@ -204,6 +204,10 @@ func TestListConnectionsToolGuidanceFollowsDashboard(t *testing.T) {
 	retargeted.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/access_token"
 	duplicate := f.linked.DeepCopy()
 	duplicate.Name = "my-second-github-link"
+	// `orka connect` would add a second link beside one created under
+	// another name, so that one is removed before relinking.
+	renamed := f.linked.DeepCopy()
+	renamed.Name = "my-github"
 	for _, tt := range []struct {
 		name      string
 		dashboard bool
@@ -212,6 +216,9 @@ func TestListConnectionsToolGuidanceFollowsDashboard(t *testing.T) {
 	}{
 		{"relink without dashboard", false, []client.Object{retargeted, f.linked}, []string{"relink it with `orka connect github --mode readWrite`"}},
 		{"relink with dashboard", true, []client.Object{retargeted, f.linked}, []string{"relink it under " + ConnectorSettingsPath}},
+		{"relink custom-named link without dashboard", false, []client.Object{retargeted, renamed}, []string{
+			"relink it by removing it with `orka connection delete my-github` and, once `orka connection list` no longer shows it, running `orka connect github --mode readWrite`",
+		}},
 		{"duplicates without dashboard", false, []client.Object{f.github, f.linked, duplicate}, []string{"with `orka connection delete <name>`"}},
 		{"duplicates with dashboard", true, []client.Object{f.github, f.linked, duplicate}, []string{"disconnect the extra ones under " + ConnectorSettingsPath}},
 		{"removed provider without dashboard", false, []client.Object{f.retained}, []string{"should be disconnected with `orka connection delete <name>`"}},

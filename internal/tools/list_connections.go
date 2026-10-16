@@ -168,10 +168,10 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 				// changed since consent refuses the token at once, before the
 				// Connection's conditions catch up.
 				summary.Ready = false
-				summary.Message = "the provider changed since you consented; relink it " + relinkGuidance(tc.DashboardEnabled, summary.Provider, summary.Mode) + " before its tools can run"
+				summary.Message = "the provider changed since you consented; relink it " + relinkGuidance(tc.DashboardEnabled, connection, requester, summary.Mode) + " before its tools can run"
 			case summary.Ready && !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, summary.Mode)):
 				summary.Ready = false
-				summary.Message = "the provider now requires scopes this link was not granted; relink it " + relinkGuidance(tc.DashboardEnabled, summary.Provider, summary.Mode) + " before its tools can run"
+				summary.Message = "the provider now requires scopes this link was not granted; relink it " + relinkGuidance(tc.DashboardEnabled, connection, requester, summary.Mode) + " before its tools can run"
 			}
 			result.Connections = append(result.Connections, summary)
 		}
@@ -223,14 +223,20 @@ func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName st
 
 // relinkGuidance says how the person renews a link: the dashboard page when
 // the controller serves one, otherwise the CLI command that starts a new
-// consent for the same provider and mode.
-func relinkGuidance(dashboard bool, provider, mode string) string {
+// consent for the same provider and mode. `orka connect` consents under the
+// name the API generates for the person, so a link created under another
+// name is removed first; connecting beside it would only add a duplicate.
+func relinkGuidance(dashboard bool, connection *corev1alpha1.Connection, requester *corev1alpha1.RequestedBy, mode string) string {
 	if dashboard {
 		return "under " + ConnectorSettingsPath
 	}
+	provider := connection.Spec.ProviderRef.Name
 	command := "orka connect " + provider
 	if mode == corev1alpha1.ConnectionModeReadWrite {
 		command += " --mode " + mode
+	}
+	if connection.Name != connectors.ConnectionName(provider, requester.Issuer, requester.Subject) {
+		return "by removing it with `orka connection delete " + connection.Name + "` and, once `orka connection list` no longer shows it, running `" + command + "`"
 	}
 	return "with `" + command + "`"
 }

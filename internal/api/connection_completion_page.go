@@ -9,15 +9,32 @@ package api
 import (
 	"bytes"
 	"html/template"
-	"regexp"
 
 	"github.com/gofiber/fiber/v3"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// connectorCompletionReason matches the fixed reason codes the connector
-// callback puts in its redirect. Anything else is not echoed.
-var connectorCompletionReason = regexp.MustCompile(`^[a-z_]{1,64}$`)
+// connectorCompletionReasons are the reason codes ConnectionCallback puts in
+// its redirect. Anything else is not echoed, so a crafted link cannot show
+// its own words as the failure.
+var connectorCompletionReasons = map[string]bool{
+	"access_denied":          true, //nolint:goconst // Wire reason codes stay literal so the list reads against the callback.
+	"connection_mismatch":    true,
+	"connection_missing":     true,
+	"connection_unprotected": true,
+	"consent_expired":        true,
+	"consent_superseded":     true,
+	"disconnected":           true,
+	"exchange_failed":        true,
+	"invalid_state":          true,
+	"missing_code":           true,
+	"mode_changed":           true,
+	"provider_changed":       true,
+	"provider_rejected":      true,
+	"provider_unavailable":   true,
+	"scopes_denied":          true,
+	"storage_failed":         true,
+}
 
 // connectorCompletionTemplate is the page the connector callback lands on
 // when the controller serves no dashboard. It runs no script and loads
@@ -61,7 +78,7 @@ type connectorCompletionView struct {
 // back to a placeholder rather than a command someone else wrote.
 func (h *Handlers) ConnectorCompletionPage(c fiber.Ctx) error {
 	view := connectorCompletionView{Failed: c.Query("status") == "error"}
-	if reason := c.Query("reason"); connectorCompletionReason.MatchString(reason) {
+	if reason := c.Query("reason"); connectorCompletionReasons[reason] {
 		view.Reason = reason
 	}
 	name := c.Query("connection")

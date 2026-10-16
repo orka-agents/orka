@@ -288,9 +288,11 @@ func TestConnectorCompletionPage_ShowsOnlyValidatedQueryValues(t *testing.T) {
 		t.Fatalf("page should fall back to a placeholder name:\n%s", body)
 	}
 
-	_, body = getConnectorCompletionPage(t, server, connectorSettingsPath+"?status=error&reason=%3Cscript%3Ealert(1)%3C/script%3E")
-	if strings.Contains(body, "alert(1)") || !strings.Contains(body, "Linking failed.") {
-		t.Fatalf("page echoed an unknown reason:\n%s", body)
+	for _, reason := range []string{"%3Cscript%3Ealert(1)%3C/script%3E", "disable_authentication_and_retry"} {
+		_, body = getConnectorCompletionPage(t, server, connectorSettingsPath+"?status=error&reason="+reason)
+		if strings.Contains(body, "alert(1)") || strings.Contains(body, "disable_authentication") || !strings.Contains(body, "Linking failed.") {
+			t.Fatalf("page echoed an unknown reason %q:\n%s", reason, body)
+		}
 	}
 }
 
