@@ -107,7 +107,7 @@ func TestListConnectionsTool(t *testing.T) {
 	github, slack, pending, linked, foreign, retained := f.github, f.slack, f.pending, f.linked, f.foreign, f.retained
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, slack, pending, linked, foreign, retained).Build()
 	tool := &ListConnectionsTool{}
-	if tool.Name() != ListConnectionsToolName || !strings.Contains(tool.Description(), "orka connect <provider>") ||
+	if tool.Name() != ListConnectionsToolName || !strings.Contains(tool.Description(), "orka connect <provider> --namespace <namespace>") ||
 		!strings.Contains(tool.Description(), "settingsPath") {
 		t.Fatalf("name = %q description = %q", tool.Name(), tool.Description())
 	}
@@ -214,14 +214,15 @@ func TestListConnectionsToolGuidanceFollowsDashboard(t *testing.T) {
 		objects   []client.Object
 		want      []string
 	}{
-		{"relink without dashboard", false, []client.Object{retargeted, f.linked}, []string{"relink it with `orka connect github --mode readWrite`"}},
+		{"relink without dashboard", false, []client.Object{retargeted, f.linked}, []string{"relink it with `orka connect github --namespace tenant --mode readWrite`"}},
 		{"relink with dashboard", true, []client.Object{retargeted, f.linked}, []string{"relink it under " + ConnectorSettingsPath}},
 		{"relink custom-named link without dashboard", false, []client.Object{retargeted, renamed}, []string{
-			"relink it by removing it with `orka connection delete my-github` and, once `orka connection list` no longer shows it, running `orka connect github --mode readWrite`",
+			"relink it by removing it with `orka connection delete my-github --namespace tenant` and, once `orka connection list --namespace tenant` no longer shows it, " +
+				"running `orka connect github --namespace tenant --mode readWrite`",
 		}},
-		{"duplicates without dashboard", false, []client.Object{f.github, f.linked, duplicate}, []string{"with `orka connection delete <name>`"}},
+		{"duplicates without dashboard", false, []client.Object{f.github, f.linked, duplicate}, []string{"with `orka connection delete <name> --namespace tenant` (`orka connection list --namespace tenant` shows the names)"}},
 		{"duplicates with dashboard", true, []client.Object{f.github, f.linked, duplicate}, []string{"disconnect the extra ones under " + ConnectorSettingsPath}},
-		{"removed provider without dashboard", false, []client.Object{f.retained}, []string{"should be disconnected with `orka connection delete <name>`"}},
+		{"removed provider without dashboard", false, []client.Object{f.retained}, []string{"should be disconnected with `orka connection delete <name> --namespace tenant`"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := fake.NewClientBuilder().WithScheme(f.scheme).WithObjects(tt.objects...).Build()
@@ -235,6 +236,9 @@ func TestListConnectionsToolGuidanceFollowsDashboard(t *testing.T) {
 			}
 			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
 				t.Fatalf("decode %s: %v", out, err)
+			}
+			if envelope.Data.Namespace != "tenant" {
+				t.Fatalf("namespace = %q, want the links' namespace for CLI commands", envelope.Data.Namespace)
 			}
 			if tt.dashboard != (envelope.Data.SettingsPath == ConnectorSettingsPath) {
 				t.Fatalf("settingsPath = %q with dashboard %t", envelope.Data.SettingsPath, tt.dashboard)

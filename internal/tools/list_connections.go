@@ -38,7 +38,8 @@ func (t *ListConnectionsTool) Name() string { return ListConnectionsToolName }
 func (t *ListConnectionsTool) Description() string {
 	return "List the accounts the person who started this work has linked (for example GitHub), whether each is ready and readOnly or readWrite, " +
 		"and the connector providers they could still link. Use it before a tool that acts as the person; when a provider is not linked, " +
-		"ask the person to link it with `orka connect <provider>`, or on the dashboard page in settingsPath when the result includes one, " +
+		"ask the person to link it with `orka connect <provider> --namespace <namespace>` using the result's namespace, or on the dashboard page " +
+		"in settingsPath when the result includes one, " +
 		"instead of trying another credential."
 }
 
@@ -51,6 +52,9 @@ func (t *ListConnectionsTool) Parameters() json.RawMessage {
 type ListConnectionsResult struct {
 	Connections []LinkedConnectionSummary  `json:"connections"`
 	Available   []ConnectorProviderSummary `json:"available"`
+	// Namespace is where the links live; CLI commands must name it, since
+	// the person's CLI may default to another namespace.
+	Namespace string `json:"namespace,omitempty"`
 	// SettingsPath is the dashboard's connector page, set only when the
 	// controller serves the dashboard.
 	SettingsPath string `json:"settingsPath,omitempty"`
@@ -126,7 +130,7 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 		byProvider[owned[i].Spec.ProviderRef.Name] = append(byProvider[owned[i].Spec.ProviderRef.Name], &owned[i])
 	}
 	result := ListConnectionsResult{
-		Connections: []LinkedConnectionSummary{}, Available: []ConnectorProviderSummary{},
+		Connections: []LinkedConnectionSummary{}, Available: []ConnectorProviderSummary{}, Namespace: tc.Namespace,
 	}
 	if tc.DashboardEnabled {
 		result.SettingsPath = ConnectorSettingsPath
@@ -156,7 +160,7 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 				// Resolution refuses the tool while the person holds more
 				// than one link to the provider; each is reported unusable.
 				summary.Ready = false
-				summary.Message = "you hold several links to this provider; disconnect the extra ones " + disconnectGuidance(tc.DashboardEnabled) + " before its tools can run"
+				summary.Message = "you hold several links to this provider; disconnect the extra ones " + disconnectGuidance(tc.DashboardEnabled, connection.Namespace) + " before its tools can run"
 			case !connectors.ProviderAccepted(provider):
 				// Credential resolution refuses a link whose provider is not
 				// accepted, so the listing says so instead of advertising a
@@ -209,7 +213,7 @@ func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName st
 		summary.Message = condition.Message
 	}
 	if providerMissing {
-		summary.Message = "the provider is no longer configured; this link cannot be used and should be disconnected " + disconnectGuidance(dashboard)
+		summary.Message = "the provider is no longer configured; this link cannot be used and should be disconnected " + disconnectGuidance(dashboard, connection.Namespace)
 	}
 	// A disconnect in progress (the finalizer revokes tokens first, and may
 	// retry) is neither Ready nor something to relink.
@@ -231,21 +235,33 @@ func relinkGuidance(dashboard bool, connection *corev1alpha1.Connection, request
 		return "under " + ConnectorSettingsPath
 	}
 	provider := connection.Spec.ProviderRef.Name
-	command := "orka connect " + provider
+	in := cliNamespaceFlag(connection.Namespace)
+	command := "orka connect " + provider + in
 	if mode == corev1alpha1.ConnectionModeReadWrite {
 		command += " --mode " + mode
 	}
 	if connection.Name != connectors.ConnectionName(provider, requester.Issuer, requester.Subject) {
-		return "by removing it with `orka connection delete " + connection.Name + "` and, once `orka connection list` no longer shows it, running `" + command + "`"
+		return "by removing it with `orka connection delete " + connection.Name + in + "` and, once `orka connection list" + in +
+			"` no longer shows it, running `" + command + "`"
 	}
 	return "with `" + command + "`"
 }
 
 // disconnectGuidance says how the person removes a link: the dashboard page
 // when the controller serves one, otherwise the CLI commands.
-func disconnectGuidance(dashboard bool) string {
+func disconnectGuidance(dashboard bool, namespace string) string {
 	if dashboard {
 		return "under " + ConnectorSettingsPath
 	}
-	return "with `orka connection delete <name>` (`orka connection list` shows the names)"
+	in := cliNamespaceFlag(namespace)
+	return "with `orka connection delete <name>" + in + "` (`orka connection list" + in + "` shows the names)"
+}
+
+// cliNamespaceFlag names the link's namespace in a CLI command, which would
+// otherwise act in whatever namespace the person's CLI defaults to.
+func cliNamespaceFlag(namespace string) string {
+	if strings.TrimSpace(namespace) == "" {
+		return ""
+	}
+	return " --namespace " + namespace
 }

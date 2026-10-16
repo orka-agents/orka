@@ -266,12 +266,13 @@ link changes whose credential is used, not where.
 
 Agents and chat have a read-only `list_connections` tool. It returns the
 signed-in person's (or the Task's verified requester's) linked accounts with
-their mode and readiness, the providers they could still link, and, when
-the controller serves the dashboard, the settings path; never any token. A link whose provider was removed is still
+their mode and readiness, the providers they could still link, the
+namespace the links live in, and, when the controller serves the
+dashboard, the settings path; never any token. A link whose provider was removed is still
 listed, marked `providerMissing` and never ready, until the person
 disconnects it. An agent that needs an account the person
 has not linked should say so and point them at **Settings › Connectors**,
-or at `orka connect <provider>` when there is no dashboard, rather than try
+or at `orka connect <provider> --namespace <namespace>` when there is no dashboard, rather than try
 another credential. The tool is available to chat, to the
 compatibility proxies' coordinator mode, and to ACP runtimes through the
 broker; a Task without a verified requester gets an explicit "no identity"
