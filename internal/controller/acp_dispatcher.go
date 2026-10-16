@@ -20,6 +20,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -1136,6 +1137,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if errors.Is(err, errNativeSessionRuntimeUnsupported) || errors.Is(err, errNativeSessionHistoryBoundary) {
 			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, err)
 		}
+		if errors.Is(err, errACPSessionNotFound) {
+			return d.rejectMissingTaskSession(ctx, task, attemptID, fence)
+		}
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
 			if cleanupErr != nil {
@@ -1517,6 +1521,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if runtimeSessionCreationRequired {
 		if sessionExecution != nil {
 			sessionExecution.Binding.RecreationRequired = true
+			sessionExecution.Binding.PromptDelivered = false
 			d.setRuntimeSessionBinding(sessionExecution.Binding)
 			if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 				applyRuntimeSessionBindingToExecution(status, &sessionExecution.Binding)
@@ -1829,6 +1834,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		bootstrap = bootstrapPromptText(sessionExecution.Bootstrap)
 		userPrompt = sessionExecution.UserPrompt
 	}
+	// The toolbox note is built only from the frozen profile and is sent once
+	// per provider process: standalone Tasks always get it, and a Session
+	// runtime gets it until its current process accepted a prompt, so a
+	// pre-submission retry that reuses a never-prompted process still sends it.
+	toolboxNote := acpToolboxPromptNote(profile.Toolboxes, acpToolboxNoteDue(sessionExecution))
 	var terminal *harnessv2.Event
 	var lastAssistantUpdate *harnessv2.Event
 	var assistant strings.Builder
@@ -1852,7 +1862,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	admissionRetry := 0
 	for {
 		promptRequest, err := d.buildPromptRequest(
-			task, runtimeFence, profile, mcpConfiguration, bootstrap, userPrompt, promptLimits, admissionRetry,
+			task, runtimeFence, profile, mcpConfiguration, bootstrap, toolboxNote, userPrompt, promptLimits, admissionRetry,
 		)
 		if err != nil {
 			return err
@@ -1889,8 +1899,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						return err
 					}
 					accepted = true
-					if nativeSessionsSupported && sessionExecution != nil {
-						sessionExecution.Binding.RecreationRequired = true
+					if sessionExecution != nil {
+						sessionExecution.Binding.PromptDelivered = true
+						if nativeSessionsSupported {
+							sessionExecution.Binding.RecreationRequired = true
+						}
 						d.setRuntimeSessionBinding(sessionExecution.Binding)
 					}
 					if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
@@ -3822,39 +3835,11 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	if err != nil {
 		return true, err
 	}
-	var recoveredSession *acpTaskSession
+	recoveredSession, complete, err := d.recoverReservedTaskBeforeTerminal(ctx, task, attemptID, fence)
+	if err != nil || !complete {
+		return true, err
+	}
 	if task.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved {
-		if task.Spec.SessionRef == nil {
-			attempt, getErr := d.Store.GetPromptAttempt(ctx, attemptID)
-			if getErr != nil {
-				return true, getErr
-			}
-			bound, boundErr := promptAttemptSessionBound(attempt)
-			if boundErr != nil {
-				return true, boundErr
-			}
-			if bound {
-				task.Status.Execution.RuntimeInstanceID = attempt.RuntimeInstanceID
-				task.Status.Execution.RuntimeSessionUID = attempt.SessionUID
-				task.Status.Execution.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
-				if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-					status.RuntimeInstanceID = attempt.RuntimeInstanceID
-					status.RuntimeSessionUID = attempt.SessionUID
-					status.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
-				}); err != nil {
-					return true, err
-				}
-				complete, cleanupErr := d.cleanupRecoveredTaskScopedRuntimeSession(ctx, task)
-				if cleanupErr != nil || !complete {
-					return true, cleanupErr
-				}
-			}
-		} else {
-			recoveredSession, err = d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
-			if err != nil {
-				return true, err
-			}
-		}
 		if strings.TrimSpace(task.Status.Execution.RuntimePoolName) != "" {
 			identity := acpRuntimePoolReservationIdentity{
 				PoolKey: types.NamespacedName{Namespace: task.Namespace, Name: task.Status.Execution.RuntimePoolName},
@@ -3872,18 +3857,69 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	if err := d.settlePreSubmissionCancellation(ctx, task, attemptID, fence, operation, reason, message); err != nil {
 		return true, err
 	}
-	if recoveredSession != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
-		defer cancel()
-		var terminalErr = context.Canceled
-		if reason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
-			terminalErr = context.DeadlineExceeded
-		}
-		if err := d.reconcileUnfinalizedTaskSession(cleanupCtx, task, fence, recoveredSession, terminalErr); err != nil {
-			return true, err
-		}
+	var terminalErr = context.Canceled
+	if reason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
+		terminalErr = context.DeadlineExceeded
 	}
-	return true, nil
+	return true, d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, terminalErr)
+}
+
+// recoverReservedTaskBeforeTerminal undoes the pre-submission runtime state a
+// Reserved Task can still hold before it is terminalized ahead of runtime
+// admission: a standalone Task's bound task-scoped RuntimeSession is cleaned
+// up, and a Session Task's interrupted preparation is quiesced. A recovered
+// open SessionTurn is returned for the caller to finalize once the Task is
+// terminal. complete is false while cleanup must be retried later.
+func (d *ACPDispatcher) recoverReservedTaskBeforeTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+) (*acpTaskSession, bool, error) {
+	if task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved {
+		return nil, true, nil
+	}
+	if task.Spec.SessionRef != nil {
+		session, err := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
+		return session, err == nil, err
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return nil, false, err
+	}
+	bound, err := promptAttemptSessionBound(attempt)
+	if err != nil || !bound {
+		return nil, err == nil, err
+	}
+	task.Status.Execution.RuntimeInstanceID = attempt.RuntimeInstanceID
+	task.Status.Execution.RuntimeSessionUID = attempt.SessionUID
+	task.Status.Execution.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
+	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+		status.RuntimeInstanceID = attempt.RuntimeInstanceID
+		status.RuntimeSessionUID = attempt.SessionUID
+		status.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
+	}); err != nil {
+		return nil, false, err
+	}
+	complete, err := d.cleanupRecoveredTaskScopedRuntimeSession(ctx, task)
+	return nil, complete && err == nil, err
+}
+
+// finalizeRecoveredTaskSessionAfterTerminal finalizes a SessionTurn returned
+// by recoverReservedTaskBeforeTerminal after the Task became terminal.
+func (d *ACPDispatcher) finalizeRecoveredTaskSessionAfterTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	cause error,
+) error {
+	if session == nil {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
+	defer cancel()
+	return d.reconcileUnfinalizedTaskSession(cleanupCtx, task, fence, session, cause)
 }
 
 //nolint:gocyclo // Reservation and its rollback paths form one fenced state transition.
@@ -3948,6 +3984,12 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 			ctx, task, task.Status.Execution.RuntimePoolName, fence, residentSlots,
 		)
 		if claimErr != nil {
+			if errors.Is(claimErr, errACPRuntimePoolNotAdmitting) {
+				settled, settleErr := d.settleRuntimePoolToolboxUnavailable(ctx, task, attemptID, fence)
+				if settleErr != nil || settled {
+					return nil, acpDispatchTarget{}, settleErr
+				}
+			}
 			if errors.Is(claimErr, errACPRuntimePoolAtCapacity) || errors.Is(claimErr, errACPRuntimePoolNotAdmitting) {
 				_ = d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 					status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
@@ -3956,6 +3998,19 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 				return nil, acpDispatchTarget{}, nil
 			}
 			return nil, acpDispatchTarget{}, claimErr
+		}
+		// A reservation that already existed is returned without rechecking
+		// the pool lifecycle, so a toolbox failure after the reservation (or a
+		// controller restart) must still fail the Task here instead of
+		// renewing the reservation forever.
+		if _, unavailable := runtimePoolToolboxUnavailableMessage(pool); unavailable {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			releaseErr := d.releaseRuntimePoolReservation(releaseCtx, *reservation)
+			cancel()
+			if releaseErr != nil {
+				return nil, acpDispatchTarget{}, releaseErr
+			}
+			return nil, acpDispatchTarget{}, d.settleRuntimePoolToolboxUnavailableForPool(ctx, task, attemptID, fence, pool)
 		}
 		target.pool = pool
 		target.reservation = reservation
@@ -4279,6 +4334,23 @@ func (d *ACPDispatcher) settlePreSubmissionCancellation(
 	); err != nil {
 		return err
 	}
+	return d.failTaskBeforeRuntimeAdmission(
+		ctx, task, attemptID, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message,
+	)
+}
+
+// failTaskBeforeRuntimeAdmission projects a Task terminalized before runtime
+// admission. A Session Task whose attempt holds no SessionTurn binding uses
+// the unbound projection; a bound turn is projected by Session settlement.
+func (d *ACPDispatcher) failTaskBeforeRuntimeAdmission(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	state corev1alpha1.TaskExecutionState,
+	outcome corev1alpha1.TaskExecutionOutcome,
+	reason corev1alpha1.TaskExecutionReason,
+	message string,
+) error {
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
 		return err
@@ -4288,13 +4360,9 @@ func (d *ACPDispatcher) settlePreSubmissionCancellation(
 		return err
 	}
 	if task.Spec.SessionRef != nil && !bound {
-		return d.failTaskBeforeSessionBinding(
-			ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message,
-		)
+		return d.failTaskBeforeSessionBinding(ctx, task, state, outcome, reason, message)
 	}
-	return d.failTask(
-		ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message,
-	)
+	return d.failTask(ctx, task, state, outcome, reason, message)
 }
 
 type attemptRuntimeBinding struct {
@@ -5405,6 +5473,7 @@ func runtimeProfileFromPool(profile corev1alpha1.RuntimePoolProfileSpec) harness
 		ApprovalPolicyDigest: profile.ApprovalPolicyDigest, MCPConfigurationDigest: profile.MCPConfigurationDigest,
 		WorkspaceIntent: harnessv2.WorkspaceIntent(profile.WorkspaceIntent), ProxyCredentialRole: profile.ProxyCredentialRole,
 		ProxyCredentialScope: profile.ProxyCredentialScope, ResourceClass: profile.ResourceClass,
+		Toolboxes: runtimeToolboxesFromPool(profile.Toolboxes),
 	}
 }
 
@@ -5438,6 +5507,7 @@ func (d *ACPDispatcher) buildPromptRequest(
 	profile harnessv2.RuntimeProfile,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
 	bootstrap string,
+	toolboxNote string,
 	userPrompt string,
 	limits harnessv2.ProtocolLimits,
 	admissionRetry int,
@@ -5459,7 +5529,7 @@ func (d *ACPDispatcher) buildPromptRequest(
 		requestExpiry = lease.ExpiresAt
 	}
 	metadata := mutationMetadata(fence, task, operation, true, requestExpiry)
-	content := acpPromptInputContent(bootstrap, userPrompt)
+	content := acpPromptInputContentWithToolboxes(bootstrap, toolboxNote, userPrompt)
 	authorization, err := buildPromptMCPAuthorization(
 		mcpConfiguration, fence, profile, metadata, lease, requestExpiry,
 	)
@@ -5487,9 +5557,18 @@ func promptLeaseDuration(limits harnessv2.ProtocolLimits) time.Duration {
 }
 
 func acpPromptInputContent(bootstrap, userPrompt string) []harnessv2.ContentBlock {
-	content := make([]harnessv2.ContentBlock, 0, 2)
+	return acpPromptInputContentWithToolboxes(bootstrap, "", userPrompt)
+}
+
+// acpPromptInputContentWithToolboxes orders the prompt as: optional session
+// bootstrap transcript, optional Orka toolbox note, then the user prompt.
+func acpPromptInputContentWithToolboxes(bootstrap, toolboxNote, userPrompt string) []harnessv2.ContentBlock {
+	content := make([]harnessv2.ContentBlock, 0, 3)
 	if strings.TrimSpace(bootstrap) != "" {
 		content = append(content, harnessv2.ContentBlock{Type: harnessv2.ContentBlockText, Text: bootstrap})
+	}
+	if strings.TrimSpace(toolboxNote) != "" {
+		content = append(content, harnessv2.ContentBlock{Type: harnessv2.ContentBlockText, Text: toolboxNote})
 	}
 	content = append(content, harnessv2.ContentBlock{Type: harnessv2.ContentBlockText, Text: userPrompt})
 	return content
@@ -7061,4 +7140,85 @@ func (d *ACPDispatcher) handleSessionPreparationError(ctx context.Context, task 
 		return err
 	}
 	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
+}
+
+// settleRuntimePoolToolboxUnavailable fails a queued or reserved Task whose
+// frozen RuntimePool reports ToolboxUnavailable. The pool cannot roll out, so
+// waiting would never end; the Task fails with the pool's stable reason.
+func (d *ACPDispatcher) settleRuntimePoolToolboxUnavailable(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+) (bool, error) {
+	if task == nil || task.Status.Execution == nil || strings.TrimSpace(task.Status.Execution.RuntimePoolName) == "" {
+		return false, nil
+	}
+	pool := &corev1alpha1.RuntimePool{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: strings.TrimSpace(task.Status.Execution.RuntimePoolName)}
+	if err := uncachedReader(d.APIReader, d.Client).Get(ctx, key, pool); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if poolUID := strings.TrimSpace(task.Status.Execution.RuntimePoolUID); poolUID != "" && poolUID != string(pool.UID) {
+		return false, nil
+	}
+	if _, unavailable := runtimePoolToolboxUnavailableMessage(pool); !unavailable {
+		return false, nil
+	}
+	if err := d.settleRuntimePoolToolboxUnavailableForPool(ctx, task, attemptID, fence, pool); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// settleRuntimePoolToolboxUnavailableForPool fails the queued or reserved
+// Task with the pool's ToolboxUnavailable message. The caller has already
+// verified the pool reports that condition and released any reservation.
+// A requeued Task's pre-submission runtime state is recovered and finalized
+// exactly as on the pre-admission timeout path.
+func (d *ACPDispatcher) settleRuntimePoolToolboxUnavailableForPool(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	pool *corev1alpha1.RuntimePool,
+) error {
+	message, _ := runtimePoolToolboxUnavailableMessage(pool)
+	reason := corev1alpha1.TaskExecutionReason(corev1alpha1.RuntimePoolReasonToolboxUnavailable)
+	message = boundACPStatusMessage(message)
+	recoveredSession, complete, err := d.recoverReservedTaskBeforeTerminal(ctx, task, attemptID, fence)
+	if err != nil || !complete {
+		return err
+	}
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "toolbox-unavailable", reason, message); err != nil {
+		return err
+	}
+	if err := d.failTaskBeforeRuntimeAdmission(
+		ctx, task, attemptID, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+	); err != nil {
+		return err
+	}
+	return d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, errors.New(message))
+}
+
+// runtimePoolToolboxUnavailableMessage reports the pool's current-generation
+// ToolboxUnavailable rollout condition, if any.
+func runtimePoolToolboxUnavailableMessage(pool *corev1alpha1.RuntimePool) (string, bool) {
+	if pool == nil {
+		return "", false
+	}
+	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse ||
+		condition.Reason != corev1alpha1.RuntimePoolReasonToolboxUnavailable ||
+		(condition.ObservedGeneration != 0 && condition.ObservedGeneration != pool.Generation) {
+		return "", false
+	}
+	message := strings.TrimSpace(condition.Message)
+	if message == "" {
+		message = strings.TrimSpace(pool.Status.Message)
+	}
+	if message == "" {
+		message = acpToolboxUnavailablePrefix + "the RuntimePool could not bind a declared toolbox"
+	}
+	return message, true
 }

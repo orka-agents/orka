@@ -21,6 +21,7 @@ const sidebars = {
           collapsed: false,
           items: [
             'guides/agents-skills-and-tools',
+            'guides/toolboxes',
             'concepts/remote-mcp',
             'guides/multi-agent-coordination',
             'guides/autonomous-tasks',

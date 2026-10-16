@@ -47,6 +47,9 @@ type AgentReconciler struct {
 	// omitted contractVersion is stamped with it on first reconcile so the
 	// stored object carries its classification.
 	Mode executionmode.Mode
+	// ToolboxPolicy gates runtime.toolboxes at admission with the same rules
+	// Task planning applies.
+	ToolboxPolicy ACPToolboxPolicy
 }
 
 const (
@@ -148,6 +151,9 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 			return err
 		}
 		if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
+			return err
+		}
+		if err := r.ToolboxPolicy.ValidateAgentToolboxes(withEffectiveBuiltInContract(agent, r.Mode)); err != nil {
 			return err
 		}
 	}
