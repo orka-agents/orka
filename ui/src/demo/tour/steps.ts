@@ -8,6 +8,8 @@ export type TourPart = 'basics' | 'more'
 export interface TourStep {
   title: string
   body: string
+  /** Short statements listed under the body, for points a visitor must not miss. */
+  points?: string[]
   /** The page this step shows. The welcome, checkpoint and closing steps leave the visitor where they are. */
   route?: NavigateOptions
   /** Which part of the tour this stop belongs to; progress counts stops within it. */
@@ -57,7 +59,12 @@ const incident = (tab?: string): NavigateOptions => ({
 export const TOUR_STEPS: TourStep[] = [
   {
     title: 'Welcome to the Orka demo',
-    body: "Orka runs AI agents and containers as Tasks on Kubernetes. Agents, Tasks, monitors and the rest of what you configure are Kubernetes resources; traces, approvals and usage are Orka's own record of what happened. This demo follows Northwind Labs, a made-up engineering team, on sample data in your browser, so nothing reaches a cluster or a model.",
+    body: 'Orka runs AI agents and containers as Tasks on Kubernetes. This demo follows Northwind Labs, a made-up company, as its platform team works a production checkout incident, reviews pull requests and ships a release.',
+    points: [
+      'This is the optional web dashboard. It is off unless you turn it on, and the rest of Orka works without it.',
+      'Everything here is mock data in your browser. Nothing reaches a cluster or a model.',
+      'Everything you see can be done with the orka CLI or kubectl. Agents, Tasks, monitors and gateways are Kubernetes resources you declare in YAML; the dashboard is a view over them and over Orka\'s record of what they did.',
+    ],
   },
   {
     title: 'An agent handles an incident',
@@ -157,7 +164,7 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: "That's the full tour",
-    body: 'The sidebar has the rest: tools, connectors, chat sessions, and a board of running work. You can reopen this tour from Take the tour in the sidebar.',
+    body: 'The sidebar has the rest: tools, connectors, chat sessions, and a board of running work. Remember that the dashboard is optional: everything in this tour works from the orka CLI and kubectl. You can reopen this tour from Take the tour in the sidebar.',
   },
 ]
 
