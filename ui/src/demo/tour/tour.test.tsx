@@ -12,7 +12,7 @@ vi.mock('@tanstack/react-router', async () => ({
 
 vi.mock('@/hooks/use-chat', () => ({ useSendMessage: () => mockSend }))
 
-import { INCIDENT_TASK, stopsIn, TOUR_FINDING, TOUR_STEPS } from './steps'
+import { INCIDENT_TASK, RELEASE_TASK, stopsIn, TOUR_AGENT, TOUR_FINDING, TOUR_STEPS } from './steps'
 import { useTourStore } from './store'
 import { TourLauncher, TourPanel } from './tour'
 
@@ -70,9 +70,11 @@ describe('demo tour', () => {
     expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: INCIDENT_TASK }, search: { tab: 'trace' } })
     next()
     expect(mockNavigate).toHaveBeenLastCalledWith(expect.objectContaining({ search: { tab: 'approvals' } }))
+    next()
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/agents/$agentId', params: { agentId: TOUR_AGENT } })
 
     fireEvent.click(screen.getByRole('button', { name: 'Back' }))
-    expect(screen.getByRole('heading', { name: 'See what it did' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'You make the call' })).toBeInTheDocument()
   })
 
   it('sends a suggested prompt from the chat stop', () => {
@@ -91,12 +93,14 @@ describe('demo tour', () => {
     expect(localStorage.getItem(seenKey)).not.toBeNull()
   })
 
-  it('keeps going past the basics into security, gateways and runtimes', () => {
+  it('keeps going past the basics into coordination, security, gateways and runtimes', () => {
     useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.checkpoint) })
     render(<TourPanel slot="bottom" />)
     fireEvent.click(screen.getByRole('button', { name: 'Keep going' }))
-    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/security/findings/$findingId', params: { findingId: TOUR_FINDING } })
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: RELEASE_TASK }, search: { tab: 'children' } })
     expect(screen.getByText(`More: Step 1 of ${stopsIn('more').length}`)).toBeInTheDocument()
+    next()
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/security/findings/$findingId', params: { findingId: TOUR_FINDING } })
     next()
     expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/gateways/$gatewayId', params: { gatewayId: 'slack-northwind' } })
     next()

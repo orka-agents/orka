@@ -105,11 +105,12 @@ and tasks created in the demo run through a simulated lifecycle. Nothing persist
 reload. The mode check is static, so `bun run build` contains none of it.
 
 A guided tour (`src/demo/tour/`) opens on a visitor's first visit and from **Take the tour**
-in the sidebar. It follows one incident Task through its trace and approval, then visits
-Chat, a repository monitor and Usage; visitors who keep going also see a security finding,
-the Slack gateway and the runtime pools. Its steps name sample objects, and
-`src/demo/tour/steps.test.ts` fails if they are renamed or the incident stops waiting on its
-approval.
+in the sidebar. It follows one incident Task through its trace and approval and the agent
+behind it, then visits Chat, a repository monitor and Usage; visitors who keep going also
+see a coordinator's child Tasks, a security finding, the Slack gateway and the runtime
+pools. Its steps name sample objects, and `src/demo/tour/steps.test.ts` fails if they are
+renamed, the incident stops waiting on its approval, or the coordinator loses its children.
+`src/demo/data/agents.test.ts` holds the sample agents to the controller's approval rules.
 
 `.github/workflows/website.yml` publishes the demo to GitHub Pages under `/demo/`, next to
 the documentation site, whenever `ui/` or `website/` changes on `main`. When an API response changes shape, update the matching

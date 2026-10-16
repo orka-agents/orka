@@ -18,7 +18,11 @@ export interface TourStep {
 
 /** The incident Task the tour follows; it waits on a rollback approval when the demo loads. */
 export const INCIDENT_TASK = 'checkout-latency-investigation-7k2qp'
+/** The agent the incident Task runs. */
+export const TOUR_AGENT = 'incident-responder'
 export const TOUR_MONITOR = 'checkout-service'
+/** A coordinator Task that delegated two child Tasks to other agents. */
+export const RELEASE_TASK = 'release-v2-14-0-plan-r2w8z'
 /** The critical finding whose patch is pull request #1486, the one the chat stop offers to review. */
 export const TOUR_FINDING = findingID('checkout-refund-idor')
 /** The gateway that created the incident Task from a Slack message. */
@@ -32,9 +36,10 @@ const incident = (tab?: string): NavigateOptions => ({
 
 /**
  * One story through the dashboard: an agent works an incident, its trace shows
- * what it did, a person approves the risky step, and then the ways work starts
- * and what it costs. Security, gateways and runtimes follow for visitors who
- * keep going; the rest of the sidebar is left to explore.
+ * what it did, a person approves the risky step, the agent definition explains
+ * why it could ask, and then the ways work starts and what it costs.
+ * Coordination, security, gateways and runtimes follow for visitors who keep
+ * going; the rest of the sidebar is left to explore.
  */
 export const TOUR_STEPS: TourStep[] = [
   {
@@ -60,6 +65,12 @@ export const TOUR_STEPS: TourStep[] = [
     part: 'basics',
   },
   {
+    title: 'Every Task runs an agent',
+    body: 'An agent is a reusable definition: a model, instructions and the tools it may use. incident-responder can query Datadog, update PagerDuty, search GitHub and post to Slack. It runs in autonomous mode, which lets it pause its own Task for approval, as it did for the rollback. Other agents, such as code-reviewer, run a coding agent like Claude Code instead.',
+    route: { to: '/agents/$agentId', params: { agentId: TOUR_AGENT } },
+    part: 'basics',
+  },
+  {
     title: 'Ask for work in chat',
     body: 'Chat is the quickest way to start work. Ask in plain language: the assistant answers from the cluster and starts Tasks for you. Try one of these:',
     route: { to: '/chat' },
@@ -80,8 +91,14 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: "That's the basics",
-    body: 'Finish here, or keep going for three more stops: security findings, the gateways that bring in Slack and GitHub, and the runtimes agents run on.',
+    body: 'Finish here, or keep going for four more stops: agents that hand work to other agents, security findings, the gateways that bring in Slack and GitHub, and the runtimes agents run on.',
     checkpoint: true,
+  },
+  {
+    title: 'Agents hand work to other agents',
+    body: 'release-captain is preparing a storefront release. It gave two jobs to other agents, each as a child Task: issue-triager checks for release blockers and docs-writer drafts the release notes. It waits for both before it finishes. Its agent definition limits which agents it may delegate to and how many children run at once.',
+    route: { to: '/tasks/$taskId', params: { taskId: RELEASE_TASK }, search: { tab: 'children' } },
+    part: 'more',
   },
   {
     title: 'Agents find and fix vulnerabilities',
@@ -103,7 +120,7 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: "That's the full tour",
-    body: 'The sidebar has the rest: agents and tools, chat sessions, and the board and live views of running work. You can reopen this tour from Take the tour in the sidebar.',
+    body: 'The sidebar has the rest: tools, connectors, chat sessions, and the board and live views of running work. You can reopen this tour from Take the tour in the sidebar.',
   },
 ]
 
