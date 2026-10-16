@@ -2,19 +2,14 @@
 description: "Running Orka's gateways: delivery guarantees, bounds, and what to watch."
 ---
 
-# Operating generic gateways
+# Operating gateways
 
-Generic gateways are enabled by default. They use the controller SQLite database for normalized ingress events, Session transcript provenance, and outbound delivery state.
+This page is for running gateways in production: their service levels and bounds, readiness,
+interim replies, secret rotation, dead letters, backup and restore, upgrades, and cleanup. To
+set up a gateway and choose an adapter, start with [Gateways](../guides/gateways.md).
 
-## External adapters
-
-The experimental [A2A adapter](https://github.com/orka-agents/orka-gateway-a2a) lets A2A clients call Orka Agents through the gateway. It runs separately from Orka and supports a text-only A2A subset.
-
-See its [setup guide](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/getting-started.md) and [compatibility notes](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/compatibility.md) for supported Orka versions, native-Agent prerequisites, and conformance limits.
-
-:::tip[Video demo]
-Watch [Agent-to-agent requests with safe retries](https://www.youtube.com/watch?v=2shxIt1ooxE).
-:::
+Gateways are enabled by default. They use the controller SQLite database for normalized
+ingress events, Session transcript provenance, and outbound delivery state.
 
 ## Default service levels and bounds
 
@@ -218,10 +213,6 @@ For an adapter that requires real routing identities, opt in with `--delivery-fi
 Populate the placeholders only from retained delivery routing values you are authorized to inspect and reuse, for an explicitly approved test destination. Do not fabricate identities or use this flag to bypass adapter authorization. If you cannot obtain the retained values through authorized access, stop rather than switching identities or relaxing access controls. **This check sends real messages**, with fixed text `[Orka conformance check] No action required.` Without interim capability it sends one final plus its byte-identical duplicate. With capability it sends two distinct interim messages before final, duplicates the first interim and final, and replays the first interim after final to check stable receipts: **three visible sends** on a conforming adapter. It also adds an oversized-interim rejection probe only when capable; a non-capable adapter receives no message probes at all. Use an originating event that has not yet received terminal delivery for the interim check. Each invocation uses fresh delivery/idempotency IDs; running again can produce more visible messages or be rejected for an already-closed event. Do not fabricate a replacement event identity to bypass that constraint. The authentication and oversized-text/body rejection probes use the same routing identities. They should not deliver messages on a conforming adapter, but a broken adapter may deliver them. There are no automatic retries.
 
 The fixture cannot supply text, credentials, delivery/idempotency IDs, or metadata. Unknown fields, malformed/trailing JSON, oversized files, and invalid routing identities fail before network requests. Fixture identities are redacted from checker results, and loader diagnostics do not include file paths or contents. Keep the fixture private; it is not a support-bundle artifact. Continue to supply the bearer token through the configured environment variable and keep TLS verification enabled. `--delivery-fixture` cannot be combined with `--reference-fixtures`, which sends reference-adapter fault deliveries. Without the new flag, the CLI retains its synthetic routing and fixed IDs; non-mutating readiness probes are unchanged.
-
-The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapter, a deterministic external AgentRuntime, and a test-only native worker image in Kind. It preserves private-CA trust, readiness, ingress deduplication, and external-v2 final-only/no-Job coverage. Native coverage creates real gateway Tasks and controller Jobs/Pods, authenticates origin, and executes the production `ReplyInConversationTool` with the reusable native client. It verifies budget-backed admission/replay, observes a delivered interim receipt while the Task is still Running, and only then releases final completion. A rolled adapter with `--interim-delivery=false` must produce the tool's typed unsupported rejection with no enqueue and still deliver final. Local start/release fences are driven through Kubernetes exec; no production authorization exception is added. CI requires all three specs, retaining the zero-spec guard. It does not run the conformance CLI and does not replace conformance testing against each adapter build before rollout.
-
-That deterministic fixture does not prove model-driven worker registration or live ACP tool execution. Native worker unit/integration tests separately cover actual registration, advertisement, dispatch, and continued model work. ACP integration tests exercise the production tool through a signed broker capability, active prompt/session guard, and real SQLite, with no native Job; Kubernetes and broker credential resolution use test fixtures, not a live RuntimePool/provider. Local unit/integration results and tagged E2E compilation are not evidence that the live suite ran. Live native delivery requires the workflow's three specs to execute successfully; the external-v2 spec remains final-only.
 
 If a future release introduces another wire version, controller and adapter release notes must define an explicit dual-version overlap. Do not infer compatibility from similar payloads or from the adapter's product version.
 

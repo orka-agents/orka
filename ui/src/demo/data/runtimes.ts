@@ -53,7 +53,7 @@ function runtimePool(seed: PoolSeed, index: number): RuntimePool {
   const podName = `${name}-${digest(`rs:${key}`, 9)}-${digest(`pod:${key}`, 5)}`
   const serving = seed.replicas > 0
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'RuntimePool',
     metadata: {
       name,
@@ -186,7 +186,7 @@ const governance = {
 
 export const agentRuntimes: AgentRuntime[] = [
   {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'AgentRuntime',
     metadata: { name: 'goose-data-team', namespace: DEMO_NAMESPACE, uid: uid('agentruntime:goose'), creationTimestamp: ago(18 * 24 * 60) },
     spec: {
@@ -234,7 +234,7 @@ export const agentRuntimes: AgentRuntime[] = [
     },
   },
   {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'AgentRuntime',
     metadata: { name: 'review-harness-legacy', namespace: DEMO_NAMESPACE, uid: uid('agentruntime:legacy'), creationTimestamp: ago(96 * 24 * 60) },
     spec: {

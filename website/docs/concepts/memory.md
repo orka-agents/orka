@@ -5,7 +5,11 @@ description: "The namespace-scoped memory layer: durable memories, proposals, an
 
 # Memory
 
-Orka provides a namespace-scoped memory layer for AI worker tasks. It is designed for shared Kubernetes environments where memory should be useful, auditable, and safe by default.
+Memory lets agents carry knowledge from one Task to the next: project facts, decisions,
+conventions, and procedures. In a shared cluster, memory that any model output could change
+would be a liability, so Orka makes writing a memory a review request. Agents propose; a
+person reviews and applies; only then do future Tasks see it. Memory is scoped to a namespace
+and available to native `type: ai` Tasks.
 
 The current model has three related concepts:
 
@@ -41,7 +45,7 @@ Tags: release, testing
 
 When an AI worker can reach the controller internal API, it loads reviewed durable memories before invoking the model. The durable memory section is appended to the system prompt as background project context, separate from the current session transcript.
 
-When coordination is enabled on an Agent, Orka auto-injects the memory tool family along with the coordination tools:
+Every native `type: ai` Task also receives the memory tools ([parameters](../reference/built-in-tools.md#memory-tools)):
 
 | Tool | Purpose |
 |------|---------|
@@ -196,22 +200,6 @@ Apply returns the durable memory as JSON. The created memory has `source: "memor
 - Disabled and deleted memories are excluded from normal recall by default.
 - Memory writes are namespace-scoped and authenticated through the same ServiceAccount-token API model as other Orka APIs.
 - Applying accepted memory proposals preserves proposal-to-memory linkage for auditability.
-
-## Validation
-
-The live copilot-proxy E2E suite validates the native `type: ai` memory path
-with a real model-backed worker. The proxy is test infrastructure and is
-separate from the built-in Copilot ACP RuntimePool path:
-
-- durable memory can be pre-seeded through the API
-- a live worker receives memory tools through `ORKA_AI_TOOLS`
-- the worker executes `recall_memory`, `remember`, `propose_memory`, and `search_transcript`
-- durable recall does not create duplicate durable memory
-- proposed memory remains a proposal until it is explicitly applied
-- proposal review persists accepted/rejected state without applying the proposal
-- accepted memory proposals apply idempotently into linked durable memory
-
-Deterministic unit and integration tests cover store behavior, API handlers, tool registration, prompt composition, and worker/tool plumbing.
 
 ## Current limitations
 

@@ -11,7 +11,7 @@ vi.mock('zustand/middleware', () => ({
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 const mockNavigate = vi.fn()
-const mockSearch: { current: { tab?: string } } = { current: { tab: 'overview' } }
+const mockSearch: { current: { tab?: string } } = { current: { tab: 'spec' } }
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
@@ -35,7 +35,8 @@ describe('TaskDetail', () => {
     useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
     useAuthStore.setState({ token: 'test-token' })
     mockNavigate.mockClear()
-    mockSearch.current = { tab: 'overview' }
+    // Most tests read the Task resource, which the Spec tab shows.
+    mockSearch.current = { tab: 'spec' }
     vi.mocked(toast.success).mockClear()
     vi.mocked(toast.error).mockClear()
   })
@@ -53,7 +54,7 @@ describe('TaskDetail', () => {
   })
 
   it('renders a permission failure instead of "Task not found" when the task 403s and stops dependent polling', async () => {
-    mockSearch.current = { tab: 'runtime' }
+    mockSearch.current = { tab: 'overview' }
     const hits: Record<string, number> = {}
     const forbidden = (key: string) => () => {
       hits[key] = (hits[key] ?? 0) + 1
@@ -90,7 +91,7 @@ describe('TaskDetail', () => {
   })
 
   it('stops polling the task and its dependent endpoints once the task 404s', async () => {
-    mockSearch.current = { tab: 'runtime' }
+    mockSearch.current = { tab: 'overview' }
     const hits: Record<string, number> = {}
     const count = (key: string) => {
       hits[key] = (hits[key] ?? 0) + 1
@@ -279,7 +280,7 @@ describe('TaskDetail', () => {
     expect(screen.getByText('platform/shared-agent')).toBeInTheDocument()
   })
 
-  it('overview tab shows metadata', async () => {
+  it('spec tab shows metadata', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
@@ -372,18 +373,14 @@ describe('TaskDetail', () => {
     expect(screen.getByText('Do something')).toBeInTheDocument()
   })
 
-  it('renders tabs for overview, result, and logs', async () => {
+  it('shows the Overview, Activity, Approvals, Result, Logs and Spec tabs', async () => {
     render(<TaskDetail taskId="test-task" />)
-    await waitFor(() => {
-      expect(screen.getByText('Overview')).toBeInTheDocument()
-    })
-    expect(screen.getByText('Runtime')).toBeInTheDocument()
-    expect(screen.getByText('Result')).toBeInTheDocument()
-    expect(screen.getByText('Logs')).toBeInTheDocument()
+    const tabs = await screen.findAllByRole('tab')
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['Overview', 'Activity', 'Approvals', 'Result', 'Logs', 'Spec'])
   })
 
-  it('switches to the Runtime tab and shows runtime panels', async () => {
-    const user = userEvent.setup()
+  it('opens on the Overview, with progress and derived checks', async () => {
+    mockSearch.current = {}
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
@@ -394,14 +391,13 @@ describe('TaskDetail', () => {
       ),
     )
     render(<TaskDetail taskId="rt-task" />)
-    await waitFor(() => expect(screen.getByText('rt-task')).toBeInTheDocument())
-    await user.click(screen.getByRole('tab', { name: /runtime/i }))
-    expect(await screen.findByText('Task flow')).toBeInTheDocument()
-    expect(screen.getByText('Derived checks')).toBeInTheDocument()
+    expect(await screen.findByText('Derived checks')).toBeInTheDocument()
+    expect(screen.getByText('Execution')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('data-state', 'active')
   })
 
-  it('surfaces task event fetch failures in the Runtime timeline', async () => {
-    mockSearch.current = { tab: 'runtime' }
+  it('says on the Overview when execution events fail to load', async () => {
+    mockSearch.current = { tab: 'overview' }
     server.use(
       http.get('/api/v1/tasks/:id/events', () =>
         HttpResponse.json({ error: 'backend unavailable' }, { status: 500 }),
@@ -417,12 +413,11 @@ describe('TaskDetail', () => {
 
     render(<TaskDetail taskId="event-error" />)
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to load events')
-    expect(screen.queryByText('No events')).not.toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to load execution events')
   })
 
-  it('surfaces disabled execution-event storage in the Runtime timeline', async () => {
-    mockSearch.current = { tab: 'runtime' }
+  it('says on the Overview when execution-event storage is off', async () => {
+    mockSearch.current = { tab: 'overview' }
     server.use(
       http.get('/api/v1/tasks/:id/events', () =>
         HttpResponse.json({ error: 'execution events disabled' }, { status: 501 }),
@@ -438,24 +433,109 @@ describe('TaskDetail', () => {
 
     render(<TaskDetail taskId="unsupported-events" />)
 
-    expect(await screen.findByText('Live stream not enabled')).toBeInTheDocument()
-    expect(screen.queryByText('No events')).not.toBeInTheDocument()
+    expect(await screen.findByText(/Execution events are not enabled/)).toBeInTheDocument()
   })
 
-  it('falls back to runtime tab when ?tab names an unavailable panel', async () => {
-    mockSearch.current = { tab: 'children' } // task has no children → no children panel
+  it('falls back to the Overview when ?tab names an unavailable panel', async () => {
+    mockSearch.current = { tab: 'plan' } // the task has no plan, so no Plan tab
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
-          metadata: { name: 'no-kids', namespace: 'default', uid: 'uid-nk' },
+          metadata: { name: 'rt-task', namespace: 'default', uid: 'uid-rt' },
           spec: { type: 'agent', agentRef: { name: 'a' } },
           status: { phase: 'Running' },
         }),
       ),
     )
-    render(<TaskDetail taskId="no-kids" />)
-    // No blank body: runtime panels render instead of an empty children panel.
-    expect(await screen.findByText('Task flow')).toBeInTheDocument()
+    render(<TaskDetail taskId="rt-task" />)
+    expect(await screen.findByText('Derived checks')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('data-state', 'active')
+  })
+
+  it('sends links to merged tabs to the tab that now shows their content', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'rt-task', namespace: 'default', uid: 'uid-rt' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    for (const [tab, lands] of [['runtime', 'Overview'], ['execution', 'Overview'], ['children', 'Overview'], ['trace', 'Activity'], ['timeline', 'Activity']]) {
+      mockSearch.current = { tab }
+      const { unmount } = render(<TaskDetail taskId="rt-task" />)
+      expect(await screen.findByRole('tab', { name: lands })).toHaveAttribute('data-state', 'active')
+      if (tab === 'timeline') expect(screen.getByRole('button', { name: 'Raw events' })).toHaveAttribute('aria-pressed', 'true')
+      if (tab === 'trace') expect(screen.getByRole('button', { name: 'Trace' })).toHaveAttribute('aria-pressed', 'true')
+      unmount()
+    }
+  })
+
+  it('switches Activity to raw events when a trace link becomes a timeline link', async () => {
+    mockSearch.current = { tab: 'trace' }
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'rt-task', namespace: 'default', uid: 'uid-rt' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    const { rerender } = render(<TaskDetail taskId="rt-task" />)
+    expect(await screen.findByRole('button', { name: 'Trace' })).toHaveAttribute('aria-pressed', 'true')
+    mockSearch.current = { tab: 'timeline' }
+    rerender(<TaskDetail taskId="rt-task" />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Raw events' })).toHaveAttribute('aria-pressed', 'true'))
+  })
+
+  it('fetches artifacts once more when the task finishes while Result is open', async () => {
+    mockSearch.current = { tab: 'result' }
+    let phase = 'Running'
+    let artifactRequests = 0
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'finishing', namespace: 'default', uid: 'uid-fin' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/artifacts', () => {
+        artifactRequests += 1
+        return HttpResponse.json({ artifacts: [] })
+      }),
+    )
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    renderRaw(<QueryClientProvider client={client}><TaskDetail taskId="finishing" /></QueryClientProvider>)
+    await waitFor(() => expect(artifactRequests).toBe(1))
+
+    // The task finishes; refetch only the task, well inside the 5s poll.
+    phase = 'Succeeded'
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['task'] })
+    })
+    await waitFor(() => expect(artifactRequests).toBe(2))
+  })
+
+  it('shows activity as a trace or as raw events', async () => {
+    const user = userEvent.setup()
+    mockSearch.current = { tab: 'activity' }
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'rt-task', namespace: 'default', uid: 'uid-rt' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="rt-task" />)
+    expect(await screen.findByText('Execution trace')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Raw events' }))
+    expect(await screen.findByText('Execution timeline')).toBeInTheDocument()
+    expect(screen.queryByText('Execution trace')).not.toBeInTheDocument()
   })
 
   it('delete button removes task and navigates', async () => {
@@ -712,11 +792,20 @@ describe('TaskDetail', () => {
     expect(screen.queryByText(/Child of/)).not.toBeInTheDocument()
   })
 
-  it('has a single Delete control on the Runtime tab', async () => {
-    mockSearch.current = { tab: 'runtime' }
+  it('has a single Delete control on the Overview', async () => {
+    mockSearch.current = { tab: 'overview' }
     render(<TaskDetail taskId="test-task" />)
-    expect(await screen.findByText('Task flow')).toBeInTheDocument()
+    expect(await screen.findByText('Derived checks')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: /delete/i })).toHaveLength(1)
+  })
+
+  it('switches the Spec tab between the summary and the Task as YAML', async () => {
+    const user = userEvent.setup()
+    render(<TaskDetail taskId="test-task" />)
+    expect(await screen.findByText('Metadata')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'YAML' }))
+    expect(await screen.findByRole('region', { name: 'Task YAML' })).toHaveTextContent('kind: Task')
+    expect(screen.queryByText('Metadata')).not.toBeInTheDocument()
   })
 
   it('shows conditions when present', async () => {
@@ -772,7 +861,8 @@ describe('TaskDetail', () => {
     expect(screen.getByText('2d ago')).toBeInTheDocument()
   })
 
-  it('renders the execution graph (not a table) in the Children tab', async () => {
+  it('draws child tasks as an execution graph on the Overview', async () => {
+    mockSearch.current = { tab: 'overview' }
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
@@ -789,10 +879,8 @@ describe('TaskDetail', () => {
       ),
     )
     render(<TaskDetail taskId="parent" />)
-    await waitFor(() => expect(screen.getByText('parent')).toBeInTheDocument())
-    await userEvent.click(screen.getByRole('tab', { name: /children/i }))
-    // Execution graph (role=tree) replaces the old child-tasks table.
     expect(await screen.findByRole('tree', { name: /execution graph/i })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /children/i })).not.toBeInTheDocument()
     expect(screen.getByText('child-1')).toBeInTheDocument()
     expect(screen.getByText('child-2')).toBeInTheDocument()
   })

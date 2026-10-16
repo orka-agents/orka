@@ -335,15 +335,12 @@ additive.
   `AgentRuntime` registrations, and harness v1 Tasks receive no connector
   tools at all.
 
-## Proving it in CI
+## Testing your setup
 
-`scripts/live-connectors-e2e.sh` (the `Live Connectors E2E` workflow) runs the
-whole lifecycle against an in-cluster fixture with no real provider: sign-in
-through an OIDC stub, consent with a fake OAuth provider, a Task that reads as
-the person, a write that waits for approval, a refresh forced by a short token
-lifetime, and a disconnect that revokes. It is the reference for what a
-working installation looks like; see
-[Development](../development/development.md#ci-validation).
+The `Live Connectors E2E` workflow exercises the whole lifecycle — sign-in, consent, a read
+as the person, a write that waits for approval, a token refresh, and disconnect — against
+in-cluster fixtures. Its script, `scripts/live-connectors-e2e.sh`, is a working reference
+installation; see [CI validation](../development/development.md#ci-validation).
 
 ## Troubleshooting
 

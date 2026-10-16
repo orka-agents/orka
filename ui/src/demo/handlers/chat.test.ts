@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { agentSchema } from '@/schemas/agent'
+import { agentSchema, agentSystemPromptSchema, type Agent } from '@/schemas/agent'
 import { agentRuntimeListSchema, agentRuntimeSchema, runtimePoolListSchema } from '@/schemas/runtime'
 import { toolListItemSchema, toolSchema } from '@/schemas/tool'
 import { scriptChatTurn, SUGGESTED_PROMPTS } from '../data/chat'
@@ -38,6 +38,18 @@ describe('demo agents', () => {
       expect.arrayContaining(Object.values(AGENTS).map((agent) => agent.name)),
     )
     expect((await json('/agents?namespace=orka-system')).items).toEqual([])
+  })
+
+  it('serves the ConfigMap text of every agent whose system prompt references one', async () => {
+    const agents: Agent[] = (await json('/agents?namespace=default')).items
+    const referencing = agents.filter((agent) => agent.spec.systemPrompt?.configMapRef)
+    expect(referencing.length).toBeGreaterThan(0)
+    for (const agent of referencing) {
+      const prompt = agentSystemPromptSchema.parse(await json(`/agents/${agent.metadata.name}/system-prompt?namespace=default`))
+      expect(prompt.configMapRef).toEqual(agent.spec.systemPrompt?.configMapRef)
+      expect(prompt.content).not.toBe('')
+    }
+    expect((await call(`/agents/${AGENTS.triage.name}/system-prompt?namespace=default`)).status).toBe(404)
   })
 
   it('creates, reads, and deletes an agent in memory', async () => {

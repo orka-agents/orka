@@ -4,7 +4,7 @@ import { DEMO_TOKEN } from '../token'
 import { PROVIDERS } from '../world'
 
 const providers = Object.values(PROVIDERS).map((provider, index) => ({
-  apiVersion: 'orka.ai/v1alpha1',
+  apiVersion: 'core.orka.ai/v1alpha1',
   kind: 'Provider',
   metadata: { name: provider.name, namespace: DEMO_NAMESPACE, uid: uid(`provider:${provider.name}`), creationTimestamp: ago(60 * 24 * (40 - index * 7)) },
   spec: { type: provider.type, defaultModel: provider.models[0], models: provider.models },

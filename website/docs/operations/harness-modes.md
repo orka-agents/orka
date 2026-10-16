@@ -1,4 +1,5 @@
 ---
+sidebar_label: Harness modes (legacy)
 description: "Legacy: running the harness-v1 compatibility mode next to a normal installation."
 ---
 

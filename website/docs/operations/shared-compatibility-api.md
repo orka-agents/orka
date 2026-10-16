@@ -1,6 +1,6 @@
 ---
-sidebar_position: 12
 title: Shared OpenAI and Anthropic endpoints
+description: "Give every team one OpenAI- and Anthropic-compatible base URL that routes each caller to its own Orka installation."
 ---
 
 The optional compatibility router lets teams use the same OpenAI or Anthropic

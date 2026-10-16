@@ -6,7 +6,19 @@ description: "Let native AI Tasks call explicitly selected tools on an independe
 
 A team can keep operating its existing MCP server while an Orka native AI Agent calls selected functions on it. Orka does not create a workspace, actor, or adapter Service for this backend.
 
-The initial backend supports **native `type: ai` Tasks**, **Streamable HTTP protocol `2025-06-18`**, and **`OutboundAccessPolicy.gateway`**. It does not enable remote Tools in ACP runtimes or the OpenAI/Anthropic compatibility APIs. Plain HTTP and managed MCP Tools retain their existing behavior.
+At a glance:
+
+- **One Tool per remote function.** Each Tool names one function on the server and carries
+  its reviewed input schema. Orka checks the live schema against it before every call.
+- **Native AI Tasks only.** Remote Tools work in `type: ai` Tasks whose Agent, in the same
+  namespace, enables them. They are not available to coding-agent runtimes or the
+  OpenAI/Anthropic compatibility APIs.
+- **Through a trusted gateway.** Calls use Streamable HTTP protocol `2025-06-18` through an
+  [`OutboundAccessPolicy`](outbound-access.md) in `gateway` mode.
+- **With Task authority.** The Task needs a Task-scoped transaction token that authorizes
+  credential use; a plain `kubectl apply` of a Task does not provide one.
+
+Plain HTTP and managed MCP Tools keep their existing behavior.
 
 ## One Tool, one remote function
 

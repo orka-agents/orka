@@ -1,30 +1,19 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { StatusDot } from '@/components/ui/status-dot'
+import { containsCredential, looksSecret, UNSAFE_KEY_PATTERN } from '@/lib/secret-like'
 import { cn } from '@/lib/utils'
 import type { Task } from '@/schemas/task'
 
-interface LiveStatePanelProps {
+interface TaskStatusDetailsProps {
   task: Task
 }
 
-// Skip keys that look credential-bearing OR are known large/spec-bearing
-// annotations (kubectl last-applied embeds the full spec, including env).
-const SECRET_KEY_PATTERN = /token|secret|key|password|cred|auth/i
-const SECRET_VALUE_PATTERN = /(?:sk-[A-Za-z0-9_-]{6,}|github_pat_|gh[pousr]_[A-Za-z0-9_]{6,}|xox[baprs]-|AIza[0-9A-Za-z_-]{10,}|AKIA[0-9A-Z]{8,}|Bearer\s+\S+|Basic\s+\S+|(?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i
-const UNSAFE_KEY_PATTERN = /last-applied-configuration|kubectl\.kubernetes\.io/i
-// Values long enough to plausibly carry an embedded blob/token are dropped too.
-const MAX_VALUE_CHARS = 80
-
 function nonSecretEntries(record?: Record<string, string>): [string, string][] {
   if (!record) return []
-  return Object.entries(record).filter(
-    ([k, v]) =>
-      !SECRET_KEY_PATTERN.test(k) &&
-      !UNSAFE_KEY_PATTERN.test(k) &&
-      !SECRET_VALUE_PATTERN.test(v) &&
-      v.length <= MAX_VALUE_CHARS,
-  )
+  // Secret-looking or long values are dropped, as are values that show a
+  // credential sign the YAML view would hide (a signed URL, say), and kubectl's
+  // annotations.
+  return Object.entries(record).filter(([k, v]) => !UNSAFE_KEY_PATTERN.test(k) && !looksSecret(k, v) && !containsCredential(v))
 }
 
 /** A collapsible, read-only section. Rendered only when it has content. */
@@ -49,15 +38,13 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 /**
- * Read-only inspector for a Task's live runtime state. Renders typed status,
- * conditions, child tasks, execution-workspace placement/density, session and
- * result references. Mutating affordances are deliberately absent — this is an
- * observation surface only — and secret-ish labels/annotations are filtered.
+ * The Task resource's status beyond its phase: conditions, the execution
+ * workspace it was placed in, session and result references, and its labels and
+ * annotations, with secret-looking ones filtered out.
  */
-export function LiveStatePanel({ task }: LiveStatePanelProps) {
+export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
   const { status, spec, metadata } = task
   const conditions = status?.conditions ?? []
-  const children = status?.childTasks ?? []
   const ws = status?.executionWorkspace
   const sessionName = spec.sessionRef?.name
   const resultRef = status?.resultRef
@@ -67,21 +54,15 @@ export function LiveStatePanel({ task }: LiveStatePanelProps) {
   const annotations = nonSecretEntries(metadata.annotations)
   const wsPlacement = ws?.placement
   const wsDensity = ws?.density
+  const hasLabels = labels.length > 0 || annotations.length > 0
+  if (!conditions.length && !ws && !sessionName && !resultRef && !hasLabels) return null
 
   return (
     <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 text-sm font-medium">
-          Live state
-          <Badge variant="outline">read-only</Badge>
-        </CardTitle>
+      <CardHeader>
+        <CardTitle>Status details</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-2 pt-0">
-        <Section title="Status">
-          <Field label="Phase" value={<StatusDot phase={status?.phase} />} />
-          {status?.message && <Field label="Message" value={status.message} />}
-        </Section>
-
+      <CardContent className="space-y-2">
         {conditions.length > 0 && (
           <Section title="Conditions">
             <ul className="space-y-1.5">
@@ -95,23 +76,6 @@ export function LiveStatePanel({ task }: LiveStatePanelProps) {
                     <Badge className="shrink-0" variant={c.status === 'True' ? 'secondary' : 'outline'}>{c.status}</Badge>
                   </div>
                   {c.message && <p className="wrap-anywhere text-muted-foreground">{c.message}</p>}
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
-
-        {children.length > 0 && (
-          <Section title="Child tasks">
-            <ul className="space-y-1.5">
-              {children.map((c) => (
-                <li key={c.name} className="flex items-center justify-between gap-2">
-                  <span className="truncate font-mono">{c.name}</span>
-                  <span className="flex items-center gap-1.5">
-                    <Badge variant="outline">{c.agent}</Badge>
-                    <StatusDot phase={c.phase} hideLabel />
-                    {c.result && <span className="text-muted-foreground">{c.result}</span>}
-                  </span>
                 </li>
               ))}
             </ul>
@@ -150,8 +114,8 @@ export function LiveStatePanel({ task }: LiveStatePanelProps) {
           </Section>
         )}
 
-        {(labels.length > 0 || annotations.length > 0) && (
-          <Section title="Metadata">
+        {hasLabels && (
+          <Section title="Labels and annotations">
             <dl className={cn('grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5')}>
               {[...labels, ...annotations].map(([k, v]) => (
                 <div key={k} className="contents">

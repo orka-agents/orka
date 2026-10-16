@@ -192,12 +192,11 @@ falls within the retention period.
 Shared reviews and cumulative-counter baselines are retained with the work that
 needs them. The report marks the oldest period that may have expired.
 
-Collection begins with this version; older Task logs are not backfilled. Persist
-the SQLite store on a volume to retain reports across controller restarts.
-This release adds reporting tables to Orka's current schema. As with other schema
-changes, startup rejects an older layout without modifying it. Preserve the old
-database and plan the upgrade according to the
-[SQLite compatibility policy](../concepts/architecture.md#sqlite-store-internals).
+Collection began with the release that added reporting; older Task logs are not
+backfilled. Persist the SQLite store on a volume to retain reports across controller
+restarts. The reporting tables are part of Orka's current database layout; the
+[database support policy](../operations/upgrading.md#supported-database-layout) lists which
+older layouts upgrade in place.
 
 ## API and access
 
