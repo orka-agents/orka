@@ -128,7 +128,26 @@ func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...Even
 // transport or non-2xx response errors. Attempts that cannot connect are retried
 // for about a minute, so a controller restart does not fail the caller.
 func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts ...EventOption) error {
-	return r.record(ctx, typ, strictEventConnectAttempts, opts...)
+	attempts := 1
+	if r != nil && tracesConnections(r.client) {
+		attempts = strictEventConnectAttempts
+	}
+	return r.record(ctx, typ, attempts, opts...)
+}
+
+// tracesConnections reports whether client uses net/http's own Transport, which
+// reports GotConn before writing a request. Another RoundTripper could send a
+// request without it, so RecordStrict does not retry through one.
+func tracesConnections(client *http.Client) bool {
+	if client == nil {
+		return false
+	}
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	_, ok := transport.(*http.Transport)
+	return ok
 }
 
 func (r *HTTPEventRecorder) record(ctx context.Context, typ string, connectAttempts int, opts ...EventOption) error {

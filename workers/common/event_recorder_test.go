@@ -585,3 +585,28 @@ func TestHTTPEventRecorderRecordDoesNotRetryDialFailures(t *testing.T) {
 		t.Fatalf("backoff = %v, want no retry", *slept)
 	}
 }
+
+type eventRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f eventRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestRecordEventStrictDoesNotRetryThroughCustomTransport(t *testing.T) {
+	slept := stubRetryWait(t)
+	var calls atomic.Int32
+	// A custom RoundTripper may send the request without reporting GotConn.
+	client := &http.Client{Transport: eventRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("connection reset after sending")
+	})}
+	recorder := newTestHTTPEventRecorder(t, "http://controller.invalid", client, time.Second)
+
+	if err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeModelUsageUpdated); err == nil {
+		t.Fatal("RecordEventStrict() error = nil, want failure")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("round trips = %d, want 1 so the event is not appended twice", got)
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("backoff = %v, want no retry", *slept)
+	}
+}
