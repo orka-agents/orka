@@ -494,6 +494,9 @@ func TestMigrateDefaultsToKnownPaths(t *testing.T) {
 func TestLocalStateDirFollowsTheAgentsVariable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
 	codex, _ := nativesession.For("codex")
 	opencode, _ := nativesession.For("opencode")
 	for _, test := range []struct {
@@ -502,9 +505,11 @@ func TestLocalStateDirFollowsTheAgentsVariable(t *testing.T) {
 	}{
 		{codex.Local(), "/custom/codex", "/custom/codex"},
 		{codex.Local(), "", filepath.Join(home, ".codex")},
+		{codex.Local(), "relative/codex", filepath.Join(cwd, "relative", "codex")},
 		{opencode.Local(), "", filepath.Join(home, ".local", "share")},
-		// XDG ignores relative values.
-		{opencode.Local(), "relative/data", filepath.Join(home, ".local", "share")},
+		// OpenCode reads XDG_DATA_HOME through xdg-basedir, which keeps a
+		// relative value.
+		{opencode.Local(), "relative/data", filepath.Join(cwd, "relative", "data")},
 	} {
 		t.Setenv(test.local.StateVar, test.value)
 		dir, err := localStateDir(test.local)
