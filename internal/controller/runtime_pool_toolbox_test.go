@@ -1090,6 +1090,11 @@ func TestRuntimePoolRecoversFromTransientToolboxImagePull(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "recovering-boot", false)}
 	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool, &pod)
 	r.ToolboxPolicy = acpTestToolboxPolicy()
+	// Rendering the native Deployment materializes the bare fixture Pod after
+	// the reconciler listed it, so the optimistic pull observation conflicts once.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil && !apierrors.IsConflict(err) {
+		t.Fatalf("first reconcile = %v", err)
+	}
 	runtimePoolReconcile(t, r, pool)
 	current := runtimePoolTestGetPool(t, r, pool)
 	if _, unavailable := runtimePoolToolboxUnavailableMessage(&current); unavailable {
@@ -1127,6 +1132,8 @@ func TestRuntimePoolToolboxPolicyRemovalRecyclesInPlaceSupervisorRestart(t *test
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 0 {
 		t.Fatal("legitimate in-place restart stranded a rejected workload")
 	}
+	// API deletion alone is not process-death evidence for enrolled native Pods.
+	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("exact restarted Pod was not recycled: %v", err)
 	}
@@ -1210,6 +1217,8 @@ func TestRuntimePoolToolboxRestartRecycleRetriesAfterScaleToZero(t *testing.T) {
 		t.Fatal("failed Pod removal did not preserve fence after scale-to-zero")
 	}
 	runtimePoolReconcile(t, r, pool)
+	// API deletion alone is not process-death evidence for enrolled native Pods.
+	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("zero-replica Deployment skipped exact Pod recycle retry: %v", err)
 	}

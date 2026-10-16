@@ -975,3 +975,46 @@ func TestRuntimePoolBootRetiredHistoryDoesNotRereadReceiptedTasks(t *testing.T) 
 		t.Fatalf("receipted history caused %d authoritative Task reads", reads)
 	}
 }
+
+func TestRuntimePoolBootTopologyAdmitsOnlyRenderedToolboxInitContainers(t *testing.T) {
+	for _, method := range []ACPToolboxMountMethod{ACPToolboxMountCopy, ACPToolboxMountImageVolume} {
+		t.Run(string(method), func(t *testing.T) {
+			policy := acpTestToolboxPolicy()
+			policy.MountMethod = method
+			pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+			r, template := renderToolboxTemplate(t, pool, policy)
+			cfg, err := r.runtimePoolConfig(pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validate := func(spec corev1.PodSpec) error {
+				topology, err := runtimePoolBootTopologySpec(spec)
+				if err != nil {
+					return err
+				}
+				return validateAgentRuntimeRecoveryPodSpec(topology, runtimePoolBootContainerName, cfg.profile.ProviderKind)
+			}
+			if err := validateAgentRuntimeRecoveryPodSpec(template.Spec, runtimePoolBootContainerName, cfg.profile.ProviderKind); err == nil {
+				t.Fatal("shared recovery topology unexpectedly admitted the toolbox template")
+			}
+			if err := validate(template.Spec); err != nil {
+				t.Fatalf("rendered toolbox template rejected: %v", err)
+			}
+			foreign := template.Spec.DeepCopy()
+			foreign.InitContainers = append(foreign.InitContainers, corev1.Container{Name: "setup", Image: pool.Spec.Runtime.Image})
+			sidecar := template.Spec.DeepCopy()
+			sidecar.InitContainers = append(sidecar.InitContainers, corev1.Container{
+				Name: runtimePoolToolboxCopyPrefix + "sidecar", Image: pool.Spec.Runtime.Image, RestartPolicy: new(corev1.ContainerRestartPolicyAlways),
+			})
+			foreignImage := template.Spec.DeepCopy()
+			foreignImage.Volumes = append(foreignImage.Volumes, corev1.Volume{
+				Name: "tools", VolumeSource: corev1.VolumeSource{Image: &corev1.ImageVolumeSource{Reference: runtimePoolTestToolboxes()[0].Image}},
+			})
+			for name, spec := range map[string]*corev1.PodSpec{"foreign init": foreign, "sidecar": sidecar, "foreign image volume": foreignImage} {
+				if err := validate(*spec); err == nil {
+					t.Fatalf("%s admitted", name)
+				}
+			}
+		})
+	}
+}
