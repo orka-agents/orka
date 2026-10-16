@@ -20,6 +20,8 @@ import { TaskOverview } from './task-overview'
 import { TaskActivity } from './task-activity'
 import { TaskArtifactsPanel } from './task-artifacts-panel'
 import { TaskStatusDetails } from './task-status-details'
+import { TaskYaml } from './task-yaml'
+import { ViewSwitch } from './view-switch'
 import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useStickyQueryError } from '@/hooks/use-sticky-query-error'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
@@ -55,6 +57,11 @@ function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
     planDocument: latest.contentText,
   }
 }
+
+const SPEC_VIEWS = [
+  { value: 'summary', label: 'Summary' },
+  { value: 'yaml', label: 'YAML' },
+] as const
 
 // Tabs that were merged into others, so links and bookmarks to them still land.
 const MERGED_TABS: Record<string, string> = {
@@ -124,6 +131,7 @@ function TaskAccessError({ message, forbidden = true }: { message: string; forbi
 
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
+  const [specView, setSpecView] = useState<'summary' | 'yaml'>('summary')
   const { data: task, isLoading, error: queryTaskError, errorUpdatedAt } = useTask(taskId, following ? 5000 : false)
   // A failed first load keeps its error page while polling retries it.
   const taskError = useStickyQueryError({ data: task, error: queryTaskError, errorUpdatedAt })
@@ -440,6 +448,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="spec" className="space-y-4">
+          <ViewSwitch label="Spec view" value={specView} options={SPEC_VIEWS} onChange={setSpecView} />
+          {specView === 'yaml' ? <TaskYaml task={task} /> : (
+          <>
           <ForkProvenance annotations={task.metadata.annotations} />
           <Card>
             <CardHeader>
@@ -593,6 +604,8 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           )}
 
           <TaskStatusDetails task={task} />
+          </>
+          )}
         </TabsContent>
 
         <TabsContent value="result" className="space-y-4">

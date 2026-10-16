@@ -799,6 +799,15 @@ describe('TaskDetail', () => {
     expect(screen.getAllByRole('button', { name: /delete/i })).toHaveLength(1)
   })
 
+  it('switches the Spec tab between the summary and the Task as YAML', async () => {
+    const user = userEvent.setup()
+    render(<TaskDetail taskId="test-task" />)
+    expect(await screen.findByText('Metadata')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'YAML' }))
+    expect(await screen.findByRole('region', { name: 'Task YAML' })).toHaveTextContent('kind: Task')
+    expect(screen.queryByText('Metadata')).not.toBeInTheDocument()
+  })
+
   it('shows conditions when present', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>

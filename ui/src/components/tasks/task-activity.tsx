@@ -1,10 +1,15 @@
 import { useState } from 'react'
-import { Button } from '@/components/ui/button'
 import type { TaskPhase } from '@/schemas/task'
 import { TaskEventTimeline } from './task-event-timeline'
 import { TaskTracePanel } from './task-trace-panel'
+import { ViewSwitch } from './view-switch'
 
 export type ActivityView = 'trace' | 'events'
+
+const ACTIVITY_VIEWS = [
+  { value: 'trace', label: 'Trace' },
+  { value: 'events', label: 'Raw events' },
+] as const
 
 interface TaskActivityProps {
   taskId: string
@@ -22,14 +27,7 @@ export function TaskActivity({ taskId, taskUid, taskNamespace, taskPhase, initia
   const [view, setView] = useState<ActivityView>(initialView)
   return (
     <div className="space-y-3">
-      <div role="group" aria-label="Activity view" className="inline-flex gap-1 rounded-md border p-0.5">
-        <Button size="sm" variant={view === 'trace' ? 'secondary' : 'ghost'} aria-pressed={view === 'trace'} onClick={() => setView('trace')}>
-          Trace
-        </Button>
-        <Button size="sm" variant={view === 'events' ? 'secondary' : 'ghost'} aria-pressed={view === 'events'} onClick={() => setView('events')}>
-          Raw events
-        </Button>
-      </div>
+      <ViewSwitch label="Activity view" value={view} options={ACTIVITY_VIEWS} onChange={setView} />
       {view === 'trace' ? (
         <TaskTracePanel taskId={taskId} taskUid={taskUid} />
       ) : (
