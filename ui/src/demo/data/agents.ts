@@ -7,6 +7,24 @@ import { AGENTS, TASKS, type AgentKey } from '../world'
 
 const tools = (...names: string[]) => names.map((name) => ({ name, enabled: true }))
 
+/** ConfigMaps in the demo namespace that agents read their system prompt from, by name and key. */
+export const promptConfigMaps: Record<string, Record<string, string>> = {
+  'incident-responder-prompt': {
+    'system.md': [
+      '# Incident responder',
+      '',
+      'You investigate production alerts for Northwind Labs and keep the incident channel informed.',
+      '',
+      '1. Read the alert, then pull latency, error-rate and saturation metrics for the affected service from Datadog.',
+      '2. Correlate the start of the problem with deploys and merged pull requests in GitHub.',
+      '3. Post a short status to the Slack thread and the PagerDuty incident: what you see, what you suspect, what you will check next.',
+      '4. Propose one mitigation. Rollbacks, restarts and config changes in production need approval: call request_approval and wait.',
+      '',
+      'Quote metric values with their time window. Say when you are unsure. Never page anyone yourself.',
+    ].join('\n'),
+  },
+}
+
 const specs: Record<AgentKey, AgentSpec> = {
   triage: {
     providerRef: { name: AGENTS.triage.provider },

@@ -129,7 +129,14 @@ export const agentSchema = z.object({
   status: agentStatusSchema.optional(),
 })
 
+/** The text an Agent's spec.systemPrompt.configMapRef selects. */
+export const agentSystemPromptSchema = z.object({
+  configMapRef: z.object({ name: z.string(), key: z.string() }),
+  content: z.string(),
+})
+
 export type BuiltInAgentRuntimeType = z.infer<typeof builtInAgentRuntimeTypeSchema>
 export type Agent = z.infer<typeof agentSchema>
 export type AgentSpec = z.infer<typeof agentSpecSchema>
 export type AgentStatus = z.infer<typeof agentStatusSchema>
+export type AgentSystemPrompt = z.infer<typeof agentSystemPromptSchema>
