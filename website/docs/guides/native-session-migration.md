@@ -255,11 +255,12 @@ the first continuation. A Task for another runtime type is rejected. Use the
 Task's current workspace and tool policy. During admission, Orka installs the
 bundle in the child's fresh private state directory before starting the agent.
 It uses capability-gated `session/resume` with the original session ID and
-current cwd, provider, MCP tools, approvals, and sandbox configuration. The
-runtime must advertise resume support and prove restoring the exact bundle
-before Orka sends the new user prompt. Canonical history is not injected again.
-Missing resume support or a failed resume rejects creation without falling back
-to `session/new`. The imported history stays native; the Orka transcript
+current cwd, provider, MCP tools, approvals, and sandbox configuration, or
+`session/load` when the agent advertises only load support, as Copilot CLI
+does. The runtime must advertise one of them and prove restoring the exact
+bundle before Orka sends the new user prompt. Canonical history is not injected
+again. Missing resume and load support, or a failed restore, rejects creation
+without falling back to `session/new`. The imported history stays native; the Orka transcript
 records new Tasks.
 
 ## Export a checkpoint
