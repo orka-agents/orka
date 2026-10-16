@@ -44,6 +44,16 @@ func TestDashboardAbsent(t *testing.T) {
 			}
 		})
 	}
+	// A gateway that sends /login to its own sign-in is judged by that
+	// redirect, even when the page it leads to is missing.
+	gateway := http.NewServeMux()
+	gateway.Handle("/login", http.RedirectHandler("/sso/start", http.StatusFound))
+	gateway.Handle("/sso/start", http.NotFoundHandler())
+	sso := httptest.NewServer(gateway)
+	defer sso.Close()
+	if dashboardAbsent(sso.URL) {
+		t.Fatal("a redirecting sign-in gateway must not count as a server without a dashboard")
+	}
 	// An unreachable server says nothing either way.
 	if dashboardAbsent("http://127.0.0.1:1") {
 		t.Fatal("an unreachable server must not count as one without a dashboard")

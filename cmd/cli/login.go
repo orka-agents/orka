@@ -16,6 +16,12 @@ import (
 // dashboard. Tests replace it to stay off the network.
 var dashboardAbsentFunc = dashboardAbsent
 
+// dashboardProbeClient answers with the first response, so an SSO gateway
+// that redirects /login is judged by that redirect, not by wherever it leads.
+var dashboardProbeClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
 // dashboardAbsent asks server for the dashboard's login page. Only a 404 is
 // an answer: the controller serves that page whenever its dashboard is
 // enabled, while an unreachable server or a proxy that wants its own sign-in
@@ -27,7 +33,7 @@ func dashboardAbsent(server string) bool {
 	if err != nil {
 		return false
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dashboardProbeClient.Do(req)
 	if err != nil {
 		return false
 	}
