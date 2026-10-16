@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 
 	workspace "github.com/orka-agents/orka-workspace/api/v1alpha1"
@@ -60,7 +61,7 @@ func TestWorkspaceCheckpointCleanupOnlyPreservesRequestsAndRoutes(t *testing.T) 
 }
 
 func TestWorkspaceCheckpointRoutingRequiresExactSourceAndProvider(t *testing.T) {
-	for _, name := range []string{"valid", "replaced source", "replaced provider", "unsupported export"} {
+	for _, name := range []string{"valid", "replaced source", "replaced provider", "unsupported export", "unreported export"} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			f := newExternalRuntimePoolFixture(t)
@@ -70,8 +71,13 @@ func TestWorkspaceCheckpointRoutingRequiresExactSourceAndProvider(t *testing.T) 
 			if name == "replaced provider" {
 				provider.UID = "new-provider"
 			}
-			if name == "unsupported export" {
-				provider.Status.SupportedFeatures = nil
+			if name == "unsupported export" || name == "unreported export" {
+				provider.Status.SupportedFeatures = slices.DeleteFunc(slices.Clone(provider.Status.SupportedFeatures), func(feature workspace.ExecutionWorkspaceFeature) bool {
+					return feature == workspace.WorkspaceFeatureCheckpoint
+				})
+			}
+			if name == "unreported export" {
+				provider.Status.ObservedGeneration = provider.Generation - 1
 			}
 			if err := f.r.Update(ctx, provider); err != nil {
 				t.Fatal(err)
@@ -85,7 +91,7 @@ func TestWorkspaceCheckpointRoutingRequiresExactSourceAndProvider(t *testing.T) 
 			}
 			r := &WorkspaceCheckpointRoutingReconciler{Client: f.r.Client, APIReader: f.r.Client}
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(checkpoint)})
-			if (err == nil) != (name == "valid" || name == "replaced source") {
+			if (err == nil) != (name == "valid" || name == "replaced source" || name == "unsupported export") {
 				t.Fatalf("routing error = %v", err)
 			}
 			if err := f.r.Get(ctx, client.ObjectKeyFromObject(checkpoint), checkpoint); err != nil {
@@ -100,6 +106,10 @@ func TestWorkspaceCheckpointRoutingRequiresExactSourceAndProvider(t *testing.T) 
 			}
 			if name == "replaced source" && checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation] != "SourceUIDMismatch" {
 				t.Fatal("replaced source did not publish its terminal routing diagnostic")
+			}
+			if want := map[string]string{"unsupported export": workspaceCheckpointUnsupportedReason}[name]; name != "replaced source" &&
+				checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation] != want {
+				t.Fatalf("routing diagnostic = %q, want %q", checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation], want)
 			}
 		})
 	}

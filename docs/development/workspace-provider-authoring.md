@@ -111,8 +111,10 @@ it does not set the provider's checkpoint phase or claim artifact cleanup.
 An existing unrouted checkpoint bound to an unsupported provider name receives
 `ProviderNameUnsupported` in that same Core-owned annotation. It acquires no
 provider status or retained-artifact ownership. Install a supported registration
-and use a new workspace and checkpoint to retry that case. Create a new checkpoint
-request from a live exact source to retry source loss.
+and use a new workspace and checkpoint to retry that case. When the source
+provider's current status omits the `checkpoint` feature, Core records
+`CheckpointUnsupported`; create a new checkpoint once the provider supports it.
+Create a new checkpoint request from a live exact source to retry source loss.
 Deleting sources and API outages remain retryable. Already routed checkpoints
 and retained artifacts keep their provider ownership after source deletion.
 With `--enable-workspace-provider-api=false`, Core preserves checkpoint requests

@@ -17,6 +17,7 @@ import (
 
 const workspaceCheckpointProviderNameLabel = "workspace.orka.ai/provider-name"
 const workspaceCheckpointRoutingFailureAnnotation = "workspace.orka.ai/checkpoint-routing-failure"
+const workspaceCheckpointUnsupportedReason = "CheckpointUnsupported"
 
 // Core establishes checkpoint routing from the exact source workspace. The
 // selected provider owns artifact export, observed status and reference cleanup.
@@ -78,8 +79,16 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 		}
 		return r.failRouting(ctx, checkpoint, reasonProviderNameUnsupported)
 	}
-	if provider.Spec.LifecycleState == workspace.ExecutionWorkspaceProviderDisabled || !slices.Contains(provider.Status.SupportedFeatures, workspace.WorkspaceFeatureCheckpoint) {
+	if provider.Spec.LifecycleState == workspace.ExecutionWorkspaceProviderDisabled {
 		return ctrl.Result{}, fmt.Errorf("checkpoint provider identity or Data export capability is unavailable")
+	}
+	if !slices.Contains(provider.Status.SupportedFeatures, workspace.WorkspaceFeatureCheckpoint) {
+		// Only current, authoritative provider status proves that Data export
+		// is unsupported; a provider that has not reported yet stays retryable.
+		if r.APIReader == nil || !externalProviderUsable(provider) {
+			return ctrl.Result{}, fmt.Errorf("checkpoint provider identity or Data export capability is unavailable")
+		}
+		return r.failRouting(ctx, checkpoint, workspaceCheckpointUnsupportedReason)
 	}
 	before := checkpoint.DeepCopy()
 	if checkpoint.Labels == nil {
