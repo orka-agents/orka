@@ -69,6 +69,8 @@ describe('displayedTaskResource', () => {
     expect(messageShown('https://hooks.slack.com:443/services/T0/B0/p0rtsecret')).toBe(`https://hooks.slack.com/${HIDDEN_VALUE}`)
     expect(messageShown('https://user:pass@hooks.slack.com/services/T0/B0/s3cr3t')).toBe(`https://hooks.slack.com/${HIDDEN_VALUE}`)
     expect(messageShown('https://user:pass@discord.com/api/v10/webhooks/1/d1sc0rd')).toBe(`https://discord.com/${HIDDEN_VALUE}`)
+    expect(messageShown('https://files.example.com/download/ghp_ExampleToken123456')).toBe(`https://files.example.com/${HIDDEN_VALUE}`)
+    expect(messageShown('https://files.example.com/download/ghp_ExampleToken123456?x=1')).toBe(`https://files.example.com/${HIDDEN_VALUE}`)
     expect(messageShown('https://alice:pass@example.com:bad/repo?sig=x')).toBe(HIDDEN_VALUE)
     expect(JSON.stringify(shown)).not.toMatch(/ghs_abc123|token=abc123|sig=abc|frag/)
   })
@@ -89,6 +91,7 @@ describe('displayedTaskResource', () => {
     ['a Stripe key', 'charge with sk_live_AbCdEf1234567890'],
     ['a Hugging Face token', 'pull with hf_AbCdEfGhIjKlMnOpQrStUv'],
     ['a long Bearer token', 'then Bearer eyJhbGciOiJIUzI1NiJ9.e30.sig works'],
+    ['Basic credentials without the header', 'request used Basic dXNlcjpwYXNzd29yZA== and was rejected'],
     ['an Authorization header', 'send Authorization: lin_api_bareKey123'],
     ['an uppercase Authorization header', 'AUTHORIZATION: Basic dXNlcjpwYXNz'],
     ['a quoted Authorization header', 'Authorization: "Bearer abc" then go'],
