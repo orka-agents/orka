@@ -62,6 +62,9 @@ export function useAgentSystemPrompt(name: string, configMapRef: { name: string;
     queryFn: () => api.get<AgentSystemPrompt>(`/agents/${name}/system-prompt`, { namespace }),
     enabled: Boolean(configMapRef),
     retry: retryUnlessForbidden,
+    // The ConfigMap can change without the Agent changing, so poll it like the Agent.
+    refetchInterval: (query) =>
+      isForbiddenError(query.state.error) || isNotFoundError(query.state.error) ? false : AGENT_POLL_INTERVAL_MS,
   })
 }
 
