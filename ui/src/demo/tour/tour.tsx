@@ -63,6 +63,7 @@ function StepBody({ step }: { step: TourStep }) {
   // A prompt waits until both the page and Chat are on the sample namespace:
   // sendMessage posts to the namespace it was rendered with, and Chat clears
   // its transcript, in-flight turn included, when it moves between namespaces.
+  // Each step mounts its own StepBody, so leaving the step drops a held prompt.
   const pendingPrompt = useRef<string | null>(null)
   useEffect(() => {
     const prompt = pendingPrompt.current
@@ -214,7 +215,7 @@ function TourRail() {
       <div className="flex-1 space-y-4 overflow-y-auto p-5">
         <Progress step={current} />
         <h2 className="text-base font-semibold">{current.title}</h2>
-        <StepBody step={current} />
+        <StepBody key={current.title} step={current} />
         <StepNav />
       </div>
     </aside>
@@ -246,7 +247,7 @@ function TourSheet() {
         {!collapsed && (
           <div className="mt-2 max-h-[45vh] space-y-3 overflow-y-auto">
             <Progress step={current} />
-            <StepBody step={current} />
+            <StepBody key={current.title} step={current} />
             <StepNav />
           </div>
         )}

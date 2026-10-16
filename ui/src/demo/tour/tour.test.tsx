@@ -116,6 +116,16 @@ describe('demo tour', () => {
     expect(mockSend).toHaveBeenCalledWith("What's running right now?")
   })
 
+  it('drops a held prompt when the visitor leaves the Chat stop', () => {
+    useChatStore.setState({ activeNamespace: 'orka-system' })
+    useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.prompts) })
+    render(<TourPanel slot="bottom" />)
+    fireEvent.click(screen.getByRole('button', { name: "What's running right now?" }))
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    act(() => useChatStore.getState().selectNamespace('default'))
+    expect(mockSend).not.toHaveBeenCalled()
+  })
+
   it('sends a suggested prompt from the chat stop', () => {
     useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.prompts) })
     render(<TourPanel slot="bottom" />)
