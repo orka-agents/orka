@@ -1798,6 +1798,24 @@ func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_HTTPErrorCarriesStatus(t *testing.T) {
+	for status, delivered := range map[int]bool{http.StatusForbidden: false, http.StatusNotFound: true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+		tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}}}
+
+		_, err := executor.Execute(context.Background(), tool, nil)
+		server.Close()
+		statusErr, ok := errors.AsType[ToolHTTPStatusError](err)
+		_, isDelivered := errors.AsType[ToolExecutionError](err)
+		if !ok || statusErr.StatusCode != status || !ToolRequestWasAttempted(err) || isDelivered != delivered {
+			t.Fatalf("Execute() for HTTP %d error = %#v, want an attempted status error (delivered=%t)", status, err, delivered)
+		}
+	}
+}
+
 func TestToolExecutor_Execute_HTTPErrorRedactsPropagatedTransactionToken(t *testing.T) {
 	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
 	if err := os.WriteFile(txnTokenPath, []byte("tx-token-sensitive"), 0600); err != nil {

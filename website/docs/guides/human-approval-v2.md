@@ -105,8 +105,12 @@ The panel separates the review decision from execution. An approved action
 can still fail, become stale before starting, or have an unknown outcome.
 History records the reviewer and decision, then `not_started`, `running`,
 `succeeded`, `failed`, or `unknown` as execution evidence becomes available.
-An unknown outcome means the action may have run. Check the target system
-before choosing whether to make a new request.
+When the tool sent nothing or the remote system refused the request, the
+outcome is `failed` and its reason says why, for example the HTTP status and
+message GitHub refused a missing permission with; nothing changed. An unknown
+outcome means the action may have run. Check the target system before
+choosing whether to make a new request. The controller logs the redacted
+cause of both.
 
 ## Waiting and cancellation
 

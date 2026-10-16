@@ -75,16 +75,16 @@ func (t *CreatePullRequestTool) Parameters() json.RawMessage {
 func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args CreatePullRequestArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("failed to parse arguments: %w", err)
+		return "", notSent(fmt.Errorf("failed to parse arguments: %w", err))
 	}
 
 	if args.TaskName == "" || args.HeadBranch == "" || args.BaseBranch == "" || args.Title == "" {
-		return "", fmt.Errorf("task_name, head_branch, base_branch, and title are required")
+		return "", notSent(fmt.Errorf("task_name, head_branch, base_branch, and title are required"))
 	}
 
 	owner, repo, token, baseURL, err := resolveForgeRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, "", t.apiBaseURL)
 	if err != nil {
-		return "", err
+		return "", notSent(err)
 	}
 
 	// Create the pull request via GitHub API

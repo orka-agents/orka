@@ -96,7 +96,7 @@ func CreateOrGetGitHubPullRequest(ctx context.Context, token, owner, repo, head,
 		return pr, nil
 	}
 
-	return GitHubPullRequest{}, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+	return GitHubPullRequest{}, githubStatusError(resp.StatusCode, respBody)
 }
 
 func findExistingGitHubPullRequest(ctx context.Context, token, owner, repo, head, base, baseURL string) (GitHubPullRequest, error) {

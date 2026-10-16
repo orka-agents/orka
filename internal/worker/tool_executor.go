@@ -685,6 +685,16 @@ type ToolExecutionError struct {
 func (e ToolExecutionError) Error() string { return e.Err.Error() }
 func (e ToolExecutionError) Unwrap() error { return e.Err }
 
+// ToolHTTPStatusError reports the non-2xx status a custom tool endpoint, or
+// the gateway in front of it, answered the tool request with.
+type ToolHTTPStatusError struct {
+	StatusCode int
+	Err        error
+}
+
+func (e ToolHTTPStatusError) Error() string { return e.Err.Error() }
+func (e ToolHTTPStatusError) Unwrap() error { return e.Err }
+
 // ToolRequestWasAttempted reports whether err happened after the custom tool send path began.
 func ToolRequestWasAttempted(err error) bool {
 	var attempted ToolRequestAttemptedError
@@ -777,9 +787,9 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, suppress
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if suppressErrorBody {
-			return nil, fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)
+			return nil, ToolHTTPStatusError{StatusCode: resp.StatusCode, Err: fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)}
 		}
-		err := fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))
+		err := ToolHTTPStatusError{StatusCode: resp.StatusCode, Err: fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))}
 		// A completed API failure can be delivered to the model as a tool
 		// result. Redirect and authentication failures remain protocol errors.
 		if resp.StatusCode >= 400 && resp.StatusCode < 600 && resp.StatusCode != http.StatusUnauthorized &&
