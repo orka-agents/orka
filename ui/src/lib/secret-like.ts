@@ -41,9 +41,24 @@ function hasCredentialParameter(text: string): boolean {
   return false
 }
 
+// HTTP Basic credentials without their header: base64 that decodes to
+// `user:password`. "Basic Authentication" decodes to nothing readable.
+const BASIC_CREDENTIALS = /\bBasic\s+([A-Za-z0-9+/]{8,}={0,2})(?![\w+/=])/gi
+
+function hasBasicCredentials(text: string): boolean {
+  for (const [, encoded] of text.matchAll(BASIC_CREDENTIALS)) {
+    try {
+      if (/^[\x20-\x7e]+:[\x20-\x7e]*$/.test(atob(encoded))) return true
+    } catch {
+      // Not base64.
+    }
+  }
+  return false
+}
+
 /** True when free text shows a sign of holding a credential. */
 export const containsCredential = (text: string) =>
-  CREDENTIAL_SIGNS.some((sign) => sign.test(text)) || hasCredentialParameter(text)
+  CREDENTIAL_SIGNS.some((sign) => sign.test(text)) || hasCredentialParameter(text) || hasBasicCredentials(text)
 
 export const UNSAFE_KEY_PATTERN = /last-applied-configuration|kubectl\.kubernetes\.io/i
 

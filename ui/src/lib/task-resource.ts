@@ -8,7 +8,7 @@ const URL_VALUE = /^[a-z][a-z\d+.-]{0,31}:\/\/\S+$/i
 
 /**
  * A URL with its credentials hidden: userinfo, query and fragment, or the path
- * of a webhook URL, which is its secret. One that will not parse is hidden
+ * when it is a webhook's secret or holds a token. One that will not parse is hidden
  * whole: nothing says where its credentials end.
  */
 function withoutCredentials(value: string): string {
@@ -18,8 +18,11 @@ function withoutCredentials(value: string): string {
   } catch {
     return HIDDEN_VALUE
   }
-  // Checked without userinfo, which would otherwise hide the webhook host.
-  if (WEBHOOK_URL.test(`${url.protocol}//${url.host}${url.pathname}`)) return `${url.origin}/${HIDDEN_VALUE}`
+  // A webhook's path is its secret, and a path can hold a token
+  // (`/download/ghp_…`). Checked without userinfo, which would hide the host.
+  if (WEBHOOK_URL.test(`${url.protocol}//${url.host}${url.pathname}`) || containsCredential(url.pathname)) {
+    return `${url.origin}/${HIDDEN_VALUE}`
+  }
   if (!url.username && !url.password && !url.search && !url.hash) return value
   const userinfo = url.username || url.password ? `${HIDDEN_VALUE}@` : ''
   return `${url.protocol}//${userinfo}${url.host}${url.pathname}${url.search ? `?${HIDDEN_VALUE}` : ''}${url.hash ? `#${HIDDEN_VALUE}` : ''}`
