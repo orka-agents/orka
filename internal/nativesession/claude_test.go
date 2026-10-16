@@ -3,6 +3,7 @@ package nativesession
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -72,6 +73,31 @@ func freshClaudeDirs(t *testing.T) Dirs {
 		}
 	}
 	return dirs
+}
+
+// Claude Code 2.1.293 created these project folders for these working
+// directories. The pinned adapter lists a long folder's sessions only when its
+// cut name carries the hash suffix.
+func TestClaudeProjectFolderMatchesClaudeCode(t *testing.T) {
+	long := "/tmp/tmp.9Om13Qn9HT"
+	for i := 1; i <= 30; i++ {
+		long += fmt.Sprintf("/segment%02d", i)
+	}
+	wide := "/tmp/orka-claude-long-cwd/é😀-seg01"
+	for i := 2; i <= 45; i++ {
+		wide += fmt.Sprintf("/seg%02d", i)
+	}
+	for workspace, folder := range map[string]string{
+		"/workspace/repo": "-workspace-repo",
+		long: "-tmp-tmp-9Om13Qn9HT-segment01-segment02-segment03-segment04-segment05-segment06-segment07-segment08-segment09-segment10-" +
+			"segment11-segment12-segment13-segment14-segment15-segment16-segment17-segment18--d7hd57",
+		wide: "-tmp-orka-claude-long-cwd-----seg01-seg02-seg03-seg04-seg05-seg06-seg07-seg08-seg09-seg10-seg11-seg12-seg13-seg14-seg15-" +
+			"seg16-seg17-seg18-seg19-seg20-seg21-seg22-seg23-seg24-seg25-seg26-seg27-seg28-se-n3wl31",
+	} {
+		if got := claudeProjectFolder(workspace); got != folder {
+			t.Errorf("claudeProjectFolder(%q) = %q, want %q", workspace, got, folder)
+		}
+	}
 }
 
 func TestClaudeVersionMatchesPinnedRuntime(t *testing.T) {

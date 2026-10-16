@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 const (
@@ -29,12 +31,10 @@ const (
 	// maxClaudeProjects bounds the project folders capture searches for a
 	// session; Claude Code keeps one per working directory.
 	maxClaudeProjects = 4096
-	// maxClaudeProjectFolder keeps a project folder name within filesystem
-	// limits; Claude Code finds a session by ID in any project folder.
+	// maxClaudeProjectFolder is where Claude Code cuts a longer project
+	// folder name and appends a hash of the working directory.
 	maxClaudeProjectFolder = 200
 )
-
-var claudeProjectFolderChars = regexp.MustCompile(`[^A-Za-z0-9]`)
 
 // claudeManifest describes a captured Claude Code conversation.
 type claudeManifest struct {
@@ -290,14 +290,25 @@ func findClaudeSession(projects, providerSessionID string) (string, error) {
 }
 
 // claudeProjectFolder names the project folder Claude Code uses for a
-// working directory: every character other than a letter or digit becomes a
-// hyphen.
+// working directory: every UTF-16 code unit other than an ASCII letter or
+// digit becomes a hyphen. A longer name is cut and gets the base-36 absolute
+// value of the directory's 32-bit JavaScript string hash, which the pinned
+// adapter requires to list the folder's sessions.
 func claudeProjectFolder(workspace string) string {
-	folder := claudeProjectFolderChars.ReplaceAllString(workspace, "-")
-	if len(folder) > maxClaudeProjectFolder {
-		folder = folder[:maxClaudeProjectFolder]
+	units := utf16.Encode([]rune(workspace))
+	folder := make([]byte, len(units))
+	var hash int32
+	for i, unit := range units {
+		folder[i] = '-'
+		if unit >= 'a' && unit <= 'z' || unit >= 'A' && unit <= 'Z' || unit >= '0' && unit <= '9' {
+			folder[i] = byte(unit)
+		}
+		hash = hash*31 + int32(unit)
 	}
-	return folder
+	if len(folder) <= maxClaudeProjectFolder {
+		return string(folder)
+	}
+	return string(folder[:maxClaudeProjectFolder]) + "-" + strconv.FormatInt(max(int64(hash), -int64(hash)), 36)
 }
 
 // claudeToolResultsPath reports whether dir is where Claude Code spills the
