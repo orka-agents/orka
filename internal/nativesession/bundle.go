@@ -147,3 +147,25 @@ func decodeOnly(decoder *json.Decoder, value any) error {
 	}
 	return nil
 }
+
+// exactFields decodes line, one JSON object, by exact key. The agents are
+// JavaScript and read keys exactly, while Go's struct decoding also matches a
+// key that differs in case, so a differently cased duplicate could otherwise
+// hide the value the agent reads.
+func exactFields(line []byte) (map[string]json.RawMessage, bool) {
+	var fields map[string]json.RawMessage
+	if !bytes.HasPrefix(line, []byte("{")) || decodeOnly(json.NewDecoder(bytes.NewReader(line)), &fields) != nil {
+		return nil, false
+	}
+	return fields, true
+}
+
+// exactField decodes fields[name] into value and leaves value unchanged when
+// the field is absent.
+func exactField(fields map[string]json.RawMessage, name string, value any) error {
+	raw, ok := fields[name]
+	if !ok {
+		return nil
+	}
+	return json.Unmarshal(raw, value)
+}

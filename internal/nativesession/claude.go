@@ -382,11 +382,13 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 	version, owned, unknown, unread := "", false, "", false
 	for line := range bytes.Lines(transcript) {
 		var entry struct {
-			Type      string  `json:"type"`
-			SessionID *string `json:"sessionId"`
-			Version   string  `json:"version"`
+			Type      string
+			SessionID *string
+			Version   string
 		}
-		if !bytes.HasPrefix(line, []byte("{")) || decodeOnly(json.NewDecoder(bytes.NewReader(line)), &entry) != nil {
+		fields, ok := exactFields(line)
+		if !ok || exactField(fields, "type", &entry.Type) != nil || exactField(fields, "sessionId", &entry.SessionID) != nil ||
+			exactField(fields, "version", &entry.Version) != nil {
 			return "", errors.New("the Claude Code transcript holds an entry that is not one JSON object")
 		}
 		if !claudeEntryTypes[entry.Type] && !unread {
