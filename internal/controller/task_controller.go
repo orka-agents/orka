@@ -4660,6 +4660,9 @@ func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task
 	if !r.isAutonomousTask(ctx, task) {
 		return ctrl.Result{}, false, nil
 	}
+	if result, refused, err := r.refuseSoulBoundAutonomy(ctx, task); err != nil || refused {
+		return result, true, err
+	}
 	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
 		return result, true, err
 	}
@@ -4753,6 +4756,9 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 		log.Error(err, "failed to collect iteration result")
 	}
 
+	if result, refused, err := r.refuseSoulBoundAutonomy(ctx, task); err != nil || refused {
+		return result, err
+	}
 	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
 		return result, err
 	}

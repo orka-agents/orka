@@ -11,6 +11,12 @@ Tasks and all four built-in harness v2 runtimes: Codex, Claude, Copilot, and
 OpenCode. External `runtimeRef` Agents, including harness v1 registrations, do not
 support this field.
 
+A soul is not yet supported on autonomous Agents (`spec.coordination.autonomous`).
+A soul-bound Task's spec is immutable, so an autonomous loop could not be paused
+with `spec.suspend`. Writes that combine them are rejected, and the controller
+fails a soul-bound Task rather than iterating it if its Agent later becomes
+autonomous.
+
 A soul is configuration, not durable memory or an authorization policy. Tool,
 workspace, publication, credential, and approval controls remain authoritative.
 There is no automatic repository `SOUL.md` discovery or autonomous soul editor.

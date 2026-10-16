@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -237,4 +238,17 @@ func effectiveAISoulTaskPrompt(task *corev1alpha1.Task) string {
 		return task.Spec.AI.Prompt
 	}
 	return task.Spec.Prompt
+}
+
+// refuseSoulBoundAutonomy fails a soul-bound Task instead of iterating or
+// parking it autonomously. Its Agent can become autonomous after binding, and
+// the bound spec, including spec.suspend, cannot change, so the loop could not
+// be paused.
+func (r *TaskReconciler) refuseSoulBoundAutonomy(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if task.Status.SoulBinding == nil {
+		return ctrl.Result{}, false, nil
+	}
+	result, err := r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed,
+		"AI soul configuration: "+agentcontext.ErrSoulAutonomy.Error())
+	return result, true, err
 }

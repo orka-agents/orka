@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -180,5 +181,88 @@ func TestAISoulIntroductionAfterExecutionIsRejected(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An Agent can become autonomous after its Task bound a soul. The bound spec,
+// including spec.suspend, is immutable, so the Task must not iterate or park.
+func TestAISoulBoundTaskRefusesAutonomousIteration(t *testing.T) {
+	binding := &corev1alpha1.TaskSoulBinding{
+		TaskGeneration: 1, AgentUID: "agent-uid", AgentGeneration: 1,
+		SoulDigest: agentcontext.Digest("persona"), PromptDigest: agentcontext.Digest("role and persona"),
+	}
+	for _, entry := range []string{"iteration", "approval state"} {
+		t.Run(entry, func(t *testing.T) {
+			ctx := context.Background()
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 2},
+				Spec: corev1alpha1.AgentSpec{
+					Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+					Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+				},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Iteration: 0,
+					JobName: "task-job", SoulBinding: binding.DeepCopy()},
+			}
+			r := newUnitReconciler(newTestScheme(), task, agent)
+			var err error
+			if entry == "iteration" {
+				_, err = r.handleAutonomousIteration(ctx, task)
+			} else {
+				var handled bool
+				_, handled, err = r.handleAutonomousApprovalState(ctx, task)
+				if !handled {
+					t.Fatal("soul-bound autonomous Task was not handled")
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := &corev1alpha1.Task{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.Iteration != 0 ||
+				!strings.Contains(current.Status.Message, "coordination.autonomous") {
+				t.Fatalf("soul-bound Task iterated or parked: phase=%s iteration=%d message=%q",
+					current.Status.Phase, current.Status.Iteration, current.Status.Message)
+			}
+		})
+	}
+}
+
+func TestAISoulAutonomousAgentFailsBeforeLaunch(t *testing.T) {
+	ctx := context.Background()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
+		Spec: corev1alpha1.AgentSpec{
+			Soul: &corev1alpha1.SoulSource{Inline: "persona"},
+			// The controller iterates on autonomous even when coordination is disabled.
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "prompt", AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	if _, err := r.createTaskJob(ctx, task, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.SoulBinding != nil ||
+		!strings.Contains(current.Status.Message, "coordination.autonomous") {
+		t.Fatalf("autonomous soul Agent launched: phase=%s message=%q", current.Status.Phase, current.Status.Message)
+	}
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs); err != nil || len(jobs.Items) != 0 {
+		t.Fatal("autonomous soul Agent created a Job")
 	}
 }
