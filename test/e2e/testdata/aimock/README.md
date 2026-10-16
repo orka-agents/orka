@@ -21,7 +21,9 @@ Conventions:
   later turns before those for earlier turns in the file.
 - Steps that must name a generated resource (a delegated child Task, a created
   Agent) are injected at run time with `injectMockLLMFixtures` once the name is
-  known, while the conversation is parked in a scripted wait.
+  known, while the conversation is parked in a scripted wait. Model requests
+  that arrive during the swap get a retryable 429, which appears in request
+  dumps.
 - Final turns return non-empty text. An empty answer makes the AI worker send a
   retry prompt that no longer carries the marker.
 - In mock mode (`e2eMockOpenAI`), specs assert on what reached the model with

@@ -171,6 +171,9 @@ func TestMCPProxyApprovalWaitStopsOnSettlementOrLeaseExpiry(t *testing.T) {
 			} else {
 				session.mu.Lock()
 				version := session.leaseVersion
+				// The callback must see genuinely expired absolute authority,
+				// not merely a manually fired timer for a still-live lease.
+				session.lease.ExpiresAt = time.Now().UTC()
 				session.mu.Unlock()
 				session.expire(authorization.PromptID, version)
 			}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
@@ -1130,11 +1131,26 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 			t.Fatalf("controller deployment is missing rotation marker %q:\n%s", marker, deployment)
 		}
 	}
-	// cert-controller writes only the Secret; the kubelet must project it into
-	// the cert directory, so generated mode mounts the whole generated Secret.
 	volume := renderedVolume(t, deployment, "webhook-tls")
-	if !strings.Contains(volume, `secretName: "test-orka-webhook-tls"`) || strings.Contains(volume, "items:") {
-		t.Fatalf("generated webhook TLS must mount the whole generated Secret:\n%s", volume)
+	if !strings.Contains(volume, "emptyDir:") || !strings.Contains(volume, "medium: Memory") ||
+		strings.Contains(volume, "secret:") {
+		t.Fatalf("generated webhook TLS needs API-synchronized memory storage, not Secret projection:\n%s", volume)
+	}
+	var decoded appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(deployment), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	mounts := 0
+	for _, mount := range decoded.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "webhook-tls" {
+			mounts++
+			if mount.MountPath != "/var/run/orka/webhook/tls" || mount.ReadOnly {
+				t.Fatal("generated webhook TLS storage must be writable at /var/run/orka/webhook/tls")
+			}
+		}
+	}
+	if mounts != 1 {
+		t.Fatalf("generated webhook TLS needs exactly one mount, got %d", mounts)
 	}
 
 	webhook := requireRenderedDocument(t, rendered,

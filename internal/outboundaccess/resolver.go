@@ -268,13 +268,15 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	if req.CheckedPolicy != nil && (string(policy.UID) != req.CheckedPolicy.UID || policy.Generation != req.CheckedPolicy.Generation) {
 		return Resolution{}, errors.New("outbound access policy changed since it was checked; re-dispatch the task")
 	}
+	// Reference validation may read Secret data. Authorize the policy's exact
+	// selectors first, including when a policy changes between caller checks.
+	if err := validatePolicyCredentialAuthority(req, policy); err != nil {
+		return Resolution{}, err
+	}
 	if issue, err := ResolveReferences(ctx, r.Reader, policy, r.Trust); err != nil {
 		return Resolution{}, err
 	} else if issue != nil {
 		return Resolution{}, issue
-	}
-	if err := validatePolicyCredentialAuthority(req, policy); err != nil {
-		return Resolution{}, err
 	}
 	needsTransactionToken := policy.Spec.Gateway != nil
 	if direct := policy.Spec.Direct; direct != nil {

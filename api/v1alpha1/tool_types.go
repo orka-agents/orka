@@ -12,14 +12,23 @@ import (
 )
 
 // ToolSpec defines the desired state of Tool
-// +kubebuilder:validation:XValidation:rule="has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor) || has(self.mcp.workspace)))",message="http or an MCP workspace backend is required"
-// +kubebuilder:validation:XValidation:rule="!has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor) || has(self.mcp.workspace))) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless an MCP workspace backend is set"
+// +kubebuilder:validation:XValidation:rule="has(self.http) || has(self.mcp)",message="http or an MCP backend is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || has(self.mcp) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless an MCP backend is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || (has(self.http) && has(self.http.authSecretRef) && self.http.authSecretRef.name.size() > 0 && self.http.authSecretRef.key.size() > 0 && has(self.http.outboundAccessPolicyRef))",message="remote MCP requires a named auth Secret key and outbound access policy"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || ((!has(self.http.url) || self.http.url.size() == 0) && (!has(self.http.authInject) || self.http.authInject == 'header') && (!has(self.http.authBodyKey) || self.http.authBodyKey.size() == 0) && (!has(self.http.method) || self.http.method == 'POST'))",message="remote MCP forbids http.url, body auth and method overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii() in ['host','authorization','cookie','txn-token','accept','content-type']))",message="remote MCP forbids authority and credential header overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii() in ['content-length','connection','transfer-encoding','upgrade','idempotency-key','last-event-id']))",message="remote MCP forbids protocol header overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().startsWith('mcp-') && !k.lowerAscii().startsWith('proxy-'))",message="remote MCP forbids MCP session and proxy header overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().matches('token|secret|password|credential|authorization|api[-_]?key|subscription[-_]?key'))",message="remote MCP credentials must use authSecretRef, not custom headers"
 type ToolSpec struct {
 	// Description is the tool description shown to the LLM
 	// +kubebuilder:validation:Required
 	Description string `json:"description"`
 
-	// Parameters is the JSON Schema for tool parameters (OpenAI function calling format)
+	// Parameters is the JSON Schema for tool parameters (OpenAI function calling format).
+	// Remote MCP requires a reviewed object schema, checked by the controller and
+	// native worker before discovery/execution. It stays schemaless at admission
+	// to preserve compatibility with existing Tool parameter schemas.
 	// +optional
 	Parameters *apiextensionsv1.JSON `json:"parameters,omitempty"`
 
@@ -33,8 +42,7 @@ type ToolSpec struct {
 	// +optional
 	HTTP *HTTPExecution `json:"http,omitempty"`
 
-	// MCP defines a durable MCP server backend for this tool. MCP tools must set
-	// substrateActor.
+	// MCP defines a managed or remote MCP server backend for this tool.
 	// +optional
 	MCP *MCPToolServer `json:"mcp,omitempty"`
 }
@@ -110,8 +118,14 @@ type SecretKeySelector struct {
 }
 
 // MCPToolServer configures a Model Context Protocol server backend.
-// +kubebuilder:validation:XValidation:rule="has(self.substrateActor) != has(self.workspace)",message="exactly one of substrateActor or workspace is required"
+// +kubebuilder:validation:XValidation:rule="(has(self.substrateActor) ? 1 : 0) + (has(self.workspace) ? 1 : 0) + (has(self.remote) ? 1 : 0) == 1",message="exactly one of substrateActor, workspace or remote is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.remote) || !has(self.path) || self.path.size() == 0",message="remote MCP uses remote.url, not mcp.path"
 type MCPToolServer struct {
+	// Remote selects one reviewed callable on an independently operated server.
+	// Only native AI Tasks with an explicitly selecting Agent are supported.
+	// +optional
+	Remote *RemoteMCPServer `json:"remote,omitempty"`
+
 	// Path is the HTTP path exposed by the MCP server inside the actor.
 	// Defaults to /mcp.
 	// +optional
@@ -124,6 +138,27 @@ type MCPToolServer struct {
 	// SubstrateActor configures the legacy durable Substrate actor backend.
 	// +optional
 	SubstrateActor *SubstrateMCPActor `json:"substrateActor,omitempty"`
+}
+
+// RemoteMCPServer selects a Streamable HTTP endpoint and exact remote tool name.
+type RemoteMCPServer struct {
+	// URL is the fixed endpoint. Credentials belong in http.authSecretRef.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://[^/@?#{}]+([/?][^{}#]*)?$`
+	// Keep credential-name checks in sync with internal/aitools/remote_mcp.go.
+	// Scalar, percent-aware matching decodes query names once without unbounded CEL map iteration.
+	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getHostname() != ''",message="remote MCP requires a fixed HTTP URL with a hostname"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[^?]*([?]([^%;]|%[0-9A-Fa-f]{2})*)?$')",message="remote MCP URL query must use valid percent escapes and no raw semicolons"
+	// +kubebuilder:validation:XValidation:rule="!self.lowerAscii().matches('^[^?]*[?]([^&]*&)*([^%=&]|%[0-9a-f]{2})*((t|%[57]4)(o|%[46]f)(k|%[46]b|K|%e2%84%aa)(e|%[46]5)(n|%[46]e)|(s|%[57]3)(e|%[46]5)(c|%[46]3)(r|%[57]2)(e|%[46]5)(t|%[57]4)|(p|%[57]0)(a|%[46]1)(s|%[57]3)(s|%[57]3)(w|%[57]7)(o|%[46]f)(r|%[57]2)(d|%[46]4)|(c|%[46]3)(r|%[57]2)(e|%[46]5)(d|%[46]4)(e|%[46]5)(n|%[46]e)(t|%[57]4)(i|%[46]9|İ|%c4%b0)(a|%[46]1)(l|%[46]c)|(a|%[46]1)(u|%[57]5)(t|%[57]4)(h|%[46]8)(o|%[46]f)(r|%[57]2)(i|%[46]9|İ|%c4%b0)(z|%[57]a)(a|%[46]1)(t|%[57]4)(i|%[46]9|İ|%c4%b0)(o|%[46]f)(n|%[46]e)|(a|%[46]1)(p|%[57]0)(i|%[46]9|İ|%c4%b0)(-|_|%2d|%5f)?(k|%[46]b|K|%e2%84%aa)(e|%[46]5)(y|%[57]9)|(s|%[57]3)(u|%[57]5)(b|%[46]2)(s|%[57]3)(c|%[46]3)(r|%[57]2)(i|%[46]9|İ|%c4%b0)(p|%[57]0)(t|%[57]4)(i|%[46]9|İ|%c4%b0)(o|%[46]f)(n|%[46]e)(-|_|%2d|%5f)?(k|%[46]b|K|%e2%84%aa)(e|%[46]5)(y|%[57]9))([^%=&]|%[0-9a-f]{2})*(=|&|$)')",message="remote MCP URL must not contain credential query parameters"
+	// +kubebuilder:validation:XValidation:rule="!self.lowerAscii().matches('^[^?]*[?]([^&]*&)*([+[:space:]\\\\x{0085}\\\\x{00a0}\\\\x{1680}\\\\x{2000}-\\\\x{200a}\\\\x{2028}\\\\x{2029}\\\\x{202f}\\\\x{205f}\\\\x{3000}]|%(09|0a|0b|0c|0d|20|c2%(85|a0)|e1%9a%80|e2%80%(8[0-9a]|a8|a9|af)|e2%81%9f|e3%80%80))*((a|%[46]1)(w|%[57]7)(s|%[57]3)(a|%[46]1)(c|%[46]3)(c|%[46]3)(e|%[46]5)(s|%[57]3)(s|%[57]3)(k|%[46]b|K|%e2%84%aa)(e|%[46]5)(y|%[57]9)(i|%[46]9|İ|%c4%b0)(d|%[46]4)|(a|%[46]1)(w|%[57]7)(s|%[57]3)(-|_|%2d|%5f)(a|%[46]1)(c|%[46]3)(c|%[46]3)(e|%[46]5)(s|%[57]3)(s|%[57]3)(-|_|%2d|%5f)(k|%[46]b|K|%e2%84%aa)(e|%[46]5)(y|%[57]9)(-|_|%2d|%5f)(i|%[46]9|İ|%c4%b0)(d|%[46]4)|(g|%[46]7)(o|%[46]f)(o|%[46]f)(g|%[46]7)(l|%[46]c)(e|%[46]5)(a|%[46]1)(c|%[46]3)(c|%[46]3)(e|%[46]5)(s|%[57]3)(s|%[57]3)(i|%[46]9|İ|%c4%b0)(d|%[46]4)|(g|%[46]7)(o|%[46]f)(o|%[46]f)(g|%[46]7)(l|%[46]c)(e|%[46]5)(-|_|%2d|%5f)(a|%[46]1)(c|%[46]3)(c|%[46]3)(e|%[46]5)(s|%[57]3)(s|%[57]3)(-|_|%2d|%5f)(i|%[46]9|İ|%c4%b0)(d|%[46]4)|(k|%[46]b|K|%e2%84%aa)(e|%[46]5)(y|%[57]9)(-|_|%2d|%5f)(p|%[57]0)(a|%[46]1)(i|%[46]9|İ|%c4%b0)(r|%[57]2)(-|_|%2d|%5f)(i|%[46]9|İ|%c4%b0)(d|%[46]4)|(s|%[57]3)(i|%[46]9|İ|%c4%b0)(g|%[46]7)|(s|%[57]3)(i|%[46]9|İ|%c4%b0)(g|%[46]7)(n|%[46]e)(a|%[46]1)(t|%[57]4)(u|%[57]5)(r|%[57]2)(e|%[46]5)|(x|%[57]8)(-|_|%2d|%5f)(a|%[46]1)(m|%[46]d)(z|%[57]a)(-|_|%2d|%5f)(c|%[46]3)(r|%[57]2)(e|%[46]5)(d|%[46]4)(e|%[46]5)(n|%[46]e)(t|%[57]4)(i|%[46]9|İ|%c4%b0)(a|%[46]1)(l|%[46]c)|(x|%[57]8)(-|_|%2d|%5f)(a|%[46]1)(m|%[46]d)(z|%[57]a)(-|_|%2d|%5f)(s|%[57]3)(e|%[46]5)(c|%[46]3)(u|%[57]5)(r|%[57]2)(i|%[46]9|İ|%c4%b0)(t|%[57]4)(y|%[57]9)(-|_|%2d|%5f)(t|%[57]4)(o|%[46]f)(k|%[46]b|K|%e2%84%aa)(e|%[46]5)(n|%[46]e)|(x|%[57]8)(-|_|%2d|%5f)(a|%[46]1)(m|%[46]d)(z|%[57]a)(-|_|%2d|%5f)(s|%[57]3)(i|%[46]9|İ|%c4%b0)(g|%[46]7)(n|%[46]e)(a|%[46]1)(t|%[57]4)(u|%[57]5)(r|%[57]2)(e|%[46]5)|(x|%[57]8)(-|_|%2d|%5f)(g|%[46]7)(o|%[46]f)(o|%[46]f)(g|%[46]7)(-|_|%2d|%5f)(c|%[46]3)(r|%[57]2)(e|%[46]5)(d|%[46]4)(e|%[46]5)(n|%[46]e)(t|%[57]4)(i|%[46]9|İ|%c4%b0)(a|%[46]1)(l|%[46]c)|(x|%[57]8)(-|_|%2d|%5f)(g|%[46]7)(o|%[46]f)(o|%[46]f)(g|%[46]7)(-|_|%2d|%5f)(s|%[57]3)(i|%[46]9|İ|%c4%b0)(g|%[46]7)(n|%[46]e)(a|%[46]1)(t|%[57]4)(u|%[57]5)(r|%[57]2)(e|%[46]5)|(x|%[57]8)(-|_|%2d|%5f)(m|%[46]d)(s|%[57]3)(-|_|%2d|%5f)(s|%[57]3)(i|%[46]9|İ|%c4%b0)(g|%[46]7)(n|%[46]e)(a|%[46]1)(t|%[57]4)(u|%[57]5)(r|%[57]2)(e|%[46]5))([+[:space:]\\\\x{0085}\\\\x{00a0}\\\\x{1680}\\\\x{2000}-\\\\x{200a}\\\\x{2028}\\\\x{2029}\\\\x{202f}\\\\x{205f}\\\\x{3000}]|%(09|0a|0b|0c|0d|20|c2%(85|a0)|e1%9a%80|e2%80%(8[0-9a]|a8|a9|af)|e2%81%9f|e3%80%80))*(=|&|$)')",message="remote MCP URL must not contain signed credential query parameters"
+	URL string `json:"url"`
+
+	// ToolName is the exact tools/list name, independent of the Kubernetes alias.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.-]+$`
+	ToolName string `json:"toolName"`
 }
 
 // MCPWorkspace selects a Service-mode ExecutionWorkspaceClass for hosting an MCP server.

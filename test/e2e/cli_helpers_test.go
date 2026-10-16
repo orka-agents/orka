@@ -336,6 +336,37 @@ func deleteK8sResource(kind, name string) {
 	_, _ = utils.Run(cmd)
 }
 
+// deleteK8sResourceAndOwnedTasks deletes a resource whose controller owns
+// Tasks and waits until garbage collection has removed them. The suite's final
+// cleanup rejects a Task that is already being deleted, so a spec that happens
+// to run last must not leave one behind.
+func deleteK8sResourceAndOwnedTasks(kind, name string) {
+	deleteK8sResource(kind, name)
+	EventuallyWithOffset(1, func(g Gomega) {
+		var tasks struct {
+			Items []struct {
+				Metadata struct {
+					Name            string `json:"name"`
+					OwnerReferences []struct {
+						Kind string `json:"kind"`
+						Name string `json:"name"`
+					} `json:"ownerReferences"`
+				} `json:"metadata"`
+			} `json:"items"`
+		}
+		kubectlJSON(g, &tasks, "get", "tasks", "-n", namespace)
+		var owned []string
+		for _, task := range tasks.Items {
+			for _, owner := range task.Metadata.OwnerReferences {
+				if strings.EqualFold(owner.Kind, kind) && owner.Name == name {
+					owned = append(owned, task.Metadata.Name)
+				}
+			}
+		}
+		g.Expect(owned).To(BeEmpty(), "Tasks owned by %s %s were not garbage collected", kind, name)
+	}, 3*time.Minute, 2*time.Second).Should(Succeed())
+}
+
 func k8sResourceExists(kind, name string) bool {
 	cmd := exec.Command("kubectl", "get", kind, name, "-n", namespace, "--ignore-not-found")
 	output, err := utils.Run(cmd)

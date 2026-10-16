@@ -13,11 +13,10 @@ import (
 	"testing"
 )
 
-func TestWorkspaceCanaryExecutesWriteResumeAndRestore(t *testing.T) {
+func TestWorkspaceCanaryVerifiesRefusedWrites(t *testing.T) {
 	for _, tool := range []string{"exec_command", "shell_command"} {
 		t.Run(tool, func(t *testing.T) {
-			source, restored := t.TempDir(), t.TempDir()
-			var saved []byte
+			dir := readOnlyWorkspace(t)
 			for _, marker := range []string{workspaceWriteMarker, workspaceResumeMarker, workspaceRestoreMarker} {
 				resetWorkspaceCanary(t, marker)
 				input := make([]any, 1, 3)
@@ -29,15 +28,6 @@ func TestWorkspaceCanaryExecutesWriteResumeAndRestore(t *testing.T) {
 					t.Fatalf("first response must request the advertised shell tool: %v", call)
 				}
 				assertWorkspaceCanaryVerified(t, marker, false)
-				dir := source
-				if marker == workspaceRestoreMarker {
-					// The fixture's read command must inspect its current workspace,
-					// even when another copy contains newer data.
-					dir = restored
-					if err := os.WriteFile(filepath.Join(dir, workspaceCanaryFile), saved, 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}
 				output := executeWorkspaceCanary(t, call, dir)
 				result := map[string]any{"type": functionCallOutputType, "call_id": call["call_id"], "output": output}
 				if stream {
@@ -46,52 +36,57 @@ func TestWorkspaceCanaryExecutesWriteResumeAndRestore(t *testing.T) {
 				final := requestWorkspaceCanary(t, append(input, call, result), tool, stream)
 				item := workspaceCanaryResponseItem(t, final)
 				if item["type"] != "message" || strings.Join(appendTextContent(nil, item["content"]), "") != marker {
-					t.Fatalf("successful shell output did not produce the final marker: %v", item)
+					t.Fatalf("refused write did not produce the final marker: %v", item)
 				}
 				assertWorkspaceCanaryVerified(t, marker, true)
-				contents, err := os.ReadFile(filepath.Join(dir, workspaceCanaryFile))
-				if err != nil {
-					t.Fatal(err)
-				}
-				switch marker {
-				case workspaceWriteMarker:
-					saved = contents
-				case workspaceResumeMarker:
-					if string(contents) != workspaceCanaryChange+"\n" {
-						t.Fatalf("continuation did not change the source file: %q", contents)
-					}
-				case workspaceRestoreMarker:
-					if !bytes.Equal(contents, saved) {
-						t.Fatal("restore command changed the restored file")
-					}
+				if _, err := os.Lstat(filepath.Join(dir, workspaceCanaryFile)); !os.IsNotExist(err) {
+					t.Fatalf("probe left the canary file behind: %v", err)
 				}
 			}
 		})
 	}
 }
 
-func TestWorkspaceCanaryRejectsMissingChangedOrFailedReads(t *testing.T) {
-	for _, scenario := range []string{"missing file", "changed file", "failed command"} {
+func TestWorkspaceCanaryRejectsWritableOrPlantedWorkspaces(t *testing.T) {
+	for _, scenario := range []string{"writable workspace", "planted file", "planted dangling symlink", "failed command"} {
 		t.Run(scenario, func(t *testing.T) {
 			resetWorkspaceCanary(t, workspaceRestoreMarker)
 			input := make([]any, 1, 3)
 			input[0] = map[string]any{"role": "user", "content": "Reply exactly: " + workspaceRestoreMarker}
 			call := workspaceCanaryResponseItem(t, requestWorkspaceCanary(t, input, "exec_command", true))
-			dir := t.TempDir()
-			if scenario == "changed file" {
+			var dir string
+			switch scenario {
+			case "writable workspace":
+				dir = t.TempDir()
+			case "planted file", "planted dangling symlink":
+				dir = t.TempDir()
 				path := filepath.Join(dir, workspaceCanaryFile)
-				if err := os.WriteFile(path, []byte(workspaceCanaryChange+"\n"), 0o600); err != nil {
+				var err error
+				if scenario == "planted file" {
+					err = os.WriteFile(path, []byte("planted\n"), 0o600)
+				} else {
+					// The target is inside the read-only workspace, so the write
+					// through it is refused and only the symlink check fails.
+					err = os.Symlink("missing", path)
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
+				if err := os.Chmod(dir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			default:
+				dir = readOnlyWorkspace(t)
 			}
 			output := executeWorkspaceCanary(t, call, dir)
 			if scenario == "failed command" {
-				output = "Process exited with code 1\nOutput:\n" + workspaceCanaryData + "\n"
+				output = "Process exited with code 1\nOutput:\n" + workspaceCanaryRefused + "\n"
 			}
 			result := map[string]any{"type": functionCallOutputType, "call_id": call["call_id"], "output": output}
 			response := requestWorkspaceCanary(t, append(input, call, result), "exec_command", true)
 			if response.Code != http.StatusUnprocessableEntity {
-				t.Fatalf("invalid read status = %d, want 422", response.Code)
+				t.Fatalf("invalid probe status = %d, want 422", response.Code)
 			}
 			assertWorkspaceCanaryVerified(t, workspaceRestoreMarker, false)
 		})
@@ -107,7 +102,7 @@ func TestWorkspaceCanaryRejectsUnissuedResultsAndIgnoresHistory(t *testing.T) {
 			input[0] = user
 			result := map[string]any{
 				"type": functionCallOutputType, "call_id": "not-issued",
-				"output": "Process exited with code 0\nOutput:\n" + workspaceCanaryData + "\n",
+				"output": "Process exited with code 0\nOutput:\n" + workspaceCanaryRefused + "\n",
 			}
 			if scenario != "unissued" {
 				call := workspaceCanaryResponseItem(t, requestWorkspaceCanary(t, input, "exec_command", false))
@@ -227,6 +222,21 @@ func executeWorkspaceCanary(t *testing.T, call map[string]any, dir string) strin
 		return fmt.Sprintf("Exit code: %d\nWall time: 0.1 seconds\nOutput:\n%s", code, output)
 	}
 	return fmt.Sprintf("Chunk ID: canary\nWall time: 0.1 seconds\nProcess exited with code %d\nOutput:\n%s", code, output)
+}
+
+// readOnlyWorkspace returns a directory the test process cannot write, like a
+// read-intent workspace is for the provider child.
+func readOnlyWorkspace(t *testing.T) string {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	return dir
 }
 
 func resetWorkspaceCanary(t *testing.T, marker string) {

@@ -113,6 +113,59 @@ func TestRuntimeSessionStartPromptDoesNotResumeExitedAdapter(t *testing.T) {
 	}
 }
 
+// An idle adapter restart must not bypass the cancellation fence introduced
+// before resume support: an old queued cancel still owns this provider session.
+func TestRuntimeSessionCancellationFencePreventsIdleAdapterResume(t *testing.T) {
+	for _, scenario := range []struct {
+		name     string
+		timedOut bool
+		wantErr  error
+	}{
+		{name: "pending", wantErr: ErrPromptCancellationPending},
+		{name: "timed-out", timedOut: true, wantErr: ErrPromptCancellationTimedOut},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{helperExitAfterPromptEnv: "1"})
+			result, _ := runHelperPrompt(t, session, "prompt-1")
+			if result.Outcome != PromptOutcomeCompleted {
+				t.Fatalf("first prompt = %#v", result)
+			}
+			awaitAdapterExit(t, session)
+			exited := session.Process()
+			session.mu.Lock()
+			session.cancelWriteTimedOut = scenario.timedOut
+			if !scenario.timedOut {
+				session.pendingCancelWrites = 1
+			}
+			session.mu.Unlock()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			deadline := defaultPromptLease(session)
+			if err := session.RecoverExitedAdapter(ctx, "prompt-2", "sha256:prompt-2", deadline); err != nil {
+				t.Fatalf("recover fenced adapter: %v", err)
+			}
+			activated := false
+			_, err := session.StartPromptWithLeaseDeadlineAndActivation(ctx, "prompt-2", "sha256:prompt-2", []ContentBlock{Text("again")}, deadline, func() error {
+				activated = true
+				return nil
+			})
+			if !errors.Is(err, scenario.wantErr) {
+				t.Fatalf("fenced admission = %v, want %v", err, scenario.wantErr)
+			}
+			if activated || session.Process() != exited || session.AdapterRestarts() != 0 {
+				t.Fatal("cancellation fence allowed adapter resume or capability activation")
+			}
+			if _, err := os.Stat(filepath.Join(stateDir, helperResumedStateFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("fenced adapter sent session/resume: stat = %v", err)
+			}
+			if _, settled := session.Tombstone("prompt-2"); settled {
+				t.Fatal("fenced admission consumed the next prompt identity")
+			}
+		})
+	}
+}
+
 func TestRuntimeSessionIdleAdapterExitWithoutResumeCapabilityIsLost(t *testing.T) {
 	session, _ := newTestRuntimeSessionWithOptions(t, "immediate", nil, map[string]string{helperExitAfterPromptEnv: "1"})
 	result, _ := runHelperPrompt(t, session, "prompt-1")

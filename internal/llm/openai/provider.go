@@ -370,6 +370,21 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 	return items
 }
 
+// rawToolParameters avoids both float64 rounding and the SDK's treatment of
+// json.Number as a string. Each complete schema field is marshaled as raw JSON.
+func rawToolParameters(parameters json.RawMessage) map[string]any {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(parameters, &fields)
+	if fields == nil {
+		return nil
+	}
+	params := make(map[string]any, len(fields))
+	for name, value := range fields {
+		params[name] = value
+	}
+	return params
+}
+
 func appendResponsesInputCall(items responses.ResponseInputParam, call llm.ToolCall) responses.ResponseInputParam {
 	return append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: &responses.ResponseFunctionToolCallParam{
 		CallID: call.ID, Name: call.Name, Arguments: string(call.Arguments),
@@ -386,8 +401,7 @@ func appendResponsesInputText(items responses.ResponseInputParam, content string
 func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 	rTools := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		var params map[string]any
-		_ = json.Unmarshal(tool.Parameters, &params)
+		params := rawToolParameters(tool.Parameters)
 
 		strict := false
 		if tool.Strict != nil {
@@ -1121,8 +1135,7 @@ func convertMessages(messages []llm.Message, systemPrompt string) []openai.ChatC
 func convertChatTools(tools []llm.Tool) []openai.ChatCompletionToolUnionParam {
 	cTools := make([]openai.ChatCompletionToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		var params map[string]any
-		_ = json.Unmarshal(tool.Parameters, &params)
+		params := rawToolParameters(tool.Parameters)
 		strict := false
 		if tool.Strict != nil {
 			strict = *tool.Strict

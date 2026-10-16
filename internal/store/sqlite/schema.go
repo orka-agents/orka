@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"regexp"
@@ -8,7 +9,8 @@ import (
 )
 
 // initializeSchema creates an empty database or checks the existing layout.
-// Existing databases are never upgraded or rewritten during startup.
+// Callers without the controller lock only validate; OpenLockedStore can also
+// migrate exact known layouts after taking a consistent backup.
 func initializeSchema(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -32,8 +34,13 @@ func initializeSchema(db *sql.DB) error {
 	return tx.Commit()
 }
 
-func readSchema(tx *sql.Tx) (map[string]string, error) {
-	rows, err := tx.Query(`SELECT name, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'`)
+type schemaQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func readSchema(q schemaQuerier) (map[string]string, error) {
+	rows, err := q.QueryContext(context.Background(), `SELECT name, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'`)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +57,9 @@ func readSchema(tx *sql.Tx) (map[string]string, error) {
 }
 
 func validateSchema(existing map[string]string, statements []string) error {
+	if schemaFingerprint(existing) == unsupportedConnectorSchema {
+		return fmt.Errorf("unsupported SQLite schema: #700 layout at b5265055 (161 objects) requires changes to existing connector tables; no rewrite path is supported; see website/docs/operations/upgrading.md (https://github.com/orka-agents/orka/blob/main/website/docs/operations/upgrading.md)")
+	}
 	for _, statement := range statements {
 		// Every definition uses CREATE ... IF NOT EXISTS <name>. SQLite omits
 		// IF NOT EXISTS when it stores the definition in sqlite_schema.
@@ -59,11 +69,11 @@ func validateSchema(existing map[string]string, statements []string) error {
 		}
 		name := strings.Fields(definition)[0]
 		if normalizeSchemaSQL(existing[name]) != normalizeSchemaSQL(prefix+definition) {
-			return fmt.Errorf("unsupported SQLite schema: %s is missing or incompatible; historical layouts are not upgraded", name)
+			return fmt.Errorf("unsupported SQLite schema: %s is missing or incompatible; only exact documented layouts can be upgraded through OpenLockedStore", name)
 		}
 	}
 	if len(existing) != len(statements) {
-		return fmt.Errorf("unsupported SQLite schema: unexpected schema objects; historical layouts are not upgraded")
+		return fmt.Errorf("unsupported SQLite schema: unexpected schema objects; only exact documented layouts can be upgraded through OpenLockedStore")
 	}
 	return nil
 }

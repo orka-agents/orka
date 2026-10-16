@@ -39,6 +39,7 @@ const sidebars = {
         'concepts/memory',
         'concepts/transaction-tokens',
         'concepts/outbound-access',
+        'concepts/remote-mcp',
         'concepts/security',
       ],
     },
