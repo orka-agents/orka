@@ -1581,16 +1581,8 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			if latest.UID != task.UID || latest.Generation != task.Generation || task.Spec.AgentRef == nil || agent == nil {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
-			agentKey := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
-			if agentKey.Namespace == "" {
-				agentKey.Namespace = task.Namespace
-			}
-			latestAgent := &corev1alpha1.Agent{}
-			if err := reader.Get(ctx, agentKey, latestAgent); err != nil {
-				return ctrl.Result{}, fmt.Errorf("recheck gateway Job Agent: %w", err)
-			}
-			if latestAgent.UID != agent.UID || latestAgent.Generation != agent.Generation || !latestAgent.DeletionTimestamp.IsZero() {
-				return ctrl.Result{RequeueAfter: time.Second}, nil
+			if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+				return ctrl.Result{RequeueAfter: time.Second}, err
 			}
 		}
 	}
@@ -1601,8 +1593,26 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		// when its resolved Agent had no soul. Reconcile the complete tuple.
 		return ctrl.Result{}, aiSoulTaskChanged(task)
 	}
+	if !gatewayReplyEligible && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		task.Spec.AgentRef != nil && agent != nil {
+		// The first binding pins the Agent revision. A cached Agent can lag an
+		// update the API server accepted before this Task, so recheck it and
+		// let compatibility, Provider selection, and binding use one revision.
+		if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+	}
 
-	aiSoul, err := r.prepareAISoul(ctx, jobTask, agent)
+	var aiSoul *resolvedAISoul
+	if existingGatewayJob && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		agent != nil && agent.Spec.Soul != nil {
+		// Bindings are persisted before Job creation, so an unbound existing Job
+		// ran without a soul even when its start-status write was lost. Retire it
+		// without binding: a new digest would misstate what already executed.
+		err = invalidAISoulConfiguration("AI Task cannot acquire a soul after execution has started; create a new Task")
+	} else {
+		aiSoul, err = r.prepareAISoul(ctx, jobTask, agent)
+	}
 	if err != nil {
 		if isPermanentAISoulConfigurationError(err) {
 			message := fmt.Sprintf("AI soul configuration: %v", err)
@@ -4844,4 +4854,18 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// taskAgentRevisionChanged reports whether the Task's Agent differs from the
+// resolved revision on the uncached reader.
+func taskAgentRevisionChanged(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (bool, error) {
+	key := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
+	if key.Namespace == "" {
+		key.Namespace = task.Namespace
+	}
+	latest := &corev1alpha1.Agent{}
+	if err := reader.Get(ctx, key, latest); err != nil {
+		return false, fmt.Errorf("recheck Task Agent revision: %w", err)
+	}
+	return latest.UID != agent.UID || latest.Generation != agent.Generation || !latest.DeletionTimestamp.IsZero(), nil
 }

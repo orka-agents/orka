@@ -100,3 +100,50 @@ func TestHandlers_UpdateAgent_ValidatesDefaultedSoulRuntime(t *testing.T) {
 		}
 	}
 }
+
+// REST writes must reject what the Agent reconciler would reject, instead of
+// persisting an Agent that can never become ready.
+func TestHandlers_AgentWritesRejectInvalidSoulAndCopilotInstructions(t *testing.T) {
+	copilot := &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot}
+	for _, tc := range []struct {
+		name string
+		spec corev1alpha1.AgentSpec
+	}{
+		{"whitespace soul", corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{Inline: " \t "}}},
+		{"ConfigMap soul without digest", corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{
+			ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "soul", Key: "SOUL.md"}}}},
+		{"Copilot soul import", corev1alpha1.AgentSpec{Runtime: copilot, Soul: &corev1alpha1.SoulSource{Inline: "see @notes.md"}}},
+		{"Copilot role import", corev1alpha1.AgentSpec{Runtime: copilot, SystemPrompt: &corev1alpha1.PromptSource{Inline: "see @notes.md"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			original := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "default"},
+				Spec: corev1alpha1.AgentSpec{SystemPrompt: &corev1alpha1.PromptSource{Inline: "original"}}}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(original).Build()
+			h := NewHandlers(HandlersConfig{Client: c, ExecutionMode: executionmode.HarnessV2})
+			app := fiber.New()
+			app.Post("/agents", h.CreateAgent)
+			app.Put("/agents/:name", h.UpdateAgent)
+			send := func(method, path string, body any) int {
+				encoded, err := json.Marshal(body)
+				require.NoError(t, err)
+				req := httptest.NewRequest(method, path, bytes.NewReader(encoded))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				defer resp.Body.Close() //nolint:errcheck
+				return resp.StatusCode
+			}
+			require.Equal(t, http.StatusBadRequest,
+				send(http.MethodPost, "/agents", CreateAgentRequest{Name: "created", Namespace: "default", Spec: tc.spec}))
+			err := c.Get(t.Context(), types.NamespacedName{Name: "created", Namespace: "default"}, &corev1alpha1.Agent{})
+			require.True(t, apierrors.IsNotFound(err), "rejected Agent must not be persisted")
+			require.Equal(t, http.StatusBadRequest,
+				send(http.MethodPut, "/agents/existing?namespace=default", UpdateAgentRequest{Spec: tc.spec}))
+			persisted := &corev1alpha1.Agent{}
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "existing", Namespace: "default"}, persisted))
+			require.Equal(t, original.Spec, persisted.Spec, "rejected update must preserve the stored Agent")
+		})
+	}
+}

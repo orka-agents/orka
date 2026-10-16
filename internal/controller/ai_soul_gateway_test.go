@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,51 +211,59 @@ func (w lostGatewayJobStatusWriter) Update(ctx context.Context, object client.Ob
 }
 
 func TestAIGatewaySoulDoesNotIgnoreJobAfterLostStartStatus(t *testing.T) {
-	ctx := context.Background()
-	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: "agent-uid", Generation: 1}}
-	r := newUnitReconciler(newTestScheme(), agent)
-	ss := r.SessionManager.store.(*sqlite.Store)
-	baseClient := r.Client
-	service := gateway.NewService(baseClient, ss, ss, ss, gateway.DefaultConfig())
-	task := newAISoulGatewayTask(t, r, ss, "lost-start-status")
-	outage := errors.New("start status write unavailable")
-	r.Client = lostGatewayJobStatusClient{Client: baseClient, err: outage}
-	_, err := r.createTaskJob(ctx, task, agent, nil)
-	require.ErrorIs(t, err, outage)
-	r.Client = baseClient
-	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(task), task))
-	require.Equal(t, corev1alpha1.TaskPhasePending, task.Status.Phase)
-	require.Zero(t, task.Status.Attempts)
-	require.Nil(t, task.Status.StartTime)
-	require.Empty(t, task.Status.JobName)
-	require.Nil(t, task.Status.SoulBinding)
-	var jobs batchv1.JobList
-	require.NoError(t, r.List(ctx, &jobs))
-	require.Len(t, jobs.Items, 1, "the no-soul Job can execute despite the missing start status")
-	require.True(t, metav1.IsControlledBy(&jobs.Items[0], task))
-	jobs.Items[0].UID = "lost-status-job-uid"
-	require.NoError(t, r.Update(ctx, &jobs.Items[0]))
+	// A valid soul must not bind either: the existing Job ran without it.
+	for _, soul := range []string{"invalid\x00", "valid persona"} {
+		t.Run(strings.ToValidUTF8(soul, "?"), func(t *testing.T) {
+			ctx := context.Background()
+			agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: "agent-uid", Generation: 1}}
+			r := newUnitReconciler(newTestScheme(), agent)
+			ss := r.SessionManager.store.(*sqlite.Store)
+			baseClient := r.Client
+			service := gateway.NewService(baseClient, ss, ss, ss, gateway.DefaultConfig())
+			task := newAISoulGatewayTask(t, r, ss, "lost-start-status")
+			outage := errors.New("start status write unavailable")
+			r.Client = lostGatewayJobStatusClient{Client: baseClient, err: outage}
+			_, err := r.createTaskJob(ctx, task, agent, nil)
+			require.ErrorIs(t, err, outage)
+			r.Client = baseClient
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(task), task))
+			require.Equal(t, corev1alpha1.TaskPhasePending, task.Status.Phase)
+			require.Zero(t, task.Status.Attempts)
+			require.Nil(t, task.Status.StartTime)
+			require.Empty(t, task.Status.JobName)
+			require.Nil(t, task.Status.SoulBinding)
+			var jobs batchv1.JobList
+			require.NoError(t, r.List(ctx, &jobs))
+			require.Len(t, jobs.Items, 1, "the no-soul Job can execute despite the missing start status")
+			require.True(t, metav1.IsControlledBy(&jobs.Items[0], task))
+			jobs.Items[0].UID = "lost-status-job-uid"
+			require.NoError(t, r.Update(ctx, &jobs.Items[0]))
 
-	agent.Spec.Soul = &corev1alpha1.SoulSource{Inline: "invalid\x00"}
-	result, err := r.createTaskJob(ctx, task, agent, nil)
-	require.NoError(t, err)
-	require.Equal(t, time.Second, result.RequeueAfter)
-	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(task), task))
-	require.Equal(t, corev1alpha1.TaskPhasePending, task.Status.Phase)
-	require.NoError(t, r.List(ctx, &jobs))
-	require.Empty(t, jobs.Items, "the live Job must retire before terminal projection")
-	_, err = r.createTaskJob(ctx, task, agent, nil)
-	require.NoError(t, err)
-	require.Equal(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)
-	require.Contains(t, task.Status.Message, "AI soul configuration: ")
-	require.NoError(t, service.ProjectTerminals(ctx))
-	messages, err := ss.LoadTranscript(ctx, task.Namespace, task.Spec.SessionRef.Name, 0)
-	require.NoError(t, err)
-	require.Len(t, messages, 2)
-	require.NotContains(t, messages[1].Metadata, store.SessionSoulUnboundMetadata)
-	next := newAISoulGatewayTask(t, r, ss, "after-lost-start-status")
-	agent.Spec.Soul.Inline = "valid persona"
-	_, err = r.prepareAISoul(ctx, next, agent)
-	require.Error(t, err, "a previously launched no-soul Job must still prevent later soul introduction")
-	require.True(t, isPermanentAISoulConfigurationError(err))
+			agent.Spec.Soul = &corev1alpha1.SoulSource{Inline: soul}
+			result, err := r.createTaskJob(ctx, task, agent, nil)
+			require.NoError(t, err)
+			require.Equal(t, time.Second, result.RequeueAfter)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(task), task))
+			require.Equal(t, corev1alpha1.TaskPhasePending, task.Status.Phase)
+			require.Nil(t, task.Status.SoulBinding, "a soul must not bind to an already executed no-soul Job")
+			require.NoError(t, r.List(ctx, &jobs))
+			require.Empty(t, jobs.Items, "the live Job must retire before terminal projection")
+			_, err = r.createTaskJob(ctx, task, agent, nil)
+			require.NoError(t, err)
+			require.Equal(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)
+			require.Contains(t, task.Status.Message, "AI soul configuration: ")
+			require.Nil(t, task.Status.SoulBinding)
+			require.NoError(t, service.ProjectTerminals(ctx))
+			messages, err := ss.LoadTranscript(ctx, task.Namespace, task.Spec.SessionRef.Name, 0)
+			require.NoError(t, err)
+			require.Len(t, messages, 2)
+			require.NotContains(t, messages[1].Metadata, store.SessionSoulUnboundMetadata)
+			require.NotContains(t, messages[1].Metadata, store.SessionSoulDigestMetadata)
+			next := newAISoulGatewayTask(t, r, ss, "after-lost-start-status")
+			agent.Spec.Soul.Inline = "valid persona"
+			_, err = r.prepareAISoul(ctx, next, agent)
+			require.Error(t, err, "a previously launched no-soul Job must still prevent later soul introduction")
+			require.True(t, isPermanentAISoulConfigurationError(err))
+		})
+	}
 }

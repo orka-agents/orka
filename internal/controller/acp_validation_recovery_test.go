@@ -88,6 +88,9 @@ func (s *validationRecoveryStore) GetExternalEffect(_ context.Context, id string
 	}
 	return s.preparation, nil
 }
+func (s *validationRecoveryStore) GetExternalEffectByIdentity(context.Context, store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
+	return nil, store.ErrNotFound
+}
 func (s *validationRecoveryStore) GetControllerEpochFence(context.Context, string) (store.ControllerEpochFence, error) {
 	return s.fence, nil
 }
@@ -488,5 +491,22 @@ func TestRecoveredValidationAcceptsKubernetesJSONReordering(t *testing.T) {
 				t.Fatal("accepted changed preparation evidence")
 			}
 		})
+	}
+}
+
+func TestCurrentEpochAbandonedValidationKeepsWorkspacePoolsOffNativeCleanupAuthority(t *testing.T) {
+	d, task, _, _ := validationRecoveryFixture(t, false)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) }))
+	defer server.Close()
+	pool := validationRecoveryPoolForServer(t, d, task, server.URL)
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{Provider: corev1alpha1.WorkspaceProviderAgentSandbox}
+	if err := d.Client.Update(t.Context(), pool); err != nil {
+		t.Fatal(err)
+	}
+	// The retained cleanup client is native-only. A same-epoch workspace pool
+	// must keep its ordinary current-epoch path instead of failing there.
+	_, err := d.reconcileRecoveredTaskScopedRuntimeSession(t.Context(), task, task.UID, false)
+	if err != nil && strings.Contains(err.Error(), "retained native runtime cleanup authority is incomplete") {
+		t.Fatalf("workspace pool recovery used native-only retained cleanup authority: %v", err)
 	}
 }

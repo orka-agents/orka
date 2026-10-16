@@ -17,7 +17,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestGatewayTerminalSoulUnboundRequiresPreExecutionConfigurationFailure(t *testing.T) {
+func TestGatewayTerminalSoulUnboundRequiresPreExecutionFailure(t *testing.T) {
 	now := metav1.Now()
 	for _, tc := range []struct {
 		name     string
@@ -29,7 +29,9 @@ func TestGatewayTerminalSoulUnboundRequiresPreExecutionConfigurationFailure(t *t
 		{name: "missing Task UID", mutate: func(task *corev1alpha1.Task) { task.UID = "" }},
 		{name: "owned Job despite missing start status", jobOwner: "current"},
 		{name: "unrelated Job with same owner name", jobOwner: "other-task-uid", unbound: true},
-		{name: "unknown failure", mutate: func(task *corev1alpha1.Task) { task.Status.Message = "failed" }},
+		{name: "provider failure before binding", unbound: true, mutate: func(task *corev1alpha1.Task) {
+			task.Status.Message = "provider is not ready"
+		}},
 		{name: "agent task", mutate: func(task *corev1alpha1.Task) { task.Spec.Type = corev1alpha1.TaskTypeAgent }},
 		{name: "cancelled", mutate: func(task *corev1alpha1.Task) { task.Status.Phase = corev1alpha1.TaskPhaseCancelled }},
 		{name: "no-soul success", mutate: func(task *corev1alpha1.Task) { task.Status.Phase = corev1alpha1.TaskPhaseSucceeded }},

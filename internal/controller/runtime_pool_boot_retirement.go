@@ -86,18 +86,39 @@ func verifiedNativeRuntimePoolRetirement(ctx context.Context, effects store.Exte
 	return loadRuntimePoolBootRetirement(ctx, effects, w)
 }
 
-func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Context, w runtimePoolBootWitness, fence store.ControllerEpochFence) error {
+// recordRetiredRuntimePoolTasks writes cleanup receipts for Tasks that ran on
+// retired boots. One cached Task list per call only selects candidates: each
+// receipt is still written after an authoritative read under the epoch guard,
+// and a candidate the cache misses is replayed by a later reconciliation.
+// Receipted Tasks are skipped, so retained history costs one in-memory scan
+// instead of an uncached namespace list per retired boot.
+func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Context, retired []runtimePoolBootWitness, fence store.ControllerEpochFence) error {
+	if len(retired) == 0 {
+		return nil
+	}
+	type bootKey struct{ poolUID, instanceID string }
+	boots := make(map[bootKey]runtimePoolBootWitness, len(retired))
+	for _, w := range retired {
+		boots[bootKey{string(w.PoolUID), string(w.Fence.RuntimeInstanceID)}] = w
+	}
 	var tasks corev1alpha1.TaskList
-	if err := r.APIReader.List(ctx, &tasks, client.InNamespace(w.PoolNamespace)); err != nil {
+	if err := r.List(ctx, &tasks, client.InNamespace(retired[0].PoolNamespace)); err != nil {
 		return err
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		e := task.Status.Execution
-		if e == nil || e.RuntimePoolUID != string(w.PoolUID) || e.RuntimeInstanceID != string(w.Fence.RuntimeInstanceID) || e.RuntimeSessionUID == "" {
+		if e == nil || e.RuntimeSessionUID == "" {
+			continue
+		}
+		w, ok := boots[bootKey{e.RuntimePoolUID, e.RuntimeInstanceID}]
+		if !ok || w.PoolNamespace != task.Namespace {
 			continue
 		}
 		uid := acpTaskControlUID(task)
+		if runtimeSessionCleanupCompleteForUID(task, uid) {
+			continue
+		}
 		// Keep each epoch interlock short. A namespace's historical Task list
 		// must not turn a single mutation guard into an unbounded cleanup loop.
 		if err := agentRuntimeRecoveryGuard(ctx, r.ControlStore, fence, func(writeCtx context.Context) error {
@@ -112,7 +133,10 @@ func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Contex
 			if err := runtimePoolTaskWitnessMatches(latest, uid, w); err != nil {
 				return err
 			}
-			return persistTaskScopedRuntimeSessionCleanupReceipt(writeCtx, r.Client, task, uid, e.RuntimeInstanceID, e.RuntimeSessionUID, e.RuntimeSessionGeneration)
+			// The cached candidate only selected this Task; write the receipt
+			// for the authoritative execution identity the witness matched.
+			le := latest.Status.Execution
+			return persistTaskScopedRuntimeSessionCleanupReceipt(writeCtx, r.Client, latest, uid, le.RuntimeInstanceID, le.RuntimeSessionUID, le.RuntimeSessionGeneration)
 		}); err != nil {
 			return err
 		}
@@ -170,7 +194,7 @@ func (r *RuntimePoolReconciler) recordNativeRuntimePoolDrain(ctx context.Context
 	if err := r.persistRuntimePoolBootRetirement(ctx, w, agentRuntimeBootRetirement{Kind: runtimePoolBootDrainedProof, DrainedStatus: &safeStatus}, fence); err != nil {
 		return err
 	}
-	if err := r.recordRetiredRuntimePoolTasks(ctx, w, fence); err != nil {
+	if err := r.recordRetiredRuntimePoolTasks(ctx, []runtimePoolBootWitness{w}, fence); err != nil {
 		return err
 	}
 	witnesses, err := r.runtimePoolBootRecords(ctx, pool, runtimePoolBootWitnessKind)
@@ -199,13 +223,17 @@ func (r *RuntimePoolReconciler) reconcileNativeRuntimePoolRetirement(ctx context
 	if err != nil {
 		return err
 	}
-	if err := r.resumeRuntimePoolBootPreparations(ctx, pool, preparations, fence); err != nil {
-		return err
+	if len(preparations) != 0 {
+		if err := r.resumeRuntimePoolBootPreparations(ctx, pool, preparations, fence); err != nil {
+			return err
+		}
+		// Resumed preparations can commit new witnesses.
+		witnesses, err = r.runtimePoolBootRecords(ctx, pool, runtimePoolBootWitnessKind)
+		if err != nil {
+			return err
+		}
 	}
-	witnesses, err = r.runtimePoolBootRecords(ctx, pool, runtimePoolBootWitnessKind)
-	if err != nil {
-		return err
-	}
+	var retiredWitnesses []runtimePoolBootWitness
 	for _, w := range witnesses {
 		retired, err := loadRuntimePoolBootRetirement(ctx, r.ControlStore, w)
 		if err != nil {
@@ -232,9 +260,12 @@ func (r *RuntimePoolReconciler) reconcileNativeRuntimePoolRetirement(ctx context
 				return err
 			}
 		}
-		if err := r.recordRetiredRuntimePoolTasks(ctx, w, fence); err != nil {
-			return err
-		}
+		retiredWitnesses = append(retiredWitnesses, w)
+	}
+	if err := r.recordRetiredRuntimePoolTasks(ctx, retiredWitnesses, fence); err != nil {
+		return err
+	}
+	for _, w := range retiredWitnesses {
 		if err := r.releaseRuntimePoolBootPod(ctx, w, witnesses, fence); err != nil {
 			return err
 		}

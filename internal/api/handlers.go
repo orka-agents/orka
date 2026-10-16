@@ -1426,7 +1426,7 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := executionmode.DefaultBuiltInAgentContract(agent, h.executionMode); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
+	if err := agentcontext.ValidateAgentWrite(agent); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
@@ -1483,7 +1483,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
-		if err := agentcontext.ValidateSoulRuntime(current); err != nil {
+		if err := agentcontext.ValidateAgentWrite(current); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {

@@ -150,3 +150,45 @@ func TestAISoulPendingAgentRefChangeDoesNotUsePreviousAgent(t *testing.T) {
 		t.Fatal("stale resolution consumed the edited Task")
 	}
 }
+
+func TestAISoulFirstBindingRechecksCachedAgentRevision(t *testing.T) {
+	ctx := t.Context()
+	stored := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 2},
+		Spec:       corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{Inline: "new persona"}},
+	}
+	// The cache can still hold the revision before the soul was added.
+	cached := stored.DeepCopy()
+	cached.Generation = 1
+	cached.Spec.Soul = nil
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "prompt", AgentRef: &corev1alpha1.AgentReference{Name: stored.Name}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(newTestScheme(), task, stored)
+	result, err := r.createTaskJob(ctx, task, cached, nil)
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("stale Agent revision did not defer dispatch: result=%v err=%v", result, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.SoulBinding != nil || current.Status.Attempts != 0 {
+		t.Fatal("a stale Agent revision was bound or consumed an attempt")
+	}
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs); err != nil || len(jobs.Items) != 0 {
+		t.Fatal("a stale Agent revision launched a Job")
+	}
+	if _, err := r.createTaskJob(ctx, current, stored, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.SoulBinding == nil || current.Status.SoulBinding.AgentGeneration != stored.Generation {
+		t.Fatal("the current Agent revision was not bound")
+	}
+}

@@ -1415,12 +1415,13 @@ func (s *Service) projectTerminal(
 	if digest := agentcontext.SessionDigest(task.Status.SoulBinding); digest != "" {
 		messageMetadata[store.SessionSoulDigestMetadata] = digest
 	} else if task.Spec.Type == corev1alpha1.TaskTypeAI && task.Status.Phase == corev1alpha1.TaskPhaseFailed &&
-		strings.HasPrefix(task.Status.Message, "AI soul configuration: ") &&
 		task.UID != "" && task.Status.SoulBinding == nil && task.Status.Attempts == 0 && task.Status.StartTime == nil &&
 		task.Status.JobName == "" && task.Status.JobUID == "" && task.Status.Iteration == 0 &&
 		task.Status.Execution == nil && task.Status.ExecutionOutcome == nil && task.Status.ResultRef == nil {
-		// The prefix identifies pre-Job failure only in this reconciliation:
-		// a lost start-status write may still hide an earlier no-soul Job.
+		// Any failure before binding and execution, including soul, Provider and
+		// compatibility errors, ran no model turn, so it must not pin absence.
+		// The status alone cannot rule out an earlier no-soul Job whose
+		// start-status write was lost, so an owned Job also counts as execution.
 		// Read failures retry projection rather than pin the wrong identity.
 		var jobs batchv1.JobList
 		if err := s.freshReader().List(ctx, &jobs, client.InNamespace(task.Namespace)); err != nil {

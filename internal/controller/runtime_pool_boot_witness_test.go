@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -927,4 +928,50 @@ func TestRuntimePoolBootUnretainedPreparationWithdrawsAfterMultipleRestarts(t *t
 	runtimePoolTestCreatePod(t, f.r, &replacement)
 	f.supervisor.probe = runtimePoolValidProbe(&current, &replacement, "replacement-after-restarts", false)
 	f.serve(t)
+}
+
+// taskReadCounter counts authoritative Task reads a reconciliation performs.
+type taskReadCounter struct {
+	client.Reader
+	reads atomic.Int64
+}
+
+func (r *taskReadCounter) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1alpha1.Task); ok {
+		r.reads.Add(1)
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func (r *taskReadCounter) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1alpha1.TaskList); ok {
+		r.reads.Add(1)
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+// Retired boots are never forgotten, so their receipted Tasks must not cost
+// authoritative reads on every reconciliation.
+func TestRuntimePoolBootRetiredHistoryDoesNotRereadReceiptedTasks(t *testing.T) {
+	f := newNativePoolBootFixture(t, false)
+	f.serve(t)
+	tasks := []*corev1alpha1.Task{f.task(t, "receipted-turn-1"), f.task(t, "receipted-turn-2")}
+	f.terminate(t, false)
+	runtimePoolReconcile(t, f.r, f.pool)
+	for _, task := range tasks {
+		if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(task), task); err != nil {
+			t.Fatal(err)
+		}
+		if !runtimeSessionCleanupCompleteForUID(task, task.UID) {
+			t.Fatal("retired boot did not receipt its Task")
+		}
+	}
+	counter := &taskReadCounter{Reader: f.r.APIReader}
+	f.r.APIReader = counter
+	if err := f.r.reconcileNativeRuntimePoolRetirement(t.Context(), f.pool); err != nil {
+		t.Fatal(err)
+	}
+	if reads := counter.reads.Load(); reads != 0 {
+		t.Fatalf("receipted history caused %d authoritative Task reads", reads)
+	}
 }

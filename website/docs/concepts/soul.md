@@ -126,10 +126,11 @@ An explicit no-soul pin records **absence only**. Sessions without `spec.soul`
 retain their legacy Agent/role-change behavior; the absence pin prevents later
 soul opt-in without introducing full revision pinning for those Sessions.
 Gateway-owned conversations retain the same rule through their canonical terminal
-projection, independently of queued future user messages. Explicitly attested
-pre-binding, pre-execution soul-configuration errors remain visible in history but
-do not establish an intentional no-soul revision; correcting the source can still
-establish the first revision. Ambiguous legacy failures are not reinterpreted.
+projection, independently of queued future user messages. Failures before soul
+binding and execution, such as soul-configuration or Provider errors, remain
+visible in history but do not establish an intentional no-soul revision;
+correcting the cause can still establish the first revision. A failure with any
+evidence of execution, including a Job the Task owns, is not reinterpreted.
 Event retention preserves an established digest-only identity anchor while removing
 expired content; the anchor is hidden from transcript reads and deleted with the
 Session.

@@ -1774,13 +1774,16 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			}
 			return true, nil
 		}
-		if active.ControllerEpoch != currentFence.Epoch || abandonedValidationRecoveryTask(task) {
-			// Unknown terminal recovery uses exact cleanup authority for every
-			// mutation (including deletion after validation), even before an
-			// epoch changes. Retained boots never get admission authority.
-			if !sessionDeletion && !abandonedValidationRecoveryTask(task) {
-				return false, nil
-			}
+		// Unknown terminal recovery on a native pool uses exact cleanup authority
+		// for every mutation (including deletion after validation), even before
+		// an epoch changes. Retained boots never get admission authority. That
+		// authority is native-only: a workspace pool keeps its current-epoch,
+		// backend-aware client and waits for a new epoch's owner otherwise.
+		retainedCleanup := pool.Spec.ExecutionWorkspace == nil && (sessionDeletion || abandonedValidationRecoveryTask(task))
+		if active.ControllerEpoch != currentFence.Epoch && !retainedCleanup {
+			return false, nil
+		}
+		if retainedCleanup && (active.ControllerEpoch != currentFence.Epoch || abandonedValidationRecoveryTask(task)) {
 			runtimeClient, runtimeFence, err = d.runtimePoolRetainedCleanupClient(ctx, task, taskUID, pool, currentFence, sessionDeletion)
 			if err != nil {
 				return false, err

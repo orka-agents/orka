@@ -107,7 +107,7 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
 		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use an AI worker Agent or a built-in orka.harness.v2 Agent; external runtimeRef and orka.harness.v1 Agents do not support souls.")
 	}
-	if err := validateInlineCopilotInstructions(agent); err != nil {
+	if err := agentcontext.ValidateInlineCopilotInstructions(agent); err != nil {
 		return ChatToolErrorResult("invalid_arguments", err.Error(), "Inline referenced text; built-in harness v2 Copilot role and soul instructions cannot contain @ characters.")
 	}
 

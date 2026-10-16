@@ -481,7 +481,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
 		return "", err
 	}
-	if err := validateInlineCopilotInstructions(agent); err != nil {
+	if err := agentcontext.ValidateInlineCopilotInstructions(agent); err != nil {
 		return "", err
 	}
 

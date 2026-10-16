@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/agentcontext"
 )
 
@@ -76,29 +75,4 @@ func soulArgument(value any) (*corev1alpha1.SoulSource, error) {
 		return nil, err
 	}
 	return &source, nil
-}
-
-// validateInlineCopilotInstructions checks only known inline portions of the
-// completed Agent. It does not resolve ConfigMaps; the controller must still
-// validate the resolved configuration before dispatch.
-func validateInlineCopilotInstructions(agent *corev1alpha1.Agent) error {
-	if agent == nil || agent.Spec.Runtime == nil {
-		return nil
-	}
-	runtime := agent.Spec.Runtime
-	if runtime.Type != corev1alpha1.AgentRuntimeCopilot || runtime.RuntimeRef != nil ||
-		runtime.ContractVersion == nil || *runtime.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 {
-		return nil
-	}
-	if role := agent.Spec.SystemPrompt; role != nil {
-		if err := acp.ValidateCopilotInstructions(role.Inline); err != nil {
-			return fmt.Errorf("agent.spec.systemPrompt.inline: %w", err)
-		}
-	}
-	if soul := agent.Spec.Soul; soul != nil {
-		if err := acp.ValidateCopilotInstructions(soul.Inline); err != nil {
-			return fmt.Errorf("agent.spec.soul.inline: %w", err)
-		}
-	}
-	return nil
 }
