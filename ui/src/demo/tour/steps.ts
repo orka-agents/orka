@@ -104,12 +104,16 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: 'Ask for work in chat',
-    body: 'Chat is the quickest way to start work. Ask in plain language: the assistant answers from the cluster and starts Tasks for you. Try one of these:',
+    body: "This is the dashboard's chat. Ask in plain language: the assistant answers from the cluster and starts Tasks for you.\nYou don't need the dashboard to chat. Orka also serves OpenAI- and Anthropic-compatible APIs, so Claude Code, Cursor, Continue or any other compatible client you already use can talk to the same assistant.\nTry one of these:",
     route: { to: '/chat' },
     part: 'basics',
     prompts: ["What's running right now?", 'Review PR #1486 in checkout-service'],
     note: "Chat sessions live in Orka's own record; the Tasks they start are Kubernetes resources.",
-    cli: ["# orka run is the CLI's chat", 'orka run "What\'s running right now?"'],
+    cli: [
+      "# orka run is the CLI's chat",
+      'orka run "What\'s running right now?"',
+      '# Or point Claude Code at Orka: set ANTHROPIC_BASE_URL to https://<orka>/anthropic',
+    ],
   },
   {
     title: 'Monitors find work on their own',
