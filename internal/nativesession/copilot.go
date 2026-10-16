@@ -3,7 +3,6 @@ package nativesession
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -255,24 +254,24 @@ func inspectCopilotEvents(events []byte, providerSessionID string) (string, erro
 	version, unknown := "", ""
 	first := true
 	for line := range bytes.Lines(events) {
-		var event struct {
-			Type string          `json:"type"`
-			Data json.RawMessage `json:"data"`
-		}
-		if !bytes.HasPrefix(line, []byte("{")) || decodeOnly(json.NewDecoder(bytes.NewReader(line)), &event) != nil || event.Type == "" {
+		var eventType string
+		fields, ok := exactFields(line)
+		if !ok || exactField(fields, "type", &eventType) != nil || eventType == "" {
 			return "", errors.New("the Copilot CLI event log holds an entry that is not one event")
 		}
-		if !copilotEventTypes[event.Type] && unknown == "" {
-			unknown = event.Type
+		if !copilotEventTypes[eventType] && unknown == "" {
+			unknown = eventType
 		}
 		switch {
 		case first:
 			var start struct {
-				SessionID      string `json:"sessionId"`
-				CopilotVersion string `json:"copilotVersion"`
-				Version        int    `json:"version"`
+				SessionID      string
+				CopilotVersion string
+				Version        int
 			}
-			if event.Type != copilotSessionStart || json.Unmarshal(event.Data, &start) != nil {
+			data, ok := exactFields(fields["data"])
+			if eventType != copilotSessionStart || !ok || exactField(data, "sessionId", &start.SessionID) != nil ||
+				exactField(data, "copilotVersion", &start.CopilotVersion) != nil || exactField(data, "version", &start.Version) != nil {
 				return "", errors.New("the Copilot CLI event log does not begin with session.start")
 			}
 			if start.SessionID != providerSessionID {
@@ -285,7 +284,7 @@ func inspectCopilotEvents(events []byte, providerSessionID string) (string, erro
 				return "", errors.New("the Copilot CLI event log does not record a release")
 			}
 			version, first = start.CopilotVersion, false
-		case event.Type == copilotSessionStart:
+		case eventType == copilotSessionStart:
 			return "", errors.New("the Copilot CLI event log starts more than one session")
 		}
 	}

@@ -157,6 +157,13 @@ func TestCopilotCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"event with trailing data": {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"user.message","data":{}}]` + "\n", "not one event"},
 		"unknown event":            {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"session.future","data":{}}` + "\n", `"session.future" event, which Copilot CLI 1.0.96 does not record`},
 		"event not a object":       {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + "[]\n", "not one event"},
+		"differently cased type": {copilotFixtureEvents(copilotFixtureSession, copilotVersion) + `{"type":"session.future","Type":"user.message","data":{}}` + "\n",
+			`"session.future" event, which Copilot CLI 1.0.96 does not record`},
+		"differently cased session": {strings.Replace(copilotFixtureEvents(copilotFixtureSession, copilotVersion), `"sessionId":"`+copilotFixtureSession+`"`,
+			`"sessionId":"8f1d0c3e-0000-4000-8000-000000000000","SessionId":"`+copilotFixtureSession+`"`, 1), "starts another session"},
+		"differently cased release": {strings.Replace(copilotFixtureEvents(copilotFixtureSession, copilotVersion), `"copilotVersion":"`+copilotVersion+`"`,
+			`"copilotVersion":"1.0.120","CopilotVersion":"`+copilotVersion+`"`, 1), "Copilot CLI 1.0.120 started"},
+		"differently cased schema": {strings.Replace(copilotFixtureEvents(copilotFixtureSession, copilotVersion), `"version":1`, `"version":2,"Version":1`, 1), "schema 2"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			source, events := newCopilotFixture(t)
@@ -223,6 +230,13 @@ func TestCopilotInspectRejectsTamperedBundles(t *testing.T) {
 		"invalid event": rebuild(func(e map[string][]byte) { e["events.jsonl"] = append(e["events.jsonl"], "[]\n"...) }),
 		"unknown event": rebuild(func(e map[string][]byte) {
 			e["events.jsonl"] = append(e["events.jsonl"], `{"type":"session.future","data":{}}`+"\n"...)
+		}),
+		"differently cased type": rebuild(func(e map[string][]byte) {
+			e["events.jsonl"] = append(e["events.jsonl"], `{"type":"session.future","Type":"user.message","data":{}}`+"\n"...)
+		}),
+		"differently cased session": rebuild(func(e map[string][]byte) {
+			e["events.jsonl"] = bytes.Replace(e["events.jsonl"], []byte(`"sessionId":"`+copilotFixtureSession+`"`),
+				[]byte(`"sessionId":"8f1d0c3e-0000-4000-8000-000000000000","SessionId":"`+copilotFixtureSession+`"`), 1)
 		}),
 		"trailing data": append(append([]byte(nil), data...), data...),
 		"not gzip":      []byte("plain"),
