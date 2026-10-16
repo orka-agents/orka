@@ -80,14 +80,17 @@ own, through the API or CLI.
    point the Helm release at it:
 
    ```bash
+   umask 077
+   openssl rand -hex 32 | tr -d '\n' > github-webhook.secret
    kubectl -n orka-system create secret generic github-webhook \
-     --from-literal=secret="$(openssl rand -hex 32)"
+     --from-file=secret=github-webhook.secret
    helm upgrade orka orka/orka --namespace orka-system --reuse-values \
      --set github.webhook.secretName=github-webhook
    ```
 
    Then add a webhook to the GitHub repository that sends **Issues** and **Pull requests**
-   events to `https://<orka-api-host>/webhooks/github` with the same secret. The endpoint must
+   events to `https://<orka-api-host>/webhooks/github`, paste the contents of
+   `github-webhook.secret` as its secret, then delete the file. The endpoint must
    be reachable from GitHub, so expose the Orka API through your ingress.
 5. **Require the readiness check.** With `review.publish.enabled: true`, Orka publishes the
    commit status `orka/<namespace>/<monitor-name>/ready`. Require it in branch protection,
@@ -96,8 +99,8 @@ own, through the API or CLI.
 ## Start from a GitHub label
 
 When a labeled issue arrives at `/webhooks/github`, the controller verifies
-`X-Hub-Signature-256`, checks that the issue belongs to the monitor's repository and base
-branch, checks the sender's current repository permission
+`X-Hub-Signature-256`, checks that the issue belongs to the monitor's repository, checks the
+sender's current repository permission
 (`triggers.github.labels.requireActorPermission`, default `write`), and records a durable
 command before starting any work. Rename the label with
 `spec.triggers.github.labels.issues.implement`.

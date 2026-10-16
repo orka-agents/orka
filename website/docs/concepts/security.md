@@ -179,7 +179,9 @@ The controller runs with:
 
 ## Authentication
 
-Every API request authenticates with one of three credentials:
+Every client request to the REST API and the compatibility endpoints authenticates with one
+of three credentials. Health probes, gateway ingress, and signed GitHub webhooks authenticate
+differently; the [API reference](../reference/api-reference.md) lists them.
 
 - **Kubernetes ServiceAccount tokens**, the default, validated with the TokenReview API.
   Validated tokens are cached for 60 seconds by SHA-256 hash, so a revoked token can keep

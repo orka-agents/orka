@@ -256,7 +256,7 @@ Configure Continue to use Orka as an OpenAI-compatible provider. Add to your Con
 {
   "models": [
     {
-      "title": "Claude Sonnet 4 (via Orka)",
+      "title": "Claude Opus 5 (via Orka)",
       "provider": "openai",
       "model": "anthropic/claude-opus-5",
       "apiBase": "https://orka.example.com/openai/v1",

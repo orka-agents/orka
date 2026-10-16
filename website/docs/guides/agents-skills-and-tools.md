@@ -26,11 +26,12 @@ Set `systemPrompt.inline`, or keep longer prompts in a ConfigMap with `systemPro
 OpenCode Agents are the exception: they must omit `systemPrompt`, so put instructions in each
 Task's `prompt`.
 
-Keep the prompt minimal and requirement-focused. Research on agent context files
-([arxiv 2602.11988](https://arxiv.org/abs/2602.11988)) found that verbose context hurts more
-than it helps: LLM-generated context files reduced task success rates by 0.5–2% while raising
-inference costs by 20–23%, and even developer-written files improved results only about 4%
-at a similar cost. In practice:
+Keep the prompt minimal and requirement-focused. A study of repository context files for
+coding agents ([arxiv 2602.11988](https://arxiv.org/abs/2602.11988)) found that they do not
+reliably help. LLM-generated context files lowered task success by 0.5–2% while raising cost
+by 20–23%. Developer-written files raised success by 2.4% on average, a gain that was not
+statistically significant, while raising cost by up to 19%. The instructions in them were
+followed; repository overviews were not useful. In practice:
 
 - **Include only** tooling commands (build, test, and lint invocations), gotchas the agent
   cannot discover (for example, "the provider Secret key defaults to `api-key`"), and hard
@@ -38,7 +39,8 @@ at a similar cost. In practice:
 - **Leave out codebase overviews.** Agents find their way around a repository with file
   listing and search tools; an overview adds tokens without speeding that up.
 - **Do not repeat** what is already in the repository's docs, README, or code comments.
-  Redundant instructions increase reasoning tokens by 14–22% without improving outcomes.
+  Agents follow what they are told, so extra instructions mean more exploration and reasoning
+  tokens — up to 22% more in the study — without better outcomes.
 
 ## Add skills
 

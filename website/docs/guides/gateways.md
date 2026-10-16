@@ -101,20 +101,25 @@ Secret must opt in with a label and name its Gateway, and the outbound Secret mu
 the exact adapter endpoint, so a changed Service cannot redirect the token:
 
 ```bash
+umask 077
+openssl rand -hex 32 > external-chat-inbound.token
+openssl rand -hex 32 > external-chat-outbound.token
+
 kubectl -n orka-system create secret generic external-chat-inbound \
-  --from-literal=token="$(openssl rand -hex 32)"
+  --from-file=token=external-chat-inbound.token
 kubectl -n orka-system label secret external-chat-inbound gateway.orka.ai/inbound-auth=true
 kubectl -n orka-system annotate secret external-chat-inbound gateway.orka.ai/gateway-name=external-chat
 
 kubectl -n orka-system create secret generic external-chat-outbound \
-  --from-literal=token="$(openssl rand -hex 32)"
+  --from-file=token=external-chat-outbound.token
 kubectl -n orka-system label secret external-chat-outbound gateway.orka.ai/outbound-auth=true
 kubectl -n orka-system annotate secret external-chat-outbound \
   gateway.orka.ai/gateway-name=external-chat \
   gateway.orka.ai/adapter-endpoint=https://external-chat-adapter.orka-system.svc:8090
 ```
 
-Give the adapter the same two token values through its own configuration.
+Give the adapter the same two token values through its own configuration, then delete the
+two token files. Writing the tokens to owner-only files keeps them out of process arguments.
 
 ### 3. Point at the adapter
 

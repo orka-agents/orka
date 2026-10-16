@@ -209,7 +209,8 @@ wins.
 
 Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
 executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
-children. Tool spans do not include raw arguments or result bodies.
+children. Tool spans do not include raw arguments or complete result bodies, but a structured tool
+error message can appear in the span status description.
 
 ### OpenTelemetry traces vs Task trace read model
 
