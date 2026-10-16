@@ -160,14 +160,20 @@ func TestAgentSoulConfigMapWatchReadinessTransitions(t *testing.T) {
 			require.Contains(t, condition.Message, message)
 		}
 	}
-	reconcileMap := func() {
+	// The ConfigMap watch drives readiness; only a failed validation also
+	// schedules the periodic recheck.
+	reconcileMap := func(wantReady bool) {
 		t.Helper()
 		requests := r.agentsForSoulConfigMap(ctx, configMap)
 		require.Equal(t, []reconcile.Request{request}, requests)
 		for _, mapped := range requests {
 			result, err := r.Reconcile(ctx, mapped)
 			require.NoError(t, err)
-			require.Zero(t, result.RequeueAfter)
+			if wantReady {
+				require.Zero(t, result.RequeueAfter)
+			} else {
+				require.Equal(t, agentValidationRecheckInterval, result.RequeueAfter)
+			}
 		}
 	}
 
@@ -176,37 +182,37 @@ func TestAgentSoulConfigMapWatchReadinessTransitions(t *testing.T) {
 	assertReady(false, "soul ConfigMap was not found")
 
 	require.NoError(t, r.Create(ctx, configMap))
-	reconcileMap()
+	reconcileMap(true)
 	assertReady(true, "")
 
 	configMap.Data[agentSoulWatchMapKey] = "changed persona"
 	require.NoError(t, r.Update(ctx, configMap))
-	reconcileMap()
+	reconcileMap(false)
 	assertReady(false, "does not match its expected digest")
 
 	configMap.Data[agentSoulWatchMapKey] = agentSoulWatchText
 	require.NoError(t, r.Update(ctx, configMap))
-	reconcileMap()
+	reconcileMap(true)
 	assertReady(true, "")
 
 	delete(configMap.Data, agentSoulWatchMapKey)
 	require.NoError(t, r.Update(ctx, configMap))
-	reconcileMap()
+	reconcileMap(false)
 	assertReady(false, "does not contain the selected key")
 
 	configMap.Data[agentSoulWatchMapKey] = agentSoulWatchText
 	require.NoError(t, r.Update(ctx, configMap))
-	reconcileMap()
+	reconcileMap(true)
 	assertReady(true, "")
 
 	require.NoError(t, r.Delete(ctx, configMap))
-	reconcileMap()
+	reconcileMap(false)
 	assertReady(false, "soul ConfigMap was not found")
 
 	configMap.ResourceVersion = ""
 	configMap.UID = ""
 	require.NoError(t, r.Create(ctx, configMap))
-	reconcileMap()
+	reconcileMap(true)
 	assertReady(true, "")
 }
 

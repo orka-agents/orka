@@ -1311,8 +1311,9 @@ spec:
                     description: |-
                       MaxTokens limits the response length. OpenCode validates positive reviewed
                       limits at its runtime-specific admission boundary; existing Agent objects
-                      may retain the legacy zero value.
+                      may retain the legacy zero value, which selects the worker default.
                     format: int32
+                    minimum: 0
                     type: integer
                   name:
                     description: |-

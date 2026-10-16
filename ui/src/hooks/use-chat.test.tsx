@@ -2,6 +2,8 @@ import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
+
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
 }))
@@ -9,6 +11,7 @@ vi.mock('zustand/middleware', () => ({
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { useChatStore } from '@/stores/chat'
+import { toast } from 'sonner'
 import { useChatConfig, useSendMessage } from './use-chat'
 
 function createWrapper() {
@@ -18,6 +21,38 @@ function createWrapper() {
   return ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
+}
+
+// A stream the test drives event by event, standing in for a live turn.
+function controlledSSE() {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c
+    },
+  })
+  return {
+    response: new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
+    emit(event: string, data: unknown) {
+      try {
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+      } catch {
+        // The client already cancelled the stream.
+      }
+    },
+    close() {
+      try {
+        controller.close()
+      } catch {
+        // Already closed or cancelled.
+      }
+    },
+  }
+}
+
+function requestURL(input: RequestInfo | URL) {
+  return typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
 }
 
 function createSSEResponse(events: Array<{ event: string; data: string }>): Response {
@@ -41,6 +76,7 @@ beforeEach(() => {
     messages: [],
     currentSessionId: null,
     isStreaming: false,
+    stopRequested: false,
     provider: '',
     model: '',
     activeNamespace: 'default',
@@ -696,5 +732,256 @@ describe('useSendMessage', () => {
 
     expect(capturedBody).toBeDefined()
     expect(capturedBody.sessionId).toBe('existing-session')
+  })
+
+  describe('ending a turn early', () => {
+    // Routes POST /chat to a controlled stream and records DELETE /chat/{id}.
+    // `onDelete` plays the server: by default the cancelled turn ends its
+    // stream with the interruption error, as HandleCancelChat does.
+    function mockTurn(options: { deleteStatus?: number; deleteBody?: unknown } = {}) {
+      const sse = controlledSSE()
+      const deletes: Array<{ url: string; headers: Record<string, string> }> = []
+      const posts: unknown[] = []
+      fetchSpy.mockImplementation(async (input, init) => {
+        const url = requestURL(input as RequestInfo | URL)
+        if (init?.method === 'DELETE') {
+          deletes.push({ url, headers: (init.headers ?? {}) as Record<string, string> })
+          const status = options.deleteStatus ?? 204
+          if (status === 204) {
+            sse.emit('error', { error: 'chat turn interrupted: context canceled' })
+            sse.close()
+            return new Response(null, { status })
+          }
+          return new Response(JSON.stringify(options.deleteBody ?? {}), { status })
+        }
+        if (url.endsWith('/chat') && init?.method === 'POST') {
+          posts.push(JSON.parse(init.body as string))
+          return sse.response
+        }
+        throw new Error(`unexpected request ${url}`)
+      })
+      return { sse, deletes, posts }
+    }
+
+    it('Stop cancels the server turn with DELETE and starts the next message in a new session', async () => {
+      const { sse, deletes } = mockTurn()
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      let turn: Promise<void> = Promise.resolve()
+      act(() => {
+        turn = result.current('Hi there')
+      })
+      sse.emit('status', { sessionId: 'sess-1', provider: 'openai', model: 'gpt-4o' })
+      await waitFor(() => expect(useChatStore.getState().currentSessionId).toBe('sess-1'))
+
+      act(() => {
+        useChatStore.getState().requestStop()
+      })
+      await act(async () => {
+        await turn
+      })
+
+      expect(deletes).toHaveLength(1)
+      expect(deletes[0].url).toBe('/api/v1/chat/sess-1?namespace=default')
+      expect(deletes[0].headers.Authorization).toBe('Bearer test-token')
+      const state = useChatStore.getState()
+      // The interruption error is replaced by the stop outcome.
+      expect(state.messages.filter((m) => m.role === 'error')).toEqual([])
+      expect(state.messages[state.messages.length - 1]).toMatchObject({
+        role: 'status',
+        content: expect.stringContaining('Stopped'),
+      })
+      expect(state.currentSessionId).toBeNull()
+      expect(state.isStreaming).toBe(false)
+      expect(state.stopRequested).toBe(false)
+    })
+
+    it('Stop before the session ID is known cancels as soon as the status event arrives', async () => {
+      const { sse, deletes } = mockTurn()
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      let turn: Promise<void> = Promise.resolve()
+      act(() => {
+        turn = result.current('Hi there')
+      })
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+      act(() => {
+        useChatStore.getState().requestStop()
+      })
+      expect(deletes).toHaveLength(0)
+      sse.emit('status', { sessionId: 'sess-late', provider: 'openai', model: 'gpt-4o' })
+      await act(async () => {
+        await turn
+      })
+      expect(deletes.map((d) => d.url)).toEqual(['/api/v1/chat/sess-late?namespace=default'])
+      expect(useChatStore.getState().currentSessionId).toBeNull()
+    })
+
+    it('a continuing chat cancels with its known session ID right away', async () => {
+      useChatStore.setState({ currentSessionId: 'sess-known' })
+      const { deletes, posts } = mockTurn()
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      let turn: Promise<void> = Promise.resolve()
+      act(() => {
+        turn = result.current('Follow-up')
+      })
+      await waitFor(() => expect(posts).toHaveLength(1))
+      act(() => {
+        useChatStore.getState().requestStop()
+      })
+      await act(async () => {
+        await turn
+      })
+      expect(deletes.map((d) => d.url)).toEqual(['/api/v1/chat/sess-known?namespace=default'])
+    })
+
+    it('New Chat during a turn cancels it server-side, not just the fetch', async () => {
+      const { sse, deletes } = mockTurn()
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      let turn: Promise<void> = Promise.resolve()
+      act(() => {
+        turn = result.current('Hi there')
+      })
+      sse.emit('status', { sessionId: 'sess-new-chat', provider: 'openai', model: 'gpt-4o' })
+      await waitFor(() => expect(useChatStore.getState().currentSessionId).toBe('sess-new-chat'))
+      act(() => {
+        useChatStore.getState().newSession()
+      })
+      await act(async () => {
+        await turn
+      })
+      expect(deletes.map((d) => d.url)).toEqual(['/api/v1/chat/sess-new-chat?namespace=default'])
+      expect(useChatStore.getState().messages).toEqual([])
+      expect(useChatStore.getState().isStreaming).toBe(false)
+    })
+
+    it('reports a failed cancel of a turn New Chat orphaned and offers a retry', async () => {
+      vi.mocked(toast.error).mockClear()
+      const { sse, deletes } = mockTurn({ deleteStatus: 403, deleteBody: { error: { code: 403, message: 'not authorized' } } })
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      act(() => {
+        void result.current('Hi there')
+      })
+      sse.emit('status', { sessionId: 'sess-orphan', provider: 'openai', model: 'gpt-4o' })
+      await waitFor(() => expect(useChatStore.getState().currentSessionId).toBe('sess-orphan'))
+      act(() => {
+        useChatStore.getState().newSession()
+      })
+
+      // The discarded transcript cannot show it, so the failure is a toast.
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+        'Could not stop the previous reply: not authorized',
+        expect.objectContaining({ action: expect.objectContaining({ label: 'Retry' }) }),
+      ))
+      expect(useChatStore.getState().messages).toEqual([])
+      const retry = vi.mocked(toast.error).mock.calls[0][1] as { action: { onClick: () => void } }
+      act(() => retry.action.onClick())
+      await waitFor(() => expect(deletes).toHaveLength(2))
+      expect(deletes[1].url).toBe('/api/v1/chat/sess-orphan?namespace=default')
+      sse.close()
+    })
+
+    it('a turn orphaned before its status event keeps reading until it can cancel, in its own namespace', async () => {
+      const { sse, deletes } = mockTurn()
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      let turn: Promise<void> = Promise.resolve()
+      act(() => {
+        turn = result.current('Hi there')
+      })
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+      act(() => {
+        useChatStore.getState().selectNamespace('team')
+      })
+      sse.emit('status', { sessionId: 'sess-orphan', provider: 'openai', model: 'gpt-4o' })
+      sse.emit('message', { content: 'stale answer' })
+      await act(async () => {
+        await turn
+      })
+      expect(deletes.map((d) => d.url)).toEqual(['/api/v1/chat/sess-orphan?namespace=default'])
+      // Nothing from the orphaned turn reaches the new namespace's transcript.
+      expect(useChatStore.getState().messages).toEqual([])
+      expect(useChatStore.getState().currentSessionId).toBeNull()
+    })
+
+    it('does not cancel a turn that already finished', async () => {
+      const { sse, deletes } = mockTurn()
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      let turn: Promise<void> = Promise.resolve()
+      act(() => {
+        turn = result.current('Hi there')
+      })
+      sse.emit('status', { sessionId: 'sess-done', provider: 'openai', model: 'gpt-4o' })
+      sse.emit('message', { content: 'answer' })
+      sse.emit('done', { usage: {} })
+      sse.close()
+      await act(async () => {
+        await turn
+      })
+      act(() => {
+        useChatStore.getState().newSession()
+      })
+      expect(deletes).toHaveLength(0)
+    })
+
+    it('reports a failed Stop and re-arms it while the turn keeps running', async () => {
+      const { sse, deletes } = mockTurn({ deleteStatus: 403, deleteBody: { error: { code: 403, message: 'not authorized' } } })
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      let turn: Promise<void> = Promise.resolve()
+      act(() => {
+        turn = result.current('Hi there')
+      })
+      sse.emit('status', { sessionId: 'sess-viewer', provider: 'openai', model: 'gpt-4o' })
+      await waitFor(() => expect(useChatStore.getState().currentSessionId).toBe('sess-viewer'))
+      act(() => {
+        useChatStore.getState().requestStop()
+      })
+      await waitFor(() =>
+        expect(useChatStore.getState().messages.some((m) => m.content === 'Could not stop the turn: not authorized')).toBe(true),
+      )
+      expect(useChatStore.getState().stopRequested).toBe(false)
+      expect(useChatStore.getState().isStreaming).toBe(true)
+      sse.emit('message', { content: 'finished anyway' })
+      sse.emit('done', { usage: {} })
+      sse.close()
+      await act(async () => {
+        await turn
+      })
+      expect(deletes).toHaveLength(1)
+      expect(useChatStore.getState().currentSessionId).toBe('sess-viewer')
+      expect(useChatStore.getState().isStreaming).toBe(false)
+    })
+  })
+
+  it('ignores a second send while a turn is in flight (double Enter)', async () => {
+    const { response, emit, close } = controlledSSE()
+    let posts = 0
+    fetchSpy.mockImplementation(async (input, init) => {
+      if (requestURL(input as RequestInfo | URL).endsWith('/chat') && init?.method === 'POST') {
+        posts += 1
+        if (posts > 1) {
+          return new Response(JSON.stringify({ error: { code: 409, message: 'chat session is busy' } }), { status: 409 })
+        }
+        return response
+      }
+      throw new Error('unexpected request')
+    })
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    let first: Promise<void> = Promise.resolve()
+    let second: Promise<void> = Promise.resolve()
+    act(() => {
+      first = result.current('Hi')
+      second = result.current('Hi')
+    })
+    await act(async () => {
+      await second
+    })
+    expect(useChatStore.getState().isStreaming).toBe(true)
+    expect(useChatStore.getState().messages.filter((m) => m.role === 'user')).toHaveLength(1)
+    emit('done', { usage: {} })
+    close()
+    await act(async () => {
+      await first
+    })
+    expect(posts).toBe(1)
+    expect(useChatStore.getState().messages.some((m) => m.role === 'error')).toBe(false)
+    expect(useChatStore.getState().isStreaming).toBe(false)
   })
 })

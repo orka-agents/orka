@@ -16,9 +16,11 @@ export function rememberLoginReturn(path: string) {
 
 /**
  * Where to go after signing in: the remembered dashboard path with the
- * fragment the address bar still holds, or the dashboard home.
+ * fragment the address bar still holds (the router's `location.hash`, without
+ * the `#`), or the dashboard home. The router's fragment is used rather than
+ * `window.location.hash`, which holds the route itself under hash routing.
  */
-export function takeLoginReturn(): string {
+export function takeLoginReturn(fragment = ''): string {
   let path: string | null = null
   try {
     path = sessionStorage.getItem(loginReturnKey)
@@ -29,5 +31,34 @@ export function takeLoginReturn(): string {
   if (!path || !path.startsWith('/') || path.startsWith('//') || path.startsWith('/\\') || path.startsWith('/login')) {
     return '/'
   }
-  return path + window.location.hash
+  return fragment ? `${path}#${fragment}` : path
+}
+
+const hashTokenPrefix = '#token='
+let pendingHashToken: string | null = null
+
+/**
+ * Takes a `#token=...` sign-in fragment (from `orka dashboard` or a deep link)
+ * out of the address bar and holds it in memory. Runs once at app start,
+ * before the router reads the URL, so the root redirect and the login page
+ * never race over the fragment and the token never lands in history.
+ */
+export function captureHashToken() {
+  const { hash, pathname, search } = window.location
+  if (!hash.startsWith(hashTokenPrefix)) return
+  window.history.replaceState(window.history.state, '', pathname + search)
+  const token = hash.slice(hashTokenPrefix.length)
+  if (token) pendingHashToken = token
+}
+
+/** Whether a captured sign-in token is still waiting for the login page. */
+export function hasPendingHashToken(): boolean {
+  return pendingHashToken !== null
+}
+
+/** Hands the captured sign-in token to the login page, once. */
+export function takeHashToken(): string | null {
+  const token = pendingHashToken
+  pendingHashToken = null
+  return token
 }

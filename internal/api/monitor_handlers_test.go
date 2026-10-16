@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -167,6 +169,56 @@ func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 	resp, err = app.Test(duplicateRunReq)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
+}
+
+func TestCreateRepositoryMonitorRun_RejectsMonitorInConfigurationError(t *testing.T) {
+	for _, tt := range []struct {
+		name               string
+		phase              string
+		reason             string
+		observedGeneration int64
+		want               string
+	}{
+		{name: "reviewer agent not found", phase: "Error", reason: "ReviewerAgentNotFound", observedGeneration: 2, want: `repository monitor is not ready (ReviewerAgentNotFound): spec.agents.reviewer "gone" not found`},
+		{name: "store unavailable", phase: "Error", reason: "StoreUnavailable", observedGeneration: 2, want: "repository monitor is not ready (StoreUnavailable)"},
+		{name: "failed run can be retried", phase: "Error", reason: "RunFailed", observedGeneration: 2},
+		{name: "invalid schedule still runs manually", phase: "Error", reason: "InvalidSchedule", observedGeneration: 2},
+		{name: "error from an older generation", phase: "Error", reason: "ReviewerAgentNotFound", observedGeneration: 1},
+		{name: "ready monitor", phase: "Ready", reason: "RunSucceeded", observedGeneration: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status := metav1.ConditionFalse
+			if tt.phase == "Ready" {
+				status = metav1.ConditionTrue
+			}
+			monitor := &corev1alpha1.RepositoryMonitor{
+				ObjectMeta: metav1.ObjectMeta{Name: "repo-monitor", Namespace: "demo", Generation: 2},
+				Spec:       corev1alpha1.RepositoryMonitorSpec{RepoURL: monitorTestRepoURL, Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "gone"}}},
+				Status: corev1alpha1.RepositoryMonitorStatus{
+					Phase: tt.phase,
+					Conditions: []metav1.Condition{{
+						Type: "Ready", Status: status, Reason: tt.reason, ObservedGeneration: tt.observedGeneration,
+						Message: `spec.agents.reviewer "gone" not found in namespace "demo"`, LastTransitionTime: metav1.Now(),
+					}},
+				},
+			}
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, monitor)
+			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/runs?namespace=demo", nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			body := readRespBody(t, resp)
+			runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", Limit: 10})
+			require.NoError(t, err)
+			if tt.want == "" {
+				require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+				require.Len(t, runs, 1)
+				return
+			}
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
+			require.Contains(t, body, tt.want)
+			require.Empty(t, runs, "a run the controller will not process must not be queued")
+		})
+	}
 }
 
 func TestRepositoryMonitorHandlers_ListSubresourcesAcceptContinueToken(t *testing.T) {
@@ -396,6 +448,57 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedPublishConfig(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 			require.Contains(t, readRespBody(t, resp), tt.want)
 		})
+	}
+}
+
+func TestRepositoryMonitorMutationsRejectInvalidValues(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		field string
+		want  string
+	}{
+		{name: "negative stale review TTL", field: `"review":{"staleReviewTTL":"-1h"}`, want: "spec.review.staleReviewTTL must not be negative"},
+		{name: "not a cron expression", field: `"schedule":"every day"`, want: "spec.schedule is invalid"},
+		{name: "minute out of range", field: `"schedule":"61 * * * *"`, want: "spec.schedule is invalid"},
+		{name: "unknown time zone", field: `"schedule":"0 * * * *","timeZone":"Mars/Olympus"`, want: "spec.schedule is invalid"},
+		{name: "zero every interval", field: `"schedule":"@every 0s"`, want: "@every interval must be at least 1 minute"},
+		{name: "negative every interval", field: `"schedule":"@every -5m"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval", field: `"schedule":"@every 30s"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval in a time zone", field: `"schedule":"@every 1s","timeZone":"America/Los_Angeles"`, want: "@every interval must be at least 1 minute"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			existing := &corev1alpha1.RepositoryMonitor{
+				ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "demo"},
+				Spec:       corev1alpha1.RepositoryMonitorSpec{RepoURL: monitorTestRepoURL},
+			}
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, existing)
+			spec := fmt.Sprintf(`{"repoURL":%q,"agents":{"reviewer":{"name":"reviewer"}},%s}`, monitorTestRepoURL, tt.field)
+			for _, req := range []struct{ method, path, body string }{
+				{http.MethodPost, "/monitors/repositories", `{"name":"repo-monitor","namespace":"demo","spec":` + spec + `}`},
+				{http.MethodPut, "/monitors/repositories/existing?namespace=demo", `{"spec":` + spec + `}`},
+			} {
+				httpReq := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(httpReq)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, req.method)
+				require.Contains(t, readRespBody(t, resp), tt.want)
+			}
+			err := handlers.client.Get(context.Background(), crclient.ObjectKey{Namespace: "demo", Name: "repo-monitor"}, &corev1alpha1.RepositoryMonitor{})
+			require.True(t, apierrors.IsNotFound(err), "an invalid spec must not create a RepositoryMonitor")
+		})
+	}
+}
+
+func TestCreateRepositoryMonitor_AcceptsStandardSchedules(t *testing.T) {
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	for i, schedule := range []string{"*/15 * * * *", "@hourly", "@every 5m"} {
+		body := fmt.Sprintf(`{"name":"monitor-%d","namespace":"demo","spec":{"repoURL":%q,"schedule":%q,"timeZone":"America/Los_Angeles","agents":{"reviewer":{"name":"reviewer"}}}}`, i, monitorTestRepoURL, schedule)
+		req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, readRespBody(t, resp))
 	}
 }
 

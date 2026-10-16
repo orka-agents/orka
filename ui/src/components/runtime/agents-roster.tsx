@@ -43,8 +43,11 @@ export function AgentsRoster({ tasks, activeTaskName, latestActivity }: AgentsRo
         ) : (
           groups.map((group) => (
             <div key={group.agent} className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-xs font-medium">
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <span
+                  className="min-w-0 truncate whitespace-nowrap font-mono text-xs font-medium"
+                  title={group.agent === UNASSIGNED_AGENT ? undefined : group.agent}
+                >
                   {group.agent === UNASSIGNED_AGENT ? 'Unassigned' : group.agent}
                 </span>
                 <Badge variant="secondary">{group.tasks.length}</Badge>
@@ -60,7 +63,7 @@ export function AgentsRoster({ tasks, activeTaskName, latestActivity }: AgentsRo
                         task.metadata.name === activeTaskName && 'border-l-live bg-accent/50',
                       )}
                     >
-                      <span className="truncate font-mono text-xs">{task.metadata.name}</span>
+                      <span className="truncate font-mono text-xs" title={task.metadata.name}>{task.metadata.name}</span>
                       <StatusDot phase={task.status?.phase} hideLabel />
                     </Link>
                   </li>

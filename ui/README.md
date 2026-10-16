@@ -51,7 +51,9 @@ UI.
 | Command | What it does |
 | --- | --- |
 | `bun run dev` | Vite dev server on `:5173`, proxying the API to `:8080` |
+| `bun run dev:demo` | Vite dev server for the demo build: sample data, no controller needed |
 | `bun run build` | Type-checks with `tsc -b`, then builds into `dist/` |
+| `bun run build:demo` | Builds the static demo site into `dist-demo/` |
 | `bun run lint` | ESLint |
 | `bun run test` | Vitest, one pass |
 | `bun run test:watch` | Vitest in watch mode |
@@ -81,6 +83,7 @@ src/
   stores/       # Zustand stores for client-only state (auth, chat drafts, UI prefs)
   lib/          # API client, list pagination, time formatting, and other helpers
   test/         # Vitest setup, MSW handlers, and shared fixtures
+  demo/         # Sample-data API for the demo build (not in the production bundle)
 ```
 
 Tests live next to what they test: `use-tasks.ts` and `use-tasks.test.tsx` in the same
@@ -92,6 +95,20 @@ directory. API calls in tests are intercepted by [MSW](https://mswjs.io) handler
 > the files in `src/routes/`. Add a route by adding a file; the tree regenerates on the next
 > dev server start or build.
 
+## The demo build
+
+`bun run build:demo` builds a static copy of the dashboard that needs no controller: the
+`demo` Vite mode answers every `/api/v1` request in the browser from sample data in
+`src/demo/` (a fictional company, Northwind Labs), starts the visitor signed in, and keeps
+the route in the URL fragment so any static host can serve it. Chat replies are scripted,
+and tasks created in the demo run through a simulated lifecycle. Nothing persists past a
+reload. The mode check is static, so `bun run build` contains none of it.
+
+`.github/workflows/website.yml` publishes the demo to GitHub Pages under `/demo/`, next to
+the documentation site, whenever `ui/` or `website/` changes on `main`. When an API response changes shape, update the matching
+fixtures in `src/demo/`; the tests under `src/demo/handlers/` parse them with the real
+schemas.
+
 ## Adding a page
 
 1. Create the route file under `src/routes/` — `src/routes/widgets/index.tsx` becomes
@@ -100,3 +117,4 @@ directory. API calls in tests are intercepted by [MSW](https://mswjs.io) handler
    `src/hooks/` that parses through it.
 3. Add the nav entry in `src/components/layout/`.
 4. Add MSW handlers in `src/test/mocks/` and a test beside the route file.
+5. Add sample data for the demo build in `src/demo/handlers/`.

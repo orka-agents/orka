@@ -302,7 +302,8 @@ func TestAgentDefaultInstructionsPreservesExternalAndLegacy(t *testing.T) {
 		agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external"}}
 		agent.Spec.Model = nil
 		agent.Spec.SystemPrompt.Inline = strings.Repeat("@", harnessv2.MaxAgentSystemPromptBytes+1)
-		r := newAgentSoulWatchReconciler(t, agent)
+		runtime := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: agent.Namespace}}
+		r := newAgentSoulWatchReconciler(t, agent, runtime)
 		require.NoError(t, r.validateAgent(context.Background(), agent), "external-profile policy remains owned by the existing runtimeRef path")
 	})
 }

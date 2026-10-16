@@ -35,6 +35,7 @@ import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors/$monito
 import { Route as GatewaysGatewayIdRouteImport } from './routes/gateways/$gatewayId'
 import { Route as AgentsNewRouteImport } from './routes/agents/new'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
+import { Route as SecurityFindingsIndexRouteImport } from './routes/security/findings/index'
 import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
 import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
 import { Route as GatewaysBindingsBindingIdRouteImport } from './routes/gateways/bindings/$bindingId'
@@ -169,6 +170,11 @@ const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SecurityFindingsIndexRoute = SecurityFindingsIndexRouteImport.update({
+  id: '/security/findings/',
+  path: '/security/findings/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SecurityFindingsFindingIdRoute =
   SecurityFindingsFindingIdRouteImport.update({
     id: '/security/findings/$findingId',
@@ -217,6 +223,7 @@ export interface FileRoutesByFullPath {
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/security/findings/': typeof SecurityFindingsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -248,6 +255,7 @@ export interface FileRoutesByTo {
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/security/findings': typeof SecurityFindingsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -280,6 +288,7 @@ export interface FileRoutesById {
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/security/findings/': typeof SecurityFindingsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -313,6 +322,7 @@ export interface FileRouteTypes {
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
+    | '/security/findings/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -344,6 +354,7 @@ export interface FileRouteTypes {
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
+    | '/security/findings'
   id:
     | '__root__'
     | '/'
@@ -375,6 +386,7 @@ export interface FileRouteTypes {
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
+    | '/security/findings/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -407,6 +419,7 @@ export interface RootRouteChildren {
   GatewaysBindingsBindingIdRoute: typeof GatewaysBindingsBindingIdRoute
   MonitorsCreateNewRoute: typeof MonitorsCreateNewRoute
   SecurityFindingsFindingIdRoute: typeof SecurityFindingsFindingIdRoute
+  SecurityFindingsIndexRoute: typeof SecurityFindingsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -593,6 +606,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsAgentIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/security/findings/': {
+      id: '/security/findings/'
+      path: '/security/findings'
+      fullPath: '/security/findings/'
+      preLoaderRoute: typeof SecurityFindingsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/security/findings/$findingId': {
       id: '/security/findings/$findingId'
       path: '/security/findings/$findingId'
@@ -647,6 +667,7 @@ const rootRouteChildren: RootRouteChildren = {
   GatewaysBindingsBindingIdRoute: GatewaysBindingsBindingIdRoute,
   MonitorsCreateNewRoute: MonitorsCreateNewRoute,
   SecurityFindingsFindingIdRoute: SecurityFindingsFindingIdRoute,
+  SecurityFindingsIndexRoute: SecurityFindingsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

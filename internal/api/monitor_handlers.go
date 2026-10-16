@@ -149,6 +149,13 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if (spec.Review.Publish.Enabled || spec.Repair.Enabled) && repositoryMonitorCredentialRefName(spec.ForgeCredentialRef) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when review publication or repair is enabled")
 	}
+	if _, err := controller.ParseRepositoryMonitorSchedule(&corev1alpha1.RepositoryMonitor{Spec: spec}); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.schedule is invalid: %v", err))
+	}
+	// The CRD schema bounds the integer limits; this duration has no minimum.
+	if ttl := spec.Review.StaleReviewTTL; ttl != nil && ttl.Duration < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.staleReviewTTL must not be negative")
+	}
 	return nil
 }
 
@@ -664,6 +671,9 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository monitor already exists")
 		}
+		if invalid := invalidObjectError("repository monitor", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(monitor)
@@ -785,6 +795,9 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
+		if invalid := invalidObjectError("repository monitor", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository monitor: %v", err))
 	}
 	return c.JSON(updated)
@@ -839,6 +852,11 @@ func (h *Handlers) CreateRepositoryMonitorRun(c fiber.Ctx) error {
 	}
 	if err := validateRepositoryMonitorRunRequest(req); err != nil {
 		return err
+	}
+	// The controller skips queued runs while the monitor reports a
+	// configuration Error, so a new run would stay queued and block the next.
+	if ready := controller.RepositoryMonitorRunsBlockedCondition(monitor); ready != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("repository monitor is not ready (%s): %s; fix the monitor before starting a run", ready.Reason, ready.Message))
 	}
 	if err := h.ensureNoActiveRepositoryMonitorRun(c, namespace, monitor.Name); err != nil {
 		return err

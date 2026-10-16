@@ -30,9 +30,9 @@ Available Commands:
   config        Manage CLI configuration
   connect       Link one of your accounts to a connector provider
   connection    Manage your linked accounts
+  dashboard     Open the Orka dashboard in your browser, signed in
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
-  login         Authenticate with the Orka dashboard
   memory        Manage durable memory
   models        List compatible model IDs
   monitor       Manage repository monitors
@@ -742,6 +742,29 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
+## `orka dashboard`
+
+```text
+Create a ServiceAccount token (or use --token) and open the Orka dashboard in your browser, signed in with it. The token goes only to the browser; other orka commands do not use it. The controller serves the dashboard only when it runs with --dashboard-enabled; every other orka command works without it.
+
+Usage:
+  orka dashboard [flags]
+
+Flags:
+  -h, --help                     help for dashboard
+      --no-open                  Print the dashboard URL without opening a browser
+      --service-account string   ServiceAccount name (default "default")
+      --show-token               Print the dashboard URL with the token in it instead of <redacted>; use only in a trusted terminal
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka gateway`
 
 ```text
@@ -1124,29 +1147,6 @@ Flags:
   -h, --help              help for list
       --limit int         Maximum number of results (default 100)
   -o, --output string     Output format: table, json, yaml (default "table")
-
-Global Flags:
-      --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
-      --txn-token string        Transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
-```
-
-## `orka login`
-
-```text
-Generate a ServiceAccount token and open the Orka dashboard in your browser.
-
-Usage:
-  orka login [flags]
-
-Flags:
-  -h, --help                     help for login
-      --no-open                  Print the login URL without opening a browser
-      --redact-token             Redact the token in printed output while preserving browser login
-      --service-account string   ServiceAccount name (default "default")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

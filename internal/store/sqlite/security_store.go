@@ -584,12 +584,22 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 	model.Content = security.SanitizeThreatModel(model.Content)
 
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
-		return tx.saveThreatModel(ctx, model)
+		return tx.saveThreatModel(ctx, model, nil)
 	})
 }
 
-func (s *Store) saveThreatModel(ctx context.Context, model *store.ThreatModel) error {
+// SaveThreatModelIfVersion saves model like SaveThreatModel, but only while
+// the latest stored version equals expectedVersion. Otherwise it returns
+// store.ErrConflict and leaves the stored model unchanged.
+func (s *Store) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
+	model.Content = security.SanitizeThreatModel(model.Content)
 
+	return s.withSecurityTransaction(ctx, func(tx *Store) error {
+		return tx.saveThreatModel(ctx, model, &expectedVersion)
+	})
+}
+
+func (s *Store) saveThreatModel(ctx context.Context, model *store.ThreatModel, expectedVersion *int64) error {
 	var latestVersion int64
 	err := s.securityDB().QueryRowContext(ctx,
 		`SELECT version FROM security_threat_models WHERE namespace = ? AND repository_scan = ? ORDER BY version DESC LIMIT 1`,
@@ -600,6 +610,9 @@ func (s *Store) saveThreatModel(ctx context.Context, model *store.ThreatModel) e
 		latestVersion = 0
 	case err != nil:
 		return err
+	}
+	if expectedVersion != nil && *expectedVersion != latestVersion {
+		return fmt.Errorf("%w: threat model version is %d, expected %d", store.ErrConflict, latestVersion, *expectedVersion)
 	}
 
 	if model.Version == 0 {

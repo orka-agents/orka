@@ -46,7 +46,7 @@ function CapacityMeter({ label, current = 0, maximum = 0 }: { label: string; cur
         <span className="text-muted-foreground">{label}</span>
         <span className="font-mono">{capacityText(current, maximum)}</span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-label={`${label} capacity`}>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="img" aria-label={`${label} capacity: ${capacityText(current, maximum)}`}>
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
       </div>
     </div>
@@ -281,7 +281,7 @@ function RuntimeAPIError({ error, resource }: { error: unknown; resource: string
   const forbidden = isForbiddenError(error)
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <EmptyState
           icon={forbidden ? ShieldCheck : Activity}
           headline={forbidden

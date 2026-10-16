@@ -64,13 +64,13 @@ function StructuredResultView({ result }: { result: StructuredResult }) {
       {result.summary && (
         <div>
           <h4 className="mb-1 text-sm font-semibold">Summary</h4>
-          <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-sm">{result.summary}</pre>
+          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted p-3 text-sm">{result.summary}</pre>
         </div>
       )}
       {result.feedback && (
         <div>
           <h4 className="mb-1 text-sm font-semibold">Feedback</h4>
-          <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-sm">{result.feedback}</pre>
+          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted p-3 text-sm">{result.feedback}</pre>
         </div>
       )}
       {result.files && result.files.length > 0 && (
@@ -95,8 +95,16 @@ function StructuredResultView({ result }: { result: StructuredResult }) {
   )
 }
 
-export function TaskResultViewer({ taskId }: { taskId: string }) {
-  const { data, isLoading, isFetched, error, refetch } = useTaskResult(taskId)
+interface TaskResultViewerProps {
+  taskId: string
+  /** A terminal task's result loads as soon as the tab opens. */
+  taskPhase?: string
+  taskUid?: string
+}
+
+export function TaskResultViewer({ taskId, taskPhase, taskUid }: TaskResultViewerProps) {
+  const terminal = ['Succeeded', 'Failed', 'Cancelled'].includes(taskPhase ?? '')
+  const { data, isLoading, isFetched, isFetching, error, refetch } = useTaskResult(taskId, terminal, taskUid)
 
   const resultText = data?.result
   const structured = useMemo(() => {
@@ -123,13 +131,15 @@ export function TaskResultViewer({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Result</CardTitle>
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
-            {unavailable ? 'Load Result' : 'Retry'}
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+            {unavailable ? (terminal ? 'Refresh' : 'Load Result') : 'Retry'}
           </Button>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground" data-testid="result-error">
-            {unavailable ? 'No result available for this task yet.' : error.message}
+            {unavailable
+              ? terminal ? 'No result was recorded for this task.' : 'No result available for this task yet.'
+              : error.message}
           </p>
         </CardContent>
       </Card>
@@ -149,14 +159,20 @@ export function TaskResultViewer({ taskId }: { taskId: string }) {
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>Result</CardTitle>
+        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? 'Refreshing…' : 'Refresh'}
+        </Button>
       </CardHeader>
       <CardContent>
         {structured ? (
           <StructuredResultView result={structured} />
         ) : (
-          <pre className="max-h-96 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">
+          // No fixed-height cap: a long result grows with the page instead of
+          // hiding most of itself in a short inner scroller, and long tokens
+          // wrap rather than forcing horizontal scrolling.
+          <pre className="overflow-x-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap break-words">
             {data?.result ?? 'No result available'}
           </pre>
         )}
