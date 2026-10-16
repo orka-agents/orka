@@ -497,12 +497,15 @@ func TestLocalStateDirFollowsTheAgentsVariable(t *testing.T) {
 	t.Chdir(t.TempDir())
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
+	claude, _ := nativesession.For("claude")
 	codex, _ := nativesession.For("codex")
 	opencode, _ := nativesession.For("opencode")
 	for _, test := range []struct {
 		local         nativesession.Local
 		value, expect string
 	}{
+		{claude.Local(), "", filepath.Join(home, ".claude")},
+		{claude.Local(), "relative/claude", filepath.Join(cwd, "relative", "claude")},
 		{codex.Local(), "/custom/codex", "/custom/codex"},
 		{codex.Local(), "", filepath.Join(home, ".codex")},
 		{codex.Local(), "relative/codex", filepath.Join(cwd, "relative", "codex")},
