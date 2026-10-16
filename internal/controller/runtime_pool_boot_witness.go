@@ -150,7 +150,7 @@ func (r *RuntimePoolReconciler) runtimePoolBootRecords(ctx context.Context, pool
 			continue
 		}
 		// An empty reservation cannot have retained a Pod or admitted work.
-		if (e.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectPending) || e.Status.State == "" && e.Status.Version == 0) && e.Status.Response == nil && e.Status.ResponseDigest == "" {
+		if emptyRuntimePoolBootEvidenceReservation(e) {
 			continue
 		}
 		w, err := loadRuntimePoolBootWitness(ctx, r.ControlStore, agentRuntimeRecoveryIdentity(kind, pool.UID, pool.Namespace, e.Spec.OperationID))
@@ -583,4 +583,18 @@ func runtimePoolTaskWitnessMatches(task *corev1alpha1.Task, taskUID types.UID, w
 		return fmt.Errorf("%w: retired RuntimePool Task binding integrity failed", store.ErrConflict)
 	}
 	return nil
+}
+
+// emptyRuntimePoolBootEvidenceReservation reports a RuntimePool boot evidence
+// record that was reserved but never written, as an interrupted controller
+// leaves it between the reservation and its transition.
+func emptyRuntimePoolBootEvidenceReservation(effect *corev1alpha1.ExternalEffect) bool {
+	switch effect.Spec.Kind {
+	case runtimePoolBootPreparationKind, runtimePoolBootWitnessKind, runtimePoolBootRetirementKind:
+	default:
+		return false
+	}
+	pending := effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectPending) ||
+		effect.Status.State == "" && effect.Status.Version == 0
+	return pending && effect.Status.Response == nil && effect.Status.ResponseDigest == ""
 }
