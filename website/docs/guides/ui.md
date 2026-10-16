@@ -64,7 +64,7 @@ Production:
 |------|-------|-------------|
 | Dashboard | `/` | Overview with task/session/agent/tool counts and recent tasks |
 | Tasks | `/tasks` | Create, monitor, and manage tasks with log streaming |
-| Task Detail | `/tasks/:taskId` | Task metadata, spec, status, result viewer, logs, execution timeline, trace, and approvals; fork provenance when forked |
+| Task Detail | `/tasks/:taskId` | Overview (current activity, progress, delivery, tokens, derived checks, child tasks), Activity (trace and raw events), Approvals, Result and artifacts, Logs, Spec (the Task resource), and Plan for autonomous runs |
 | Create Task | `/tasks/new` | Form with type selector (container/AI/agent) and conditional fields |
 | Board / Kanban | `/kanban` | Kanban board for task status and work-in-progress tracking |
 | Security | `/security` | Repository scan inventory with scan status, finding counts, and manual scan actions |
@@ -88,21 +88,22 @@ Task and session detail pages surface the evented execution backbone (see the
 [Execution Events reference](../reference/execution-events.md) for the underlying
 APIs):
 
-- **Timeline tab** — the semantic execution event stream for a task, loaded from
-  `GET /tasks/:id/events` and followed live over `GET /tasks/:id/stream`. Events
-  are deduplicated by sequence, grouped by category, and filterable by category,
-  severity, and free-text search. Redacted/truncated payloads are marked and the
-  raw (already-redacted) payload is available behind a disclosure toggle and a
-  copy-JSON action. Live follow stops on the terminal `stream_complete` frame.
-- **Trace tab** — an explainable, grouped view from `GET /tasks/:id/trace`:
-  lifecycle summary, model requests, tool calls, child tasks (linkable), workspace,
-  artifacts, approvals, fork provenance, and errors/warnings, with a raw-timeline
-  fallback when no structured groups exist.
+- **Activity tab, Trace view** (the default) — an explainable, grouped view from
+  `GET /tasks/:id/trace`: lifecycle summary, model requests, tool calls, child
+  tasks (linkable), workspace, artifacts, approvals, fork provenance, and
+  errors/warnings, with a raw-timeline fallback when no structured groups exist.
+- **Activity tab, Raw events view** — the semantic execution event stream for a
+  task, loaded from `GET /tasks/:id/events` and followed live over
+  `GET /tasks/:id/stream`. Events are deduplicated by sequence, grouped by
+  category, and filterable by category, severity, and free-text search.
+  Redacted/truncated payloads are marked and the raw (already-redacted) payload is
+  available behind a disclosure toggle and a copy-JSON action. Live follow stops on
+  the terminal `stream_complete` frame.
 - **Approvals tab** — pending high-risk approvals from `GET /tasks/:id/approvals`
   with approve/decline actions (optional reason) posted to
   `POST /tasks/:id/approvals/:approvalID/decision`. Buttons disable while a
   decision is in flight; conflicts (decided elsewhere/expired) surface inline.
-- **Fork from a checkpoint** — each timeline row offers "Fork from here", which
+- **Fork from a checkpoint** — each raw event row offers "Fork from here", which
   opens a dialog seeded with that event's sequence and posts to
   `POST /tasks/:id/fork`. Forked tasks show a provenance card derived from their
   `orka.ai/fork-source-task` and `orka.ai/fork-source-seq` annotations.
