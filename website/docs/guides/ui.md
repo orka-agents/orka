@@ -5,12 +5,6 @@ description: "The dashboard built into the controller: what each page shows and 
 
 # Web dashboard
 
-:::tip[Try it in your browser]
-The [dashboard demo](https://orka-agents.github.io/orka/demo/) runs this dashboard on sample
-data for a fictional company. Chat replies are scripted and new Tasks run a simulated
-lifecycle; nothing reaches a cluster or a model.
-:::
-
 Orka includes a web dashboard built into the controller. There is nothing extra to
 deploy, but it is off by default: the API and the `orka` CLI work without it, and
 a signed-in browser keeps its token in localStorage on the same origin as every API,
@@ -35,6 +29,11 @@ kubectl -n orka-system set env deployment/orka-controller-manager ORKA_DASHBOARD
 While it is off, paths outside the APIs answer with a JSON 404, `orka dashboard` stops
 with an error, and connector consent finishes with `orka connection complete` (see
 [Connectors](connectors.md#3-link-an-account)).
+
+:::tip Try it without a cluster
+The [dashboard demo](pathname:///demo/) runs in your browser on sample data, with a
+guided tour of the main pages. Nothing in it reaches a cluster or a model.
+:::
 
 ## Open it
 
@@ -61,9 +60,8 @@ CLI, `orka dashboard` opens the dashboard already signed in.
 | Monitors | `/monitors` | Repository monitors: runs, pull request and issue queues, workflow timeline, blocked reasons, implementation jobs, and GitHub mutation audit. See [Repository monitors](repository-monitors.md) |
 | Security | `/security` | Repository scans, threat models, findings, validation, patch proposals, and remediation pull requests. See [Security scanning](repository-security-scanning.md) |
 | Tasks | `/tasks` | Create, monitor, and manage Tasks, with log streaming |
-| Task detail | `/tasks/:taskId` | Spec, status, result, logs, execution timeline, trace, and approvals; fork provenance when forked |
+| Task detail | `/tasks/:taskId` | Overview (current activity, progress, delivery, tokens, derived checks, child tasks), Activity (trace and raw events), Approvals, Result and artifacts, Logs, Spec (the Task resource), and Plan for autonomous runs |
 | Board | `/kanban` | Tasks as a Kanban board by status |
-| Live | `/live` | A live grid of running agents |
 | Gateways | `/gateways` | Gateway readiness, bindings, per-Session queues, event timelines, and delivery attempts. See [Gateways](gateways.md) |
 | Sessions | `/sessions` | Sessions with message counts and token use; each one's transcript and timeline across its Tasks |
 | Runtimes | `/runtimes` | RuntimePool capacity and admission, and external AgentRuntime registrations |
@@ -78,21 +76,22 @@ Task and session detail pages surface the evented execution backbone (see the
 [Execution Events reference](../reference/execution-events.md) for the underlying
 APIs):
 
-- **Timeline tab** — the semantic execution event stream for a task, loaded from
-  `GET /tasks/:id/events` and followed live over `GET /tasks/:id/stream`. Events
-  are deduplicated by sequence, grouped by category, and filterable by category,
-  severity, and free-text search. Redacted/truncated payloads are marked and the
-  raw (already-redacted) payload is available behind a disclosure toggle and a
-  copy-JSON action. Live follow stops on the terminal `stream_complete` frame.
-- **Trace tab** — an explainable, grouped view from `GET /tasks/:id/trace`:
-  lifecycle summary, model requests, tool calls, child tasks (linkable), workspace,
-  artifacts, approvals, fork provenance, and errors/warnings, with a raw-timeline
-  fallback when no structured groups exist.
+- **Activity tab, Trace view** (the default) — an explainable, grouped view from
+  `GET /tasks/:id/trace`: lifecycle summary, model requests, tool calls, child
+  tasks (linkable), workspace, artifacts, approvals, fork provenance, and
+  errors/warnings, with a raw-timeline fallback when no structured groups exist.
+- **Activity tab, Raw events view** — the semantic execution event stream for a
+  task, loaded from `GET /tasks/:id/events` and followed live over
+  `GET /tasks/:id/stream`. Events are deduplicated by sequence, grouped by
+  category, and filterable by category, severity, and free-text search.
+  Redacted/truncated payloads are marked and the raw (already-redacted) payload is
+  available behind a disclosure toggle and a copy-JSON action. Live follow stops on
+  the terminal `stream_complete` frame.
 - **Approvals tab** — pending high-risk approvals from `GET /tasks/:id/approvals`
   with approve/decline actions (optional reason) posted to
   `POST /tasks/:id/approvals/:approvalID/decision`. Buttons disable while a
   decision is in flight; conflicts (decided elsewhere/expired) surface inline.
-- **Fork from a checkpoint** — each timeline row offers "Fork from here", which
+- **Fork from a checkpoint** — each raw event row offers "Fork from here", which
   opens a dialog seeded with that event's sequence and posts to
   `POST /tasks/:id/fork`. Forked tasks show a provenance card derived from their
   `orka.ai/fork-source-task` and `orka.ai/fork-source-seq` annotations.

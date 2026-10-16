@@ -51,7 +51,7 @@ const specs: Record<AgentKey, AgentSpec> = {
       allowedAgents: [{ name: AGENTS.docs.name }, { name: AGENTS.triage.name }, { name: AGENTS.reviewer.name }, { name: AGENTS.fixer.name }],
       maxConcurrentChildren: 3,
       maxDepth: 2,
-      autonomous: false,
+      autonomous: true,
       maxIterations: 25,
       approvalRequiredTools: ['slack_post'],
     },
@@ -66,8 +66,8 @@ const specs: Record<AgentKey, AgentSpec> = {
       allowedAgents: [{ name: AGENTS.fixer.name }],
       maxConcurrentChildren: 1,
       maxDepth: 1,
-      autonomous: false,
-      approvalRequiredTools: ['pagerduty_incident'],
+      autonomous: true,
+      maxIterations: 5,
     },
   },
   fixer: {
@@ -127,7 +127,7 @@ function agentStatus(key: AgentKey): NonNullable<Agent['status']> {
 
 export function demoAgent(name: string, spec: AgentSpec, createdAt: string, status?: Agent['status']): Agent {
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'Agent',
     metadata: {
       name,
@@ -139,6 +139,15 @@ export function demoAgent(name: string, spec: AgentSpec, createdAt: string, stat
     spec,
     status,
   }
+}
+
+/**
+ * An autonomous coordinator: the controller re-runs its Task until the plan
+ * marks the goal complete, so its stories must end that way.
+ */
+export function isAutonomousAgent(key: AgentKey): boolean {
+  const coordination = specs[key].coordination
+  return Boolean(coordination?.enabled && coordination.autonomous)
 }
 
 /** The seeded agents, one per world.AGENTS entry. */

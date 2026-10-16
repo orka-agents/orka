@@ -70,7 +70,7 @@ const config = {
             position: 'left',
           },
           {
-            href: 'https://orka-agents.github.io/orka/demo/',
+            to: 'pathname:///demo/',
             label: 'Live demo',
             position: 'left',
           },
@@ -110,7 +110,7 @@ const config = {
             items: [
               {
                 label: 'Live dashboard demo',
-                href: 'https://orka-agents.github.io/orka/demo/',
+                to: 'pathname:///demo/',
               },
               {
                 label: 'Demo videos',

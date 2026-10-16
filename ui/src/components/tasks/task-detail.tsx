@@ -3,7 +3,6 @@ import { Link } from '@tanstack/react-router'
 import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AlertTriangle, ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
@@ -13,15 +12,16 @@ import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
-import { TaskExecutionPanel } from './task-execution-panel'
-import { TaskEventTimeline } from './task-event-timeline'
-import { TaskTracePanel } from './task-trace-panel'
 import { TaskApprovalPanel } from './task-approval-panel'
 import { ForkProvenance } from './fork-provenance'
-import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
 import { TaskSchedulePanel } from './task-schedule-panel'
-import { TaskRuntimeView } from '@/components/runtime/task-runtime-view'
+import { TaskOverview } from './task-overview'
+import { TaskActivity } from './task-activity'
+import { TaskArtifactsPanel } from './task-artifacts-panel'
+import { TaskStatusDetails } from './task-status-details'
+import { TaskYaml } from './task-yaml'
+import { ViewSwitch } from './view-switch'
 import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useStickyQueryError } from '@/hooks/use-sticky-query-error'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
@@ -56,6 +56,20 @@ function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
     goalComplete: typeof fields?.goalComplete === 'boolean' ? fields.goalComplete : undefined,
     planDocument: latest.contentText,
   }
+}
+
+const SPEC_VIEWS = [
+  { value: 'summary', label: 'Summary' },
+  { value: 'yaml', label: 'YAML' },
+] as const
+
+// Tabs that were merged into others, so links and bookmarks to them still land.
+const MERGED_TABS: Record<string, string> = {
+  runtime: 'overview',
+  execution: 'overview',
+  children: 'overview',
+  trace: 'activity',
+  timeline: 'activity',
 }
 
 // Titled like the load-error pages: the header is the page's h1 and names
@@ -117,6 +131,7 @@ function TaskAccessError({ message, forbidden = true }: { message: string; forbi
 
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
+  const [specView, setSpecView] = useState<'summary' | 'yaml'>('summary')
   const { data: task, isLoading, error: queryTaskError, errorUpdatedAt } = useTask(taskId, following ? 5000 : false)
   // A failed first load keeps its error page while polling retries it.
   const taskError = useStickyQueryError({ data: task, error: queryTaskError, errorUpdatedAt })
@@ -132,12 +147,12 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     task?.metadata.uid,
     !taskUnavailable,
   )
-  // Fork and the runtime timeline need execution-event storage; a 501 means it's off.
+  // Fork and the Overview's activity need execution-event storage; a 501 means it's off.
   // While retries are pending, failureReason carries the current fetch failure.
   const taskEventsIssue = taskEventsError ?? taskEventsFailureReason
   const taskEventsUnsupported = taskEventsIssue instanceof ApiError && taskEventsIssue.status === 501
   const taskEventsFailed = Boolean(taskEventsIssue) && !taskEventsUnsupported
-  const taskEventsStreamStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
+  const taskEventsStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
   const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
   const plan = task?.plan ?? latestEventPlan(taskEvents)
@@ -151,11 +166,12 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // source of truth and the override can't permanently shadow it.
   const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
   if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
-  const availableTabs = new Set(['runtime', 'overview', 'execution', 'timeline', 'trace', 'approvals', 'result', 'logs'])
+  const availableTabs = new Set(['overview', 'activity', 'approvals', 'result', 'logs', 'spec'])
   if (hasPlanHistory) availableTabs.add('plan')
-  if ((task?.status?.childTasks?.length ?? 0) > 0) availableTabs.add('children')
-  const requestedTab = tabState.override ?? search.tab ?? 'runtime'
-  const activeTab = availableTabs.has(requestedTab) ? requestedTab : 'runtime'
+  const rawTab = tabState.override ?? search.tab ?? 'overview'
+  const requestedTab = MERGED_TABS[rawTab] ?? rawTab
+  const activeTab = availableTabs.has(requestedTab) ? requestedTab : 'overview'
+  const activityView = rawTab === 'timeline' ? 'events' : 'trace'
   const setTab = (tab: string) => {
     setTabState({ override: tab, seen: search.tab })
     navigate({ to: '/tasks/$taskId', params: { taskId }, search: { tab }, replace: true })
@@ -199,28 +215,29 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       deletingRef.current = false
     }
   }
-  // Runtime-tab data: fetched only when that tab is active so other tabs don't
+  // Overview data: fetched only when that tab is active so other tabs don't
   // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
-  const runtimeActive = activeTab === 'runtime' && !taskUnavailable
+  const overviewActive = activeTab === 'overview' && !taskUnavailable
+  const resultActive = activeTab === 'result' && !taskUnavailable
   const taskRunning = task?.status?.phase === 'Running'
   const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
-  const traceRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
+  const traceRefetchInterval = overviewActive && taskRunning && following ? 5000 : false
   const terminalTraceRefetchKey = useRef<string | null>(null)
   const terminalArtifactRefetchKey = useRef<string | null>(null)
   const { data: trace, refetch: refetchTrace } = useTaskTrace(
     taskId,
-    runtimeActive,
+    overviewActive,
     task?.metadata.uid,
     traceRefetchInterval,
   )
   // Poll approvals while live and until execution recovery settles after termination.
   const approvalRefetchInterval = following ? 5000 : undefined
-  // A task parked on an approval also loads approvals off the Runtime tab so
+  // A task parked on an approval also loads approvals off the Overview so
   // the Approvals tab can show how many are pending.
   const waitingForApproval = task !== undefined && !taskUnavailable && isWaitingForApproval(task)
   const { data: approvalsResp } = useTaskApprovals(
     taskId,
-    runtimeActive || waitingForApproval,
+    overviewActive || waitingForApproval,
     approvalRefetchInterval,
     taskRunning,
     taskTerminal,
@@ -228,25 +245,28 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   )
   // Terminal tasks reject decisions, so their leftovers are not "pending".
   const pendingApprovals = taskTerminal ? 0 : (approvalsResp?.approvals ?? []).filter((a) => a.status === 'pending').length
-  const artifactRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
+  const artifactRefetchInterval = overviewActive && taskRunning && following ? 5000 : false
+  const resultArtifactRefetchInterval = resultActive && taskRunning && following ? 5000 : false
   const { data: artifactsResp, refetch: refetchArtifacts } = useTaskArtifacts(
     taskId,
-    runtimeActive,
+    overviewActive,
     task?.metadata.uid,
     artifactRefetchInterval,
   )
+  // Polling stops when the task finishes, so fetch once more for what it
+  // published at the end. Artifacts show on both the Overview and Result.
   useEffect(() => {
-    if (!runtimeActive || !taskTerminal || !task?.metadata.uid) return
+    if (!taskTerminal || !task?.metadata.uid) return
     const key = `${task.metadata.uid}/${task.status?.phase ?? ''}`
-    if (terminalTraceRefetchKey.current !== key) {
+    if (overviewActive && terminalTraceRefetchKey.current !== key) {
       terminalTraceRefetchKey.current = key
       refetchTrace()
     }
-    if (terminalArtifactRefetchKey.current !== key) {
+    if ((overviewActive || resultActive) && terminalArtifactRefetchKey.current !== key) {
       terminalArtifactRefetchKey.current = key
       refetchArtifacts()
     }
-  }, [refetchArtifacts, refetchTrace, runtimeActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
+  }, [refetchArtifacts, refetchTrace, overviewActive, resultActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
 
   // On narrow screens the tab bar scrolls sideways; keep the active tab in
   // view when it changes (or first renders) without scrolling the page. The
@@ -375,11 +395,8 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       <Tabs value={activeTab} onValueChange={setTab}>
         <div ref={tabsScrollRef} className="overflow-x-auto pb-1">
         <TabsList>
-          <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="execution">Execution</TabsTrigger>
-          <TabsTrigger value="timeline">Timeline</TabsTrigger>
-          <TabsTrigger value="trace">Trace</TabsTrigger>
+          <TabsTrigger value="activity">Activity</TabsTrigger>
           <TabsTrigger value="approvals">
             Approvals
             {pendingApprovals > 0 && (
@@ -394,32 +411,46 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           </TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
+          <TabsTrigger value="spec">Spec</TabsTrigger>
           {hasPlanHistory && (
             <TabsTrigger value="plan">Plan</TabsTrigger>
-          )}
-          {(task.status?.childTasks?.length ?? 0) > 0 && (
-            <TabsTrigger value="children">Children</TabsTrigger>
           )}
         </TabsList>
         </div>
 
-        <TabsContent value="runtime" className="space-y-4">
-          <TaskRuntimeView
+        <TabsContent value="overview">
+          <TaskOverview
             task={task}
             events={taskEvents}
             trace={trace}
             approvals={approvalsResp?.approvals}
             artifacts={artifactsResp?.artifacts}
+            eventsStatus={taskEventsStatus}
             following={following}
             onToggleFollow={() => setFollowing((f) => !f)}
             forkSupported={forkSupported}
-            streamStatus={taskEventsStreamStatus}
             latestSeq={taskEventsResponse?.latestSeq}
-            artifactRefetchInterval={artifactRefetchInterval}
+            pendingApprovals={pendingApprovals}
+            onReviewApprovals={() => setTab('approvals')}
           />
         </TabsContent>
 
-        <TabsContent value="overview" className="space-y-4">
+        <TabsContent value="activity">
+          {/* Keyed by the view, so a link from ?tab=trace to ?tab=timeline switches it. */}
+          <TaskActivity
+            key={activityView}
+            taskId={taskId}
+            taskUid={task.metadata.uid}
+            taskNamespace={task.metadata.namespace}
+            taskPhase={task.status?.phase}
+            initialView={activityView}
+          />
+        </TabsContent>
+
+        <TabsContent value="spec" className="space-y-4">
+          <ViewSwitch label="Spec view" value={specView} options={SPEC_VIEWS} onChange={setSpecView} />
+          {specView === 'yaml' ? <TaskYaml task={task} /> : (
+          <>
           <ForkProvenance annotations={task.metadata.annotations} />
           <Card>
             <CardHeader>
@@ -476,21 +507,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               )}
             </CardContent>
           </Card>
-
-          {hasPlanHistory && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Plan</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <RunTimeline
-                  task={task}
-                  plan={plan}
-                  events={taskEvents}
-                />
-              </CardContent>
-            </Card>
-          )}
 
           {task.spec.type === 'container' && (
             <Card>
@@ -587,53 +603,14 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </Card>
           )}
 
-          {(task.status?.conditions?.length ?? 0) > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Conditions</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {task.status!.conditions!.map((c, i) => (
-                    <div key={i} className="flex items-center gap-2 text-sm">
-                      <Badge
-                        variant={c.status === 'True' ? 'default' : 'secondary'}
-                      >
-                        {c.type}
-                      </Badge>
-                      <span className="text-muted-foreground">{c.status}</span>
-                      {c.message && (
-                        <span className="text-muted-foreground">
-                          — {c.message}
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
+          <TaskStatusDetails task={task} />
+          </>
           )}
         </TabsContent>
 
-        <TabsContent value="result">
+        <TabsContent value="result" className="space-y-4">
           <TaskResultViewer taskId={taskId} taskPhase={task.status?.phase} taskUid={task.metadata.uid} />
-        </TabsContent>
-
-        <TabsContent value="execution">
-          <TaskExecutionPanel task={task} events={taskEvents} />
-        </TabsContent>
-
-        <TabsContent value="timeline">
-          <TaskEventTimeline
-            key={`${task.metadata.namespace ?? ''}/${taskId}/${task.metadata.uid ?? ''}`}
-            taskId={taskId}
-            taskPhase={task.status?.phase}
-            taskUid={task.metadata.uid}
-          />
-        </TabsContent>
-
-        <TabsContent value="trace">
-          <TaskTracePanel taskId={taskId} taskUid={task.metadata.uid} />
+          <TaskArtifactsPanel taskId={taskId} taskUid={task.metadata.uid} refetchInterval={resultArtifactRefetchInterval} />
         </TabsContent>
 
         <TabsContent value="approvals">
@@ -652,7 +629,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
-                  <RunTimeline task={task} plan={plan} events={taskEvents} />
+                  <RunTimeline task={task} plan={plan} />
                   {plan?.planDocument && (
                     <div>
                       <p className="mb-1 text-xs font-medium text-muted-foreground">
@@ -669,18 +646,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           </TabsContent>
         )}
 
-        {(task.status?.childTasks?.length ?? 0) > 0 && (
-          <TabsContent value="children">
-            <Card>
-              <CardHeader>
-                <CardTitle>Execution Graph</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ExecutionGraph task={task} events={taskEvents} />
-              </CardContent>
-            </Card>
-          </TabsContent>
-        )}
       </Tabs>
     </div>
   )

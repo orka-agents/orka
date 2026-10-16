@@ -18,9 +18,9 @@ scoped Kubernetes tokens instead, and the platform team decides which models, to
 repositories are allowed.
 
 :::tip[See it before you install it]
-The [dashboard demo](https://orka-agents.github.io/orka/demo/) runs the real Orka dashboard
-in your browser on sample data for a fictional company. Nothing is sent to a cluster or a
-model. The [demo videos](demos.md) show the same features on a live cluster.
+The [dashboard demo](pathname:///demo/) runs the real Orka dashboard
+in your browser on sample data for a fictional company, with a guided tour. Nothing is sent
+to a cluster or a model. The [demo videos](demos.md) show the same features on a live cluster.
 :::
 
 :::caution[Experimental]
@@ -139,7 +139,7 @@ and the [Glossary](reference/glossary.md) defines every term.
 | If you want to... | Start here |
 | --- | --- |
 | Try Orka on a laptop | [Install Orka](operations/installation.md), then [Getting started](getting-started.md) |
-| See it working first | [Dashboard demo](https://orka-agents.github.io/orka/demo/) and [Demos](demos.md) |
+| See it working first | [Dashboard demo](pathname:///demo/) and [Demos](demos.md) |
 | Copy a working setup | [Examples on GitHub](https://github.com/orka-agents/orka/tree/main/examples) |
 | Understand how it fits together | [Architecture](concepts/architecture.md) and [Glossary](reference/glossary.md) |
 | Run coding agents with your models | [Provider proxy](operations/provider-proxy.md), then [Agent runtimes](concepts/agent-runtimes.md) |

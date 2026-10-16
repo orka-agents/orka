@@ -305,7 +305,7 @@ The dashboard is built into the controller but off by default. Turn it on with t
 with the [API port forwarded](#connect-to-the-api), open
 [http://localhost:8080](http://localhost:8080) and sign in with your client token.
 
-Want to look around first? The [dashboard demo](https://orka-agents.github.io/orka/demo/)
+Want to look around first? The [dashboard demo](pathname:///demo/)
 runs in your browser on sample data.
 
 ## Use the CLI {#the-cli}

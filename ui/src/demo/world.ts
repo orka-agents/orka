@@ -72,7 +72,7 @@ export interface DemoTaskSeed {
 }
 
 /**
- * The task catalog. Task, usage, kanban, live, monitor, and gateway fixtures
+ * The task catalog. Task, usage, board, monitor, and gateway fixtures
  * all reference these names.
  */
 export const TASKS: DemoTaskSeed[] = [
