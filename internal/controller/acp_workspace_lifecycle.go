@@ -1040,7 +1040,9 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		}
 		return false, err
 	}
-	if !workspace.DeletionTimestamp.IsZero() {
+	// A Deleted desired state is terminal: the workspace is already being
+	// destroyed and no detach action can apply to it.
+	if !workspace.DeletionTimestamp.IsZero() || workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 		return true, nil
 	}
 	// The link label is mutable Task metadata: revalidate that the named

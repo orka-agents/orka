@@ -175,3 +175,59 @@ func TestSettleACPClassWorkspaceKeepsFailedIncarnationWithRetainedData(t *testin
 		})
 	}
 }
+
+func TestSettleACPClassWorkspaceLeavesDeletedDesiredStateAlone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatal(err)
+	}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: acpClassWorkspaceName(task, binding)}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatal(err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
+		t.Fatal("attach failed")
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatal(err)
+	}
+	// Deleting the linked RuntimePool retires the workspace this way; the API
+	// server rejects any later desired state.
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	workspace.Spec.Attachment = nil
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatal(err)
+	}
+	before := workspace.ResourceVersion
+	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
+		t.Fatalf("settlement of a Deleted workspace = (%v, %v)", done, err)
+	}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if workspace.ResourceVersion != before || workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
+		t.Fatal("settlement wrote to a workspace whose Deleted desired state is terminal")
+	}
+}
