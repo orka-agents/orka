@@ -1818,7 +1818,11 @@ func acpWorkspacePoolReadinessFailure(
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		if runtimePoolHasExternalWorkspace(pool) && workspaceHasCoreAdmission(workspace) && workspace.Spec.CoreAdmission.AdmittedGeneration > 0 {
 			condition := workspaceprovider.FindCondition(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted))
-			if (workspaceHasCoreAdmissionEvidence(workspace) && workspace.Spec.CoreAdmission.AdmittedGeneration < workspace.Generation) ||
+			// Core re-admits in two writes: the Admitted condition names the
+			// next generation before the coreAdmission patch lands.
+			readmitting := workspace.Spec.CoreAdmission.AdmittedGeneration < workspace.Generation &&
+				workspaceCoreAdmissionConditionMatches(workspace, workspace.Generation+1)
+			if (workspaceHasCoreAdmissionEvidence(workspace) && workspace.Spec.CoreAdmission.AdmittedGeneration < workspace.Generation) || readmitting ||
 				(condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration == workspace.Generation && workspaceAdmissionRetryable(condition.Reason)) {
 				return errACPWorkspaceRecoveryPending
 			}
