@@ -1,3 +1,4 @@
+import { stringify } from 'yaml'
 import { seedAgents } from '../data/agents'
 import { gatewayBindings } from '../data/gateways'
 import { monitors } from '../data/monitors'
@@ -80,58 +81,6 @@ export function bindingManifest(name: string): Manifest {
   }
 }
 
-// ---- YAML ---------------------------------------------------------------------
-// Enough YAML for these manifests: maps, lists, and scalars. Absent and empty
-// values are left out, and long prose is folded to fit the tour panel when
-// folding reads back as the same text: words separated by single spaces.
-
-const FOLD_WIDTH = 44
-const pad = (indent: number) => ' '.repeat(indent)
-const isMap = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-
-function scalar(value: unknown): string {
-  if (typeof value !== 'string') return String(value)
-  const plain = /^[A-Za-z_/][\w./@:+-]*$/.test(value) && !value.endsWith(':') &&
-    !/^(true|false|yes|no|on|off|null|y|n)$/i.test(value)
-  return plain ? value : JSON.stringify(value)
-}
-
-function folded(text: string, indent: number): string[] {
-  const lines: string[] = []
-  let line = ''
-  for (const word of text.split(' ')) {
-    if (line && line.length + 1 + word.length > FOLD_WIDTH) {
-      lines.push(pad(indent) + line)
-      line = word
-    } else {
-      line = line ? `${line} ${word}` : word
-    }
-  }
-  if (line) lines.push(pad(indent) + line)
-  return lines
-}
-
-function block(value: unknown, indent: number): string[] {
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => {
-      if (!isMap(item)) return [`${pad(indent)}- ${scalar(item)}`]
-      const [first, ...rest] = block(item, indent + 2)
-      return first ? [`${pad(indent)}- ${first.trimStart()}`, ...rest] : []
-    })
-  }
-  if (!isMap(value)) return []
-  return Object.entries(value).flatMap(([key, item]) => {
-    if (item === undefined || item === null) return []
-    if (Array.isArray(item) || isMap(item)) {
-      const children = block(item, indent + 2)
-      return children.length ? [`${pad(indent)}${key}:`, ...children] : []
-    }
-    if (typeof item === 'string' && item.length > FOLD_WIDTH && /^\S+( \S+)+$/.test(item)) {
-      return [`${pad(indent)}${key}: >-`, ...folded(item, indent + 2)]
-    }
-    return [`${pad(indent)}${key}: ${scalar(item)}`]
-  })
-}
-
-export const toYaml = (value: object) => block(value, 0).join('\n')
+// The tour panel fits about 40 characters, so long values fold onto
+// continuation lines. The writer can run a first line past lineWidth, hence 38.
+export const toYaml = (value: object) => stringify(value, { lineWidth: 38 }).trimEnd()
