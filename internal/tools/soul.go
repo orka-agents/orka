@@ -22,7 +22,7 @@ func soulParameterSchema() map[string]any {
 		jsonSchemaTypeField: jsonSchemaTypeObject,
 		jsonSchemaDescriptionField: fmt.Sprintf("Persistent Agent persona, separate from systemPrompt. "+
 			"Supported only for AI worker Agents and built-in codex, claude, copilot, and opencode Agents using orka.harness.v2. "+
-			"External runtimeRef and orka.harness.v1 Agents do not support souls, nor do autonomous Agents (coordination.autonomous). "+
+			"External runtimeRef and orka.harness.v1 Agents do not support souls. "+
 			"Use inline Markdown or an Agent-namespace ConfigMap with its exact SHA-256 digest. "+
 			"Soul content is limited to %d UTF-8 bytes (not characters). "+
 			"Inline maxLength counts Unicode characters only; runtime validation enforces the byte limit. "+

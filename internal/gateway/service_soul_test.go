@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -12,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/store"
@@ -136,4 +138,20 @@ func TestGatewaySoulUnboundJobReadFailureRetriesProjection(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, messages, 2)
 	require.Equal(t, "true", messages[1].Metadata[store.SessionSoulUnboundMetadata])
+}
+
+// A paused Gateway Task is still the deterministic Task the event created, not
+// a name collision.
+func TestGatewayTaskMatchIgnoresControlFields(t *testing.T) {
+	now := time.Now()
+	event := &store.GatewayEvent{ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}
+	binding := &gatewayv1alpha1.GatewayBinding{}
+	expected := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "hello",
+		Timeout: &metav1.Duration{Duration: time.Minute}}}
+	paused := expected.DeepCopy()
+	paused.Spec.Suspend = new(true)
+	require.True(t, gatewayTaskMatchesExpected(paused, expected, event, binding))
+	edited := expected.DeepCopy()
+	edited.Spec.Prompt = "another task"
+	require.False(t, gatewayTaskMatchesExpected(edited, expected, event, binding))
 }

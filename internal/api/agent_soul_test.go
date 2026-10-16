@@ -114,10 +114,6 @@ func TestHandlers_AgentWritesRejectInvalidSoulAndCopilotInstructions(t *testing.
 			ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "soul", Key: "SOUL.md"}}}},
 		{"Copilot soul import", corev1alpha1.AgentSpec{Runtime: copilot, Soul: &corev1alpha1.SoulSource{Inline: "see @notes.md"}}},
 		{"Copilot role import", corev1alpha1.AgentSpec{Runtime: copilot, SystemPrompt: &corev1alpha1.PromptSource{Inline: "see @notes.md"}}},
-		{"soul on an autonomous Agent", corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{Inline: "persona"},
-			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}}},
-		{"soul with disabled autonomy", corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{Inline: "persona"},
-			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()

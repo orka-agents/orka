@@ -1625,10 +1625,6 @@ spec:
             x-kubernetes-validations:
             - message: execution.workspace.classRef is only supported on Task specs
               rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
-            - message: 'soul is not yet supported with coordination.autonomous: soul-bound
-                Tasks cannot be suspended'
-              rule: '!has(self.soul) || !has(self.coordination) || !has(self.coordination.autonomous)
-                || !self.coordination.autonomous'
           status:
             description: AgentStatus defines the observed state of Agent
             properties:

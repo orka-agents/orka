@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"k8s.io/client-go/util/retry"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -62,12 +61,21 @@ func resolveAISoul(ctx context.Context, reader client.Reader, task *corev1alpha1
 	if len(literalKubernetesPrompt(prompt)) > maxContainerDeliveredPromptBytes {
 		return nil, invalidAISoulConfiguration("composed AI soul prompt exceeds the safe environment limit")
 	}
+	inputsDigest, err := agentcontext.TaskInputsDigest(&task.Spec)
+	if err != nil {
+		return nil, err
+	}
 	binding := corev1alpha1.TaskSoulBinding{
 		TaskGeneration: task.Generation, AgentUID: string(agent.UID), AgentGeneration: agent.Generation,
-		SoulDigest: soul.Digest, PromptDigest: agentcontext.Digest(prompt),
+		SoulDigest: soul.Digest, PromptDigest: agentcontext.Digest(prompt), InputsDigest: inputsDigest,
 	}
-	if task.Status.SoulBinding != nil && *task.Status.SoulBinding != binding {
-		return nil, invalidAISoulConfiguration("AI prompt configuration changed after binding; create a new Task")
+	if recorded := task.Status.SoulBinding; recorded != nil {
+		if !agentcontext.SoulBindingMatches(*recorded, binding) {
+			return nil, invalidAISoulConfiguration("AI prompt configuration changed after binding; create a new Task")
+		}
+		// Keep the recorded binding: a control-field edit can advance the
+		// generation without changing what was bound.
+		binding = *recorded
 	}
 	return &resolvedAISoul{Prompt: prompt, UserPrompt: userPrompt, Binding: binding}, nil
 }
@@ -126,7 +134,7 @@ func (r *TaskReconciler) prepareAISoul(ctx context.Context, task *corev1alpha1.T
 			return err
 		}
 		if current.Status.SoulBinding != nil {
-			if *current.Status.SoulBinding != *binding {
+			if !agentcontext.SoulBindingMatches(*current.Status.SoulBinding, *binding) {
 				return invalidAISoulConfiguration("AI soul was bound to a different prompt configuration")
 			}
 			task.Status = current.Status
@@ -221,8 +229,16 @@ func validatePreparedAISoul(task *corev1alpha1.Task, agent *corev1alpha1.Agent, 
 		}
 		return nil
 	}
+	inputsMatch := prepared != nil && prepared.Binding.TaskGeneration == task.Generation
+	if prepared != nil && prepared.Binding.InputsDigest != "" {
+		inputsDigest, err := agentcontext.TaskInputsDigest(&task.Spec)
+		if err != nil {
+			return err
+		}
+		inputsMatch = prepared.Binding.InputsDigest == inputsDigest
+	}
 	if prepared == nil || task.Status.SoulBinding == nil || !reflect.DeepEqual(task.Status.SoulBinding, &prepared.Binding) ||
-		prepared.Binding.TaskGeneration != task.Generation || prepared.Binding.AgentUID != string(agent.UID) ||
+		!inputsMatch || prepared.Binding.AgentUID != string(agent.UID) ||
 		prepared.Binding.AgentGeneration != agent.Generation || prepared.Binding.PromptDigest != agentcontext.Digest(prepared.Prompt) || prepared.UserPrompt != effectiveAISoulTaskPrompt(task) {
 		return invalidAISoulConfiguration("AI Job requires the exact controller-bound soul prompt")
 	}
@@ -238,17 +254,4 @@ func effectiveAISoulTaskPrompt(task *corev1alpha1.Task) string {
 		return task.Spec.AI.Prompt
 	}
 	return task.Spec.Prompt
-}
-
-// refuseSoulBoundAutonomy fails a soul-bound Task instead of iterating or
-// parking it autonomously. Its Agent can become autonomous after binding, and
-// the bound spec, including spec.suspend, cannot change, so the loop could not
-// be paused.
-func (r *TaskReconciler) refuseSoulBoundAutonomy(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
-	if task.Status.SoulBinding == nil {
-		return ctrl.Result{}, false, nil
-	}
-	result, err := r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed,
-		"AI soul configuration: "+agentcontext.ErrSoulAutonomy.Error())
-	return result, true, err
 }

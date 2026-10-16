@@ -1,7 +1,6 @@
 package agentcontext
 
 import (
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -76,33 +75,6 @@ func TestValidateSoulRuntime(t *testing.T) {
 			}
 			if !reflect.DeepEqual(before, tc.agent) {
 				t.Fatal("runtime validation mutated the Agent")
-			}
-		})
-	}
-}
-
-func TestValidateSoulRuntimeRejectsAutonomousAgents(t *testing.T) {
-	soul := &corev1alpha1.SoulSource{Inline: "persona"}
-	builtIn := &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2)}
-	for _, tc := range []struct {
-		name    string
-		spec    corev1alpha1.AgentSpec
-		allowed bool
-	}{
-		{"AI worker soul with coordination", corev1alpha1.AgentSpec{Soul: soul, Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}, true},
-		{"autonomy without soul", corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}}, true},
-		{"AI worker soul with autonomy", corev1alpha1.AgentSpec{Soul: soul, Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}}, false},
-		// The controller iterates on autonomous alone.
-		{"soul with disabled autonomy", corev1alpha1.AgentSpec{Soul: soul, Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true}}, false},
-		{"built-in soul with autonomy", corev1alpha1.AgentSpec{Soul: soul, Runtime: builtIn, Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateSoulRuntime(&corev1alpha1.Agent{Spec: tc.spec})
-			if tc.allowed && err != nil {
-				t.Fatalf("unexpected rejection: %v", err)
-			}
-			if !tc.allowed && !errors.Is(err, ErrSoulAutonomy) {
-				t.Fatalf("soul on an autonomous Agent was not rejected: %v", err)
 			}
 		})
 	}

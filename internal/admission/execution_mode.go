@@ -199,7 +199,7 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 	if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task execution authority: %w", err))
 	}
-	if taskHasExecutionAuthority(oldObject) && !reflect.DeepEqual(oldObject.Spec, object.Spec) {
+	if taskHasExecutionAuthority(oldObject) && !taskSpecUnchangedForAuthority(oldObject, object) {
 		return ctrladmission.Denied("Task spec is immutable after execution authority is recorded")
 	}
 	if taskHasExecutionAuthority(oldObject) && slices.Contains(oldObject.Finalizers, labels.TaskFinalizer) &&
@@ -316,4 +316,14 @@ func admissionReadError(operation string, err error) ctrladmission.Response {
 		return ctrladmission.Denied(operation + ": referenced object does not exist")
 	}
 	return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("%s: %w", operation, err))
+}
+
+// taskSpecUnchangedForAuthority applies the same freeze as the Task CRD rule:
+// an ACP execution binding freezes the whole spec, while a soul-only binding
+// freezes the execution inputs and leaves control fields such as suspend mutable.
+func taskSpecUnchangedForAuthority(oldObject, object *corev1alpha1.Task) bool {
+	if oldObject.Status.AgentExecutionBinding != nil {
+		return reflect.DeepEqual(oldObject.Spec, object.Spec)
+	}
+	return reflect.DeepEqual(oldObject.Spec.ExecutionInputs(), object.Spec.ExecutionInputs())
 }

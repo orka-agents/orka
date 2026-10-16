@@ -15,7 +15,6 @@ import (
 
 // AgentSpec defines the desired state of Agent
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
-// +kubebuilder:validation:XValidation:rule="!has(self.soul) || !has(self.coordination) || !has(self.coordination.autonomous) || !self.coordination.autonomous",message="soul is not yet supported with coordination.autonomous: soul-bound Tasks cannot be suspended"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)

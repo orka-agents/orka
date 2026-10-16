@@ -151,14 +151,40 @@ func Compose(role string, soul *ResolvedSoul) string {
 	return role + "\n\n" + persona
 }
 
-// SessionDigest excludes the per-Task generation so different Tasks can continue
-// the same Agent revision, while a changed role, persona, or Agent requires a new Session.
+// SessionDigest excludes the per-Task generation and inputs so different Tasks
+// can continue the same Agent revision, while a changed role, persona, or Agent
+// requires a new Session.
 func SessionDigest(binding *corev1alpha1.TaskSoulBinding) string {
 	if binding == nil {
 		return ""
 	}
 	identity := *binding
-	identity.TaskGeneration = 0
+	identity.TaskGeneration, identity.InputsDigest = 0, ""
 	encoded, _ := json.Marshal(identity) // A fixed struct containing strings and integers.
 	return Digest(string(encoded))
+}
+
+// TaskInputsDigest identifies a Task's execution inputs: its spec without the
+// control fields a soul binding leaves mutable.
+func TaskInputsDigest(spec *corev1alpha1.TaskSpec) (string, error) {
+	inputs := spec.ExecutionInputs()
+	encoded, err := json.Marshal(&inputs)
+	if err != nil {
+		return "", fmt.Errorf("encode Task execution inputs: %w", err)
+	}
+	return Digest(string(encoded)), nil
+}
+
+// SoulBindingMatches reports whether a recorded binding still describes the
+// current one. TaskGeneration identifies only the first binding: afterwards
+// the inputs digest proves the execution inputs are unchanged, so control-field
+// edits that advance the generation keep the binding. A binding recorded
+// without an inputs digest keeps the exact generation check.
+func SoulBindingMatches(recorded, current corev1alpha1.TaskSoulBinding) bool {
+	if recorded.InputsDigest == "" {
+		current.InputsDigest = ""
+	} else {
+		current.TaskGeneration = recorded.TaskGeneration
+	}
+	return recorded == current
 }

@@ -8,24 +8,10 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 )
 
-// ErrSoulAutonomy rejects a soul on an autonomous Agent. A soul-bound Task's
-// spec is immutable, including spec.suspend, so an autonomous loop could not
-// be paused. The controller iterates on coordination.autonomous alone, so
-// coordination.enabled does not matter.
-var ErrSoulAutonomy = errors.New("agent.spec.soul is not yet supported with spec.coordination.autonomous: " +
-	"soul-bound Tasks cannot be suspended")
-
 // ValidateSoulRuntime permits souls only for AI workers and the four built-in
-// harness v2 runtimes, and not yet for autonomous Agents. Agents without a
-// soul retain their existing behavior.
+// harness v2 runtimes. Agents without a soul retain their existing behavior.
 func ValidateSoulRuntime(agent *corev1alpha1.Agent) error {
-	if agent == nil || agent.Spec.Soul == nil {
-		return nil
-	}
-	if agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous {
-		return ErrSoulAutonomy
-	}
-	if agent.Spec.Runtime == nil {
+	if agent == nil || agent.Spec.Soul == nil || agent.Spec.Runtime == nil {
 		return nil
 	}
 	runtime := agent.Spec.Runtime

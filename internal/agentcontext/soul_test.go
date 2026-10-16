@@ -89,3 +89,62 @@ func TestSessionSoulDigestIgnoresTaskGenerationOnly(t *testing.T) {
 		t.Fatal("Agent revision did not split a Session")
 	}
 }
+
+func TestTaskInputsDigestIgnoresOnlyControlFields(t *testing.T) {
+	spec := corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "iterate"}
+	base, err := TaskInputsDigest(&spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused := spec
+	paused.Suspend = new(true)
+	if got, err := TaskInputsDigest(&paused); err != nil || got != base {
+		t.Fatalf("suspend changed the inputs digest: %v", err)
+	}
+	edited := spec
+	edited.Prompt = "a different task"
+	if got, err := TaskInputsDigest(&edited); err != nil || got == base {
+		t.Fatalf("a prompt edit kept the inputs digest: %v", err)
+	}
+	// An explicitly empty native tool policy is a different input than none.
+	none, empty := spec, spec
+	none.AI = &corev1alpha1.AISpec{}
+	empty.AI = &corev1alpha1.AISpec{Tools: []string{}}
+	noneDigest, err := TaskInputsDigest(&none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := TaskInputsDigest(&empty); err != nil || got == noneDigest {
+		t.Fatalf("an explicitly empty tool policy matched an omitted one: %v", err)
+	}
+}
+
+func TestSoulBindingMatches(t *testing.T) {
+	recorded := corev1alpha1.TaskSoulBinding{TaskGeneration: 1, AgentUID: "agent-uid", AgentGeneration: 1,
+		SoulDigest: Digest("soul"), PromptDigest: Digest("prompt"), InputsDigest: Digest("inputs")}
+	advanced := recorded
+	advanced.TaskGeneration = 2
+	if !SoulBindingMatches(recorded, advanced) {
+		t.Fatal("a control-field generation bump invalidated the binding")
+	}
+	for name, mutate := range map[string]func(*corev1alpha1.TaskSoulBinding){
+		"inputs":           func(b *corev1alpha1.TaskSoulBinding) { b.InputsDigest = Digest("other") },
+		"agent generation": func(b *corev1alpha1.TaskSoulBinding) { b.AgentGeneration = 2 },
+		"prompt":           func(b *corev1alpha1.TaskSoulBinding) { b.PromptDigest = Digest("other") },
+	} {
+		changed := advanced
+		mutate(&changed)
+		if SoulBindingMatches(recorded, changed) {
+			t.Fatalf("a changed %s kept the binding", name)
+		}
+	}
+	legacy := recorded
+	legacy.InputsDigest = ""
+	if !SoulBindingMatches(legacy, recorded) || SoulBindingMatches(legacy, advanced) {
+		t.Fatal("a binding without an inputs digest must keep the exact generation check")
+	}
+	if SessionDigest(&recorded) != SessionDigest(&corev1alpha1.TaskSoulBinding{AgentUID: "agent-uid", AgentGeneration: 1,
+		SoulDigest: Digest("soul"), PromptDigest: Digest("prompt"), InputsDigest: Digest("another task")}) {
+		t.Fatal("different Task inputs split the Session identity")
+	}
+}

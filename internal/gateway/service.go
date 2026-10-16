@@ -1850,7 +1850,8 @@ func gatewayTaskMatchesExpected(
 	existingSpec := existing.Spec.DeepCopy()
 	expectedSpec := expected.Spec.DeepCopy()
 	existingSpec.Timeout = expectedSpec.Timeout
-	if !apiequality.Semantic.DeepEqual(*existingSpec, *expectedSpec) {
+	// Control fields such as suspend can change after creation.
+	if !apiequality.Semantic.DeepEqual(existingSpec.ExecutionInputs(), expectedSpec.ExecutionInputs()) {
 		return false
 	}
 	for key, value := range expected.Labels {
