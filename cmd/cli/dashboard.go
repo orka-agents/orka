@@ -43,7 +43,7 @@ func dashboardAbsent(server string) bool {
 
 func newDashboardCmd() *cobra.Command {
 	var serviceAccount string
-	var noOpen, redactToken bool
+	var noOpen, showToken bool
 
 	cmd := &cobra.Command{
 		Use:   "dashboard",
@@ -89,16 +89,16 @@ func newDashboardCmd() *cobra.Command {
 
 			dashboardURL := fmt.Sprintf("%s/login#token=%s", server, token)
 			displayURL := dashboardURL
-			if redactToken {
+			if !showToken {
 				displayURL = fmt.Sprintf("%s/login#token=<redacted>", server)
 			}
 			fmt.Printf("Dashboard URL: %s\n", displayURL)
 
 			if noOpen {
-				if redactToken {
+				if !showToken {
 					fmt.Println(
 						"Browser opening skipped. The printed dashboard URL is redacted and cannot be opened manually. " +
-							"Rerun without --redact-token in a trusted terminal if you need to copy the URL.",
+							"Rerun with --show-token in a trusted terminal if you need to copy the URL.",
 					)
 				} else {
 					fmt.Println("Browser opening skipped. Open the dashboard URL above in your browser manually.")
@@ -108,11 +108,11 @@ func newDashboardCmd() *cobra.Command {
 
 			if err := openBrowser(dashboardURL); err != nil {
 				fmt.Fprintf(os.Stderr, "Could not open browser: %v\n", err)
-				if redactToken {
+				if !showToken {
 					fmt.Fprintln(
 						os.Stderr,
 						"The printed dashboard URL is redacted and cannot be opened manually. "+
-							"Rerun without --redact-token in a trusted terminal if you need to copy the URL.",
+							"Rerun with --show-token in a trusted terminal if you need to copy the URL.",
 					)
 				} else {
 					fmt.Fprintln(os.Stderr, "Open the URL above in your browser manually.")
@@ -127,10 +127,10 @@ func newDashboardCmd() *cobra.Command {
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "default", "ServiceAccount name")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "Print the dashboard URL without opening a browser")
 	cmd.Flags().BoolVar(
-		&redactToken,
-		"redact-token",
+		&showToken,
+		"show-token",
 		false,
-		"Redact the token in printed output; the browser still signs in",
+		"Print the dashboard URL with the token in it instead of <redacted>; use only in a trusted terminal",
 	)
 
 	return cmd

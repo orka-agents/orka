@@ -231,7 +231,7 @@ func TestNewDashboardCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	}
 }
 
-func TestNewDashboardCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
+func TestNewDashboardCmd_NoOpenRedactsTokenByDefault(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -250,7 +250,6 @@ func TestNewDashboardCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
 		"--server", "http://test-server:8080",
 		"--token", "opaque-login-value-123",
 		"--no-open",
-		"--redact-token",
 	})
 
 	stdout, err := captureOutput(t, root.Execute)
@@ -274,7 +273,7 @@ func TestNewDashboardCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
 	}
 }
 
-func TestNewDashboardCmd_RedactsOutputButOpensFullURL(t *testing.T) {
+func TestNewDashboardCmd_RedactsOutputByDefaultButOpensFullURL(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -292,7 +291,6 @@ func TestNewDashboardCmd_RedactsOutputButOpensFullURL(t *testing.T) {
 		"dashboard",
 		"--server", "http://test-server:8080",
 		"--token", "opaque-login-value-123",
-		"--redact-token",
 	})
 
 	stdout, err := captureOutput(t, root.Execute)
@@ -310,6 +308,32 @@ func TestNewDashboardCmd_RedactsOutputButOpensFullURL(t *testing.T) {
 	}
 }
 
+func TestNewDashboardCmd_ShowTokenPrintsFullURL(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	stubDashboardProbe(t)
+
+	root := newRootCmd()
+	root.SetArgs([]string{
+		"dashboard",
+		"--server", "http://test-server:8080",
+		"--token", "opaque-login-value-123",
+		"--no-open",
+		"--show-token",
+	})
+
+	stdout, err := captureOutput(t, root.Execute)
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if !strings.Contains(stdout, "Dashboard URL: http://test-server:8080/login#token=opaque-login-value-123") {
+		t.Fatalf("stdout = %q, want the full dashboard URL with --show-token", stdout)
+	}
+	if !strings.Contains(stdout, "Open the dashboard URL above") {
+		t.Fatalf("stdout = %q, want guidance to open the printed URL", stdout)
+	}
+}
+
 func TestNewDashboardCmd_RedactedBrowserFailureExplainsURLIsNotUsable(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -324,7 +348,6 @@ func TestNewDashboardCmd_RedactedBrowserFailureExplainsURLIsNotUsable(t *testing
 		"dashboard",
 		"--server", "http://test-server:8080",
 		"--token", "opaque-login-value-123",
-		"--redact-token",
 	})
 
 	stderr, err := captureStderr(t, root.Execute)

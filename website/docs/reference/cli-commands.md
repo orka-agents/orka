@@ -753,8 +753,8 @@ Usage:
 Flags:
   -h, --help                     help for dashboard
       --no-open                  Print the dashboard URL without opening a browser
-      --redact-token             Redact the token in printed output; the browser still signs in
       --service-account string   ServiceAccount name (default "default")
+      --show-token               Print the dashboard URL with the token in it instead of <redacted>; use only in a trusted terminal
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

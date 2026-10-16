@@ -345,19 +345,17 @@ It may depend on live provider credentials, model configuration, and server-side
 orka dashboard --service-account orka-client --namespace orka-system
 ```
 
-For automation, tests, or terminals where token-bearing URLs could be captured, use the safe print-only mode:
+The printed URL shows `<redacted>` in place of the token, while the browser still gets the full URL. `--no-open` skips the browser launch. When no browser can open, such as over SSH, `--show-token` prints the full URL so you can copy it:
 
 ```bash
 orka dashboard \
   --service-account orka-client \
   --namespace orka-system \
   --no-open \
-  --redact-token
+  --show-token
 ```
 
-`--no-open` skips browser launch. `--redact-token` prints `<redacted>` instead of the raw token while still using the full token internally if browser opening is enabled. A redacted URL cannot be opened by hand; rerun without `--redact-token` only in a trusted terminal if you need to copy the full URL.
-
-Do not use default `orka dashboard` output in logs or shared terminals where the generated browser URL might be captured.
+Use `--show-token` only in a trusted terminal: logs, CI output, and shared sessions would capture the token.
 
 ## Linked accounts
 
