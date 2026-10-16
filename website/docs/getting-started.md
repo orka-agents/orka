@@ -327,6 +327,12 @@ Run `orka version` to confirm that the local CLI matches your Helm/controller re
 
 ```bash
 orka version
+```
+
+With the [dashboard turned on](guides/ui.md#turn-it-on), `orka login` opens it signed in.
+Without the dashboard, `orka login` stops with an error, and every other command still works:
+
+```bash
 orka login                                  # reads your kubeconfig, opens the dashboard
 orka login --server https://orka.example.com
 orka login --token '<token>'
