@@ -58,7 +58,7 @@ describe('TaskYaml', () => {
     await screen.findByRole('region', { name: 'Task YAML' })
     fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
     await waitFor(() => expect(writeText).toHaveBeenCalled())
-    expect(writeText.mock.calls[0][0]).toContain('apiVersion: orka.ai/v1alpha1')
+    expect(writeText.mock.calls[0][0]).toContain('apiVersion: core.orka.ai/v1alpha1')
     expect(writeText.mock.calls[0][0]).not.toContain('sk-live')
   })
 })
