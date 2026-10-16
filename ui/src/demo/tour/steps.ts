@@ -59,7 +59,7 @@ const incident = (tab?: string): NavigateOptions => ({
 export const TOUR_STEPS: TourStep[] = [
   {
     title: 'Welcome to the Orka demo',
-    body: 'Orka runs AI agents and containers as Tasks on Kubernetes. This demo follows Northwind Labs, a made-up company, as its platform team works a production checkout incident, reviews pull requests and ships a release.',
+    body: 'Orka runs AI agents and containers as Tasks on Kubernetes.\nThis demo follows Northwind Labs, a made-up company, as its platform team works a production checkout incident, reviews pull requests and ships a release.',
     points: [
       'This is the optional web dashboard. It is off unless you turn it on, and the rest of Orka works without it.',
       'Everything here is mock data in your browser. Nothing reaches a cluster or a model.',

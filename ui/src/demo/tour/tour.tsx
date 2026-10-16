@@ -73,7 +73,7 @@ function StepBody({ step }: { step: TourStep }) {
   }, [namespace, chatNamespace, sendMessage])
   return (
     <div className="space-y-3">
-      <p aria-live="polite" className="text-sm leading-relaxed text-muted-foreground">{step.body}</p>
+      <p aria-live="polite" className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">{step.body}</p>
       {step.points && (
         <ul className="list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-primary">
           {step.points.map((point) => <li key={point}>{point}</li>)}
