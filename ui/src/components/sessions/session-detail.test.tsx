@@ -8,12 +8,14 @@ vi.mock('zustand/middleware', () => ({
 }))
 
 const mockNavigate = vi.fn()
+const mockSearch: { current: { tab?: string } } = { current: {} }
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
     ...actual,
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
     useNavigate: () => mockNavigate,
+    useSearch: () => mockSearch.current,
     useLocation: () => ({ pathname: '/sessions/test-session' }),
   }
 })
@@ -36,6 +38,7 @@ vi.mock('@/hooks/use-execution-event-stream', () => ({
 }))
 
 import { render, screen, waitFor } from '@/test/test-utils'
+import { toast } from 'sonner'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { SessionDetail } from './session-detail'
@@ -45,6 +48,10 @@ describe('SessionDetail', () => {
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     useAuthStore.setState({ token: 'test-token' })
     mockNavigate.mockClear()
+    mockSearch.current = {}
+    vi.mocked(toast.success).mockClear()
+    vi.mocked(toast.error).mockClear()
+    vi.restoreAllMocks()
   })
 
   it('shows skeletons while loading', () => {
@@ -53,17 +60,41 @@ describe('SessionDetail', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
-  it('shows "Session not found" when API returns 404', async () => {
+  it('shows a styled not-found page with a way back when the API returns 404', async () => {
+    let eventRequests = 0
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return new HttpResponse(null, { status: 404 })
-      })
+      }),
+      http.get('/api/v1/sessions/:id/events', () => {
+        eventRequests += 1
+        return HttpResponse.json({ events: [], latestSeq: 0 })
+      }),
     )
 
     render(<SessionDetail sessionId="missing-session" />)
-    await waitFor(() => {
-      expect(screen.getByText('Session not found')).toBeInTheDocument()
-    })
+    expect(await screen.findByRole('heading', { level: 1, name: 'Session not found' })).toBeInTheDocument()
+    expect(screen.getByText('No session named "missing-session"')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to sessions' })).toHaveAttribute('href', '/sessions')
+    expect(document.title).toBe('Session not found · Orka')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Timeline' })).not.toBeInTheDocument()
+    expect(eventRequests).toBe(0)
+  })
+
+  it('shows a load error, not "Session not found", for other failures', async () => {
+    server.use(
+      // A client error, so useSession does not retry it.
+      http.get('/api/v1/sessions/:id', () =>
+        HttpResponse.json({ error: { code: 400, message: 'invalid session name' } }, { status: 400 }),
+      ),
+    )
+
+    render(<SessionDetail sessionId="broken-session" />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('invalid session name')
+    expect(screen.getByRole('heading', { level: 1, name: 'Could not load session' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to sessions' })).toHaveAttribute('href', '/sessions')
+    expect(screen.queryByText('Session not found')).not.toBeInTheDocument()
   })
 
   it('shows a not-authorized message (not "Session not found") on 403', async () => {
@@ -78,7 +109,19 @@ describe('SessionDetail', () => {
       expect(screen.getByText('Not authorized to view sessions')).toBeInTheDocument()
     })
     expect(screen.getByText(/read permission \(not authorized\)/)).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
     expect(screen.queryByText('Session not found')).not.toBeInTheDocument()
+  })
+
+  it('names the back link to the session list and nests no button in it', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'back-session', namespace: 'default' })),
+    )
+    render(<SessionDetail sessionId="back-session" />)
+    const back = await screen.findByRole('link', { name: 'Back to sessions' })
+    expect(back).toHaveAttribute('href', '/sessions')
+    expect(back.querySelector('button')).toBeNull()
+    expect(back.closest('button')).toBeNull()
   })
 
   it('shows session name and namespace', async () => {
@@ -171,8 +214,9 @@ describe('SessionDetail', () => {
     })
   })
 
-  it('delete button removes session and navigates', async () => {
+  it('delete button removes a confirmed session and navigates', async () => {
     const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     server.use(
       http.get('/api/v1/sessions/:id', () =>
         HttpResponse.json({
@@ -189,8 +233,103 @@ describe('SessionDetail', () => {
       expect(screen.getByText('del-session')).toBeInTheDocument()
     })
     await user.click(screen.getByRole('button', { name: /delete/i }))
+    expect(window.confirm).toHaveBeenCalledWith('Delete session "del-session"?')
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({ to: '/sessions' })
     })
+    expect(toast.success).toHaveBeenCalledWith('Session deleted')
+  })
+
+  it('declining the confirmation keeps the session', async () => {
+    const user = userEvent.setup()
+    let deletes = 0
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'keep-session', namespace: 'default' })),
+      http.delete('/api/v1/sessions/:id', () => {
+        deletes += 1
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    render(<SessionDetail sessionId="keep-session" />)
+    await user.click(await screen.findByRole('button', { name: /delete/i }))
+    expect(deletes).toBe(0)
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('shows the server message instead of throwing when a viewer deletes', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'ro-session', namespace: 'default' })),
+      http.delete('/api/v1/sessions/:id', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+    render(<SessionDetail sessionId="ro-session" />)
+    await user.click(await screen.findByRole('button', { name: /delete/i }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete session: not authorized'))
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('keeps keyboard focus on Delete while a refused delete is in flight', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let deletes = 0
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'ro-session', namespace: 'default' })),
+      http.delete('/api/v1/sessions/:id', async () => {
+        deletes += 1
+        await gate
+        return HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })
+      }),
+    )
+    render(<SessionDetail sessionId="ro-session" />)
+    const button = await screen.findByRole('button', { name: /delete/i })
+    button.focus()
+    await user.keyboard('{Enter}')
+
+    // Pending: marked unavailable but never disabled, so focus stays put.
+    await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'))
+    expect(button).not.toBeDisabled()
+    expect(button).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(deletes).toBe(1)
+
+    release()
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete session: not authorized'))
+    await waitFor(() => expect(button).not.toHaveAttribute('aria-disabled'))
+    expect(button).toHaveFocus()
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('opens the tab named in the URL and records tab changes there', async () => {
+    const user = userEvent.setup()
+    mockSearch.current = { tab: 'timeline' }
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'tab-session', namespace: 'default' })),
+    )
+    render(<SessionDetail sessionId="tab-session" />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Timeline' })).toHaveAttribute('aria-selected', 'true'))
+    await user.click(screen.getByRole('tab', { name: 'Overview' }))
+    expect(mockNavigate).toHaveBeenCalledWith({
+      to: '/sessions/$sessionId',
+      params: { sessionId: 'tab-session' },
+      search: { tab: 'overview' },
+      replace: true,
+    })
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('falls back to Overview for an unknown tab in the URL', async () => {
+    mockSearch.current = { tab: 'bogus' }
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'tab-session', namespace: 'default' })),
+    )
+    render(<SessionDetail sessionId="tab-session" />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true'))
   })
 })

@@ -104,6 +104,36 @@ func TestParseGitHubRepositoryURL(t *testing.T) {
 	}
 }
 
+func TestValidateRepositoryScanSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    corev1alpha1.RepositoryScanSpec
+		wantErr string
+	}{
+		{name: "default provider", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project"}},
+		{name: "SSH root", spec: corev1alpha1.RepositoryScanSpec{Provider: "github", RepoURL: "git@github.com:example/project.git"}},
+		{name: "not a URL", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "not a url"}, wantErr: "spec.repoURL must be a GitHub repository URL"},
+		{name: "other forge", spec: corev1alpha1.RepositoryScanSpec{Provider: "github", RepoURL: "https://gitlab.com/a/b"}, wantErr: "spec.repoURL must be a GitHub repository URL"},
+		{name: "missing repository", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example"}, wantErr: "spec.repoURL must include GitHub owner and repository"},
+		{name: "empty", spec: corev1alpha1.RepositoryScanSpec{}, wantErr: "spec.repoURL is required"},
+		{name: "unsupported provider", spec: corev1alpha1.RepositoryScanSpec{Provider: "gitlab", RepoURL: "https://github.com/example/project"}, wantErr: `spec.provider "gitlab" is not supported`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRepositoryScanSource(tt.spec)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateRepositoryScanSource() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ValidateRepositoryScanSource() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCanonicalRepositoryCloneURL(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -291,6 +291,7 @@ func main() {
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
 	var connectorsEnabled bool
+	var dashboardEnabled bool
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
 	var gatewayPendingPerSession int
@@ -512,6 +513,8 @@ func main() {
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
+		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
 			"and let linked-account requests reach them. A person's token would be sent to such an address, so the flag takes only the literal "+
@@ -2360,6 +2363,7 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
+		DashboardEnabled: dashboardEnabled,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2419,6 +2423,7 @@ func main() {
 					MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
 						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 					GatewayReplySender: gatewayReplySender,
+					DashboardEnabled:   dashboardEnabled,
 					MemoryReader:       sqliteStore, MemoryProposalWriter: sqliteStore,
 					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
 						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),

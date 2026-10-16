@@ -298,6 +298,7 @@ func TestCustomErrorHandler_NonAPI404_ServesSPA(t *testing.T) {
 	app := fiber.New(fiber.Config{
 		ErrorHandler: customErrorHandler,
 	})
+	app.State().Set(dashboardStateKey, true)
 	app.Get("/api/test", func(c fiber.Ctx) error {
 		return c.SendString("api")
 	})
@@ -308,11 +309,28 @@ func TestCustomErrorHandler_NonAPI404_ServesSPA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %s, want text/html", ct)
+	}
+}
 
-	// Should serve SPA (200 with index.html) or fall through to JSON error
-	// depending on whether embedded UI assets are available
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		t.Errorf("StatusCode = %d, want 200 or 404", resp.StatusCode)
+func TestCustomErrorHandler_NonAPI404_WithoutDashboardReturnsJSON(t *testing.T) {
+	app := fiber.New(fiber.Config{
+		ErrorHandler: customErrorHandler,
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/some-ui-route", nil))
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %s, want application/json", ct)
 	}
 }
 

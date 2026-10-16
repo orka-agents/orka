@@ -94,15 +94,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
 		event.TaskName = streamID
 		if writerTask != nil {
-			expectedSessionName := sessionNameForTask(writerTask)
-			if expectedSessionName != "" && h.sessionStore != nil {
-				if _, err := h.sessionStore.GetSession(c.Context(), namespace, expectedSessionName); err != nil {
-					if errors.Is(err, store.ErrNotFound) {
-						expectedSessionName = ""
-					} else {
-						return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
-					}
-				}
+			expectedSessionName, err := executionEventSessionName(c.Context(), h.sessionStore, namespace, writerTask)
+			if err != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
 			}
 			if event.SessionName != "" && event.SessionName != expectedSessionName {
 				return fiber.NewError(fiber.StatusBadRequest, "sessionName does not match task session")

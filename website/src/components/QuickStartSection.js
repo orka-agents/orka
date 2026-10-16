@@ -6,7 +6,7 @@ export default function QuickStartSection() {
     <section className="landing-section quickstart-section">
       <h2 className="section-title">Quick start</h2>
       <p className="section-subtitle">
-        Install Orka on Kubernetes and run your first task.
+        From an empty cluster to a coding agent reviewing a real repository.
       </p>
       <div className="quickstart-grid">
         <div className="quickstart-card">
@@ -17,7 +17,7 @@ export default function QuickStartSection() {
             model API key needed yet.
           </p>
           <p>
-            <Link to="/docs/installation">Open the installation guide</Link>
+            <Link to="/docs/installation">Install Orka</Link>
           </p>
         </div>
         <div className="quickstart-card">
@@ -27,17 +27,27 @@ export default function QuickStartSection() {
             as a Provider, and submit a Task.
           </p>
           <p>
-            <Link to="/docs/getting-started#connect-to-the-api">
-              Continue with Getting started
+            <Link to="/docs/getting-started#your-first-task">
+              Run your first task
+            </Link>
+          </p>
+        </div>
+        <div className="quickstart-card">
+          <h3>3. Run a coding agent</h3>
+          <p>
+            Connect your model gateway and let Codex or Claude Code review a
+            repository from a warm pool.
+          </p>
+          <p>
+            <Link to="/docs/getting-started#running-a-coding-agent">
+              Run a coding agent
             </Link>
           </p>
         </div>
       </div>
       <p className="section-subtitle">
-        For development,{' '}
-        <Link to="/docs/build-from-source">
-          build from source
-        </Link>.
+        New here? Read <Link to="/docs">What is Orka?</Link> For development,{' '}
+        <Link to="/docs/build-from-source">build from source</Link>.
       </p>
     </section>
   );

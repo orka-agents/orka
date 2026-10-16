@@ -51,9 +51,25 @@ function installDOMPolyfills() {
   if (!HTMLElement.prototype.scrollIntoView) HTMLElement.prototype.scrollIntoView = () => {}
 }
 
+const providerItems = [
+  { metadata: { name: 'anthropic-prod', namespace: 'default' }, spec: { type: 'anthropic', defaultModel: 'claude-default' }, status: { ready: true } },
+  { metadata: { name: 'openai-lab', namespace: 'default' }, spec: { type: 'openai', defaultModel: 'gpt-default' }, status: { ready: false } },
+]
+
+async function pickOption(trigger: Element, name: string | RegExp) {
+  await act(async () => {
+    fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+  })
+  const option = await screen.findByRole('option', { name })
+  await act(async () => {
+    fireEvent.click(option)
+  })
+}
+
 describe('AgentCreateForm', () => {
   beforeEach(() => {
     installDOMPolyfills()
+    server.use(http.get('/api/v1/providers', () => HttpResponse.json({ items: providerItems, metadata: {} })))
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     useAuthStore.setState({ token: 'test-token' })
     useStateModeOverride = null
@@ -164,7 +180,7 @@ describe('AgentCreateForm', () => {
 
     const modelInput = screen.getByLabelText('Model')
     expect(modelInput).toBeRequired()
-    expect(modelInput).toHaveAttribute('placeholder', 'openai/gpt-5.4')
+    expect(modelInput).toHaveAttribute('placeholder', 'provider/model')
     expect(screen.getByText('OpenCode model IDs use provider/model form.')).toBeInTheDocument()
     expect(screen.getByText(/Reviewed native-tool defaults: Read, Write, Edit, Bash, Glob, and Grep/)).toBeInTheDocument()
     await user.type(modelInput, 'openai/gpt-5.4')
@@ -281,7 +297,7 @@ describe('AgentCreateForm', () => {
     expect(submitted.spec.model).toBeUndefined()
   })
 
-  it('submits native AI agents unchanged', async () => {
+  it('submits native AI agents with a providerRef instead of a legacy model.provider', async () => {
     let submitted: any
     server.use(http.post('/api/v1/agents', async ({ request }) => {
       submitted = await request.json()
@@ -290,12 +306,129 @@ describe('AgentCreateForm', () => {
     const user = userEvent.setup()
     render(<AgentCreateForm />)
     await user.type(screen.getByPlaceholderText('my-agent'), 'native-agent')
-    await user.type(screen.getByPlaceholderText('claude-sonnet-4-20250514'), 'native-model')
+    const providerTrigger = screen.getByLabelText('Provider')
+    await waitFor(() => expect(providerTrigger).not.toBeDisabled())
+    await pickOption(providerTrigger, /anthropic-prod/)
+    await waitFor(() => expect(providerTrigger).toHaveTextContent('anthropic-prod'))
+    // The model placeholder follows the selected Provider's default model.
+    expect(screen.getByLabelText('Model')).toHaveAttribute('placeholder', 'claude-default')
+    await user.type(screen.getByLabelText('Model'), 'native-model')
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
     expect(submitted.spec.runtime).toBeUndefined()
-    expect(submitted.spec.model.name).toBe('native-model')
+    expect(submitted.spec.providerRef).toEqual({ name: 'anthropic-prod' })
+    expect(submitted.spec.model).toEqual({ name: 'native-model', temperature: 0.7 })
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/agents' })
+  })
+
+  it('lists namespace Providers and marks the ones that are not ready', async () => {
+    render(<AgentCreateForm />)
+    const providerTrigger = screen.getByLabelText('Provider')
+    await waitFor(() => expect(providerTrigger).not.toBeDisabled())
+    await act(async () => {
+      fireEvent.pointerDown(providerTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    })
+    expect(await screen.findByRole('option', { name: 'anthropic-prod (anthropic)' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'openai-lab (openai) — not ready' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Anthropic' })).not.toBeInTheDocument()
+  })
+
+  it('requires a Provider for native AI agents with an inline error', async () => {
+    let postCount = 0
+    server.use(http.post('/api/v1/agents', () => {
+      postCount += 1
+      return HttpResponse.json({})
+    }))
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-agent'), 'native-agent')
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    expect(await screen.findByText('Select a Provider for native AI agents.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Provider')).toHaveAttribute('aria-invalid', 'true')
+    expect(postCount).toBe(0)
+
+    await pickOption(screen.getByLabelText('Provider'), /anthropic-prod/)
+    await waitFor(() => expect(screen.queryByText('Select a Provider for native AI agents.')).not.toBeInTheDocument())
+  })
+
+  it('links to the Provider docs when the namespace has no Providers', async () => {
+    server.use(http.get('/api/v1/providers', () => HttpResponse.json({ items: [], metadata: {} })))
+    render(<AgentCreateForm />)
+    expect(await screen.findByText(/No Providers in default/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'see the Provider reference' })).toHaveAttribute(
+      'href',
+      'https://orka-agents.github.io/orka/docs/reference/configuration#provider',
+    )
+    expect(screen.getByLabelText('Provider')).toBeDisabled()
+  })
+
+  it('rejects a non-positive native max tokens value before posting', async () => {
+    let postCount = 0
+    server.use(http.post('/api/v1/agents', () => {
+      postCount += 1
+      return HttpResponse.json({})
+    }))
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-agent'), 'native-agent')
+    const providerTrigger = screen.getByLabelText('Provider')
+    await waitFor(() => expect(providerTrigger).not.toBeDisabled())
+    await pickOption(providerTrigger, /anthropic-prod/)
+    const maxTokens = screen.getByLabelText('Max Tokens')
+    expect(maxTokens).toHaveAttribute('min', '1')
+    fireEvent.change(maxTokens, { target: { value: '-5' } })
+    fireEvent.submit(screen.getByRole('button', { name: 'Create Agent' }).closest('form')!)
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Max tokens must be a positive integer'))
+    expect(postCount).toBe(0)
+  })
+
+  it('accepts a fractional temperature within bounds', async () => {
+    let submitted: any
+    server.use(http.post('/api/v1/agents', async ({ request }) => {
+      submitted = await request.json()
+      return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted.spec })
+    }))
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-agent'), 'native-agent')
+    const providerTrigger = screen.getByLabelText('Provider')
+    await waitFor(() => expect(providerTrigger).not.toBeDisabled())
+    await pickOption(providerTrigger, /anthropic-prod/)
+    const temperature = screen.getByLabelText('Temperature')
+    expect(temperature).toHaveAttribute('step', 'any')
+    expect(temperature).toHaveAttribute('min', '0')
+    expect(temperature).toHaveAttribute('max', '2')
+    await user.clear(temperature)
+    await user.type(temperature, '0.15')
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
+    expect(submitted.spec.model).toEqual({ temperature: 0.15 })
+  })
+
+  it('resets mode-specific fields when the mode changes', async () => {
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+    await user.type(screen.getByLabelText('Model'), 'native-model')
+    await user.type(screen.getByLabelText('Max Tokens'), '2048')
+
+    await pickOption(screen.getByLabelText('Mode'), 'ACP agent runtime')
+    await waitFor(() => expect(screen.getByLabelText('Runtime profile')).toBeInTheDocument())
+    expect(screen.getByLabelText('Model')).toHaveValue('')
+
+    await pickOption(screen.getByLabelText('Runtime profile'), 'OpenCode ACP')
+    await waitFor(() => expect(screen.getByLabelText('Max Output Tokens')).toBeInTheDocument())
+    expect(screen.getByLabelText('Max Output Tokens')).toHaveValue(null)
+  })
+
+  it('labels the mode and runtime selects for assistive technology', async () => {
+    useStateModeOverride = 'runtime'
+    render(<AgentCreateForm />)
+    expect(screen.getByLabelText('Mode')).toHaveAttribute('role', 'combobox')
+    expect(screen.getByLabelText('Runtime source')).toHaveAttribute('role', 'combobox')
+    expect(screen.getByLabelText('Runtime profile')).toHaveAttribute('role', 'combobox')
   })
 })

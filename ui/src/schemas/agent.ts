@@ -27,6 +27,7 @@ export const builtInAgentRuntimeTypeSchema = z.enum(builtInAgentRuntimeTypes)
 
 export const builtInAgentRuntimeSchema = z.object({
   type: builtInAgentRuntimeTypeSchema,
+  contractVersion: z.string().optional(),
   ...agentRuntimeDefaultsSchema,
 }).strict()
 
@@ -58,6 +59,9 @@ export const agentSpecSchema = z.object({
     allowedAgents: z.array(z.object({ name: z.string(), namespace: z.string().optional() })).optional(),
     maxConcurrentChildren: z.number().optional(),
     maxDepth: z.number().optional(),
+    autonomous: z.boolean().optional(),
+    maxIterations: z.number().optional(),
+    approvalRequiredTools: z.array(z.string()).optional(),
   }).optional(),
   runtime: agentRuntimeSchema.optional(),
 }).superRefine((spec, ctx) => {
@@ -125,7 +129,14 @@ export const agentSchema = z.object({
   status: agentStatusSchema.optional(),
 })
 
+/** The text an Agent's spec.systemPrompt.configMapRef selects. */
+export const agentSystemPromptSchema = z.object({
+  configMapRef: z.object({ name: z.string(), key: z.string() }),
+  content: z.string(),
+})
+
 export type BuiltInAgentRuntimeType = z.infer<typeof builtInAgentRuntimeTypeSchema>
 export type Agent = z.infer<typeof agentSchema>
 export type AgentSpec = z.infer<typeof agentSpecSchema>
 export type AgentStatus = z.infer<typeof agentStatusSchema>
+export type AgentSystemPrompt = z.infer<typeof agentSystemPromptSchema>

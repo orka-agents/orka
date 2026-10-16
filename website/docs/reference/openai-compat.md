@@ -6,7 +6,7 @@ description: "Use Orka with OpenAI Chat Completions and stateless Responses clie
 # OpenAI-compatible API
 
 Orka serves `/openai/v1/chat/completions`, stateless `/openai/v1/responses`, and `/openai/v1/models`,
-so clients like [Continue](https://continue.dev/) and [Cursor](https://cursor.sh/) can point
+so clients like Codex, OpenCode and more can point
 at Orka instead of at a model vendor. Your cluster holds the API keys; the client holds a
 ServiceAccount token.
 
@@ -178,8 +178,8 @@ follow-up history; it does not establish behavior of a particular hosted model.
 
 The `model` field supports two formats:
 
-- **`provider/model`** — e.g., `anthropic/claude-sonnet-4-20250514`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
-- **`model`** — e.g., `claude-sonnet-4-20250514`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
+- **`provider/model`** — e.g., `anthropic/claude-opus-5`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
+- **`model`** — e.g., `claude-opus-5`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
 
 ## Prerequisites
 
@@ -196,7 +196,7 @@ spec:
   secretRef:
     name: anthropic-secret
     key: api-key
-  defaultModel: claude-sonnet-4-20250514
+  defaultModel: claude-opus-5
 ```
 
 2. **Secret** with the API key:
@@ -256,9 +256,9 @@ Configure Continue to use Orka as an OpenAI-compatible provider. Add to your Con
 {
   "models": [
     {
-      "title": "Claude Sonnet 4 (via Orka)",
+      "title": "Claude Opus 5 (via Orka)",
       "provider": "openai",
-      "model": "anthropic/claude-sonnet-4-20250514",
+      "model": "anthropic/claude-opus-5",
       "apiBase": "https://orka.example.com/openai/v1",
       "apiKey": "YOUR_ORKA_TOKEN"
     }
@@ -283,7 +283,7 @@ curl -X POST https://orka.example.com/openai/v1/chat/completions \
   -H "Authorization: Bearer $ORKA_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 1024
   }'

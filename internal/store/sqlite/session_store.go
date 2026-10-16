@@ -52,7 +52,7 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 		 )`,
 		session.Namespace, session.Name, session.SessionType, session.ActiveTask, session.ActiveTaskUID,
 		session.MessageCount, session.InputTokens, session.OutputTokens, session.Cancelled,
-		session.CreatedAt, session.UpdatedAt,
+		utcTime(session.CreatedAt), utcTime(session.UpdatedAt),
 		session.Namespace, session.Name, session.Namespace, session.Name,
 	)
 	if err != nil {
@@ -132,19 +132,25 @@ func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.Ses
 	return sessions, rows.Err()
 }
 
-// ListSessionsPage pushes the name cursor, type filter, ordering, and LIMIT
+// ListSessionsPage pushes the cursor, type filter, ordering, and LIMIT
 // into SQL so a continuation request reads only its own page.
-func (s *Store) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+func (s *Store) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
 	if limit <= 0 {
 		return nil, false, nil
+	}
+	// Session timestamps are written in UTC, so their text sorts in time order.
+	hasCursor, afterCreatedAt, afterName := after != nil, time.Time{}, ""
+	if hasCursor {
+		afterCreatedAt, afterName = utcTime(after.CreatedAt), after.Name
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT name, session_type, message_count, input_tokens, output_tokens, created_at, updated_at, active_task, active_task_uid
 		 FROM sessions
-		 WHERE namespace = ? AND name > ? AND (? = '' OR session_type <> ?)
-		 ORDER BY name ASC
+		 WHERE namespace = ? AND (? = '' OR session_type <> ?)
+		   AND (NOT ? OR created_at < ? OR (created_at = ? AND name > ?))
+		 ORDER BY created_at DESC, name ASC
 		 LIMIT ?`,
-		namespace, afterName, excludeType, excludeType, limit+1,
+		namespace, excludeType, excludeType, hasCursor, afterCreatedAt, afterCreatedAt, afterName, limit+1,
 	)
 	if err != nil {
 		return nil, false, err
@@ -1201,6 +1207,34 @@ func (s *Store) UpdateTokenCountsWithLock(
 		return fmt.Errorf("%w: session %s/%s lock owner changed or expired", store.ErrConflict, namespace, name)
 	}
 	return nil
+}
+
+// ReleaseLockWithTokenUsage releases the owner's lock and, while that lock is
+// still current and the session is not being cleaned up, adds the owner's
+// token usage in the same statement. A replay after the lock was released
+// matches no row and counts nothing.
+func (s *Store) ReleaseLockWithTokenUsage(
+	ctx context.Context,
+	namespace, name, ownerName, ownerUID string,
+	inputTokens, outputTokens int,
+) error {
+	now := time.Now().UTC()
+	// SET expressions see the row as it was before this UPDATE, so the lock
+	// expiry test reads the lock being released.
+	counted := `(active_task_expires_at IS NULL OR active_task_expires_at > ?)
+		AND NOT EXISTS (SELECT 1 FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?)`
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions
+		 SET input_tokens = input_tokens + CASE WHEN `+counted+` THEN ? ELSE 0 END,
+		     output_tokens = output_tokens + CASE WHEN `+counted+` THEN ? ELSE 0 END,
+		     updated_at = ?,
+		     active_task = '', active_task_uid = '', active_task_expires_at = NULL
+		 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ?`,
+		now, namespace, name, inputTokens,
+		now, namespace, name, outputTokens,
+		now, namespace, name, ownerName, ownerUID,
+	)
+	return err
 }
 
 // nilIfEmpty returns nil if s is empty, otherwise returns a pointer to s.

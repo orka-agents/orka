@@ -105,6 +105,13 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 
 // ReleaseLock releases the session lock for a task.
 func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Task) error {
+	return m.ReleaseLockWithTokenUsage(ctx, task, 0, 0)
+}
+
+// ReleaseLockWithTokenUsage releases the session lock for a finished task
+// and adds its token usage to the Session in the same write, so a completion
+// replayed after a crash cannot count the usage twice.
+func (m *SessionManager) ReleaseLockWithTokenUsage(ctx context.Context, task *corev1alpha1.Task, inputTokens, outputTokens int64) error {
 	if _, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
 		return err
 	} else if ok {
@@ -128,7 +135,13 @@ func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Tas
 			return getErr
 		}
 	}
-	err := m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	var err error
+	if fenced, ok := m.store.(store.FencedSessionWriteStore); ok && (inputTokens != 0 || outputTokens != 0) {
+		err = fenced.ReleaseLockWithTokenUsage(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID),
+			int(inputTokens), int(outputTokens))
+	} else {
+		err = m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	}
 	if err != nil {
 		// Ignore not-found errors (session may have been deleted)
 		if errors.Is(err, store.ErrNotFound) {
@@ -344,7 +357,7 @@ func (m *SessionManager) ListSessions(ctx context.Context, namespace string) ([]
 	return m.store.ListSessions(ctx, namespace)
 }
 
-// ListSessionsPage lists one name-ordered page of sessions in a namespace.
-func (m *SessionManager) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
-	return m.store.ListSessionsPage(ctx, namespace, afterName, limit, excludeType)
+// ListSessionsPage lists one newest-first page of sessions in a namespace.
+func (m *SessionManager) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	return m.store.ListSessionsPage(ctx, namespace, after, limit, excludeType)
 }

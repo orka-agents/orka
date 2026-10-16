@@ -19,7 +19,6 @@ on:
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "test/e2e/**"
       - "test/utils/**"
-      - "ui/**"
       - "workers/**"
   pull_request:
     paths:
@@ -38,7 +37,6 @@ on:
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "test/e2e/**"
       - "test/utils/**"
-      - "ui/**"
       - "workers/**"
 
 permissions:

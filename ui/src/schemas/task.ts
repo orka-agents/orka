@@ -268,6 +268,11 @@ export const taskSpecSchema = z.object({
   prompt: z.string().optional(),
   agentRuntime: agentRuntimeSpecSchema.optional(),
   workspace: workspaceConfigSchema.optional(),
+  // Cron scheduling: a scheduled Task creates one child Task per tick.
+  schedule: z.string().optional(),
+  suspend: z.boolean().optional(),
+  timeZone: z.string().optional(),
+  concurrencyPolicy: z.string().optional(),
 })
 
 // Harness v1 compatibility status surface (non-secret routing metadata only).
@@ -337,6 +342,16 @@ export const taskStatusSchema = z.object({
   childTasks: z.array(childTaskStatusSchema).optional(),
   conditions: z.array(conditionSchema).optional(),
   executionWorkspace: executionWorkspaceStatusSchema.optional(),
+  lastScheduleTime: z.string().optional(),
+  nextScheduleTime: z.string().optional(),
+})
+
+export const ownerReferenceSchema = z.object({
+  apiVersion: z.string().optional(),
+  kind: z.string(),
+  name: z.string(),
+  uid: z.string().optional(),
+  controller: z.boolean().optional(),
 })
 
 export const k8sMetadataSchema = z.object({
@@ -344,8 +359,11 @@ export const k8sMetadataSchema = z.object({
   namespace: z.string().optional(),
   uid: z.string().optional(),
   creationTimestamp: z.string().optional(),
+  // Set once a delete is accepted; the object lingers until finalizers finish.
+  deletionTimestamp: z.string().optional(),
   labels: z.record(z.string()).optional(),
   annotations: z.record(z.string()).optional(),
+  ownerReferences: z.array(ownerReferenceSchema).optional(),
 })
 
 export const planStateSchema = z.object({

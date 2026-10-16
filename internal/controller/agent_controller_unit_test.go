@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -277,7 +278,7 @@ func TestValidateAgent_ModelControlsRemainValidOutsideBuiltInACPRuntimes(t *test
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			r := setupAgentReconciler()
+			r := setupAgentReconciler(&corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}})
 			agent := baseAgent(tt.name)
 			agent.Spec.Runtime = tt.runtime
 			agent.Spec.Model.Temperature = &temperature
@@ -285,6 +286,38 @@ func TestValidateAgent_ModelControlsRemainValidOutsideBuiltInACPRuntimes(t *test
 
 			if err := r.validateAgent(context.Background(), agent); err != nil {
 				t.Fatalf("validateAgent() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_ModelTokenLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		maxTokens     *int32
+		contextWindow *int32
+		wantError     string
+	}{
+		{name: "positive limits", maxTokens: new(int32(1024)), contextWindow: new(int32(8192))},
+		{name: "legacy zero max tokens", maxTokens: new(int32(0))},
+		{name: "negative max tokens", maxTokens: new(int32(-1)), wantError: "spec.model.maxTokens must not be negative"},
+		{name: "zero context window", contextWindow: new(int32(0)), wantError: "spec.model.contextWindow must be positive"},
+		{name: "negative context window", contextWindow: new(int32(-5)), wantError: "spec.model.contextWindow must be positive"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := baseAgent("token-limits")
+			agent.Spec.Model.MaxTokens = tt.maxTokens
+			agent.Spec.Model.ContextWindow = tt.contextWindow
+
+			err := setupAgentReconciler().validateAgent(context.Background(), agent)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateAgent() error = %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantError {
+				t.Fatalf("validateAgent() error = %v, want %q", err, tt.wantError)
 			}
 		})
 	}
@@ -299,6 +332,105 @@ func TestValidateAgent_RuntimeRefRequiresName(t *testing.T) {
 	err := setupAgentReconciler().validateAgent(context.Background(), agent)
 	if err == nil || !strings.Contains(err.Error(), "runtimeRef.name is required") {
 		t.Fatalf("validateAgent() error = %v, want runtimeRef.name rejection", err)
+	}
+}
+
+func TestValidateAgent_RuntimeRefRequiresExistingAgentRuntime(t *testing.T) {
+	runtimeRefAgent := func() *corev1alpha1.Agent {
+		agent := baseAgent("external-agent")
+		agent.Spec.Model = nil
+		agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+		}
+		return agent
+	}
+	inNamespace := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}}
+	otherNamespace := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: "other"}}
+
+	if err := setupAgentReconciler(inNamespace).validateAgent(context.Background(), runtimeRefAgent()); err != nil {
+		t.Fatalf("validateAgent() error = %v, want an existing AgentRuntime accepted", err)
+	}
+	for name, r := range map[string]*AgentReconciler{
+		"missing":         setupAgentReconciler(),
+		"other namespace": setupAgentReconciler(otherNamespace),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := r.validateAgent(context.Background(), runtimeRefAgent())
+			if err == nil || err.Error() != `referenced AgentRuntime "custom-runtime" not found` {
+				t.Fatalf("validateAgent() error = %v, want missing AgentRuntime", err)
+			}
+		})
+	}
+
+	// The Agent reports the missing runtime as not Ready.
+	agent := runtimeRefAgent()
+	r := setupAgentReconciler()
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: testNS}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	stored := &corev1alpha1.Agent{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: agent.Name, Namespace: testNS}, stored); err != nil {
+		t.Fatal(err)
+	}
+	ready := findCondition(stored.Status.Conditions, conditionReasonReady)
+	if stored.Status.Ready || ready == nil || ready.Status != metav1.ConditionFalse ||
+		ready.Message != `referenced AgentRuntime "custom-runtime" not found` {
+		t.Fatalf("status = ready %v condition %+v, want Ready=False for the missing AgentRuntime", stored.Status.Ready, ready)
+	}
+}
+
+func TestAgentsForAgentRuntime(t *testing.T) {
+	refAgent := func(name, namespace, runtimeName string) *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+			}},
+		}
+	}
+	r := setupAgentReconciler(
+		refAgent("uses-runtime", testNS, "custom-runtime"),
+		refAgent("uses-other-runtime", testNS, "other-runtime"),
+		refAgent("other-namespace", "other", "custom-runtime"),
+		baseAgent("provider-agent"),
+	)
+	agentRuntime := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}}
+
+	requests := r.agentsForAgentRuntime(context.Background(), agentRuntime)
+	if len(requests) != 1 || requests[0].Name != "uses-runtime" || requests[0].Namespace != testNS {
+		t.Fatalf("requests = %v, want only %s/uses-runtime", requests, testNS)
+	}
+}
+
+func TestAgentsForProvider(t *testing.T) {
+	providerAgent := func(name, namespace, provider string) *corev1alpha1.Agent {
+		a := baseAgent(name)
+		a.Namespace = namespace
+		a.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: provider}
+		return a
+	}
+	crossNamespace := providerAgent("cross-namespace", "other", "vekil")
+	crossNamespace.Spec.ProviderRef.Namespace = testNS
+	pointsElsewhere := providerAgent("points-elsewhere", testNS, "vekil")
+	pointsElsewhere.Spec.ProviderRef.Namespace = "other"
+	r := setupAgentReconciler(
+		providerAgent("uses-vekil", testNS, "vekil"),
+		providerAgent("uses-other", testNS, "other"),
+		providerAgent("other-namespace", "other", "vekil"),
+		crossNamespace,
+		pointsElsewhere,
+	)
+	provider := &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "vekil", Namespace: testNS}}
+
+	requests := r.agentsForProvider(context.Background(), provider)
+	got := map[string]bool{}
+	for _, request := range requests {
+		got[request.Namespace+"/"+request.Name] = true
+	}
+	want := map[string]bool{testNS + "/uses-vekil": true, "other/cross-namespace": true}
+	if len(got) != len(want) || !got[testNS+"/uses-vekil"] || !got["other/cross-namespace"] {
+		t.Fatalf("requests = %v, want %v (matched on the reference's effective namespace)", requests, want)
 	}
 }
 
@@ -1097,6 +1229,15 @@ func TestCheckTTLExpiry(t *testing.T) {
 			}(),
 		},
 		{
+			name: "negative TTL never deletes",
+			agent: func() *corev1alpha1.Agent {
+				a := baseAgent("negative-ttl")
+				a.Spec.TTLAfterLastTask = &metav1.Duration{Duration: -time.Hour}
+				a.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+				return a
+			}(),
+		},
+		{
 			name: "active tasks prevent deletion",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("active-ttl")
@@ -1314,6 +1455,26 @@ func TestUpdateStatus_NoTTLNoLastUsed(t *testing.T) {
 	}
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestUpdateStatus_RechecksFailedValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("status-missing-secret")
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	// A Secret created later is not watched, so readiness must be rechecked.
+	result, err := r.updateStatus(context.Background(), agent, 0, errors.New(`referenced secret "later" not found`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != agentValidationRecheckInterval {
+		t.Errorf("RequeueAfter = %v, want %v", result.RequeueAfter, agentValidationRecheckInterval)
 	}
 }
 
