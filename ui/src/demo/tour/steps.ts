@@ -1,5 +1,6 @@
 import type { NavigateOptions } from '@tanstack/react-router'
 import { findingID } from '../data/security'
+import { agentManifest, bindingManifest, monitorManifest, taskManifest, type Manifest } from './manifests'
 
 export type TourPart = 'basics' | 'more'
 
@@ -14,6 +15,10 @@ export interface TourStep {
   prompts?: string[]
   /** The end of the basics, where the visitor can finish or keep going. */
   checkpoint?: boolean
+  /** The Kubernetes resource behind the page, which the visitor can show as YAML. */
+  manifest?: Manifest
+  /** Where the page's data comes from, for pages not backed by a resource. */
+  note?: string
 }
 
 /** The incident Task the tour follows; it waits on a rollback approval when the demo loads. */
@@ -27,6 +32,10 @@ export const RELEASE_TASK = 'release-v2-14-0-plan-r2w8z'
 export const TOUR_FINDING = findingID('checkout-refund-idor')
 /** The gateway that created the incident Task from a Slack message. */
 export const TOUR_GATEWAY = 'slack-northwind'
+/** The binding that sends the #incidents channel to the incident agent. */
+export const TOUR_BINDING = 'slack-incidents'
+
+const RECORD_NOTE = "comes from Orka's own record, not from a Kubernetes resource."
 
 const incident = (tab?: string): NavigateOptions => ({
   to: '/tasks/$taskId',
@@ -44,31 +53,35 @@ const incident = (tab?: string): NavigateOptions => ({
 export const TOUR_STEPS: TourStep[] = [
   {
     title: 'Welcome to the Orka demo',
-    body: 'Orka runs AI agents and containers as Tasks on Kubernetes, with approvals, traces and usage tracking built in. This demo follows Northwind Labs, a made-up engineering team. It runs on sample data in your browser, so nothing reaches a cluster or a model.',
+    body: "Orka runs AI agents and containers as Tasks on Kubernetes. Agents, Tasks, monitors and the rest of what you configure are Kubernetes resources; traces, approvals and usage are Orka's own record of what happened. This demo follows Northwind Labs, a made-up engineering team, on sample data in your browser, so nothing reaches a cluster or a model.",
   },
   {
     title: 'An agent handles an incident',
-    body: 'Checkout latency spiked in production. Someone asked for help in the #incidents Slack channel, and Orka started this Task for the incident-responder agent. All work in Orka is a Task with a phase, events, logs and a result.',
+    body: 'Checkout latency spiked in production. Someone asked for help in the #incidents Slack channel, and Orka started this Task for the incident-responder agent. All work in Orka is a Task: a Kubernetes resource with a phase, events, logs and a result.',
     route: incident(),
     part: 'basics',
+    manifest: taskManifest(INCIDENT_TASK),
   },
   {
     title: 'See what it did',
     body: 'The Trace tab lists every model request and tool call in order. The agent read latency and error rates from Datadog, found the merged pull request that shrank the database connection pool, and posted its findings to PagerDuty and Slack.',
     route: incident('trace'),
     part: 'basics',
+    note: `The trace ${RECORD_NOTE}`,
   },
   {
     title: 'You make the call',
     body: 'Risky steps wait for a person. The agent wants to roll production back, and the Task stays paused until someone decides. Approve or decline it: either way the agent carries on and finishes about a minute later.',
     route: incident('approvals'),
     part: 'basics',
+    note: "Approvals come from Orka's own record, not from the Task resource.",
   },
   {
     title: 'Every Task runs an agent',
     body: 'An agent is a reusable definition: a model, instructions and the tools it may use. incident-responder can query Datadog, update PagerDuty, search GitHub and post to Slack. It runs in autonomous mode, which lets it pause its own Task for approval, as it did for the rollback. Other agents, such as code-reviewer, run a coding agent like Claude Code instead.',
     route: { to: '/agents/$agentId', params: { agentId: TOUR_AGENT } },
     part: 'basics',
+    manifest: agentManifest(TOUR_AGENT),
   },
   {
     title: 'Ask for work in chat',
@@ -76,18 +89,21 @@ export const TOUR_STEPS: TourStep[] = [
     route: { to: '/chat' },
     part: 'basics',
     prompts: ["What's running right now?", 'Review PR #1486 in checkout-service'],
+    note: "Chat sessions live in Orka's own record; the Tasks they start are Kubernetes resources.",
   },
   {
     title: 'Monitors find work on their own',
     body: 'A repository monitor watches checkout-service on GitHub. It implements issues labeled for Orka, reviews new pull requests and repairs failing ones, each as a Task. Right now it is fixing issue #2214.',
     route: { to: '/monitors/$monitorId', params: { monitorId: TOUR_MONITOR } },
     part: 'basics',
+    manifest: monitorManifest(TOUR_MONITOR),
   },
   {
     title: 'See what each change cost',
     body: 'Usage follows model tokens from the original issue through review to the merged pull request, so you see how many tokens each shipped change took, including attempts that failed along the way.',
     route: { to: '/usage' },
     part: 'basics',
+    note: `Usage ${RECORD_NOTE}`,
   },
   {
     title: "That's the basics",
@@ -105,12 +121,14 @@ export const TOUR_STEPS: TourStep[] = [
     body: "Security scans run agents over each repository and report findings with evidence. This one lets a merchant refund another merchant's payment. An agent reproduced it to confirm it, then wrote a patch and opened it as pull request #1486, the one chat offered to review.",
     route: { to: '/security/findings/$findingId', params: { findingId: TOUR_FINDING } },
     part: 'more',
+    note: "Findings live in Orka's own record; the scan that found them is a RepositoryScan resource.",
   },
   {
     title: 'Gateways bring in Slack and GitHub',
-    body: 'A gateway connects a chat or code platform to agents. This Slack gateway turned the #incidents message into the incident Task from the start of the tour. Its event timeline shows each message: accepted, queued behind a running turn, or rejected because the sender is not allowed.',
+    body: 'A gateway connects a chat or code platform to agents. On this Slack gateway, a binding sends the #incidents channel to incident-responder, which is how the incident Task at the start of the tour began. The event timeline shows each message: accepted, queued behind a running turn, or rejected because the sender is not allowed.',
     route: { to: '/gateways/$gatewayId', params: { gatewayId: TOUR_GATEWAY } },
     part: 'more',
+    manifest: bindingManifest(TOUR_BINDING),
   },
   {
     title: 'Where agents run',

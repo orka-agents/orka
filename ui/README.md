@@ -108,8 +108,11 @@ A guided tour (`src/demo/tour/`) opens on a visitor's first visit and from **Tak
 in the sidebar. It follows one incident Task through its trace and approval and the agent
 behind it, then visits Chat, a repository monitor and Usage; visitors who keep going also
 see a coordinator's child Tasks, a security finding, the Slack gateway and the runtime
-pools. Its steps name sample objects, and `src/demo/tour/steps.test.ts` fails if they are
-renamed, the incident stops waiting on its approval, or the coordinator loses its children.
+pools. Stops backed by a Kubernetes resource can show it as YAML, trimmed to the fields the
+stop mentions (`src/demo/tour/manifests.ts`); the others say their data comes from Orka's
+own record. Its steps name sample objects, and `src/demo/tour/steps.test.ts` fails if they
+are renamed, a YAML stops matching the resource its page shows, the incident stops waiting
+on its approval, or the coordinator loses its children.
 `src/demo/data/agents.test.ts` holds the sample agents to the controller's approval rules.
 
 `.github/workflows/website.yml` publishes the demo to GitHub Pages under `/demo/`, next to

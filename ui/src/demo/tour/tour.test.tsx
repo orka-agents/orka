@@ -110,6 +110,20 @@ describe('demo tour', () => {
     expect(useTourStore.getState().open).toBe(false)
   })
 
+  it('shows the resource behind a page as YAML, or says where the page comes from', () => {
+    useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.manifest?.kind === 'Agent') })
+    render(<TourPanel slot="bottom" />)
+    expect(screen.queryByRole('region', { name: 'Agent YAML' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Show the YAML' }))
+    expect(screen.getByRole('region', { name: 'Agent YAML' })).toHaveTextContent(`name: ${TOUR_AGENT}`)
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the YAML' }))
+    expect(screen.queryByRole('region', { name: 'Agent YAML' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByText(/Approvals come from Orka's own record/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show the YAML' })).not.toBeInTheDocument()
+  })
+
   it('folds the narrow-screen panel to its title', () => {
     render(<TourPanel slot="bottom" />)
     fireEvent.click(screen.getByRole('button', { name: 'Collapse the tour' }))

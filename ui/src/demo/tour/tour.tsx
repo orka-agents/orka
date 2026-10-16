@@ -1,10 +1,12 @@
 import { useNavigate } from '@tanstack/react-router'
-import { ChevronDown, ChevronUp, Compass, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, Compass, Database, FileCode, X } from 'lucide-react'
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { useSendMessage } from '@/hooks/use-chat'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '@/stores/chat'
+import { toYaml } from './manifests'
 import { stopsIn, TOUR_STEPS, type TourStep } from './steps'
 import { useTourStore } from './store'
 
@@ -69,6 +71,45 @@ function StepBody({ step }: { step: TourStep }) {
             </Button>
           ))}
         </div>
+      )}
+      <StepSource key={step.title} step={step} />
+    </div>
+  )
+}
+
+/** Where the page's data comes from: a resource to show as YAML, or Orka's own record. */
+function StepSource({ step }: { step: TourStep }) {
+  const [open, setOpen] = useState(false)
+  const { manifest, note } = step
+  if (note) {
+    return (
+      <p className="flex gap-2 text-xs text-muted-foreground">
+        <Database className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        {note}
+      </p>
+    )
+  }
+  if (!manifest) return null
+  return (
+    <div className="space-y-2">
+      <Button variant="outline" size="sm" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <FileCode className="h-4 w-4" aria-hidden="true" />
+        {open ? 'Hide the YAML' : 'Show the YAML'}
+      </Button>
+      {open && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            {manifest.kind} {manifest.metadata.name}, trimmed to the fields this stop mentions.
+          </p>
+          <pre
+            tabIndex={0}
+            role="region"
+            aria-label={`${manifest.kind} YAML`}
+            className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed"
+          >
+            {toYaml(manifest)}
+          </pre>
+        </>
       )}
     </div>
   )
