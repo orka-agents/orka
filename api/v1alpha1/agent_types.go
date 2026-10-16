@@ -206,7 +206,8 @@ type ModelConfig struct {
 
 	// MaxTokens limits the response length. OpenCode validates positive reviewed
 	// limits at its runtime-specific admission boundary; existing Agent objects
-	// may retain the legacy zero value.
+	// may retain the legacy zero value, which selects the worker default.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxTokens *int32 `json:"maxTokens,omitempty"`
 

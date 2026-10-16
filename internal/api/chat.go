@@ -216,6 +216,7 @@ type chatStreamRequest struct {
 	turnDeadline   time.Time
 	finalizeTurn   func()
 	provider       llm.Provider
+	providerName   string // the Provider resource's name; provider.Name() is only its type
 	messages       []llm.Message
 	systemPrompt   string
 	tools          []llm.Tool
@@ -446,7 +447,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			switch {
 			case agentObj.Spec.Runtime != nil && slices.Contains(offeredChatTools, "create_agent_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has runtime %q — use create_agent_task with agent=%q for this request.]\n\n%s",
-					req.AgentRef, agentObj.Spec.Runtime.Type, req.AgentRef, req.Message)
+					req.AgentRef, agentRuntimeLabel(agentObj.Spec.Runtime), req.AgentRef, req.Message)
 			case agentObj.Spec.Runtime == nil && slices.Contains(offeredChatTools, "create_ai_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
 					req.AgentRef, req.AgentRef, req.Message)
@@ -550,6 +551,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		turnDeadline:   activeChat.turnDeadline,
 		finalizeTurn:   activeChat.finish,
 		provider:       provider,
+		providerName:   providerInfo.Name,
 		messages:       messages,
 		systemPrompt:   systemPrompt,
 		tools:          tools,
@@ -615,9 +617,13 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		emitSSE := func(event, data string) {
 			_ = writeSSE(w, event, data)
 		}
+		providerName := req.providerName
+		if providerName == "" {
+			providerName = req.provider.Name()
+		}
 		statusData, _ := json.Marshal(map[string]string{
 			"sessionId":     req.sessionID,
-			chatProviderKey: req.provider.Name(),
+			chatProviderKey: providerName,
 			chatModelKey:    req.model,
 		})
 		emitSSE("status", string(statusData))
@@ -1641,4 +1647,17 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 		}
 	}
 	return false
+}
+
+// agentRuntimeLabel names an Agent's runtime for the model: its built-in
+// type, or the external AgentRuntime it references.
+func agentRuntimeLabel(runtime *corev1alpha1.AgentCLIRuntime) string {
+	switch {
+	case runtime.Type != "":
+		return string(runtime.Type)
+	case runtime.RuntimeRef != nil:
+		return "external AgentRuntime " + runtime.RuntimeRef.Name
+	default:
+		return "unspecified"
+	}
 }

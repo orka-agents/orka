@@ -13,7 +13,7 @@ function makeMessage(overrides: Partial<ChatMessage> & { role: ChatMessage['role
 
 describe('useChatStore', () => {
   beforeEach(() => {
-    useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false, activeNamespace: 'default', selections: {} })
+    useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false, stopRequested: false, activeNamespace: 'default', selections: {} })
   })
 
   it('resets the transcript and session when switching between namespaces', () => {
@@ -40,6 +40,22 @@ describe('useChatStore', () => {
     useChatStore.getState().selectNamespace('gamma')
     expect(useChatStore.getState().currentSessionId).toBe('sess-beta')
     expect(useChatStore.getState().turnEpoch).toBe(4)
+  })
+
+  it('accepts a stop request only while streaming and clears it with the turn', () => {
+    useChatStore.getState().requestStop()
+    expect(useChatStore.getState().stopRequested).toBe(false)
+
+    useChatStore.getState().setStreaming(true)
+    useChatStore.getState().requestStop()
+    expect(useChatStore.getState().stopRequested).toBe(true)
+    useChatStore.getState().setStreaming(false)
+    expect(useChatStore.getState().stopRequested).toBe(false)
+
+    useChatStore.getState().setStreaming(true)
+    useChatStore.getState().requestStop()
+    useChatStore.getState().newSession()
+    expect(useChatStore.getState().stopRequested).toBe(false)
   })
 
   it('keeps a separate provider/model selection per namespace', () => {

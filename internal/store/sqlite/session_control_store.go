@@ -795,7 +795,7 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		}
 	}
 	if err := finalizeSessionTranscriptTx(ctx, tx, control.Namespace, control.SessionName,
-		request.Key.TaskUID, messageCountDelta, request.FinalizedAt); err != nil {
+		request.Key, messageCountDelta, request.FinalizedAt); err != nil {
 		return nil, err
 	}
 	if err := validateNativeFinalization(request.NativeSession, request.NativeSessionCarried, request.TerminalKind, request.SkipTranscriptAppend); err != nil {

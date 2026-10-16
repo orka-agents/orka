@@ -129,7 +129,7 @@ func effectiveStatusCode(c fiber.Ctx, err error) int {
 		}
 	}
 	if status == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
-		if _, ok := spaIndexHTML(); ok {
+		if _, ok := embeddedSPAIndexPage(); ok {
 			status = fiber.StatusOK
 		}
 	}

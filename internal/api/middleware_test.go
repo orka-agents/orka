@@ -368,6 +368,8 @@ func TestEffectiveStatusCodeReportsSPAFallbackAsSuccess(t *testing.T) {
 	}{
 		{"client-side route", "/settings/profile", true, fiber.StatusOK},
 		{"client-side route without dashboard", "/settings/profile", false, fiber.StatusNotFound},
+		{"missing static asset", "/assets/index-stale.js", true, fiber.StatusNotFound},
+		{"upper-case missing static asset", "/ASSETS/index-stale.js", true, fiber.StatusNotFound},
 		{"api path", "/api/v1/missing", true, fiber.StatusNotFound},
 		{"healthz", "/healthz", true, fiber.StatusNotFound},
 		{"readyz", "/readyz", true, fiber.StatusNotFound},

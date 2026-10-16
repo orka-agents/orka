@@ -45,6 +45,34 @@ describe('RuntimeCanvas', () => {
     expect(screen.getByText(/only the selected namespace/)).toBeInTheDocument()
   })
 
+  it('says not authorized, without a Retry, when the task list is forbidden', async () => {
+    server.use(http.get('/api/v1/tasks', () =>
+      HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })))
+    render(<RuntimeCanvas />)
+    expect(await screen.findByText('Not authorized to view tasks')).toBeInTheDocument()
+    // No task count while the list cannot be read.
+    expect(screen.queryByText(/\d+ active ·/)).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('not authorized')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/No tasks in namespace/)).not.toBeInTheDocument()
+  })
+
+  it('shows the server error with a Retry when the task list fails', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks', () => {
+      calls += 1
+      return HttpResponse.json({ error: { code: 500, message: 'etcd unavailable' } }, { status: 500 })
+    }))
+    // The hook retries server errors; skip the backoff so the error settles.
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } })
+    rawRender(<QueryClientProvider client={client}><RuntimeCanvas /></QueryClientProvider>)
+    expect(await screen.findByText('Could not load tasks')).toBeInTheDocument()
+    expect(screen.getByText('etcd unavailable')).toBeInTheDocument()
+    const before = calls
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(calls).toBeGreaterThan(before))
+  })
+
   it('renders spotlight + roster for running tasks', async () => {
     server.use(http.get('/api/v1/tasks', () => HttpResponse.json({
       items: [running('r1'), running('r2')], metadata: {},
@@ -53,6 +81,19 @@ describe('RuntimeCanvas', () => {
     await waitFor(() => expect(screen.getByText('2 active · namespace default')).toBeInTheDocument())
     expect(screen.getByText('Active now')).toBeInTheDocument()
     expect(screen.getByText('Agents')).toBeInTheDocument()
+  })
+
+  it('lets grid columns shrink below their content so mobile cards are not clipped', async () => {
+    server.use(http.get('/api/v1/tasks', () => HttpResponse.json({
+      items: [running('r1')], metadata: {},
+    })))
+    render(<RuntimeCanvas />)
+    const spotlight = await screen.findByText('Active now')
+    const grid = spotlight.closest('.grid')!
+    expect(grid).toHaveClass('min-w-0')
+    for (const column of Array.from(grid.children)) {
+      expect(column).toHaveClass('min-w-0')
+    }
   })
 
   it('selects a stable active task when none has startTime', async () => {

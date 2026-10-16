@@ -54,7 +54,10 @@ const (
 	runtimePoolMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 	sessionDataVolumeName         = "session-data"
 	workspaceRootPath             = "/workspace"
-	skillsVolumeName              = "skills"
+	// workerArtifactsDirEnv names the directory whose top-level files a
+	// worker uploads as Task artifacts; workers default to /tmp/artifacts.
+	workerArtifactsDirEnv = "ORKA_ARTIFACTS_DIR"
+	skillsVolumeName      = "skills"
 )
 
 const (
@@ -554,6 +557,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
 		b.addWorkspaceVolumes(job, task, validationTask)
+	} else if task.Spec.Type == corev1alpha1.TaskTypeAI {
+		addAIOutputWorkspace(job)
 	}
 
 	if taskNeedsWorkspaceInitContainer(task) {
@@ -2092,6 +2097,24 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 				corev1.VolumeMount{Name: volumeName, MountPath: "/secrets/git", ReadOnly: true},
 			)
 		}
+	}
+}
+
+// addAIOutputWorkspace gives an AI task without a repository a writable
+// /workspace, the default root of its file tools, and makes it the artifact
+// directory so files the agent writes at its top level become Task artifacts.
+func addAIOutputWorkspace(job *batchv1.Job) {
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name:         taskWorkspaceVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	container := &job.Spec.Template.Spec.Containers[0]
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      taskWorkspaceVolume,
+		MountPath: workspaceRootPath,
+	})
+	if !envVarExists(container.Env, workerArtifactsDirEnv) {
+		container.Env = append(container.Env, corev1.EnvVar{Name: workerArtifactsDirEnv, Value: workspaceRootPath})
 	}
 }
 

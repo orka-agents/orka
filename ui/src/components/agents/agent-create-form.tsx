@@ -6,7 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageHeader } from '@/components/layout/page-header'
 import { useCreateAgent } from '@/hooks/use-agents'
-import { useSecretNames } from '@/hooks/use-secrets'
+import { useProviderList } from '@/hooks/use-providers'
+import { SecretNameField } from '@/components/ui/secret-name-field'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 import {
@@ -15,17 +16,21 @@ import {
   type BuiltInAgentRuntimeType,
 } from '@/lib/agent-runtime'
 
+const PROVIDER_DOCS_URL = 'https://orka-agents.github.io/orka/docs/reference/configuration#provider'
+
 export function AgentCreateForm() {
   const navigate = useNavigate()
   const createAgent = useCreateAgent()
-  const { data: secretsData } = useSecretNames()
+  const { data: providersData, isLoading: providersLoading, error: providersError } = useProviderList()
   const namespace = useUIStore((s) => s.namespace)
+  const providers = providersError ? [] : (providersData?.items ?? [])
 
   const [name, setName] = useState('')
   const [mode, setMode] = useState<'ai' | 'runtime'>('ai')
 
-  // Native AI mode fields remain unchanged by the ACP runtime cutover.
+  // Native AI agents reference a Provider resource in the Agent's namespace.
   const [provider, setProvider] = useState('')
+  const [providerMissing, setProviderMissing] = useState(false)
   const [model, setModel] = useState('')
   const [temperature, setTemperature] = useState('0.7')
   const [contextWindow, setContextWindow] = useState('')
@@ -38,10 +43,50 @@ export function AgentCreateForm() {
   const [runtimeType, setRuntimeType] = useState<BuiltInAgentRuntimeType>('claude')
   const [runtimeRef, setRuntimeRef] = useState('')
 
+  const selectedProvider = providers.find((p) => p.name === provider)
+
+  // Model, token, and runtime fields mean different things per mode (the
+  // native max-tokens field and OpenCode's output limit share state), so a
+  // mode switch starts the mode-specific fields over instead of carrying them.
+  const handleModeChange = (value: string) => {
+    setMode(value as 'ai' | 'runtime')
+    setProvider('')
+    setProviderMissing(false)
+    setModel('')
+    setTemperature('0.7')
+    setContextWindow('')
+    setMaxTokens('')
+    setSystemPrompt('')
+    setRuntimeSource('built-in')
+    setRuntimeType('claude')
+    setRuntimeRef('')
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
     const trimmedModel = model.trim()
+    if (mode === 'ai') {
+      // The pick must still be listed: a namespace switch leaves a stale name.
+      if (!selectedProvider) {
+        setProviderMissing(true)
+        return
+      }
+      if (temperature) {
+        const parsedTemperature = Number(temperature)
+        if (!Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) {
+          toast.error('Temperature must be between 0 and 2')
+          return
+        }
+      }
+      if (maxTokens) {
+        const parsedNativeMaxTokens = Number(maxTokens)
+        if (!Number.isInteger(parsedNativeMaxTokens) || parsedNativeMaxTokens <= 0) {
+          toast.error('Max tokens must be a positive integer')
+          return
+        }
+      }
+    }
     if (
       mode === 'runtime'
       && runtimeSource === 'built-in'
@@ -79,17 +124,21 @@ export function AgentCreateForm() {
     const spec: Record<string, unknown> = {}
 
     if (mode === 'ai') {
-      spec.model = {
-        provider,
-        name: model,
-        ...(temperature ? { temperature: parseFloat(temperature) } : {}),
-        ...(maxTokens ? { maxTokens: parseInt(maxTokens) } : {}),
+      spec.providerRef = { name: provider }
+      // An omitted model name inherits the Provider's defaultModel.
+      const modelConfig = {
+        ...(trimmedModel ? { name: trimmedModel } : {}),
+        ...(temperature ? { temperature: Number(temperature) } : {}),
+        ...(maxTokens ? { maxTokens: Number(maxTokens) } : {}),
+      }
+      if (Object.keys(modelConfig).length > 0) {
+        spec.model = modelConfig
       }
       if (systemPrompt) {
         spec.systemPrompt = { inline: systemPrompt }
       }
-      if (secretRef && secretRef !== '__none__') {
-        spec.secretRef = { name: secretRef }
+      if (secretRef.trim() && secretRef !== '__none__') {
+        spec.secretRef = { name: secretRef.trim() }
       }
     } else {
       spec.runtime = runtimeSource === 'built-in'
@@ -132,9 +181,9 @@ export function AgentCreateForm() {
                 <Input id="agent-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-agent" required />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Mode</label>
-                <Select value={mode} onValueChange={(value) => setMode(value as 'ai' | 'runtime')}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                <label htmlFor="agent-mode" className="text-sm font-medium">Mode</label>
+                <Select value={mode} onValueChange={handleModeChange}>
+                  <SelectTrigger id="agent-mode"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="ai">Native AI (LLM provider)</SelectItem>
                     <SelectItem value="runtime">ACP agent runtime</SelectItem>
@@ -148,27 +197,66 @@ export function AgentCreateForm() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label htmlFor="agent-provider" className="text-sm font-medium">Provider</label>
-                    <Select value={provider} onValueChange={setProvider}>
-                      <SelectTrigger id="agent-provider"><SelectValue placeholder="Select provider" /></SelectTrigger>
+                    <Select
+                      value={provider}
+                      onValueChange={(value) => {
+                        setProvider(value)
+                        setProviderMissing(false)
+                      }}
+                      disabled={providers.length === 0}
+                    >
+                      <SelectTrigger
+                        id="agent-provider"
+                        aria-invalid={providerMissing || undefined}
+                        aria-describedby={providerMissing ? 'agent-provider-error' : undefined}
+                      >
+                        <SelectValue placeholder={providersLoading ? 'Loading providers...' : 'Select provider'} />
+                      </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="anthropic">Anthropic</SelectItem>
-                        <SelectItem value="openai">OpenAI</SelectItem>
+                        {providers.map((p) => (
+                          <SelectItem key={p.name} value={p.name}>
+                            {p.name}
+                            {p.type && ` (${p.type})`}
+                            {p.ready === false && ' — not ready'}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
+                    {providersError ? (
+                      <p role="alert" className="text-xs text-destructive">
+                        Providers unavailable: {providersError instanceof Error ? providersError.message : 'unknown error'}
+                      </p>
+                    ) : !providersLoading && providers.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        No Providers in {namespace}. Create a Provider resource first;{' '}
+                        <a href={PROVIDER_DOCS_URL} target="_blank" rel="noreferrer" className="text-primary underline">see the Provider reference</a>.
+                      </p>
+                    ) : null}
+                    {providerMissing && (
+                      <p id="agent-provider-error" role="alert" className="text-xs text-destructive">
+                        Select a Provider for native AI agents.
+                      </p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <label htmlFor="agent-model" className="text-sm font-medium">Model</label>
-                    <Input id="agent-model" value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet-4-20250514" />
+                    <Input
+                      id="agent-model"
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder={selectedProvider?.defaultModel || 'Model identifier'}
+                    />
+                    <p className="text-xs text-muted-foreground">Leave empty to use the Provider&apos;s default model.</p>
                   </div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label htmlFor="agent-temperature" className="text-sm font-medium">Temperature</label>
-                    <Input id="agent-temperature" type="number" step="0.1" min="0" max="2" value={temperature} onChange={(e) => setTemperature(e.target.value)} />
+                    <Input id="agent-temperature" type="number" step="any" min="0" max="2" value={temperature} onChange={(e) => setTemperature(e.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <label htmlFor="agent-max-tokens" className="text-sm font-medium">Max Tokens</label>
-                    <Input id="agent-max-tokens" type="number" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} />
+                    <Input id="agent-max-tokens" type="number" min="1" step="1" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} />
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -182,16 +270,8 @@ export function AgentCreateForm() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Secret Reference</label>
-                  <Select value={secretRef} onValueChange={setSecretRef}>
-                    <SelectTrigger><SelectValue placeholder="Select a secret..." /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">None</SelectItem>
-                      {(secretsData?.items ?? []).map((secret) => (
-                        <SelectItem key={secret.name} value={secret.name}>{secret.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <label htmlFor="agent-secret-ref" className="text-sm font-medium">Secret Reference</label>
+                  <SecretNameField id="agent-secret-ref" value={secretRef} onChange={setSecretRef} placeholder="Select a secret..." />
                   <p className="text-xs text-muted-foreground">Kubernetes Secret containing native AI provider credentials</p>
                 </div>
               </div>
@@ -200,9 +280,9 @@ export function AgentCreateForm() {
             {mode === 'runtime' && (
               <div className="space-y-4 rounded-md border bg-muted/20 p-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Runtime source</label>
+                  <label htmlFor="agent-runtime-source" className="text-sm font-medium">Runtime source</label>
                   <Select value={runtimeSource} onValueChange={(value) => setRuntimeSource(value as 'built-in' | 'external')}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger id="agent-runtime-source"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="built-in">Orka-managed RuntimePool</SelectItem>
                       <SelectItem value="external">External v2 AgentRuntime</SelectItem>
@@ -215,9 +295,9 @@ export function AgentCreateForm() {
 
                 {runtimeSource === 'built-in' ? (
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Runtime profile</label>
+                    <label htmlFor="agent-runtime-profile" className="text-sm font-medium">Runtime profile</label>
                     <Select value={runtimeType} onValueChange={(value) => setRuntimeType(value as BuiltInAgentRuntimeType)}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectTrigger id="agent-runtime-profile"><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="claude">Claude ACP</SelectItem>
                         <SelectItem value="codex">OpenAI Codex ACP</SelectItem>
@@ -252,7 +332,7 @@ export function AgentCreateForm() {
                       id="runtime-model"
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      placeholder={runtimeType === 'opencode' ? 'openai/gpt-5.4' : 'Enter model identifier'}
+                      placeholder={runtimeType === 'opencode' ? 'provider/model' : 'Enter model identifier'}
                       required
                     />
                     {runtimeType === 'opencode' && (

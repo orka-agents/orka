@@ -87,11 +87,14 @@ export function LiveStatePanel({ task }: LiveStatePanelProps) {
             <ul className="space-y-1.5">
               {conditions.map((c, i) => (
                 <li key={`${c.type}-${i}`}>
+                  {/* Messages can carry long unbroken IDs (approval digests);
+                      they wrap anywhere so the card keeps its width and the
+                      status badge stays beside the type. */}
                   <div className="flex items-center gap-1.5">
-                    <span className="font-mono">{c.type}</span>
-                    <Badge variant={c.status === 'True' ? 'secondary' : 'outline'}>{c.status}</Badge>
+                    <span className="min-w-0 wrap-anywhere font-mono">{c.type}</span>
+                    <Badge className="shrink-0" variant={c.status === 'True' ? 'secondary' : 'outline'}>{c.status}</Badge>
                   </div>
-                  {c.message && <p className="text-muted-foreground">{c.message}</p>}
+                  {c.message && <p className="wrap-anywhere text-muted-foreground">{c.message}</p>}
                 </li>
               ))}
             </ul>

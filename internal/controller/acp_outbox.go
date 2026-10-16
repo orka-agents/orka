@@ -10,6 +10,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -370,6 +371,14 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			delivery := taskDeliveryStatusForKubernetes(task, *payload.Delivery)
 			delivery.LastTransitionTime = &now
 			task.Status.Delivery = &delivery
+		}
+		// A terminal Task no longer waits on any approval it was parked on.
+		if waiting := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval); waiting != nil &&
+			waiting.Status == metav1.ConditionTrue && isTerminalTaskPhase(payload.Phase) {
+			meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+				Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: now,
+				Reason: "Task" + string(payload.Phase), Message: taskTerminalMessage,
+			})
 		}
 		if err := p.Client.Status().Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err

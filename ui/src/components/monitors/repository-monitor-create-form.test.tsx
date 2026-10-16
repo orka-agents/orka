@@ -65,6 +65,7 @@ if (typeof HTMLElement !== 'undefined') {
 
 import userEvent from '@testing-library/user-event'
 import { render, screen, waitFor } from '@/test/test-utils'
+import { ApiError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import { RepositoryMonitorCreateForm } from './repository-monitor-create-form'
 
@@ -84,7 +85,7 @@ describe('RepositoryMonitorCreateForm', () => {
       },
       isLoading: false,
     })
-    mockUseSecretNames.mockReturnValue({ data: { items: [{ name: 'repo-monitor-github' }] } })
+    mockUseSecretNames.mockReturnValue({ data: { items: [{ name: 'repo-monitor-github' }] }, error: null, isLoading: false })
     mockMutateAsync.mockResolvedValue({
       metadata: { name: 'example-app', namespace: 'default' },
       spec: { repoURL: 'https://github.com/example/app' },
@@ -101,7 +102,8 @@ describe('RepositoryMonitorCreateForm', () => {
     await user.clear(screen.getByLabelText(/Branch/i))
     await user.type(screen.getByLabelText(/Branch/i), 'develop')
     await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
-    await user.type(screen.getByLabelText(/Git Secret name/i), 'repo-monitor-github')
+    await user.click(screen.getByRole('combobox', { name: /Git Secret name/i }))
+    await user.click(await screen.findByRole('option', { name: 'repo-monitor-github' }))
     await user.clear(screen.getByLabelText(/Schedule/i))
     await user.type(screen.getByLabelText(/Schedule/i), '*/15 * * * *')
     await user.clear(screen.getByLabelText(/Max PRs per run/i))
@@ -151,6 +153,24 @@ describe('RepositoryMonitorCreateForm', () => {
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/monitors/$monitorId', params: { monitorId: 'example-app' } })
   })
 
+  it('takes a typed Git Secret name when Secrets cannot be listed', async () => {
+    mockUseSecretNames.mockReturnValue({ data: undefined, error: new ApiError(403, 'forbidden'), isLoading: false })
+    const user = userEvent.setup()
+    render(<RepositoryMonitorCreateForm />)
+
+    await user.type(screen.getByLabelText(/Monitor name/i), 'example-app')
+    await user.type(screen.getByLabelText(/GitHub repository URL/i), 'https://github.com/example/app')
+    await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
+    const secret = screen.getByRole('textbox', { name: /Git Secret name/i })
+    expect(secret).toHaveAccessibleDescription("You can't list Secrets; type the Secret name.")
+    await user.type(secret, 'typed-secret')
+
+    await user.click(screen.getByRole('button', { name: /Create Monitor/i }))
+
+    await waitFor(() => expect(mockMutateAsync).toHaveBeenCalledTimes(1))
+    expect(mockMutateAsync.mock.calls[0][0].spec.gitSecretRef).toEqual({ name: 'typed-secret' })
+  })
+
   it('rejects non-root GitHub pull request URLs before submitting', async () => {
     const user = userEvent.setup()
     render(<RepositoryMonitorCreateForm />)
@@ -164,6 +184,78 @@ describe('RepositoryMonitorCreateForm', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Repository URL must be a credential-free GitHub repository root')
     expect(mockToastError).toHaveBeenCalledWith(expect.stringContaining('Repository URL must be a credential-free GitHub repository root'))
     expect(mockMutateAsync).not.toHaveBeenCalled()
+  })
+
+  it('rejects a schedule with an out-of-range field before submitting', async () => {
+    const user = userEvent.setup()
+    render(<RepositoryMonitorCreateForm />)
+
+    await user.type(screen.getByLabelText(/Monitor name/i), 'example-app')
+    await user.type(screen.getByLabelText(/GitHub repository URL/i), 'https://github.com/example/app')
+    await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
+    await user.clear(screen.getByLabelText(/Schedule/i))
+    await user.type(screen.getByLabelText(/Schedule/i), '0 24 * * *')
+
+    await user.click(screen.getByRole('button', { name: /Create Monitor/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Schedule must be a five-field cron expression with in-range values')
+    expect(screen.getByLabelText(/Schedule/i)).toHaveAttribute('aria-invalid', 'true')
+    expect(mockMutateAsync).not.toHaveBeenCalled()
+  })
+
+  it('rejects an @every schedule shorter than a minute before submitting', async () => {
+    const user = userEvent.setup()
+    render(<RepositoryMonitorCreateForm />)
+
+    await user.type(screen.getByLabelText(/Monitor name/i), 'example-app')
+    await user.type(screen.getByLabelText(/GitHub repository URL/i), 'https://github.com/example/app')
+    await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
+    await user.clear(screen.getByLabelText(/Schedule/i))
+    await user.type(screen.getByLabelText(/Schedule/i), '@every 1s')
+
+    await user.click(screen.getByRole('button', { name: /Create Monitor/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Schedule "@every 1s" needs an interval of at least 1m')
+    expect(screen.getByLabelText(/Schedule/i)).toHaveAttribute('aria-invalid', 'true')
+    expect(mockMutateAsync).not.toHaveBeenCalled()
+  })
+
+  it('accepts an empty schedule for manual runs only', async () => {
+    const user = userEvent.setup()
+    render(<RepositoryMonitorCreateForm />)
+
+    await user.type(screen.getByLabelText(/Monitor name/i), 'example-app')
+    await user.type(screen.getByLabelText(/GitHub repository URL/i), 'https://github.com/example/app')
+    await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
+    await user.clear(screen.getByLabelText(/Schedule/i))
+
+    await user.click(screen.getByRole('button', { name: /Create Monitor/i }))
+
+    await waitFor(() => expect(mockMutateAsync).toHaveBeenCalledTimes(1))
+    expect(mockMutateAsync.mock.calls[0][0].spec.schedule).toBeUndefined()
+  })
+
+  it('suggests every reviewer Agent the controller accepts', () => {
+    mockUseAgentList.mockReturnValue({
+      data: {
+        items: [
+          { metadata: { name: 'claude-reviewer' }, spec: { runtime: { type: 'claude' } } },
+          { metadata: { name: 'codex-reviewer' }, spec: { runtime: { type: 'codex' } } },
+          { metadata: { name: 'opencode-reviewer' }, spec: { runtime: { type: 'opencode' } } },
+          { metadata: { name: 'copilot-agent' }, spec: { runtime: { type: 'copilot' } } },
+          { metadata: { name: 'external-agent' }, spec: { runtime: { runtimeRef: { name: 'remote' } } } },
+          { metadata: { name: 'keyed-claude' }, spec: { runtime: { type: 'claude' }, secretRef: { name: 'anthropic-key' } } },
+          { metadata: { name: 'llm-agent' }, spec: {} },
+        ],
+      },
+      isLoading: false,
+    })
+    const { container } = render(<RepositoryMonitorCreateForm />)
+
+    const options = Array.from(container.querySelectorAll('#monitor-reviewer-agent-options option')).map((option) => option.getAttribute('value'))
+    expect(options).toEqual(['claude-reviewer', 'codex-reviewer', 'opencode-reviewer'])
+    expect(screen.getByText(/Must be a claude, codex, or opencode runtime Agent/)).toBeInTheDocument()
+    expect(screen.queryByText(/Anthropic credential/)).not.toBeInTheDocument()
   })
 
   it('requires a reviewer Agent name', async () => {

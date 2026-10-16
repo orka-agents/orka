@@ -20,9 +20,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -58,6 +61,7 @@ const (
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=list
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=get
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
@@ -114,6 +118,10 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		return fmt.Errorf("runtime and providerRef are mutually exclusive")
 	}
 
+	if err := validateAgentModelLimits(agent.Spec.Model); err != nil {
+		return err
+	}
+
 	// For non-runtime agents, validate model config
 	if agent.Spec.Runtime == nil {
 		if agent.Spec.ProviderRef == nil && (agent.Spec.Model == nil || agent.Spec.Model.Provider == "") {
@@ -146,6 +154,9 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 	if err := r.validateProviderRef(ctx, agent); err != nil {
 		return err
 	}
+	if err := r.validateRuntimeRef(ctx, agent); err != nil {
+		return err
+	}
 	if err := r.validateSecretRef(ctx, agent); err != nil {
 		return err
 	}
@@ -159,6 +170,22 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		return err
 	}
 	return r.validateCoordination(ctx, agent)
+}
+
+// validateAgentModelLimits rejects token limits that Agents admitted before
+// the CRD bounds existed can still carry. Workers otherwise silently replace
+// a non-positive maxTokens with their default.
+func validateAgentModelLimits(model *corev1alpha1.ModelConfig) error {
+	if model == nil {
+		return nil
+	}
+	if model.MaxTokens != nil && *model.MaxTokens < 0 {
+		return fmt.Errorf("spec.model.maxTokens must not be negative")
+	}
+	if model.ContextWindow != nil && *model.ContextWindow < 1 {
+		return fmt.Errorf("spec.model.contextWindow must be positive")
+	}
+	return nil
 }
 
 func isBuiltInACPProviderRuntime(runtimeType corev1alpha1.AgentRuntimeType) bool {
@@ -234,6 +261,69 @@ func (r *AgentReconciler) validateProviderRef(ctx context.Context, agent *corev1
 		return fmt.Errorf("referenced provider %q is not ready", agent.Spec.ProviderRef.Name)
 	}
 	return nil
+}
+
+// validateRuntimeRef reports a runtime.runtimeRef whose AgentRuntime does not
+// exist in the Agent's namespace. Dispatch still resolves the runtime and
+// checks its live readiness in the Task namespace.
+func (r *AgentReconciler) validateRuntimeRef(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil
+	}
+	name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, &corev1alpha1.AgentRuntime{}); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("referenced AgentRuntime %q not found", name)
+		}
+		return fmt.Errorf("failed to get AgentRuntime %q: %w", name, err)
+	}
+	return nil
+}
+
+// agentsForAgentRuntime re-validates the Agents whose runtimeRef names an
+// AgentRuntime that was created or deleted.
+func (r *AgentReconciler) agentsForAgentRuntime(ctx context.Context, obj client.Object) []reconcile.Request {
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents for AgentRuntime", "agentRuntime", obj.GetName())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		if agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+			strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == obj.GetName() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		}
+	}
+	return requests
+}
+
+// agentsForProvider maps a Provider to the Agents that reference it. A
+// providerRef may name another namespace, so Agents in every watched namespace
+// are matched on the reference's effective namespace.
+func (r *AgentReconciler) agentsForProvider(ctx context.Context, obj client.Object) []reconcile.Request {
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents for Provider", "provider", obj.GetName())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		ref := agent.Spec.ProviderRef
+		if ref == nil || ref.Name != obj.GetName() {
+			continue
+		}
+		namespace := ref.Namespace
+		if namespace == "" {
+			namespace = agent.Namespace
+		}
+		if namespace == obj.GetNamespace() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		}
+	}
+	return requests
 }
 
 // validateSecretRef validates the secretRef if set.
@@ -434,12 +524,23 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		}
 	}
 
+	// A failed validation usually waits on something created later (a
+	// Secret, Provider, or AgentRuntime); Secrets are not watched, so recheck.
+	if validationErr != nil {
+		return ctrl.Result{RequeueAfter: agentValidationRecheckInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
+// agentValidationRecheckInterval paces rechecks of an Agent whose referenced
+// resources were missing.
+const agentValidationRecheckInterval = 30 * time.Second
+
 // checkTTLExpiry deletes the agent if its TTL has expired and no tasks are active.
 func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32) (ctrl.Result, bool) {
-	if agent.Spec.TTLAfterLastTask == nil || agent.Spec.TTLAfterLastTask.Duration == 0 {
+	// Zero means permanent; a negative TTL is invalid and must never delete.
+	if agent.Spec.TTLAfterLastTask == nil || agent.Spec.TTLAfterLastTask.Duration <= 0 {
 		return ctrl.Result{}, false
 	}
 	if activeTasks > 0 {
@@ -486,6 +587,12 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					},
 				}}
 			})).
+		// Agent readiness depends only on whether a referenced AgentRuntime
+		// exists, so its frequent status updates are ignored.
+		Watches(&corev1alpha1.AgentRuntime{}, handler.EnqueueRequestsFromMapFunc(r.agentsForAgentRuntime),
+			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(event.UpdateEvent) bool { return false }})).
+		// A Provider created or changed after the Agent can change its readiness.
+		Watches(&corev1alpha1.Provider{}, handler.EnqueueRequestsFromMapFunc(r.agentsForProvider)).
 		Named("agent").
 		Complete(r)
 }

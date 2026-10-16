@@ -27,6 +27,7 @@ export const builtInAgentRuntimeTypeSchema = z.enum(builtInAgentRuntimeTypes)
 
 export const builtInAgentRuntimeSchema = z.object({
   type: builtInAgentRuntimeTypeSchema,
+  contractVersion: z.string().optional(),
   ...agentRuntimeDefaultsSchema,
 }).strict()
 
@@ -58,6 +59,9 @@ export const agentSpecSchema = z.object({
     allowedAgents: z.array(z.object({ name: z.string(), namespace: z.string().optional() })).optional(),
     maxConcurrentChildren: z.number().optional(),
     maxDepth: z.number().optional(),
+    autonomous: z.boolean().optional(),
+    maxIterations: z.number().optional(),
+    approvalRequiredTools: z.array(z.string()).optional(),
   }).optional(),
   runtime: agentRuntimeSchema.optional(),
 }).superRefine((spec, ctx) => {
