@@ -67,7 +67,7 @@ describe('demo tour', () => {
     expect(screen.getByText(`Step 1 of ${stopsIn('basics').length}`)).toBeInTheDocument()
 
     next()
-    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: INCIDENT_TASK }, search: { tab: 'trace' } })
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: INCIDENT_TASK }, search: { tab: 'activity' } })
     next()
     expect(mockNavigate).toHaveBeenLastCalledWith(expect.objectContaining({ search: { tab: 'approvals' } }))
     next()
@@ -97,7 +97,7 @@ describe('demo tour', () => {
     useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.checkpoint) })
     render(<TourPanel slot="bottom" />)
     fireEvent.click(screen.getByRole('button', { name: 'Keep going' }))
-    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: RELEASE_TASK }, search: { tab: 'children' } })
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/tasks/$taskId', params: { taskId: RELEASE_TASK }, search: {} })
     expect(screen.getByText(`More: Step 1 of ${stopsIn('more').length}`)).toBeInTheDocument()
     next()
     expect(mockNavigate).toHaveBeenLastCalledWith({ to: '/security/findings/$findingId', params: { findingId: TOUR_FINDING } })

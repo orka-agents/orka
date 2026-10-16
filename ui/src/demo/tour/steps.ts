@@ -69,8 +69,8 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: 'See what it did',
-    body: 'The Trace tab lists every model request and tool call in order. The agent read latency and error rates from Datadog, found the merged pull request that shrank the database connection pool, and posted its findings to PagerDuty and Slack.',
-    route: incident('trace'),
+    body: 'The Activity tab traces every model request and tool call in order. The agent read latency and error rates from Datadog, found the merged pull request that shrank the database connection pool, and posted its findings to PagerDuty and Slack.',
+    route: incident('activity'),
     part: 'basics',
     note: `The trace ${RECORD_NOTE}`,
     cli: [`orka task trace ${INCIDENT_TASK}`],
@@ -127,8 +127,8 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: 'Agents hand work to other agents',
-    body: 'release-captain is preparing a storefront release. It gave two jobs to other agents, each as a child Task: issue-triager checks for release blockers and docs-writer drafts the release notes. It waits for both before it finishes. Its agent definition limits which agents it may delegate to and how many children run at once.',
-    route: { to: '/tasks/$taskId', params: { taskId: RELEASE_TASK }, search: { tab: 'children' } },
+    body: 'release-captain is preparing a storefront release. It gave two jobs to other agents, each as a child Task: issue-triager checks for release blockers and docs-writer drafts the release notes. The Child tasks graph at the bottom of this page shows both; release-captain waits for them before it finishes. Its agent definition limits which agents it may delegate to and how many children run at once.',
+    route: { to: '/tasks/$taskId', params: { taskId: RELEASE_TASK }, search: {} },
     part: 'more',
     cli: [`orka task children ${RELEASE_TASK}`],
   },
@@ -157,7 +157,7 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: "That's the full tour",
-    body: 'The sidebar has the rest: tools, connectors, chat sessions, and the board and live views of running work. You can reopen this tour from Take the tour in the sidebar.',
+    body: 'The sidebar has the rest: tools, connectors, chat sessions, and a board of running work. You can reopen this tour from Take the tour in the sidebar.',
   },
 ]
 

@@ -68,7 +68,7 @@ describe('demo tour steps', () => {
     }
   })
 
-  it('reach a coordinator with child Tasks, so its Children tab shows', async () => {
+  it('reach a coordinator with child Tasks, so its Overview draws them', async () => {
     const task = await (await get(`/tasks/${RELEASE_TASK}?namespace=default`)).json()
     expect(task.status.childTasks).toHaveLength(2)
   })
