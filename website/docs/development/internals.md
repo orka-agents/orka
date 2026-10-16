@@ -102,7 +102,7 @@ Copilot-compatible Responses API 403s are handled as a scoped fallback to Chat C
 ### Anthropic quirks
 
 - The Anthropic SDK appends `v1/messages` to the base URL — strip trailing `/v1` from custom `baseURL` to avoid doubled paths
-- System messages are converted to `tool_result` blocks, not user messages
+- `system` messages in the conversation are sent as user text messages; only `tool` messages become user `tool_result` blocks
 - Tool input JSON parsing errors are silently ignored (`_ = json.Unmarshal`)
 
 ## SQLite store internals

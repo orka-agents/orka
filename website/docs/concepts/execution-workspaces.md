@@ -18,8 +18,8 @@ providers; you run them.
 
 :::note[Two different "workspaces"]
 `Task.spec.workspace` is the **repository** an agent works on: what to clone and where to
-publish. It is always required for coding agents. `Task.spec.execution.workspace` is **where
-the agent runs**. This page is about the second.
+publish. Coding agents need it to clone or publish; without it they get an empty workspace.
+`Task.spec.execution.workspace` is **where the agent runs**. This page is about the second.
 :::
 
 ## Choose a provider

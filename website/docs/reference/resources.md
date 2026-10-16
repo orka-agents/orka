@@ -524,7 +524,7 @@ spec:
 | `spec.http.authInject` | string | default `header`; allowed `header`, `body` | `header` sends `Authorization: Bearer <token>`. `body` injects the token into the JSON request body and is invalid for MCP tools. |
 | `spec.http.authBodyKey` | string | empty | JSON key used when `authInject: body`. |
 | `spec.mcp.remote.url`, `spec.mcp.remote.toolName` | string | empty | Call one reviewed function on an independently operated MCP server. See [Remote MCP tools](../concepts/remote-mcp.md). |
-| `spec.mcp.workspace.classRef.name`, `spec.mcp.workspace.port` | object, integer | empty | Run the MCP server in a Service-mode execution workspace of the named class, listening on `port`. See [Workspace providers](configuration.md#workspace-providers). |
+| `spec.mcp.workspace.classRef.name`, `spec.mcp.workspace.port` | object, integer | empty | Reserved for running the MCP server in a Service-mode execution workspace. Not supported yet: a Tool that sets it fails reconciliation. |
 | `spec.mcp.path` | string | `/mcp` | HTTP path exposed by the MCP server inside the actor. |
 | `spec.mcp.substrateActor.templateRef.name` | string | required | Substrate `ActorTemplate` hosting the MCP server. |
 | `spec.mcp.substrateActor.templateRef.namespace` | string | Tool namespace or configured default | Namespace containing the actor template. |
@@ -535,7 +535,7 @@ spec:
 | `status.endpoint` | string | empty | Resolved non-secret endpoint used by workers. For MCP actor-backed tools this is the Substrate router endpoint. |
 | `status.actor` | object | empty | Safe actor metadata, including provider, actor ID, route host, resolved template, and pool reference. |
 
-A Tool selects at most one MCP backend: `remote`, `workspace`, or `substrateActor`.
+A Tool selects at most one MCP backend: `remote` or `substrateActor`.
 
 ### MCP servers in Substrate actors
 
