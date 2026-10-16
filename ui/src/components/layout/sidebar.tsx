@@ -147,7 +147,8 @@ export function Sidebar() {
           )}
         </Button>
       </div>
-      <nav className="flex-1 space-y-1 p-2">
+      {/* Scrolls on short screens, so whatever sits below it stays in view. */}
+      <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
         {navItems.map(({ to, label, icon: Icon }) => {
           const isActive = to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
           return (
