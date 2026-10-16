@@ -67,7 +67,6 @@ Production:
 | Task Detail | `/tasks/:taskId` | Task metadata, spec, status, result viewer, logs, execution timeline, trace, and approvals; fork provenance when forked |
 | Create Task | `/tasks/new` | Form with type selector (container/AI/agent) and conditional fields |
 | Board / Kanban | `/kanban` | Kanban board for task status and work-in-progress tracking |
-| Live | `/live` | Live agent grid for active task execution and status updates |
 | Security | `/security` | Repository scan inventory with scan status, finding counts, and manual scan actions |
 | New Repository Scan | `/security/new` | Form for creating a RepositoryScan from provider, URL, branch, schedule, and analysis agent |
 | Repository Security Detail | `/security/:repoId` | Threat model editor, scan history, finding tables, and recommended remediation view |

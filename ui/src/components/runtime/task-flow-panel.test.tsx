@@ -18,14 +18,8 @@ describe('TaskFlowPanel', () => {
     expect(screen.getByRole('tree', { name: /execution graph/i })).toBeInTheDocument()
   })
 
-  it('renders fallback list of running tasks when no root', () => {
-    render(<TaskFlowPanel tasks={[task('a'), task('b'), task('s', 'Succeeded')]} />)
-    expect(screen.getByText('a')).toBeInTheDocument()
-    expect(screen.getByText('b')).toBeInTheDocument()
-  })
-
   it('empty state when nothing selectable', () => {
-    render(<TaskFlowPanel tasks={[]} />)
+    render(<TaskFlowPanel task={null} />)
     expect(screen.getByText('No active flow')).toBeInTheDocument()
   })
 })

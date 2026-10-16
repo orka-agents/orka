@@ -477,21 +477,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </CardContent>
           </Card>
 
-          {hasPlanHistory && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Plan</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <RunTimeline
-                  task={task}
-                  plan={plan}
-                  events={taskEvents}
-                />
-              </CardContent>
-            </Card>
-          )}
-
           {task.spec.type === 'container' && (
             <Card>
               <CardHeader>
@@ -652,7 +637,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
-                  <RunTimeline task={task} plan={plan} events={taskEvents} />
+                  <RunTimeline task={task} plan={plan} />
                   {plan?.planDocument && (
                     <div>
                       <p className="mb-1 text-xs font-medium text-muted-foreground">
