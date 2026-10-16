@@ -216,6 +216,19 @@ func soulEvalStringsContaining(value any, canary string) []string {
 	return found
 }
 
+// soulEvalParkRuntimePools stops every running RuntimePool. Each persona
+// revision has its own runtime profile and so its own pool, and idle pools
+// otherwise hold their runtime Pods past what a small CI node can schedule.
+func soulEvalParkRuntimePools() {
+	var pools corev1alpha1.RuntimePoolList
+	kubectlJSON(Default, &pools, "get", "runtimepools", "-n", namespace)
+	for _, pool := range pools.Items {
+		if pool.DeletionTimestamp == nil && (pool.Spec.DesiredReplicas != 0 || pool.Status.CurrentReplicas != 0) {
+			parkRuntimePool(pool.Name)
+		}
+	}
+}
+
 func soulEvalWaitTask(name, phase string) {
 	EventuallyWithOffset(1, func(g Gomega) {
 		output, err := utils.Run(exec.Command("kubectl", "get", "task", name, "-n", namespace,
@@ -266,8 +279,10 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 		// runSoulEval drives one runtime through delivery, continuation,
 		// revision drift in the bound Session, and a new Session for the
 		// revision. agent builds the Agent; task builds a Task for a Session.
+		// Built-in runtimes run on RuntimePools, which are parked around and
+		// between revisions.
 		runSoulEval := func(
-			runtime string, instance mockLLMInstance,
+			runtime string, instance mockLLMInstance, pooled bool,
 			agent func(name, role string, soul map[string]any) map[string]any,
 			task func(name, agent, prompt, session string, create bool) map[string]any,
 		) {
@@ -289,7 +304,13 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 				deleteE2EObjects("agent", agentName)
 				deleteE2EObjects("configmap", first.configMap)
 				deleteE2EObjects("configmap", second.configMap)
+				if pooled {
+					soulEvalParkRuntimePools()
+				}
 			})
+			if pooled {
+				soulEvalParkRuntimePools()
+			}
 			role := "SOUL_EVAL_ROLE_" + strings.ToUpper(runtime) + "_" + runID +
 				" Answer the request in one short sentence."
 			name := func(stage string) string { return runID + "-" + runtime + "-" + stage }
@@ -322,6 +343,11 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 			requests, _ = run("second", session, false, "Succeeded")
 			Expect(soulEvalCheck(requests, soulEvalMarker(runtime, "second"), role, first, second)).To(Succeed())
 
+			if pooled {
+				// The new revision needs a new pool; free the first one's Pod.
+				parkRuntimePool(getACPTask(Default, name("second")).Status.Execution.RuntimePoolName)
+			}
+
 			By("refusing a changed persona revision in the bound Session before inference")
 			Expect(applyManifestJSON(agent(agentName, role, second.source()))).To(Succeed())
 			_, before := run("drift", session, false, "Failed")
@@ -334,7 +360,7 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 
 		It("delivers and pins the soul for the AI worker", func() {
 			provider := runID + "-provider"
-			runSoulEval("ai", suiteMockLLM,
+			runSoulEval("ai", suiteMockLLM, false,
 				func(name, role string, soul map[string]any) map[string]any {
 					return map[string]any{
 						"apiVersion": "core.orka.ai/v1alpha1", "kind": "Agent",
@@ -361,7 +387,7 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 
 		for _, provider := range runtimeEvalProviders {
 			It("delivers and pins the soul for the built-in "+provider.kind+" runtime", func() {
-				runSoulEval(provider.kind, providerProxyMockLLM,
+				runSoulEval(provider.kind, providerProxyMockLLM, true,
 					func(name, role string, soul map[string]any) map[string]any {
 						agent := agentRuntimeAgentManifest(name, provider.kind, provider.model, runID, 3, false,
 							&corev1alpha1.ModelTokenLimits{Context: 32768, Output: 4096})
