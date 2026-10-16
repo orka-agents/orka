@@ -1358,14 +1358,13 @@ Use "orka memory proposal [command] --help" for more information about a command
 ## `orka memory proposal apply`
 
 ```text
-Apply an accepted memory proposal
+Apply an accepted memory proposal. The server records your signed-in identity as the applier.
 
 Usage:
   orka memory proposal apply <id> [flags]
 
 Flags:
-      --applied-by string   Reviewer applying the proposal
-  -h, --help                help for apply
+  -h, --help   help for apply
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1447,16 +1446,15 @@ Global Flags:
 ## `orka memory proposal review`
 
 ```text
-Review a memory proposal
+Review a memory proposal. The server records your signed-in identity as the reviewer.
 
 Usage:
   orka memory proposal review <id> [flags]
 
 Flags:
-  -h, --help              help for review
-      --note string       Review note
-      --reviewer string   Reviewer name
-      --status string     Review status (accepted or rejected)
+  -h, --help            help for review
+      --note string     Review note
+      --status string   Review status (accepted or rejected)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

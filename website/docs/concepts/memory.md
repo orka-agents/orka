@@ -21,6 +21,8 @@ The current model has three related concepts:
 
 Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` can then be applied explicitly, which creates (or idempotently returns) durable memory linked back to the proposal.
 
+Both steps record who took them: `reviewer` on the review and `appliedBy` on the apply. The server takes these names from the signed-in identity of the request. A client cannot set them: a request body with a non-empty `reviewer` or `appliedBy` is rejected with `400 Bad Request`, and a request without an identity is refused.
+
 :::tip[Video demo]
 Watch [Review and publish an agent's memory](https://www.youtube.com/watch?v=iCqyVfWBpyg).
 :::
@@ -172,25 +174,20 @@ curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/re
   -H "Content-Type: application/json" \
   -d '{
     "status": "accepted",
-    "reviewer": "platform-team",
     "reviewNote": "Valid reusable release procedure."
   }'
 ```
 
-Review returns `204 No Content`. It records governance state only; it does not apply the proposal as durable memory.
+Review returns the stored review record: `id`, `namespace`, `status`, `reviewer`, `reviewNote`, and `reviewedAt`. `reviewer` is the identity that made the request. Review records governance state only; it does not apply the proposal as durable memory.
 
 Apply an accepted memory proposal:
 
 ```bash
 curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/apply?namespace=orka-system" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "appliedBy": "platform-team"
-  }'
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy`, and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
+Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
 
 ## Safety model
 

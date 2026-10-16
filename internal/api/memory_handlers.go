@@ -7,11 +7,14 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 
@@ -364,16 +367,40 @@ func getNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalS
 	return c.JSON(proposal)
 }
 
+// memoryProposalReviewRecord is what a review returns: the stored decision and
+// who made it, without the proposal content the review verb does not grant.
+type memoryProposalReviewRecord struct {
+	ID         string     `json:"id"`
+	Namespace  string     `json:"namespace"`
+	Status     string     `json:"status"`
+	Reviewer   string     `json:"reviewer"`
+	ReviewNote string     `json:"reviewNote,omitempty"`
+	ReviewedAt *time.Time `json:"reviewedAt,omitempty"`
+}
+
 func reviewNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalStore, review store.MemoryProposalReview) error {
-	if review.Reviewer == "" {
-		if ui := GetUserInfo(c); ui != nil {
-			review.Reviewer = ui.Username
-		}
+	reviewer, err := memoryProposalActor(c)
+	if err != nil {
+		return err
 	}
+	review.Reviewer = reviewer
 	if err := proposalStore.ReviewMemoryProposal(c.Context(), review); err != nil {
 		return memoryStoreError("review memory proposal", "memory proposal", err)
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	// Read the record back so the caller sees what was stored, after the
+	// store's normalization and redaction.
+	proposal, err := proposalStore.GetMemoryProposal(c.Context(), strings.TrimSpace(review.Namespace), strings.TrimSpace(review.ID))
+	if err != nil {
+		return memoryStoreError("get memory proposal", "memory proposal", err)
+	}
+	return c.JSON(memoryProposalReviewRecord{
+		ID:         proposal.ID,
+		Namespace:  proposal.Namespace,
+		Status:     proposal.Status,
+		Reviewer:   proposal.Reviewer,
+		ReviewNote: proposal.ReviewNote,
+		ReviewedAt: proposal.ReviewedAt,
+	})
 }
 
 func archiveNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalStore, namespace string) error {
@@ -384,11 +411,11 @@ func archiveNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryPropo
 }
 
 func applyNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalStore, apply store.MemoryProposalApply) error {
-	if apply.AppliedBy == "" {
-		if ui := GetUserInfo(c); ui != nil {
-			apply.AppliedBy = ui.Username
-		}
+	appliedBy, err := memoryProposalActor(c)
+	if err != nil {
+		return err
 	}
+	apply.AppliedBy = appliedBy
 	memory, err := proposalStore.ApplyMemoryProposal(c.Context(), apply)
 	if err != nil {
 		// AuthorizeExistingMemory (external API only) surfaces its own 403;
@@ -399,6 +426,16 @@ func applyNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposa
 		return memoryStoreError("apply memory proposal", "memory proposal", err)
 	}
 	return c.JSON(memory)
+}
+
+// memoryProposalActor returns the signed-in identity that review and apply
+// record. Clients cannot name it, so a request without one is refused rather
+// than stored anonymously.
+func memoryProposalActor(c fiber.Ctx) (string, error) {
+	if actor := approvalDecisionActor(GetUserInfo(c)); actor != "" {
+		return actor, nil
+	}
+	return "", fiber.NewError(fiber.StatusUnauthorized, "missing authenticated identity")
 }
 
 func parseMemoryFilter(c fiber.Ctx, namespace string) (store.MemoryFilter, error) {
@@ -503,10 +540,12 @@ func applyMemoryUpdate(memory *store.Memory, req store.Memory) {
 }
 
 func bindMemoryProposalReview(c fiber.Ctx, fallbackNamespace, id string) (store.MemoryProposalReview, error) {
+	if err := rejectClientRecordedIdentity(c.Body(), "reviewer"); err != nil {
+		return store.MemoryProposalReview{}, err
+	}
 	var req struct {
 		Namespace  string `json:"namespace"`
 		Status     string `json:"status"`
-		Reviewer   string `json:"reviewer"`
 		ReviewNote string `json:"reviewNote"`
 	}
 	if err := c.Bind().JSON(&req); err != nil {
@@ -522,15 +561,16 @@ func bindMemoryProposalReview(c fiber.Ctx, fallbackNamespace, id string) (store.
 		Namespace:  req.Namespace,
 		ID:         id,
 		Status:     req.Status,
-		Reviewer:   req.Reviewer,
 		ReviewNote: req.ReviewNote,
 	}, nil
 }
 
 func bindMemoryProposalApply(c fiber.Ctx, fallbackNamespace, id string) (store.MemoryProposalApply, error) {
+	if err := rejectClientRecordedIdentity(c.Body(), "appliedBy"); err != nil {
+		return store.MemoryProposalApply{}, err
+	}
 	var req struct {
 		Namespace string `json:"namespace"`
-		AppliedBy string `json:"appliedBy"`
 	}
 	if strings.TrimSpace(string(c.Body())) != "" {
 		if err := c.Bind().JSON(&req); err != nil {
@@ -543,8 +583,33 @@ func bindMemoryProposalApply(c fiber.Ctx, fallbackNamespace, id string) (store.M
 	return store.MemoryProposalApply{
 		Namespace: req.Namespace,
 		ID:        id,
-		AppliedBy: req.AppliedBy,
 	}, nil
+}
+
+// rejectClientRecordedIdentity refuses a body that names who reviewed or
+// applied a proposal, the way Task creation refuses requestedBy: the server
+// records the signed-in identity instead. Keys match case-insensitively, as
+// JSON decoding does. An empty value names no one, so older clients that
+// always send the key keep working.
+func rejectClientRecordedIdentity(body []byte, field string) error {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(body, &topLevel); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	for key, raw := range topLevel {
+		if !strings.EqualFold(key, field) {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) == "" {
+			continue
+		}
+		return fiber.NewError(fiber.StatusBadRequest, field+" cannot be set by clients; it is recorded from your identity")
+	}
+	return nil
 }
 
 func memoryStoreError(action, resource string, err error) error {

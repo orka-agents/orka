@@ -141,7 +141,7 @@ Common list query parameters: `namespace`, `query`/`q`, `sessionName`, `agentNam
 | `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted `memory` proposal into durable memory |
 | `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
 
-Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`. Apply accepts optional `appliedBy` and returns the linked durable memory JSON; repeated apply requests return the same memory.
+Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review returns the stored review record (`id`, `namespace`, `status`, `reviewer`, `reviewNote`, `reviewedAt`), and archive returns `204 No Content`. Apply returns the linked durable memory JSON; repeated apply requests return the same memory. The server records the request's signed-in identity as `reviewer` and `appliedBy`; a body with a non-empty `reviewer` (review) or `appliedBy` (apply) returns `400 Bad Request`, and a request without an identity returns `401 Unauthorized`.
 
 ## ACP runtime resources
 

@@ -427,12 +427,14 @@ orka memory update MEMORY_ID --content "updated fact"
 orka memory delete MEMORY_ID
 orka memory proposal list -o json
 orka memory proposal get PROPOSAL_ID -o json
-orka memory proposal review PROPOSAL_ID --status accepted --reviewer OPERATOR
-orka memory proposal apply PROPOSAL_ID --applied-by OPERATOR
+orka memory proposal review PROPOSAL_ID --status accepted --note "Matches the operations note."
+orka memory proposal apply PROPOSAL_ID
 orka memory proposal archive PROPOSAL_ID
 ```
 
 Memory governance is explicit: reviewing a memory proposal does not automatically create durable memory. Use `orka memory proposal apply PROPOSAL_ID` only for an accepted proposal that should become durable memory.
+
+The server records your signed-in identity as the reviewer and the applier; neither can be set from the CLI. `review` prints the recorded status and reviewer, and `apply` prints the new memory ID and who applied the proposal.
 
 ## Security scans and repository monitors
 
