@@ -13,9 +13,22 @@ function shown(record: Record<string, string>, dropUnsafe: boolean): Record<stri
 }
 
 /**
+ * A webhook URL can carry its secret in the path (Slack), the query (signed
+ * URLs) or userinfo, so only the scheme and host are shown.
+ */
+function shownWebhookURL(value: string): string {
+  try {
+    return `${new URL(value).origin}/${HIDDEN_VALUE}`
+  } catch {
+    return HIDDEN_VALUE
+  }
+}
+
+/**
  * The Task resource as kubectl shows it, minus what the dashboard never
- * displays: environment values, secret-looking labels and annotations, and
- * kubectl's annotations (last-applied embeds the whole spec, env included).
+ * displays: environment values, the webhook URL past its host, secret-looking
+ * labels and annotations, and kubectl's annotations (last-applied embeds the
+ * whole spec, env included).
  * The API's `plan` is not part of the resource and is left out.
  */
 export function displayedTaskResource(task: Task): Record<string, unknown> {
@@ -31,9 +44,11 @@ export function displayedTaskResource(task: Task): Record<string, unknown> {
       ...(labels && { labels: shown(labels, false) }),
       ...(annotations && { annotations: shown(annotations, true) }),
     },
-    spec: spec.env
-      ? { ...spec, env: spec.env.map((entry) => (entry.value === undefined ? entry : { ...entry, value: HIDDEN_VALUE })) }
-      : spec,
+    spec: {
+      ...spec,
+      ...(spec.env && { env: spec.env.map((entry) => (entry.value === undefined ? entry : { ...entry, value: HIDDEN_VALUE })) }),
+      ...(spec.webhookURL && { webhookURL: shownWebhookURL(spec.webhookURL) }),
+    },
     ...(status && { status }),
   }
 }

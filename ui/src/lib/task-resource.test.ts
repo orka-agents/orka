@@ -17,7 +17,12 @@ const task = {
       'example.com/blob': `{"settings":"${'x'.repeat(100)}"}`,
     },
   },
-  spec: { type: 'container', image: 'busybox', env: [{ name: 'API_KEY', value: 'sk-live-123456' }, { name: 'FROM_SECRET' }] },
+  spec: {
+    type: 'container',
+    image: 'busybox',
+    env: [{ name: 'API_KEY', value: 'sk-live-123456' }, { name: 'FROM_SECRET' }],
+    webhookURL: 'https://bot:pw@hooks.example.com/services/T0/B0/s3cr3t?sig=abc',
+  },
   status: { phase: 'Running' },
   plan: { summary: 'not part of the resource' },
 } as unknown as Task
@@ -29,6 +34,13 @@ describe('displayedTaskResource', () => {
     expect(shown).toMatchObject({ apiVersion: 'orka.ai/v1alpha1', kind: 'Task', spec: { type: 'container', image: 'busybox' }, status: { phase: 'Running' } })
     expect(shown).not.toHaveProperty('plan')
     expect(shown.metadata).not.toHaveProperty('managedFields')
+  })
+
+  it('shows only the scheme and host of a webhook URL', () => {
+    expect((shown.spec as Task['spec']).webhookURL).toBe(`https://hooks.example.com/${HIDDEN_VALUE}`)
+    expect(JSON.stringify(shown)).not.toMatch(/s3cr3t|sig=|bot:pw/)
+    const unparsable = displayedTaskResource({ ...task, spec: { ...task.spec, webhookURL: 'not a url s3cr3t' } } as Task)
+    expect((unparsable.spec as Task['spec']).webhookURL).toBe(HIDDEN_VALUE)
   })
 
   it('hides environment values and secret-looking labels and annotations', () => {

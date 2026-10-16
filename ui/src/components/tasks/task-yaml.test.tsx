@@ -41,6 +41,16 @@ describe('TaskYaml', () => {
     expect(tokenOf(region, 'enabled')).toBeUndefined()
   })
 
+  it('offers a retry when the YAML library fails to load', async () => {
+    let calls = 0
+    const load = () => (++calls === 1 ? Promise.reject(new Error('chunk failed')) : import('yaml').then((yaml) => yaml.stringify))
+    render(<TaskYaml task={task} load={load} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('The YAML view could not load')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByRole('region', { name: 'Task YAML' })).toHaveTextContent('kind: Task')
+    expect(calls).toBe(2)
+  })
+
   it('copies the YAML it shows', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
