@@ -67,6 +67,8 @@ describe('displayedTaskResource', () => {
     expect(shown.metadata).toMatchObject({ annotations: { 'example.com/callback': `https://cb.example.com/done?${HIDDEN_VALUE}` } })
     expect(shown.status).toMatchObject({ pullRequest: { url: 'https://github.com/northwind/checkout/pull/12' } })
     expect(messageShown('https://hooks.slack.com:443/services/T0/B0/p0rtsecret')).toBe(`https://hooks.slack.com/${HIDDEN_VALUE}`)
+    expect(messageShown('https://user:pass@hooks.slack.com/services/T0/B0/s3cr3t')).toBe(`https://hooks.slack.com/${HIDDEN_VALUE}`)
+    expect(messageShown('https://user:pass@discord.com/api/v10/webhooks/1/d1sc0rd')).toBe(`https://discord.com/${HIDDEN_VALUE}`)
     expect(messageShown('https://alice:pass@example.com:bad/repo?sig=x')).toBe(HIDDEN_VALUE)
     expect(JSON.stringify(shown)).not.toMatch(/ghs_abc123|token=abc123|sig=abc|frag/)
   })
