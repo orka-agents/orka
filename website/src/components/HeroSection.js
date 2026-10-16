@@ -24,7 +24,7 @@ export default function HeroSection() {
           to="/docs/getting-started"
           className="button button--primary button--lg"
         >
-          Get Started
+          Get started
         </Link>
         <Link
           to="/docs/demos"
@@ -33,10 +33,10 @@ export default function HeroSection() {
           Watch demos
         </Link>
         <Link
-          to="https://github.com/orka-agents/orka"
+          to="https://orka-agents.github.io/orka/demo/"
           className="button button--secondary button--lg"
         >
-          View on GitHub
+          Try the live demo
         </Link>
       </div>
     </section>

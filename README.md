@@ -10,7 +10,7 @@
 [![Release](https://img.shields.io/github/v/release/orka-agents/orka?include_prereleases)](https://github.com/orka-agents/orka/releases)
 [![License](https://img.shields.io/github/license/orka-agents/orka)](LICENSE)
 
-[Getting started](https://orka-agents.github.io/orka/docs/getting-started) · [Install](https://orka-agents.github.io/orka/docs/installation) · [Docs](https://orka-agents.github.io/orka/) · [Contributing](CONTRIBUTING.md)
+[Docs](https://orka-agents.github.io/orka/docs) · [Getting started](https://orka-agents.github.io/orka/docs/getting-started) · [Live demo](https://orka-agents.github.io/orka/demo/) · [Demo videos](https://orka-agents.github.io/orka/docs/demos) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -32,6 +32,9 @@ Three kinds of work fit in a Task:
 
 Model keys never leave the cluster. People and CI get a token; the platform team decides
 which models and providers are allowed.
+
+Want to look before you install? The [live demo](https://orka-agents.github.io/orka/demo/)
+runs the Orka dashboard in your browser on sample data.
 
 > [!IMPORTANT]
 > **Orka is experimental and under active development.** APIs, CRDs, and behavior may change without notice between releases, and it is not yet recommended for production use. Feedback, bug reports, and feature ideas are very welcome — please [open an issue](https://github.com/orka-agents/orka/issues).
@@ -74,9 +77,13 @@ coding agent.
 
 - **[Pull request review on every PR.](https://orka-agents.github.io/orka/docs/repository-monitors)**
   A repository monitor queues review Tasks as PRs arrive and posts the findings back.
+- **[Issues that become pull requests.](https://orka-agents.github.io/orka/docs/guides/issue-to-pr-automation)**
+  Label an issue `orka:implement`; agents plan, implement, review, and repair the PR.
 - **["Just do it" chat.](https://orka-agents.github.io/orka/docs/chat)** Describe what
   you want in plain language and an orchestrator creates and runs the Tasks, in the
   dashboard or over the API.
+- **[Agents in Teams, Telegram, and A2A.](https://orka-agents.github.io/orka/docs/gateways)**
+  Gateways bring the same Agents into the conversations people already have.
 - **[Agents on a schedule.](https://orka-agents.github.io/orka/docs/scheduled-tasks)**
   Nightly dependency audits, security scans, or reports, with retries and notifications
   handled for you.
@@ -93,10 +100,10 @@ coding agent.
 
 ## Learn more
 
+- [What is Orka?](https://orka-agents.github.io/orka/docs) — the mental model and everything it can do
 - [Architecture](https://orka-agents.github.io/orka/docs/architecture) — how a Task becomes a Pod
-- [Interactive chat](https://orka-agents.github.io/orka/docs/chat) — the orchestrator and its tools
 - [Coding agents](https://orka-agents.github.io/orka/docs/agent-runtimes) — Codex, Claude Code, Copilot, and OpenCode as pooled runtimes
-- [Compatibility APIs](https://orka-agents.github.io/orka/docs/openai-compat) — using Orka from your editor
+- [Multi-agent coordination](https://orka-agents.github.io/orka/docs/multi-agent-coordination) — one agent delegating to several
 - [Security](https://orka-agents.github.io/orka/docs/security) — the trust model and hardening
 - [Troubleshooting](https://orka-agents.github.io/orka/docs/troubleshooting) — error strings, causes, fixes
 - [Development](https://orka-agents.github.io/orka/docs/development) — building and testing Orka itself

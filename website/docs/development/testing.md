@@ -77,6 +77,24 @@ cannot satisfy the job. This verifies the native integration, not live-model rec
   on packages that start an envtest API server, export it first:
   `KUBEBUILDER_ASSETS="$(bin/setup-envtest use -p path)"`.
 
+### Repository monitor fake-GitHub suite
+
+The RepositoryMonitor workflows have an integrated, secret-free suite that runs against fake
+GitHub servers. It covers durable command intake, replay and coalescing, guard-label
+blocking, issue implementation to pull request, stop/resume late-task safety, and pull
+request review, repair, and readiness. These tests do not claim live model execution.
+
+```bash
+make repository-monitor-fake-e2e         # the fake-GitHub E2E scenarios
+make repository-monitor-validate         # plus generated CLI docs, example manifests, website docs, and workflow syntax
+make repository-monitor-completion-audit # runs the bundle and reports what still needs live validation
+```
+
+The `Repository Monitor Smoke` GitHub Actions workflow runs the same fake-GitHub script on
+relevant pull requests. The completion audit exits non-zero if local validation fails. Live
+model execution, publication, and GitHub rule enforcement need separate validation against an
+explicitly selected repository.
+
 ## Test structure
 
 ### Go tests
@@ -145,6 +163,10 @@ End-to-end tests run against a dedicated Kind cluster:
 | `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved chart and runtime acceptance, real local Git publication tests, GitHub API fixture tests, and cleanup; no stored Git publication credentials |
 
 The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
+
+The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapter, a deterministic external AgentRuntime, and a test-only native worker image in Kind. It preserves private-CA trust, readiness, ingress deduplication, and external-v2 final-only/no-Job coverage. Native coverage creates real gateway Tasks and controller Jobs/Pods, authenticates origin, and executes the production `ReplyInConversationTool` with the reusable native client. It verifies budget-backed admission/replay, observes a delivered interim receipt while the Task is still Running, and only then releases final completion. A rolled adapter with `--interim-delivery=false` must produce the tool's typed unsupported rejection with no enqueue and still deliver final. Local start/release fences are driven through Kubernetes exec; no production authorization exception is added. CI requires all three specs, retaining the zero-spec guard. It does not run the conformance CLI and does not replace conformance testing against each adapter build before rollout.
+
+That deterministic fixture does not prove model-driven worker registration or live ACP tool execution. Native worker unit/integration tests separately cover actual registration, advertisement, dispatch, and continued model work. ACP integration tests exercise the production tool through a signed broker capability, active prompt/session guard, and real SQLite, with no native Job; Kubernetes and broker credential resolution use test fixtures, not a live RuntimePool/provider. Local unit/integration results and tagged E2E compilation are not evidence that the live suite ran. Live native delivery requires the workflow's three specs to execute successfully; the external-v2 spec remains final-only.
 
 The Repository Monitor Smoke workflow runs in GitHub Actions on pull requests and pushes that touch the workflow, API, controller, CRD/config, worker, or Go dependency paths. It creates the UI embed stub and runs focused `go test` selections for the monitor store, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue/review flow, blocked status counts, read-only review job construction, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker signing/detection tooling. The workflow is secret-free: exact PR event queueing is tested with synthetic signed webhook payloads and fake GitHub clients rather than live repository credentials. The normal Go Tests workflow runs `make test` for non-doc code changes and covers worker-level PR review diff context generation.
 
@@ -457,6 +479,84 @@ cd ui && bun run test:coverage  # adds the coverage report and threshold check
 `.github/workflows/test.yml` runs plain `bun run test`, so a pull request that drops coverage
 still passes CI. Run the coverage command yourself before assuming a number.
 :::
+
+## CLI tests
+
+### CLI binary coverage
+
+Normal binary e2e tests build and invoke `bin/orka` directly with isolated config/home directories. They intentionally avoid real secrets in command arguments and assert stdout/stderr do not leak configured tokens or sentinel secret values.
+
+| CLI area | Binary e2e status | Notes |
+| --- | --- | --- |
+| `auth` | Covered | `validate`, `whoami`; invalid-token negative path. |
+| `models` | Covered | OpenAI and Anthropic compatibility list output. |
+| `config` | Covered | Isolated `HOME`, `set-server`, fake `set-token`, masked `view`. |
+| `status` | Covered | Health/readiness/task/agent summary. |
+| `task` | Covered | Manifest create, flag create (including read/write workspace policy), structured status, list/filter, get, wait, result, logs, children, plan, artifacts, download, delete. |
+| `workspace` | Covered | Canonical workspace intent, credential-role presence, and delivery status. |
+| `runtime-pool` | Focused unit coverage | CRUD routing plus lifecycle/admission/capacity table output. |
+| `agent-runtime` | Focused unit coverage | CRUD routing plus v2-only identity/profile table output. |
+| `provider` | Covered | CRUD and secret redaction expectations. |
+| `agent` | Covered | CRUD. |
+| `tool` | Covered | CRUD. |
+| `skill` | Covered | init, validate, import, list, get, content, update, delete. |
+| `secret` | Covered | Metadata-only list. |
+| `audit` | Covered | Trace no-match path. |
+| `session` | Covered | List/get/delete against a controlled fixture. |
+| `memory` | Covered | Create/list/get/disable/enable/update/delete and proposal-list smoke. |
+| `security` | Partially covered | Repository scan create/get/list/delete, threat model update/get, scan/finding/slice/dropped-finding list; repository scan update is not covered. |
+| `monitor` | Partially covered | Repository monitor create/get/list/delete plus runs/items/events list; monitor update is not covered. |
+| `usage` | Compiled-binary fixture coverage | Summary table, work JSON, other-usage YAML, configured authentication, and nonzero exit for a missing work request. |
+| `substrate` | Covered | Pool create/get/list/update/delete. |
+| `run` | Negative covered; positive live-gated | Unreachable-server error path is safe for normal e2e; positive chat/SSE flow needs provider fixtures. |
+| `dashboard` | Negative covered | The default install serves no dashboard, so the e2e covers the refusal before any token URL is printed; the browser-open token URL remains unsuitable for normal e2e logs. |
+| `completion` | Covered | Binary smoke generates bash, zsh, fish, and PowerShell completion output. |
+| `security scan run` | Deferred/live-gated | Creates downstream scan Tasks and requires live agent/GitHub/provider setup. |
+| `monitor run` | Deferred/live-gated | Creates downstream monitor work and can require GitHub/provider setup. |
+| security finding actions | Deferred/live-gated | Need stable finding fixtures or live scan data. |
+
+Use this matrix as a coverage guide when adding CLI commands: non-live command groups should have at least one compiled-binary e2e smoke path, and CRUD-style groups should cover create/get/list/update/delete where the API supports it.
+
+### Live-gated CLI workflows
+
+Some commands intentionally create downstream work or require external services. Keep these behind explicit operator intent in automation and e2e tests.
+
+#### `orka run`
+
+`orka run` streams chat responses over the Orka chat API. A positive smoke needs server-side chat enabled plus a configured provider/model or agent:
+
+```bash
+ORKA_API=http://127.0.0.1:8080
+ORKA_TOKEN="$(kubectl create token orka-client -n orka-system)"
+
+orka --server "$ORKA_API" --token "$ORKA_TOKEN" \
+  run --session cli-live-smoke "Reply with one short sentence."
+```
+
+For normal non-live validation, prefer a negative smoke against an unreachable or deliberately unconfigured server and assert a clean error without printing tokens.
+
+#### `orka security scan run`
+
+Manual security scan runs can create scan Tasks and may require GitHub credentials, analysis agents, provider credentials, and repository network access:
+
+```bash
+orka security scan run my-repository-scan
+orka security scan list my-repository-scan -o json
+```
+
+Gate this path with explicit environment variables in CI, for example `ORKA_CLI_E2E_LIVE_ACTIONS=1`, and skip by default when credentials or fixtures are missing.
+
+#### `orka monitor run`
+
+Manual repository monitor runs can enqueue repository review/repair work and may require GitHub credentials plus reviewer/repair agents:
+
+```bash
+orka monitor run my-monitor --target-kind pull_request --target-number 123
+orka monitor runs my-monitor -o json
+orka monitor items my-monitor -o json
+```
+
+Use live-gated tests or manual verification for this path until stable GitHub/provider fixtures are available.
 
 ## Testing patterns
 

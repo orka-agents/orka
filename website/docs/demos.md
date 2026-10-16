@@ -13,6 +13,11 @@ documentation for its setup and behavior.
 
 [Watch the full playlist on YouTube](https://www.youtube.com/playlist?list=PLR43VQQvpyY8).
 
+:::tip[Click around yourself]
+The [live dashboard demo](https://orka-agents.github.io/orka/demo/) runs the Orka dashboard in
+your browser on sample data, with no cluster or model behind it.
+:::
+
 ## Chat and pull requests
 
 <DemoVideo videoId="FlLgdh2lKMk" />
@@ -65,7 +70,7 @@ Read about [shared OpenAI and Anthropic endpoints](operations/shared-compatibili
 Discover an Agent Card, ask an inventory agent for advice through A2A, retry
 without duplicate work, and continue the conversation in the same Session.
 
-Read about the [A2A gateway adapter](operations/gateways.md#external-adapters).
+Read about [gateways](guides/gateways.md) and the [A2A adapter](https://github.com/orka-agents/orka-gateway-a2a).
 
 ## Tool access controls
 
@@ -74,7 +79,7 @@ Read about the [A2A gateway adapter](operations/gateways.md#external-adapters).
 Expose a stock lookup while keeping the supplier's purchasing route closed.
 Verify that the lookup reaches the test supplier and no order is created.
 
-Read about [Tool configuration](reference/configuration.md#tool) and
+Read about [Tool configuration](reference/resources.md#tool) and
 [outbound access policies](concepts/outbound-access.md).
 
 ## Memory

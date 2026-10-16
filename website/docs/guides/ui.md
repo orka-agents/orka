@@ -5,6 +5,12 @@ description: "The dashboard built into the controller: what each page shows and 
 
 # Web dashboard
 
+:::tip[Try it in your browser]
+The [dashboard demo](https://orka-agents.github.io/orka/demo/) runs this dashboard on sample
+data for a fictional company. Chat replies are scripted and new Tasks run a simulated
+lifecycle; nothing reaches a cluster or a model.
+:::
+
 Orka includes a web dashboard built into the controller. There is nothing extra to
 deploy, but it is off by default: the API and the `orka` CLI work without it, and
 a signed-in browser keeps its token in localStorage on the same origin as every API,
@@ -45,66 +51,26 @@ paste the one you just created. From there you can create Tasks, chat with the
 orchestrator, watch Tasks run live, and browse sessions and artifacts. If you use the
 CLI, `orka dashboard` opens the dashboard already signed in.
 
-## Tech stack
-
-| Layer | Technology |
-|-------|-----------|
-| Runtime | Bun 1.2+ |
-| Frontend | React 19 |
-| Build Tool | Vite 6 |
-| Styling | Tailwind CSS 4 |
-| UI Primitives | shadcn/ui (Radix-based) |
-| State Management | Zustand 5 |
-| Data Fetching | TanStack Query 5 |
-| Routing | TanStack Router (file-based) |
-| Schema Validation | Zod 3 |
-| Icons | Lucide React |
-| Testing | Vitest + Testing Library |
-
-## Architecture
-
-```
-┌─────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│   Browser   │────▶│  Go API Server  │────▶│   Kubernetes     │
-│   (React)   │◀────│ (Fiber, :8080)  │◀────│   API Server     │
-└─────────────┘     └────────┬────────┘     └──────────────────┘
-                             │
-                      ┌──────┴──────┐
-                      │ //go:embed  │
-                      │  ui/dist/*  │
-                      └─────────────┘
-
-Development:
-  Vite (:5173) --proxy /api/*--> Go API (:8080)
-
-Production:
-  Go binary serves ui/dist/ at "/" and API at "/api/*"
-```
-
 ## Pages
 
-| Page | Route | Description |
-|------|-------|-------------|
-| Dashboard | `/` | Overview with task/session/agent/tool counts and recent tasks |
-| Tasks | `/tasks` | Create, monitor, and manage tasks with log streaming |
-| Task Detail | `/tasks/:taskId` | Task metadata, spec, status, result viewer, logs, execution timeline, trace, and approvals; fork provenance when forked |
-| Create Task | `/tasks/new` | Form with type selector (container/AI/agent) and conditional fields |
-| Board / Kanban | `/kanban` | Kanban board for task status and work-in-progress tracking |
-| Live | `/live` | Live agent grid for active task execution and status updates |
-| Security | `/security` | Repository scan inventory with scan status, finding counts, and manual scan actions |
-| New Repository Scan | `/security/new` | Form for creating a RepositoryScan from provider, URL, branch, schedule, and analysis agent |
-| Repository Security Detail | `/security/:repoId` | Threat model editor, scan history, finding tables, and recommended remediation view |
-| Security Finding Detail | `/security/findings/:findingId` | Evidence, validation status, patch proposal, dismissal/reopen, and remediation PR actions |
-| Sessions | `/sessions` | Browse sessions with message count and token stats |
-| Session Detail | `/sessions/:sessionId` | Transcript viewer plus an aggregated execution timeline across the session's tasks |
-| Agents | `/agents` | Card grid of agents with model and tool info |
-| Agent Detail | `/agents/:agentId` | Full agent configuration view |
-| Create Agent | `/agents/new` | Agent creation form |
-| Tools | `/tools` | Table of built-in and custom tools |
-| Tool Detail | `/tools/:toolName` | Tool spec with JSON Schema parameters |
-| Chat | `/chat` | Interactive chat with SSE streaming and tool execution |
-| Settings › Connectors | `/settings/connectors` | Link your own accounts (for example GitHub) for agents to act as you, change a link between read-only and read-write, reconnect, and disconnect; the OAuth callback returns here |
-| Login | `/login` | Token input for ServiceAccount authentication |
+| Page | Route | What it shows |
+|------|-------|---------------|
+| Dashboard | `/` | Task, session, agent, and tool counts, and recent Tasks |
+| Usage | `/usage` | Model usage and tokens per merged pull request by team. See [Usage and PR outcomes](usage-and-pr-outcomes.md) |
+| Chat | `/chat` | The chat orchestrator, with streamed tool calls. See [Interactive chat](chat.md) |
+| Monitors | `/monitors` | Repository monitors: runs, pull request and issue queues, workflow timeline, blocked reasons, implementation jobs, and GitHub mutation audit. See [Repository monitors](repository-monitors.md) |
+| Security | `/security` | Repository scans, threat models, findings, validation, patch proposals, and remediation pull requests. See [Security scanning](repository-security-scanning.md) |
+| Tasks | `/tasks` | Create, monitor, and manage Tasks, with log streaming |
+| Task detail | `/tasks/:taskId` | Spec, status, result, logs, execution timeline, trace, and approvals; fork provenance when forked |
+| Board | `/kanban` | Tasks as a Kanban board by status |
+| Live | `/live` | A live grid of running agents |
+| Gateways | `/gateways` | Gateway readiness, bindings, per-Session queues, event timelines, and delivery attempts. See [Gateways](gateways.md) |
+| Sessions | `/sessions` | Sessions with message counts and token use; each one's transcript and timeline across its Tasks |
+| Runtimes | `/runtimes` | RuntimePool capacity and admission, and external AgentRuntime registrations |
+| Agents | `/agents` | Agents with their model and tools, and a form to create one |
+| Tools | `/tools` | Built-in and custom tools, with their parameter schemas |
+| Connectors | `/settings/connectors` | Link your own accounts, such as GitHub, for agents to act as you. See [Connectors](connectors.md) |
+| Login | `/login` | Sign in with a token |
 
 ## Execution events
 
@@ -159,102 +125,8 @@ All API requests include `Authorization: Bearer <token>`.
 - **Live event streams**: SSE-backed task/session execution timelines that reconnect from the last sequence and recover history after refresh
 - **Cursor pagination**: Kubernetes-style `continue` token pagination
 
-## Development
+## Working on the dashboard
 
-```bash
-# Install dependencies
-make ui-install    # or: cd ui && bun install
-
-# Run dev server (port 5173, proxies /api to :8080)
-make ui-dev        # or: cd ui && bun run dev
-
-# Build for production
-make ui-build      # or: cd ui && bun run build
-
-# Run tests
-make ui-test       # or: cd ui && bun run test
-
-# Run tests with coverage
-make ui-test-coverage  # or: cd ui && bun run test:coverage
-
-# Lint
-make ui-lint       # or: cd ui && bun run lint
-```
-
-## Directory structure
-
-```
-ui/
-├── index.html
-├── package.json
-├── vite.config.ts
-├── components.json              # shadcn/ui config
-├── src/
-│   ├── main.tsx                 # App entry
-│   ├── app.tsx                  # Root component with providers
-│   ├── index.css                # Tailwind imports
-│   ├── routeTree.gen.ts         # TanStack Router generated
-│   ├── lib/
-│   │   ├── api-client.ts        # Fetch wrapper with auth
-│   │   └── utils.ts             # cn() helper
-│   ├── schemas/                 # Zod schemas matching Go API types
-│   │   ├── agent.ts
-│   │   ├── chat.ts
-│   │   ├── security.ts          # RepositoryScan, findings, scan runs, patch proposals
-│   │   ├── session.ts
-│   │   ├── task.ts
-│   │   └── tool.ts
-│   ├── stores/
-│   │   ├── auth.ts              # Zustand: token, user info
-│   │   ├── chat.ts              # Zustand: chat state
-│   │   └── ui.ts                # Zustand: sidebar, theme, namespace
-│   ├── hooks/                   # TanStack Query hooks per resource
-│   │   ├── use-agents.ts
-│   │   ├── use-chat.ts
-│   │   ├── use-security.ts      # Repository security API hooks
-│   │   ├── use-sessions.ts
-│   │   ├── use-tasks.ts
-│   │   └── use-tools.ts
-│   ├── components/
-│   │   ├── ui/                  # shadcn/ui primitives
-│   │   ├── layout/              # Sidebar, header, root layout
-│   │   ├── tasks/               # Task list/detail, Kanban board, live agent grid
-│   │   ├── events/              # Execution event timeline, trace, severity primitives
-│   │   ├── security/            # Repository scans, threat models, findings, patch proposals
-│   │   ├── sessions/            # Session list, detail, transcript
-│   │   ├── agents/              # Agent list, detail, create form
-│   │   ├── tools/               # Tool list, detail
-│   │   ├── chat/                # Chat interface
-│   │   └── dashboard/           # Overview, stats cards
-│   ├── routes/                  # File-based TanStack Router routes
-│   │   ├── index.tsx            # Dashboard
-│   │   ├── chat.tsx
-│   │   ├── kanban.tsx           # Board / Kanban
-│   │   ├── live.tsx             # Live agent grid
-│   │   ├── security/
-│   │   │   ├── index.tsx        # /security
-│   │   │   ├── new.tsx          # /security/new
-│   │   │   ├── $repoId.tsx      # /security/:repoId
-│   │   │   └── findings/
-│   │   │       └── $findingId.tsx # /security/findings/:findingId
-│   │   ├── tasks/
-│   │   ├── sessions/
-│   │   ├── agents/
-│   │   └── tools/
-│   └── test/                    # Test utilities and setup
-└── dist/                        # Vite build output (gitignored)
-```
-
-## Embedding
-
-The UI is embedded into the Go binary via `//go:embed`:
-
-```go
-// internal/uiembed/embed.go
-//go:embed all:dist
-var distFS embed.FS
-
-func FS() fs.FS { ... }
-```
-
-The Fiber server serves embedded static assets at `/` with fallback to `index.html` for client-side routing.
+The dashboard's source, its development server, and its tests live in
+[`ui/`](https://github.com/orka-agents/orka/tree/main/ui); see its
+[README](https://github.com/orka-agents/orka/blob/main/ui/README.md).

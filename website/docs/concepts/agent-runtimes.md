@@ -5,20 +5,37 @@ description: "How Orka runs coding agents: ACP RuntimePools, sessions, and the p
 
 # Agent runtimes
 
-`type: agent` Tasks use the ACP core runtime and the `orka.harness.v2` session protocol. Built-in Codex, Claude, Copilot, and OpenCode profiles run in controller-owned `RuntimePool` resources; there is no per-Task agent Job and no fallback runtime path.
+A `type: agent` Task runs a real coding-agent CLI — Codex, Claude Code, GitHub Copilot CLI,
+or OpenCode — against a git repository. This page explains how Orka runs them: warm pools of
+runtime Pods, private sessions inside them, a strict separation between the agent and your
+credentials, and a durable record of every attempt.
 
-Orka harness v2 is the controller-to-supervisor contract, carried over HTTP with
-NDJSON prompt streams. The supervisor drives each agent CLI using ACP over
-stdin/stdout. These are separate protocols with independent versions.
+In short:
 
-Orka owns the durable Task attempt, RuntimeSession identity, queueing, workspace validation, delivery receipt, transcript, and result projection. The runtime Pod owns only the short-lived provider process and ACP session for a fenced RuntimeSession.
+- **Pools, not Jobs.** Orka keeps a controller-owned `RuntimePool` per runtime profile. Its
+  Pod scales to zero when idle and hosts several private **RuntimeSessions** when busy, so a
+  Task usually starts in seconds. There is no per-Task Job and no fallback path.
+- **The agent edits; Orka publishes.** The CLI works on a sanitized checkout with no Git
+  credentials. When it finishes, Orka validates the change, and a separate
+  Workspace/Publisher commits, pushes, and verifies it, optionally opening a pull request.
+- **Every attempt is durable.** Orka records each prompt attempt, so a controller restart
+  never sends the same prompt twice and an uncertain outcome is reported as uncertain.
+- **Models through a proxy.** Runtimes reach your model gateway through Orka's authenticated
+  [provider proxy](../operations/provider-proxy.md); no provider key enters the agent.
 
-The supported built-in set is intentionally closed: `codex`, `claude`,
-`copilot`, and `opencode`. Operators can also register and conformance-test an
-external `orka.harness.v2` `AgentRuntime`. A ready strict-governed registration
-selected through `runtimeRef` uses the same durable Task and RuntimeSession
-state machines, while the operator remains responsible for the external
-service lifecycle and capacity.
+Orka harness v2 (`orka.harness.v2`) is the controller-to-supervisor contract, carried over
+HTTP with NDJSON prompt streams. The supervisor in each runtime Pod drives the agent CLI over
+the [Agent Client Protocol](https://agentclientprotocol.com) (ACP) on stdin/stdout. These are
+separate protocols with independent versions. Orka owns the durable Task attempt,
+RuntimeSession identity, queueing, workspace validation, delivery receipt, transcript, and
+result projection; the runtime Pod owns only the short-lived provider process and ACP session
+for a fenced RuntimeSession.
+
+The built-in set is intentionally closed: `codex`, `claude`, `copilot`, and `opencode`.
+Operators can also register and conformance-test an external `orka.harness.v2`
+`AgentRuntime`. A ready strict-governed registration selected through `runtimeRef` uses the
+same durable Task and RuntimeSession state machines, while the operator remains responsible
+for the external service lifecycle and capacity.
 
 ## Supported runtime profiles
 
@@ -240,10 +257,10 @@ spec:
       - Glob
       - Grep
   model:
-    name: gpt-5.4
+    name: gpt-6-astra
 ```
 
-OpenCode model IDs use provider/model form, for example `openai/gpt-5.4`.
+OpenCode model IDs use provider/model form, for example `openai/gpt-6-astra`.
 OpenCode selects `apply_patch` for GPT-family models and `edit`/`write` for
 others; Orka normalizes those aliases into one governed mutation capability, so
 allowing one exposes the group and disallowing one closes the group. For
@@ -349,26 +366,10 @@ through short-lived artifact capabilities bound to the operation, method,
 path, digest, size, media type, identity, and expiry. The Publisher does not
 hold the artifact signing key.
 
-## Workspace fields
+Every `spec.workspace` field, with defaults, is in the
+[Resource reference](../reference/resources.md#workspace).
 
-| Field | Purpose |
-| --- | --- |
-| `intent` | `read` or `write`; defaults to `read` for agent Tasks and is immutable for an active attempt. |
-| `gitRepo` | Credential-free source repository URL. |
-| `sourceRepository` | Optional canonical provider repository identity. |
-| `branch` / `ref` | Source branch or exact ref/commit/tag. |
-| `readCredentialRef.name` | Secret used only by the clean-room clone/read boundary. |
-| `publicationGitRepo` | Credential-free repository URL that receives the publication branch. |
-| `publicationRepository` | Optional canonical publication repository identity. |
-| `publicationReadCredentialRef.name` | Target-read Secret used only for publication preflight and independent verification. |
-| `publicationCredentialRef.name` | Target-write Secret used only for the exact compare-and-swap push. |
-| `forgeCredentialRef.name` | Forge API Secret used only for pull-request reconciliation. Required when `createPR` is true. |
-| `subPath` | Repository subdirectory exposed as the workspace root. |
-| `pushBranch` | Publication branch. If omitted for a write Task, Orka derives a full-entropy Task- or Session-owned branch. |
-| `prBaseBranch` | Pull-request base branch when `createPR` is true. |
-| `prTitle` | Optional exact pull-request title, up to 256 characters. Empty uses the prompt's first nonblank line, trimmed and truncated to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
-| `prBody` | Optional pull-request body, up to 32,768 characters. Defaults to the publisher summary with the Task namespace/name. Publication generation and reconciliation markers are appended in either case. |
-| `createPR` | Explicitly request PR reconciliation after verified branch publication. |
+## Pull request text
 
 Pull-request text comes from the frozen Task spec and prompt, never from files or output produced by the agent. Orka rejects secret-like titles and bodies at runtime before publication, including prompt-derived titles. Orka reserves comments beginning with `<!-- orka.publisher.pr-` for reconciliation. Remove these comments when copying an existing PR body into `prBody`. The publisher keeps the original title and body when reconciling an existing pull request. A continuation does not overwrite a person's edits.
 
@@ -417,30 +418,12 @@ the supported format and import/export commands.
 
 ## Runtime and credential boundaries
 
-Built-in runtime Pods:
-
-- use a digest-pinned image and immutable runtime-profile digest;
-- have no Git read or publication credential;
-- have no direct SCM egress;
-- use a read-only root filesystem and no service-account token;
-- isolate resident sessions with private directories, distinct non-reused UIDs/GIDs, and process-tree cleanup;
-- expose only non-sensitive health/capability probes without authentication;
-- require controller authentication and operation-scoped authorization for status and mutations.
-
-Provider traffic goes only to the central authenticated provider proxy. The
-proxy accepts the controller-issued RuntimePool bearer, enforces the configured
-provider/model path, and forwards to Vekil. The `config/acp-production` overlay
-also applies the Vekil ingress policy so runtime Pods cannot bypass that proxy.
-
-Each RuntimeSession receives a credential-protected loopback MCP endpoint. It
-lists the canonical prompt tool policy while idle, but executes calls only for
-the active Task/attempt/prompt/lease. The controller broker revalidates the
-exact runtime fences, tool allowlist, approval evidence, and lease expiry on
-every call. Consequential calls reserve an `ExternalEffect` identity before
-execution and replay only a committed matching response.
-
-The Workspace/Publisher has brokered SCM/forge credentials and artifact access,
-but no provider or prompt-scoped MCP access.
+A built-in runtime Pod uses a digest-pinned image, a read-only root filesystem, and no
+service-account token. It holds no Git credential and has no route to source control. Its
+model traffic goes only to the central provider proxy, and each RuntimeSession reaches Orka
+tools only through a credential-protected loopback MCP proxy that the controller rechecks on
+every call. The Workspace/Publisher, which does hold the Git credentials, has no access to
+models or tools. [Security](security.md#acp-runtimepool-pods) describes each boundary.
 
 ## Controller configuration
 
