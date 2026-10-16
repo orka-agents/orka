@@ -120,7 +120,7 @@ export function TaskYaml({ task, load = loadYaml }: { task: Task; load?: () => P
       </CardHeader>
       <CardContent className="space-y-3">
         <p className="text-xs text-muted-foreground">
-          Environment values and secret-looking labels and annotations are hidden, and kubectl&apos;s annotations, which can embed the whole spec, are left out.
+          Credentials show as (hidden): environment values, the credential parts of URLs, and any label, annotation or text that looks like it holds one. kubectl&apos;s annotations, which can embed the whole spec, are left out.
         </p>
         {failed ? (
           <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 p-3 text-sm">

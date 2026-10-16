@@ -22,6 +22,7 @@ const task = {
   spec: {
     type: 'container',
     image: 'busybox',
+    ai: { prompt: 'Build a basic HTTP server with Basic Authentication; Bearer tokens expire, so set max_tokens: 100 and see https://github.com/northwind/checkout?tab=files.' },
     env: [{ name: 'API_KEY', value: 'sk-live-123456' }, { name: 'FROM_SECRET' }],
     webhookURL: 'https://bot:pw@hooks.example.com/services/T0/B0/s3cr3t?sig=abc',
     agentRuntime: {
@@ -31,9 +32,12 @@ const task = {
       },
     },
   },
-  status: { phase: 'Running', pullRequest: { url: 'https://github.com/northwind/checkout/pull/12' }, message: 'clone of https://alice:pa@ssword@example.com/repo failed; see https://github.com/northwind/checkout?tab=x', reason: 'notify https://hooks.slack.com/services/T0/B0/s3cr3tpath failed', detail: 'also https://discord.com/api/v10/webhooks/1/d1sc0rdtoken and https://hooks.slack.com:443/services/T0/B0/p0rtsecret', lastError: 'https://alice:pass@example.com:bad/repo?sig=x' },
+  status: { phase: 'Running', pullRequest: { url: 'https://github.com/northwind/checkout/pull/12' } },
   plan: { summary: 'not part of the resource' },
 } as unknown as Task
+
+const messageShown = (message: string) =>
+  (displayedTaskResource({ ...task, status: { phase: 'Running', message } } as Task).status as { message: string }).message
 
 describe('displayedTaskResource', () => {
   const shown = displayedTaskResource(task)
@@ -51,7 +55,7 @@ describe('displayedTaskResource', () => {
     expect((unparsable.spec as Task['spec']).webhookURL).toBe(HIDDEN_VALUE)
   })
 
-  it('hides the credentials in any URL value but keeps the rest of the URL', () => {
+  it('keeps a URL value but hides its credentials, or the whole value when it will not parse', () => {
     expect(shown.spec).toMatchObject({
       agentRuntime: {
         workspace: {
@@ -61,16 +65,62 @@ describe('displayedTaskResource', () => {
       },
     })
     expect(shown.metadata).toMatchObject({ annotations: { 'example.com/callback': `https://cb.example.com/done?${HIDDEN_VALUE}` } })
-    // A URL with nothing to hide stays as it is; in prose, only userinfo is hidden.
-    expect(shown.status).toMatchObject({
-      pullRequest: { url: 'https://github.com/northwind/checkout/pull/12' },
-      message: `clone of https://${HIDDEN_VALUE}@example.com/repo failed; see https://github.com/northwind/checkout?tab=x`,
-      reason: `notify https://hooks.slack.com/services/${HIDDEN_VALUE} failed`,
-      detail: `also https://discord.com/api/v10/webhooks/${HIDDEN_VALUE} and https://hooks.slack.com:443/services/${HIDDEN_VALUE}`,
-      // URL-shaped but unparsable: hidden whole.
-      lastError: HIDDEN_VALUE,
-    })
-    expect(JSON.stringify(shown)).not.toMatch(/ghs_abc123|token=abc123|sig=abc|frag|alice|ssword|s3cr3tpath|d1sc0rdtoken|p0rtsecret/)
+    expect(shown.status).toMatchObject({ pullRequest: { url: 'https://github.com/northwind/checkout/pull/12' } })
+    expect(messageShown('https://hooks.slack.com:443/services/T0/B0/p0rtsecret')).toBe(`https://hooks.slack.com/${HIDDEN_VALUE}`)
+    expect(messageShown('https://alice:pass@example.com:bad/repo?sig=x')).toBe(HIDDEN_VALUE)
+    expect(JSON.stringify(shown)).not.toMatch(/ghs_abc123|token=abc123|sig=abc|frag/)
+  })
+
+  // Finding where a secret ends inside prose is not reliable, so text that
+  // shows any credential sign is hidden whole rather than cut.
+  it.each([
+    ['userinfo in a URL', 'clone of https://alice:pa@ssword@example.com/repo failed'],
+    ['an apostrophe in URL userinfo', "clone of https://alice:pa'ss@example.test/repo failed"],
+    ['a lowercase bearer token', 'use bearer abcdefghijklmnopqrstuvwxyz012345 here'],
+    ['a Google signature parameter', 'see https://storage.example.com/o?X-Goog-Signature=abc'],
+    ['a signed URL', 'download failed for https://bucket.example.com/a?X-Amz-Signature=sig (retrying)'],
+    ['a Slack webhook', 'notify https://hooks.slack.com/services/T0/B0/s3cr3t failed'],
+    ['a versioned Discord webhook', 'also https://discord.com/api/v10/webhooks/1/token'],
+    ['a GitHub token', 'use ghp_abcdefgh123456 for the clone'],
+    ['a GitLab token', 'Clone using glpat-AbCdEf123456789xyz'],
+    ['an npm token', 'publish with npm_AbCdEfGhIjKlMnOpQrStUvWx'],
+    ['a Stripe key', 'charge with sk_live_AbCdEf1234567890'],
+    ['a Hugging Face token', 'pull with hf_AbCdEfGhIjKlMnOpQrStUv'],
+    ['a long Bearer token', 'then Bearer eyJhbGciOiJIUzI1NiJ9.e30.sig works'],
+    ['an Authorization header', 'send Authorization: lin_api_bareKey123'],
+    ['an uppercase Authorization header', 'AUTHORIZATION: Basic dXNlcjpwYXNz'],
+    ['a quoted Authorization header', 'Authorization: "Bearer abc" then go'],
+    ['a parameterized Authorization header', 'Authorization: AWS4-HMAC-SHA256 Credential=AKID/x, SignedHeaders=host, Signature=abc'],
+    ['a quoted password with spaces', 'password="a pass \\" phrase" done'],
+    ['a JSON password', '{"url":"https://example.test/?mode=x","password":"two word passphrase"}'],
+    ['an escaped JSON password', 'response: {\\"password\\":\\"two word passphrase\\"}'],
+    ['an escaped JSON Authorization header', 'headers: {\\"Authorization\\":\\"opaque\\"}'],
+    ['an API key label with a space', 'Use API key: q8Zr2opaque to deploy'],
+    ['a YAML password with a doubled quote', "password: 'it''s a tail' done"],
+    ['a connection string', 'Server=db;User Id=sa;Password="start""rest";'],
+    ['OAuth fields', 'got access_token=at123 refresh_token="rt 456" clientSecret: cs789'],
+    ['AWS keys', 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI'],
+    ['a private key', '-----BEGIN RSA PRIVATE KEY-----\nMIIE'],
+  ])('hides text with %s whole', (_, text) => {
+    expect(messageShown(text)).toBe(HIDDEN_VALUE)
+  })
+
+  it('scrubs long adversarial text in linear time', () => {
+    const started = performance.now()
+    for (const text of ['1-'.repeat(100_000) + ': x', 'a.'.repeat(100_000) + 'x', '?' + 'a-'.repeat(100_000) + '=', '?' + 'token-'.repeat(30_000) + 'x', 'x'.repeat(200_000)]) {
+      messageShown(text)
+    }
+    // Quadratic matching takes minutes here; linear takes milliseconds.
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+
+  it('leaves ordinary text alone', () => {
+    expect((shown.spec as Task['spec']).ai?.prompt).toBe(
+      'Build a basic HTTP server with Basic Authentication; Bearer tokens expire, so set max_tokens: 100 and see https://github.com/northwind/checkout?tab=files.',
+    )
+    for (const text of ['the aws_access_key_id rotated; maxTokens=5', 'Build the layout at https://example.test/?design=compact&assignees=2']) {
+      expect(messageShown(text)).toBe(text)
+    }
   })
 
   it('hides environment values and secret-looking labels and annotations', () => {
@@ -86,7 +136,7 @@ describe('displayedTaskResource', () => {
         'example.com/hook': HIDDEN_VALUE,
       },
     })
-    expect(JSON.stringify(shown)).not.toMatch(/sk-live|last-applied|Bearer|hunter2|xxxx/)
+    expect(JSON.stringify(shown)).not.toMatch(/sk-live|last-applied|Bearer abc|hunter2|xxxx/)
   })
 
   it('writes YAML that reads back as the same object', () => {

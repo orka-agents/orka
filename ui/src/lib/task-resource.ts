@@ -1,38 +1,43 @@
 import type { Task } from '@/schemas/task'
-import { looksSecret, UNSAFE_KEY_PATTERN, WEBHOOK_URL_IN_TEXT } from './secret-like'
+import { containsCredential, looksSecret, UNSAFE_KEY_PATTERN, WEBHOOK_URL } from './secret-like'
 
 export const HIDDEN_VALUE = '(hidden)'
 
 // A value that is one URL and nothing else.
-const URL_VALUE = /^[a-z][a-z\d+.-]*:\/\/\S+$/i
-// `user:token@` after a scheme, anywhere in a string (a git error in a message).
-// Greedy up to the last `@` before the path, as URL parsers read a password
-// that itself contains `@`.
-const USERINFO_IN_TEXT = /\b([a-z][a-z\d+.-]*:\/\/)[^\s/?#]*@/gi
+const URL_VALUE = /^[a-z][a-z\d+.-]{0,31}:\/\/\S+$/i
 
 /**
- * Hides the userinfo, query and fragment of a URL value, where credentials
- * ride (`user:token@`, signed query strings); userinfo in a URL inside other
- * text; and the secret path of a known webhook URL anywhere. Legacy harness-v1 repository URLs, for one, are stored without
- * the current credential rules.
+ * A URL with its credentials hidden: userinfo, query and fragment, or the path
+ * of a webhook URL, which is its secret. One that will not parse is hidden
+ * whole: nothing says where its credentials end.
  */
-function withoutURLCredentials(value: string): string {
-  value = value.replace(WEBHOOK_URL_IN_TEXT, `$1${HIDDEN_VALUE}`)
-  if (!URL_VALUE.test(value)) return value.replace(USERINFO_IN_TEXT, `$1${HIDDEN_VALUE}@`)
+function withoutCredentials(value: string): string {
   let url: URL
   try {
     url = new URL(value)
   } catch {
-    // Shaped like a URL but unparsable: nothing says where its credentials end.
     return HIDDEN_VALUE
   }
+  if (WEBHOOK_URL.test(value)) return `${url.origin}/${HIDDEN_VALUE}`
   if (!url.username && !url.password && !url.search && !url.hash) return value
   const userinfo = url.username || url.password ? `${HIDDEN_VALUE}@` : ''
   return `${url.protocol}//${userinfo}${url.host}${url.pathname}${url.search ? `?${HIDDEN_VALUE}` : ''}${url.hash ? `#${HIDDEN_VALUE}` : ''}`
 }
 
+/**
+ * Hides credentials in a string. A value that is one URL keeps all but its
+ * credentials; legacy harness-v1 repository URLs, for one, are stored without
+ * the current credential rules. Other text that shows a sign of a credential
+ * (a token, an Authorization header, a password assignment, a URL's userinfo
+ * or signature) is hidden whole.
+ */
+function scrubbedText(value: string): string {
+  if (URL_VALUE.test(value)) return withoutCredentials(value)
+  return containsCredential(value) ? HIDDEN_VALUE : value
+}
+
 function scrubbed(value: unknown): unknown {
-  if (typeof value === 'string') return withoutURLCredentials(value)
+  if (typeof value === 'string') return scrubbedText(value)
   if (Array.isArray(value)) return value.map(scrubbed)
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrubbed(item)]))
   return value
@@ -42,7 +47,7 @@ function shown(record: Record<string, string>, dropUnsafe: boolean): Record<stri
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(record)) {
     if (dropUnsafe && UNSAFE_KEY_PATTERN.test(key)) continue
-    out[key] = looksSecret(key, value) ? HIDDEN_VALUE : withoutURLCredentials(value)
+    out[key] = looksSecret(key, value) ? HIDDEN_VALUE : scrubbedText(value)
   }
   return out
 }
@@ -62,8 +67,9 @@ function shownWebhookURL(value: string): string {
 /**
  * The Task resource as kubectl shows it, minus what the dashboard never
  * displays: environment values, the webhook URL past its host, credentials in
- * any other URL, secret-looking labels and annotations, and kubectl's
- * annotations (last-applied embeds the whole spec, env included).
+ * URLs, any other text that looks like it holds a credential, secret-looking
+ * labels and annotations, and kubectl's annotations (last-applied embeds the
+ * whole spec, env included).
  * The API's `plan` is not part of the resource and is left out.
  */
 export function displayedTaskResource(task: Task): Record<string, unknown> {
