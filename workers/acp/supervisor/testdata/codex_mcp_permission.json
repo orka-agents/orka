@@ -1,0 +1,84 @@
+{
+  "provenance": {
+    "adapterRevision": "68d7d2d5ddfc0ed5746f9f6130892dda685e65dd",
+    "sources": [
+      "src/tool-calls/reporters/McpToolReporter.ts:started/completed",
+      "src/permissions/mcp.ts:buildMcpPermissionRequest",
+      "src/tool-calls/ToolCallReports.ts:send (unchanged fields omitted)"
+    ],
+    "substitutions": "Orka server/tool and stable synthetic session/call IDs. Completion explicitly repeats rawInput to exercise validation; the current producer can omit it, tested separately and by the opt-in native round trip."
+  },
+  "notification": {
+    "sessionId": "test-session-id",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "feedback-call-1",
+      "kind": "execute",
+      "title": "mcp.orka.runtime_feedback",
+      "status": "in_progress",
+      "rawInput": {
+        "server": "orka",
+        "tool": "runtime_feedback",
+        "arguments": {}
+      },
+      "_meta": {
+        "is_mcp_tool_call": true
+      }
+    }
+  },
+  "permission": {
+    "sessionId": "test-session-id",
+    "toolCall": {
+      "toolCallId": "feedback-call-1",
+      "kind": "execute",
+      "status": "pending"
+    },
+    "_meta": {
+      "is_mcp_tool_approval": true
+    },
+    "options": [
+      {
+        "optionId": "allow_once",
+        "name": "Allow",
+        "kind": "allow_once"
+      },
+      {
+        "optionId": "decline",
+        "name": "Decline",
+        "kind": "reject_once"
+      }
+    ]
+  },
+  "postPermission": {
+    "sessionId": "test-session-id",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "feedback-call-1",
+      "status": "in_progress"
+    }
+  },
+  "completion": {
+    "sessionId": "test-session-id",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "feedback-call-1",
+      "status": "completed",
+      "rawInput": {
+        "server": "orka",
+        "tool": "runtime_feedback",
+        "arguments": {}
+      },
+      "rawOutput": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Available"
+            }
+          ]
+        },
+        "error": null
+      }
+    }
+  }
+}

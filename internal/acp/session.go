@@ -168,6 +168,10 @@ type PromptEvent struct {
 type PermissionRequestEvent struct {
 	RequestID string
 	Request   RequestPermissionRequest
+	// RawParams preserves the original authority envelope for provider-specific
+	// validation. Decoded fields cannot reveal duplicate keys or case aliases.
+	// This internal transport data must never be projected or logged.
+	RawParams json.RawMessage `json:"-"`
 }
 
 type PromptOutcome string
@@ -1167,7 +1171,7 @@ func (s *RuntimeSession) handleRequest(ctx context.Context, request IncomingRequ
 		pending.options[option.OptionID] = struct{}{}
 	}
 	active.permissions[requestID] = pending
-	s.emitLocked(active, PromptEvent{Type: PromptEventPermissionRequested, Permission: &PermissionRequestEvent{RequestID: requestID, Request: permission}, Size: len(request.Params)})
+	s.emitLocked(active, PromptEvent{Type: PromptEventPermissionRequested, Permission: &PermissionRequestEvent{RequestID: requestID, Request: permission, RawParams: append(json.RawMessage(nil), request.Params...)}, Size: len(request.Params)})
 	done := active.done
 	s.mu.Unlock()
 

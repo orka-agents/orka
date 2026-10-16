@@ -124,7 +124,7 @@ func TestCodexMCPPermissionIdentityFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := prompt.toolCallNames[id]; got != test.want {
+			if got := prompt.toolCallNames[id].name; got != test.want {
 				t.Fatalf("remembered tool = %q, want %q", got, test.want)
 			}
 		})

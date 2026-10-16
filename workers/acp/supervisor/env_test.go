@@ -993,7 +993,7 @@ func testProviderProjectionRequest(
 		}
 		if _, ok := canonicalProviderNativeToolName(name); !ok {
 			switch name {
-			case "send_message", "check_messages":
+			case "send_message", "check_messages", "runtime_feedback":
 				descriptor.Source = harnessv2.MCPToolSourceBrokeredBuiltin
 				descriptor.InputSchema = json.RawMessage(`{"type":"object"}`)
 			default:

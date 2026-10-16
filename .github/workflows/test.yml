@@ -114,7 +114,7 @@ jobs:
       - name: Build the pinned production Codex runtime
         run: docker build --platform linux/amd64 -f workers/acp/images/codex/Dockerfile -t orka-native-codex-test .
 
-      - name: Verify native restore, continuation, publication, capture, and return
+      - name: Verify native handoff and read-only MCP feedback
         run: |
           set -Eeuo pipefail
           docker run --rm --network none --user 0:0 \
@@ -125,9 +125,10 @@ jobs:
             --workdir /src/workers/acp/supervisor \
             --entrypoint /src/bin/native-codex/supervisor.test \
             orka-native-codex-test \
-            -test.run '^TestPinnedNativeCodexACPRoundTrip$' -test.count=1 -test.timeout=5m -test.v \
+            -test.run '^TestPinnedNativeCodex(ACPRoundTrip|RuntimeFeedback)$' -test.count=1 -test.timeout=5m -test.v \
             | tee bin/native-codex/results.log
           grep -q '^--- PASS: TestPinnedNativeCodexACPRoundTrip ' bin/native-codex/results.log
+          grep -q '^--- PASS: TestPinnedNativeCodexRuntimeFeedback ' bin/native-codex/results.log
 
   ui-test:
     name: UI Tests

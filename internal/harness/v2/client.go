@@ -488,13 +488,19 @@ func (c *Client) getJSONWithCapability(ctx context.Context, operation, relative 
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return c.decodeHTTPError(operation, resp, nil, "")
+		return c.decodeHTTPError(operation, resp, nil, capability)
 	}
 	if err := requireMediaType(resp.Header.Get("Content-Type"), "application/json"); err != nil {
 		return c.protocolError(operation, resp.StatusCode, err)
 	}
 	body, err := readBoundedResponseBody(resp, c.maxJSONResponseBytes)
 	if err != nil {
+		// A status GET is read-only. Losing its response body after headers
+		// is still transport failure, not a definitive malformed status.
+		// Preserve the protocol limit error; it must never earn a retry.
+		if _, readFailure := errors.AsType[*responseBodyReadError](err); operation == "status" && readFailure {
+			return c.transportError(operation, requestCtx, err, nil, capability)
+		}
 		return c.protocolError(operation, resp.StatusCode, err)
 	}
 	if protocolErr := decodeSuccessJSON(body, out); protocolErr != nil {
@@ -641,6 +647,9 @@ func (c *Client) decodeHTTPError(operation string, response *http.Response, trac
 	}
 	body, err := readBoundedResponseBody(response, c.maxErrorBodyBytes)
 	if err != nil {
+		if _, readFailure := errors.AsType[*responseBodyReadError](err); operation == "status" && readFailure {
+			return c.transportError(operation, nil, err, tracker, capability)
+		}
 		return c.protocolErrorWithEvidence(operation, response.StatusCode, err, evidence, capability)
 	}
 	errorResponse, ok, err := decodeErrorEnvelope(body)
@@ -864,6 +873,13 @@ func requireMediaType(header, expected string) error {
 	return nil
 }
 
+// Separate I/O interruption from complete but empty/oversized protocol bodies.
+// Only read-only status consumers use this distinction to permit a retry.
+type responseBodyReadError struct{ cause error }
+
+func (e *responseBodyReadError) Error() string { return "read response body: " + e.cause.Error() }
+func (e *responseBodyReadError) Unwrap() error { return e.cause }
+
 func readBoundedResponseBody(response *http.Response, limit int64) ([]byte, error) {
 	if response == nil || response.Body == nil {
 		return nil, fmt.Errorf("response body is required")
@@ -875,11 +891,13 @@ func readBoundedResponseBody(response *http.Response, limit int64) ([]byte, erro
 		return nil, fmt.Errorf("%w: content length %d exceeds limit %d", ErrResponseBodyTooLarge, response.ContentLength, limit)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
+	// A reader may return both data and an error. An observed overflow is
+	// definitive even when the same read also reports I/O interruption.
 	if int64(len(body)) > limit {
 		return nil, fmt.Errorf("%w: body exceeds limit %d", ErrResponseBodyTooLarge, limit)
+	}
+	if err != nil {
+		return nil, &responseBodyReadError{cause: err}
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, fmt.Errorf("response body is empty")

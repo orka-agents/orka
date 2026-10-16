@@ -27,6 +27,83 @@ func WithResponseBodyLimit(maxBytes int64) ClientOption {
 
 const clientTestBearer = "controller-bearer-token-0123456789abcdef"
 
+func TestClientStatusSeparatesInterruptedAndInvalidBodies(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		for _, test := range []struct {
+			name   string
+			body   string
+			length int
+			want   error
+		}{
+			{name: "interrupted", body: "{", length: 64, want: ErrClientTransport},
+			{name: "empty", length: 0, want: ErrClientProtocol},
+			{name: "whitespace", body: " ", length: 1, want: ErrClientProtocol},
+			{name: "malformed", body: "{", length: 1, want: ErrClientProtocol},
+			{name: "oversized", body: strings.Repeat("x", 129), length: 129, want: ErrResponseBodyTooLarge},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", code, test.name), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("Content-Length", fmt.Sprint(test.length))
+					w.WriteHeader(code)
+					_, _ = io.WriteString(w, test.body)
+				}))
+				defer server.Close()
+				client, err := NewClient(server.URL, WithControllerBearerToken(clientTestBearer),
+					WithOperationCapabilitySecret([]byte(strings.Repeat("s", MinCapabilitySecretBytes))),
+					WithStatusCapabilityBinding(StatusCapabilityBinding{RuntimeProfileDigest: testFence(t).RuntimeProfileDigest}),
+					WithResponseBodyLimit(128))
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.maxErrorBodyBytes = 128
+				_, err = client.Status(t.Context())
+				if !errors.Is(err, test.want) {
+					t.Fatalf("Status error=%v, want %v", err, test.want)
+				}
+				clientErr, ok := errors.AsType[*ClientError](err)
+				if !ok || clientErr.Retryable || (test.name != "interrupted" && clientErr.Kind != ClientErrorProtocol) {
+					t.Fatal("invalid completed status body earned transient transport classification")
+				}
+			})
+		}
+	}
+}
+
+func TestClientStatusObservedOverflowWinsOverReadError(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		for _, size := range []int{128, 129} {
+			t.Run(fmt.Sprintf("%d/%d", code, size), func(t *testing.T) {
+				transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+					body := statusBodyReadFunc(func(buffer []byte) (int, error) {
+						return copy(buffer, strings.Repeat("x", size)), io.ErrUnexpectedEOF
+					})
+					return &http.Response{StatusCode: code, Header: http.Header{"Content-Type": {"application/json"}}, ContentLength: -1, Body: io.NopCloser(body)}, nil
+				})
+				client, err := NewClient("https://runtime.example", WithHTTPClient(&http.Client{Transport: transport}),
+					WithControllerBearerToken(clientTestBearer), WithOperationCapabilitySecret([]byte(strings.Repeat("s", MinCapabilitySecretBytes))),
+					WithStatusCapabilityBinding(StatusCapabilityBinding{RuntimeProfileDigest: testFence(t).RuntimeProfileDigest}), WithResponseBodyLimit(128))
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.maxErrorBodyBytes = 128
+				_, err = client.Status(t.Context())
+				want := ErrClientTransport
+				if size > 128 {
+					want = ErrResponseBodyTooLarge
+				}
+				if !errors.Is(err, want) {
+					t.Fatalf("Status error=%v, want %v", err, want)
+				}
+			})
+		}
+	}
+}
+
+type statusBodyReadFunc func([]byte) (int, error)
+
+func (read statusBodyReadFunc) Read(buffer []byte) (int, error) { return read(buffer) }
+
 var clientTestCapabilitySecret = []byte("capability-secret-0123456789abcdef")
 
 func TestNewClientDefaultsToProxylessTransport(t *testing.T) {

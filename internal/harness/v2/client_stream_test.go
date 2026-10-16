@@ -265,7 +265,11 @@ func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
 			if test.wantKind == ClientErrorHTTP && (clientErr.Code != ErrorCodePromptNotAccepted || clientErr.Retryable) {
 				t.Fatalf("validated rejection = %#v", clientErr)
 			}
-			if summary.Accepted || emitted || summary.WriteEvidence.State != RequestWriteComplete ||
+			// The response reader can observe the rejection before the transport's
+			// concurrent WroteRequest callback. Both complete and ambiguous writes
+			// must preserve their evidence and remain unsafe to resend.
+			written := summary.WriteEvidence.State == RequestWriteComplete || summary.WriteEvidence.State == RequestWriteAmbiguous
+			if summary.Accepted || emitted || !written || summary.WriteEvidence != clientErr.WriteEvidence ||
 				clientErr.WriteEvidence.RequestBodyBytesRead == 0 || clientErr.WriteEvidence.SafeToResendSameIdentity() {
 				t.Fatalf("rejection must preserve a written request without stream acceptance: summary=%#v error=%#v", summary, clientErr)
 			}

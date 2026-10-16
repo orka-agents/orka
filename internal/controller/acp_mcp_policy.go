@@ -30,7 +30,7 @@ var readOnlyBrokeredTools = map[string]struct{}{
 	"fetch_task_output": {}, "file_read": {}, "get_issue": {},
 	"list_agents": {}, "list_issues": {}, "list_pull_requests": {}, "list_tasks": {},
 	"list_connections": {}, "list_tools": {}, "recall_memory": {}, "review_pull_request": {}, "search_transcript": {}, "wait_for_task": {},
-	"wait_for_tasks": {}, "web_fetch": {}, "web_search": {},
+	"wait_for_tasks": {}, "web_fetch": {}, "web_search": {}, RuntimeFeedbackToolName: {},
 }
 
 var controllerLocalOnlyTools = map[string]struct{}{
@@ -138,6 +138,9 @@ func buildExternalRuntimeSessionMCPConfigurationWithRegistry(
 		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("task, Agent, and external AgentRuntime policy are required")
 	}
 	policy := runtime.Spec.Capabilities.MCPPolicy
+	if policy != nil && slices.Contains(policy.AllowedTools, RuntimeFeedbackToolName) {
+		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(fmt.Errorf("runtime_feedback requires a controller-owned native RuntimePool; external AgentRuntimes are unsupported"))
+	}
 	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err != nil {
 		return harnessv2.MCPPolicyConfiguration{}, err
 	}
@@ -166,6 +169,9 @@ func buildAgentRuntimeMCPConfigurationWithRegistry(
 		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("external AgentRuntime MCP policy is required")
 	}
 	policy := runtime.Spec.Capabilities.MCPPolicy
+	if policy != nil && slices.Contains(policy.AllowedTools, RuntimeFeedbackToolName) {
+		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(fmt.Errorf("runtime_feedback requires a controller-owned native RuntimePool; external AgentRuntimes are unsupported"))
+	}
 	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err != nil {
 		return harnessv2.MCPPolicyConfiguration{}, err
 	}
@@ -419,6 +425,9 @@ func buildCanonicalMCPToolDescriptors(
 				})
 				continue
 			}
+		}
+		if name == RuntimeFeedbackToolName {
+			return nil, permanentACPAgentConfiguration(fmt.Errorf("runtime_feedback is not configured on this controller"))
 		}
 		if native := providerNativeTools[strings.ToLower(provider)]; native != nil {
 			if _, ok := native[strings.ToLower(name)]; ok {

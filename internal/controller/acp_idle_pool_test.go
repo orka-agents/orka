@@ -465,6 +465,68 @@ func TestReapStoppedSupersededPlainPoolDeletesAfterGrace(t *testing.T) {
 	}
 }
 
+func TestReapStoppedFeedbackPoolHonorsRetirementGuards(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name        string
+		mutate      func(*corev1alpha1.RuntimePool)
+		activeTasks int
+		wantDeleted bool
+	}{
+		{name: "dedicated stopped pool retires without image rotation", wantDeleted: true},
+		{name: "active task", activeTasks: 1},
+		{name: "recent demand", mutate: func(p *corev1alpha1.RuntimePool) {
+			p.Annotations[acpRuntimeLastDemandAnnotation] = now.Format(time.RFC3339Nano)
+		}},
+		{name: "still draining", mutate: func(p *corev1alpha1.RuntimePool) { p.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining }},
+		{name: "unobserved generation", mutate: func(p *corev1alpha1.RuntimePool) { p.Status.ObservedGeneration-- }},
+		{name: "active instance", mutate: func(p *corev1alpha1.RuntimePool) {
+			p.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{PodUID: "pod-uid"}
+		}},
+		{name: "finalizing session", mutate: func(p *corev1alpha1.RuntimePool) { p.Status.Capacity.FinalizingSessions = 1 }},
+		{name: "queued task", mutate: func(p *corev1alpha1.RuntimePool) { p.Status.Capacity.QueuedTasks = 1 }},
+		{name: "reservation", mutate: func(p *corev1alpha1.RuntimePool) {
+			p.Status.Capacity.Reservations = []corev1alpha1.RuntimePoolCapacityReservationStatus{{}}
+		}},
+		{name: "shared capacity", mutate: func(p *corev1alpha1.RuntimePool) { p.Spec.Capacity.MaxResidentSessions = 2 }},
+		{name: "forged task label", mutate: func(p *corev1alpha1.RuntimePool) { p.Labels[runtimeFeedbackTaskLabel] = "another-task" }},
+		{name: "ordinary reusable pool", mutate: func(p *corev1alpha1.RuntimePool) {
+			delete(p.Labels, runtimeFeedbackTaskLabel)
+			digest, _ := runtimePoolIdentityDigest(p.Spec.Runtime.Profile.Digest, p.Spec.Runtime.Image, "")
+			p.Name = acpRuntimePoolName(p.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(digest))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pool := runtimePoolTestObject(0)
+			pool.Spec.Capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+			pool.Labels = map[string]string{runtimeFeedbackTaskLabel: "feedback-task-uid"}
+			digest, err := runtimePoolIdentityDigest(pool.Spec.Runtime.Profile.Digest, pool.Spec.Runtime.Image, "feedback-task-uid")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(digest))
+			pool.Annotations = map[string]string{acpRuntimeLastDemandAnnotation: now.Add(-3 * time.Minute).Format(time.RFC3339Nano)}
+			pool.Status = corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped, ObservedGeneration: pool.Generation}
+			images := ACPRuntimeImages{Codex: pool.Spec.Runtime.Image}
+			if test.mutate != nil {
+				test.mutate(pool)
+			}
+			kube := fake.NewClientBuilder().WithScheme(runtimePoolTestScheme(t)).WithStatusSubresource(&corev1alpha1.RuntimePool{}).WithObjects(pool).Build()
+			dispatcher := &ACPDispatcher{Client: kube, IdlePoolTTL: time.Minute, ACPRuntimeImages: images}
+			if err := dispatcher.reapStoppedSupersededPlainPool(t.Context(), pool, test.activeTasks, now); err != nil {
+				t.Fatal(err)
+			}
+			var remaining corev1alpha1.RuntimePoolList
+			if err := kube.List(t.Context(), &remaining); err != nil {
+				t.Fatal(err)
+			}
+			if deleted := len(remaining.Items) == 0; deleted != test.wantDeleted {
+				t.Fatalf("pool deleted=%v want=%v", deleted, test.wantDeleted)
+			}
+		})
+	}
+}
+
 type capacityAppearsOnRefreshClient struct {
 	client.Client
 	pool                              types.NamespacedName
