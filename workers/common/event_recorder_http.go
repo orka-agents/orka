@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -21,6 +24,13 @@ import (
 const (
 	DefaultServiceAccountBearerPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultEventRecorderTimeout     = 2 * time.Second
+
+	// Strict events retry only attempts that never connected, so the controller
+	// cannot have appended them. About a minute of backoff covers a routine
+	// controller restart, whose Recreate rollout leaves the API Service without
+	// a serving endpoint until the new Pod is up.
+	strictEventConnectAttempts = 10
+	strictEventMaxBackoff      = 8 * time.Second
 )
 
 // HTTPEventRecorderConfig configures the worker HTTP event recorder.
@@ -106,7 +116,7 @@ func NewHTTPEventRecorder(cfg HTTPEventRecorderConfig) EventRecorder {
 
 // Record implements EventRecorder. Failures are warning-only and never returned to callers.
 func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...EventOption) {
-	if err := r.RecordStrict(ctx, typ, opts...); err != nil {
+	if err := r.record(ctx, typ, 1, opts...); err != nil {
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -115,8 +125,13 @@ func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...Even
 }
 
 // RecordStrict implements StrictEventRecorder by posting the event and returning
-// transport or non-2xx response errors.
+// transport or non-2xx response errors. Attempts that cannot connect are retried
+// for about a minute, so a controller restart does not fail the caller.
 func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts ...EventOption) error {
+	return r.record(ctx, typ, strictEventConnectAttempts, opts...)
+}
+
+func (r *HTTPEventRecorder) record(ctx context.Context, typ string, connectAttempts int, opts ...EventOption) error {
 	if r == nil {
 		return fmt.Errorf("http execution event recorder is nil")
 	}
@@ -169,11 +184,32 @@ func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts .
 		return fmt.Errorf("marshal execution event: %w", err)
 	}
 
+	for attempt := 1; ; attempt++ {
+		unsent, postErr := r.post(ctx, body)
+		if !unsent || attempt >= connectAttempts || ctx.Err() != nil {
+			return postErr
+		}
+		log.FromContext(ctx).Info("warning: controller unreachable, retrying execution event",
+			"attempt", attempt, "error", postErr)
+		if waitErr := retryWait(ctx, min(time.Second<<(attempt-1), strictEventMaxBackoff)); waitErr != nil {
+			return errors.Join(postErr, waitErr)
+		}
+	}
+}
+
+// post sends one attempt. unsent reports a failure before any connection to
+// the controller, such as a refused or timed-out dial, so a retry cannot
+// append a duplicate event.
+func (r *HTTPEventRecorder) post(ctx context.Context, body []byte) (unsent bool, err error) {
 	reqCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
+	var connected atomic.Bool
+	reqCtx = httptrace.WithClientTrace(reqCtx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	})
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create execution event request: %w", err)
+		return false, fmt.Errorf("create execution event request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token := readServiceAccountToken(r.bearerPath); token != "" {
@@ -182,19 +218,19 @@ func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts .
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("record execution event: %w", err)
+		return !connected.Load(), fmt.Errorf("record execution event: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	_, _ = io.CopyN(io.Discard, resp.Body, 64<<10)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 			"controller rejected execution event: HTTP %d: %s",
 			resp.StatusCode,
 			strings.TrimSpace(string(bodyPreview)),
 		)
 	}
-	return nil
+	return false, nil
 }
 
 type submitRecordedEventRequest struct {
