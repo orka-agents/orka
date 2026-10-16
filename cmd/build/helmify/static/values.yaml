@@ -529,6 +529,13 @@ workers:
       tag: "0.0.0-dev"
       digest: ""
 
+  # Session transcript fetcher. Requires BusyBox-compatible sh, cat, wget, rm, mv, and sleep.
+  # Only SHA256 digest references are accepted by the controller.
+  sessionLoader:
+    image:
+      repository: docker.io/library/busybox
+      digest: "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.
 github:
