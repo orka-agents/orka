@@ -63,7 +63,7 @@ export const TOUR_STEPS: TourStep[] = [
     points: [
       'This is the optional web dashboard. It is off unless you turn it on, and the rest of Orka works without it.',
       'Everything here is mock data in your browser. Nothing reaches a cluster or a model.',
-      'Everything you see can be done with the orka CLI or kubectl. Agents, Tasks, monitors and gateways are Kubernetes resources you declare in YAML; the dashboard is a view over them and over Orka\'s record of what they did.',
+      'Everything you see or do here can be done with the orka CLI or kubectl. Agents, Tasks, monitors and gateways are Kubernetes resources you declare in YAML. When you start a Task or approve a step here, the dashboard calls the same API the CLI does.',
     ],
   },
   {
