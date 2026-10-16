@@ -104,7 +104,7 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: 'Ask for work in chat',
-    body: "This is the dashboard's chat. Ask in plain language: the assistant answers from the cluster and starts Tasks for you.\nYou don't need the dashboard to chat. Orka also serves OpenAI- and Anthropic-compatible APIs, so Claude Code, Cursor, Continue or any other compatible client you already use can talk to the same assistant.\nTry one of these:",
+    body: "This is the dashboard's chat. Ask in plain language: the assistant answers from the cluster and starts Tasks for you.\nYou don't need the dashboard to chat. Orka also serves OpenAI- and Anthropic-compatible APIs, so Claude Code, Codex, OpenCode and more can talk to the same assistant from the tools you already use.\nTry one of these:",
     route: { to: '/chat' },
     part: 'basics',
     prompts: ["What's running right now?", 'Review PR #1486 in checkout-service'],
