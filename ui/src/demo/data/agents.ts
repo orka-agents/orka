@@ -141,6 +141,15 @@ export function demoAgent(name: string, spec: AgentSpec, createdAt: string, stat
   }
 }
 
+/**
+ * An autonomous coordinator: the controller re-runs its Task until the plan
+ * marks the goal complete, so its stories must end that way.
+ */
+export function isAutonomousAgent(key: AgentKey): boolean {
+  const coordination = specs[key].coordination
+  return Boolean(coordination?.enabled && coordination.autonomous)
+}
+
 /** The seeded agents, one per world.AGENTS entry. */
 export function seedAgents(): Agent[] {
   return (Object.keys(AGENTS) as AgentKey[]).map((key) =>

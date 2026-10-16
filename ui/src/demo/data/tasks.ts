@@ -1,3 +1,4 @@
+import { isAutonomousAgent } from './agents'
 import { currentRuntimePool } from './runtimes'
 import { digest } from '../shared'
 import { AGENTS, REPOS, type AgentKey, type PEOPLE, type RepoKey } from '../world'
@@ -813,6 +814,7 @@ const inc512: Story = {
     ...tool('web_fetch', { url: 'https://northwind.slack.example/archives/C04INCIDENTS/p1760432110' }, { messages: 86 }, { summary: 'web_fetch the #incidents thread', done: 'Fetched 86 messages' }),
     ...llm(incident, 31000, 3900, { message: INC512_RESULT }),
     ...tool('pagerduty_incident', { incident: 'INC-512', action: 'add_note', note: 'Post-incident summary drafted by Orka.' }, { ok: true }, { summary: 'pagerduty_incident add summary to INC-512', done: 'Summary attached to INC-512' }),
+    plan(1, 1, 100, 'Post-incident summary attached to INC-512', '# INC-512 post-incident summary\n\n1. [x] Read the PagerDuty timeline and #incidents thread\n2. [x] Draft the summary\n3. [x] Attach it to INC-512', true),
     resultSubmitted(INC512_RESULT.length),
     workerCompleted,
   ],
@@ -834,6 +836,8 @@ const outboxExplain: Story = {
     ...llm(coordinator, 5200, 260),
     ...tool('github_search', { repo: REPOS.checkout.slug, query: 'path:internal/events outbox relay' }, { files: ['internal/events/outbox.go', 'internal/events/relay.go'] }, { summary: 'github_search outbox code in checkout-service', done: 'Found outbox.go and relay.go' }),
     ...llm(coordinator, 16300, 1640, { message: OUTBOX_RESULT }),
+    // release-captain is an autonomous coordinator: marking the goal complete ends the loop.
+    plan(1, 1, 100, 'Explained the outbox relay', '# Explain the outbox relay\n\n1. [x] Read internal/events/outbox.go and relay.go\n2. [x] Answer in chat', true),
     resultSubmitted(OUTBOX_RESULT.length),
     workerCompleted,
   ],
@@ -907,6 +911,8 @@ export function liveStory(type: 'ai' | 'agent' | 'container', opts: { agent?: Ag
         ...llm(m, 3800, 240, { secs: 5 }),
         ...tool('web_search', { query: opts.prompt.slice(0, 80) }, { results: 5 }, { summary: 'web_search for context', done: '5 results', secs: 4 }),
         ...llm(m, 7600, 720, { message: note, secs: 8 }),
+        // An autonomous coordinator's Task ends only once its plan marks the goal complete.
+        ...(isAutonomousAgent(agent) ? [plan(1, 1, 100, 'Answered the request', '# Request\n\n1. [x] Answer it', true)] : []),
         resultSubmitted(note.length),
         workerCompleted,
       ],

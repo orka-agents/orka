@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { AGENTS, TASKS } from '../world'
-import { seedAgents } from './agents'
-import { STORIES } from './tasks'
+import { isAutonomousAgent, seedAgents } from './agents'
+import { liveStory, STORIES, type Beat } from './tasks'
 import { builtinTools } from './tools'
 
 // The controller refuses to run a Task whose agent breaks these rules, so the
@@ -36,5 +36,22 @@ describe('demo agents', () => {
         }
       }
     }
+  })
+
+  it('end every autonomous coordinator story by marking its goal complete', () => {
+    // Otherwise the controller would start another iteration, up to maxIterations.
+    const goalComplete = (beats: Beat[]) => {
+      const plans = beats.flatMap((beat) => beat.events ?? []).filter((event) => event.type === 'PlanUpdated')
+      return (plans.at(-1)?.content as { goalComplete?: boolean } | undefined)?.goalComplete === true
+    }
+    const autonomous = TASKS.filter((seed) => seed.agent && seed.type === 'ai' && isAutonomousAgent(seed.agent) && STORIES[seed.name])
+    expect(autonomous.length).toBeGreaterThan(0)
+    for (const seed of autonomous) {
+      const story = STORIES[seed.name]
+      expect(goalComplete(story.beats), seed.name).toBe(true)
+      if (story.declined) expect(goalComplete(story.declined.beats), `${seed.name} declined`).toBe(true)
+    }
+    expect(goalComplete(liveStory('ai', { agent: 'coordinator', prompt: 'hi' }).beats)).toBe(true)
+    expect(goalComplete(liveStory('ai', { agent: 'triage', prompt: 'hi' }).beats)).toBe(false)
   })
 })
