@@ -104,6 +104,14 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	}
 
+	// An Agent stored without a built-in contract runs under the namespace's
+	// mode, so validate the soul against that effective contract, as creation
+	// does. Only an omitted contract is filled; a stored one is left as is.
+	if runtime := agent.Spec.Runtime; runtime != nil && runtime.Type != "" && runtime.RuntimeRef == nil && runtime.ContractVersion == nil {
+		if contract := tc.ExecutionMode.ContractVersion(); contract != "" {
+			runtime.ContractVersion = &contract
+		}
+	}
 	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
 		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use an AI worker Agent or a built-in orka.harness.v2 Agent; external runtimeRef and orka.harness.v1 Agents do not support souls.")
 	}

@@ -9,6 +9,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
+	"github.com/orka-agents/orka/internal/executionmode"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -143,5 +144,56 @@ func TestSoulParameterSchemaDocumentsRuntimeCompatibility(t *testing.T) {
 		if !strings.Contains(description, constraint) {
 			t.Errorf("soul schema omits runtime compatibility constraint %q", constraint)
 		}
+	}
+}
+
+// A built-in Agent stored without a contract runs under the namespace's mode,
+// so update_agent validates a new soul against that effective contract.
+func TestUpdateAgentSoulDefaultsOmittedContract(t *testing.T) {
+	for _, tc := range []struct {
+		mode    executionmode.Mode
+		allowed bool
+	}{
+		{executionmode.HarnessV2, true},
+		{executionmode.HarnessV1, false},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			ctx := context.Background()
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+					Model:   &corev1alpha1.ModelConfig{Name: "review-model"},
+				},
+			}
+			c := newFakeClient(agent)
+			args, err := json.Marshal(map[string]any{nameField: agent.Name, "soul": map[string]any{"inline": "new persona"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := (&UpdateAgentTool{}).Execute(WithToolContext(ctx, &ToolContext{
+				Client: c, Namespace: agent.Namespace, ExecutionMode: tc.mode,
+			}), args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			after := &corev1alpha1.Agent{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(agent), after); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.allowed {
+				if response.Success || after.Spec.Soul != nil {
+					t.Fatalf("harness v1 namespace accepted a soul: %#v", response)
+				}
+				return
+			}
+			if !response.Success || after.Spec.Soul == nil || after.BuiltInContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+				t.Fatalf("soul update on an Agent with an omitted contract failed: %#v", response)
+			}
+		})
 	}
 }
