@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@/test/test-utils'
-import { LiveStatePanel } from './live-state-panel'
+import { TaskStatusDetails } from './task-status-details'
 import type { Task } from '@/schemas/task'
 
 const fullTask: Task = {
@@ -8,7 +8,7 @@ const fullTask: Task = {
     name: 'parent',
     namespace: 'default',
     labels: { 'app.kubernetes.io/name': 'orka' },
-    annotations: { 'orka.ai/note': 'visible-note', 'orka.ai/api-token': 'sk-should-hide', 'orka.ai/description': 'sk-should-hide' },
+    annotations: { 'orka.ai/note': 'visible-note', 'orka.ai/api-token': 'sk-should-hide', 'orka.ai/description': 'sk-should-hide', 'example.com/callback': 'https://cb.example.com/done?sig=abc' },
   },
   spec: { type: 'agent', sessionRef: { name: 'session-7' } },
   status: {
@@ -34,24 +34,23 @@ const minimalTask: Task = {
   status: { phase: 'Pending' },
 }
 
-describe('LiveStatePanel', () => {
+describe('TaskStatusDetails', () => {
   it('renders execution workspace pool and visible metadata, hides secret-looking keys', () => {
-    render(<LiveStatePanel task={fullTask} />)
+    render(<TaskStatusDetails task={fullTask} />)
     expect(screen.getByText('pool-blue')).toBeInTheDocument()
     expect(screen.getByText('2.5')).toBeInTheDocument()
     expect(screen.getByText('1.2s')).toBeInTheDocument()
     expect(screen.getByText('session-7')).toBeInTheDocument()
-    expect(screen.getByText('child-a')).toBeInTheDocument()
     expect(screen.getByText('visible-note')).toBeInTheDocument()
     expect(screen.queryByText('sk-should-hide')).not.toBeInTheDocument()
+    expect(screen.queryByText('example.com/callback')).not.toBeInTheDocument()
     expect(screen.queryByText('orka.ai/api-token')).not.toBeInTheDocument()
     expect(screen.queryByText('orka.ai/description')).not.toBeInTheDocument()
-    expect(screen.getByText('read-only')).toBeInTheDocument()
   })
 
   it('wraps a long unbroken condition message and keeps the status badge beside the type', () => {
     const approvalID = 'a'.repeat(64)
-    render(<LiveStatePanel task={{
+    render(<TaskStatusDetails task={{
       ...minimalTask,
       status: {
         phase: 'Running',
@@ -67,7 +66,7 @@ describe('LiveStatePanel', () => {
   })
 
   it('treats legacy result references as available', () => {
-    render(<LiveStatePanel task={{
+    render(<TaskStatusDetails task={{
       ...minimalTask,
       status: { phase: 'Succeeded', resultRef: { configMapName: 'legacy-result', key: 'out' } },
     }} />)
@@ -76,14 +75,15 @@ describe('LiveStatePanel', () => {
     expect(screen.getByText('legacy-result')).toBeInTheDocument()
   })
 
-  it('omits empty sections for a minimal task', () => {
-    render(<LiveStatePanel task={minimalTask} />)
-    expect(screen.getByText('Status')).toBeInTheDocument()
+  it('leaves out its sections, and itself, when a task has none of them', () => {
+    const { container } = render(<TaskStatusDetails task={minimalTask} />)
+    expect(container).toBeEmptyDOMElement()
+
+    render(<TaskStatusDetails task={{ ...minimalTask, spec: { type: 'agent', sessionRef: { name: 'session-7' } } }} />)
+    expect(screen.getByText('Session')).toBeInTheDocument()
     expect(screen.queryByText('Conditions')).not.toBeInTheDocument()
-    expect(screen.queryByText('Child tasks')).not.toBeInTheDocument()
     expect(screen.queryByText('Execution workspace')).not.toBeInTheDocument()
-    expect(screen.queryByText('Session')).not.toBeInTheDocument()
     expect(screen.queryByText('Result')).not.toBeInTheDocument()
-    expect(screen.queryByText('Metadata')).not.toBeInTheDocument()
+    expect(screen.queryByText('Labels and annotations')).not.toBeInTheDocument()
   })
 })

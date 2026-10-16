@@ -3,13 +3,39 @@ name: Live Agent Sandbox E2E
 on:
   workflow_dispatch:
   push:
-    paths-ignore:
-      - ".agents/**"
-      - ".claude/**"
+    # Run only when something this lane builds or exercises changes. Later
+    # patterns override earlier ones, so the self and shared-action paths are
+    # re-included after .github is excluded. UI, docs, website, and example
+    # changes are covered by UI Lint/Tests, Website, Docs Check, and Go Tests.
+    paths:
+      - "**"
+      - "!.agents/**"
+      - "!.claude/**"
+      - "!.github/**"
+      - ".github/workflows/live-agent-sandbox-e2e.yml"
+      - ".github/actions/**"
+      - "!website/**"
+      - "!docs/**"
+      - "!ui/**"
+      - "!examples/**"
+      - "!**.md"
+      - "!LICENSE"
+      - "!.gitignore"
   pull_request:
-    paths-ignore:
-      - ".agents/**"
-      - ".claude/**"
+    paths:
+      - "**"
+      - "!.agents/**"
+      - "!.claude/**"
+      - "!.github/**"
+      - ".github/workflows/live-agent-sandbox-e2e.yml"
+      - ".github/actions/**"
+      - "!website/**"
+      - "!docs/**"
+      - "!ui/**"
+      - "!examples/**"
+      - "!**.md"
+      - "!LICENSE"
+      - "!.gitignore"
 
 permissions:
   contents: read

@@ -431,6 +431,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/agents", s.handlers.CreateAgent)
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
+	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 

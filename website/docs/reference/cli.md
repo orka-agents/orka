@@ -481,7 +481,7 @@ orka monitor events my-monitor -o json
 orka monitor delete my-monitor
 ```
 
-Manual run/action commands such as `orka security scan run`, `orka monitor run`, and finding patch/PR actions can create downstream Tasks and may require live GitHub, provider, and agent configuration.
+Manual run and action commands such as `orka security scan run`, `orka monitor run`, and finding patch and pull request actions create downstream Tasks, and need working GitHub, provider, and agent configuration.
 
 ## Usage and PR outcomes
 
@@ -516,47 +516,6 @@ Tables distinguish missing measurements from reported zero and include coverage
 and cache availability. JSON and YAML preserve the full response, including
 nulls. See [Usage and PR outcomes](../guides/usage-and-pr-outcomes.md) for examples,
 retention, and access requirements.
-
-## Live-gated workflows
-
-Some commands intentionally create downstream work or require external services. Keep these behind explicit operator intent in automation and e2e tests.
-
-### `orka run`
-
-`orka run` streams chat responses over the Orka chat API. A positive smoke needs server-side chat enabled plus a configured provider/model or agent:
-
-```bash
-ORKA_API=http://127.0.0.1:8080
-ORKA_TOKEN="$(kubectl create token orka-client -n orka-system)"
-
-orka --server "$ORKA_API" --token "$ORKA_TOKEN" \
-  run --session cli-live-smoke "Reply with one short sentence."
-```
-
-For normal non-live validation, prefer a negative smoke against an unreachable or deliberately unconfigured server and assert a clean error without printing tokens.
-
-### `orka security scan run`
-
-Manual security scan runs can create scan Tasks and may require GitHub credentials, analysis agents, provider credentials, and repository network access:
-
-```bash
-orka security scan run my-repository-scan
-orka security scan list my-repository-scan -o json
-```
-
-Gate this path with explicit environment variables in CI, for example `ORKA_CLI_E2E_LIVE_ACTIONS=1`, and skip by default when credentials or fixtures are missing.
-
-### `orka monitor run`
-
-Manual repository monitor runs can enqueue repository review/repair work and may require GitHub credentials plus reviewer/repair agents:
-
-```bash
-orka monitor run my-monitor --target-kind pull_request --target-number 123
-orka monitor runs my-monitor -o json
-orka monitor items my-monitor -o json
-```
-
-Use live-gated tests or manual verification for this path until stable GitHub/provider fixtures are available.
 
 ## ACP runtime management
 
@@ -645,39 +604,4 @@ orka task list --status <TAB>   # Pending, Running, Finalizing, ...
 | `orka models list --compat openai` / `anthropic` | List model IDs in provider-compatible formats. |
 | `orka workspace status TASK` | Inspect canonical workspace policy and delivery status without credential references, one field per line. |
 | `orka task status TASK [--verbose]` | Show whether a Task finished and where the change went; `--verbose` adds RuntimePool identity and publication verification. |
-| `orka audit trace TRANSACTION_ID` | Show tasks correlated by Kontxt transaction ID. |
-
-## Binary e2e coverage matrix
-
-Normal binary e2e tests build and invoke `bin/orka` directly with isolated config/home directories. They intentionally avoid real secrets in command arguments and assert stdout/stderr do not leak configured tokens or sentinel secret values.
-
-| CLI area | Binary e2e status | Notes |
-| --- | --- | --- |
-| `auth` | Covered | `validate`, `whoami`; invalid-token negative path. |
-| `models` | Covered | OpenAI and Anthropic compatibility list output. |
-| `config` | Covered | Isolated `HOME`, `set-server`, fake `set-token`, masked `view`. |
-| `status` | Covered | Health/readiness/task/agent summary. |
-| `task` | Covered | Manifest create, flag create (including read/write workspace policy), structured status, list/filter, get, wait, result, logs, children, plan, artifacts, download, delete. |
-| `workspace` | Covered | Canonical workspace intent, credential-role presence, and delivery status. |
-| `runtime-pool` | Focused unit coverage | CRUD routing plus lifecycle/admission/capacity table output. |
-| `agent-runtime` | Focused unit coverage | CRUD routing plus v2-only identity/profile table output. |
-| `provider` | Covered | CRUD and secret redaction expectations. |
-| `agent` | Covered | CRUD. |
-| `tool` | Covered | CRUD. |
-| `skill` | Covered | init, validate, import, list, get, content, update, delete. |
-| `secret` | Covered | Metadata-only list. |
-| `audit` | Covered | Trace no-match path. |
-| `session` | Covered | List/get/delete against a controlled fixture. |
-| `memory` | Covered | Create/list/get/disable/enable/update/delete and proposal-list smoke. |
-| `security` | Partially covered | Repository scan create/get/list/delete, threat model update/get, scan/finding/slice/dropped-finding list; repository scan update is not covered. |
-| `monitor` | Partially covered | Repository monitor create/get/list/delete plus runs/items/events list; monitor update is not covered. |
-| `usage` | Compiled-binary fixture coverage | Summary table, work JSON, other-usage YAML, configured authentication, and nonzero exit for a missing work request. |
-| `substrate` | Covered | Pool create/get/list/update/delete. |
-| `run` | Negative covered; positive live-gated | Unreachable-server error path is safe for normal e2e; positive chat/SSE flow needs provider fixtures. |
-| `dashboard` | Negative covered | The default install serves no dashboard, so the e2e covers the refusal before any token URL is printed; the browser-open token URL remains unsuitable for normal e2e logs. |
-| `completion` | Covered | Binary smoke generates bash, zsh, fish, and PowerShell completion output. |
-| `security scan run` | Deferred/live-gated | Creates downstream scan Tasks and requires live agent/GitHub/provider setup. |
-| `monitor run` | Deferred/live-gated | Creates downstream monitor work and can require GitHub/provider setup. |
-| security finding actions | Deferred/live-gated | Need stable finding fixtures or live scan data. |
-
-Use this matrix as a coverage guide when adding CLI commands: non-live command groups should have at least one compiled-binary e2e smoke path, and CRUD-style groups should cover create/get/list/update/delete where the API supports it.
+| `orka audit trace TRANSACTION_ID` | Show Tasks correlated by [transaction](../concepts/transaction-tokens.md) ID. |

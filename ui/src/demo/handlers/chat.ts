@@ -2,7 +2,7 @@ import { http, HttpResponse, type RequestHandler } from 'msw'
 import { agentSchema, type Agent } from '@/schemas/agent'
 import type { ChatRequest } from '@/schemas/chat'
 import { scriptChatTurn, type ChatStep } from '../data/chat'
-import { demoAgent, seedAgents } from '../data/agents'
+import { demoAgent, promptConfigMaps, seedAgents } from '../data/agents'
 import { agentRuntimes, runtimePools } from '../data/runtimes'
 import { builtinTools, customTools, toolListItem } from '../data/tools'
 import { api, apiError, digest, DEMO_NAMESPACE, inDemoNamespace, list, noContent, notFound, now, sseFrame, isDNSLabel } from '../shared'
@@ -110,6 +110,14 @@ export const chatHandlers: RequestHandler[] = [
   http.get(api('/agents/:name'), ({ request, params }) => {
     const agent = inDemoNamespace(request) ? findAgent(String(params.name)) : undefined
     return agent ? HttpResponse.json(agent) : notFound(`agent "${params.name}"`)
+  }),
+  http.get(api('/agents/:name/system-prompt'), ({ request, params }) => {
+    const agent = inDemoNamespace(request) ? findAgent(String(params.name)) : undefined
+    if (!agent) return notFound(`agent "${params.name}"`)
+    const ref = agent.spec.systemPrompt?.configMapRef
+    if (!ref) return notFound('ConfigMap system prompt')
+    const content = promptConfigMaps[ref.name]?.[ref.key]
+    return content === undefined ? notFound(`key "${ref.key}" in ConfigMap "${ref.name}"`) : HttpResponse.json({ configMapRef: ref, content })
   }),
   http.post(api('/agents'), async ({ request }) => {
     const body = (await request.json()) as { name?: string; namespace?: string; spec?: unknown }

@@ -1,4 +1,5 @@
 ---
+sidebar_label: Bring your own runtime
 description: "Registering your own external agent runtime with Orka using the AgentRuntime resource."
 ---
 
