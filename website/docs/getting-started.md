@@ -329,8 +329,7 @@ Run `orka version` to confirm that the local CLI matches your Helm/controller re
 orka version
 ```
 
-With the [dashboard turned on](guides/ui.md#turn-it-on), `orka login` opens it signed in.
-Without the dashboard, `orka login` stops with an error, and every other command still works:
+With the [dashboard turned on](guides/ui.md#turn-it-on), `orka login` opens it signed in:
 
 ```bash
 orka login                                  # reads your kubeconfig, opens the dashboard
@@ -338,7 +337,10 @@ orka login --server https://orka.example.com
 orka login --token '<token>'
 ```
 
-It can pull a token from a bearer token, a token file, exec-based auth (GKE, AWS IAM), or
+Without the dashboard, the controller answers `/login` with a 404, and `orka login` stops
+there before creating a token. Every other command works either way.
+
+The CLI can pull a token from a bearer token, a token file, exec-based auth (GKE, AWS IAM), or
 an OIDC provider. With it, checking a Task and downloading its artifacts looks like this:
 
 ```bash
