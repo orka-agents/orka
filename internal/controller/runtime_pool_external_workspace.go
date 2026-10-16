@@ -108,12 +108,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, provider); err != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is unavailable")
 	}
-	// Like Task dispatch, an Active provider must still be the frozen
-	// generation; Draining keeps serving the workspace it already bound.
-	bound := w.Spec.ProviderBinding.Generation
-	generationMatches := provider.Generation == bound ||
-		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining && bound > 0 && bound <= provider.Generation
-	if provider.UID != w.Spec.ProviderBinding.UID || !generationMatches || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
+	if !externalProviderServesBinding(provider, w) {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is not usable")
 	}
 	cfg, err := r.runtimePoolConfig(pool)
@@ -278,8 +273,7 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, registration); err != nil {
 		return ctrl.Result{}, err
 	}
-	if registration.UID != w.Spec.ProviderBinding.UID || registration.Spec.ControllerName != w.Labels[workspacev1alpha1.ProviderControllerLabel] ||
-		registration.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(registration) {
+	if registration.Spec.ControllerName != w.Labels[workspacev1alpha1.ProviderControllerLabel] || !externalProviderServesBinding(registration, w) {
 		return ctrl.Result{}, fmt.Errorf("workspace provider no longer matches the admitted identity and capabilities")
 	}
 	required, err := externalWorkspaceRuntimeRequiredFeatures(pool, w)
@@ -1002,6 +996,18 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 	}
 	pool.Annotations[externalRuntimeEvidenceAnnotation] = string(encoded)
 	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+}
+
+// externalProviderServesBinding reports whether a provider may still act for
+// the workspace's frozen binding. Like Task dispatch, an Active provider must
+// still be the frozen generation; Draining keeps serving the workspace it
+// already bound.
+func externalProviderServesBinding(provider *workspacev1alpha1.ExecutionWorkspaceProvider, w *workspacev1alpha1.ExecutionWorkspace) bool {
+	bound := w.Spec.ProviderBinding.Generation
+	generationMatches := provider.Generation == bound ||
+		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining && bound > 0 && bound <= provider.Generation
+	return provider.UID == w.Spec.ProviderBinding.UID && generationMatches &&
+		provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderDisabled && externalProviderUsable(provider)
 }
 
 func externalProviderUsable(provider *workspacev1alpha1.ExecutionWorkspaceProvider) bool {
