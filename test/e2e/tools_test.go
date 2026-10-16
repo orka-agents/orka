@@ -10,9 +10,11 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -20,6 +22,14 @@ import (
 
 	"github.com/orka-agents/orka/test/utils"
 )
+
+const customToolReceiverHTTPProbe = `import json, sys, urllib.request
+request = urllib.request.Request(sys.argv[1], data=b"{}", headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(request, timeout=2) as response:
+    if response.status != 200 or json.load(response) != {"echo": "{}"}:
+        raise RuntimeError("echo receiver is not ready")
+print("ready")
+`
 
 var _ = Describe("Tools and Configuration", Ordered, func() {
 	const (
@@ -224,6 +234,25 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create echo receiver pod")
 
+		DeferCleanup(func() {
+			if CurrentSpecReport().Failed() {
+				for _, args := range [][]string{
+					{"logs", echoReceiverName, "-n", namespace, "-c", "echo", "--tail=100"},
+					{"get", "endpointslice", "-n", namespace, "-l", "kubernetes.io/service-name=" + echoSvcName, "-o", "yaml"},
+				} {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					output, diagnosticErr := utils.Run(exec.CommandContext(ctx, "kubectl", args...))
+					cancel()
+					_, _ = fmt.Fprintf(GinkgoWriter,
+						"\n=== Echo receiver diagnostic (%s): %v ===\n%s\n", args[0], diagnosticErr, output)
+				}
+			}
+			cmd := exec.Command("kubectl", "delete", "pod", echoReceiverName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "service", echoSvcName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
 		svcManifest := fmt.Sprintf(`{
 			"apiVersion": "v1",
 			"kind": "Service",
@@ -242,22 +271,30 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create echo service")
 
+		By("waiting for a ready echo Service endpoint")
 		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "pod", echoReceiverName,
-				"-n", namespace, "-o", "jsonpath={.status.phase}")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "kubectl", "get", "endpointslice", "-n", namespace,
+				"-l", "kubernetes.io/service-name="+echoSvcName,
+				"-o", `jsonpath={range .items[*].endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{"\n"}{end}`)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("Running"))
+			g.Expect(strings.TrimSpace(output)).NotTo(BeEmpty())
 		}, 2*time.Minute, time.Second).Should(Succeed())
 
-		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "pod", echoReceiverName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "service", echoSvcName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-		})
-
 		echoURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", echoSvcName, namespace, echoPort)
+		By("probing the echo HTTP Service from the Pod network before running the Tool")
+		Eventually(func(g Gomega) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			// Exercise Service DNS/routing, not the API-server proxy or a port-forward.
+			cmd := exec.CommandContext(ctx, "kubectl", "exec", echoReceiverName, "-n", namespace,
+				"-c", "echo", "--", "python3", "-c", customToolReceiverHTTPProbe, echoURL)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(Equal("ready"))
+		}, 2*time.Minute, time.Second).Should(Succeed())
 
 		By("creating a custom Tool CRD that calls the in-cluster echo endpoint")
 		toolManifest := fmt.Sprintf(`{

@@ -61,8 +61,8 @@ var _ = Describe("Orka CLI security and monitor binary workflows", Ordered, func
 		fakeAnthropicKey := "fake-secmon-anthropic-key-" + suffix
 		repoURL := "https://github.com/orka-agents/orka"
 
-		DeferCleanup(deleteK8sResource, "repositorymonitor", monitorName)
-		DeferCleanup(deleteK8sResource, "repositoryscan", repositoryScanName)
+		DeferCleanup(deleteK8sResourceAndOwnedTasks, "repositorymonitor", monitorName)
+		DeferCleanup(deleteK8sResourceAndOwnedTasks, "repositoryscan", repositoryScanName)
 		DeferCleanup(deleteK8sResource, "agent", agentName)
 		DeferCleanup(deleteK8sResource, "secret", secretName)
 

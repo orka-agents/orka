@@ -163,6 +163,13 @@ spec:
                 - /manager
                 - --acp-upgrade-drain-trigger-url=http://127.0.0.1:8083/acp/upgrade-drain
                 - --acp-upgrade-drain-trigger-timeout=5m15s
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          failureThreshold: 60
+          periodSeconds: 10
+          timeoutSeconds: 1
         livenessProbe:
           httpGet:
             path: /healthz

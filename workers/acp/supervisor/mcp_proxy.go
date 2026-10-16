@@ -177,14 +177,18 @@ func (s *mcpProxySession) activate(ctx context.Context, auth harnessv2.PromptMCP
 		OperationID: "mcp-activate", RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
 		RequestDigest: testlessRequestDigest(), ExpiresAt: auth.ExpiresAt,
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Admission can wait behind capability locks after the handler samples time.
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
 	if err := auth.ValidateForAt(metadata, lease, now); err != nil {
 		return err
 	}
 	if !s.configuration.Matches(auth.Configuration()) {
 		return fmt.Errorf("prompt MCP policy does not match the RuntimeSession configuration")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed || s.authorization != nil || s.state != harnessv2.RuntimeSessionStateIdle {
 		return fmt.Errorf("MCP proxy session is not idle")
 	}
@@ -211,6 +215,9 @@ func testlessRequestDigest() harnessv2.RequestDigest {
 func (s *mcpProxySession) markRunning(promptID harnessv2.PromptID, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
 	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
 		s.gateCancel == nil || !s.authorization.AuthorizedAt(harnessv2.RuntimeSessionStatePromptRunning, s.lease, now) {
 		return fmt.Errorf("MCP prompt authority is not active")
@@ -230,9 +237,14 @@ func (s *mcpProxySession) renew(auth harnessv2.PromptMCPAuthorization, lease har
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Commit and schedule expiry against the clock observed under the lock.
+	// A backward clock step must not rewind a later caller timestamp.
+	if lockedNow := time.Now().UTC(); now.Before(lockedNow) {
+		now = lockedNow
+	}
 	if s.closed || s.authorization == nil || s.gateCancel == nil || s.state != harnessv2.RuntimeSessionStatePromptRunning ||
 		s.authorization.PromptID != auth.PromptID || lease.Generation != s.lease.Generation+1 ||
-		!now.Before(s.lease.ExpiresAt) {
+		!now.Before(auth.ExpiresAt) || !now.Before(s.authorization.ExpiresAt) || !now.Before(s.lease.ExpiresAt) {
 		return fmt.Errorf("MCP prompt lease is no longer renewable")
 	}
 	if s.authorization.ToolPolicyDigest != auth.ToolPolicyDigest ||
@@ -268,7 +280,14 @@ func (s *mcpProxySession) resetLeaseTimerLocked(now time.Time) {
 func (s *mcpProxySession) expire(promptID harnessv2.PromptID, version uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.authorization == nil || s.authorization.PromptID != promptID || s.leaseVersion != version {
+	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID || s.leaseVersion != version {
+		return
+	}
+	// Relative timers can fire before an absolute wire deadline following a
+	// backward wall-clock step. Recheck both bounds and rearm the earlier one.
+	now := time.Now()
+	if now.Before(s.authorization.ExpiresAt) && now.Before(s.lease.ExpiresAt) {
+		s.resetLeaseTimerLocked(now)
 		return
 	}
 	slog.Warn("ACP MCP proxy prompt authorization expired without renewal; revoking tool access",
@@ -324,6 +343,9 @@ func (s *mcpProxySession) revokeLocked(next harnessv2.RuntimeSessionState) {
 func (s *mcpProxySession) authorizePermissionTool(provider string, promptID harnessv2.PromptID, name string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
 	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
 		!s.authorization.AuthorizedAt(s.state, s.lease, now) {
 		return fmt.Errorf("prompt tool authority is not active")
@@ -347,6 +369,9 @@ func (s *mcpProxySession) authorizeCall(toolName string, now time.Time) (
 ) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
 	if s.closed || s.authorization == nil || s.gateContext == nil || s.gateCancel == nil ||
 		s.state != harnessv2.RuntimeSessionStatePromptRunning ||
 		!s.authorization.AuthorizedAt(s.state, s.lease, now) {

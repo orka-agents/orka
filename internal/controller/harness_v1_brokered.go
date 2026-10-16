@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -95,6 +96,9 @@ func (e *KubernetesHarnessV1BrokeredToolExecutor) ExecuteHarnessV1BrokeredTool(
 	tool *corev1alpha1.Tool,
 	request harness.ToolCallRequest,
 ) (json.RawMessage, error) {
+	if aitools.IsRemoteMCP(tool) {
+		return nil, errors.New("remote MCP tools are supported only by native AI Tasks")
+	}
 	if e == nil || e.KubeClient == nil {
 		return nil, errors.New("harness v1 brokered tool executor is not configured")
 	}
@@ -292,6 +296,11 @@ func resolveHarnessV1BrokeredTools(
 		}
 		if tool.UID == "" || tool.Generation < 1 || !tool.DeletionTimestamp.IsZero() {
 			return resolvedHarnessV1ToolGovernance{}, fmt.Errorf("brokered harness v1 Tool %q identity is not ready", name)
+		}
+		if aitools.IsRemoteMCP(tool) {
+			return resolvedHarnessV1ToolGovernance{}, permanentHarnessV1Candidate(
+				errors.New("remote MCP tools are supported only by native AI Tasks"),
+			)
 		}
 		class := tool.Spec.BrokeredToolClass
 		if !harness.IsKnownBrokeredToolClass(harness.BrokeredToolClass(class)) {

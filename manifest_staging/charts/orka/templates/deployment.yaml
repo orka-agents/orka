@@ -7,6 +7,7 @@
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
+{{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if $harnessV2 }}
 {{- if not .Values.publisher.enabled }}
 {{- fail "publisher must be enabled when controller.mode=harness-v2" }}
@@ -463,6 +464,13 @@ spec:
                   - {{ printf "--acp-upgrade-drain-trigger-url=http://127.0.0.1:%v%s" .Values.controller.acpRuntime.upgradeDrain.port "/acp/upgrade-drain" | quote }}
                   - {{ printf "--acp-upgrade-drain-trigger-timeout=%s" .Values.controller.acpRuntime.upgradeDrain.triggerTimeout | quote }}
           {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: {{ $startupProbe.failureThreshold | default 60 }}
+            periodSeconds: {{ $startupProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ $startupProbe.timeoutSeconds | default 1 }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -513,7 +521,7 @@ spec:
               readOnly: true
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
-              readOnly: true
+              readOnly: {{ if include "orka.webhookTLSGenerated" . }}false{{ else }}true{{ end }}
             {{- if $harnessV1 }}
             - name: harness-v1-tls
               mountPath: /var/run/orka/harness-v1-tls
@@ -593,11 +601,11 @@ spec:
                 path: key
         - name: webhook-tls
           {{- if include "orka.webhookTLSGenerated" . }}
-          # The controller writes the generated certificate into this Secret
-          # and the kubelet projects it here; the rotator waits for the files.
-          secret:
-            secretName: {{ include "orka.webhookTLSSecretName" . | quote }}
-            defaultMode: 0400
+          # The API syncer publishes validated pairs here without waiting for
+          # kubelet Secret projection, using a memory-backed volume.
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
           {{- else }}
           secret:
             secretName: {{ .Values.webhooks.tls.existingSecret | quote }}

@@ -11,6 +11,8 @@ package e2e
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +38,7 @@ const (
 	mockLLMName           = "e2e-aimock"
 	mockLLMPort           = 4010
 	mockLLMImage          = "ghcr.io/copilotkit/aimock:1.43.0@sha256:163ecad18171e7d28752c386f448cc168bae71b2278d6b9e61a50f454860d8ed"
+	mockLLMCaptureImage   = "ghcr.io/orka-agents/orka/e2e-aimock-capture:e2e"
 	mockLLMAPIKey         = "aimock-e2e-key"
 	mockLLMFixtureDir     = "test/e2e/testdata/aimock"
 	mockLLMDisableEnvVar  = "E2E_DISABLE_MOCK_LLM"
@@ -44,6 +47,10 @@ const (
 )
 
 var (
+	// Per-run synthetic upstream proxy bearer. Child-local capabilities are
+	// different and legitimately reach the runtime; this must not reach inference.
+	mockLLMProviderCanary = "orka-e2e-proxy-canary-" + rand.Text()
+
 	// e2eMockOpenAI and e2eMockAnthropic report whether the matching provider
 	// is backed by aimock rather than a live key.
 	e2eMockOpenAI    bool
@@ -115,7 +122,7 @@ func (m mockLLMInstance) deploy(projectDir string) {
 		"--dry-run=client", "-o", "yaml"}
 	args := []string{
 		"--host", "0.0.0.0",
-		"--port", fmt.Sprint(m.port),
+		"--port", fmt.Sprint(m.port + 1),
 		"--journal-max", "0",
 		"--validate-on-load",
 	}
@@ -152,6 +159,7 @@ spec:
         app.kubernetes.io/name: %[1]s
       annotations:
         e2e.orka.ai/fixtures-revision: %[7]q
+        kubectl.kubernetes.io/default-container: aimock
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -169,13 +177,10 @@ spec:
             # aimock 1.43 otherwise lets a turnIndex fixture match later turns.
             - name: AIMOCK_STRICT_TURN_INDEX
               value: "1"
-          ports:
-            - name: http
-              containerPort: %[5]d
           readinessProbe:
             httpGet:
               path: /__aimock/health
-              port: http
+              port: %[10]d
             periodSeconds: 2
           securityContext:
             allowPrivilegeEscalation: false
@@ -194,6 +199,29 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+        - name: capture
+          image: %[9]s
+          imagePullPolicy: IfNotPresent
+          args: ["--listen=:%[5]d", "--upstream=http://127.0.0.1:%[10]d"]
+          ports:
+            - name: http
+              containerPort: %[5]d
+          readinessProbe:
+            httpGet:
+              path: /__orka_eval/health
+              port: http
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
       volumes:
         - name: %[6]s
           configMap:
@@ -214,7 +242,7 @@ spec:
       port: %[5]d
       targetPort: http
 `, m.name, m.namespace, mockLLMImage, string(encodedArgs), m.port, mockLLMFixtureVolume,
-		mockLLMFixturesRevision(files), mockLLMFixtureMountAt)
+		mockLLMFixturesRevision(files), mockLLMFixtureMountAt, mockLLMCaptureImage, m.port+1)
 	cmd = exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	_, err = utils.Run(cmd)
@@ -257,8 +285,9 @@ var mockLLMInjectedFixtures []json.RawMessage
 // fixtures posted at run time after its catch-all, so this clears and reloads
 // the whole ordered set: fixture files, injected fixtures, then the catch-all.
 // Call it while the scripted conversation is parked (for example in a
-// wait_for_tasks on a placeholder Task) so no request lands in the brief
-// window between the clear and the reload.
+// wait_for_tasks on a placeholder Task). Other callers, such as a child Task
+// that is just starting, can still send a request during the swap; aimock
+// answers those with a retryable 429 until the reload completes.
 func injectMockLLMFixtures(fixtures ...map[string]any) {
 	for _, fixture := range fixtures {
 		encoded, err := json.Marshal(fixture)
@@ -280,17 +309,48 @@ func injectMockLLMFixtures(fixtures ...map[string]any) {
 		}
 	}
 
+	suiteMockLLM.reloadFixtures(mockLLMInjectedFixtures)
+}
+
+// injectFixtures installs case-local scripts on either mock instance. Call only
+// between cases, when no model request is in flight.
+func (m mockLLMInstance) injectFixtures(fixtures ...map[string]any) {
+	encoded := make([]json.RawMessage, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		body, err := json.Marshal(fixture)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		encoded = append(encoded, body)
+	}
+	m.reloadFixtures(encoded)
+}
+
+func (m mockLLMInstance) reloadFixtures(injected []json.RawMessage) {
 	projectDir, err := utils.GetProjectDir()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	set, err := mockLLMFixtureSet(projectDir, mockLLMInjectedFixtures)
+	set, err := mockLLMFixtureSet(projectDir, injected)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	body, err := json.Marshal(map[string]any{"fixtures": set})
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
-	path := mockLLMControlPath("fixtures")
+	// aimock has no atomic replace. Between the clear and the reload a request
+	// matches nothing and gets a 404, which model clients do not retry, so
+	// rate-limit every model request (Retry-After: 1) for the whole swap. The
+	// control API is not subject to chaos.
+	hold := m.controlPath("chaos")
+	cmd := exec.Command("kubectl", "create", "--raw", hold, "-f", "-")
+	cmd.Stdin = strings.NewReader(`{"rateLimitRate":1}`)
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to hold aimock model requests")
+	defer func() {
+		// Release even after a failed swap so later specs are not throttled.
+		_, err := utils.Run(exec.Command("kubectl", "delete", "--raw", hold))
+		ExpectWithOffset(2, err).NotTo(HaveOccurred(), "Failed to release aimock model requests")
+	}()
+
+	path := m.controlPath("fixtures")
 	_, err = utils.Run(exec.Command("kubectl", "delete", "--raw", path))
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to clear aimock fixtures")
-	cmd := exec.Command("kubectl", "create", "--raw", path, "-f", "-")
+	cmd = exec.Command("kubectl", "create", "--raw", path, "-f", "-")
 	cmd.Stdin = bytes.NewReader(body)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to reload aimock fixtures")
@@ -338,8 +398,12 @@ func mockLLMFixtureSet(projectDir string, injected []json.RawMessage) ([]json.Ra
 // mockLLMControlPath addresses an aimock control route through the API
 // server's Service proxy.
 func mockLLMControlPath(route string) string {
+	return suiteMockLLM.controlPath(route)
+}
+
+func (m mockLLMInstance) controlPath(route string) string {
 	return fmt.Sprintf("/api/v1/namespaces/%s/services/http:%s:%d/proxy/__aimock/%s",
-		namespace, mockLLMName, mockLLMPort, route)
+		m.namespace, m.name, m.port, route)
 }
 
 func (m mockLLMInstance) delete() error {
@@ -390,6 +454,15 @@ func (m mockLLMMessage) Text() string {
 }
 
 type mockLLMRequest struct {
+	// RawBody is populated only by complete-capture evals. aimock normalizes
+	// protocol shapes and caps its own Body, so it is not the raw-wire oracle.
+	RawBody   json.RawMessage `json:"-"`
+	RequestID string          `json:"requestId"`
+	// Only the public correlation header is decoded; authentication headers
+	// retained by aimock itself must not enter these typed receipts.
+	Headers struct {
+		RequestID string `json:"x-request-id"`
+	} `json:"headers"`
 	Timestamp int64  `json:"timestamp"`
 	Path      string `json:"path"`
 	Body      struct {
@@ -412,6 +485,9 @@ type mockLLMRequest struct {
 
 // Mentions reports whether any user or system message carries marker.
 func (r mockLLMRequest) Mentions(marker string) bool {
+	if len(r.RawBody) > 0 && strings.Contains(string(r.RawBody), marker) {
+		return true
+	}
 	for _, message := range r.Body.Messages {
 		if (message.Role == "user" || message.Role == "system") && strings.Contains(message.Text(), marker) {
 			return true
@@ -423,7 +499,7 @@ func (r mockLLMRequest) Mentions(marker string) bool {
 // RoleText joins the text of every message with role.
 func (r mockLLMRequest) RoleText(role string) string {
 	var b strings.Builder
-	for _, message := range r.Body.Messages {
+	for _, message := range r.evalMessages() {
 		if message.Role == role {
 			b.WriteString(message.Text())
 			b.WriteString("\n")
@@ -437,7 +513,7 @@ func (r mockLLMRequest) RoleText(role string) string {
 func (r mockLLMRequest) ToolResults(toolName string) []string {
 	calls := map[string]string{}
 	var results []string
-	for _, message := range r.Body.Messages {
+	for _, message := range r.evalMessages() {
 		for _, call := range message.ToolCalls {
 			calls[call.ID] = call.Function.Name
 		}
@@ -451,12 +527,23 @@ func (r mockLLMRequest) ToolResults(toolName string) []string {
 // journal reads every request aimock has served from inside its Pod, which
 // works behind ingress NetworkPolicies such as the one guarding Vekil.
 func (m mockLLMInstance) journal() ([]mockLLMRequest, error) {
-	cmd := exec.Command("kubectl", "exec", "-n", m.namespace, "deployment/"+m.name, "--", "node", "-e",
-		fmt.Sprintf(`fetch("http://127.0.0.1:%d/__aimock/journal").then(r => r.text()).then(t => process.stdout.write(t))`, m.port))
+	ctx, cancel := context.WithTimeout(context.Background(), mockLLMCaptureReadTimeout)
+	defer cancel()
+	return m.journalWithin(ctx)
+}
+
+func (m mockLLMInstance) journalWithin(ctx context.Context) ([]mockLLMRequest, error) {
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", m.namespace, "deployment/"+m.name, "-c", "aimock",
+		"--", "node", "-e", mockLLMReadScript(m.port, "/__aimock/journal", mockLLMCaptureFetchTimeout))
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
+	// Bound inherited pipe waits as well as kubectl itself.
+	cmd.WaitDelay = time.Second
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("read %s/%s journal expired: %w", m.namespace, m.name, ctx.Err())
+		}
 		return nil, fmt.Errorf("read %s/%s journal: %w: %s", m.namespace, m.name, err, stderr.String())
 	}
 	var requests []mockLLMRequest

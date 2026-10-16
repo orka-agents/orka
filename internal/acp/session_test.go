@@ -574,7 +574,10 @@ func TestACPHelperProcess(t *testing.T) {
 					"jsonrpc": "2.0", "id": 50, "method": MethodRequestPermission,
 					"params": map[string]any{"sessionId": providerSession, "toolCall": map[string]any{"toolCallId": "tool-1", "title": "test"}, "options": []map[string]any{{"optionId": "allow", "name": "Allow", "kind": "allow_once"}}},
 				})
-			case "immediate", "resume-success":
+			case "immediate", "delayed-complete", "resume-success":
+				if mode == "delayed-complete" {
+					time.Sleep(100 * time.Millisecond)
+				}
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonEndTurn}})
 			case "rpc-error":
 				writeACPHelper(writer, map[string]any{
@@ -585,6 +588,9 @@ func TestACPHelperProcess(t *testing.T) {
 				os.Exit(0)
 			}
 		case MethodSessionCancel:
+			if mode == "ignore-cancel" {
+				continue
+			}
 			if len(promptID) > 0 {
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonCancelled}})
 				promptID = nil

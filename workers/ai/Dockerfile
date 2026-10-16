@@ -5,13 +5,14 @@ WORKDIR /workspace
 
 # Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source
 COPY . .
 
 # Build the worker
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o worker ./workers/ai
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -o worker ./workers/ai
 
 # Runtime stage - using python slim for code_exec tool support
 FROM python:3.14-slim
