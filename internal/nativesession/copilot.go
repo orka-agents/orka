@@ -104,8 +104,17 @@ func (copilotFormat) Inspect(_ context.Context, data []byte, maxBytes int) (Summ
 // Install writes the conversation into a Copilot CLI state directory that
 // does not hold the session. Copilot loads it in the cwd session/load names,
 // so nothing is rewritten. A failed install removes what it created, so
-// journalDir is unused.
-func (copilotFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string, maxBytes int) (err error) {
+// journalDir is unused. Installs into one destination run one at a time.
+func (copilotFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ string, maxBytes int) error {
+	unlock, err := lockInstallDestination(ctx, dirs.State)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return installCopilot(data, dirs, maxBytes)
+}
+
+func installCopilot(data []byte, dirs Dirs, maxBytes int) (err error) {
 	manifest, events, err := decodeCopilotBundle(data, maxBytes)
 	if err != nil {
 		return err

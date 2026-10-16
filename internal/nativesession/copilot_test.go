@@ -112,6 +112,35 @@ func TestCopilotFormatCarriesTheSessionIntoANewHome(t *testing.T) {
 	}
 }
 
+func TestCopilotInstallWaitsForAConcurrentInstall(t *testing.T) {
+	format, _ := For("copilot")
+	source, events := newCopilotFixture(t)
+	data, err := format.Capture(t.Context(), source, copilotFixtureSession, copilotFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := Dirs{State: filepath.Join(realDir(t), ".copilot"), Workspace: realDir(t)}
+	sessionDir := filepath.Dir(copilotEventsPath(destination.State, copilotFixtureSession))
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Another install holds the destination and has staged its event log.
+	unlock, err := lockInstallDestination(t.Context(), destination.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(sessionDir, ".events.jsonl.restore")
+	writeForTest(t, staged, "the other install's checkpoint")
+	expectWaitsForConcurrentInstall(t, format, data, destination, staged, copilotFixtureLimit, unlock)
+	original, err := os.ReadFile(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !holdsFile(copilotEventsPath(destination.State, copilotFixtureSession), original) {
+		t.Fatal("the install did not publish its own event log")
+	}
+}
+
 func TestCopilotCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	format, _ := For("copilot")
 	for name, test := range map[string]struct {
