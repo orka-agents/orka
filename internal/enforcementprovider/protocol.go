@@ -20,7 +20,7 @@ const (
 	maxTrustProfileBytes = 64 << 10
 )
 
-var policyDomain = []byte("orka.enforcement.policy/v2")
+const policyDomain = "agentsuite-effective-policy\x00v1\x00"
 
 type canonicalEncoder struct{ bytes.Buffer }
 
@@ -60,7 +60,13 @@ func hashTranscript(domain string, fields func(*canonicalEncoder)) string {
 	return "sha256:" + hex.EncodeToString(h[:])
 }
 func PolicyDigest(b []byte) string {
-	return hashTranscript(string(policyDomain), func(e *canonicalEncoder) { e.field(10, b) })
+	h := sha256.New()
+	h.Write([]byte(policyDomain))
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(b)))
+	h.Write(size[:])
+	h.Write(b)
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 func descriptorMessage(d Descriptor) []byte {
 	return transcript("orka.enforcement.descriptor/v2", func(e *canonicalEncoder) {

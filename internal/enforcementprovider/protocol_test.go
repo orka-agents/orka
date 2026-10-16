@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+func TestPolicyDigestMatchesAgentSuiteCanonicalPayload(t *testing.T) {
+	policy := []byte(`{"denyWritePaths":["/workspace/source","/𐀀","/"],"requiredCapabilities":["filesystem/deny-write/v1"],"version":"agentsuite.policy/v1"}`)
+	const want = "sha256:c06512cf93ae8e9275dc8196425734668f9682e1747dd6ec2d14012e18e80188"
+	if got := PolicyDigest(policy); got != want {
+		t.Fatalf("PolicyDigest() = %q, want AgentSuite digest %q", got, want)
+	}
+}
+
 func fixture() (Descriptor, TrustProfile, Authorization, ReadBack, Proof) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	now := time.Now().UTC()

@@ -1,6 +1,7 @@
 package enforcementprovider
 
 import (
+	"encoding/hex"
 	"os"
 	"testing"
 	"time"
@@ -22,7 +23,8 @@ func TestExternalProviderEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewFileStore(secureStorePath(t, "orka-enforcement.json"))
+	storePath := secureStorePath(t, "orka-enforcement.json")
+	store, err := NewFileStore(storePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,9 +37,16 @@ func TestExternalProviderEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	policy := []byte(`{"version":"agentsuite.policy/v1","denyWritePaths":["/workspace/source"],"requiredCapabilities":["filesystem/deny-write/v1"]}`)
+	policy, err := hex.DecodeString(os.Getenv("ORKA_PROVIDER_TEST_POLICY_HEX"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPolicyDigest := os.Getenv("ORKA_PROVIDER_TEST_POLICY_DIGEST")
+	if got := PolicyDigest(policy); got != wantPolicyDigest {
+		t.Fatalf("policy digest mismatch: got %q want %q", got, wantPolicyDigest)
+	}
 	ctx := Context{RequestID: "req", AttemptID: "attempt", WorkloadID: "workload", ProviderID: descriptor.ProviderID, Audience: "orka", Challenge: "challenge", IdempotencyKey: "idem", PolicyBytes: policy, RequiredCapabilities: []string{"filesystem/deny-write/v1"}}
-	ctx.PolicyDigest = PolicyDigest(policy)
+	ctx.PolicyDigest = wantPolicyDigest
 	auth := Authorization{ID: "auth", Context: ctx, IssuedAt: now.Add(-time.Second), NotBefore: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute), Epoch: descriptor.Epoch}
 	o := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 	if _, err = o.Authorize(auth); err != nil {
@@ -54,11 +63,42 @@ func TestExternalProviderEndToEnd(t *testing.T) {
 	if a.Phase != PhaseProofConsumed {
 		t.Fatal(a.Phase)
 	}
-	a, err = o.Release(ctx.AttemptID)
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restartedStore, err := NewFileStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := Orchestrator{Store: restartedStore, Provider: provider, Trust: trust, Now: time.Now}
+	results := restarted.Recover([]Attempt{a})
+	if err = results[ctx.AttemptID]; err != nil {
+		t.Fatal(err)
+	}
+	a, err = restartedStore.Get(ctx.AttemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.Phase != PhaseReleased {
+		t.Fatal(a.Phase)
+	}
+	if err = restartedStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cleanupStore, err := NewFileStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup := Orchestrator{Store: cleanupStore, Provider: provider, Trust: trust, Now: time.Now}
+	results = cleanup.Recover([]Attempt{a})
+	if err = results[ctx.AttemptID]; err != nil {
+		t.Fatal(err)
+	}
+	a, err = cleanupStore.Get(ctx.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Phase != PhaseCleaned {
 		t.Fatal(a.Phase)
 	}
 }
