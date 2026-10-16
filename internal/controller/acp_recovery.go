@@ -1936,7 +1936,9 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	case harnessv2.RuntimeSessionStateValidating:
 		// Session deletion itself is deliberately delete-only. Normal Task
 		// recovery must first finish its abandoned local validation barrier.
-		if sessionDeletion {
+		// That recovery uses native-only retained cleanup authority, so other
+		// backends keep waiting as they did before it existed.
+		if sessionDeletion || target.pool == nil || target.pool.Spec.ExecutionWorkspace != nil {
 			return false, nil
 		}
 		if err := d.recoverAbandonedWorkspaceValidation(ctx, task, taskUID, target.pool); err != nil {
