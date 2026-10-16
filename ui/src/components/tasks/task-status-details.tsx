@@ -1,6 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { looksSecret, UNSAFE_KEY_PATTERN } from '@/lib/secret-like'
+import { containsCredential, looksSecret, UNSAFE_KEY_PATTERN } from '@/lib/secret-like'
 import { cn } from '@/lib/utils'
 import type { Task } from '@/schemas/task'
 
@@ -10,8 +10,10 @@ interface TaskStatusDetailsProps {
 
 function nonSecretEntries(record?: Record<string, string>): [string, string][] {
   if (!record) return []
-  // Secret-looking or long values are dropped, and so are kubectl's annotations.
-  return Object.entries(record).filter(([k, v]) => !UNSAFE_KEY_PATTERN.test(k) && !looksSecret(k, v))
+  // Secret-looking or long values are dropped, as are values that show a
+  // credential sign the YAML view would hide (a signed URL, say), and kubectl's
+  // annotations.
+  return Object.entries(record).filter(([k, v]) => !UNSAFE_KEY_PATTERN.test(k) && !looksSecret(k, v) && !containsCredential(v))
 }
 
 /** A collapsible, read-only section. Rendered only when it has content. */

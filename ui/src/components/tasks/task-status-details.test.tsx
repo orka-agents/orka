@@ -8,7 +8,7 @@ const fullTask: Task = {
     name: 'parent',
     namespace: 'default',
     labels: { 'app.kubernetes.io/name': 'orka' },
-    annotations: { 'orka.ai/note': 'visible-note', 'orka.ai/api-token': 'sk-should-hide', 'orka.ai/description': 'sk-should-hide' },
+    annotations: { 'orka.ai/note': 'visible-note', 'orka.ai/api-token': 'sk-should-hide', 'orka.ai/description': 'sk-should-hide', 'example.com/callback': 'https://cb.example.com/done?sig=abc' },
   },
   spec: { type: 'agent', sessionRef: { name: 'session-7' } },
   status: {
@@ -43,6 +43,7 @@ describe('TaskStatusDetails', () => {
     expect(screen.getByText('session-7')).toBeInTheDocument()
     expect(screen.getByText('visible-note')).toBeInTheDocument()
     expect(screen.queryByText('sk-should-hide')).not.toBeInTheDocument()
+    expect(screen.queryByText('example.com/callback')).not.toBeInTheDocument()
     expect(screen.queryByText('orka.ai/api-token')).not.toBeInTheDocument()
     expect(screen.queryByText('orka.ai/description')).not.toBeInTheDocument()
   })
