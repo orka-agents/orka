@@ -355,7 +355,7 @@ every workflow.
 
 **Connect your tools**
 
-- [OpenAI-compatible API](reference/openai-compat.md) — Continue, Cursor, and similar
+- [OpenAI-compatible API](reference/openai-compat.md) — Codex, OpenCode and more
 - [Anthropic-compatible API](reference/anthropic-compat.md) — Claude Code and similar
 - [Gateways](guides/gateways.md) — Microsoft Teams, Telegram, and A2A
 

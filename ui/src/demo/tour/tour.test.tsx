@@ -59,6 +59,8 @@ describe('demo tour', () => {
   it('welcomes the visitor and lets them skip the tour for good', () => {
     render(<TourPanel slot="bottom" />)
     expect(screen.getByRole('heading', { name: 'Welcome to the Orka demo' })).toBeInTheDocument()
+    expect(screen.getByText(/optional web dashboard/)).toBeInTheDocument()
+    expect(screen.getByText(/can be done with the orka CLI or kubectl/)).toBeInTheDocument()
     expect(mockNavigate).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Explore on my own' }))

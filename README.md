@@ -86,7 +86,7 @@ coding agent.
   Nightly dependency audits, security scans, or reports, with retries and notifications
   handled for you.
 - **[Your existing tools, safer.](https://orka-agents.github.io/orka/docs/openai-compat)**
-  Point Cursor, Continue, or Claude Code at Orka's OpenAI- and Anthropic-compatible
+  Point Claude Code, Codex, OpenCode and more at Orka's OpenAI- and Anthropic-compatible
   endpoints and stop handing out provider keys.
 
 ## Why on Kubernetes

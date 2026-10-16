@@ -6,7 +6,7 @@ description: "Use Orka with OpenAI Chat Completions and stateless Responses clie
 # OpenAI-compatible API
 
 Orka serves `/openai/v1/chat/completions`, stateless `/openai/v1/responses`, and `/openai/v1/models`,
-so clients like [Continue](https://continue.dev/) and [Cursor](https://cursor.sh/) can point
+so clients like Codex, OpenCode and more can point
 at Orka instead of at a model vendor. Your cluster holds the API keys; the client holds a
 ServiceAccount token.
 

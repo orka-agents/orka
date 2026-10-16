@@ -164,6 +164,7 @@ RuntimePools are controller-owned for built-in Codex, OpenCode, Claude, and Copi
 | `/api/v1/agents` | POST | Create an agent |
 | `/api/v1/agents` | GET | List agents |
 | `/api/v1/agents/:name` | GET | Get agent details |
+| `/api/v1/agents/:name/system-prompt` | GET | Get the system prompt an agent reads from its `systemPrompt.configMapRef` |
 | `/api/v1/agents/:name` | PUT | Update an agent |
 | `/api/v1/agents/:name` | DELETE | Delete an agent |
 

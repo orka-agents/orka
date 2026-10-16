@@ -43,10 +43,10 @@ export function Header() {
         </Select>
         {import.meta.env.MODE === 'demo' && (
           <span
-            title="This dashboard runs on sample data in your browser. Nothing is sent to a cluster or a model."
+            title="Orka's optional web dashboard, on mock data in your browser. Nothing is sent to a cluster or a model, and everything you see or do in it can be done with the orka CLI or kubectl."
             className="hidden shrink-0 rounded-full border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground sm:inline"
           >
-            Demo<span className="hidden lg:inline"> · sample data, no live cluster or model</span>
+            Demo<span className="hidden lg:inline"> · optional dashboard, mock data</span>
           </span>
         )}
       </div>

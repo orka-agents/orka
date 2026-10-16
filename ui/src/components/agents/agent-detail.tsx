@@ -7,10 +7,47 @@ import { Separator } from '@/components/ui/separator'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { Activity, ArrowLeft, Bot, SearchX, ShieldCheck, Trash2, type LucideIcon } from 'lucide-react'
-import { useAgent, useDeleteAgent } from '@/hooks/use-agents'
+import { useAgent, useAgentSystemPrompt, useDeleteAgent } from '@/hooks/use-agents'
 import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { toast } from 'sonner'
 import { agentProviderName, agentReadiness, builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
+import type { AgentSpec } from '@/schemas/agent'
+
+const promptClassName = 'max-h-64 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap'
+
+// A ConfigMap prompt names its source, then shows the referenced key when the
+// caller may read that ConfigMap.
+function SystemPromptCard({ agentName, prompt }: { agentName: string; prompt: NonNullable<AgentSpec['systemPrompt']> }) {
+  const ref = prompt.inline ? null : prompt.configMapRef
+  const resolved = useAgentSystemPrompt(agentName, ref)
+  let body
+  if (!ref) {
+    body = <pre tabIndex={0} role="region" aria-label="System prompt" className={promptClassName}>{prompt.inline || '-'}</pre>
+  } else if (resolved.isPending) {
+    body = <Skeleton className="h-24 w-full" />
+  } else if (resolved.isError) {
+    body = (
+      <p className="text-sm text-muted-foreground">
+        {isForbiddenError(resolved.error) ? 'You are not allowed to read this ConfigMap.' : `Could not load the prompt: ${resolved.error instanceof Error ? resolved.error.message : String(resolved.error)}`}
+      </p>
+    )
+  } else {
+    body = <pre tabIndex={0} role="region" aria-label="System prompt" className={promptClassName}>{resolved.data.content}</pre>
+  }
+  return (
+    <Card className="md:col-span-2">
+      <CardHeader><CardTitle>System Prompt</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        {ref && (
+          <p className="text-xs text-muted-foreground">
+            From ConfigMap <code className="font-mono">{ref.name}</code>, key <code className="font-mono">{ref.key}</code>
+          </p>
+        )}
+        {body}
+      </CardContent>
+    </Card>
+  )
+}
 
 // A missing or unreadable Agent keeps the page heading (and so the tab
 // title) and a way back to the list.
@@ -228,16 +265,7 @@ export function AgentDetail({ agentId }: { agentId: string }) {
           </Card>
         )}
 
-        {agent.spec.systemPrompt && (
-          <Card className="md:col-span-2">
-            <CardHeader><CardTitle>System Prompt</CardTitle></CardHeader>
-            <CardContent>
-              <pre tabIndex={0} role="region" aria-label="System prompt" className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">
-                {agent.spec.systemPrompt.inline || (agent.spec.systemPrompt.configMapRef ? `ConfigMap: ${agent.spec.systemPrompt.configMapRef.name}/${agent.spec.systemPrompt.configMapRef.key}` : '-')}
-              </pre>
-            </CardContent>
-          </Card>
-        )}
+        {agent.spec.systemPrompt && <SystemPromptCard agentName={agent.metadata.name} prompt={agent.spec.systemPrompt} />}
 
         {coordination && (
           <Card>
