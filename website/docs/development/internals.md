@@ -116,10 +116,15 @@ status `resourceVersion` CAS.
 ### Schema
 
 Startup creates the complete current layout in one transaction for an empty
-database. An existing database must already have that layout. Reopening validates
-the schema without rewriting records or changing their IDs and ordering. Historical
-schema conversions and startup backfills are not supported. See the
-[database support policy](../operations/upgrading.md#supported-database-layout).
+database. Production startup opens the store through `OpenLockedStore`, which holds the
+exclusive controller lock, validates an existing database against the exact current
+layout, and upgrades an exactly recognized older layout in place after taking a verified
+backup beside the database. Unknown, partially modified, and newer layouts are refused
+without changes. Reopening a current layout validates it without rewriting records or
+changing their IDs and ordering. The lower-level `NewDB` constructor and in-memory stores
+validate only and never migrate. The
+[database support policy](../operations/upgrading.md#supported-database-layout) lists the
+recognized layouts.
 
 | Table | Primary Key | Purpose |
 |-------|-------------|---------|

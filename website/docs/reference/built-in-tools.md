@@ -50,7 +50,7 @@ endpoints also offer the first five to clients.
 | `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
 | `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |
 | `file_write` | Write or append files in workspace paths | `path` (required), `content` (required), `mode` (`write`/`append`), `create_dirs` |
-| `request_approval` | Park the Task until a person approves or declines. Added automatically for autonomous coordinators; see [human approval](../guides/autonomous-tasks.md#human-approvals). | — |
+| `request_approval` | Park the Task until a person approves or declines one exact custom-tool call. Added automatically for autonomous coordinators; see [human approval](../guides/autonomous-tasks.md#human-approvals). | `action`, `targetTool` (a custom Tool name), `targetArguments` (the exact argument object) (required); `riskSummary`, `severity` (`warning`/`critical`) |
 
 ## Memory tools
 
@@ -72,7 +72,7 @@ how to use them together.
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `namespace`, `priority`, `workspace`, `maxTurns`, `allowBash`, `prior_task`, `feedback`, `auto_retry`, `max_retries` |
+| `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `taskNamespace`, `agentNamespace`, `priority`, `timeout`, `workspace`, `maxTurns`, `allowBash`, `prior_task`, `feedback`, `auto_retry`, `max_retries` |
 | `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
 | `create_container_task` | Create a child container task | `image`, `command`/`args`; `workspace`, `prior_task`, `namespace`, `timeout`, `priority`, `schedule` |
 | `cancel_task` | Cancel a running child task | `task_name` (required); `namespace`, `reason` |
@@ -85,40 +85,38 @@ how to use them together.
 Creates a child Task for the named Agent and returns `{"taskName": "<name>", "status": "created"}`.
 The child is `type: agent` when the target Agent has `spec.runtime`, and `type: ai` otherwise.
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "agent":       {"type": "string", "description": "Name of the agent to delegate to"},
-    "prompt":      {"type": "string", "description": "The task prompt for the agent"},
-    "namespace":   {"type": "string", "description": "Namespace (defaults to current)"},
-    "priority":    {"type": "integer", "description": "Priority 0-1000 (defaults to parent priority)"},
-    "workspace":   {"type": "object", "description": "Git workspace configuration for agent runtime tasks",
-      "properties": {
-        "intent":                   {"type": "string", "enum": ["read", "write"]},
-        "gitRepo":                  {"type": "string", "description": "Credential-free source repository URL"},
-        "branch":                   {"type": "string", "description": "Source branch name"},
-        "ref":                      {"type": "string", "description": "Source ref, commit SHA, or tag"},
-        "readCredentialRef":        {"type": "string", "description": "Secret used only for clean-room clone/read"},
-        "publicationGitRepo":       {"type": "string", "description": "Credential-free publication repository URL"},
-        "publicationCredentialRef": {"type": "string", "description": "Secret used only by the Workspace/Publisher"},
-        "pushBranch":               {"type": "string", "description": "Publication branch"},
-        "prBaseBranch":             {"type": "string", "description": "Pull-request base branch"},
-        "prTitle":                  {"type": "string", "maxLength": 256, "description": "Optional Task-authored PR title. Supply descriptive text when createPR is true; omitted or empty text uses the prompt-derived fallback."},
-        "prBody":                   {"type": "string", "maxLength": 32768, "description": "Optional Task-authored PR body describing the change and validation plan. Omitted or empty text uses the publisher's default body."},
-        "createPR":                 {"type": "boolean", "description": "Request PR reconciliation after verified publication"}
-      }
-    },
-    "maxTurns":    {"type": "integer", "description": "Maximum number of turns for the agent"},
-    "allowBash":   {"type": "boolean", "description": "Whether to allow bash execution in the agent"},
-    "prior_task":  {"type": "string", "description": "Name of a previously completed task whose diff should be applied to the workspace before this task starts. Used for iterative workflows."},
-    "feedback":    {"type": "string", "description": "Review feedback to prepend to the task prompt. Used with prior_task for iterative code review workflows."},
-    "auto_retry":  {"type": "boolean", "description": "Include structured retry metadata in failure reports. The coordinator decides whether to retry — wait_for_tasks does not auto-retry."},
-    "max_retries": {"type": "integer", "description": "Maximum retry budget for coordinator reference (default: 2). Only used when auto_retry is true."}
-  },
-  "required": ["agent", "prompt"]
-}
-```
+| Parameter | Description |
+| --- | --- |
+| `agent` | Name of the Agent to delegate to. Required. |
+| `prompt` | The child Task's prompt. Required. |
+| `taskNamespace` | Namespace for the child Task. Defaults to the parent's. |
+| `agentNamespace` | Namespace of the target Agent. Defaults to `taskNamespace`. (`namespace` is the legacy form that sets both.) |
+| `priority` | 0–1000. Defaults to the parent's priority. |
+| `timeout` | Child Task timeout, such as `20m`. |
+| `workspace` | Repository settings for a coding-agent child, below. |
+| `maxTurns`, `allowBash` | Per-Task runtime overrides for a coding-agent child. |
+| `prior_task`, `feedback` | Apply a completed Task's diff first and prepend review feedback to the prompt. Native children only. |
+| `auto_retry`, `max_retries` | Report structured failure details for the coordinator to act on; see [retrying failed children](../guides/multi-agent-coordination.md#retry-failed-children). `max_retries` defaults to 2. |
+
+`workspace` takes the same fields as a Task [workspace](resources.md#workspace), with Secret
+names as plain strings:
+
+| Field | Description |
+| --- | --- |
+| `gitRepo` | Credential-free HTTPS source URL. Required for write intent. |
+| `branch` / `ref` | Source branch, or an exact commit, tag, or `refs/heads/...` ref. With neither, the repository's default branch is resolved and frozen. |
+| `intent` | `read` (default) or `write`. Publication fields require `write`. |
+| `readCredentialRef` | Secret for clone and read. |
+| `publicationGitRepo` | Credential-free HTTPS repository that receives the branch. |
+| `publicationReadCredentialRef` | Secret for target preflight and verification. |
+| `publicationCredentialRef` | Secret for the branch push. Required for write intent. |
+| `forgeCredentialRef` | Secret for the pull request API. Required when `createPR` is true. |
+| `pushBranch` | Publication branch. |
+| `prBaseBranch` | Pull request base branch. Required when `createPR` is true. |
+| `prTitle`, `prBody` | Pull request text, up to 256 and 32,768 characters. |
+| `createPR` | Reconcile a pull request after verified publication. |
+
+Keep the four credential roles on distinct Secrets.
 
 `delegate_task` and chat's `create_agent_task` both accept optional `workspace.prTitle` and
 `workspace.prBody`. When requesting a pull request, the agent creating the Task should write
@@ -181,13 +179,17 @@ let these tools act through their own linked account; see [Connectors](../guides
 Every GitHub tool that accepts `repo_url` checks it against the current Task's workspace
 repository or its signed transaction repository context. A mismatch fails before Orka reads
 a credential or calls GitHub. Tools that accept `task_name` read the repository and
-credentials from that Task's workspace.
+credentials from that Task's workspace: tools that write to GitHub (`create_pull_request`,
+`post_review_comment`, `comment_on_issue`, `merge_pull_request`, `auto_merge_pull_request`)
+use its `forgeCredentialRef` and never fall back to
+another credential, and read tools use its `readCredentialRef`.
 
 ### `create_pull_request`
 
 Creates a pull request from a branch that Orka independently verified for a completed agent
-Task. It uses the child Task's `workspace.publicationCredentialRef`, which never reaches the
-coding-agent runtime. Require a terminal verified delivery receipt before calling it: a model
+Task. It calls the GitHub API with the child Task's `workspace.forgeCredentialRef`, or the
+requester's linked account, and fails if neither is available; it never falls back to the push
+or read credential. The forge credential never reaches the coding-agent runtime. Require a terminal verified delivery receipt before calling it: a model
 saying it pushed is not evidence.
 
 | Parameter | Type | Required | Description |

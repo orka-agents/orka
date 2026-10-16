@@ -235,7 +235,9 @@ into the child's worker.
 A common pattern is a loop between a coding agent and a reviewer until the change is approved,
 then a pull request. Coding agents never hold Git credentials: the coder edits a clean checkout,
 and Orka's publisher pushes the validated change to `pushBranch` and records the result in the
-child's `status.delivery`. The reviewer reads that published branch.
+child's `status.delivery`. The reviewer reads that published branch. The pull request tools
+then act with the coder Task's `forgeCredentialRef`, or with the requester's
+[linked account](connectors.md); the push credential is never used for the GitHub API.
 
 A coordinator prompt for this loop:
 
@@ -243,8 +245,10 @@ A coordinator prompt for this loop:
 You are a coordinator agent. Follow this protocol:
 
 1. DELEGATE implementation to the coder agent with workspace.intent = write,
-   separate readCredentialRef/publicationCredentialRef, publicationGitRepo,
-   pushBranch, and prBaseBranch. Tell the coder to edit only.
+   gitRepo, publicationGitRepo, pushBranch, and prBaseBranch, and four distinct
+   Secrets: readCredentialRef (clone), publicationReadCredentialRef (verify),
+   publicationCredentialRef (push), and forgeCredentialRef (pull request API).
+   Tell the coder to edit only.
 2. WAIT for the coder's result and require a verified delivery receipt.
 3. DELEGATE review to the reviewer agent (workspace.intent = read on the
    PUBLISHED head: publicationGitRepo — or gitRepo for same-repository

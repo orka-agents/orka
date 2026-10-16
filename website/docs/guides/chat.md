@@ -31,8 +31,10 @@ curl -N -H "Authorization: Bearer ${ORKA_TOKEN}" \
 Swap `Accept: text/event-stream` for `Accept: application/json` to get one JSON
 reply instead of a stream. From the CLI, the same conversation is:
 
+Without `--session`, each `orka run` starts a new conversation.
+
 ```bash
-orka run "Run a container task that prints the date, then tell me what it printed."
+orka run --session incident-123 "Run a container task that prints the date, then tell me what it printed."
 orka run --session incident-123 "What did that task print?"
 ```
 
