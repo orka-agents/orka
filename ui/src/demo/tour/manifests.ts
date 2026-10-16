@@ -63,7 +63,8 @@ export function monitorManifest(name: string): Manifest {
       repoURL: spec.repoURL,
       schedule: spec.schedule,
       agents: spec.agents && { reviewer: spec.agents.reviewer, implementer: spec.agents.implementer, repairer: spec.agents.repairer },
-      triggers: labels && { github: { labels: { enabled: labels.enabled, issues: labels.issues } } },
+      // Issue labels default to orka:implement and the other orka:* labels.
+      triggers: labels && { github: { labels: { enabled: labels.enabled } } },
       repair: spec.repair && { enabled: spec.repair.enabled },
     },
   }

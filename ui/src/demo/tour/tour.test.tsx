@@ -12,7 +12,7 @@ vi.mock('@tanstack/react-router', async () => ({
 
 vi.mock('@/hooks/use-chat', () => ({ useSendMessage: () => mockSend }))
 
-import { INCIDENT_TASK, RELEASE_TASK, stopsIn, TOUR_AGENT, TOUR_FINDING, TOUR_STEPS } from './steps'
+import { INCIDENT_APPROVAL, INCIDENT_TASK, RELEASE_TASK, stopsIn, TOUR_AGENT, TOUR_FINDING, TOUR_STEPS } from './steps'
 import { useTourStore } from './store'
 import { TourLauncher, TourPanel } from './tour'
 
@@ -110,18 +110,26 @@ describe('demo tour', () => {
     expect(useTourStore.getState().open).toBe(false)
   })
 
-  it('shows the resource behind a page as YAML, or says where the page comes from', () => {
+  it('shows the resource behind a page as YAML or the same from the CLI, one at a time', () => {
     useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.manifest?.kind === 'Agent') })
     render(<TourPanel slot="bottom" />)
-    expect(screen.queryByRole('region', { name: 'Agent YAML' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Show the YAML' }))
     expect(screen.getByRole('region', { name: 'Agent YAML' })).toHaveTextContent(`name: ${TOUR_AGENT}`)
-    fireEvent.click(screen.getByRole('button', { name: 'Hide the YAML' }))
-    expect(screen.queryByRole('region', { name: 'Agent YAML' })).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Show the CLI' }))
+    expect(screen.queryByRole('region', { name: 'Agent YAML' })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'CLI commands' })).toHaveTextContent(`orka agent get ${TOUR_AGENT}`)
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the CLI' }))
+    expect(screen.queryByRole('region', { name: 'CLI commands' })).not.toBeInTheDocument()
+  })
+
+  it('says where a page without a resource comes from, and offers only the CLI', () => {
+    useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.route?.search && 'tab' in step.route.search && step.route.search.tab === 'approvals') })
+    render(<TourPanel slot="bottom" />)
     expect(screen.getByText(/Approvals come from Orka's own record/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Show the YAML' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Show the CLI' }))
+    expect(screen.getByRole('region', { name: 'CLI commands' })).toHaveTextContent(`orka task approve ${INCIDENT_TASK} ${INCIDENT_APPROVAL}`)
   })
 
   it('folds the narrow-screen panel to its title', () => {

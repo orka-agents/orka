@@ -1,6 +1,6 @@
 import { useNavigate } from '@tanstack/react-router'
-import { ChevronDown, ChevronUp, Compass, Database, FileCode, X } from 'lucide-react'
-import { useState } from 'react'
+import { ChevronDown, ChevronUp, Compass, Database, FileCode, SquareTerminal, X } from 'lucide-react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { useSendMessage } from '@/hooks/use-chat'
 import { useMediaQuery } from '@/hooks/use-media-query'
@@ -77,41 +77,74 @@ function StepBody({ step }: { step: TourStep }) {
   )
 }
 
-/** Where the page's data comes from: a resource to show as YAML, or Orka's own record. */
+/** Where the page's data comes from, and the same thing as YAML or from the CLI. */
 function StepSource({ step }: { step: TourStep }) {
-  const [open, setOpen] = useState(false)
-  const { manifest, note } = step
-  if (note) {
-    return (
-      <p className="flex gap-2 text-xs text-muted-foreground">
-        <Database className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {note}
-      </p>
-    )
-  }
-  if (!manifest) return null
+  const [open, setOpen] = useState<'yaml' | 'cli' | null>(null)
+  const { manifest, note, cli } = step
+  const toggle = (view: 'yaml' | 'cli') => setOpen(open === view ? null : view)
+  if (!note && !manifest && !cli) return null
   return (
     <div className="space-y-2">
-      <Button variant="outline" size="sm" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <FileCode className="h-4 w-4" aria-hidden="true" />
-        {open ? 'Hide the YAML' : 'Show the YAML'}
-      </Button>
-      {open && (
-        <>
-          <p className="text-xs text-muted-foreground">
-            {manifest.kind} {manifest.metadata.name}, trimmed to the fields this stop mentions.
-          </p>
-          <pre
-            tabIndex={0}
-            role="region"
-            aria-label={`${manifest.kind} YAML`}
-            className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed"
-          >
-            {toYaml(manifest)}
-          </pre>
-        </>
+      {note && (
+        <p className="flex gap-2 text-xs text-muted-foreground">
+          <Database className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          {note}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {manifest && (
+          <Button variant="outline" size="sm" aria-expanded={open === 'yaml'} onClick={() => toggle('yaml')}>
+            <FileCode className="h-4 w-4" aria-hidden="true" />
+            {open === 'yaml' ? 'Hide the YAML' : 'Show the YAML'}
+          </Button>
+        )}
+        {cli && (
+          <Button variant="outline" size="sm" aria-expanded={open === 'cli'} onClick={() => toggle('cli')}>
+            <SquareTerminal className="h-4 w-4" aria-hidden="true" />
+            {open === 'cli' ? 'Hide the CLI' : 'Show the CLI'}
+          </Button>
+        )}
+      </div>
+      {open === 'yaml' && manifest && (
+        <SourceBlock label={`${manifest.kind} YAML`} caption={`${manifest.kind} ${manifest.metadata.name}, trimmed to the fields this stop mentions.`}>
+          {toYaml(manifest)}
+        </SourceBlock>
+      )}
+      {open === 'cli' && cli && (
+        <SourceBlock label="CLI commands" caption="The same from the orka CLI, against a real cluster." wrap>
+          {/* Long commands wrap between words with a hanging indent; each stays one line when copied. */}
+          {cli.map((line) => (
+            <span key={line} className={cn('block pl-[2ch] -indent-[2ch]', line.startsWith('#') && 'text-muted-foreground')}>
+              {line.split(' ').map((word, index) => (
+                <Fragment key={index}>
+                  {index > 0 && ' '}
+                  <span className="whitespace-nowrap">{word}</span>
+                </Fragment>
+              ))}
+            </span>
+          ))}
+        </SourceBlock>
       )}
     </div>
+  )
+}
+
+function SourceBlock({ label, caption, wrap, children }: { label: string; caption: string; wrap?: boolean; children: ReactNode }) {
+  return (
+    <>
+      <p className="text-xs text-muted-foreground">{caption}</p>
+      <pre
+        tabIndex={0}
+        role="region"
+        aria-label={label}
+        className={cn(
+          'overflow-x-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed',
+          wrap && 'whitespace-pre-wrap',
+        )}
+      >
+        {children}
+      </pre>
+    </>
   )
 }
 

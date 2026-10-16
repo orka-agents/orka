@@ -1,5 +1,6 @@
 import type { NavigateOptions } from '@tanstack/react-router'
 import { findingID } from '../data/security'
+import { REPOS } from '../world'
 import { agentManifest, bindingManifest, monitorManifest, taskManifest, type Manifest } from './manifests'
 
 export type TourPart = 'basics' | 'more'
@@ -19,10 +20,13 @@ export interface TourStep {
   manifest?: Manifest
   /** Where the page's data comes from, for pages not backed by a resource. */
   note?: string
+  /** The same thing from the orka CLI. Lines starting with # are comments. */
+  cli?: string[]
 }
 
 /** The incident Task the tour follows; it waits on a rollback approval when the demo loads. */
 export const INCIDENT_TASK = 'checkout-latency-investigation-7k2qp'
+export const INCIDENT_APPROVAL = 'apr-rollback-checkout'
 /** The agent the incident Task runs. */
 export const TOUR_AGENT = 'incident-responder'
 export const TOUR_MONITOR = 'checkout-service'
@@ -61,6 +65,7 @@ export const TOUR_STEPS: TourStep[] = [
     route: incident(),
     part: 'basics',
     manifest: taskManifest(INCIDENT_TASK),
+    cli: [`orka task get ${INCIDENT_TASK}`],
   },
   {
     title: 'See what it did',
@@ -68,6 +73,7 @@ export const TOUR_STEPS: TourStep[] = [
     route: incident('trace'),
     part: 'basics',
     note: `The trace ${RECORD_NOTE}`,
+    cli: [`orka task trace ${INCIDENT_TASK}`],
   },
   {
     title: 'You make the call',
@@ -75,6 +81,11 @@ export const TOUR_STEPS: TourStep[] = [
     route: incident('approvals'),
     part: 'basics',
     note: "Approvals come from Orka's own record, not from the Task resource.",
+    cli: [
+      '# See what is waiting, then approve it',
+      `orka task approvals ${INCIDENT_TASK}`,
+      `orka task approve ${INCIDENT_TASK} ${INCIDENT_APPROVAL}`,
+    ],
   },
   {
     title: 'Every Task runs an agent',
@@ -82,6 +93,7 @@ export const TOUR_STEPS: TourStep[] = [
     route: { to: '/agents/$agentId', params: { agentId: TOUR_AGENT } },
     part: 'basics',
     manifest: agentManifest(TOUR_AGENT),
+    cli: [`orka agent get ${TOUR_AGENT}`],
   },
   {
     title: 'Ask for work in chat',
@@ -90,6 +102,7 @@ export const TOUR_STEPS: TourStep[] = [
     part: 'basics',
     prompts: ["What's running right now?", 'Review PR #1486 in checkout-service'],
     note: "Chat sessions live in Orka's own record; the Tasks they start are Kubernetes resources.",
+    cli: ["# orka run is the CLI's chat", 'orka run "What\'s running right now?"'],
   },
   {
     title: 'Monitors find work on their own',
@@ -97,6 +110,7 @@ export const TOUR_STEPS: TourStep[] = [
     route: { to: '/monitors/$monitorId', params: { monitorId: TOUR_MONITOR } },
     part: 'basics',
     manifest: monitorManifest(TOUR_MONITOR),
+    cli: [`orka monitor issue status ${TOUR_MONITOR} 2214`],
   },
   {
     title: 'See what each change cost',
@@ -104,6 +118,7 @@ export const TOUR_STEPS: TourStep[] = [
     route: { to: '/usage' },
     part: 'basics',
     note: `Usage ${RECORD_NOTE}`,
+    cli: [`orka usage summary --repository ${REPOS.checkout.slug}`],
   },
   {
     title: "That's the basics",
@@ -115,6 +130,7 @@ export const TOUR_STEPS: TourStep[] = [
     body: 'release-captain is preparing a storefront release. It gave two jobs to other agents, each as a child Task: issue-triager checks for release blockers and docs-writer drafts the release notes. It waits for both before it finishes. Its agent definition limits which agents it may delegate to and how many children run at once.',
     route: { to: '/tasks/$taskId', params: { taskId: RELEASE_TASK }, search: { tab: 'children' } },
     part: 'more',
+    cli: [`orka task children ${RELEASE_TASK}`],
   },
   {
     title: 'Agents find and fix vulnerabilities',
@@ -122,6 +138,7 @@ export const TOUR_STEPS: TourStep[] = [
     route: { to: '/security/findings/$findingId', params: { findingId: TOUR_FINDING } },
     part: 'more',
     note: "Findings live in Orka's own record; the scan that found them is a RepositoryScan resource.",
+    cli: [`orka security finding get ${TOUR_FINDING}`],
   },
   {
     title: 'Gateways bring in Slack and GitHub',
@@ -129,12 +146,14 @@ export const TOUR_STEPS: TourStep[] = [
     route: { to: '/gateways/$gatewayId', params: { gatewayId: TOUR_GATEWAY } },
     part: 'more',
     manifest: bindingManifest(TOUR_BINDING),
+    cli: [`orka gateway events list --gateway ${TOUR_GATEWAY}`],
   },
   {
     title: 'Where agents run',
     body: 'Coding agents such as Claude Code, Codex, Copilot and OpenCode run in runtime pools that Orka manages. Each pool is pinned to an exact image, drains its sessions before an upgrade replaces it, and scales to zero when idle. Agents hosted elsewhere register under External runtimes.',
     route: { to: '/runtimes' },
     part: 'more',
+    cli: ['orka runtime-pool list'],
   },
   {
     title: "That's the full tour",
