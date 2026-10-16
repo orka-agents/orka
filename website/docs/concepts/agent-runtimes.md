@@ -422,7 +422,8 @@ A built-in runtime Pod uses a digest-pinned image, a read-only root filesystem, 
 service-account token. It holds no Git credential and has no route to source control. Its
 model traffic goes only to the central provider proxy, and each RuntimeSession reaches Orka
 tools only through a credential-protected loopback MCP proxy that the controller rechecks on
-every call. The Workspace/Publisher, which does hold the Git credentials, has no access to
+every call. A call to a tool outside the frozen policy, such as one the model names on its own,
+is refused there as a failed tool call and the prompt continues. The Workspace/Publisher, which does hold the Git credentials, has no access to
 models or tools. [Security](security.md#acp-runtimepool-pods) describes each boundary.
 
 ## Controller configuration
@@ -458,6 +459,7 @@ cross-namespace Vekil ingress boundary.
 
 - **Task fails before queueing**: for a built-in runtime, verify the Agent has `runtime.type: codex`, `claude`, `copilot`, or `opencode`, ACP is enabled, and the matching digest-pinned image is configured. For `runtimeRef`, verify the registration is current-generation, ready, strict-governed, and matches the Task workspace intent.
 - **Task remains queued**: inspect the selected RuntimePool lifecycle/admission/capacity and the runtime Pod scheduling conditions.
+- **Agent warnings in Task results**: Orka advertises ACP session notices, so Codex and Claude Code send their own warnings, such as Codex's missing model metadata, as notices, which Orka keeps out of the result and does not log. Copilot CLI 1.0.96 ignores notices and still writes its `Info:` lines into the reply.
 - **Task reports `OutcomeUnknown`**: do not retry the same attempt automatically. Inspect the recorded attempt, controller epoch, runtime instance, and event timeline.
 - **Read Task fails validation**: inspect `status.delivery` for `ReadOnlyWorkspaceModified` and treat the session as poisoned.
 - **Write Task is blocked**: verify all required source-read, target-read, target-write, and forge credential references, the publication repository/branch, and the Workspace/Publisher broker configuration. Require a terminal verified delivery receipt before claiming success.
