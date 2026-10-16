@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -240,5 +241,44 @@ func TestAISoulBindingSurvivesControlFieldEdits(t *testing.T) {
 	legacy.Status.SoulBinding.InputsDigest = ""
 	if _, err := resolveAISoul(ctx, r.Client, legacy, agent); !isPermanentAISoulConfigurationError(err) {
 		t.Fatalf("a legacy binding accepted a generation change: %v", err)
+	}
+}
+
+// A pause that lands after an autonomous iteration finished, while the next
+// one waits in Pending, must stop it before a Job starts.
+func TestAutonomousPauseBetweenIterationsStopsDispatch(t *testing.T) {
+	ctx := context.Background()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Soul:         &corev1alpha1.SoulSource{Inline: "persona"},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 2},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "iterate", Suspend: new(true),
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1, Iteration: 1},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	result, err := r.handlePending(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("a paused iteration was not held for resume")
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhasePending || current.Status.Message != "autonomous task suspended at iteration 1" {
+		t.Fatalf("paused iteration state: phase=%s message=%q", current.Status.Phase, current.Status.Message)
+	}
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs); err != nil || len(jobs.Items) != 0 {
+		t.Fatal("a paused autonomous iteration started a Job")
 	}
 }

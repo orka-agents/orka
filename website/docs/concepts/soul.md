@@ -110,7 +110,9 @@ except control fields. `spec.suspend` is a control field, so a soul-enabled
 autonomous Task can still be paused and resumed between iterations. Edits to any
 other field are rejected, and the binding records a digest of the frozen inputs,
 so an input change that bypassed admission fails the next attempt instead of
-running under the bound persona.
+running under the bound persona. This exception applies only to soul-only
+bindings: a Task that also has an ACP execution binding keeps its whole spec,
+including `spec.suspend`, immutable.
 
 For AI Tasks using Sessions, conversation continuity pins controller-authored
 revision metadata under the exact Task's Session lock **before the first Job

@@ -117,6 +117,36 @@ func TestTaskInputsDigestIgnoresOnlyControlFields(t *testing.T) {
 	if got, err := TaskInputsDigest(&empty); err != nil || got == noneDigest {
 		t.Fatalf("an explicitly empty tool policy matched an omitted one: %v", err)
 	}
+	// An explicitly empty node selector or toleration list clears the Agent's
+	// placement, while an omitted one inherits it.
+	omitted := spec
+	omitted.Execution = &corev1alpha1.ExecutionSpec{}
+	omittedDigest, err := TaskInputsDigest(&omitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, execution := range map[string]*corev1alpha1.ExecutionSpec{
+		"node selector": {NodeSelector: map[string]string{}},
+		"tolerations":   {Tolerations: []corev1.Toleration{}},
+	} {
+		cleared := spec
+		cleared.Execution = execution
+		if got, err := TaskInputsDigest(&cleared); err != nil || got == omittedDigest {
+			t.Fatalf("an explicitly empty %s matched an omitted one: %v", name, err)
+		}
+	}
+	// The digest is deterministic, including map order.
+	selector := spec
+	selector.Execution = &corev1alpha1.ExecutionSpec{NodeSelector: map[string]string{"a": "1", "b": "2", "c": "3"}}
+	first, err := TaskInputsDigest(&selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		if got, err := TaskInputsDigest(&selector); err != nil || got != first {
+			t.Fatalf("the inputs digest is not deterministic: %v", err)
+		}
+	}
 }
 
 func TestSoulBindingMatches(t *testing.T) {

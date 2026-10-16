@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -165,14 +167,64 @@ func SessionDigest(binding *corev1alpha1.TaskSoulBinding) string {
 }
 
 // TaskInputsDigest identifies a Task's execution inputs: its spec without the
-// control fields a soul binding leaves mutable.
+// control fields a soul binding leaves mutable. JSON omits empty collections,
+// so the digest also lists the path of every present but empty collection: an
+// explicitly empty node selector or toleration list behaves differently from an
+// omitted one.
 func TaskInputsDigest(spec *corev1alpha1.TaskSpec) (string, error) {
 	inputs := spec.ExecutionInputs()
 	encoded, err := json.Marshal(&inputs)
 	if err != nil {
 		return "", fmt.Errorf("encode Task execution inputs: %w", err)
 	}
-	return Digest(string(encoded)), nil
+	var empty []string
+	appendEmptyCollections(reflect.ValueOf(inputs), "spec", &empty)
+	return Digest(string(encoded) + "\n" + strings.Join(empty, "\n")), nil
+}
+
+// appendEmptyCollections records, by JSON path, each non-nil empty slice or
+// map reachable from value. Map keys are visited in sorted order.
+func appendEmptyCollections(value reflect.Value, path string, empty *[]string) {
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !value.IsNil() {
+			appendEmptyCollections(value.Elem(), path, empty)
+		}
+	case reflect.Struct:
+		for i := range value.NumField() {
+			field := value.Type().Field(i)
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if !field.IsExported() || name == "-" {
+				continue
+			}
+			child := path
+			if name != "" {
+				child += "." + name
+			} else if !field.Anonymous {
+				child += "." + field.Name
+			}
+			appendEmptyCollections(value.Field(i), child, empty)
+		}
+	case reflect.Slice, reflect.Map:
+		if value.IsNil() {
+			return
+		}
+		if value.Len() == 0 {
+			*empty = append(*empty, path)
+			return
+		}
+		if value.Kind() == reflect.Slice {
+			for i := range value.Len() {
+				appendEmptyCollections(value.Index(i), fmt.Sprintf("%s[%d]", path, i), empty)
+			}
+			return
+		}
+		keys := value.MapKeys()
+		sort.Slice(keys, func(i, j int) bool { return fmt.Sprint(keys[i]) < fmt.Sprint(keys[j]) })
+		for _, key := range keys {
+			appendEmptyCollections(value.MapIndex(key), fmt.Sprintf("%s[%v]", path, key), empty)
+		}
+	}
 }
 
 // SoulBindingMatches reports whether a recorded binding still describes the
