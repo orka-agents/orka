@@ -1,11 +1,13 @@
 import { useNavigate } from '@tanstack/react-router'
 import { ChevronDown, ChevronUp, Compass, Database, FileCode, SquareTerminal, X } from 'lucide-react'
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { useSendMessage } from '@/hooks/use-chat'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '@/stores/chat'
+import { useUIStore } from '@/stores/ui'
+import { DEMO_NAMESPACE } from '../shared'
 import { toYaml } from './manifests'
 import { stopsIn, TOUR_STEPS, type TourStep } from './steps'
 import { useTourStore } from './store'
@@ -17,13 +19,19 @@ import { useTourStore } from './store'
  */
 const RAIL_MEDIA_QUERY = '(min-width: 1280px)'
 
+// The sample data lives in one namespace, and a visitor may have switched away.
+const switchToSampleNamespace = () => useUIStore.getState().setNamespace(DEMO_NAMESPACE)
+
 function useTour() {
   const { step, goTo, close } = useTourStore()
   const navigate = useNavigate()
   const go = (index: number) => {
     goTo(index)
     const route = TOUR_STEPS[index]?.route
-    if (route) void navigate(route)
+    if (route) {
+      switchToSampleNamespace()
+      void navigate(route)
+    }
   }
   return { step, current: TOUR_STEPS[step], go, close }
 }
@@ -50,6 +58,16 @@ function StepBody({ step }: { step: TourStep }) {
   const navigate = useNavigate()
   const sendMessage = useSendMessage()
   const streaming = useChatStore((s) => s.isStreaming)
+  const namespace = useUIStore((s) => s.namespace)
+  // sendMessage posts to the namespace it was rendered with, so a prompt picked
+  // from another namespace waits for the switch to the sample one.
+  const pendingPrompt = useRef<string | null>(null)
+  useEffect(() => {
+    const prompt = pendingPrompt.current
+    if (prompt === null || namespace !== DEMO_NAMESPACE) return
+    pendingPrompt.current = null
+    void sendMessage(prompt)
+  }, [namespace, sendMessage])
   return (
     <div className="space-y-3">
       <p aria-live="polite" className="text-sm leading-relaxed text-muted-foreground">{step.body}</p>
@@ -64,7 +82,12 @@ function StepBody({ step }: { step: TourStep }) {
               disabled={streaming}
               onClick={() => {
                 void navigate({ to: '/chat' })
-                void sendMessage(prompt)
+                if (namespace === DEMO_NAMESPACE) {
+                  void sendMessage(prompt)
+                } else {
+                  pendingPrompt.current = prompt
+                  switchToSampleNamespace()
+                }
               }}
             >
               {prompt}

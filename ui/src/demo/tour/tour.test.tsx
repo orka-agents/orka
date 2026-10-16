@@ -11,7 +11,10 @@ vi.mock('@tanstack/react-router', async () => ({
 }))
 
 vi.mock('@/hooks/use-chat', () => ({ useSendMessage: () => mockSend }))
+// The UI store persists through zustand; keep it in memory here.
+vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 
+import { useUIStore } from '@/stores/ui'
 import { INCIDENT_APPROVAL, INCIDENT_TASK, RELEASE_TASK, stopsIn, TOUR_AGENT, TOUR_FINDING, TOUR_STEPS } from './steps'
 import { useTourStore } from './store'
 import { TourLauncher, TourPanel } from './tour'
@@ -33,7 +36,7 @@ function memoryStorage() {
 describe('demo tour', () => {
   beforeEach(() => {
     mockNavigate.mockClear()
-    mockSend.mockClear()
+    mockSend.mockReset()
     vi.stubGlobal('localStorage', memoryStorage())
     useTourStore.setState({ open: true, step: 0, collapsed: false })
   })
@@ -75,6 +78,25 @@ describe('demo tour', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByRole('heading', { name: 'You make the call' })).toBeInTheDocument()
+  })
+
+  it('brings a visitor who switched namespace back to the sample data', () => {
+    useUIStore.setState({ namespace: 'orka-system' })
+    const { unmount } = render(<TourPanel slot="bottom" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start the tour' }))
+    expect(useUIStore.getState().namespace).toBe('default')
+    expect(mockNavigate).toHaveBeenCalledWith(expect.objectContaining({ params: { taskId: INCIDENT_TASK } }))
+    unmount()
+
+    // The prompt goes out only once the sample namespace is in place.
+    useUIStore.setState({ namespace: 'orka-system' })
+    useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.prompts) })
+    const sentIn: string[] = []
+    mockSend.mockImplementation(() => void sentIn.push(useUIStore.getState().namespace))
+    render(<TourPanel slot="bottom" />)
+    fireEvent.click(screen.getByRole('button', { name: "What's running right now?" }))
+    expect(mockSend).toHaveBeenCalledWith("What's running right now?")
+    expect(sentIn).toEqual(['default'])
   })
 
   it('sends a suggested prompt from the chat stop', () => {
