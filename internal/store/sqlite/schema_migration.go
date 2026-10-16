@@ -21,6 +21,7 @@ const (
 	schema150 = "66de67c84e6cf135ea10f5aa98ebb0a65eb920f2742be8c0bd27c5d651167df8" // #731, 1f18614c
 	schema162 = "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7" // #701, 57583975
 	schema166 = "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36" // #732, abd2c040
+	schema167 = "10d05a3ab1d90d4837476740a4b8dc6e9b5ee3d2c9699e3a4252b9f6d944168b" // dataset identity
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -36,6 +37,9 @@ var migration150To162 string
 //go:embed migrations/162-to-166.sql
 var migration162To166 string
 
+//go:embed migrations/166-to-167.sql
+var migration166To167 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
@@ -46,6 +50,7 @@ func schemaMigrations() []schemaMigration {
 		{schema149, schema150, migration149To150},
 		{schema150, schema162, migration150To162},
 		{schema162, schema166, migration162To166},
+		{schema166, schema167, migration166To167},
 	}
 }
 
@@ -73,6 +78,13 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	version, err := readSchemaVersion(conn)
+	if err != nil {
+		return err
+	}
+	if version != 0 {
+		return validationErr
+	}
 	schema, err := readSchema(conn)
 	if err != nil {
 		return err
@@ -105,6 +117,13 @@ func runSchemaMigrations(ctx context.Context, conn *sql.Conn, source string, ste
 		return err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
+	version, err := readSchemaVersion(conn)
+	if err != nil {
+		return err
+	}
+	if version != 0 {
+		return fmt.Errorf("unsupported SQLite schema version %d before upgrade", version)
+	}
 	schema, err := readSchema(conn)
 	if err != nil {
 		return err
@@ -129,6 +148,9 @@ func runSchemaMigrations(ctx context.Context, conn *sql.Conn, source string, ste
 		source = step.to
 	}
 	if err := validateSchema(schema, currentSchemaStatements()); err != nil {
+		return err
+	}
+	if err := initializeDatasetRecord(conn, datasetOriginAdopted); err != nil {
 		return err
 	}
 	if err := checkSchemaIntegrity(ctx, conn); err != nil {

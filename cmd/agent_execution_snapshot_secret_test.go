@@ -35,7 +35,7 @@ func TestEnsureAgentExecutionSnapshotKeyMintsOnceAndReuses(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 	opts := agentExecutionSnapshotSecretOptions{Name: "orka-agent-execution-snapshot", Key: "key"}
 
-	first, err := ensureAgentExecutionSnapshotKey(context.Background(), c, c, "orka-system", opts, false)
+	first, err := ensureAgentExecutionSnapshotKey(context.Background(), c, c, "orka-system", opts, true)
 	if err != nil {
 		t.Fatalf("first start: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestEnsureAgentExecutionSnapshotKeyMintsOnceAndReuses(t *testing.T) {
 		t.Fatalf("Secret item is not the base64 text of the minted key: %q (%v)", stored.Data["key"], err)
 	}
 
-	second, err := ensureAgentExecutionSnapshotKey(context.Background(), c, c, "orka-system", opts, true)
+	second, err := ensureAgentExecutionSnapshotKey(context.Background(), c, c, "orka-system", opts, false)
 	if err != nil {
 		t.Fatalf("second start: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestEnsureAgentExecutionSnapshotKeyAcceptsRawAndBase64Items(t *testing.T) {
 			}
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 			got, err := ensureAgentExecutionSnapshotKey(context.Background(), c, c, "orka-system",
-				agentExecutionSnapshotSecretOptions{Name: "snapshot", Key: "key"}, true)
+				agentExecutionSnapshotSecretOptions{Name: "snapshot", Key: "key"}, false)
 			if err != nil || string(got) != string(raw) {
 				t.Fatalf("key = %q, err = %v", got, err)
 			}
@@ -122,7 +122,7 @@ func TestEnsureAgentExecutionSnapshotKeyFailsClosed(t *testing.T) {
 			}
 			c := builder.Build()
 			_, err := ensureAgentExecutionSnapshotKey(context.Background(), c, c, "orka-system", opts,
-				tt.storePreexisted)
+				!tt.storePreexisted)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %v, want it to mention %q", err, tt.wantErr)
 			}

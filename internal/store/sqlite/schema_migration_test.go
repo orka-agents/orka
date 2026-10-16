@@ -20,6 +20,7 @@ func TestOpenLockedStoreMigrationLifecycle(t *testing.T) {
 		{"149", "0e567418", "", 1},
 		{"150", "1f18614c", "", 1},
 		{"162", "57583975", "", 1},
+		{"166", "abd2c040", "", 1},
 		{"rollback and retry", "0e567418", "failure", 2},
 		{"crash and retry", "0e567418", "crash", 2},
 	} {
@@ -128,7 +129,7 @@ func TestNewestHistoricalMigrationReproducesCurrentSchema(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 	steps := schemaMigrations()
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema162, steps[len(steps)-1:]))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema162, steps[len(steps)-2:]))
 	schema, err := readSchema(conn)
 	require.NoError(t, err)
 	require.NoError(t, validateSchema(schema, currentSchemaStatements()))
@@ -248,8 +249,11 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 		ddl += migration149To150
 	}
 	switch revision {
-	case "57583975":
+	case "57583975", "abd2c040":
 		ddl += migration150To162
+		if revision == "abd2c040" {
+			ddl += migration162To166
+		}
 	case "b5265055":
 		ddl += read("b5265055")
 	}
@@ -267,6 +271,7 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 		"1f18614c": "66de67c84e6cf135ea10f5aa98ebb0a65eb920f2742be8c0bd27c5d651167df8",
 		"b5265055": "c82fb870c7ed92488fbe33daf9f0693ffdee5aebff9f48db6fa115fdf99ce83b",
 		"57583975": "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7",
+		"abd2c040": "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36",
 	}
 	require.Equal(t, want[revision], schemaFingerprint(schema))
 	return path, db
