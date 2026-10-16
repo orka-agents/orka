@@ -469,6 +469,12 @@ func TestLocalAcceptsTheReleasesTheFormatResumes(t *testing.T) {
 		{copilot.Local(), "GitHub Copilot CLI 1.0.96.\nRun 'copilot update' to check for updates.\n", true},
 		{copilot.Local(), "GitHub Copilot CLI 1.0.120.", true},
 		{copilot.Local(), "GitHub Copilot CLI 1.0.90.", false},
+		// The prerelease channel publishes 1.0.99-3 before 1.0.99.
+		{copilot.Local(), "GitHub Copilot CLI 1.0.99-3.\nRun 'copilot update' to check for updates.\n", true},
+		{copilot.Local(), "GitHub Copilot CLI 1.0.96-2.", false},
+		{copilot.Local(), "GitHub Copilot CLI 1.0.93-unstable.r38480845218.gd06f261.", false},
+		{copilot.Local(), "GitHub Copilot CLI 1.0.99-.", false},
+		{codex.Local(), "codex-cli 0.160.0-alpha.1", false},
 		{opencode.Local(), "1.19.0\n", true},
 		{opencode.Local(), "1.19.1", false},
 	} {

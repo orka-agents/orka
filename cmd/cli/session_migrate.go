@@ -413,7 +413,12 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				if local.NewerReleases {
 					later = " or later"
 				}
-				return fmt.Errorf("destination requires %s %s%s (--agent-bin)", local.Binary, local.Release, later)
+				printed, _, _ := strings.Cut(strings.TrimSpace(string(version)), "\n")
+				if len(printed) > 80 {
+					printed = printed[:80]
+				}
+				return fmt.Errorf("destination requires %s %s%s (--agent-bin); %s --version printed %q",
+					local.Binary, local.Release, later, binary, printed)
 			}
 			c, target, cleanup, err := newMigrationClient(cmd)
 			if err != nil {

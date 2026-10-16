@@ -52,15 +52,24 @@ type Local struct {
 }
 
 // Accepts reports whether a local agent whose `--version` printed output can
-// resume what the Format installs.
+// resume what the Format installs. A prerelease, such as Copilot CLI's
+// 1.0.99-3, precedes its release, so only a prerelease of a later release
+// qualifies, and only for a Format that later releases resume.
 func (l Local) Accepts(output string) bool {
 	first, _, _ := strings.Cut(strings.TrimSpace(output), "\n")
 	match := l.VersionLine.FindStringSubmatch(strings.TrimSpace(first))
 	if match == nil {
 		return false
 	}
-	order, ok := compareReleases(match[1], l.Release)
-	return ok && (order == 0 || l.NewerReleases && order > 0)
+	release, prerelease, _ := strings.Cut(match[1], "-")
+	order, ok := compareReleases(release, l.Release)
+	if !ok {
+		return false
+	}
+	if prerelease != "" {
+		return l.NewerReleases && order > 0
+	}
+	return order == 0 || l.NewerReleases && order > 0
 }
 
 // parseRelease parses a MAJOR.MINOR.PATCH release.

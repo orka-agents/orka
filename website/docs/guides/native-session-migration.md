@@ -150,7 +150,8 @@ and rejects a later release's session, an event type 1.0.96 does not record, an
 event log with another schema, a second `session.start`, or an unfinished last
 event; at runtime, capture falls back to the canonical transcript in the same
 cases. Export accepts a local
-Copilot CLI 1.0.96 or later. Copilot keeps its encrypted reasoning in the
+Copilot CLI 1.0.96 or later, including a prerelease of a later release such as
+1.0.99-3. Copilot keeps its encrypted reasoning in the
 event log and does not send it again after a load. Every load appends a
 `session.resume` event and a full system message, about 40 KB, so a Session
 restored every turn grows by that much per turn.

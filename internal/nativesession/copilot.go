@@ -43,7 +43,7 @@ type copilotFormat struct{}
 // Later Copilot CLI releases load sessions that earlier ones wrote.
 func (copilotFormat) Local() Local {
 	return Local{
-		Binary: "copilot", VersionLine: regexp.MustCompile(`^GitHub Copilot CLI ([0-9]+\.[0-9]+\.[0-9]+)\.$`),
+		Binary: "copilot", VersionLine: regexp.MustCompile(`^GitHub Copilot CLI ([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?)\.$`),
 		Release: copilotVersion, NewerReleases: true, StateVar: "COPILOT_HOME", HomeState: ".copilot",
 	}
 }
