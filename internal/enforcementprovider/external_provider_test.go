@@ -45,9 +45,17 @@ func TestExternalProviderEndToEnd(t *testing.T) {
 	if got := PolicyDigest(policy); got != wantPolicyDigest {
 		t.Fatalf("policy digest mismatch: got %q want %q", got, wantPolicyDigest)
 	}
-	ctx := Context{RequestID: "req", AttemptID: "attempt", WorkloadID: "workload", ProviderID: descriptor.ProviderID, Audience: "orka", Challenge: "challenge", IdempotencyKey: "idem", PolicyBytes: policy, RequiredCapabilities: []string{"filesystem/deny-write/v1"}}
+	attemptID := os.Getenv("ORKA_PROVIDER_TEST_ATTEMPT_ID")
+	if attemptID == "" {
+		attemptID = "attempt"
+	}
+	workloadID := os.Getenv("ORKA_PROVIDER_TEST_WORKLOAD_ID")
+	if workloadID == "" {
+		workloadID = "workload"
+	}
+	ctx := Context{RequestID: "req:" + attemptID, AttemptID: attemptID, WorkloadID: workloadID, ProviderID: descriptor.ProviderID, Audience: "orka", Challenge: "challenge:" + attemptID, IdempotencyKey: "idem:" + attemptID, PolicyBytes: policy, RequiredCapabilities: []string{"filesystem/deny-write/v1"}}
 	ctx.PolicyDigest = wantPolicyDigest
-	auth := Authorization{ID: "auth", Context: ctx, IssuedAt: now.Add(-time.Second), NotBefore: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute), Epoch: descriptor.Epoch}
+	auth := Authorization{ID: "auth:" + attemptID, Context: ctx, IssuedAt: now.Add(-time.Second), NotBefore: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute), Epoch: descriptor.Epoch}
 	o := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
 	if _, err = o.Authorize(auth); err != nil {
 		t.Fatal(err)
@@ -62,6 +70,35 @@ func TestExternalProviderEndToEnd(t *testing.T) {
 	}
 	if a.Phase != PhaseProofConsumed {
 		t.Fatal(a.Phase)
+	}
+	if activeFIFO := os.Getenv("ORKA_PROVIDER_TEST_ACTIVE_FIFO"); activeFIFO != "" {
+		releaseFIFO := os.Getenv("ORKA_PROVIDER_TEST_RELEASE_FIFO")
+		if releaseFIFO == "" {
+			t.Fatal("release FIFO is required with active FIFO")
+		}
+		active, openErr := os.OpenFile(activeFIFO, os.O_WRONLY, 0)
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		if _, openErr = active.WriteString("active\n"); openErr != nil {
+			_ = active.Close()
+			t.Fatal(openErr)
+		}
+		if openErr = active.Close(); openErr != nil {
+			t.Fatal(openErr)
+		}
+		release, openErr := os.Open(releaseFIFO)
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		var signal [1]byte
+		if _, openErr = release.Read(signal[:]); openErr != nil {
+			_ = release.Close()
+			t.Fatal(openErr)
+		}
+		if openErr = release.Close(); openErr != nil {
+			t.Fatal(openErr)
+		}
 	}
 	if err = store.Close(); err != nil {
 		t.Fatal(err)
