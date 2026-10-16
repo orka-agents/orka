@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,29 @@ func TestEncodeTransportFrameBoundsBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestUnixAuthorizationRejectsImpossibleFramesBeforePersistence(t *testing.T) {
+	_, trust, authorization := newSynthetic()
+	authorization.Context.PolicyBytes = bytes.Repeat([]byte("p"), 800<<10)
+	authorization.Context.PolicyDigest = PolicyDigest(authorization.Context.PolicyBytes)
+	store := NewMemoryStore()
+	orchestrator := Orchestrator{
+		Store:    store,
+		Provider: NewUnixProvider(filepath.Join(t.TempDir(), "missing.sock"), uint32(os.Geteuid()), time.Second),
+		Trust:    trust,
+		Now:      time.Now,
+	}
+	if _, err := orchestrator.Authorize(authorization); !errors.Is(err, errTransportFrameTooLarge) {
+		t.Fatalf("Authorize error = %v, want transport frame limit", err)
+	}
+	if _, err := store.Get(authorization.Context.AttemptID); !errors.Is(err, ErrAttemptNotFound) {
+		t.Fatalf("oversized authorization was persisted: %v", err)
+	}
+}
+
 func TestUnixReconcileSendsAttemptID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("successful Unix peer authentication requires Linux")
+	}
 	directory := filepath.Join(t.TempDir(), "socket")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)

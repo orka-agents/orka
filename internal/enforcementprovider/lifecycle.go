@@ -81,7 +81,7 @@ func (s *MemoryStore) CompareAndSwap(id string, v uint64, fn func(*Attempt) erro
 		return a, errors.New("attempt not found")
 	}
 	if a.Version != v {
-		return a, errors.New("attempt version conflict")
+		return cloneAttempt(a), errors.New("attempt version conflict")
 	}
 	candidate := cloneAttempt(a)
 	if err := fn(&candidate); err != nil {
@@ -105,6 +105,10 @@ type Orchestrator struct {
 	Now      func() time.Time
 }
 
+type authorizationAdmissionValidator interface {
+	validateAuthorizationAdmission(Authorization) error
+}
+
 func (o Orchestrator) now() time.Time {
 	if o.Now != nil {
 		return o.Now()
@@ -114,6 +118,11 @@ func (o Orchestrator) now() time.Time {
 func (o Orchestrator) Authorize(a Authorization) (Attempt, error) {
 	if err := validateAuthorizationContract(a); err != nil {
 		return Attempt{}, err
+	}
+	if validator, ok := o.Provider.(authorizationAdmissionValidator); ok {
+		if err := validator.validateAuthorizationAdmission(a); err != nil {
+			return Attempt{}, err
+		}
 	}
 	if current, err := o.Store.Get(a.Context.AttemptID); err == nil {
 		if current.Phase != PhaseRequested {
@@ -209,14 +218,14 @@ func (o Orchestrator) verifyPersistedObligations(a Attempt) error {
 	if !ed25519.Verify(ed25519.PublicKey(descriptor.PublicKey), proofMessage(proof), proof.Signature) {
 		return errors.New("invalid persisted proof signature")
 	}
-	if releasePhase(a.Phase) {
+	if hasReleaseObligation(a) {
 		expectedReleaseID := stableID("release-", a.Context.AttemptID, a.Authorization.ID, a.ProofID)
 		if a.ReleaseID != expectedReleaseID {
 			return errors.New("persisted release obligation mismatch")
 		}
 	}
 	if a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned {
-		expectedCleanupID := stableID("cleanup-", a.Context.AttemptID, a.ActivationID, a.ReleaseID)
+		expectedCleanupID := cleanupID(a)
 		if a.CleanupID != expectedCleanupID {
 			return errors.New("persisted cleanup obligation mismatch")
 		}
@@ -339,11 +348,15 @@ func (o Orchestrator) ConsumeProof(attemptID, proofID string) (Attempt, error) {
 	if err != nil {
 		return a, err
 	}
-	if a.Phase == PhaseProofConsumed || a.Phase == PhaseReleased || a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned {
+	if a.Phase == PhaseProofConsumed || a.Phase == PhaseReleased ||
+		((a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned) && a.ReleaseID != "") {
 		if a.ProofID == proofID {
 			return a, nil
 		}
 		return a, errors.New("proof replay conflict")
+	}
+	if (a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned) && a.ReleaseID == "" {
+		return a, errors.New("proof expired and activation was abandoned")
 	}
 	if a.Phase != PhaseProofIssued || a.ProofID != proofID {
 		return a, errors.New("proof is not releasable")
@@ -351,41 +364,50 @@ func (o Orchestrator) ConsumeProof(attemptID, proofID string) (Attempt, error) {
 	if _, err = o.authenticateAttempt(a); err != nil {
 		return a, err
 	}
-	now := o.now()
 	return o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
-		descriptor, verifyErr := o.authenticateAttempt(*x)
-		if verifyErr != nil {
-			return verifyErr
-		}
-		if x.Phase != PhaseProofIssued || x.ProofID != proofID {
-			return errors.New("proof consumption state changed")
-		}
-		proof := x.Proof
-		context := x.Authorization.Context
-		if proof.ID != proofID || proof.AuthorizationID != x.Authorization.ID || proof.AuthorizationDigest != authorizationDigest(x.Authorization) ||
-			proof.ActivationID != x.ActivationID || proof.WorkloadID != context.WorkloadID || proof.ProviderID != context.ProviderID ||
-			proof.Audience != context.Audience || proof.Challenge != context.Challenge || proof.PolicyDigest != context.PolicyDigest ||
-			proof.KeyID != descriptor.KeyID || proof.Epoch != descriptor.Epoch || now.Before(proof.IssuedAt) || !now.Before(proof.ExpiresAt) {
-			return errors.New("proof is stale or no longer bound to authorization")
-		}
-		if x.ProofDigest != stableID("proof-", string(proofMessage(proof)), string(proof.Signature)) {
-			return errors.New("persisted proof digest mismatch")
-		}
-		if !ed25519.Verify(ed25519.PublicKey(descriptor.PublicKey), proofMessage(proof), proof.Signature) {
-			return errors.New("invalid persisted proof signature")
-		}
-		x.ReleaseID = stableID("release-", x.Context.AttemptID, x.Authorization.ID, x.ProofID)
-		x.Phase = PhaseProofConsumed
-		return nil
+		return o.consumeProofCandidate(x, proofID)
 	})
 }
+
+func (o Orchestrator) consumeProofCandidate(x *Attempt, proofID string) error {
+	descriptor, err := o.authenticateAttempt(*x)
+	if err != nil {
+		return err
+	}
+	if x.Phase != PhaseProofIssued || x.ProofID != proofID {
+		return errors.New("proof consumption state changed")
+	}
+	proof := x.Proof
+	context := x.Authorization.Context
+	now := o.now()
+	if proof.ID != proofID || proof.AuthorizationID != x.Authorization.ID || proof.AuthorizationDigest != authorizationDigest(x.Authorization) ||
+		proof.ActivationID != x.ActivationID || proof.WorkloadID != context.WorkloadID || proof.ProviderID != context.ProviderID ||
+		proof.Audience != context.Audience || proof.Challenge != context.Challenge || proof.PolicyDigest != context.PolicyDigest ||
+		proof.KeyID != descriptor.KeyID || proof.Epoch != descriptor.Epoch || now.Before(proof.IssuedAt) || !now.Before(proof.ExpiresAt) {
+		return errors.New("proof is stale or no longer bound to authorization")
+	}
+	if x.ProofDigest != stableID("proof-", string(proofMessage(proof)), string(proof.Signature)) {
+		return errors.New("persisted proof digest mismatch")
+	}
+	if !ed25519.Verify(ed25519.PublicKey(descriptor.PublicKey), proofMessage(proof), proof.Signature) {
+		return errors.New("invalid persisted proof signature")
+	}
+	x.ReleaseID = stableID("release-", x.Context.AttemptID, x.Authorization.ID, x.ProofID)
+	x.Phase = PhaseProofConsumed
+	return nil
+}
+
 func (o Orchestrator) Release(attemptID string) (Attempt, error) {
 	a, err := o.Store.Get(attemptID)
 	if err != nil {
 		return a, err
 	}
-	if a.Phase == PhaseReleased || a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned {
+	if a.Phase == PhaseReleased ||
+		((a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned) && a.ReleaseID != "") {
 		return a, nil
+	}
+	if (a.Phase == PhaseCleanupPending || a.Phase == PhaseCleaned) && a.ReleaseID == "" {
+		return a, errors.New("activation was abandoned without release")
 	}
 	if a.Phase != PhaseProofConsumed {
 		return a, errors.New("workload remains held: proof is not durably consumed")
@@ -409,6 +431,24 @@ func (o Orchestrator) Cleanup(attemptID string) (Attempt, error) {
 		switch a.Phase {
 		case PhaseCleaned:
 			return a, nil
+		case PhaseProofIssued:
+			if err = o.verifyPersistedObligations(a); err != nil {
+				return a, err
+			}
+			a, err = o.Store.CompareAndSwap(attemptID, a.Version, func(x *Attempt) error {
+				if x.Phase != PhaseProofIssued || x.ProofID != a.ProofID {
+					return errors.New("cleanup state changed")
+				}
+				if o.now().Before(x.Proof.ExpiresAt) {
+					return errors.New("unconsumed proof has not expired")
+				}
+				x.CleanupID = cleanupID(*x)
+				x.Phase = PhaseCleanupPending
+				return nil
+			})
+			if err != nil {
+				return a, err
+			}
 		case PhaseReleased:
 			if err = o.verifyPersistedObligations(a); err != nil {
 				return a, err
@@ -417,7 +457,7 @@ func (o Orchestrator) Cleanup(attemptID string) (Attempt, error) {
 				if x.Phase != PhaseReleased {
 					return errors.New("cleanup state changed")
 				}
-				x.CleanupID = stableID("cleanup-", x.Context.AttemptID, x.ActivationID, x.ReleaseID)
+				x.CleanupID = cleanupID(*x)
 				x.Phase = PhaseCleanupPending
 				return nil
 			})
@@ -458,17 +498,17 @@ func (o Orchestrator) Recover(attempts []Attempt) map[string]error {
 		}
 		switch current.Phase {
 		case PhaseAuthorized, PhaseProvisioning, PhaseActivatedAndReadBack:
-			_, err = o.Activate(id)
+			current, err = o.Activate(id)
+			if err == nil && current.Phase == PhaseProofIssued {
+				err = o.verifyHeldAttemptActive(current)
+			}
 		case PhaseProofConsumed:
 			_, err = o.Release(id)
 		case PhaseProofIssued:
-			if err = o.verifyPersistedObligations(current); err != nil {
-				break
-			}
-			var status Status
-			status, err = o.Provider.GetStatus(current.ActivationID)
-			if err == nil && status.State != "active" {
-				err = fmt.Errorf("provider state %q for held attempt", status.State)
+			if !o.now().Before(current.Proof.ExpiresAt) {
+				_, err = o.Cleanup(id)
+			} else {
+				err = o.verifyHeldAttemptActive(current)
 			}
 		case PhaseReleased, PhaseCleanupPending:
 			_, err = o.Cleanup(id)
@@ -484,4 +524,22 @@ func (o Orchestrator) Recover(attempts []Attempt) map[string]error {
 		results[id] = err
 	}
 	return results
+}
+
+func cleanupID(attempt Attempt) string {
+	return stableID("cleanup-", attempt.Context.AttemptID, attempt.ActivationID, attempt.ProofID, attempt.ReleaseID)
+}
+
+func (o Orchestrator) verifyHeldAttemptActive(attempt Attempt) error {
+	if err := o.verifyPersistedObligations(attempt); err != nil {
+		return err
+	}
+	status, err := o.Provider.GetStatus(attempt.ActivationID)
+	if err != nil {
+		return err
+	}
+	if status.State != "active" {
+		return fmt.Errorf("provider state %q for held attempt", status.State)
+	}
+	return nil
 }

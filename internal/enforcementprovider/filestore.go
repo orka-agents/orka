@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	fileStoreVersion = 5
+	fileStoreVersion = 6
 	maxStoreBytes    = 16 << 20
 )
 
@@ -119,7 +119,7 @@ func NewFileStore(path string) (*FileStore, error) {
 }
 
 func strictDecodeStore(data []byte, out *fileStoreDocument) error {
-	if err := strictDecodeJSON(data, out); err != nil {
+	if err := strictDecodeJSONLimit(data, out, maxStoreBytes, errors.New("enforcement store exceeds size limit")); err != nil {
 		return fmt.Errorf("enforcement store: %w", err)
 	}
 	return nil
@@ -128,8 +128,12 @@ func strictDecodeStore(data []byte, out *fileStoreDocument) error {
 // strictDecodeJSON applies the same duplicate-key, nesting, unknown-field, and
 // trailing-data contract to persisted state and every provider result object.
 func strictDecodeJSON(data []byte, out any) error {
-	if len(data) > maxTransportFrame {
-		return errTransportFrameTooLarge
+	return strictDecodeJSONLimit(data, out, maxTransportFrame, errTransportFrameTooLarge)
+}
+
+func strictDecodeJSONLimit(data []byte, out any, limit int, limitError error) error {
+	if len(data) > limit {
+		return limitError
 	}
 	if err := rejectDuplicateJSONKeys(json.NewDecoder(bytes.NewReader(data))); err != nil {
 		return err
@@ -380,6 +384,10 @@ func (s *FileStore) checkOpen() error {
 	}
 	if err := verifyLockedPath(s.lockPath, s.lock); err != nil {
 		s.fatalErr = fmt.Errorf("enforcement store lock ownership lost; close and reopen: %w", err)
+		return s.fatalErr
+	}
+	if err := s.rejectLinkedCurrentState(); err != nil {
+		s.fatalErr = fmt.Errorf("enforcement store state ownership lost; close and reopen: %w", err)
 		return s.fatalErr
 	}
 	return nil

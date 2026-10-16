@@ -7,14 +7,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
 const (
-	maxTransportFrame = 1 << 20
-	activationIDField = "activationId"
+	maxTransportFrame     = 1 << 20
+	maxProviderResourceID = 4 << 10
+	activationIDField     = "activationId"
+	authorizationField    = "authorization"
 )
 
 var errTransportFrameTooLarge = errors.New("provider frame exceeds limit")
@@ -77,6 +81,30 @@ func encodeTransportFrame(value any) ([]byte, error) {
 		return nil, err
 	}
 	return buffer.Bytes(), nil
+}
+
+func (p *unixProvider) validateAuthorizationAdmission(a Authorization) error {
+	authorization := wireAuthorization(a)
+	requests := []requestFrame{
+		{Version: transportFrameVersion, ID: "1", Operation: "Prepare", Parameters: map[string]any{authorizationField: authorization}},
+		{Version: transportFrameVersion, ID: "1", Operation: "Activate", Parameters: map[string]any{authorizationField: authorization, "preparationId": strings.Repeat("x", maxProviderResourceID)}},
+	}
+	for _, request := range requests {
+		if _, err := encodeTransportFrame(request); err != nil {
+			return fmt.Errorf("%s authorization transport admission: %w", request.Operation, err)
+		}
+	}
+	return nil
+}
+
+func validateProviderResourceID(name, value string) error {
+	if value == "" {
+		return fmt.Errorf("provider returned empty %s", name)
+	}
+	if len(value) > maxProviderResourceID {
+		return fmt.Errorf("provider %s exceeds size limit", name)
+	}
+	return nil
 }
 
 func (p *unixProvider) call(operation string, parameters, result any) error {
@@ -250,32 +278,65 @@ type emptyResultWire struct{}
 func (p *unixProvider) Prepare(r PrepareRequest) (string, error) {
 	var x preparationResultWire
 	err := p.call("Prepare", map[string]any{"authorization": wireAuthorization(r.Authorization)}, &x)
+	if err == nil {
+		err = validateProviderResourceID("preparation ID", x.PreparationID)
+	}
 	return x.PreparationID, err
 }
 func (p *unixProvider) Activate(r ActivateRequest) (string, error) {
+	if err := validateProviderResourceID("preparation ID", r.PreparationID); err != nil {
+		return "", err
+	}
 	var x activationResultWire
 	err := p.call("Activate", map[string]any{"authorization": wireAuthorization(r.Authorization), "preparationId": r.PreparationID}, &x)
+	if err == nil {
+		err = validateProviderResourceID("activation ID", x.Proof.ActivationID)
+	}
 	return x.Proof.ActivationID, err
 }
 func (p *unixProvider) ReadBack(id string) (ReadBack, error) {
+	if err := validateProviderResourceID("activation ID", id); err != nil {
+		return ReadBack{}, err
+	}
 	var x readBackResultWire
 	err := p.call("ReadBack", map[string]any{activationIDField: id}, &x)
 	return ReadBack{x.ActivationID, x.TargetID, x.PolicyDigest, x.ConfigurationDigest}, err
 }
 func (p *unixProvider) GetProof(id string) (Proof, error) {
+	if err := validateProviderResourceID("activation ID", id); err != nil {
+		return Proof{}, err
+	}
 	var w proofResultWire
 	err := p.call("GetProof", map[string]any{activationIDField: id}, &w)
 	if err != nil {
+		return Proof{}, err
+	}
+	if err = validateProviderResourceID("proof ID", w.ID); err != nil {
+		return Proof{}, err
+	}
+	if err = validateProviderResourceID("proof activation ID", w.ActivationID); err != nil {
 		return Proof{}, err
 	}
 	sig, err := base64.StdEncoding.DecodeString(w.Signature)
 	return Proof{ID: w.ID, AuthorizationID: w.AuthorizationID, ActivationID: w.ActivationID, WorkloadID: w.WorkloadID, ProviderID: w.ProviderID, Audience: w.Audience, Challenge: w.Challenge, PolicyDigest: w.PolicyDigest, ReadBackDigest: w.ReadBackDigest, AuthorizationDigest: w.AuthorizationDigest, KeyID: w.KeyID, Epoch: w.Epoch, IssuedAt: w.IssuedAt, ExpiresAt: w.ExpiresAt, Signature: sig}, err
 }
 func (p *unixProvider) Release(r ReleaseRequest) error {
+	for name, value := range map[string]string{
+		"activation ID": r.ActivationID,
+		"proof ID":      r.ProofID,
+		"release ID":    r.ReleaseID,
+	} {
+		if err := validateProviderResourceID(name, value); err != nil {
+			return err
+		}
+	}
 	var x emptyResultWire
 	return p.call("Release", map[string]any{activationIDField: r.ActivationID, "authorizationId": r.AuthorizationID, "proofId": r.ProofID, "releaseId": r.ReleaseID}, &x)
 }
 func (p *unixProvider) GetStatus(id string) (Status, error) {
+	if err := validateProviderResourceID("activation ID", id); err != nil {
+		return Status{}, err
+	}
 	var x statusResultWire
 	err := p.call("GetStatus", map[string]any{activationIDField: id}, &x)
 	return Status{State: x.State}, err
@@ -286,6 +347,12 @@ func (p *unixProvider) Reconcile(r ReconcileRequest) (Status, error) {
 	return Status{State: x.State}, err
 }
 func (p *unixProvider) Cleanup(r CleanupRequest) error {
+	if err := validateProviderResourceID("activation ID", r.ActivationID); err != nil {
+		return err
+	}
+	if err := validateProviderResourceID("cleanup ID", r.CleanupID); err != nil {
+		return err
+	}
 	var x emptyResultWire
 	return p.call("Cleanup", map[string]any{"attemptId": r.AttemptID, activationIDField: r.ActivationID, "cleanupId": r.CleanupID}, &x)
 }

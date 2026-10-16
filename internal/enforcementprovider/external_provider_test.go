@@ -7,6 +7,68 @@ import (
 	"time"
 )
 
+func waitForExternalRelease(t *testing.T) {
+	t.Helper()
+	activeFIFO := os.Getenv("ORKA_PROVIDER_TEST_ACTIVE_FIFO")
+	if activeFIFO == "" {
+		return
+	}
+	releaseFIFO := os.Getenv("ORKA_PROVIDER_TEST_RELEASE_FIFO")
+	if releaseFIFO == "" {
+		t.Fatal("release FIFO is required with active FIFO")
+	}
+	active, err := os.OpenFile(activeFIFO, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = active.WriteString("active\n"); err != nil {
+		_ = active.Close()
+		t.Fatal(err)
+	}
+	if err = active.Close(); err != nil {
+		t.Fatal(err)
+	}
+	release, err := os.Open(releaseFIFO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var signal [1]byte
+	if _, err = release.Read(signal[:]); err != nil {
+		_ = release.Close()
+		t.Fatal(err)
+	}
+	if err = release.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func restartExternalAttempt(t *testing.T, store *FileStore, storePath string, provider Provider, trust TrustProfile, attempt Attempt, expected Phase) (*FileStore, Attempt) {
+	t.Helper()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restartedStore, err := NewFileStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := Orchestrator{Store: restartedStore, Provider: provider, Trust: trust, Now: time.Now}
+	results := restarted.Recover([]Attempt{attempt})
+	if err = results[attempt.Context.AttemptID]; err != nil {
+		_ = restartedStore.Close()
+		t.Fatal(err)
+	}
+	attempt, err = restartedStore.Get(attempt.Context.AttemptID)
+	if err != nil {
+		_ = restartedStore.Close()
+		t.Fatal(err)
+	}
+	if attempt.Phase != expected {
+		_ = restartedStore.Close()
+		t.Fatalf("phase = %s, want %s", attempt.Phase, expected)
+	}
+	return restartedStore, attempt
+}
+
 // Installed temporarily into Orka's package by the handoff verification script.
 // It exercises Orka's actual Unix provider client against a configured server.
 func TestExternalProviderEndToEnd(t *testing.T) {
@@ -71,71 +133,10 @@ func TestExternalProviderEndToEnd(t *testing.T) {
 	if a.Phase != PhaseProofConsumed {
 		t.Fatal(a.Phase)
 	}
-	if activeFIFO := os.Getenv("ORKA_PROVIDER_TEST_ACTIVE_FIFO"); activeFIFO != "" {
-		releaseFIFO := os.Getenv("ORKA_PROVIDER_TEST_RELEASE_FIFO")
-		if releaseFIFO == "" {
-			t.Fatal("release FIFO is required with active FIFO")
-		}
-		active, openErr := os.OpenFile(activeFIFO, os.O_WRONLY, 0)
-		if openErr != nil {
-			t.Fatal(openErr)
-		}
-		if _, openErr = active.WriteString("active\n"); openErr != nil {
-			_ = active.Close()
-			t.Fatal(openErr)
-		}
-		if openErr = active.Close(); openErr != nil {
-			t.Fatal(openErr)
-		}
-		release, openErr := os.Open(releaseFIFO)
-		if openErr != nil {
-			t.Fatal(openErr)
-		}
-		var signal [1]byte
-		if _, openErr = release.Read(signal[:]); openErr != nil {
-			_ = release.Close()
-			t.Fatal(openErr)
-		}
-		if openErr = release.Close(); openErr != nil {
-			t.Fatal(openErr)
-		}
-	}
-	if err = store.Close(); err != nil {
+	waitForExternalRelease(t)
+	restartedStore, a := restartExternalAttempt(t, store, storePath, provider, trust, a, PhaseReleased)
+	cleanupStore, _ := restartExternalAttempt(t, restartedStore, storePath, provider, trust, a, PhaseCleaned)
+	if err = cleanupStore.Close(); err != nil {
 		t.Fatal(err)
-	}
-	restartedStore, err := NewFileStore(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restarted := Orchestrator{Store: restartedStore, Provider: provider, Trust: trust, Now: time.Now}
-	results := restarted.Recover([]Attempt{a})
-	if err = results[ctx.AttemptID]; err != nil {
-		t.Fatal(err)
-	}
-	a, err = restartedStore.Get(ctx.AttemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.Phase != PhaseReleased {
-		t.Fatal(a.Phase)
-	}
-	if err = restartedStore.Close(); err != nil {
-		t.Fatal(err)
-	}
-	cleanupStore, err := NewFileStore(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleanup := Orchestrator{Store: cleanupStore, Provider: provider, Trust: trust, Now: time.Now}
-	results = cleanup.Recover([]Attempt{a})
-	if err = results[ctx.AttemptID]; err != nil {
-		t.Fatal(err)
-	}
-	a, err = cleanupStore.Get(ctx.AttemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.Phase != PhaseCleaned {
-		t.Fatal(a.Phase)
 	}
 }

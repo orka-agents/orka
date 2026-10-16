@@ -347,6 +347,19 @@ func (s *failOnceStore) CompareAndSwap(id string, version uint64, mutate func(*A
 	return s.Store.CompareAndSwap(id, version, mutate)
 }
 
+type advanceBeforeCASStore struct {
+	Store
+	advance func()
+	armed   bool
+}
+
+func (s *advanceBeforeCASStore) CompareAndSwap(id string, version uint64, mutate func(*Attempt) error) (Attempt, error) {
+	if s.armed {
+		s.advance()
+	}
+	return s.Store.CompareAndSwap(id, version, mutate)
+}
+
 func TestActivationRetriesProviderSuccessAfterPersistenceFailure(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -586,6 +599,97 @@ func TestProofConsumptionHonorsOperatorRevocation(t *testing.T) {
 				t.Fatal("consumed proof after admitted descriptor revocation")
 			}
 		})
+	}
+}
+
+func TestProofConsumptionSamplesClockAfterStoreLockAcquisition(t *testing.T) {
+	provider, trust, authorization := newSynthetic()
+	now := time.Now().UTC()
+	provider.p.IssuedAt = now.Add(-time.Second)
+	provider.p.ExpiresAt = now.Add(time.Second)
+	provider.p.AuthorizationDigest = authorizationDigest(authorization)
+	SignProof(&provider.p, provider.priv)
+	clock := now
+	base := NewMemoryStore()
+	store := &advanceBeforeCASStore{Store: base, advance: func() { clock = now.Add(2 * time.Second) }}
+	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: func() time.Time { return clock }}
+	if _, err := orchestrator.Authorize(authorization); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := orchestrator.Activate(authorization.Context.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.armed = true
+	if _, err = orchestrator.ConsumeProof(authorization.Context.AttemptID, attempt.ProofID); err == nil {
+		t.Fatal("consumed proof using time sampled before CAS lock acquisition")
+	}
+}
+
+func TestRecoveryAbandonsExpiredUnconsumedProofWithoutRelease(t *testing.T) {
+	provider, trust, authorization := newSynthetic()
+	now := time.Now().UTC()
+	provider.p.IssuedAt = now.Add(-time.Second)
+	provider.p.ExpiresAt = now.Add(time.Second)
+	provider.p.AuthorizationDigest = authorizationDigest(authorization)
+	SignProof(&provider.p, provider.priv)
+	clock := now
+	store := NewMemoryStore()
+	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: func() time.Time { return clock }}
+	if _, err := orchestrator.Authorize(authorization); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := orchestrator.Activate(authorization.Context.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = now.Add(2 * time.Second)
+	result := orchestrator.Recover([]Attempt{attempt})
+	if result[authorization.Context.AttemptID] != nil {
+		t.Fatal(result)
+	}
+	cleaned, err := store.Get(authorization.Context.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned.Phase != PhaseCleaned || cleaned.ReleaseID != "" || cleaned.CleanupID == "" {
+		t.Fatalf("expired proof was not safely abandoned: %#v", cleaned)
+	}
+	if len(provider.releaseRequests) != 0 || len(provider.cleanupRequests) != 1 {
+		t.Fatalf("release=%d cleanup=%d", len(provider.releaseRequests), len(provider.cleanupRequests))
+	}
+	if _, err = orchestrator.ConsumeProof(authorization.Context.AttemptID, attempt.ProofID); err == nil {
+		t.Fatal("abandoned proof later reported successful consumption")
+	}
+	if _, err = orchestrator.Release(authorization.Context.AttemptID); err == nil {
+		t.Fatal("abandoned activation later reported successful release")
+	}
+	if len(provider.releaseRequests) != 0 {
+		t.Fatal("abandoned activation called provider release")
+	}
+}
+
+func TestRecoveryChecksProviderStatusAfterResumedActivation(t *testing.T) {
+	provider, trust, authorization := newSynthetic()
+	store := &failOnceStore{
+		Store: NewMemoryStore(),
+		fail:  func(attempt Attempt) bool { return attempt.Phase == PhaseProofIssued },
+	}
+	orchestrator := Orchestrator{Store: store, Provider: provider, Trust: trust, Now: time.Now}
+	if _, err := orchestrator.Authorize(authorization); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orchestrator.Activate(authorization.Context.AttemptID); err == nil {
+		t.Fatal("expected proof persistence failure")
+	}
+	current, err := store.Get(authorization.Context.AttemptID)
+	if err != nil || current.Phase != PhaseActivatedAndReadBack {
+		t.Fatalf("attempt = %#v, err = %v", current, err)
+	}
+	provider.statusState = "released"
+	result := orchestrator.Recover([]Attempt{current})
+	if result[authorization.Context.AttemptID] == nil {
+		t.Fatal("recovery accepted non-active provider after resumed activation")
 	}
 }
 

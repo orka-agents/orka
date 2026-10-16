@@ -81,6 +81,23 @@ func TestStoreSnapshotsAndFailedCASDoNotAlias(t *testing.T) {
 			if after.Context.PolicyBytes[0] != original.Context.PolicyBytes[0] {
 				t.Fatal("failed CAS leaked mutation")
 			}
+			conflict, err := store.CompareAndSwap(authorization.Context.AttemptID, original.Version+1, func(*Attempt) error {
+				t.Fatal("version-conflict callback ran")
+				return nil
+			})
+			if err == nil {
+				t.Fatal("version conflict unexpectedly succeeded")
+			}
+			conflict.Context.PolicyBytes[0] ^= 1
+			conflict.Descriptor.PublicKey[0] ^= 1
+			afterConflict, getErr := store.Get(authorization.Context.AttemptID)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if afterConflict.Context.PolicyBytes[0] == conflict.Context.PolicyBytes[0] ||
+				afterConflict.Descriptor.PublicKey[0] == conflict.Descriptor.PublicKey[0] {
+				t.Fatal("version-conflict result exposed mutable store aliases")
+			}
 		})
 	}
 }
@@ -122,16 +139,16 @@ func TestFileStoreExclusiveOwnershipCloseAndAliases(t *testing.T) {
 func TestFileStoreRejectsMalformedAndUnknownState(t *testing.T) {
 	for name, makeData := range map[string]func(string) string{
 		"trailing": func(path string) string {
-			return fmt.Sprintf(`{"version":5,"storePath":%q,"attempts":{}} {}`, path)
+			return fmt.Sprintf(`{"version":6,"storePath":%q,"attempts":{}} {}`, path)
 		},
 		"unknown field": func(path string) string {
-			return fmt.Sprintf(`{"version":5,"storePath":%q,"attempts":{},"other":true}`, path)
+			return fmt.Sprintf(`{"version":6,"storePath":%q,"attempts":{},"other":true}`, path)
 		},
 		"duplicate field": func(path string) string {
-			return fmt.Sprintf(`{"version":5,"version":5,"storePath":%q,"attempts":{}}`, path)
+			return fmt.Sprintf(`{"version":6,"version":6,"storePath":%q,"attempts":{}}`, path)
 		},
 		"unknown phase": func(path string) string {
-			return fmt.Sprintf(`{"version":5,"storePath":%q,"attempts":{"a":{"Context":{"AttemptID":"a"},"Phase":"Future","Version":1}}}`, path)
+			return fmt.Sprintf(`{"version":6,"storePath":%q,"attempts":{"a":{"Context":{"AttemptID":"a"},"Phase":"Future","Version":1}}}`, path)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -143,6 +160,68 @@ func TestFileStoreRejectsMalformedAndUnknownState(t *testing.T) {
 				t.Fatal("accepted malformed state")
 			}
 		})
+	}
+}
+
+func TestFileStoreReopensPersistedDocumentAboveTransportLimit(t *testing.T) {
+	path := secureStorePath(t, "state.json")
+	store, err := NewFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, _, authorization := newSynthetic()
+	authorization.Context.PolicyBytes = bytes.Repeat([]byte("p"), 400<<10)
+	authorization.Context.PolicyDigest = PolicyDigest(authorization.Context.PolicyBytes)
+	attempt, err := store.Create(authorization.Context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CompareAndSwap(authorization.Context.AttemptID, attempt.Version, func(candidate *Attempt) error {
+		candidate.Authorization = cloneAuthorization(authorization)
+		candidate.Descriptor = cloneDescriptor(provider.d)
+		candidate.Phase = PhaseAuthorized
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() <= maxTransportFrame {
+		t.Fatalf("test store size = %d, want above transport limit %d", info.Size(), maxTransportFrame)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewFileStore(path)
+	if err != nil {
+		t.Fatalf("reopen store above transport limit: %v", err)
+	}
+	if err = reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFileStoreRejectsReadsAfterStatePathDisappears(t *testing.T) {
+	path := secureStorePath(t, "state.json")
+	store, err := NewFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	_, _, authorization := newSynthetic()
+	if _, err = store.Create(authorization.Context); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Get(authorization.Context.AttemptID); err == nil {
+		t.Fatal("Get exposed cached attempt after state path disappeared")
+	}
+	if attempts, listErr := store.List(); listErr == nil || attempts != nil {
+		t.Fatalf("List exposed cached attempts after state path disappeared: %#v, %v", attempts, listErr)
 	}
 }
 

@@ -41,13 +41,21 @@ func validateAttempt(key string, attempt Attempt) error {
 	if (attempt.Phase == PhaseCleanupPending || attempt.Phase == PhaseCleaned) && attempt.CleanupID == "" {
 		return fmt.Errorf("attempt %q has incomplete cleanup obligation", key)
 	}
+	if (attempt.Phase == PhaseCleanupPending || attempt.Phase == PhaseCleaned) &&
+		attempt.ReleaseID == "" && attempt.ProofID == "" {
+		return fmt.Errorf("attempt %q has incomplete abandonment obligation", key)
+	}
 	return nil
 }
 func proofPhase(phase Phase) bool {
 	return phase == PhaseProofIssued || phase == PhaseProofConsumed || phase == PhaseReleased || phase == PhaseCleanupPending || phase == PhaseCleaned
 }
 func releasePhase(phase Phase) bool {
-	return phase == PhaseProofConsumed || phase == PhaseReleased || phase == PhaseCleanupPending || phase == PhaseCleaned
+	return phase == PhaseProofConsumed || phase == PhaseReleased
+}
+func hasReleaseObligation(attempt Attempt) bool {
+	return releasePhase(attempt.Phase) ||
+		((attempt.Phase == PhaseCleanupPending || attempt.Phase == PhaseCleaned) && attempt.ReleaseID != "")
 }
 func (owners identityOwners) add(key string, attempt Attempt) error {
 	if attempt.Authorization.ID != "" {
@@ -60,7 +68,7 @@ func (owners identityOwners) add(key string, attempt Attempt) error {
 			return err
 		}
 	}
-	if releasePhase(attempt.Phase) {
+	if hasReleaseObligation(attempt) {
 		if err := claimIdentity(owners.releases, attempt.ReleaseID, key, "release"); err != nil {
 			return err
 		}

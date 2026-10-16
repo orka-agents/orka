@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestRecoveryRejectsEveryTamperedCleanupObligationWithoutProviderSideEffects
 		t.Run(name, func(t *testing.T) {
 			provider, store, orchestrator, attempt := consumedFixture(t)
 			attempt.Phase = PhaseCleanupPending
-			attempt.CleanupID = stableID("cleanup-", attempt.Context.AttemptID, attempt.ActivationID, attempt.ReleaseID)
+			attempt.CleanupID = cleanupID(attempt)
 			tamper(&attempt)
 			replaceMemoryAttempt(store, attempt)
 			result := orchestrator.Recover([]Attempt{attempt})
@@ -107,6 +108,9 @@ func TestProtocolV2RejectsV1NegotiationAndFrameDowngrade(t *testing.T) {
 }
 
 func TestUnixTransportRejectsV1ResponseFrame(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("successful Unix peer authentication requires Linux")
+	}
 	directory := filepath.Join(t.TempDir(), "socket")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
