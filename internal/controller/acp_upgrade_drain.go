@@ -268,6 +268,12 @@ func (o *KubernetesACPUpgradeDrainBarrierObserver) ObserveACPUpgradeDrainBarrier
 		return snapshot, fmt.Errorf("list ExternalEffects for upgrade drain: %w", err)
 	}
 	for i := range effects.Items {
+		if emptyRuntimePoolBootEvidenceReservation(&effects.Items[i]) {
+			// Boot evidence only records a local observation. An interrupted
+			// controller can leave its reservation empty; the writer resumes it,
+			// and it never stands for in-flight external work.
+			continue
+		}
 		switch store.ExternalEffectState(effects.Items[i].Status.State) {
 		case store.ExternalEffectSucceeded, store.ExternalEffectFailed, store.ExternalEffectOutcomeUnknown:
 		default:

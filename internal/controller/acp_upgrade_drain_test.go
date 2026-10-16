@@ -719,6 +719,13 @@ func TestKubernetesACPUpgradeDrainBarrierObserver(t *testing.T) {
 		&corev1alpha1.Publication{ObjectMeta: metav1.ObjectMeta{Name: "foreign-preparing", Namespace: "tenant-b"}, Status: corev1alpha1.PublicationStatus{State: corev1alpha1.PublicationControlState(store.PublicationPreparing)}},
 		&corev1alpha1.ExternalEffect{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "tenant-a"}, Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectPending)}},
 		&corev1alpha1.ExternalEffect{ObjectMeta: metav1.ObjectMeta{Name: "succeeded", Namespace: "tenant-a"}, Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectSucceeded)}},
+		// Boot evidence reservations an interrupted controller left empty are
+		// local proofs, not in-flight external work.
+		&corev1alpha1.ExternalEffect{ObjectMeta: metav1.ObjectMeta{Name: "empty-boot-preparation", Namespace: "tenant-a"},
+			Spec:   corev1alpha1.ExternalEffectSpec{Kind: runtimePoolBootPreparationKind},
+			Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectPending)}},
+		&corev1alpha1.ExternalEffect{ObjectMeta: metav1.ObjectMeta{Name: "empty-boot-retirement", Namespace: "tenant-a"},
+			Spec: corev1alpha1.ExternalEffectSpec{Kind: runtimePoolBootRetirementKind}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	observer := &KubernetesACPUpgradeDrainBarrierObserver{
