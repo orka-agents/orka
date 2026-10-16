@@ -11,10 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf16"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -289,12 +292,19 @@ func findClaudeSession(projects, providerSessionID string) (string, error) {
 	}
 }
 
+// claudeNormalizesPaths reports whether Claude Code composes a working
+// directory to NFC before naming its folder, as it does on macOS.
+var claudeNormalizesPaths = runtime.GOOS == "darwin"
+
 // claudeProjectFolder names the project folder Claude Code uses for a
 // working directory: every UTF-16 code unit other than an ASCII letter or
 // digit becomes a hyphen. A longer name is cut and gets the base-36 absolute
 // value of the directory's 32-bit JavaScript string hash, which the pinned
 // adapter requires to list the folder's sessions.
 func claudeProjectFolder(workspace string) string {
+	if claudeNormalizesPaths {
+		workspace = norm.NFC.String(workspace)
+	}
 	units := utf16.Encode([]rune(workspace))
 	folder := make([]byte, len(units))
 	var hash int32

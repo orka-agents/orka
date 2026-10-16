@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -98,6 +99,20 @@ func TestClaudeProjectFolderMatchesClaudeCode(t *testing.T) {
 			t.Errorf("claudeProjectFolder(%q) = %q, want %q", workspace, got, folder)
 		}
 	}
+}
+
+// On macOS Claude Code 2.1.293 named the folder of a decomposed (NFD)
+// directory "café-project" from its composed form, so an accented letter is
+// one hyphen there and two elsewhere.
+func TestClaudeProjectFolderComposesMacOSPaths(t *testing.T) {
+	decomposed := "/Users/dev/cafe\u0301-project"
+	for normalizes, folder := range map[bool]string{true: "-Users-dev-caf--project", false: "-Users-dev-cafe--project"} {
+		claudeNormalizesPaths = normalizes
+		if got := claudeProjectFolder(decomposed); got != folder {
+			t.Errorf("normalizing=%v: claudeProjectFolder(%q) = %q, want %q", normalizes, decomposed, got, folder)
+		}
+	}
+	claudeNormalizesPaths = runtime.GOOS == "darwin"
 }
 
 func TestClaudeVersionMatchesPinnedRuntime(t *testing.T) {
