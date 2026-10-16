@@ -127,7 +127,7 @@ function agentStatus(key: AgentKey): NonNullable<Agent['status']> {
 
 export function demoAgent(name: string, spec: AgentSpec, createdAt: string, status?: Agent['status']): Agent {
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'Agent',
     metadata: {
       name,

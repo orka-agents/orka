@@ -768,11 +768,11 @@ function toTask(rec: TaskRecord, now = Date.now()): Task {
   }
 
   const ownerReferences = rec.ownerUID && rec.parent
-    ? [{ apiVersion: 'orka.ai/v1alpha1', kind: 'Task', name: rec.parent, uid: rec.ownerUID, controller: true }]
+    ? [{ apiVersion: 'core.orka.ai/v1alpha1', kind: 'Task', name: rec.parent, uid: rec.ownerUID, controller: true }]
     : undefined
 
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'Task',
     metadata: {
       name: rec.name,

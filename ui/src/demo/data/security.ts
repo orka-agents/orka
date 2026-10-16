@@ -38,7 +38,7 @@ function repositoryScan(
   status: Partial<NonNullable<RepositoryScan['status']>> = {},
 ): RepositoryScan {
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'RepositoryScan',
     metadata: { name, namespace: ns, uid: uid(`repositoryscan:${name}`), creationTimestamp: ago(createdAgo) },
     spec: {

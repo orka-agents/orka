@@ -25,7 +25,7 @@ export function taskManifest(name: string): Manifest {
   const seed = TASKS.find((task) => task.name === name)
   if (!seed?.agent) throw new Error(`demo tour: no sample agent Task named ${name}`)
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'Task',
     metadata: { name },
     spec: {
@@ -40,7 +40,7 @@ export function agentManifest(name: string): Manifest {
   const { spec } = named(seedAgents(), 'Agent', name)
   const coordination = spec.coordination
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'Agent',
     metadata: { name },
     spec: {
@@ -57,7 +57,7 @@ export function monitorManifest(name: string): Manifest {
   const { spec } = named(monitors, 'RepositoryMonitor', name)
   const labels = spec.triggers?.github?.labels
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'RepositoryMonitor',
     metadata: { name },
     spec: {
