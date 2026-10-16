@@ -182,6 +182,7 @@ func TestCustomToolNoEffectError(t *testing.T) {
 		{name: "stopped before sending", err: errors.New("resolve outbound access policy: connection revoked"), wantSummary: "The tool stopped before sending its request."},
 		{name: "refused authorization", err: attempted(status(403)), wantSummary: "The tool endpoint refused the request (HTTP 403)."},
 		{name: "refused authentication", err: attempted(status(401)), wantSummary: "The tool endpoint refused the request (HTTP 401)."},
+		{name: "refused after a redirect", err: attempted(workerexecutor.ToolHTTPStatusError{StatusCode: 403, Redirected: true, Err: errors.New("tool returned HTTP 403")})},
 		{name: "request timeout", err: attempted(status(408))},
 		{name: "server error", err: attempted(status(502))},
 		{name: "transport after sending", err: attempted(errors.New("connection reset"))},
@@ -203,5 +204,25 @@ func TestCustomToolNoEffectError(t *testing.T) {
 	}
 	if customToolNoEffectError(nil) != nil {
 		t.Fatal("customToolNoEffectError(nil) is not nil")
+	}
+}
+
+func TestAcpApprovalFailureSummaryRedactsBeforeBounding(t *testing.T) {
+	// Cut at the bound first, the URL would lose its "@" and its credential
+	// would no longer be recognized; redacting the token first also moves the
+	// URL back inside the bound.
+	const exposed = "https://user:pa"
+	padding := strings.Repeat("x", acpPromptFailureMessageLimit-len("token=")-len(approvalFailureTestToken)-2-len(exposed))
+	summary := "token=" + approvalFailureTestToken + " " + padding + " https://user:password-value@example.com/hook"
+	if cut := summary[:acpPromptFailureMessageLimit]; !strings.HasSuffix(cut, exposed) {
+		t.Fatalf("fixture cut = %q, want it to end inside the URL credential", cut[len(cut)-20:])
+	}
+	got := acpApprovalFailureSummary(summary)
+	if strings.Contains(got, "user:") || strings.Contains(got, approvalFailureTestToken) || len(got) > acpPromptFailureMessageLimit ||
+		!strings.Contains(got, "[REDACTED]@example.com") {
+		t.Fatalf("acpApprovalFailureSummary() = %q, want credentials redacted before the bound", got)
+	}
+	if acpApprovalFailureSummary(" \x00 ") != "The tool failed without any effect." {
+		t.Fatal("an empty summary has no fallback")
 	}
 }

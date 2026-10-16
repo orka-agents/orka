@@ -529,8 +529,9 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 // customToolNoEffectError marks a custom Tool failure that provably had no
 // effect: the executor marks every send of the tool request, so an error
 // without that mark stopped before the request left, and a 4xx other than
-// 408 is a refusal. Upstream bodies stay out of the summary. Failures the
-// executor delivers as tool results and all other errors are unchanged.
+// 408 answering the original request (not a followed redirect) is a refusal.
+// Upstream bodies stay out of the summary. Failures the executor delivers as
+// tool results and all other errors are unchanged.
 func customToolNoEffectError(err error) error {
 	if err == nil {
 		return nil
@@ -541,7 +542,7 @@ func customToolNoEffectError(err error) error {
 	if !workerexecutor.ToolRequestWasAttempted(err) {
 		return &tools.NoEffectError{Summary: "The tool stopped before sending its request.", Err: err}
 	}
-	if status, ok := errors.AsType[workerexecutor.ToolHTTPStatusError](err); ok &&
+	if status, ok := errors.AsType[workerexecutor.ToolHTTPStatusError](err); ok && !status.Redirected &&
 		status.StatusCode >= 400 && status.StatusCode < 500 && status.StatusCode != http.StatusRequestTimeout {
 		return &tools.NoEffectError{Summary: fmt.Sprintf("The tool endpoint refused the request (HTTP %d).", status.StatusCode), Err: err}
 	}

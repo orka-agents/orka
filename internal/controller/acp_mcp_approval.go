@@ -22,6 +22,7 @@ import (
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const (
@@ -877,7 +878,8 @@ func (b *ACPMCPBroker) failApprovedCall(ctx context.Context, call *acpMCPApprova
 func logApprovedCallFailure(ctx context.Context, call *acpMCPApprovalCall, outcome string, cause error) {
 	log.FromContext(ctx).Info("Approved MCP tool call failed",
 		"namespace", call.Task.Namespace, "task", call.Task.Name, "approvalID", call.ID,
-		"tool", call.Request.Call.ToolName, "outcome", outcome, "error", acpApprovalFailureDetail(cause.Error()))
+		"tool", call.Request.Call.ToolName, "outcome", outcome,
+		"error", acpApprovalFailureDetail(workerexecutor.ToolErrorDiagnostic(cause)))
 }
 
 // acpApprovalFailureDetail strips control runes and credential shapes from

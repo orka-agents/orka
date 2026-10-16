@@ -65,6 +65,39 @@ func TestCommentOnIssueToolMarksOnlyDefiniteFailuresAsNoEffect(t *testing.T) {
 	}
 }
 
+func TestCommentOnIssueToolKeepsRefusalsAfterRedirectsUncertain(t *testing.T) {
+	// The POST may have taken effect before redirecting to a result the
+	// token may not read.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /repos/testorg/testrepo/issues/1/comments", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/result", http.StatusSeeOther)
+	})
+	mux.HandleFunc("GET /result", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	tool := &CommentOnIssueTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	args, _ := json.Marshal(CommentOnIssueArgs{RepoURL: testOrgTestRepoURL, IssueNumber: 1, Body: testCommentBody})
+
+	_, err := tool.Execute(context.Background(), args)
+	if _, ok := errors.AsType[*NoEffectError](err); err == nil || !strings.Contains(err.Error(), "403") || ok {
+		t.Fatalf("Execute() error = %v, want an uncertain 403 after a redirect", err)
+	}
+}
+
+func TestGitHubRefusalSummaryKeepsTheWholeMessage(t *testing.T) {
+	// The caller redacts the summary before bounding it, so it must arrive whole.
+	message := strings.Repeat("m", 2*maxGitHubErrorNoteBytes)
+	body, _ := json.Marshal(map[string]string{"message": message})
+	err := githubStatusError(&http.Response{StatusCode: http.StatusForbidden, Request: &http.Request{}}, body)
+	if noEffect, ok := errors.AsType[*NoEffectError](err); !ok || !strings.HasSuffix(noEffect.Summary, message) {
+		t.Fatalf("githubStatusError() = %v, want the whole message in the summary", err)
+	}
+}
+
 func TestCommentOnIssueToolMarksFailuresBeforeSendingAsNoEffect(t *testing.T) {
 	t.Setenv("ORKA_GIT_REPO", "")
 	t.Setenv("GITHUB_TOKEN", testGitHubToken)
@@ -135,5 +168,23 @@ func TestGitHubMutationToolsMarkScopeFailuresAsNoEffect(t *testing.T) {
 		if _, ok := errors.AsType[*NoEffectError](err); !ok || !strings.Contains(err.Error(), "failed to get task") {
 			t.Fatalf("%s error = %v, want a not-sent scope failure", name, err)
 		}
+	}
+}
+
+func TestCreateOrGetGitHubPullRequestMarksRefusedDuplicateAsNoEffect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"message":"A pull request already exists for owner:head."}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	_, err := CreateOrGetGitHubPullRequest(context.Background(), testGitHubToken, "owner", "repo", "head", "main", "title", "body", server.URL)
+	noEffect, ok := errors.AsType[*NoEffectError](err)
+	if !ok || !strings.Contains(noEffect.Summary, "already exists") || !strings.Contains(err.Error(), "lookup failed") {
+		t.Fatalf("CreateOrGetGitHubPullRequest() error = %v, want a refused create whose lookup failed", err)
 	}
 }
