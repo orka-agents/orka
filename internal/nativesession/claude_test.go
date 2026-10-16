@@ -221,6 +221,15 @@ func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"empty entry type": {reason: `type "", which Claude Code 2.1.293 does not read`, mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"","sessionId":"`+claudeFixtureSession+`"}`+"\n")
 		}},
+		"differently cased type": {reason: `type "future-entry", which Claude Code 2.1.293 does not read`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"future-entry","Type":"user","sessionId":"`+claudeFixtureSession+`"}`+"\n")
+		}},
+		"differently cased session": {reason: "another session", mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"user","sessionId":"8f1d0c3e-0000-4000-8000-000000000000","SessionId":"`+claudeFixtureSession+`"}`+"\n")
+		}},
+		"differently cased release": {reason: "Claude Code 2.1.999 wrote", mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1.999","Version":"`+claudeCodeVersion+`"}`+"\n")
+		}},
 		"unparseable release": {reason: `records release "2.1"`, mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1"}`+"\n")
 		}},
@@ -318,6 +327,12 @@ func TestClaudeInspectRejectsTamperedBundles(t *testing.T) {
 	if _, err := format.Inspect(t.Context(), newer, claudeFixtureLimit); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("a later Claude Code's transcript must be unsupported: %v", err)
 	}
+	maskedRelease := rebuild(func(e map[string][]byte) {
+		e["session.jsonl"] = append(e["session.jsonl"], `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1.999","Version":"`+claudeCodeVersion+`"}`+"\n"...)
+	})
+	if _, err := format.Inspect(t.Context(), maskedRelease, claudeFixtureLimit); err == nil {
+		t.Error("a differently cased version must not hide a later Claude Code's entry")
+	}
 	for name, tampered := range map[string][]byte{
 		"unknown entry": rebuild(func(e map[string][]byte) { e["extra"] = []byte("x") }),
 		"other session": rebuild(func(e map[string][]byte) {
@@ -340,6 +355,12 @@ func TestClaudeInspectRejectsTamperedBundles(t *testing.T) {
 		}),
 		"empty entry type": rebuild(func(e map[string][]byte) {
 			e["session.jsonl"] = append(e["session.jsonl"], `{"type":"","sessionId":"`+claudeFixtureSession+`"}`+"\n"...)
+		}),
+		"differently cased type": rebuild(func(e map[string][]byte) {
+			e["session.jsonl"] = append(e["session.jsonl"], `{"type":"future-entry","Type":"user","sessionId":"`+claudeFixtureSession+`"}`+"\n"...)
+		}),
+		"differently cased session": rebuild(func(e map[string][]byte) {
+			e["session.jsonl"] = append(e["session.jsonl"], `{"type":"user","sessionId":"8f1d0c3e-0000-4000-8000-000000000000","SessionId":"`+claudeFixtureSession+`"}`+"\n"...)
 		}),
 		"relative spills": rebuild(func(e map[string][]byte) {
 			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`"/`), []byte(`"`), 1)
