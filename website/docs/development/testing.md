@@ -164,6 +164,19 @@ End-to-end tests run against a dedicated Kind cluster:
 
 The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
 
+### Which CI lanes run for a pull request
+
+The Kind-based lanes are the slowest checks, so they skip changes that cannot affect them. `E2E Tests`,
+`Live Agent Sandbox E2E`, and `Live GitHub OIDC E2E` run for any change except `ui/`, `website/`, `docs/`, `examples/`,
+Markdown, `.agents/`, `.claude/`, `LICENSE`, `.gitignore`, and `.github/` (a change to the lane's own workflow or to
+`.github/actions/` still runs it). `Gateway Live E2E` and the other path-listed lanes run only for the paths in their
+workflow. A UI change is covered by `UI Lint`, `UI Tests`, and the `Website` workflow, whose dashboard build runs `tsc -b`;
+example and docs changes are covered by `Docs Check` and `Go Tests`. `Go Tests` and `Lint` still run on UI changes
+because they are also the release gates, and one Go test reads `ui/src/routes`.
+
+A new push to a pull request cancels that pull request's in-progress `Tests`, `Lint`, and `E2E Tests` runs. Pushes to
+`main` and release runs are never cancelled.
+
 The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapter, a deterministic external AgentRuntime, and a test-only native worker image in Kind. It preserves private-CA trust, readiness, ingress deduplication, and external-v2 final-only/no-Job coverage. Native coverage creates real gateway Tasks and controller Jobs/Pods, authenticates origin, and executes the production `ReplyInConversationTool` with the reusable native client. It verifies budget-backed admission/replay, observes a delivered interim receipt while the Task is still Running, and only then releases final completion. A rolled adapter with `--interim-delivery=false` must produce the tool's typed unsupported rejection with no enqueue and still deliver final. Local start/release fences are driven through Kubernetes exec; no production authorization exception is added. CI requires all three specs, retaining the zero-spec guard. It does not run the conformance CLI and does not replace conformance testing against each adapter build before rollout.
 
 That deterministic fixture does not prove model-driven worker registration or live ACP tool execution. Native worker unit/integration tests separately cover actual registration, advertisement, dispatch, and continued model work. ACP integration tests exercise the production tool through a signed broker capability, active prompt/session guard, and real SQLite, with no native Job; Kubernetes and broker credential resolution use test fixtures, not a live RuntimePool/provider. Local unit/integration results and tagged E2E compilation are not evidence that the live suite ran. Live native delivery requires the workflow's three specs to execute successfully; the external-v2 spec remains final-only.
@@ -307,7 +320,7 @@ go test -tags=e2e ./test/e2e -run 'Test(AimockEval|RuntimeEval|AuthorizationEval
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
   When either key is unset, the suite deploys [aimock](https://github.com/CopilotKit/aimock)
   in the test namespace and backs that provider with scripted fixtures from
-  `test/e2e/testdata/aimock`, so those specs run on every PR without credentials.
+  `test/e2e/testdata/aimock`, so those specs run in the E2E lanes without credentials.
   Set `E2E_DISABLE_MOCK_LLM=1` to skip them instead. Fixture conventions are in
   `test/e2e/testdata/aimock/README.md`. The Anthropic-compatible API,
   coordination memory tool, and agent runtime matrix specs also run on aimock

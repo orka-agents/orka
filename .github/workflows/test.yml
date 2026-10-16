@@ -23,6 +23,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Supersede earlier runs of the same pull request. Every other event,
+  # including release workflow_call, gets a unique group and never cancels.
+  group: ${{ github.event_name == 'pull_request' && format('tests-pr-{0}', github.event.pull_request.number) || format('tests-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   release-automation:
     name: Release automation tests
