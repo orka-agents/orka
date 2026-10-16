@@ -2,6 +2,7 @@ package nativesession
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,6 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
@@ -124,6 +129,43 @@ func holdsFiles(dir string, files map[string][]byte) bool {
 		}
 	}
 	return true
+}
+
+// lockInstallDestination holds an exclusive lock on the directory that holds
+// state, an install's state directory, until the returned function first
+// runs. Two installs into one destination never interleave, so staging that an
+// install finds belongs to one that died, and the kernel released its lock.
+func lockInstallDestination(ctx context.Context, state string) (func(), error) {
+	if !absoluteCleanPath(state) {
+		return nil, errors.New("the state directory must be an absolute, clean path")
+	}
+	parent := filepath.Dir(state)
+	if err := requireRealPath(parent, true); err != nil {
+		return nil, err
+	}
+	dir, err := os.OpenFile(parent, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err = unix.Flock(int(dir.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return sync.OnceFunc(func() {
+				_ = unix.Flock(int(dir.Fd()), unix.LOCK_UN)
+				_ = dir.Close()
+			}), nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) {
+			_ = dir.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			_ = dir.Close()
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 // syncDirs syncs each directory in order. An install lists the directories it

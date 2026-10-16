@@ -171,6 +171,31 @@ func TestClaudeInstallReclaimsAKilledInstall(t *testing.T) {
 	}
 }
 
+func TestClaudeInstallWaitsForAConcurrentInstall(t *testing.T) {
+	format, _ := For("claude")
+	data, err := format.Capture(t.Context(), newClaudeFixture(t).dirs, claudeFixtureSession, claudeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := freshClaudeDirs(t)
+	folder := filepath.Join(destination.State, "projects", claudeProjectFolder(destination.Workspace))
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Another install holds the destination and has staged its transcript.
+	unlock, err := lockInstallDestination(t.Context(), destination.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(folder, "."+claudeFixtureSession+".jsonl.restore")
+	writeForTest(t, staged, "the other install's checkpoint")
+	expectWaitsForConcurrentInstall(t, format, data, destination, staged, claudeFixtureLimit, unlock)
+	if transcript, err := os.ReadFile(filepath.Join(folder, claudeFixtureSession+".jsonl")); err != nil ||
+		!strings.Contains(string(transcript), "Remember nonce-fixture") {
+		t.Fatalf("the install did not publish its own transcript: %v", err)
+	}
+}
+
 func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	format, _ := For("claude")
 	for name, test := range map[string]struct {
@@ -186,6 +211,15 @@ func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		}},
 		"unknown entry type": {reason: `type "future-entry", which Claude Code 2.1.293 does not read`, mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"future-entry","sessionId":"`+claudeFixtureSession+`"}`+"\n")
+		}},
+		"missing entry type": {reason: `type "", which Claude Code 2.1.293 does not read`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"sessionId":"`+claudeFixtureSession+`"}`+"\n")
+		}},
+		"null entry type": {reason: `type "", which Claude Code 2.1.293 does not read`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":null,"sessionId":"`+claudeFixtureSession+`"}`+"\n")
+		}},
+		"empty entry type": {reason: `type "", which Claude Code 2.1.293 does not read`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"","sessionId":"`+claudeFixtureSession+`"}`+"\n")
 		}},
 		"unparseable release": {reason: `records release "2.1"`, mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1"}`+"\n")
@@ -297,6 +331,15 @@ func TestClaudeInspectRejectsTamperedBundles(t *testing.T) {
 		"invalid entry": rebuild(func(e map[string][]byte) { e["session.jsonl"] = append(e["session.jsonl"], "[]\n"...) }),
 		"unknown entry type": rebuild(func(e map[string][]byte) {
 			e["session.jsonl"] = append(e["session.jsonl"], `{"type":"future-entry"}`+"\n"...)
+		}),
+		"missing entry type": rebuild(func(e map[string][]byte) {
+			e["session.jsonl"] = append(e["session.jsonl"], `{"sessionId":"`+claudeFixtureSession+`"}`+"\n"...)
+		}),
+		"null entry type": rebuild(func(e map[string][]byte) {
+			e["session.jsonl"] = append(e["session.jsonl"], `{"type":null,"sessionId":"`+claudeFixtureSession+`"}`+"\n"...)
+		}),
+		"empty entry type": rebuild(func(e map[string][]byte) {
+			e["session.jsonl"] = append(e["session.jsonl"], `{"type":"","sessionId":"`+claudeFixtureSession+`"}`+"\n"...)
 		}),
 		"relative spills": rebuild(func(e map[string][]byte) {
 			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`"/`), []byte(`"`), 1)

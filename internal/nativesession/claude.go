@@ -135,8 +135,17 @@ func (claudeFormat) Inspect(_ context.Context, data []byte, maxBytes int) (Summa
 // does not hold the session, under the project folder of the new working
 // directory, and points the transcript's spilled tool results at their new
 // location. A failed install removes what it created, so journalDir is
-// unused.
-func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string, maxBytes int) (err error) {
+// unused. Installs into one destination run one at a time.
+func (claudeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ string, maxBytes int) error {
+	unlock, err := lockInstallDestination(ctx, dirs.State)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return installClaude(data, dirs, maxBytes)
+}
+
+func installClaude(data []byte, dirs Dirs, maxBytes int) (err error) {
 	limit, err := normalizeLimit(maxBytes)
 	if err != nil {
 		return err
@@ -368,7 +377,9 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 	if len(transcript) == 0 || transcript[len(transcript)-1] != '\n' {
 		return "", errors.New("the Claude Code transcript is empty or ends in a partial entry")
 	}
-	version, owned, unknown := "", false, ""
+	// A missing, null, or empty type decodes to "", so unread records the
+	// first unread entry separately from its type.
+	version, owned, unknown, unread := "", false, "", false
 	for line := range bytes.Lines(transcript) {
 		var entry struct {
 			Type      string  `json:"type"`
@@ -378,8 +389,8 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 		if !bytes.HasPrefix(line, []byte("{")) || decodeOnly(json.NewDecoder(bytes.NewReader(line)), &entry) != nil {
 			return "", errors.New("the Claude Code transcript holds an entry that is not one JSON object")
 		}
-		if !claudeEntryTypes[entry.Type] && unknown == "" {
-			unknown = entry.Type
+		if !claudeEntryTypes[entry.Type] && !unread {
+			unknown, unread = entry.Type, true
 		}
 		switch {
 		case entry.SessionID != nil && *entry.SessionID == providerSessionID:
@@ -406,7 +417,7 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 	if err := requireSupportedClaudeVersion(version); err != nil {
 		return "", err
 	}
-	if unknown != "" {
+	if unread {
 		return "", fmt.Errorf("the Claude Code transcript holds an entry of type %q, which Claude Code %s does not read", unknown, claudeCodeVersion)
 	}
 	return version, nil
