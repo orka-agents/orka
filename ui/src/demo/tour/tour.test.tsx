@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@/test/test-utils'
+import { act, fireEvent, render, screen } from '@/test/test-utils'
 
 const mockNavigate = vi.fn()
 const mockSend = vi.fn()
@@ -14,6 +14,7 @@ vi.mock('@/hooks/use-chat', () => ({ useSendMessage: () => mockSend }))
 // The UI store persists through zustand; keep it in memory here.
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 
+import { useChatStore } from '@/stores/chat'
 import { useUIStore } from '@/stores/ui'
 import { INCIDENT_APPROVAL, INCIDENT_TASK, RELEASE_TASK, stopsIn, TOUR_AGENT, TOUR_FINDING, TOUR_STEPS } from './steps'
 import { useTourStore } from './store'
@@ -39,6 +40,8 @@ describe('demo tour', () => {
     mockSend.mockReset()
     vi.stubGlobal('localStorage', memoryStorage())
     useTourStore.setState({ open: true, step: 0, collapsed: false })
+    useUIStore.setState({ namespace: 'default' })
+    useChatStore.setState({ activeNamespace: 'default' })
   })
 
   afterEach(() => {
@@ -97,6 +100,20 @@ describe('demo tour', () => {
     fireEvent.click(screen.getByRole('button', { name: "What's running right now?" }))
     expect(mockSend).toHaveBeenCalledWith("What's running right now?")
     expect(sentIn).toEqual(['default'])
+  })
+
+  it('holds a prompt until Chat has moved to the sample namespace, so its reset cannot wipe it', () => {
+    // Chat was last used in another namespace; opening it in the sample one clears its transcript.
+    useChatStore.setState({ activeNamespace: 'orka-system' })
+    useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.prompts) })
+    render(<TourPanel slot="bottom" />)
+    fireEvent.click(screen.getByRole('button', { name: "What's running right now?" }))
+    expect(mockNavigate).toHaveBeenCalledWith({ to: '/chat' })
+    expect(mockSend).not.toHaveBeenCalled()
+
+    act(() => useChatStore.getState().selectNamespace('default'))
+    expect(mockSend).toHaveBeenCalledTimes(1)
+    expect(mockSend).toHaveBeenCalledWith("What's running right now?")
   })
 
   it('sends a suggested prompt from the chat stop', () => {

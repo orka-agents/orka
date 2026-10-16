@@ -59,15 +59,17 @@ function StepBody({ step }: { step: TourStep }) {
   const sendMessage = useSendMessage()
   const streaming = useChatStore((s) => s.isStreaming)
   const namespace = useUIStore((s) => s.namespace)
-  // sendMessage posts to the namespace it was rendered with, so a prompt picked
-  // from another namespace waits for the switch to the sample one.
+  const chatNamespace = useChatStore((s) => s.activeNamespace)
+  // A prompt waits until both the page and Chat are on the sample namespace:
+  // sendMessage posts to the namespace it was rendered with, and Chat clears
+  // its transcript, in-flight turn included, when it moves between namespaces.
   const pendingPrompt = useRef<string | null>(null)
   useEffect(() => {
     const prompt = pendingPrompt.current
-    if (prompt === null || namespace !== DEMO_NAMESPACE) return
+    if (prompt === null || namespace !== DEMO_NAMESPACE || chatNamespace !== DEMO_NAMESPACE) return
     pendingPrompt.current = null
     void sendMessage(prompt)
-  }, [namespace, sendMessage])
+  }, [namespace, chatNamespace, sendMessage])
   return (
     <div className="space-y-3">
       <p aria-live="polite" className="text-sm leading-relaxed text-muted-foreground">{step.body}</p>
@@ -82,7 +84,7 @@ function StepBody({ step }: { step: TourStep }) {
               disabled={streaming}
               onClick={() => {
                 void navigate({ to: '/chat' })
-                if (namespace === DEMO_NAMESPACE) {
+                if (namespace === DEMO_NAMESPACE && chatNamespace === DEMO_NAMESPACE) {
                   void sendMessage(prompt)
                 } else {
                   pendingPrompt.current = prompt
