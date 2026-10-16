@@ -370,7 +370,9 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 	if len(transcript) == 0 || transcript[len(transcript)-1] != '\n' {
 		return "", errors.New("the Claude Code transcript is empty or ends in a partial entry")
 	}
-	version, owned, unknown := "", false, ""
+	// A missing, null, or empty type decodes to "", so unread records the
+	// first unread entry separately from its type.
+	version, owned, unknown, unread := "", false, "", false
 	for line := range bytes.Lines(transcript) {
 		var entry struct {
 			Type      string  `json:"type"`
@@ -380,8 +382,8 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 		if !bytes.HasPrefix(line, []byte("{")) || decodeOnly(json.NewDecoder(bytes.NewReader(line)), &entry) != nil {
 			return "", errors.New("the Claude Code transcript holds an entry that is not one JSON object")
 		}
-		if !claudeEntryTypes[entry.Type] && unknown == "" {
-			unknown = entry.Type
+		if !claudeEntryTypes[entry.Type] && !unread {
+			unknown, unread = entry.Type, true
 		}
 		switch {
 		case entry.SessionID != nil && *entry.SessionID == providerSessionID:
@@ -408,7 +410,7 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 	if err := requireSupportedClaudeVersion(version); err != nil {
 		return "", err
 	}
-	if unknown != "" {
+	if unread {
 		return "", fmt.Errorf("the Claude Code transcript holds an entry of type %q, which Claude Code %s does not read", unknown, claudeCodeVersion)
 	}
 	return version, nil
