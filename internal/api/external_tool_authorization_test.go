@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -847,3 +848,86 @@ func boolString(value bool) string {
 }
 
 var _ client.Client = (*externalToolCountingClient)(nil)
+
+func TestExternalToolCreateAgentProviderChecksDoNotBypassCaller(t *testing.T) {
+	for _, denied := range []string{"create", "provider-get", "none"} {
+		for _, provider := range []string{"private-provider", "missing-provider"} {
+			t.Run(denied+"/"+provider, func(t *testing.T) {
+				clientset, _ := externalToolReviews(t, func(spec authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
+					a := spec.ResourceAttributes
+					return externalToolReview((denied != "create" || a.Resource != "agents" || a.Verb != "create") &&
+						(denied != "provider-get" || a.Resource != "providers" || a.Verb != "get")), nil
+				})
+				executor, backend, _, _ := newExternalToolExecutor(clientset,
+					&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "private-provider", Namespace: externalToolNamespace}})
+				executor.policyReader = backend
+				args := fmt.Sprintf(`{"name":"new-agent","namespace":%q,"providerRef":%q}`, externalToolNamespace, provider)
+				result := executeExternalTool(t, executor, "create_agent", args)
+				if denied != "none" {
+					require.False(t, result.Success)
+					require.Equal(t, "permission_denied", result.ErrorType)
+					require.Zero(t, backend.reads, "denied caller reached direct policy reader")
+					require.Zero(t, backend.writes)
+				} else {
+					require.Equal(t, provider == "private-provider", result.Success, "%s", result.Error)
+				}
+			})
+		}
+	}
+}
+
+func TestChatAgentTaskReferencePreflightPreservesExternalProfile(t *testing.T) {
+	agent, externalRuntime := testExternalRuntimeAuthorizationObjects([]string{"Read"})
+	externalRuntime.Spec.Capabilities.Profile.WorkspaceIntent = "read"
+	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(agent, externalRuntime).Build()
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}, TransactionContext: map[string]any{
+		"namespace": "default", "allowedAgents": []any{"agentkit"},
+	}}
+	executor := NewToolExecutor(fc, nil, "default", "eval-session", "", false, 5, time.Second, nil)
+	executor.SetPolicyReader(fc)
+	referenceChecks, fullChecks := 0, 0
+	executor.authorizeAgentReference = func(_ context.Context, ref *corev1alpha1.Agent) error {
+		referenceChecks++
+		return authorizeContextTokenAgentTaskReference(token, cfg, ref.Namespace, ref.Name)
+	}
+	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
+		fullChecks++
+		require.NotNil(t, task.Spec.AgentRuntime, "full authorization ran before materialization")
+		require.Equal(t, []string{"Read"}, task.Spec.AgentRuntime.AllowedTools)
+		return authorizeContextTokenTaskCreateObject(ctx, fc, token, cfg, "full-task-test", task)
+	})
+	result := executeExternalTool(t, executor, "create_agent_task", `{"agentRef":"agentkit","prompt":"work"}`)
+	require.True(t, result.Success, "%s", result.Error)
+	require.Equal(t, 1, referenceChecks)
+	require.Equal(t, 1, fullChecks)
+}
+
+func TestExternalToolAITaskDefaultsProviderWithoutDiscoveryPermission(t *testing.T) {
+	for _, target := range []string{"caller", externalToolNamespace} {
+		t.Run(target, func(t *testing.T) {
+			clientset, _ := externalToolReviews(t, func(spec authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
+				a := spec.ResourceAttributes
+				return externalToolReview(a.Resource != "providers" || a.Verb != "list"), nil
+			})
+			executor, backend, _, _ := newExternalToolExecutor(clientset,
+				&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "session-provider", Namespace: "provider-ns"}})
+			executor.provider = "session-provider"
+			executor.providerNamespace = "provider-ns"
+			requestClient := newExternalToolClient(backend, clientset, externalToolUser(), "caller", "", false, nil)
+			builder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: requestClient}, "caller", ACPRuntimeAvailability{})
+			builder.SetChatProvider(executor.provider)
+			prompt, err := builder.BuildSystemPrompt(t.Context(), "")
+			require.NoError(t, err)
+			require.NotContains(t, prompt, "chat_provider=session-provider", "hidden discovery metadata must stay hidden")
+			result := executeExternalTool(t, executor, "create_ai_task", fmt.Sprintf(`{"prompt":"Analyze code","namespace":%q}`, target))
+			require.True(t, result.Success, "%s", result.Error)
+			var tasks corev1alpha1.TaskList
+			require.NoError(t, backend.Client.List(t.Context(), &tasks, client.InNamespace(target)))
+			require.Len(t, tasks.Items, 1)
+			require.NotNil(t, tasks.Items[0].Spec.AI)
+			require.Equal(t, corev1alpha1.ProviderReference{Name: "session-provider", Namespace: "provider-ns"}, *tasks.Items[0].Spec.AI.ProviderRef)
+		})
+	}
+}

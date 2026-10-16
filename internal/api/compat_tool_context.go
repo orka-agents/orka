@@ -82,12 +82,19 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		Namespace:                 cfg.Namespace,
 		Tenant:                    cfg.Namespace,
 		Provider:                  cfg.Provider.Name,
+		ProviderNamespace:         cfg.Provider.Namespace,
 		ProviderType:              cfg.Provider.Type,
 		WatchNamespace:            cfg.WatchNamespace,
 		EnforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
 		ResultStore:               cfg.ResultStore,
 		GenerateTaskName:          cfg.GenerateTaskName,
 		TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": cfg.Profile.SourceLabel} },
+		AuthorizeAgentReference: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			authorize := func(_ context.Context, agent *corev1alpha1.Agent) error {
+				return authorizeContextTokenAgentTaskReference(cfg.AuthContext, cfg.AuthorizationConfig, agent.Namespace, agent.Name)
+			}
+			return chatToolAuthorizationError(authorize, ctx, agent, "Use an authorized Agent reference")
+		},
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if tasksCreated >= maxProxyCreatedTasks {
 				return &tools.ChatToolError{Type: "limit_reached", Message: fmt.Sprintf("task creation limit reached (max %d)", maxProxyCreatedTasks), Suggestion: "Wait for existing tasks to complete"}

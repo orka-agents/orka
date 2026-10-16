@@ -11,8 +11,7 @@ import (
 
 const (
 	workspaceCanaryFile         = ".orka-checkpoint-canary"
-	workspaceCanaryData         = "orka-acp-checkpoint-before-export"
-	workspaceCanaryChange       = "orka-acp-checkpoint-after-export"
+	workspaceCanaryRefused      = "orka-acp-workspace-write-refused"
 	workspaceWriteMarker        = "ORKA_NATIVE_DATA_WRITE_OK"
 	workspaceResumeMarker       = "ORKA_NATIVE_DATA_CHANGE_OK"
 	workspaceRestoreMarker      = "ORKA_NATIVE_DATA_READ_OK"
@@ -27,20 +26,23 @@ const (
 )
 
 // These maps hold only fixed scenario keys and fixture-generated call IDs.
-// A response marker alone never proves a file operation succeeded.
+// A response marker alone never proves a file operation was refused.
 var workspaceCanaryCalls sync.Map
 var workspaceCanaryResults sync.Map
 
 func workspaceCanaryCommand(marker string) string {
-	read := "cat " + workspaceCanaryFile
 	switch marker {
-	case workspaceWriteMarker:
-		return "set -eu; umask 077; test ! -e " + workspaceCanaryFile +
-			"; printf '%s\\n' '" + workspaceCanaryData + "' > " + workspaceCanaryFile + "; " + read
-	case workspaceResumeMarker:
-		return "set -eu; " + read + "; printf '%s\\n' '" + workspaceCanaryChange + "' > " + workspaceCanaryFile
-	case workspaceRestoreMarker:
-		return read
+	case workspaceWriteMarker, workspaceResumeMarker, workspaceRestoreMarker:
+		// Read-intent workspaces are not writable by the provider child. The
+		// probe passes only when no earlier turn or checkpoint left the file
+		// behind and the shell itself is denied a new one. -L also catches a
+		// dangling symlink, which -e follows.
+		absent := "test ! -e " + workspaceCanaryFile + " && test ! -L " + workspaceCanaryFile
+		return "set -u; " + absent + " || exit 3; " +
+			"if denied=$( (printf x > " + workspaceCanaryFile + ") 2>&1 ); then exit 4; fi; " +
+			absent + " || exit 5; " +
+			`case "$denied" in *"Permission denied"*) ;; *) exit 6 ;; esac; ` +
+			"printf '%s\\n' '" + workspaceCanaryRefused + "'"
 	case workspaceLifetimeMarker:
 		// Node is part of the Codex image. The held HTTP request lets the
 		// test observe both a running shell command and its cancellation.
@@ -57,7 +59,7 @@ setTimeout(() => process.exit(2), 300000).unref();'`
 	}
 }
 
-// File cases require successful shell output with exactly the saved bytes.
+// File cases require successful shell output proving the write was refused.
 // The lifetime case keeps its shell command running until cancellation; its
 // separate held request proves the command started and was stopped.
 func handleWorkspaceCanary(
@@ -72,7 +74,7 @@ func handleWorkspaceCanary(
 		callID, issued := workspaceCanaryCalls.Load(key)
 		if !issued || output["call_id"] != callID ||
 			(marker != workspaceLifetimeMarker && !validWorkspaceCanaryOutput(output["output"])) {
-			http.Error(w, "workspace canary shell result did not match the saved file", http.StatusUnprocessableEntity)
+			http.Error(w, "workspace canary shell result did not prove a refused write", http.StatusUnprocessableEntity)
 			return true
 		}
 		if marker != workspaceLifetimeMarker {
@@ -132,7 +134,7 @@ func validWorkspaceCanaryOutput(value any) bool {
 		return false
 	}
 	header, output, found := strings.Cut(parts[0], "\nOutput:\n")
-	if !found || output != workspaceCanaryData+"\n" {
+	if !found || output != workspaceCanaryRefused+"\n" {
 		return false
 	}
 	// These are the pinned Codex exec_command and shell_command result formats.

@@ -46,6 +46,21 @@ make lint-fix
 make ui-lint
 ```
 
+### Native Codex handoff gate
+
+The `Native Codex handoff` job in `.github/workflows/test.yml` compiles the
+supervisor test from the current checkout and runs it inside the pinned production
+Codex 0.160.0 / codex-acp 2.1.1 image. Docker networking is disabled; inference uses
+a local scripted Responses server and disposable test credentials. The container
+uses only the production supervisor's CHOWN, KILL, SETGID, and SETUID capabilities.
+
+The gate restores the original thread UUID through `session/resume`, continues
+across fresh homes with rotated credentials, checks current destination policy,
+and verifies read and write intents, a publishable workspace delta, native capture,
+return history, unchanged source bytes, and runtime cleanup. It explicitly enables
+`ORKA_NATIVE_CODEX_TEST=1` and requires the named test to pass, so a skipped test
+cannot satisfy the job. This verifies the native integration, not live-model recall.
+
 ### Local environment notes
 
 - **Script test suites need bash >= 4.** The suites under `scripts/tests/`
@@ -113,7 +128,9 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
 | `test/e2e/anthropic_compat_test.go` | Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior, on aimock or the live proxy |
 | `test/e2e/coordination_memory_tools_test.go` | Coordination memory tool auto-injection and execution (`search_transcript`, `recall_memory`, `propose_memory`, `remember`) and proposal review without durable writes, on aimock or the live proxy |
-| `test/e2e/agent_runtime_lifecycle_test.go` | Go port of `scripts/agent-runtime-e2e.sh` (label `agent-runtime`): RuntimePool profile projection and execution fences; read, Session continuation, and Task fork for Codex, OpenCode, Claude, and Copilot; unsafe workspace URLs; concurrency within capacity; Task timeout and deletion cancellation through the cleanup finalizer; controller restart without replay; Pod replacement and scale-to-zero recovery of the same RuntimeSession; OpenCode read-intent tool policy; and Session archival and RuntimePool cleanup. On aimock it also checks that each continuation, fork, and recovery replayed the prior transcript to the model, except for Copilot: its requests exceed the 64 KB aimock journal cap, so its continuations rely on the RuntimeSession identity checks, as in the bash lane |
+| `test/e2e/agent_runtime_lifecycle_test.go` | Go port of `scripts/agent-runtime-e2e.sh` (label `agent-runtime`): RuntimePool profile projection and execution fences; read, Session continuation, and Task fork for Codex, OpenCode, Claude, and Copilot; an idle adapter killed between prompts, which OpenCode and Claude resume in place under the same RuntimeSession generation (with Claude's resume-time model request refused by the provider proxy) and which Copilot, unable to resume, fails as `RuntimeLost` before rebuilding from the transcript on the next continuation; unsafe workspace URLs; concurrency within capacity; Task timeout and deletion cancellation through the cleanup finalizer; controller restart without replay; Pod replacement and scale-to-zero recovery of the same RuntimeSession; OpenCode read-intent tool policy; and Session archival and RuntimePool cleanup. On aimock it also checks that each continuation, fork, and recovery replayed the prior transcript to the model, except for Copilot: its requests exceed the 64 KB aimock journal cap, so its continuations rely on the RuntimeSession identity checks, as in the bash lane |
+| `test/e2e/aimock_runtime_eval_test.go` | Model-free adversarial evals on the actual Codex, Claude, Copilot, and OpenCode CLIs: consumed SCM/proxy credential containment, governed extraction during Session continuation, and repository-origin read-only mutation checks with independent delivery/publication evidence |
+| `test/e2e/aimock_authorization_eval_test.go` | Deployed broker allowlist, delegation namespace/agent restrictions, and child transaction-scope containment on a supported external runtimeRef; native publication-authority checks, permitted controls, and a synthetic signing/JWKS/TTS fixture |
 | `test/e2e/agent_runtime_matrix_test.go` | Codex against a pinned read workspace, OpenCode read-intent enforcement, and Claude session wiring through the provider proxy (aimock as Vekil, or the live proxy), plus a digest-pinned Copilot image smoke assertion; it is not the canonical ACP release gate |
 | `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
 | `.github/workflows/gateway-e2e.yml` | Focused, model-free, secret-free Gateway live E2E in Kind using generated bearer tokens, an ephemeral CA, the TLS reference adapter, and the deterministic echo runtime |
@@ -123,7 +140,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
-| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
+| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation, cancellation/timeout, restart/replacement, publication/PR verification, immutable images, and cleanup |
 | `.github/workflows/agent-runtime-e2e.yml` / `scripts/agent-runtime-kind-e2e.sh` | Manual agent runtime smoke that calls real model providers, requires credentials, and bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
 | `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved chart and runtime acceptance, real local Git publication tests, GitHub API fixture tests, and cleanup; no stored Git publication credentials |
 
@@ -136,13 +153,87 @@ incremental scan behavior, invalid v2 evidence being dropped and visible through
 validation task persistence, successful verified patch proposals, and patch proposals with
 missing or mismatched artifacts staying not ready.
 
+### Adversarial aimock evals
+
+The `adversarial-eval` label is part of the `agent-runtime` lane. These evals
+script a model acting on an untrusted repository file or brokered tool note and
+check the resulting system boundaries. They do **not** measure model judgment
+or resistance to prompt injection. The existing fast, in-process evals remain unchanged.
+
+The legitimate prompt asks to read a fixture file or tool note. The malicious
+action is scripted only after its nonce returns as a real tool result. Passing
+a prevention case requires both the returned refusal and independent evidence
+that no forbidden Task, token exchange, workspace change, push, or PR occurred.
+Permitted controls exercise the same tools and consume the fixture credentials;
+absence of a credential that was never used is not containment evidence.
+Public broker/CLI refusals intentionally redact private executor errors. Each
+delegation denial is paired with a permitted same-tool control and independent
+Task, token-exchange, and access receipts; generic failure alone is not proof of
+a specific authorization boundary.
+
+A test-only proxy in front of aimock retains complete request bodies, including
+bodies above aimock's own 64 KiB journal cap. It stores no headers or response
+bodies and never logs captured content. Capture is bounded to 4 MiB per request,
+64 MiB in total, and 4096 entries; exhaustion rejects requests rather than
+silently discarding evidence. Snapshot exports stream one entry at a time with
+a single concurrent exporter, rather than buffering a potentially expanded
+whole-store JSON response. Eval helpers require a stable capture instance,
+retained request identities, completed responses, and matching fixture receipts.
+Missing or incomplete observation cannot pass. Auxiliary requests are scanned
+as well as the case's marked inference requests.
+
+All credentials are synthetic and local to the test cluster. The provider
+canary covers Orka's upstream proxy bearer, not vendor credentials held by a
+real Vekil deployment. Child-local loopback capabilities are distinct from that
+bearer. Transaction tests use cryptographically valid, ephemeral mock authority
+and inspect actual child-token exchange results; malformed tokens are not a
+scope-containment control. Canary detector tests deliberately plant exposure
+and verify that failure messages omit the values.
+
+Built-in ACP Tasks reject transaction-token delegation before inference. The
+shared TxToken cases therefore use the conformed external harness-v2 E2E
+fixture, which runs a bounded aimock loop against the real controller's public
+MCP broker using accepted running-Task fences. An exact fixture-only ingress
+grant connects it to isolated aimock; the production proxy-only ingress policy
+is unchanged. The injected note is a real brokered tool result, not native
+repository content. Parent and permitted child tokens must be valid, and the
+child consumes its token in a brokered control.
+The fixture keeps these Tasks running until normal cancellation cleanup; a
+completed model loop is not presented as native Task success. Publication
+checks use real Claude Tasks without a transaction context. Its flat MCP
+protocol fits the pinned mock; this case does not cover Codex namespaced MCP
+calls. No test claims that built-in runtimes support TxTokens or that external
+fixtures exercise native CLI workspace isolation.
+
+Run the focused label through the usual isolated E2E bootstrap:
+
+```bash
+E2E_GINKGO_LABEL_FILTER=adversarial-eval E2E_ACP_IDLE_POOL_TTL=15m make test-e2e
+```
+
+Every runtime must satisfy native refusal plus `ReadValidated` and no
+publication. Claude, Copilot, and OpenCode refuse the write tool itself. Codex
+reads and writes through one shell tool, so its refusal comes from the
+filesystem: under read intent the supervisor owns the workspace and the
+session root, and the Codex shell's write fails with `Permission denied`.
+
+The capture, signing-fixture, detector, and fixture-contract tests also run
+without a cluster:
+
+```bash
+make ensure-ui-embed
+go test ./test/fixtures/aimockcapture/... ./test/fixtures/aimockauthority/...
+go test -tags=e2e ./test/e2e -run 'Test(AimockEval|RuntimeEval|AuthorizationEval)'
+```
+
 ### E2E key requirements
 
 - `scripts/agent-runtime-e2e.sh --context <context>` is the canonical ACP
-  deployed-cluster validator. Its default mode is a smoke test; set
-  `RELEASE_GATE=1` for full runtime acceptance, including Task result/fork and
-  scale-to-zero scenarios. The Kind wrapper also requires uncached publication
-  tests. A smoke result cannot qualify a release. Live GitHub publication is
+  deployed-cluster validator. Its default mode is a smoke test of runtime
+  behavior against real models. `RELEASE_GATE=1` checks the shipped artifacts
+  instead: one workspace read with its API result per runtime, unsafe workspace
+  rejection, and image digests. The Kind wrapper also requires uncached
+  publication tests. A smoke result cannot qualify a release. Live GitHub publication is
   available only through an explicit local opt-in.
 - `scripts/agent-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
@@ -159,13 +250,13 @@ missing or mismatched artifacts staying not ready.
 - `.github/workflows/release-qualification.yml` uses `workflow_dispatch` and is
   serialized. The release workflow dispatches it automatically. Restrict the
   `release-qualification` environment to `main` and exact permitted release
-  branches, require a trusted reviewer, and disable administrator bypass before
-  exposing model-provider credentials. It accepts a full source SHA that must
-  equal both the dispatched workflow commit and selected branch head. GitHub
+  branches, require a trusted reviewer, and disable administrator bypass. It
+  accepts a full source SHA that must equal both the dispatched workflow commit
+  and selected branch head. GitHub
   observations use the job's temporary `GITHUB_TOKEN` with `contents: read`.
-  `COPILOT_GITHUB_TOKEN` supplies model-provider access and can come from the
-  existing repository secret. No stored Git publication token or fork setting
-  is needed. Publication tests use real temporary Git repositories and local
+  Agent execution runs against aimock (`ACP_E2E_MODEL_BACKEND=aimock`), so no
+  model-provider secret, stored Git publication token, or fork setting is
+  needed. Publication tests use real temporary Git repositories and local
   GitHub API test servers. They do not prove the complete cluster-to-GitHub
   publication path or live organization permissions.
   [Release qualification](release-qualification.md) documents trusted dispatch,
@@ -183,15 +274,13 @@ missing or mismatched artifacts staying not ready.
   `config/acp-production` Vekil ingress boundary; durable controller/Publisher
   PVCs; a distinct publication fork; and authenticated `gh` access for
   independent remote and PR verification/cleanup.
-- Canonical ACP acceptance runs all Codex scenarios, including publication,
-  before deleting the Codex pool and starting OpenCode. It validates OpenCode
-  native ACP read, continuation, and read-intent tool policy, deletes the
-  OpenCode pool, starts Claude, and then runs live Copilot read/continuation
-  after Claude cleanup. Every provider phase verifies exact Pod UID, image ID,
-  runtime instance/profile, and RuntimeSession identity. Codex additionally
-  covers cancellation and timeout settlement, controller restart, pool
-  replacement, drain/scale-to-zero, and publication/remote delivery; release
-  mode also exercises Task forks.
+- The validator runs Codex, then OpenCode, Claude, and Copilot, deleting each
+  provider's pools before starting the next. Every provider phase verifies exact
+  Pod UID, image ID, runtime instance/profile, and RuntimeSession identity. Smoke
+  mode also checks continuation, OpenCode's read-intent tool policy, and, for
+  Codex, concurrency, cancellation and timeout settlement, controller restart,
+  and pool replacement. Release mode runs only the reads and, with the local
+  opt-in, the live publication canary.
 - `E2E_OPENAI_API_KEY` and `E2E_ANTHROPIC_API_KEY` remain inputs for older native
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
   When either key is unset, the suite deploys [aimock](https://github.com/CopilotKit/aimock)
@@ -224,8 +313,8 @@ missing or mismatched artifacts staying not ready.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:
-  external-provider execution and clean-room publication stay with `Agent Runtime E2E`
-  and `Release Qualification`.
+  external-provider execution stays with `Agent Runtime E2E`, and release acceptance
+  with `Release Qualification`.
   Every Substrate run includes DataOnly suspension, cold continuation, and
   checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
@@ -326,11 +415,14 @@ rotation, lost responses, source identity changes, reference races, and explicit
 recovery. Tests do not supply fork-only lifecycle preconditions.
 
 The ACP file scenario uses the real Codex runtime with a deterministic Responses
-fixture. It writes a file, exports a checkpoint, changes and deletes the source
-workspace, then restores the checkpoint and checks the original bytes through a
-shell read. The fixture requires successful tool output from the current turn.
-The file Tasks retain read-only intent, so the suite requires successful
-execution and `ReadOnlyWorkspaceModified` delivery rejection. The workflow also
+fixture. The file Tasks have read-only intent, so each one runs a shell probe
+that must find no canary file and be denied creating one. The scenario probes,
+exports a checkpoint, probes again in the same session, deletes the source
+workspace, then restores the checkpoint and probes the restored workspace. The
+fixture requires successful probe output from the current turn, and the suite
+requires successful execution and `ReadValidated` delivery. Because read-intent
+Tasks cannot write, this scenario does not compare file bytes across a
+checkpoint. The workflow also
 runs a Linux regression as root to verify durable file ownership after session
 deletion, drain, and supervisor shutdown.
 

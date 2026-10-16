@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/events"
@@ -543,8 +544,9 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 			)
 		}
 	}
-	if customTool.Spec.HTTP.AuthSecretRef != nil {
-		if approvalMountedCredentialExists(customTool.Spec.HTTP.AuthSecretRef.Name, customTool.Spec.HTTP.AuthSecretRef.Key) {
+	if authRef := customTool.Spec.HTTP.AuthSecretRef; authRef != nil {
+		// Remote credentials use the exact API Secret selector and never mounted files.
+		if !aitools.IsRemoteMCP(customTool) && approvalMountedCredentialExists(authRef.Name, authRef.Key) {
 			return fmt.Errorf(
 				"approval-gated tool %q mounted credential source cannot be approval-bound",
 				customTool.Name,
@@ -801,8 +803,10 @@ func injectIdempotencyKey(args json.RawMessage, key string) (json.RawMessage, er
 		return args, nil
 	}
 	params := map[string]any{}
-	if len(strings.TrimSpace(string(args))) > 0 {
-		if err := json.Unmarshal(args, &params); err != nil {
+	if len(bytes.TrimSpace(args)) > 0 {
+		var err error
+		params, err = tools.DecodeToolArgumentObject(args)
+		if err != nil {
 			return nil, fmt.Errorf("parse tool arguments for idempotency key injection: %w", err)
 		}
 	}
@@ -880,6 +884,10 @@ func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.
 	}
 	if baseToolCtxCopy.ApprovalTargetRefresh == nil && baseToolCtxCopy.Client != nil {
 		baseToolCtxCopy.ApprovalTargetRefresh = func(ctx context.Context, _ string, tool *corev1alpha1.Tool) error {
+			if aitools.IsRemoteMCP(tool) {
+				_, err := validateNativeRemoteTool(ctx, &baseToolCtxCopy, tool)
+				return err
+			}
 			bindApprovalAuthRefVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
 			return bindApprovalOutboundAccessPolicyVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
 		}
@@ -904,7 +912,26 @@ func handleExplicitRequestApprovalBatch(
 			return nil, nil
 		}
 		if gate != nil && len(gate.resolved) > 0 {
-			if target, err := explicitApprovalTargetForCall(ctx, call, customTools, baseToolCtx); err == nil {
+			// Validate the original bytes before normalization, including duplicate
+			// keys and Unicode. Execution below still receives the original call.
+			matchingCall := call
+			if tool, ok := tools.DefaultRegistry.Get(strings.TrimSpace(call.Name)); ok {
+				args, err := tools.NormalizeToolArguments(tool, call.Arguments)
+				if err != nil {
+					return &approvalBatchDecision{
+						continueLLM: true,
+						toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
+					}, nil
+				}
+				matchingCall.Arguments = args
+			}
+			var matchingArgs map[string]any
+			_ = json.Unmarshal(matchingCall.Arguments, &matchingArgs)
+			// A declared null is omitted by normalization. Do not let missing
+			// targetArguments inherit the empty-object approval matching default.
+			_, hasTargetArguments := matchingArgs["targetArguments"].(map[string]any)
+			target, err := explicitApprovalTargetForCall(ctx, matchingCall, customTools, baseToolCtx)
+			if hasTargetArguments && err == nil {
 				if decision, found := gate.resolvedDecision(target); found {
 					return &approvalBatchDecision{
 						continueLLM: true,
@@ -915,7 +942,9 @@ func handleExplicitRequestApprovalBatch(
 		}
 		result, err := executeRequestApprovalToolCall(ctx, call, customTools, eventRecorder, baseToolCtx)
 		if err != nil {
-			if _, ok := errors.AsType[*tools.RequestApprovalValidationError](err); ok {
+			_, invalidRequest := errors.AsType[*tools.RequestApprovalValidationError](err)
+			_, invalidArgument := errors.AsType[*tools.ToolArgumentError](err)
+			if invalidRequest || invalidArgument {
 				return &approvalBatchDecision{
 					continueLLM: true,
 					toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
@@ -1012,6 +1041,12 @@ func explicitApprovalTargetForCall(
 		if err := json.Unmarshal(call.Arguments, &req); err != nil {
 			return approvals.ApprovalTarget{}, err
 		}
+	}
+	// Match RequestApprovalTool.Execute before a resolved decision can bypass it.
+	switch req.Severity {
+	case "", "warning", "critical":
+	default:
+		return approvals.ApprovalTarget{}, fmt.Errorf("invalid severity %q: must be warning or critical", req.Severity)
 	}
 	baseToolCtx = prepareApprovalToolContext(baseToolCtx, nil)
 	if baseToolCtx == nil {

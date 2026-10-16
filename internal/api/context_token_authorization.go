@@ -1725,6 +1725,20 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 	return failures
 }
 
+// authorizeContextTokenAgentTaskReference checks only request-supplied identity
+// and creation scope. Runtime policy validation belongs to the completed Task.
+func authorizeContextTokenAgentTaskReference(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, name string) error {
+	if !cfg.Enabled() || token == nil {
+		return nil
+	}
+	failures := contextTokenTaskCreateScopeFailures(token, cfg)
+	failures = append(failures, contextTokenAgentContextFailures(token, namespace, name)...)
+	if len(failures) == 0 {
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, "chatToolAgentReference", failures)
+}
+
 func contextTokenTaskCreateScopeFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig) []string {
 	if hasAnyScope(token.Scopes, cfg.TaskCreateScopes) {
 		return nil

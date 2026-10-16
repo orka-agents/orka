@@ -185,10 +185,11 @@ func run(transcriptPath string) (err error) {
 
 	// Create LLM provider
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
-		APIKey:          apiKey,
-		BaseURL:         baseURL,
-		ProviderType:    provider,
-		AzureAPIVersion: azureAPIVersion,
+		APIKey:              apiKey,
+		BaseURL:             baseURL,
+		ProviderType:        provider,
+		AzureAPIVersion:     azureAPIVersion,
+		AzureDeploymentName: workerEnv.AzureDeploymentName,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
@@ -207,10 +208,11 @@ func run(transcriptPath string) (err error) {
 			}
 
 			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, llm.ProviderConfig{
-				APIKey:          fallbackEnv.APIKey,
-				BaseURL:         fallbackEnv.BaseURL,
-				ProviderType:    fallbackEnv.Provider,
-				AzureAPIVersion: fallbackEnv.AzureAPIVersion,
+				APIKey:              fallbackEnv.APIKey,
+				BaseURL:             fallbackEnv.BaseURL,
+				ProviderType:        fallbackEnv.Provider,
+				AzureAPIVersion:     fallbackEnv.AzureAPIVersion,
+				AzureDeploymentName: fallbackEnv.AzureDeploymentName,
 			})
 			if err != nil {
 				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
@@ -268,6 +270,12 @@ func run(transcriptPath string) (err error) {
 	}
 	markConnectorBackedTools(customTools, connectorBackedToolNames)
 	connectorBindings = parseConnectionBindings(os.Getenv(workerenv.ConnectionBindings))
+	ctx, err = prepareNativeRemoteTools(
+		ctx, k8sClient, taskNamespace, taskName, enabledTools, customTools, worker.NewToolExecutor(),
+	)
+	if err != nil {
+		return fmt.Errorf("prepare remote MCP tools: %w", err)
+	}
 
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
@@ -479,6 +487,12 @@ func loadCustomTools(
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
 			continue
 		}
+		if aitools.IsRemoteMCP(tool) {
+			// Remote binding/discovery is mandatory and Task-authorized, not a
+			// best-effort load that may silently omit a selected capability.
+			customTools[name] = tool
+			continue
+		}
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
 			if frozen {
@@ -589,6 +603,19 @@ func bindApprovalOutboundAccessPolicyVersion(
 	if err := k8sClient.Get(ctx, key, policy); err != nil {
 		return fmt.Errorf("read outbound access policy %q for approval binding: %w", key.Name, err)
 	}
+	return bindApprovalResolvedOutboundPolicyVersion(ctx, k8sClient, namespace, tool, policy)
+}
+
+// bindApprovalResolvedOutboundPolicyVersion binds the exact policy snapshot the
+// caller validated, without a second policy read introducing different selectors.
+func bindApprovalResolvedOutboundPolicyVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+	policy *corev1alpha1.OutboundAccessPolicy,
+) error {
+	clearApprovalOutboundAccessPolicyVersion(tool)
 	secretRefs := approvalOutboundPolicySecretRefs(policy)
 	serviceAccountNames := approvalOutboundPolicyServiceAccountNames(policy)
 	serviceRefs := approvalOutboundPolicyServiceRefs(policy)
@@ -1512,7 +1539,7 @@ func executeAgentLoopWithEvents(
 					// controller; the worker asks it to run the call.
 					result, execErr = executeConnectorToolViaController(execCtx, nil, customTool, execArgs, tc.ID, approvalKey)
 				} else {
-					result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+					result, execErr = executeNativeCustomTool(execCtx, baseToolCtx, toolExecutor, customTool, execArgs)
 				}
 				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 					approvalGate.markFired(approvalKey)
@@ -1536,6 +1563,17 @@ func executeAgentLoopWithEvents(
 						toolCtxCopy.Tenant = toolCtxCopy.Namespace
 					}
 					execCtx = tools.WithToolContext(stepCtx, &toolCtxCopy)
+				}
+				if execErr == nil && approvalKey != "" {
+					// Schema preflight cannot execute the tool, so it must not
+					// consume approval. Once execution starts, retain the fired
+					// key even if the tool returns an argument-shaped error.
+					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
+						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
+						if execErr != nil {
+							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments", execErr.Error())
+						}
+					}
 				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)

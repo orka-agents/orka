@@ -58,7 +58,9 @@ jobs:
           install-mode: goinstall
           # GitHub refuses REST PR diffs over 20,000 lines. Compare revisions
           # locally so large PRs still filter out pre-existing lint findings.
-          args: ${{ !inputs.full_check && format('--new-from-rev={0}', github.event.pull_request.base.sha || github.event.before || 'HEAD~1') || '' }}
+          # PR checkout is a merge ref: its first parent is the actual base,
+          # which can be newer than the base SHA frozen in the event payload.
+          args: ${{ !inputs.full_check && format('--new-from-rev={0}', github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || 'HEAD~1') || '' }}
 
   ui-lint:
     name: UI Lint

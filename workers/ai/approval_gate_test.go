@@ -1484,6 +1484,46 @@ func TestRequestApprovalToolValidationErrorReturnsWholeBatchToModel(t *testing.T
 	}
 }
 
+// The registry rejects a wrong-typed argument before request_approval runs;
+// the model must still get the batch back to correct the call.
+func TestRequestApprovalToolArgumentTypeErrorReturnsWholeBatchToModel(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "bad approval",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-approval",
+					Name:      "request_approval",
+					Arguments: json.RawMessage(`{"action":{"k":"v"},"targetTool":"deploy","targetArguments":{}}`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		modelSettings{maxTokens: 4096},
+		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+}
+
 func TestRequestApprovalToolDuplicateTerminalDecisionReturnsWholeBatchToModel(t *testing.T) {
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()
@@ -1511,40 +1551,146 @@ func TestRequestApprovalToolDuplicateTerminalDecisionReturnsWholeBatchToModel(t 
 	}
 	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{resolvedApprovalForTarget(target)})
 
-	result, err := executeAgentLoopWithEvents(
-		context.Background(),
-		&mockProvider{responses: []*llm.CompletionResponse{
-			{
-				Content: "duplicate approval",
-				ToolCalls: []llm.ToolCall{
-					{
-						ID:   "call-approval",
-						Name: "request_approval",
-						Arguments: json.RawMessage(
-							`{"action":"dispatch","targetTool":"dispatch_work_order","targetArguments":{"incident":"inc-1"}}`,
-						),
+	for _, tt := range []struct {
+		name            string
+		targetArguments json.RawMessage
+	}{
+		{name: "object", targetArguments: args},
+		{name: "stringified object", targetArguments: json.RawMessage(`"{\"incident\":\"inc-1\"}"`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			callArgs, err := json.Marshal(map[string]json.RawMessage{
+				"action":          json.RawMessage(`"dispatch"`),
+				"targetTool":      json.RawMessage(`"dispatch_work_order"`),
+				"targetArguments": tt.targetArguments,
+			})
+			if err != nil {
+				t.Fatalf("marshal approval call: %v", err)
+			}
+			provider := &mockProvider{responses: []*llm.CompletionResponse{
+				{
+					Content: "duplicate approval",
+					ToolCalls: []llm.ToolCall{
+						{ID: "call-approval", Name: "request_approval", Arguments: callArgs},
+						{ID: "call-other", Name: "other_tool", Arguments: json.RawMessage(`{"ok":true}`)},
 					},
-					{ID: "call-other", Name: "other_tool", Arguments: json.RawMessage(`{"ok":true}`)},
+					StopReason: "tool_use",
 				},
-				StopReason: "tool_use",
-			},
-			{Content: correctedResult, StopReason: "end_turn"},
-		}},
-		[]llm.Message{{Role: "user", Content: "handle incident"}},
-		"",
-		"test-model",
-		modelSettings{maxTokens: 4096},
-		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
-		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
-		nil,
-		common.NewFakeEventRecorder(),
-		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
-	)
-	if err != nil {
-		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+				{Content: correctedResult, StopReason: "end_turn"},
+			}}
+			recorder := common.NewFakeEventRecorder()
+			result, err := executeAgentLoopWithEvents(
+				context.Background(),
+				provider,
+				[]llm.Message{{Role: "user", Content: "handle incident"}},
+				"",
+				"test-model",
+				modelSettings{maxTokens: 4096},
+				toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
+				map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+				nil,
+				recorder,
+				&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+			)
+			if err != nil {
+				t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+			}
+			if result != correctedResult {
+				t.Fatalf("result = %q, want %s", result, correctedResult)
+			}
+			if len(provider.requests) != 2 {
+				t.Fatalf("model requests = %d, want 2", len(provider.requests))
+			}
+			messages := provider.requests[1].Messages
+			results := messages[len(messages)-2:]
+			acknowledgement := "approval " + target.ApprovalID + " for " + gatedDispatchTool + " is already approved"
+			if results[0].ToolCallID != "call-approval" || !strings.Contains(results[0].Content, acknowledgement) {
+				t.Fatalf("approval tool result = %+v, want existing approval", results[0])
+			}
+			if results[1].ToolCallID != "call-other" || !strings.Contains(results[1].Content, "Not executed") {
+				t.Fatalf("other tool result = %+v, want batch skip", results[1])
+			}
+			for _, event := range recorder.Events() {
+				if event.Type == events.ExecutionEventTypeApprovalRequested {
+					t.Fatalf("already-approved call emitted a new approval request")
+				}
+			}
+		})
 	}
-	if result != correctedResult {
-		t.Fatalf("result = %q, want %s", result, correctedResult)
+}
+
+func TestRequestApprovalToolInvalidTargetArgumentsFailClosed(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	customTools := map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool}
+	baseToolCtx := &toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"}
+	target, err := explicitApprovalTargetForCall(context.Background(), llm.ToolCall{
+		Arguments: json.RawMessage(`{"action":"dispatch","targetTool":"dispatch_work_order","targetArguments":{}}`),
+	}, customTools, baseToolCtx)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	gate := &approvalGate{
+		namespace: "default", taskName: "incident-task", taskUID: "task-uid-1",
+		resolved: []approvals.ResolvedApproval{resolvedApprovalForTarget(target)},
+	}
+
+	for _, tt := range []struct {
+		name            string
+		targetArguments json.RawMessage
+	}{
+		{name: "missing"},
+		{name: "invalid string", targetArguments: json.RawMessage(`"not JSON"`)},
+		{name: "trailing JSON", targetArguments: json.RawMessage(`"{} {}"`)},
+		{name: "array", targetArguments: json.RawMessage(`[]`)},
+		{name: "stringified array", targetArguments: json.RawMessage(`"[]"`)},
+		{name: "null", targetArguments: json.RawMessage(`null`)},
+		{name: "stringified null", targetArguments: json.RawMessage(`"null"`)},
+		{name: "stringified number", targetArguments: json.RawMessage(`"42"`)},
+		{name: "double-stringified object", targetArguments: json.RawMessage(`"\"{}\""`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := map[string]json.RawMessage{
+				"action":     json.RawMessage(`"dispatch"`),
+				"targetTool": json.RawMessage(`"dispatch_work_order"`),
+			}
+			if tt.targetArguments != nil {
+				args["targetArguments"] = tt.targetArguments
+			}
+			callArgs, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("marshal approval call: %v", err)
+			}
+			calls := []llm.ToolCall{
+				{ID: "call-approval", Name: "request_approval", Arguments: callArgs},
+				{ID: "call-other", Name: "other_tool", Arguments: json.RawMessage(`{"ok":true}`)},
+			}
+			recorder := common.NewFakeEventRecorder()
+			messages, result, stop, continueLLM, err := processApprovalBatch(
+				context.Background(), nil, calls, gate,
+				map[string]struct{}{"request_approval": {}}, customTools, recorder, baseToolCtx,
+			)
+			if err != nil {
+				t.Fatalf("processApprovalBatch() error = %v", err)
+			}
+			if stop || !continueLLM || result != "" || len(messages) != len(calls) {
+				t.Fatalf("approval batch = (%+v, %q, %v, %v), want validation results and continuation",
+					messages, result, stop, continueLLM)
+			}
+			if messages[0].ToolCallID != "call-approval" || !strings.Contains(messages[0].Content, "targetArguments") {
+				t.Fatalf("approval tool result = %+v, want targetArguments validation error", messages[0])
+			}
+			if messages[1].ToolCallID != "call-other" || !strings.Contains(messages[1].Content, "Not executed") {
+				t.Fatalf("other tool result = %+v, want batch skip", messages[1])
+			}
+			for _, event := range recorder.Events() {
+				if event.Type == events.ExecutionEventTypeApprovalRequested {
+					t.Fatalf("invalid targetArguments emitted an approval request")
+				}
+			}
+		})
 	}
 }
 
@@ -2612,5 +2758,59 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": local}, map[string]bool{})
 	if got, err := approvalTargetSpecDigest(local); err != nil || got == plain {
 		t.Fatalf("a locally executed tool must keep the full digest: got %q err = %v", got, err)
+	}
+}
+
+func TestRequestApprovalRawArgumentsFailClosed(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	customTools := map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool}
+	baseToolCtx := &toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"}
+	target, err := explicitApprovalTargetForCall(context.Background(), llm.ToolCall{
+		Arguments: json.RawMessage(`{"action":"dispatch","targetTool":"dispatch_work_order","targetArguments":{}}`),
+	}, customTools, baseToolCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resolved := range []bool{false, true} {
+		for _, tt := range []struct {
+			name string
+			args string
+		}{
+			{"duplicate action", `{"action":"dispatch","action":"dispatch",` +
+				`"targetTool":"dispatch_work_order","targetArguments":"{}"}`},
+			{"duplicate nested key", `{"action":"dispatch","targetTool":"dispatch_work_order",` +
+				`"targetArguments":"{\"x\":1,\"x\":2}"}`},
+			{"invalid Unicode", `{"action":"\ud800","targetTool":"dispatch_work_order","targetArguments":"{}"}`},
+		} {
+			t.Run(fmt.Sprintf("resolved=%v/%s", resolved, tt.name), func(t *testing.T) {
+				gate := &approvalGate{namespace: "default", taskName: "incident-task", taskUID: "task-uid-1"}
+				if resolved {
+					gate.resolved = []approvals.ResolvedApproval{resolvedApprovalForTarget(target)}
+				}
+				toolName := "request_approval"
+				if resolved {
+					toolName = " request_approval "
+				}
+				calls := []llm.ToolCall{{ID: "malformed", Name: toolName, Arguments: json.RawMessage(tt.args)}}
+				recorder := common.NewFakeEventRecorder()
+				messages, result, stop, continueLLM, err := processApprovalBatch(context.Background(), nil, calls,
+					gate, map[string]struct{}{"request_approval": {}}, customTools, recorder, baseToolCtx)
+				if err != nil || stop || !continueLLM || result != "" || len(messages) != 1 {
+					t.Fatalf("invalid raw call did not return validation: messages=%v result=%q stop=%v continue=%v err=%v",
+						messages, result, stop, continueLLM, err)
+				}
+				if strings.Contains(messages[0].Content, "already approved") {
+					t.Fatal("malformed raw call matched an existing approval")
+				}
+				for _, event := range recorder.Events() {
+					if event.Type == events.ExecutionEventTypeApprovalRequested {
+						t.Fatal("malformed raw call emitted approval request")
+					}
+				}
+			})
+		}
 	}
 }

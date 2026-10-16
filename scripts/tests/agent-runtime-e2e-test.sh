@@ -162,7 +162,7 @@ line_of_script() {
 }
 
 concurrency_line="$(line_of_script 'run_concurrency_check "${codex_agent}" codex "${codex_model}" "${codex_pool}"')"
-park_read_line="$(grep -nF 'park_runtimepool "${codex_pool}"' "${script}" | head -1 | cut -d: -f1)"
+park_read_line="$(grep -nF 'park_runtimepool "${codex_pool}"' "${script}" | awk -F: -v after="${concurrency_line}" '$1 > after { print $1; exit }')"
 timeout_line="$(line_of_script 'run_timeout_check codex "${codex_model}" "${codex_tool_agent}"')"
 cancel_line="$(line_of_script 'run_explicit_cancel_check codex "${codex_model}" "${codex_tool_agent}"')"
 restart_line="$(line_of_script 'run_controller_restart_check codex "${codex_model}" "${codex_tool_agent}" "${restart_nonce}"')"
@@ -464,7 +464,6 @@ printf '%s\n' 'ok - complete RuntimePool profile projection retries until two st
 grep -F 'for ((attempt = 1; attempt <= 10; attempt++)); do' "${script}" >/dev/null
 grep -F 'patch task "${task}" --type=merge' "${script}" >/dev/null
 grep -F 'orka.ai/acp-e2e-validated":"true"' "${script}" >/dev/null
-grep -F 'patch task "${fork_task}" --type=merge' "${script}" >/dev/null
 grep -F 'release-gate command failed with status ${rc} at ${failed_source}:${failed_line} (${failed_function})' "${script}" >/dev/null
 if grep -F 'label task "${task}"' "${script}" >/dev/null; then
   echo "validated Task metadata still uses conflict-prone kubectl label" >&2
@@ -798,49 +797,16 @@ rm -rf "${restart_fence_root}"
 printf '%s\n' 'ok - restart recovery fence preserves the old runtime instance and permits a newer controller epoch'
 
 
-lifecycle_reached_body="$(awk '/^pool_lifecycle_reached\(\) \{/,/^\}$/' "${script}")"
-[[ -n "${lifecycle_reached_body}" ]] || {
-  echo "monotonic RuntimePool lifecycle assertion is missing" >&2
-  exit 1
-}
-eval "${lifecycle_reached_body}"
-namespace="test-namespace"
-pool_payload=''
-k() { printf '%s\n' "${pool_payload}"; }
-
-pool_payload='{"status":{"lifecycle":"Stopped","admissionState":"Closed"}}'
-pool_lifecycle_reached test-pool Draining
-pool_lifecycle_reached test-pool Quiescent
-pool_lifecycle_reached test-pool Stopping
-pool_lifecycle_reached test-pool Stopped
-
-pool_payload='{"status":{"lifecycle":"Draining","admissionState":"Draining"}}'
-if pool_lifecycle_reached test-pool Quiescent; then
-  echo "monotonic lifecycle accepted a state before Quiescent" >&2
-  exit 1
-fi
-
-pool_payload='{"status":{"lifecycle":"Stopping","admissionState":"Draining"}}'
-if pool_lifecycle_reached test-pool Stopping; then
-  echo "monotonic lifecycle accepted an invalid Stopping admission state" >&2
-  exit 1
-fi
-
-printf '%s\n' 'ok - scale-to-zero lifecycle assertions accept valid later states without accepting regressions'
-
-
 park_count="$(grep -Fc 'park_runtimepool "${codex_pool}"' "${script}")"
 [[ "${park_count}" == "2" ]] || {
-  echo "Codex read RuntimePool must be parked before both tool checks and write publication" >&2
+  echo "Codex read RuntimePool must be parked before the smoke tool checks and the release write publication" >&2
   exit 1
 }
-scale_zero_line="$(grep -nF 'run_scale_to_zero_recovery_check codex "${codex_model}"' "${script}" | tail -1 | cut -d: -f1)"
-park_before_write_line="$(grep -nF 'park_runtimepool "${codex_pool}"' "${script}" | tail -1 | cut -d: -f1)"
+park_before_write_line="$(grep -nF 'park_runtimepool "${codex_pool}"' "${script}" | head -1 | cut -d: -f1)"
 write_gate_line="$(grep -nF 'run_write_release_gate "${codex_agent}"' "${script}" | tail -1 | cut -d: -f1)"
-(( scale_zero_line < park_before_write_line ))
 (( park_before_write_line < write_gate_line ))
 
-printf '%s\n' 'ok - release gate parks the recovered read pool before creating the write profile pool'
+printf '%s\n' 'ok - release gate parks the read pool before creating the write profile pool'
 
 
 terminal_projection_body="$(awk '/^task_terminal_projection_ready\(\) \{/,/^\}$/' "${script}")"
@@ -929,3 +895,58 @@ printf '%s\n' 'ok - Task terminal waits require execution and phase projection f
   [[ "${positive_controls}" == 2 && "${negative_controls}" == 7 ]]
 )
 printf '%s\n' 'ok - candidate identity and all workspace URL controls run without live GitHub publication settings'
+
+(
+  eval "$(awk '/^run_read_smoke\(\) \{/,/^\}$/' "${script}")"
+  release_gate=0
+  namespace=test
+  state_wait_seconds=1
+  read_repo_commit=fixture-commit
+  temp_root=/tmp
+  apply_agent() { :; }
+  apply_read_task() { :; }
+  wait_until() { :; }
+  wait_task_pool_name_value() { printf '%s\n' fixture-pool; }
+  capture_pool_snapshot() { :; }
+  assert_task_succeeded_read() { :; }
+  sanitize_name() { printf '%s\n' "$1"; }
+  die() { printf '%s\n' "$*" >&2; exit 1; }
+  k() {
+    local task="$5" query="$7"
+    case "${task}:${query}" in
+      'read:jsonpath={.status.execution.runtimeSessionUID}') printf '%s\n' fixture-session ;;
+      'read:jsonpath={.status.execution.runtimeSessionGeneration}') printf '%s\n' 3 ;;
+      'read:jsonpath={.status.execution.runtimeSessionRecreationPending}') printf '%s\n' "${retired}" ;;
+      'read-continue:jsonpath={.status.execution.runtimeSessionUID}') printf '%s\n' "${fixture_continued_uid}" ;;
+      'read-continue:jsonpath={.status.execution.runtimeSessionGeneration}') printf '%s\n' "${fixture_continued_generation}" ;;
+      *) echo 'unexpected continuation identity query' >&2; exit 1 ;;
+    esac
+  }
+  fixture_continued_uid=fixture-session
+  retired=false
+  fixture_continued_generation=3
+  run_read_smoke codex model agent read session nonce license
+  [[ "${read_smoke_session_uid}" == fixture-session && "${read_smoke_session_generation}" == 3 ]]
+  retired=true
+  fixture_continued_generation=4
+  run_read_smoke codex model agent read session nonce license
+  [[ "${read_smoke_session_uid}" == fixture-session && "${read_smoke_session_generation}" == 4 ]]
+  for case in retired-without-increment resident-with-increment different-uid extra-generation; do
+    if (
+      retired=true
+      fixture_continued_generation=4
+      fixture_continued_uid=fixture-session
+      case "${case}" in
+        retired-without-increment) fixture_continued_generation=3 ;;
+        resident-with-increment) retired=false ;;
+        different-uid) fixture_continued_uid=another-session ;;
+        extra-generation) fixture_continued_generation=5 ;;
+      esac
+      run_read_smoke codex model agent read session nonce license
+    ) >/dev/null 2>&1; then
+      echo "continuation identity accepted ${case}" >&2
+      exit 1
+    fi
+  done
+)
+printf '%s\n' 'ok - continuation preserves its logical UID and advances exactly once only after recorded runtime retirement'

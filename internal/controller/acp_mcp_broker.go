@@ -536,6 +536,16 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 				Error   string `json:"error"`
 			}{true, rejection.Error()})
 		}
+		if argErr, ok := errors.AsType[*tools.ToolArgumentError](err); ok {
+			// The registry rejected the arguments before the tool ran, so the
+			// call had no effect and the agent can resend it. The message names
+			// only the field and JSON types.
+			return json.Marshal(struct {
+				IsError bool   `json:"isError"`
+				Code    string `json:"code"`
+				Error   string `json:"error"`
+			}{true, "invalid_arguments", argErr.Error()})
+		}
 		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
 		// A read-only Tool may reach its own request deadline while the
 		// enclosing prompt is still active. Preparation failures never carry

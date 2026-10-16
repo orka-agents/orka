@@ -49,6 +49,7 @@ type AgentReconciler struct {
 const (
 	agentSoulConfigMapDependenciesField = "agent.soulConfigMapDependencies"
 
+	agentReasoningEffortNone   = "none"
 	agentReasoningEffortLow    = "low"
 	agentReasoningEffortMedium = "medium"
 	agentReasoningEffortHigh   = "high"
@@ -197,10 +198,10 @@ func validateAgentRuntimeReasoningEffort(runtimeCfg *corev1alpha1.AgentCLIRuntim
 	switch runtimeCfg.Type {
 	case corev1alpha1.AgentRuntimeCodex:
 		switch effort {
-		case agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh, agentReasoningEffortXHigh:
+		case agentReasoningEffortNone, agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh, agentReasoningEffortXHigh:
 			return nil
 		default:
-			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be low, medium, high, or xhigh", effort)
+			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be none, low, medium, high, or xhigh", effort)
 		}
 	case corev1alpha1.AgentRuntimeClaude:
 		switch effort {

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -31,8 +32,13 @@ func init() {
 }
 
 // NewDB opens a SQLite database with recommended pragmas for WAL mode,
-// busy timeout, synchronous mode, and foreign keys.
+// busy timeout, synchronous mode, and foreign keys. It creates or validates the
+// current schema; upgrades require OpenLockedStore's exclusive controller lock.
 func NewDB(path string) (*sql.DB, error) {
+	return newDB(path, false)
+}
+
+func newDB(path string, allowMigration bool) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -63,9 +69,13 @@ func NewDB(path string) (*sql.DB, error) {
 		}
 	}
 
-	if err := initializeSchema(db); err != nil {
+	schemaErr := initializeSchema(db)
+	if schemaErr != nil && allowMigration {
+		schemaErr = upgradeSchema(db, path, schemaErr)
+	}
+	if schemaErr != nil {
 		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", err)
+		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", schemaErr)
 	}
 
 	return db, nil
@@ -965,6 +975,7 @@ func currentSchemaStatements() []string {
 	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
 	statements = append(statements, usageSchema()...)
 	statements = append(statements, agentExecutionSchemaStatements()...)
+	statements = append(statements, nativeSessionSchemaStatements()...)
 	return append(statements, connectorSchemaStatements()...)
 }
 
@@ -985,6 +996,9 @@ type Store struct {
 	// rest. Snapshot persistence fails closed while it is nil.
 	snapshotCipher *AgentExecutionSnapshotCipher
 
+	// nativeSessionMaxBytes limits new bundles, not authenticated stored reads.
+	nativeSessionMaxBytes int
+
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
 	applyMemoryProposalAfterAcceptedRead func()
@@ -997,7 +1011,7 @@ type Store struct {
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	s := &Store{db: db, dbPath: dbPath}
+	s := &Store{db: db, dbPath: dbPath, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	s.pendingWALTruncate.Store(true)
 	return s
 }
@@ -1011,12 +1025,12 @@ func OpenLockedStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := NewDB(path)
+	db, err := newDB(path, true)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
-	store := &Store{db: db, dbPath: path, processLock: lock}
+	store := &Store{db: db, dbPath: path, processLock: lock, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	store.pendingWALTruncate.Store(true)
 	return store, nil
 }

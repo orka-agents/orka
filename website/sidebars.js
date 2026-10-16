@@ -40,6 +40,7 @@ const sidebars = {
         'concepts/soul',
         'concepts/transaction-tokens',
         'concepts/outbound-access',
+        'concepts/remote-mcp',
         'concepts/security',
       ],
     },

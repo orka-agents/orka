@@ -22,6 +22,8 @@ type acpTaskSession struct {
 	Turn             *ACPSessionTurn
 	Binding          ACPRuntimeSessionBinding
 	Bootstrap        *ACPBootstrapTranscript
+	NativeSession    *store.NativeSessionRecord
+	NativeCapture    *store.NativeSessionRecord
 	UserPrompt       string
 	VerifiedBaseline *store.VerifiedBranchBaseline
 	Reused           bool
@@ -168,6 +170,9 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 	if session == nil || session.Turn == nil || session.finalized || session.requeued {
 		return nil
 	}
+	if errors.Is(cause, errNativeSessionInstallUnresolved) || task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
+		return errNativeSessionInstallUnresolved
+	}
 	attemptID := session.Turn.Turn.PromptAttemptID
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
@@ -198,7 +203,13 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 	default:
 		return fmt.Errorf("unsupported unfinalized ACP SessionTurn attempt state %s", attempt.ExecutionState)
 	}
-	return d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence)
+	if err := d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
+		return err
+	}
+	// Recovery reconstructs a separate SessionTurn. Reflect its completed
+	// durable finalization on the live turn before runtime cleanup examines it.
+	session.finalized = d.finalizedSessionTurnKnown(task.UID, session.Turn.Turn.ID)
+	return nil
 }
 
 type acpTaskSessionPreparation struct {
@@ -206,6 +217,7 @@ type acpTaskSessionPreparation struct {
 	current          *ACPRuntimeSessionBinding
 	plan             ACPRuntimeSessionPlan
 	bootstrap        *ACPBootstrapTranscript
+	nativeSession    *store.NativeSessionRecord
 	userPrompt       string
 	verifiedBaseline *store.VerifiedBranchBaseline
 }
@@ -290,6 +302,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 	runtimeInstanceID harnessv2.RuntimeInstanceID,
 	supervisorBootID harnessv2.SupervisorBootID,
 	lineage acpSessionLineageIdentity,
+	nativeSessionsSupported bool,
 ) (*acpTaskSession, error) {
 	if task.Spec.SessionRef == nil {
 		return nil, nil
@@ -305,6 +318,12 @@ func (d *ACPDispatcher) prepareTaskSession(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if preparation.nativeSession != nil && !nativeSessionsSupported {
+		return nil, errNativeSessionRuntimeUnsupported
+	}
+	if preparation.nativeSession != nil && !nativeRestoreHonorsHistoryBoundary(task.Spec.SessionRef, preparation.nativeSession) {
+		return nil, errNativeSessionHistoryBoundary
 	}
 	lease, turn, err := d.bindAndOpenTaskSessionTurn(
 		ctx, task, fence, runtimeInstanceID, preparation.control, preparation.userPrompt,
@@ -353,7 +372,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 		"durableGeneration", preparation.control.RuntimeSessionGeneration,
 	)
 	return &acpTaskSession{
-		Turn: turn, Binding: preparation.plan.Binding, Bootstrap: preparation.bootstrap,
+		Turn: turn, Binding: preparation.plan.Binding, Bootstrap: preparation.bootstrap, NativeSession: preparation.nativeSession,
 		UserPrompt:       preparation.userPrompt,
 		VerifiedBaseline: preparation.verifiedBaseline, Reused: !preparation.plan.Recreate,
 		LeaseGeneration: lease.Key.LeaseGeneration,
@@ -427,9 +446,13 @@ func (d *ACPDispatcher) planTaskSession(
 	if err != nil {
 		return nil, err
 	}
+	native, err := d.loadTaskNativeSession(ctx, task, control)
+	if err != nil {
+		return nil, err
+	}
 	var userPrompt string
 	var bootstrap *ACPBootstrapTranscript
-	if plan.BootstrapRequired {
+	if plan.BootstrapRequired && native == nil {
 		bootstrap, userPrompt, err = d.resolveTaskSessionBootstrap(ctx, task, control)
 	} else {
 		userPrompt, err = d.resolveTaskSessionPrompt(ctx, task, control)
@@ -444,7 +467,7 @@ func (d *ACPDispatcher) planTaskSession(
 	}
 	return &acpTaskSessionPreparation{
 		control: control, current: current, plan: plan, bootstrap: bootstrap, userPrompt: userPrompt,
-		verifiedBaseline: verifiedBaseline,
+		verifiedBaseline: verifiedBaseline, nativeSession: native,
 	}, nil
 }
 
@@ -853,6 +876,9 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 			"namespace", task.Namespace, "task", task.Name)
 		return nil
 	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, session.NativeCapture); err != nil {
+		return err
+	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
 		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
@@ -878,7 +904,7 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 		return err
 	}
 	_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
-		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result,
+		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result, NativeSession: session.NativeCapture,
 		PublicationID: publicationID,
 		Projection:    ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt:   time.Now().UTC(),
@@ -899,6 +925,13 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
 	}
+	carried, err := d.carriedNativeCheckpoint(ctx, task, session)
+	if err != nil {
+		return err
+	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, carried); err != nil {
+		return err
+	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
 		State: corev1alpha1.TaskExecutionStateOutcomeUnknown, Outcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
 		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
@@ -915,7 +948,7 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 		return err
 	}
 	_, err = d.Sessions.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
-		SessionTurn: *session.Turn, Fence: fence, Reason: reason,
+		SessionTurn: *session.Turn, Fence: fence, Reason: reason, NativeSession: carried,
 		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
@@ -938,7 +971,13 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
 	}
-	var err error
+	carried, err := d.carriedNativeCheckpoint(ctx, task, session)
+	if err != nil {
+		return err
+	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, carried); err != nil {
+		return err
+	}
 	execution, err = taskSessionProjectionExecution(task, execution)
 	if err != nil {
 		return err
@@ -951,7 +990,7 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 		return err
 	}
 	_, err = d.Sessions.FinalizeOutcomeMarker(ctx, ACPFinalizeOutcomeMarkerRequest{
-		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason,
+		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason, NativeSession: carried,
 		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
@@ -1047,9 +1086,10 @@ func (d *ACPDispatcher) removeRuntimeSessionBinding(sessionUID string) {
 func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(task *corev1alpha1.Task, attempt *store.PromptAttempt, binding ACPRuntimeSessionBinding) {
 	sessionUID := strings.TrimSpace(binding.SessionUID)
 	reusable := task != nil && attempt != nil && sessionUID != "" &&
+		!binding.RecreationRequired &&
 		attempt.ExecutionState == store.PromptExecutionSucceeded &&
 		(attempt.DeliveryState == store.PromptDeliveryNotRequested || attempt.DeliveryState == store.PromptDeliveryReadValidated) &&
-		task.Spec.SessionRef != nil &&
+		task.Spec.SessionRef != nil && task.Annotations[nativeCaptureIntentAnnotation] == "" &&
 		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite)
 	if reusable {
 		if binding.Generation > 0 {

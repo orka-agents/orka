@@ -93,6 +93,7 @@ type ToolContext struct {
 	OperationID               string
 	Tenant                    string
 	Provider                  string
+	ProviderNamespace         string
 	ProviderType              string
 	ExecutionMode             executionmode.Mode
 	WatchNamespace            string
@@ -133,6 +134,8 @@ type ToolContext struct {
 	TaskLabels          func() map[string]string
 	CheckTaskLimit      func() *ChatToolError
 	AuthorizeTaskCreate func(context.Context, *corev1alpha1.Task) *ChatToolError
+	// AuthorizeAgentReference checks caller authority without resolving the Agent or its runtime profile.
+	AuthorizeAgentReference func(context.Context, *corev1alpha1.Agent) *ChatToolError
 	// SealTaskCreate runs right after a Task this tool created exists, so
 	// the API can bind server-assigned identity (the UID) to the requester
 	// it stamped. A failure is logged by the sealer; the Task stays.
@@ -413,11 +416,22 @@ func (r *Registry) Names() []string {
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	tool, ok := r.Get(name)
+	// call checks argument types inside the instrumented path, so a rejected
+	// call is recorded like any other tool error. The check runs on the
+	// arguments as sent, before decoding stringified objects collapses
+	// duplicate keys.
+	call := func(ctx context.Context) (string, error) {
+		normalized, err := NormalizeToolArguments(tool, args)
+		if err != nil {
+			return "", err
+		}
+		return tool.Execute(ctx, normalized)
+	}
 	if telemetryDisabled() {
 		if !ok {
-			return "", fmt.Errorf("tool %q not found", name)
+			return "", &ToolNotFoundError{Name: name}
 		}
-		return tool.Execute(ctx, args)
+		return call(ctx)
 	}
 
 	toolTelemetryName := name
@@ -451,16 +465,16 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	if !spanRecording && !meterActive {
 		if !ok {
 			span.End()
-			return "", fmt.Errorf("tool %q not found", name)
+			return "", &ToolNotFoundError{Name: name}
 		}
-		result, err := tool.Execute(ctx, args)
+		result, err := call(ctx)
 		span.End()
 		return result, err
 	}
 	defer span.End()
 
 	if !ok {
-		err := fmt.Errorf("tool %q not found", name)
+		err := &ToolNotFoundError{Name: name}
 		if spanRecording {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -472,7 +486,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		return "", err
 	}
 
-	result, err := tool.Execute(ctx, args)
+	result, err := call(ctx)
 	duration := time.Since(start).Seconds()
 	if spanRecording {
 		span.SetAttributes(attribute.Int(tracing.AttrToolResultSizeBytes, len(result)))
@@ -869,6 +883,63 @@ func KnownBuiltInToolNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// NormalizeToolArguments validates the original JSON before applying the same
+// type and stringified-object normalization used by Registry.Execute. Consumers
+// comparing a call to a recorded decision can use it without executing the tool.
+func NormalizeToolArguments(tool Tool, args json.RawMessage) (json.RawMessage, error) {
+	normalized, err := normalizeArgTypes(tool, args)
+	if err != nil {
+		return nil, err
+	}
+	return decodeStringifiedObjectArgs(tool, normalized), nil
+}
+
+// decodeStringifiedObjectArgs replaces top-level arguments that the tool schema
+// declares as objects, but that the model sent as JSON-encoded strings, with
+// the decoded object. Models often stringify nested objects, and tools that
+// type-switch on map[string]any would otherwise ignore them. Every other value
+// is left for the tool to validate.
+func decodeStringifiedObjectArgs(tool Tool, args json.RawMessage) json.RawMessage {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(args, &values); err != nil || len(values) == 0 {
+		return args
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type any `json:"type"`
+		} `json:"properties"`
+	}
+	changed := false
+	for name, value := range values {
+		var encoded string
+		if json.Unmarshal(value, &encoded) != nil {
+			continue
+		}
+		if schema.Properties == nil {
+			if err := json.Unmarshal(tool.Parameters(), &schema); err != nil || schema.Properties == nil {
+				return args
+			}
+		}
+		if schema.Properties[name].Type != jsonSchemaTypeObject {
+			continue
+		}
+		var object map[string]json.RawMessage
+		if json.Unmarshal([]byte(encoded), &object) != nil || object == nil {
+			continue
+		}
+		values[name] = json.RawMessage(encoded)
+		changed = true
+	}
+	if !changed {
+		return args
+	}
+	decoded, err := json.Marshal(values)
+	if err != nil {
+		return args
+	}
+	return decoded
 }
 
 // ChatToolNames returns the names of all chat tools in registration order.

@@ -83,6 +83,9 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 	if a.PlanDocument == "" {
 		return "", fmt.Errorf("plan_document is required")
 	}
+	if a.ProgressPct < 0 || a.ProgressPct > 100 {
+		return "", fmt.Errorf("progress_pct must be between 0 and 100, got %d", a.ProgressPct)
+	}
 
 	controllerURL := os.Getenv(envOrkaControllerURL)
 	taskName := os.Getenv(envOrkaTaskName)

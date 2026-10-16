@@ -63,10 +63,14 @@ func TestCreateAgentTaskTool_Parameters(t *testing.T) {
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{nameField, promptField, agentRefField, namespaceField, timeoutField, "maxTurns", workspaceField, scheduleField} {
+	for _, key := range []string{promptField, agentRefField, namespaceField, timeoutField, "maxTurns", workspaceField, scheduleField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
+	}
+	// Task names are generated, so the model is not asked for one.
+	if _, ok := props[nameField]; ok {
+		t.Errorf("schema must not offer a %s argument the tool ignores", nameField)
 	}
 	workspaceSchema, ok := props[workspaceField].(map[string]any)
 	if !ok {
@@ -493,6 +497,33 @@ func TestCreateAgentTaskTool_Execute_PullRequestMetadata(t *testing.T) {
 		}
 		return task.Spec.Workspace, ""
 	})
+}
+
+func TestCreateAgentTaskTool_Execute_RejectsAgentWithoutRuntime(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec:       corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: testProviderOpenAI}},
+	})
+	ctx := newCreateAgentTaskToolCtx(fc)
+
+	result, err := (&CreateAgentTaskTool{}).Execute(ctx, json.RawMessage(`{"prompt":"Review the design","agentRef":"reviewer"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Suggestion, "create_ai_task") {
+		t.Fatalf("response = %#v, want invalid arguments pointing to create_ai_task", response)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := fc.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks, want none", len(tasks.Items))
+	}
 }
 
 func TestCreateAgentTaskTool_Execute_RejectsNonObjectWorkspace(t *testing.T) {
@@ -1304,5 +1335,42 @@ func TestCreateAgentTaskTool_Execute_MissingContext(t *testing.T) {
 	}
 	if r.ErrorType != errTypeInternalError {
 		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
+	}
+}
+
+func TestCreateAgentTaskTool_AuthorizesBeforeAgentState(t *testing.T) {
+	for _, state := range []string{"missing", "runtime", "non-runtime"} {
+		t.Run(state, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "disallowed", Namespace: defaultNamespace}}
+			if state == "runtime" {
+				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}
+			}
+			fc := newFakeClient()
+			if state != "missing" {
+				if err := fc.Create(context.Background(), agent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := newCreateAgentTaskToolCtx(fc)
+			calls := 0
+			GetToolContext(ctx).AuthorizeAgentReference = func(_ context.Context, agent *corev1alpha1.Agent) *ChatToolError {
+				calls++
+				if agent.Name != "disallowed" {
+					t.Fatal("preflight lost the Agent reference")
+				}
+				return &ChatToolError{Type: "permission_denied", Message: "agent reference is not allowed"}
+			}
+			result, err := (&CreateAgentTaskTool{}).Execute(ctx, json.RawMessage(`{"agentRef":"disallowed","prompt":"work"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Success || response.ErrorType != "permission_denied" || response.Error != "agent reference is not allowed" || calls != 1 {
+				t.Fatalf("state=%s response=%#v authorization calls=%d", state, response, calls)
+			}
+		})
 	}
 }

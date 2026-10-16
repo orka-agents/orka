@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -265,6 +266,174 @@ func TestUpdateAgentTool_Execute_UpdatesNestedModelFields(t *testing.T) {
 	}
 	if updated.Spec.Model.MaxTokens == nil || *updated.Spec.Model.MaxTokens != 8192 {
 		t.Fatalf("model.maxTokens = %#v, want 8192", updated.Spec.Model.MaxTokens)
+	}
+}
+
+// The Registry preserves numeric-string text, and the fake client does not
+// enforce CRD bounds: validation must reject before any Agent update.
+func TestUpdateAgentTool_Execute_TemperatureBounds(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  float64
+		valid bool
+	}{
+		{name: "minimum", value: "0", want: 0, valid: true},
+		{name: "maximum", value: "2", want: 2, valid: true},
+		{name: "ordinary control", value: "0.7", want: 0.7, valid: true},
+		{name: "maximum exponent", value: "2e0", want: 2, valid: true},
+		{name: "scaled maximum exponent", value: "20E-1", want: 2, valid: true},
+		{name: "negative zero", value: "-0", want: 0, valid: true},
+		{name: "zero exponent", value: "0e50", want: 0, valid: true},
+		{name: "underflow control", value: "1e-1000", want: 0, valid: true},
+		{name: "huge negative exponent", value: "1e-999999999999999999999", want: 0, valid: true},
+		{name: "zero huge exponent", value: "0e999999999999999999999", want: 0, valid: true},
+		{name: "inside maximum", value: "1.9999999999999999", want: 2, valid: true},
+		{name: "above maximum", value: "2.1"},
+		{name: "rounded maximum", value: "2.0000000000000001"},
+		{name: "rounded maximum exponent", value: "2.0000000000000001e0"},
+		{name: "scaled rounded maximum exponent", value: "20000000000000001e-16"},
+		{name: "negative", value: "-0.1"},
+		{name: "negative underflow", value: "-1e-1000"},
+		{name: "negative huge exponent", value: "-1e-999999999999999999999"},
+	}
+	for _, mode := range []string{"direct", "registry", "registry numeric string"} {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				temperature := 0.4
+				original := &corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+					Spec: corev1alpha1.AgentSpec{
+						Model: &corev1alpha1.ModelConfig{
+							Provider: providerOpenAI, Name: testGPT4OModel, Temperature: &temperature,
+						},
+						SystemPrompt: &corev1alpha1.PromptSource{Inline: "original prompt"},
+						Tools:        []corev1alpha1.ToolReference{{Name: "web_search"}},
+					},
+				}
+				fc := newFakeClient(original.DeepCopy())
+				ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+				key := apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}
+				if err := fc.Get(ctx, key, original); err != nil {
+					t.Fatal(err)
+				}
+				tool := &UpdateAgentTool{}
+				execute := tool.Execute
+				if mode != "direct" {
+					registry := NewRegistry()
+					registry.Register(tool)
+					execute = func(ctx context.Context, args json.RawMessage) (string, error) {
+						return registry.Execute(ctx, tool.Name(), args)
+					}
+				}
+				value := tc.value
+				if mode == "registry numeric string" {
+					value = fmt.Sprintf("%q", value)
+				}
+				result, err := execute(ctx, json.RawMessage(`{"name":"my-agent","systemPrompt":"updated prompt","tools":["file_read"],"model":{"name":"updated-model","temperature":`+value+`}}`))
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				var response ChatToolResult
+				if err := json.Unmarshal([]byte(result), &response); err != nil {
+					t.Fatal(err)
+				}
+				var persisted corev1alpha1.Agent
+				if err := fc.Get(ctx, key, &persisted); err != nil {
+					t.Fatal(err)
+				}
+				if !tc.valid {
+					if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "model.temperature") {
+						t.Errorf("result = %#v, want invalid_arguments naming model.temperature", response)
+					}
+					if !reflect.DeepEqual(&persisted, original) {
+						t.Errorf("rejected temperature mutated Agent (resourceVersion %q -> %q)", original.ResourceVersion, persisted.ResourceVersion)
+					}
+					return
+				}
+				if !response.Success {
+					t.Fatalf("expected success, got error: %s", response.Error)
+				}
+				want := original.DeepCopy()
+				want.Spec.Model.Name = "updated-model"
+				want.Spec.Model.Temperature = &tc.want
+				want.Spec.SystemPrompt.Inline = "updated prompt"
+				want.Spec.Tools = []corev1alpha1.ToolReference{{Name: "file_read"}}
+				if !reflect.DeepEqual(persisted.Spec, want.Spec) {
+					t.Errorf("persisted spec = %#v, want %#v", persisted.Spec, want.Spec)
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateAgentTool_Execute_ModelTemperatureCompatibility(t *testing.T) {
+	for _, mode := range []string{"direct", "registry"} {
+		for _, tc := range []struct {
+			name      string
+			modelJSON string
+			wantName  string
+			wantError bool
+		}{
+			{name: "omitted temperature", modelJSON: `{"name":"updated-model"}`, wantName: "updated-model"},
+			{name: "null temperature", modelJSON: `{"name":"updated-model","temperature":null}`, wantName: "updated-model", wantError: mode == "direct"},
+			{name: "null model", modelJSON: `null`, wantName: testGPT4OModel, wantError: mode == "direct"},
+			{name: "legacy scalar model", modelJSON: `"updated-model"`, wantName: "updated-model"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				temperature := 0.4
+				original := &corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+					Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{
+						Provider: providerOpenAI, Name: testGPT4OModel, Temperature: &temperature,
+					}},
+				}
+				fc := newFakeClient(original.DeepCopy())
+				ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+				key := apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}
+				if err := fc.Get(ctx, key, original); err != nil {
+					t.Fatal(err)
+				}
+				tool := &UpdateAgentTool{}
+				execute := tool.Execute
+				if mode == "registry" {
+					registry := NewRegistry()
+					registry.Register(tool)
+					execute = func(ctx context.Context, args json.RawMessage) (string, error) {
+						return registry.Execute(ctx, tool.Name(), args)
+					}
+				}
+				result, err := execute(ctx, json.RawMessage(`{"name":"my-agent","model":`+tc.modelJSON+`}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var response ChatToolResult
+				if err := json.Unmarshal([]byte(result), &response); err != nil {
+					t.Fatal(err)
+				}
+				var persisted corev1alpha1.Agent
+				if err := fc.Get(ctx, key, &persisted); err != nil {
+					t.Fatal(err)
+				}
+				if tc.wantError {
+					if response.Success || response.ErrorType != errTypeInvalidArgs {
+						t.Errorf("result = %#v, want invalid_arguments", response)
+					}
+					if !reflect.DeepEqual(&persisted, original) {
+						t.Error("rejected null value mutated Agent")
+					}
+					return
+				}
+				if !response.Success {
+					t.Fatalf("expected success, got error: %s", response.Error)
+				}
+				want := original.DeepCopy()
+				want.Spec.Model.Name = tc.wantName
+				if !reflect.DeepEqual(persisted.Spec, want.Spec) {
+					t.Errorf("persisted spec = %#v, want %#v", persisted.Spec, want.Spec)
+				}
+			})
+		}
 	}
 }
 

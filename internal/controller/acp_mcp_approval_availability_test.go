@@ -250,14 +250,14 @@ func requireApprovalReadRetrying(t *testing.T, f *mcpApprovalFixture, id, status
 		select {
 		case <-failedReads:
 		case response := <-done:
-			t.Fatalf("original approval call ended during a recoverable read outage: HTTP %d", response.Code)
+			t.Fatalf("original approval call ended during a recoverable read outage: HTTP %d body=%s", response.Code, response.Body.String())
 		case <-time.After(3 * time.Second):
 			t.Fatal("unclaimed approval did not retry the failed read")
 		}
 	}
 	select {
 	case response := <-done:
-		t.Fatalf("original approval call ended before read recovery: HTTP %d", response.Code)
+		t.Fatalf("original approval call ended before read recovery: HTTP %d body=%s", response.Code, response.Body.String())
 	default:
 	}
 	requireApprovalUnclaimed(t, f, id, status)

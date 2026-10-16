@@ -7,12 +7,15 @@ package e2e
 // scripts/agent-runtime-e2e.sh, used by agent_runtime_lifecycle_test.go.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os/exec"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -374,6 +377,84 @@ func taskSessionIdentity(g Gomega, name string) (string, int64) {
 	g.Expect(task.Status.Execution).NotTo(BeNil())
 	g.Expect(task.Status.Execution.RuntimeSessionUID).NotTo(BeEmpty())
 	return task.Status.Execution.RuntimeSessionUID, task.Status.Execution.RuntimeSessionGeneration
+}
+
+// runtimeSessionProcessesScript prints the owner of one RuntimeSession's
+// private home, then the status of every process in the runtime container.
+// The home stays child-owned even when a read-intent workspace protects the
+// session root and workspace.
+const runtimeSessionProcessesScript = `set -- /sessions/session-"$1"-*
+if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then echo "no single RuntimeSession tree $1" >&2; exit 3; fi
+echo "Owner: $(stat -c %u "$1/home")"
+cat /proc/[0-9]*/status 2>/dev/null
+exit 0`
+
+// runtimeSessionAdapters returns the PIDs of the adapters the supervisor (PID
+// 1 in the runtime container) runs for RuntimeSession uid/generation. The
+// supervisor starts each adapter as the leader of its own process group under
+// the session's private UID, which also owns the session's private home.
+func runtimeSessionAdapters(g Gomega, snapshot runtimePoolSnapshot, uid string, generation int64) []int {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s:%d", uid, generation))
+	output, err := utils.Run(exec.Command("kubectl", "exec", "-n", snapshot.PodNamespace, snapshot.PodName,
+		"-c", "runtime", "--", "sh", "-c", runtimeSessionProcessesScript, "sh", hex.EncodeToString(sum[:])))
+	g.Expect(err).NotTo(HaveOccurred())
+	owner, adapters, err := parseRuntimeSessionAdapters(output)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(owner).NotTo(BeElementOf("", "0"), "RuntimeSession %s generation %d has no child-owned home", uid, generation)
+	return adapters
+}
+
+// parseRuntimeSessionAdapters reads runtimeSessionProcessesScript output: the
+// home owner, then the processes that are children of PID 1, run as that
+// owner, and lead their own process group.
+func parseRuntimeSessionAdapters(output string) (string, []int, error) {
+	owner := ""
+	process := map[string]string{}
+	var adapters []int
+	var parseErr error
+	flush := func() {
+		if process["Pid:"] != "" && process["PPid:"] == "1" && process["Uid:"] == owner &&
+			process["NSpgid:"] == process["Pid:"] {
+			pid, err := strconv.Atoi(process["Pid:"])
+			if err != nil {
+				parseErr = err
+			}
+			adapters = append(adapters, pid)
+		}
+		clear(process)
+	}
+	for line := range strings.Lines(output) {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "Owner:":
+			owner = fields[1]
+		case "Name:":
+			flush()
+		case "Pid:", "PPid:", "Uid:", "NSpgid:":
+			process[fields[0]] = fields[1]
+		}
+	}
+	flush()
+	return owner, adapters, parseErr
+}
+
+// killRuntimeSessionAdapter kills the process group of the idle adapter behind
+// RuntimeSession uid/generation, as an adapter crash between prompts would, and
+// waits until the supervisor has reaped it. It returns the killed PID.
+func killRuntimeSessionAdapter(snapshot runtimePoolSnapshot, uid string, generation int64) int {
+	adapters := runtimeSessionAdapters(Default, snapshot, uid, generation)
+	ExpectWithOffset(1, adapters).To(HaveLen(1),
+		"RuntimeSession %s generation %d needs exactly one adapter", uid, generation)
+	_, err := utils.Run(exec.Command("kubectl", "exec", "-n", snapshot.PodNamespace, snapshot.PodName,
+		"-c", "runtime", "--", "sh", "-c", `kill -9 -"$1"`, "sh", strconv.Itoa(adapters[0])))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	EventuallyWithOffset(1, func(g Gomega) {
+		g.Expect(runtimeSessionAdapters(g, snapshot, uid, generation)).To(BeEmpty())
+	}, agentRuntimeSettleBound, time.Second).Should(Succeed())
+	return adapters[0]
 }
 
 func runtimePoolServing(g Gomega, name string) {

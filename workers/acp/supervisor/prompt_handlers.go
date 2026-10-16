@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"reflect"
 	"slices"
@@ -24,6 +23,11 @@ import (
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/workspacedelta"
+)
+
+var (
+	errPromptProviderActivation = errors.New("provider proxy activation failed")
+	errPromptMCPActivation      = errors.New("MCP proxy activation failed")
 )
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
@@ -151,49 +155,49 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
-	if providerProxy == nil ||
-		providerProxy.activatePrompt(request, state.agentConfiguration.MaxTurns, now) != nil {
-		state.prompt = nil
-		delete(state.operations, request.Metadata.OperationID)
-		s.mu.Unlock()
-		writeError(
-			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
-			"provider proxy activation failed", nil, false,
-		)
+	// Resume an adapter that exited while idle before this prompt gets any
+	// provider or MCP access. Some agents call the model during
+	// session/resume; with the prompt not yet active the provider proxy
+	// refuses that call instead of charging it to this prompt's maxTurns.
+	s.mu.Unlock()
+	recoverErr := runtimeSession.RecoverExitedAdapter(
+		r.Context(), string(request.Metadata.PromptID), string(request.Metadata.RequestDigest), request.Lease.ExpiresAt,
+	)
+	s.mu.Lock()
+	if recoverErr == nil && state.prompt != prompt {
+		recoverErr = fmt.Errorf("prompt %s was cleared while its adapter resumed", request.Metadata.PromptID)
+	}
+	if recoverErr != nil {
+		s.handlePromptStartFailureLocked(w, state, prompt, recoverErr)
 		return
 	}
-	if mcpProxy == nil || mcpProxy.activate(r.Context(), request.MCPAuthorization, request.Lease, now) != nil {
-		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
-		state.prompt = nil
-		delete(state.operations, request.Metadata.OperationID)
-		s.mu.Unlock()
-		writeError(
-			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
-			"MCP proxy activation failed", nil, false,
-		)
-		return
-	}
+	now = time.Now().UTC()
 	stopRequestGate := context.AfterFunc(r.Context(), func() {
-		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+		s.revokePromptRequestCapabilities(state, prompt)
 	})
 	defer stopRequestGate()
-	s.mu.Unlock()
 
-	run, err := runtimeSession.StartPromptWithLeaseDeadline(
+	// Admission and local capability activation are one transaction. In
+	// particular, Foundry activation cannot precede a retryable rejection:
+	// revoking it would irreversibly settle the never-accepted prompt identity.
+	run, err := runtimeSession.StartPromptWithLeaseDeadlineAndActivation(
 		r.Context(), string(request.Metadata.PromptID), string(request.Metadata.RequestDigest),
-		content, request.Lease.ExpiresAt,
+		content, request.Lease.ExpiresAt, func() error {
+			if providerProxy == nil || providerProxy.activatePrompt(request, state.agentConfiguration.MaxTurns, now) != nil {
+				return errPromptProviderActivation
+			}
+			if mcpProxy == nil || mcpProxy.activate(r.Context(), request.MCPAuthorization, request.Lease, now) != nil {
+				return errPromptMCPActivation
+			}
+			return nil
+		},
 	)
 	if err != nil {
-		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
-		s.mu.Lock()
-		if state.prompt == prompt {
-			state.prompt = nil
-			delete(state.operations, request.Metadata.OperationID)
-		}
-		s.mu.Unlock()
-		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, safeError(err), nil, false)
+		stopRequestGate()
+		s.handlePromptStartFailureLocked(w, state, prompt, err)
 		return
 	}
+	s.mu.Unlock()
 
 	first, ok := <-run.Events
 	if !ok {
@@ -1233,7 +1237,7 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	descriptor := state.descriptor
 	mcpProxy := state.mcpProxy
-	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled
+	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if drainCleanup {
 		state.drainCleanupScheduled = true
 	}
@@ -1412,7 +1416,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	if err := os.RemoveAll(state.paths.Root); err != nil {
+	if err := s.removeSessionPrivateFiles(state); err != nil {
 		s.poisonPool("session_root_cleanup_unproven")
 		s.mu.Lock()
 		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
@@ -1474,6 +1478,9 @@ func (s *Server) cancelPromptForDeletion(ctx context.Context, cancellation *prom
 // and an active prompt must settle through CancelPrompt before descendant
 // cleanup can be proven. The caller must hold s.mu.
 func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool, now time.Time) (bool, error) {
+	if state.nativeCapture != nil && !state.nativeCapture.finished {
+		return false, fmt.Errorf("native session capture must finish before deletion")
+	}
 	nextState := harnessv2.RuntimeSessionStateDeleting
 	if !publicationFinalized {
 		var err error
@@ -1929,7 +1936,14 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
+	if request.Intent == harnessv2.WorkspaceIntentRead {
+		if err := acp.ProtectReadOnlySessionWorkspace(paths, uid, gid); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "read-only workspace protection")
+			s.poisonSession(state, "read-only workspace protection failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "read-only workspace protection failed", nil, false)
+			return
+		}
+	}
 	if buildErr != nil {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
 		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {
@@ -2056,7 +2070,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	}
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	mcpProxy := state.mcpProxy
-	sessionCleanup := (s.drain.Requested || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) && !state.drainCleanupScheduled
+	sessionCleanup := (s.drain.Requested || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if sessionCleanup {
 		state.drainCleanupScheduled = true
 	}
@@ -2618,6 +2632,117 @@ func remoteSettlementFailureResult(prompt *promptState, result acp.PromptResult)
 	result.StopReason = ""
 	result.Err = errFoundryCleanupUnproven
 	return result
+}
+
+// revokePromptRequestCapabilities serializes request cancellation with admission
+// rollback. Stopping context.AfterFunc does not join an already-running callback;
+// the prompt identity check also fences it from a retry of the same prompt ID.
+func (s *Server) revokePromptRequestCapabilities(state *sessionState, prompt *promptState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions[state.id] != state || state.prompt != prompt || prompt.settlement != nil {
+		return
+	}
+	next := state.descriptor.State
+	if next == harnessv2.RuntimeSessionStateIdle || next == harnessv2.RuntimeSessionStatePromptRunning {
+		next = harnessv2.RuntimeSessionStateCancelling
+	}
+	if s.poisoned {
+		next = harnessv2.RuntimeSessionStatePoisoned
+	}
+	deactivatePromptCapabilities(state, prompt.request.Metadata.PromptID, next)
+}
+
+// handlePromptStartFailureLocked restores admission only when the runtime proves
+// it never accepted the prompt. The caller holds s.mu; this method releases it
+// before scheduling cleanup or writing the response. Other errors stay fail-closed.
+func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *sessionState, prompt *promptState, err error) {
+	cancellationPending := errors.Is(err, acp.ErrPromptCancellationPending)
+	leaseExpired := errors.Is(err, acp.ErrPromptLeaseExpired)
+	preActivationRejected := cancellationPending || leaseExpired
+	cancellationTimedOut := errors.Is(err, acp.ErrPromptCancellationTimedOut)
+	activationMessage, activationFailed := promptActivationFailureMessage(err)
+	lost, adapterLost := errors.AsType[*acp.AdapterLostError](err)
+	terminalAdmissionFailure := cancellationTimedOut || activationFailed || adapterLost
+	sessionCleanup := false
+	if s.sessions[state.id] == state && state.prompt == prompt {
+		if terminalAdmissionFailure && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
+			state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+			state.descriptor.LastTransitionAt = time.Now().UTC()
+		}
+		next := state.descriptor.State
+		if !preActivationRejected && (next == harnessv2.RuntimeSessionStateIdle || next == harnessv2.RuntimeSessionStatePromptRunning) {
+			next = harnessv2.RuntimeSessionStateCancelling
+		}
+		if s.poisoned {
+			next = harnessv2.RuntimeSessionStatePoisoned
+		}
+		deactivatePromptCapabilities(state, prompt.request.Metadata.PromptID, next)
+		state.prompt = nil
+		operationID := prompt.request.Metadata.OperationID
+		delete(state.operations, operationID)
+		delete(state.operationRetention, operationID)
+		delete(state.operationReplays, operationID)
+		// Cleanup may have deferred to this never-accepted owner. There is no
+		// stream finisher to retry its retirement after rollback.
+		if (preActivationRejected || terminalAdmissionFailure) && (s.drain.Requested || s.poisoned || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) &&
+			!state.creating && state.runtime != nil && !state.drainCleanupScheduled && isDrainCleanupState(state) {
+			state.drainCleanupScheduled = true
+			sessionCleanup = true
+		}
+	}
+	s.mu.Unlock()
+	if sessionCleanup {
+		go s.cleanupDrainedSession(state.id, state)
+	}
+	if adapterLost {
+		// Preserve the typed pre-write rejection so the controller retires the
+		// binding and recreates a session from the canonical transcript.
+		slog.Warn(
+			"ACP adapter lost while idle; retiring runtime session",
+			"sessionID", state.id, "promptID", prompt.request.Metadata.PromptID,
+			"resumeAttempted", lost.Attempted,
+			// The cause can carry adapter-controlled JSON-RPC text.
+			"errorDetail", redactedPromptErrorDetail(lost),
+		)
+		writeError(
+			w, http.StatusConflict, harnessv2.ErrorCodePromptNotAccepted,
+			"ACP adapter exited while idle; prompt was not accepted and runtime session was retired", nil, false,
+		)
+		return
+	}
+	if cancellationTimedOut {
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned,
+			"runtime session cancellation transport timed out; recreate the session", nil, false)
+		return
+	}
+	if activationFailed {
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, activationMessage, nil, false)
+		return
+	}
+	if leaseExpired {
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeExpired, acp.ErrPromptLeaseExpired.Error(), nil, false)
+		return
+	}
+	if cancellationPending {
+		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited,
+			"runtime session is completing a previous prompt cancellation; retry admission", nil, true)
+		return
+	}
+	writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, safeError(err), nil, false)
+}
+
+func promptActivationFailureMessage(err error) (string, bool) {
+	switch {
+	case errors.Is(err, acp.ErrPromptActivationExpired):
+		return acp.ErrPromptActivationExpired.Error(), true
+	case errors.Is(err, errPromptMCPActivation):
+		return errPromptMCPActivation.Error(), true
+	case errors.Is(err, errPromptProviderActivation):
+		return errPromptProviderActivation.Error(), true
+	default:
+		return "", false
+	}
 }
 
 func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState) {

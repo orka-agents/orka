@@ -39,12 +39,9 @@ func parseAgentModelUpdate(value any) (agentModelUpdate, error) {
 			return agentModelUpdate{}, err
 		}
 		if raw, ok := model["temperature"]; ok {
-			temperature, ok := raw.(float64)
-			if !ok || math.IsNaN(temperature) || math.IsInf(temperature, 0) {
-				return agentModelUpdate{}, fmt.Errorf("model.temperature must be a number")
-			}
-			if temperature < 0 || temperature > 2 {
-				return agentModelUpdate{}, fmt.Errorf("model.temperature must be between 0 and 2")
+			temperature, err := parseChatAgentTemperature(raw)
+			if err != nil {
+				return agentModelUpdate{}, err
 			}
 			update.temperature = temperature
 			update.temperatureSet = true
