@@ -145,6 +145,9 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
 			return err
 		}
+		if err := validateAgentRuntimeCeiling(nil, agent); err != nil {
+			return fmt.Errorf("runtime defaults exceed the ceiling: %w", err)
+		}
 	}
 
 	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
@@ -271,11 +274,19 @@ func (r *AgentReconciler) validateRuntimeRef(ctx context.Context, agent *corev1a
 		return nil
 	}
 	name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
-	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, &corev1alpha1.AgentRuntime{}); err != nil {
+	registered := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, registered); err != nil {
 		if errors.IsNotFound(err) {
 			return fmt.Errorf("referenced AgentRuntime %q not found", name)
 		}
 		return fmt.Errorf("failed to get AgentRuntime %q: %w", name, err)
+	}
+	// Harness v1 registrations run with the Agent's defaultMaxTurns, so an
+	// explicit default above the ceiling would fail every Task that inherits it.
+	if registered.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV1 && agent.Spec.Runtime.DefaultMaxTurns != nil {
+		if err := validateHarnessV1RuntimeRefCeiling(nil, agent); err != nil {
+			return fmt.Errorf("runtime defaults exceed the ceiling: %w", err)
+		}
 	}
 	return nil
 }

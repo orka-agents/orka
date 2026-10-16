@@ -335,6 +335,38 @@ func effectiveACPWorkspaceIntent(task *corev1alpha1.Task) corev1alpha1.Workspace
 }
 
 func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
+	values := requestedACPAllowedTools(task, agent)
+	if injectsACPCoordinationTools(task, agent) {
+		// Materialize the implicit native grant before adding brokered tools.
+		// Appending to nil would otherwise replace native defaults with an
+		// allowlist containing only the injected messaging tools.
+		if values == nil && agent != nil && agent.Spec.Runtime != nil {
+			values = acp.BuiltInRuntimeNativeToolNames(string(agent.Spec.Runtime.Type))
+		}
+		values = append(values, acpInjectedCoordinationTools...)
+	}
+	return sortedUnique(values)
+}
+
+var acpInjectedCoordinationTools = []string{"send_message", "check_messages"}
+
+// injectsACPCoordinationTools reports whether Orka adds the messaging tools
+// to a delegated child Task's allowlist.
+func injectsACPCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil {
+		return false
+	}
+	_, delegatedChild := task.Labels[labels.LabelParentTask]
+	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
+	runtimeRefAgent := agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
+	return delegatedChild && !disableCoordinationToolInjection && !runtimeRefAgent
+}
+
+// requestedACPAllowedTools resolves the tool allowlist a Task asks for from
+// its own override or the Agent defaults, before Orka injects coordination
+// tools. A nil result keeps the implicit full native grant.
+func requestedACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	var values []string
 	if agent != nil && agent.Spec.Runtime != nil {
 		runtime := agent.Spec.Runtime
@@ -372,22 +404,7 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 		}
 		values = append(values, brokered...)
 	}
-	if task != nil {
-		_, delegatedChild := task.Labels[labels.LabelParentTask]
-		disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
-		runtimeRefAgent := agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
-			strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
-		if delegatedChild && !disableCoordinationToolInjection && !runtimeRefAgent {
-			// Materialize the implicit native grant before adding brokered tools.
-			// Appending to nil would otherwise replace native defaults with an
-			// allowlist containing only the injected messaging tools.
-			if values == nil && agent != nil && agent.Spec.Runtime != nil {
-				values = acp.BuiltInRuntimeNativeToolNames(string(agent.Spec.Runtime.Type))
-			}
-			values = append(values, "send_message", "check_messages")
-		}
-	}
-	return sortedUnique(values)
+	return values
 }
 
 func taskUsesReadOnlyAgentToolPreset(task *corev1alpha1.Task) bool {

@@ -126,6 +126,59 @@ type AgentCLIRuntime struct {
 	// +kubebuilder:validation:Enum=none;low;medium;high;xhigh;max
 	// +optional
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
+
+	// Ceiling is the upper bound of what any Task using this Agent may
+	// request. Unlike the default* fields, which a Task can replace, a Task
+	// that asks for more than the ceiling (directly or through the Agent
+	// defaults) fails before it is bound. Omitted means no ceiling.
+	// +optional
+	Ceiling *AgentRuntimeCeiling `json:"ceiling,omitempty"`
+}
+
+// AgentRuntimeCeiling bounds the tool policy and iteration budget that Tasks
+// using an Agent may run with. Each omitted field leaves that dimension
+// unbounded. Orka-injected coordination messaging tools for delegated children
+// are platform plumbing and are not counted against AllowedTools.
+type AgentRuntimeCeiling struct {
+	// AllowedTools is the largest tool set a Task may run with. Tool names
+	// ignore case. An entry without a scope, such as "Read", also permits
+	// scoped requests such as "Read(/workspace/**)"; a scoped entry permits
+	// only that exact, case-sensitive scope. An explicitly empty list permits
+	// no tools.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=256
+	// +optional
+	AllowedTools []string `json:"allowedTools,omitempty"`
+
+	// AllowBash false forbids shell access for every Task using this Agent.
+	// +optional
+	AllowBash *bool `json:"allowBash,omitempty"`
+
+	// MaxTurns is the largest agent loop iteration budget a Task may use.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +optional
+	MaxTurns *int32 `json:"maxTurns,omitempty"`
+}
+
+// MarshalJSON preserves an explicitly empty AllowedTools ceiling, which
+// permits no tools, instead of omitting it, which leaves tools unbounded.
+func (in AgentRuntimeCeiling) MarshalJSON() ([]byte, error) {
+	type agentRuntimeCeilingJSON struct {
+		AllowedTools *[]string `json:"allowedTools,omitempty"`
+		AllowBash    *bool     `json:"allowBash,omitempty"`
+		MaxTurns     *int32    `json:"maxTurns,omitempty"`
+	}
+	var allowedTools *[]string
+	if in.AllowedTools != nil {
+		tools := append([]string{}, in.AllowedTools...)
+		allowedTools = &tools
+	}
+	return json.Marshal(agentRuntimeCeilingJSON{
+		AllowedTools: allowedTools,
+		AllowBash:    in.AllowBash,
+		MaxTurns:     in.MaxTurns,
+	})
 }
 
 // MarshalJSON preserves the distinction between an omitted tool allowlist and
@@ -140,6 +193,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools    *[]string                    `json:"defaultAllowedTools,omitempty"`
 		DefaultAllowBash       *bool                        `json:"defaultAllowBash,omitempty"`
 		DefaultReasoningEffort string                       `json:"defaultReasoningEffort,omitempty"`
+		Ceiling                *AgentRuntimeCeiling         `json:"ceiling,omitempty"`
 	}
 	var defaultAllowedTools *[]string
 	if in.DefaultAllowedTools != nil {
@@ -154,6 +208,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools:    defaultAllowedTools,
 		DefaultAllowBash:       in.DefaultAllowBash,
 		DefaultReasoningEffort: in.DefaultReasoningEffort,
+		Ceiling:                in.Ceiling,
 	})
 }
 

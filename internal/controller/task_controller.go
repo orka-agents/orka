@@ -3448,6 +3448,9 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 ) error {
 	// planAgentExecution resolves runtimeRef before selecting the external path,
 	// so these v2-only checks cannot change harness v1 compatibility.
+	if plan.path == agentExecutionPathHarnessV1 {
+		return validateHarnessV1RuntimeRefCeiling(task, agent)
+	}
 	if plan.path != agentExecutionPathExternal {
 		return nil
 	}
@@ -3526,6 +3529,9 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 		}
 	default:
 		return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
+	}
+	if err := validateAgentRuntimeCeiling(task, agent); err != nil {
+		return err
 	}
 	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil &&
 		(agent.Spec.Execution.Workspace.Enabled || agent.Spec.Execution.Workspace.ClassRef != nil) {

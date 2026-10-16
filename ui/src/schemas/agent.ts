@@ -19,6 +19,11 @@ const agentRuntimeDefaultsSchema = {
   defaultAllowedTools: z.array(z.string()).optional(),
   defaultAllowBash: z.boolean().optional(),
   defaultReasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  ceiling: z.object({
+    allowedTools: z.array(z.string()).optional(),
+    allowBash: z.boolean().optional(),
+    maxTurns: z.number().optional(),
+  }).strict().optional(),
 }
 
 export const builtInAgentRuntimeTypes = ['claude', 'codex', 'copilot', 'opencode'] as const

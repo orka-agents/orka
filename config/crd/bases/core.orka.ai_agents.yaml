@@ -1414,6 +1414,37 @@ spec:
                   Runtime configures this Agent for external CLI runtimes (type: agent tasks).
                   When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
                 properties:
+                  ceiling:
+                    description: |-
+                      Ceiling is the upper bound of what any Task using this Agent may
+                      request. Unlike the default* fields, which a Task can replace, a Task
+                      that asks for more than the ceiling (directly or through the Agent
+                      defaults) fails before it is bound. Omitted means no ceiling.
+                    properties:
+                      allowBash:
+                        description: AllowBash false forbids shell access for every
+                          Task using this Agent.
+                        type: boolean
+                      allowedTools:
+                        description: |-
+                          AllowedTools is the largest tool set a Task may run with. Tool names
+                          ignore case. An entry without a scope, such as "Read", also permits
+                          scoped requests such as "Read(/workspace/**)"; a scoped entry permits
+                          only that exact, case-sensitive scope. An explicitly empty list permits
+                          no tools.
+                        items:
+                          maxLength: 256
+                          type: string
+                        maxItems: 256
+                        type: array
+                      maxTurns:
+                        description: MaxTurns is the largest agent loop iteration
+                          budget a Task may use.
+                        format: int32
+                        maximum: 1000
+                        minimum: 1
+                        type: integer
+                    type: object
                   contractVersion:
                     description: |-
                       ContractVersion is the harness protocol selector for built-in runtime
