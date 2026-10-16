@@ -75,18 +75,31 @@ function highlightYaml(text: string): ReactNode[] {
   })
 }
 
+type Stringify = (value: unknown) => string
+
+const loadYaml = () => import('yaml').then((yaml): Stringify => yaml.stringify)
+
 /** The Task resource as YAML. The yaml library loads only when this view opens. */
-export function TaskYaml({ task }: { task: Task }) {
-  const [stringify, setStringify] = useState<((value: unknown) => string) | null>(null)
+export function TaskYaml({ task, load = loadYaml }: { task: Task; load?: () => Promise<Stringify> }) {
+  const [stringify, setStringify] = useState<Stringify | null>(null)
+  // A failed chunk load (a redeploy, a dropped connection) offers a retry
+  // instead of a skeleton that never resolves.
+  const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     let mounted = true
-    void import('yaml').then((yaml) => {
-      if (mounted) setStringify(() => yaml.stringify)
-    })
+    load().then(
+      (loaded) => {
+        if (mounted) setStringify(() => loaded)
+      },
+      () => {
+        if (mounted) setFailed(true)
+      },
+    )
     return () => {
       mounted = false
     }
-  }, [])
+  }, [load, attempt])
   const text = useMemo(() => stringify?.(displayedTaskResource(task)) ?? null, [stringify, task])
 
   const copy = () => {
@@ -109,7 +122,21 @@ export function TaskYaml({ task }: { task: Task }) {
         <p className="text-xs text-muted-foreground">
           Environment values and secret-looking labels and annotations are hidden, and kubectl&apos;s annotations, which can embed the whole spec, are left out.
         </p>
-        {text === null ? (
+        {failed ? (
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 p-3 text-sm">
+            <span>The YAML view could not load. Check your connection and try again.</span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setFailed(false)
+                setAttempt((n) => n + 1)
+              }}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : text === null ? (
           <Skeleton className="h-64 w-full" />
         ) : (
           <pre
