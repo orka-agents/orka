@@ -137,8 +137,17 @@ func (claudeFormat) Inspect(_ context.Context, data []byte, maxBytes int) (Summa
 // does not hold the session, under the project folder of the new working
 // directory, and points the transcript's spilled tool results at their new
 // location. A failed install removes what it created, so journalDir is
-// unused.
-func (claudeFormat) Install(_ context.Context, data []byte, dirs Dirs, _ string, maxBytes int) (err error) {
+// unused. Installs into one destination run one at a time.
+func (claudeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ string, maxBytes int) error {
+	unlock, err := lockInstallDestination(ctx, dirs.State)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return installClaude(data, dirs, maxBytes)
+}
+
+func installClaude(data []byte, dirs Dirs, maxBytes int) (err error) {
 	limit, err := normalizeLimit(maxBytes)
 	if err != nil {
 		return err

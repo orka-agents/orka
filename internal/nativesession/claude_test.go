@@ -171,6 +171,31 @@ func TestClaudeInstallReclaimsAKilledInstall(t *testing.T) {
 	}
 }
 
+func TestClaudeInstallWaitsForAConcurrentInstall(t *testing.T) {
+	format, _ := For("claude")
+	data, err := format.Capture(t.Context(), newClaudeFixture(t).dirs, claudeFixtureSession, claudeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := freshClaudeDirs(t)
+	folder := filepath.Join(destination.State, "projects", claudeProjectFolder(destination.Workspace))
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Another install holds the destination and has staged its transcript.
+	unlock, err := lockInstallDestination(t.Context(), destination.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(folder, "."+claudeFixtureSession+".jsonl.restore")
+	writeForTest(t, staged, "the other install's checkpoint")
+	expectWaitsForConcurrentInstall(t, format, data, destination, staged, claudeFixtureLimit, unlock)
+	if transcript, err := os.ReadFile(filepath.Join(folder, claudeFixtureSession+".jsonl")); err != nil ||
+		!strings.Contains(string(transcript), "Remember nonce-fixture") {
+		t.Fatalf("the install did not publish its own transcript: %v", err)
+	}
+}
+
 func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	format, _ := For("claude")
 	for name, test := range map[string]struct {

@@ -2,11 +2,13 @@ package nativesession
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 const (
@@ -22,6 +24,39 @@ func realDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// expectWaitsForConcurrentInstall checks that an install into destination
+// waits, without touching staged, while another install holds the destination
+// lock, and that once the other install dies and unlock releases its lock, the
+// install reclaims that staging and completes.
+func expectWaitsForConcurrentInstall(t *testing.T, format Format, data []byte, destination Dirs, staged string, limit int, unlock func()) {
+	t.Helper()
+	defer unlock()
+	other, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	if err := format.Install(ctx, data, destination, realDir(t), limit); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("an install must wait while another holds the destination: %v", err)
+	}
+	if content, err := os.ReadFile(staged); err != nil || !bytes.Equal(content, other) {
+		t.Fatalf("a waiting install touched the other install's staging: %v", err)
+	}
+	journal := realDir(t)
+	done := make(chan error, 1)
+	go func() { done <- format.Install(t.Context(), data, destination, journal, limit) }()
+	select {
+	case err := <-done:
+		t.Fatalf("an install finished while another held the destination: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("the install must reclaim a dead install's staging: %v", err)
+	}
 }
 
 // codexFixtureDirs writes codexstate's recorded Codex 0.160.0 rollout into a
