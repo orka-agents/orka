@@ -88,8 +88,9 @@ tool calls spilled their output to. The source must be a database OpenCode
 changing it.
 
 Import rejects a session that holds state Orka does not carry: a todo list,
-subagent (child) sessions, per-session permission rules, or OpenCode
-workspaces. It also rejects a source database larger than twice the expanded
+subagent (child) sessions, per-session permission rules that allow or ask, or
+OpenCode workspaces. Deny rules, such as the ones `opencode run` adds for its
+interactive tools, carry over because they only narrow Orka's policy. It also rejects a source database larger than twice the expanded
 budget (16 times the bundle limit) and a session whose tool calls spilled more
 than 256 outputs.
 

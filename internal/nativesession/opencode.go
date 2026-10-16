@@ -583,6 +583,37 @@ func verifyOpenCodeDatabase(ctx context.Context, path string, manifest openCodeM
 	return nil
 }
 
+// openCodePermissionOnlyDenies reports whether a session's permission rules
+// can only deny. OpenCode evaluates the last rule that matches across the
+// agent's rules and then the session's, so a deny rule only narrows what the
+// runtime's configuration allows; `opencode run` writes such rules for its
+// interactive tools. An allow or ask rule could widen it, so it is not carried.
+// Keys are matched exactly, as OpenCode reads them.
+func openCodePermissionOnlyDenies(permission sql.NullString) bool {
+	if !permission.Valid {
+		return true
+	}
+	var rules []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(permission.String), &rules); err != nil {
+		return false
+	}
+	for _, rule := range rules {
+		if len(rule) != 3 {
+			return false
+		}
+		for _, key := range []string{"permission", "pattern", "action"} {
+			var value *string
+			if json.Unmarshal(rule[key], &value) != nil || value == nil {
+				return false
+			}
+			if key == "action" && *value != "deny" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 type openCodeSession struct {
 	projectID, directory, path string
 }
@@ -591,7 +622,7 @@ type openCodeSession struct {
 // session, providerSessionID, whose messages and parts are its own.
 func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID string) (openCodeSession, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, project_id, directory, COALESCE(path, ''), parent_id IS NULL AND workspace_id IS NULL,
- COALESCE(permission, 'null') IN ('null', '[]') FROM session`)
+ permission FROM session`)
 	if err != nil {
 		return openCodeSession{}, err
 	}
@@ -601,13 +632,14 @@ func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID stri
 	for rows.Next() {
 		var current openCodeSession
 		var id string
-		var topLevel, unrestricted bool
-		if err := rows.Scan(&id, &current.projectID, &current.directory, &current.path, &topLevel, &unrestricted); err != nil {
+		var topLevel bool
+		var permission sql.NullString
+		if err := rows.Scan(&id, &current.projectID, &current.directory, &current.path, &topLevel, &permission); err != nil {
 			return openCodeSession{}, err
 		}
 		count++
 		if id == providerSessionID {
-			found, session, restricted = true, current, !topLevel || !unrestricted
+			found, session, restricted = true, current, !topLevel || !openCodePermissionOnlyDenies(permission)
 		}
 	}
 	if err := rows.Err(); err != nil {

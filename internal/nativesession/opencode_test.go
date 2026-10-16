@@ -254,6 +254,35 @@ func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) 
 	}
 }
 
+// `opencode run` denies its interactive tools on every session it creates.
+// Deny rules only narrow the runtime's own policy, so they carry over.
+func TestOpenCodeFormatCarriesDenyOnlySessionPermission(t *testing.T) {
+	const runRules = `[{"permission":"question","pattern":"*","action":"deny"},{"permission":"plan_enter","pattern":"*","action":"deny"},{"permission":"plan_exit","pattern":"*","action":"deny"}]`
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	source.exec(t, `UPDATE session SET permission = ?`, runRules)
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := freshOpenCodeDirs(t)
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.State, "opencode", "opencode.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restored.Close() }()
+	var permission string
+	if err := restored.QueryRow(`SELECT permission FROM session WHERE id = ?`, openCodeFixtureSession).Scan(&permission); err != nil {
+		t.Fatal(err)
+	}
+	if permission != runRules {
+		t.Fatalf("restored session permission = %s, want %s", permission, runRules)
+	}
+}
+
 func TestOpenCodeInstallMovesAGitProjectWorktree(t *testing.T) {
 	format, _ := For("opencode")
 	source := newOpenCodeFixture(t)
@@ -301,6 +330,30 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		}},
 		"session permission": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET permission = '[{"permission":"bash","action":"allow"}]'`)
+		}},
+		"session ask rule": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `[{"permission":"bash","pattern":"*","action":"ask"}]`)
+		}},
+		"session allow after a deny rule": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `[{"permission":"bash","pattern":"*","action":"deny"},{"permission":"bash","pattern":"*","action":"allow"}]`)
+		}},
+		"session deny rule with another field": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `[{"permission":"bash","pattern":"*","action":"deny","note":"x"}]`)
+		}},
+		"session deny rule without a pattern": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `[{"permission":"bash","action":"deny"}]`)
+		}},
+		"session rule with a differently cased action": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `[{"permission":"bash","pattern":"*","Action":"deny"}]`)
+		}},
+		"session rule whose last action allows": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `[{"permission":"bash","pattern":"*","action":"deny","action":"allow"}]`)
+		}},
+		"session null rule": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `[null]`)
+		}},
+		"session rule object": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = ?`, `{"permission":"bash","pattern":"*","action":"deny"}`)
 		}},
 		"trigger": {reason: "schema differs", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `CREATE TRIGGER mark AFTER INSERT ON message BEGIN SELECT 1; END`)
