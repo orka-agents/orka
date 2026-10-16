@@ -195,9 +195,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if blocked {
 		return "", false, nil
 	}
-	if !workspace.DeletionTimestamp.IsZero() {
-		// The predecessor detach is still deleting the deterministic-name
-		// workspace; the replacement is created once deletion completes.
+	if !workspace.DeletionTimestamp.IsZero() || workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
+		// The predecessor is being deleted (a Deleted desired state precedes
+		// the object deletion); the replacement is created once deletion
+		// completes.
 		return "", false, nil
 	}
 	if err := verifyACPClassWorkspace(workspace, task, binding, plan.PoolName); err != nil {

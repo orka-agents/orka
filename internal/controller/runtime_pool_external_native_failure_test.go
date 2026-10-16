@@ -231,3 +231,35 @@ func TestSettleACPClassWorkspaceLeavesDeletedDesiredStateAlone(t *testing.T) {
 		t.Fatal("settlement wrote to a workspace whose Deleted desired state is terminal")
 	}
 }
+
+func TestEnsureACPClassWorkspaceWaitsForDeletedPredecessor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatal(err)
+	}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: acpClassWorkspaceName(task, binding)}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, key, workspace); err != nil {
+		t.Fatal(err)
+	}
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
+		t.Fatalf("Task against a Deleted predecessor = (ready %v, %v), want a wait for its replacement", ready, err)
+	}
+}
