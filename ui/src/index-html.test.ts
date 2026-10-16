@@ -5,7 +5,8 @@ import path from 'node:path'
 // The inline script in index.html applies the theme before React loads, so a
 // dark page never flashes light. It repeats the store's migration; this runs it.
 const html = readFileSync(path.resolve(__dirname, '../index.html'), 'utf8')
-const prePaint = html.match(/<script>([\s\S]*?)<\/script>/)![1]
+// The first script without a src is the pre-paint one; the second loads the app.
+const prePaint = new DOMParser().parseFromString(html, 'text/html').querySelector('script:not([src])')!.textContent!
 
 function paintsDark(stored: string | null, systemDark: boolean): boolean {
   document.documentElement.classList.remove('dark')
