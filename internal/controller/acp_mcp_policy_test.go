@@ -844,7 +844,10 @@ func TestBuildRuntimeSessionMCPConfigurationDefaultsOpenCodeToolsOnlyWhenOmitted
 	}
 }
 
-func TestBuildRuntimeSessionMCPConfigurationOpenCodeReadIntentClosesConsequentialTools(t *testing.T) {
+// Read intent closes OpenCode's mutation tools. Bash and Grep keep the Agent's
+// grant, as with the other built-in runtimes: the supervisor owns a read-intent
+// workspace, so shell writes fail.
+func TestBuildRuntimeSessionMCPConfigurationOpenCodeReadIntentClosesMutationTools(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
@@ -873,15 +876,15 @@ func TestBuildRuntimeSessionMCPConfigurationOpenCodeReadIntentClosesConsequentia
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configuration.ToolPolicy.AllowBash {
-		t.Fatal("read-intent OpenCode policy retained bash authority")
+	if !configuration.ToolPolicy.AllowBash {
+		t.Fatal("read-intent OpenCode policy dropped the Agent's bash grant")
 	}
-	for _, name := range []string{"apply_patch", "bash", "edit", "grep", "write"} {
+	for _, name := range []string{"apply_patch", "edit", "write"} {
 		if configuration.ToolPolicy.Allows(name) {
 			t.Fatalf("read-intent OpenCode policy allows %q: %#v", name, configuration.ToolPolicy)
 		}
 	}
-	for _, name := range []string{"glob", "read"} {
+	for _, name := range []string{"bash", "glob", "grep", "read"} {
 		if !configuration.ToolPolicy.Allows(name) {
 			t.Fatalf("read-intent OpenCode policy removed %q: %#v", name, configuration.ToolPolicy)
 		}

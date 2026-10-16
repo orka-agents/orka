@@ -1036,11 +1036,11 @@ func TestChildTransactionEffectiveRuntimePolicyNormalizesOpenCode(t *testing.T) 
 	}}}
 	child := &corev1alpha1.Task{}
 	tools, bash := childTransactionEffectiveRuntimePolicy(child, agent)
-	if want := []string{"glob", "read"}; !slices.Equal(tools, want) {
+	if want := []string{"bash", "glob", "grep", "read"}; !slices.Equal(tools, want) {
 		t.Fatalf("read-intent tools = %#v, want %#v", tools, want)
 	}
-	if bash {
-		t.Fatal("read-intent policy retained bash")
+	if !bash {
+		t.Fatal("read-intent policy dropped the default bash grant")
 	}
 
 	agent.Spec.Runtime.DefaultAllowedTools = []string{"Edit"}

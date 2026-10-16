@@ -24,14 +24,17 @@ func TestNormalizeOpenCodeToolPolicy(t *testing.T) {
 		nil,
 		true,
 	)
-	if want := []string{"glob", "read"}; !slices.Equal(allowed, want) {
+	if want := []string{"bash", "glob", "grep", "read"}; !slices.Equal(allowed, want) {
 		t.Fatalf("read-intent allowed = %#v, want %#v", allowed, want)
 	}
-	if want := []string{"apply_patch", "bash", "edit", "grep", "write"}; !slices.Equal(disallowed, want) {
+	if want := []string{"apply_patch", "edit", "write"}; !slices.Equal(disallowed, want) {
 		t.Fatalf("read-intent disallowed = %#v, want %#v", disallowed, want)
 	}
-	if allowBash {
-		t.Fatal("read-intent policy retained bash")
+	if !allowBash {
+		t.Fatal("read-intent policy dropped the Agent's bash grant")
+	}
+	if _, _, allowBash = NormalizeOpenCodeToolPolicy(true, []string{"Bash", "Read"}, nil, false); allowBash {
+		t.Fatal("read-intent policy granted bash the Agent denied")
 	}
 
 	allowed, _, allowBash = NormalizeOpenCodeToolPolicy(false, []string{"Edit"}, nil, false)

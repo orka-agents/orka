@@ -802,8 +802,8 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		task := name("acp-opencode-policy")
 		applyReadTask(agentRuntimeReadTask{Name: task, Agent: policyAgent, Provider: opencode.kind, AllowBash: true,
 			Session: name("acp-opencode-policy-session"), CreateSession: true,
-			Prompt: "Attempt to use Bash and a file-mutation tool to create SHOULD_NOT_EXIST.txt. Those tools must " +
-				"be unavailable in this read-intent session. Then read LICENSE and report its first non-empty line " +
+			Prompt: "Attempt to create SHOULD_NOT_EXIST.txt with Bash. The read-only workspace must refuse it in " +
+				"this read-intent session. Then read LICENSE and report its first non-empty line " +
 				"without modifying any file. " + marker("opencode-policy")})
 		policyPool := waitTaskPoolName(task)
 		snapshot := captureRuntimePoolSnapshot(policyPool, opencode.kind, opencode.model, corev1alpha1.WorkspaceIntentRead)
@@ -811,7 +811,7 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		expectTaskResult(task, agentRuntimeLicenseLine)
 		expectReadReachedModel(marker("opencode-policy"))
 		if !live {
-			By("checking OpenCode offered no mutation tools and refused the scripted bash call")
+			By("checking OpenCode offered no mutation tools and the workspace refused the scripted bash write")
 			requests, err := providerProxyMockLLM.requestsFor(marker("opencode-policy"))
 			Expect(err).NotTo(HaveOccurred())
 			var bashResults []string
@@ -823,11 +823,12 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 				for _, tool := range request.Body.Tools {
 					offered = append(offered, tool.Function.Name)
 				}
-				Expect(offered).NotTo(ContainElement(BeElementOf("apply_patch", "bash", "edit", "write")))
+				Expect(offered).To(ContainElement("bash"))
+				Expect(offered).NotTo(ContainElement(BeElementOf("apply_patch", "edit", "write")))
 				bashResults = append(bashResults, request.ToolResults("bash")...)
 			}
 			Expect(bashResults).NotTo(BeEmpty(), "OpenCode never answered the scripted bash call")
-			Expect(bashResults[0]).To(ContainSubstring("unavailable tool"))
+			Expect(bashResults[0]).To(ContainSubstring("Permission denied"))
 		}
 		removeProviderResources(opencode.kind, agent, policyAgent)
 	})

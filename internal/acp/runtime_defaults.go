@@ -177,7 +177,7 @@ func OpenCodeDefaultAllowedTools() []string {
 }
 
 // NormalizeOpenCodeToolPolicy canonicalizes OpenCode-native tool names and
-// applies the fail-closed read-intent restrictions used by the runtime.
+// closes the mutation tools for read-intent sessions.
 func NormalizeOpenCodeToolPolicy(
 	readIntent bool,
 	allowed, disallowed []string,
@@ -188,10 +188,11 @@ func NormalizeOpenCodeToolPolicy(
 	if !readIntent {
 		return allowed, disallowed, allowBash
 	}
-	// OpenCode's Grep permission cannot carry the path-specific secret-file
-	// exclusions applied to Read, so read-intent sessions disable it entirely.
+	// Bash and Grep keep the Agent's policy, as with the other built-in
+	// runtimes: the supervisor owns a read-intent workspace, so shell writes
+	// fail with EACCES.
 	blocked := map[string]struct{}{
-		nativeToolApplyPatch: {}, openCodeToolBash: {}, "edit": {}, "grep": {}, "write": {},
+		nativeToolApplyPatch: {}, "edit": {}, "write": {},
 	}
 	filtered := allowed[:0]
 	for _, name := range allowed {
@@ -199,8 +200,8 @@ func NormalizeOpenCodeToolPolicy(
 			filtered = append(filtered, name)
 		}
 	}
-	disallowed = append(disallowed, nativeToolApplyPatch, openCodeToolBash, "edit", "grep", "write")
-	return sortedUniqueToolNames(filtered), sortedUniqueToolNames(disallowed), false
+	disallowed = append(disallowed, nativeToolApplyPatch, "edit", "write")
+	return sortedUniqueToolNames(filtered), sortedUniqueToolNames(disallowed), allowBash
 }
 
 // OpenCodeEffectiveAllowedTools returns the tools that the normalized policy

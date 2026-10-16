@@ -807,8 +807,8 @@ func providerProfile(
 				// The credential below is not an upstream provider secret. It is a random,
 				// per-session loopback capability accepted only while the prompt lease is active
 				// and only for the immutable profile model. OpenCode needs it during provider
-				// construction; write-intent shells share the child environment by design, as
-				// with the other built-in runtimes, while read-intent sessions disable bash.
+				// construction; shells share the child environment by design, as with the
+				// other built-in runtimes.
 				config, err := openCodeSessionConfig(model, modelLimits, intent, request, paths, proxy)
 				if err != nil {
 					return nil, err
@@ -934,10 +934,10 @@ func openCodeSessionConfig(
 		}
 	}
 	if intent == harnessv2.WorkspaceIntentRead {
+		// Bash and Grep keep the tool policy: the supervisor owns a read-intent
+		// workspace, so shell writes fail with EACCES.
 		permissions[openCodeToolApplyPatch] = openCodePermissionDeny
-		permissions[openCodeToolBash] = openCodePermissionDeny
 		permissions[openCodeToolEdit] = openCodePermissionDeny
-		permissions[openCodeToolGrep] = openCodePermissionDeny
 		permissions[openCodeToolWrite] = openCodePermissionDeny
 	}
 	return json.Marshal(map[string]any{

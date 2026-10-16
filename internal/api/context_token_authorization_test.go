@@ -1084,7 +1084,8 @@ func TestContextTokenTaskCreateEffectiveRuntimePolicyNormalizesOpenCode(t *testi
 		{
 			name:       "default read intent",
 			runtime:    &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
-			wantTools:  []string{"glob", "read"},
+			wantTools:  []string{"bash", "glob", "grep", "read"},
+			wantBash:   true,
 			wantNonNil: true,
 		},
 		{

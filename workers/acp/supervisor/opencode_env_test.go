@@ -47,7 +47,7 @@ func TestOpenCodeProviderProfileIsImmutableAndGoverned(t *testing.T) {
 		writeRule string
 		bashRule  string
 	}{
-		{intent: harnessv2.WorkspaceIntentRead, editRule: openCodePermissionDeny, writeRule: openCodePermissionDeny, bashRule: openCodePermissionDeny},
+		{intent: harnessv2.WorkspaceIntentRead, editRule: openCodePermissionDeny, writeRule: openCodePermissionDeny, bashRule: openCodePermissionAllow},
 		{intent: harnessv2.WorkspaceIntentWrite, editRule: openCodePermissionAllow, writeRule: openCodePermissionAllow, bashRule: openCodePermissionAllow},
 	} {
 		t.Run(string(test.intent), func(t *testing.T) {
@@ -340,7 +340,9 @@ func TestOpenCodeSessionConfigRejectsCollidingBrokeredPermissionNames(t *testing
 	}
 }
 
-func TestOpenCodeReadIntentDeniesGrepContentAccess(t *testing.T) {
+// Read intent closes only the mutation tools. Grep follows the tool policy in
+// both intents, like Bash, because the read-intent workspace is not writable.
+func TestOpenCodeReadIntentKeepsGrepPolicy(t *testing.T) {
 	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
 	request := harnessv2.CreateRuntimeSessionRequest{MCPConfiguration: harnessv2.MCPPolicyConfiguration{
@@ -360,13 +362,8 @@ func TestOpenCodeReadIntentDeniesGrepContentAccess(t *testing.T) {
 		if err := json.Unmarshal(data, &config); err != nil {
 			t.Fatal(err)
 		}
-		got := config["permission"].(map[string]any)["grep"]
-		want := any(openCodePermissionAllow)
-		if name == "read" {
-			want = openCodePermissionDeny
-		}
-		if got != want {
-			t.Fatalf("%s-intent grep permission = %#v, want %#v", name, got, want)
+		if got := config["permission"].(map[string]any)["grep"]; got != openCodePermissionAllow {
+			t.Fatalf("%s-intent grep permission = %#v, want %#v", name, got, openCodePermissionAllow)
 		}
 	}
 }

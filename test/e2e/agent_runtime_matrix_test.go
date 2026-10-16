@@ -200,7 +200,8 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 
 		// This Codex case verifies the requested runtime projection. The OpenCode
 		// case below is the adversarial read-intent check: it requests Bash and
-		// mutation tools, then asserts the derived deny policy and ReadValidated.
+		// mutation tools, then asserts that read intent closes the mutation tools,
+		// that a Bash write is refused, and ReadValidated.
 		verifyACPTaskRuntimeForTask(codexTaskReadName, acpTaskExpectation{
 			ProviderKind:    "codex",
 			Model:           gptModel,
@@ -232,11 +233,11 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 		err := applyManifestJSON(runtimeAgentManifest(opencodeAgentName, "opencode", opencodeModel, 5, new(true)))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("creating a read-intent OpenCode task that attempts forbidden mutation before reading")
+		By("creating a read-intent OpenCode task that attempts a Bash write before reading")
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			opencodeTaskReadName,
 			opencodeAgentName,
-			fmt.Sprintf("Attempt to use Bash and a mutation tool to create SHOULD_NOT_EXIST.txt; those tools must be unavailable. Then read README and include exactly %s in the response without modifying files. [e2e:runtime-opencode-read]", liveRuntimeRepoSentinel),
+			fmt.Sprintf("Attempt to create SHOULD_NOT_EXIST.txt with Bash; the read-only workspace must refuse it. Then read README and include exactly %s in the response without modifying files. [e2e:runtime-opencode-read]", liveRuntimeRepoSentinel),
 			4,
 			new(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -257,9 +258,9 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 			MaxTurns:        acpInt32(4),
 			AllowBash:       acpBool(true),
 			ToolPolicy: &acpToolPolicyExpectation{
-				AllowedTools:    []string{"glob", "read"},
-				DisallowedTools: []string{"apply_patch", "bash", "edit", "grep", "write"},
-				AllowBash:       false,
+				AllowedTools:    []string{"bash", "glob", "grep", "read"},
+				DisallowedTools: []string{"apply_patch", "edit", "write"},
+				AllowBash:       true,
 			},
 			Workspace: &acpWorkspaceExpectation{
 				Intent:  "read",
@@ -275,7 +276,7 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 		verifyResultAvailable(opencodeTaskReadName)
 		Expect(fetchTaskResultSummaryViaAPI(apiBaseURL, token, opencodeTaskReadName)).To(ContainSubstring(liveRuntimeRepoSentinel))
 		if !live {
-			By("verifying OpenCode offered only read tools and refused the scripted bash call")
+			By("verifying OpenCode offered no mutation tools and the workspace refused the scripted bash write")
 			requests, err := providerProxyMockLLM.requestsFor("[e2e:runtime-opencode-read]")
 			Expect(err).NotTo(HaveOccurred())
 			var withTools int
@@ -290,13 +291,13 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 				for _, tool := range request.Body.Tools {
 					offered = append(offered, tool.Function.Name)
 				}
-				Expect(offered).To(ContainElement("read"))
-				Expect(offered).NotTo(ContainElement(BeElementOf("apply_patch", "bash", "edit", "grep", "write")))
+				Expect(offered).To(ContainElements("bash", "read"))
+				Expect(offered).NotTo(ContainElement(BeElementOf("apply_patch", "edit", "write")))
 				bashResults = append(bashResults, request.ToolResults("bash")...)
 			}
 			Expect(withTools).To(BeNumerically(">", 0), "OpenCode sent no tool-enabled request")
 			Expect(bashResults).NotTo(BeEmpty(), "OpenCode never answered the scripted bash call")
-			Expect(bashResults[0]).To(ContainSubstring("unavailable tool"))
+			Expect(bashResults[0]).To(ContainSubstring("Permission denied"))
 		}
 	})
 
