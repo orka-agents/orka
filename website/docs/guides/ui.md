@@ -26,7 +26,7 @@ Without Helm, start the controller with `--dashboard-enabled`, or set its
 kubectl -n orka-system set env deployment/orka-controller-manager ORKA_DASHBOARD_ENABLED=true
 ```
 
-While it is off, paths outside the APIs answer with a JSON 404, `orka login` stops
+While it is off, paths outside the APIs answer with a JSON 404, `orka dashboard` stops
 with an error, and connector consent finishes with `orka connection complete` (see
 [Connectors](connectors.md#3-link-an-account)).
 
@@ -43,7 +43,7 @@ kubectl -n orka-system create token orka-client
 Open [http://localhost:8080](http://localhost:8080). The login page asks for a token;
 paste the one you just created. From there you can create Tasks, chat with the
 orchestrator, watch Tasks run live, and browse sessions and artifacts. If you use the
-CLI, `orka login` opens the dashboard already signed in.
+CLI, `orka dashboard` opens the dashboard already signed in.
 
 ## Tech stack
 
@@ -141,7 +141,7 @@ is not enabled on the server (`501 Not Implemented`).
 
 The UI uses ServiceAccount bearer tokens stored in localStorage:
 
-1. **CLI login**: `orka login` extracts the OIDC token from kubeconfig and opens the browser with `#token=<token>`
+1. **CLI**: `orka dashboard` creates a 24-hour ServiceAccount token with `kubectl create token` (or uses `--token`) and opens the browser with `#token=<token>`
 2. **Manual login**: Paste a ServiceAccount token on the login page
 3. **Token creation**: `kubectl create token orka-client -n orka-system`
 

@@ -60,7 +60,7 @@ func TestDashboardAbsent(t *testing.T) {
 	}
 }
 
-func TestNewLoginCmd_RefusesServerWithoutDashboard(t *testing.T) {
+func TestNewDashboardCmd_RefusesServerWithoutDashboard(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -68,12 +68,12 @@ func TestNewLoginCmd_RefusesServerWithoutDashboard(t *testing.T) {
 	defer server.Close()
 
 	minted := false
-	origCreate := serviceAccountLoginFunc
-	serviceAccountLoginFunc = func(string, string) (string, error) {
+	origCreate := serviceAccountTokenFunc
+	serviceAccountTokenFunc = func(string, string) (string, error) {
 		minted = true
 		return "opaque-login-value-000", nil
 	}
-	t.Cleanup(func() { serviceAccountLoginFunc = origCreate })
+	t.Cleanup(func() { serviceAccountTokenFunc = origCreate })
 	opened := false
 	origBrowser := openBrowserFunc
 	openBrowserFunc = func(string) error {
@@ -83,7 +83,7 @@ func TestNewLoginCmd_RefusesServerWithoutDashboard(t *testing.T) {
 	t.Cleanup(func() { openBrowserFunc = origBrowser })
 
 	root := newRootCmd()
-	root.SetArgs([]string{"login", "--server", server.URL})
+	root.SetArgs([]string{"dashboard", "--server", server.URL})
 	stdout, err := captureOutput(t, root.Execute)
 	if err == nil || !strings.Contains(err.Error(), "does not serve the dashboard") || !strings.Contains(err.Error(), "--dashboard-enabled") {
 		t.Fatalf("Execute() error = %v, want a missing-dashboard error", err)
@@ -91,16 +91,16 @@ func TestNewLoginCmd_RefusesServerWithoutDashboard(t *testing.T) {
 	if minted || opened {
 		t.Fatalf("token minted = %t, browser opened = %t; neither may happen without a dashboard", minted, opened)
 	}
-	if strings.Contains(stdout, "Login URL") {
-		t.Fatalf("stdout = %q, must not print a login URL", stdout)
+	if strings.Contains(stdout, "Dashboard URL") {
+		t.Fatalf("stdout = %q, must not print a dashboard URL", stdout)
 	}
 }
 
-func TestNewLoginCmd_Structure(t *testing.T) {
-	cmd := newLoginCmd()
+func TestNewDashboardCmd_Structure(t *testing.T) {
+	cmd := newDashboardCmd()
 
-	if cmd.Use != "login" {
-		t.Errorf("Use = %q, want %q", cmd.Use, "login")
+	if cmd.Use != "dashboard" {
+		t.Errorf("Use = %q, want %q", cmd.Use, "dashboard")
 	}
 	if cmd.Short == "" {
 		t.Error("Short description should not be empty")
@@ -110,8 +110,8 @@ func TestNewLoginCmd_Structure(t *testing.T) {
 	}
 }
 
-func TestNewLoginCmd_ServiceAccountFlag(t *testing.T) {
-	cmd := newLoginCmd()
+func TestNewDashboardCmd_ServiceAccountFlag(t *testing.T) {
+	cmd := newDashboardCmd()
 
 	flag := cmd.Flags().Lookup("service-account")
 	if flag == nil {
@@ -122,7 +122,7 @@ func TestNewLoginCmd_ServiceAccountFlag(t *testing.T) {
 	}
 }
 
-func TestNewLoginCmd_WithTokenFlag(t *testing.T) {
+func TestNewDashboardCmd_WithTokenFlag(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -132,14 +132,14 @@ func TestNewLoginCmd_WithTokenFlag(t *testing.T) {
 	openBrowserFunc = func(string) error { return nil }
 	t.Cleanup(func() { openBrowserFunc = orig })
 
-	cmd := newLoginCmd()
+	cmd := newDashboardCmd()
 
 	// Create a root command to provide persistent flags
 	root := newRootCmd()
 	root.AddCommand(cmd)
 
 	// With --token provided, it should try to construct URL and open browser.
-	root.SetArgs([]string{"login", "--server", "http://test-server:8080", "--token", "opaque-login-value-123"})
+	root.SetArgs([]string{"dashboard", "--server", "http://test-server:8080", "--token", "opaque-login-value-123"})
 
 	err := root.Execute()
 	if err != nil {
@@ -147,27 +147,27 @@ func TestNewLoginCmd_WithTokenFlag(t *testing.T) {
 	}
 }
 
-func TestNewLoginCmd_WithoutToken(t *testing.T) {
+func TestNewDashboardCmd_WithoutToken(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
 
-	cmd := newLoginCmd()
+	cmd := newDashboardCmd()
 	root := newRootCmd()
 	root.AddCommand(cmd)
 
 	// Without --token, it will try createServiceAccountToken which needs kubectl.
 	// This should error in test environment.
-	root.SetArgs([]string{"login", "--server", "http://test:8080"})
+	root.SetArgs([]string{"dashboard", "--server", "http://test:8080"})
 
 	err := root.Execute()
 	// Expect error since kubectl is likely not available or service account doesn't exist
 	if err == nil {
-		t.Log("login without token succeeded (kubectl available)")
+		t.Log("dashboard without token succeeded (kubectl available)")
 	}
 }
 
-func TestNewLoginCmd_DefaultServerFromConfig(t *testing.T) {
+func TestNewDashboardCmd_DefaultServerFromConfig(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -183,18 +183,18 @@ func TestNewLoginCmd_DefaultServerFromConfig(t *testing.T) {
 		t.Fatalf("saveConfig error: %v", err)
 	}
 
-	cmd := newLoginCmd()
+	cmd := newDashboardCmd()
 	root := newRootCmd()
 	root.AddCommand(cmd)
 
-	root.SetArgs([]string{"login", "--token", "opaque-value-456"})
+	root.SetArgs([]string{"dashboard", "--token", "opaque-value-456"})
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
 }
 
-func TestNewLoginCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
+func TestNewDashboardCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -205,20 +205,20 @@ func TestNewLoginCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	}
 
 	var gotServiceAccount, gotNamespace string
-	origCreate := serviceAccountLoginFunc
-	serviceAccountLoginFunc = func(serviceAccount, namespace string) (string, error) {
+	origCreate := serviceAccountTokenFunc
+	serviceAccountTokenFunc = func(serviceAccount, namespace string) (string, error) {
 		gotServiceAccount = serviceAccount
 		gotNamespace = namespace
 		return "opaque-login-value-789", nil
 	}
-	t.Cleanup(func() { serviceAccountLoginFunc = origCreate })
+	t.Cleanup(func() { serviceAccountTokenFunc = origCreate })
 
 	origBrowser := openBrowserFunc
 	openBrowserFunc = func(string) error { return nil }
 	t.Cleanup(func() { openBrowserFunc = origBrowser })
 
 	root := newRootCmd()
-	root.SetArgs([]string{"login", "--service-account", "orka-client"})
+	root.SetArgs([]string{"dashboard", "--service-account", "orka-client"})
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
@@ -231,7 +231,7 @@ func TestNewLoginCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	}
 }
 
-func TestNewLoginCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
+func TestNewDashboardCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -246,7 +246,7 @@ func TestNewLoginCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
 
 	root := newRootCmd()
 	root.SetArgs([]string{
-		"login",
+		"dashboard",
 		"--server", "http://test-server:8080",
 		"--token", "opaque-login-value-123",
 		"--no-open",
@@ -263,18 +263,18 @@ func TestNewLoginCmd_NoOpenRedactsTokenInOutput(t *testing.T) {
 	if strings.Contains(stdout, "opaque-login-value-123") {
 		t.Fatalf("stdout leaked token: %q", stdout)
 	}
-	if !strings.Contains(stdout, "Login URL: http://test-server:8080/login#token=<redacted>") {
-		t.Fatalf("stdout = %q, want redacted login URL", stdout)
+	if !strings.Contains(stdout, "Dashboard URL: http://test-server:8080/login#token=<redacted>") {
+		t.Fatalf("stdout = %q, want redacted dashboard URL", stdout)
 	}
-	if !strings.Contains(stdout, "printed login URL is redacted") {
+	if !strings.Contains(stdout, "printed dashboard URL is redacted") {
 		t.Fatalf("stdout = %q, want redacted no-open guidance", stdout)
 	}
-	if strings.Contains(stdout, "Use the login URL above") {
+	if strings.Contains(stdout, "Open the dashboard URL above") {
 		t.Fatalf("stdout = %q, should not suggest using the redacted URL", stdout)
 	}
 }
 
-func TestNewLoginCmd_RedactsOutputButOpensFullURL(t *testing.T) {
+func TestNewDashboardCmd_RedactsOutputButOpensFullURL(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -289,7 +289,7 @@ func TestNewLoginCmd_RedactsOutputButOpensFullURL(t *testing.T) {
 
 	root := newRootCmd()
 	root.SetArgs([]string{
-		"login",
+		"dashboard",
 		"--server", "http://test-server:8080",
 		"--token", "opaque-login-value-123",
 		"--redact-token",
@@ -305,12 +305,12 @@ func TestNewLoginCmd_RedactsOutputButOpensFullURL(t *testing.T) {
 	if strings.Contains(stdout, "opaque-login-value-123") {
 		t.Fatalf("stdout leaked token: %q", stdout)
 	}
-	if !strings.Contains(stdout, "Login URL: http://test-server:8080/login#token=<redacted>") {
-		t.Fatalf("stdout = %q, want redacted login URL", stdout)
+	if !strings.Contains(stdout, "Dashboard URL: http://test-server:8080/login#token=<redacted>") {
+		t.Fatalf("stdout = %q, want redacted dashboard URL", stdout)
 	}
 }
 
-func TestNewLoginCmd_RedactedBrowserFailureExplainsURLIsNotUsable(t *testing.T) {
+func TestNewDashboardCmd_RedactedBrowserFailureExplainsURLIsNotUsable(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
@@ -321,7 +321,7 @@ func TestNewLoginCmd_RedactedBrowserFailureExplainsURLIsNotUsable(t *testing.T) 
 
 	root := newRootCmd()
 	root.SetArgs([]string{
-		"login",
+		"dashboard",
 		"--server", "http://test-server:8080",
 		"--token", "opaque-login-value-123",
 		"--redact-token",
@@ -331,7 +331,7 @@ func TestNewLoginCmd_RedactedBrowserFailureExplainsURLIsNotUsable(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
-	if !strings.Contains(stderr, "printed login URL is redacted") {
+	if !strings.Contains(stderr, "printed dashboard URL is redacted") {
 		t.Fatalf("stderr = %q, want redacted URL guidance", stderr)
 	}
 	if strings.Contains(stderr, "Open the URL above") {

@@ -103,7 +103,7 @@ var _ = Describe("Orka CLI local binary paths", Ordered, func() {
 		Expect(status.Stdout).To(ContainSubstring("Agents:"))
 	})
 
-	It("generates completion scripts and refuses login without a dashboard", func() {
+	It("generates completion scripts and refuses orka dashboard without a dashboard", func() {
 		localHome, err := os.MkdirTemp("", "orka-cli-local-e2e-home-*")
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { _ = os.RemoveAll(localHome) })
@@ -115,19 +115,19 @@ var _ = Describe("Orka CLI local binary paths", Ordered, func() {
 			Expect(completion.Stdout).To(ContainSubstring("orka"), "completion output for %s should mention the orka command", shell)
 		}
 
-		// The default install serves no dashboard, so login stops before it
-		// prints or opens a URL that carries the token.
-		By("refusing login against a controller without the dashboard")
-		fakeToken := "fake-login-value-sentinel-" + suffix
-		login := runOrka(localHome,
-			"login",
+		// The default install serves no dashboard, so orka dashboard stops
+		// before it prints or opens a URL that carries the token.
+		By("refusing orka dashboard against a controller without the dashboard")
+		fakeToken := "fake-dashboard-value-sentinel-" + suffix
+		dashboard := runOrka(localHome,
+			"dashboard",
 			"--server", apiBaseURL,
 			"--token", fakeToken,
 			"--no-open",
 		)
-		expectOrkaFailure(login, fakeToken)
-		Expect(login.Stderr + login.Stdout).To(ContainSubstring("does not serve the dashboard"))
-		Expect(login.Stdout).NotTo(ContainSubstring("Login URL"))
+		expectOrkaFailure(dashboard, fakeToken)
+		Expect(dashboard.Stderr + dashboard.Stdout).To(ContainSubstring("does not serve the dashboard"))
+		Expect(dashboard.Stdout).NotTo(ContainSubstring("Dashboard URL"))
 	})
 
 	It("returns a clean run error when the API is unreachable", func() {

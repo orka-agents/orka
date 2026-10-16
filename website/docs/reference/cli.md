@@ -339,25 +339,25 @@ orka run --agent reviewer "review this diff"
 
 It may depend on live provider credentials, model configuration, and server-side chat support.
 
-`orka login` creates a ServiceAccount token and opens the dashboard with that token in the URL fragment. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
+`orka dashboard` creates a ServiceAccount token, or uses `--token`, and opens the dashboard signed in with it, passing the token in the URL fragment. It does not save the token or sign the CLI in; other commands authenticate on their own. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
 
 ```bash
-orka login --service-account orka-client --namespace orka-system
+orka dashboard --service-account orka-client --namespace orka-system
 ```
 
 For automation, tests, or terminals where token-bearing URLs could be captured, use the safe print-only mode:
 
 ```bash
-orka login \
+orka dashboard \
   --service-account orka-client \
   --namespace orka-system \
   --no-open \
   --redact-token
 ```
 
-`--no-open` skips browser launch. `--redact-token` prints `<redacted>` instead of the raw token while still using the full token internally if browser opening is enabled. A redacted URL is not usable for manual login; rerun without `--redact-token` only in a trusted terminal if you need to copy the full URL.
+`--no-open` skips browser launch. `--redact-token` prints `<redacted>` instead of the raw token while still using the full token internally if browser opening is enabled. A redacted URL cannot be opened by hand; rerun without `--redact-token` only in a trusted terminal if you need to copy the full URL.
 
-Do not use default `login` output in logs or shared terminals where the generated browser URL might be captured.
+Do not use default `orka dashboard` output in logs or shared terminals where the generated browser URL might be captured.
 
 ## Linked accounts
 
@@ -377,7 +377,7 @@ orka connection complete github-<digest> --completion <value>   # when no dashbo
 ```
 
 These commands need a personal identity (OIDC or context token). A
-ServiceAccount token, such as the one `orka login` creates, has no accounts to
+ServiceAccount token, such as the one `orka dashboard` creates, has no accounts to
 link; the CLI explains the resulting `403`. `--no-open` prints the consent URL
 without opening a browser and `--no-wait` returns once consent has started.
 
@@ -676,7 +676,7 @@ Normal binary e2e tests build and invoke `bin/orka` directly with isolated confi
 | `usage` | Compiled-binary fixture coverage | Summary table, work JSON, other-usage YAML, configured authentication, and nonzero exit for a missing work request. |
 | `substrate` | Covered | Pool create/get/list/update/delete. |
 | `run` | Negative covered; positive live-gated | Unreachable-server error path is safe for normal e2e; positive chat/SSE flow needs provider fixtures. |
-| `login` | Safe mode covered | `--no-open --redact-token` is covered; full browser-open token URL remains unsuitable for normal e2e logs. |
+| `dashboard` | Negative covered | The default install serves no dashboard, so the e2e covers the refusal before any token URL is printed; the browser-open token URL remains unsuitable for normal e2e logs. |
 | `completion` | Covered | Binary smoke generates bash, zsh, fish, and PowerShell completion output. |
 | `security scan run` | Deferred/live-gated | Creates downstream scan Tasks and requires live agent/GitHub/provider setup. |
 | `monitor run` | Deferred/live-gated | Creates downstream monitor work and can require GitHub/provider setup. |

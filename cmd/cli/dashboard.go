@@ -41,14 +41,15 @@ func dashboardAbsent(server string) bool {
 	return resp.StatusCode == http.StatusNotFound
 }
 
-func newLoginCmd() *cobra.Command {
+func newDashboardCmd() *cobra.Command {
 	var serviceAccount string
 	var noOpen, redactToken bool
 
 	cmd := &cobra.Command{
-		Use:   "login",
-		Short: "Authenticate with the Orka dashboard",
-		Long: "Generate a ServiceAccount token and open the Orka dashboard in your browser. The controller serves the " +
+		Use:   "dashboard",
+		Short: "Open the Orka dashboard in your browser, signed in",
+		Long: "Create a ServiceAccount token (or use --token) and open the Orka dashboard in your browser, signed in " +
+			"with it. The token goes only to the browser; other orka commands do not use it. The controller serves the " +
 			"dashboard only when it runs with --dashboard-enabled; every other orka command works without it.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			server, _ := cmd.Flags().GetString("server")
@@ -78,7 +79,7 @@ func newLoginCmd() *cobra.Command {
 
 			if token == "" {
 				var err error
-				token, err = serviceAccountLoginFunc(serviceAccount, ns)
+				token, err = serviceAccountTokenFunc(serviceAccount, ns)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error creating token: %v\n", err)
 					fmt.Fprintf(os.Stderr, "You can provide a token directly with --token\n")
@@ -86,31 +87,31 @@ func newLoginCmd() *cobra.Command {
 				}
 			}
 
-			loginURL := fmt.Sprintf("%s/login#token=%s", server, token)
-			displayURL := loginURL
+			dashboardURL := fmt.Sprintf("%s/login#token=%s", server, token)
+			displayURL := dashboardURL
 			if redactToken {
 				displayURL = fmt.Sprintf("%s/login#token=<redacted>", server)
 			}
-			fmt.Printf("Login URL: %s\n", displayURL)
+			fmt.Printf("Dashboard URL: %s\n", displayURL)
 
 			if noOpen {
 				if redactToken {
 					fmt.Println(
-						"Browser opening skipped. The printed login URL is redacted and cannot be opened manually. " +
+						"Browser opening skipped. The printed dashboard URL is redacted and cannot be opened manually. " +
 							"Rerun without --redact-token in a trusted terminal if you need to copy the URL.",
 					)
 				} else {
-					fmt.Println("Browser opening skipped. Open the login URL above in your browser manually.")
+					fmt.Println("Browser opening skipped. Open the dashboard URL above in your browser manually.")
 				}
 				return nil
 			}
 
-			if err := openBrowser(loginURL); err != nil {
+			if err := openBrowser(dashboardURL); err != nil {
 				fmt.Fprintf(os.Stderr, "Could not open browser: %v\n", err)
 				if redactToken {
 					fmt.Fprintln(
 						os.Stderr,
-						"The printed login URL is redacted and cannot be opened manually. "+
+						"The printed dashboard URL is redacted and cannot be opened manually. "+
 							"Rerun without --redact-token in a trusted terminal if you need to copy the URL.",
 					)
 				} else {
@@ -118,18 +119,18 @@ func newLoginCmd() *cobra.Command {
 				}
 				return nil
 			}
-			fmt.Println("Browser opened successfully. You can now log in to the Orka dashboard.")
+			fmt.Println("Opened the Orka dashboard in your browser.")
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "default", "ServiceAccount name")
-	cmd.Flags().BoolVar(&noOpen, "no-open", false, "Print the login URL without opening a browser")
+	cmd.Flags().BoolVar(&noOpen, "no-open", false, "Print the dashboard URL without opening a browser")
 	cmd.Flags().BoolVar(
 		&redactToken,
 		"redact-token",
 		false,
-		"Redact the token in printed output while preserving browser login",
+		"Redact the token in printed output; the browser still signs in",
 	)
 
 	return cmd

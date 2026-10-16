@@ -199,7 +199,7 @@ controller:
     callbackBaseUrl: ""
 
   # Web dashboard served by the controller on the API port. Off by default: the API and the
-  # orka CLI work without it, and `orka login` needs it.
+  # orka CLI work without it, and `orka dashboard` needs it.
   dashboard:
     enabled: false
 
