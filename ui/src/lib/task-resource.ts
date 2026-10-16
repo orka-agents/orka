@@ -19,8 +19,16 @@ function withoutCredentials(value: string): string {
     return HIDDEN_VALUE
   }
   // A webhook's path is its secret, and a path can hold a token
-  // (`/download/ghp_…`). Checked without userinfo, which would hide the host.
-  if (WEBHOOK_URL.test(`${url.protocol}//${url.host}${url.pathname}`) || containsCredential(url.pathname)) {
+  // (`/download/ghp_…`), percent-encoded or not. Checked decoded, as the server
+  // reads it, and without userinfo, which would hide the host. A path that will
+  // not decode is hidden.
+  let path: string
+  try {
+    path = decodeURIComponent(url.pathname)
+  } catch {
+    return `${url.origin}/${HIDDEN_VALUE}`
+  }
+  if (WEBHOOK_URL.test(`${url.protocol}//${url.host}${path}`) || containsCredential(path)) {
     return `${url.origin}/${HIDDEN_VALUE}`
   }
   if (!url.username && !url.password && !url.search && !url.hash) return value
