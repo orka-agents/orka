@@ -140,15 +140,18 @@ type TaskReconciler struct {
 	HarnessV1Enabled             bool
 	// Mode is the controller's static execution mode; it classifies built-in
 	// Agents that omitted contractVersion.
-	Mode                              executionmode.Mode
-	HarnessV1Endpoint                 string
-	HarnessV1AuthSecretNamespace      string
-	HarnessV1AuthSecretName           string
-	HarnessV1AuthSecretKey            string
-	HarnessV1Attempts                 store.HarnessV1AttemptStore
-	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
-	ACPRuntimeEnabled                 bool
-	ACPRuntimeImages                  ACPRuntimeImages
+	Mode                            executionmode.Mode
+	HarnessV1Endpoint               string
+	HarnessV1AuthSecretNamespace    string
+	HarnessV1AuthSecretName         string
+	HarnessV1AuthSecretKey          string
+	HarnessV1Attempts               store.HarnessV1AttemptStore
+	HarnessV1SettlementAcknowledger HarnessV1SettlementAcknowledger
+	ACPRuntimeEnabled               bool
+	ACPRuntimeImages                ACPRuntimeImages
+	// ACPToolboxPolicy repeats the Agent toolbox admission rules at planning
+	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
+	ACPToolboxPolicy                  ACPToolboxPolicy
 	ACPRuntimeNamespace               string
 	EnforceNamespaceIsolation         bool
 	MaxTasksPerNamespace              int32

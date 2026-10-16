@@ -88,6 +88,10 @@ const (
 	RuntimePoolReasonSchedulingFailed    = "SchedulingFailed"
 	RuntimePoolReasonRolloutFailed       = "RolloutFailed"
 	RuntimePoolReasonRuntimeAmbiguous    = "RuntimeAmbiguous"
+	// RuntimePoolReasonToolboxUnavailable reports that a declared toolbox could
+	// not be bound into the runtime Pod. Tasks waiting on the pool fail with the
+	// same reason instead of waiting for a rollout that cannot complete.
+	RuntimePoolReasonToolboxUnavailable = "ToolboxUnavailable"
 )
 
 // RuntimePoolTrustDomain identifies the logical same-trust-domain boundary
@@ -212,6 +216,39 @@ type RuntimePoolProfileSpec struct {
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
 	ResourceClass string `json:"resourceClass"`
+
+	// Toolboxes lists the read-only tool images bound into the runtime Pod, in
+	// declared order. It is part of Digest. Absent means no toolboxes and
+	// leaves the digest of pre-existing pools unchanged.
+	// +kubebuilder:validation:MaxItems=4
+	// +optional
+	Toolboxes []RuntimePoolToolbox `json:"toolboxes,omitempty"`
+}
+
+// RuntimePoolToolbox is the frozen projection of one Agent toolbox.
+type RuntimePoolToolbox struct {
+	// Image is the digest-pinned toolbox image.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// MountPath is the toolbox folder, bound read-only at the same path.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=5
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^(/opt/[A-Za-z0-9][A-Za-z0-9._-]{0,127}|/home/linuxbrew/\.linuxbrew)$`
+	MountPath string `json:"mountPath"`
+
+	// PathEntries are folders relative to MountPath appended, in order, to the
+	// agent PATH.
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9._-][A-Za-z0-9._/-]*$`
+	// +optional
+	PathEntries []string `json:"pathEntries,omitempty"`
 }
 
 // RuntimePoolExecutionWorkspaceSpec binds a pool's runtime workload to an

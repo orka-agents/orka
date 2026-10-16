@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -195,8 +196,12 @@ func (r *RuntimePoolReconciler) observeNativeRuntimePoolBoot(ctx context.Context
 		pod.Status.PodIP != selected.Status.PodIP || !nativeRuntimePoolProvider(cfg.profile.ProviderKind) {
 		return nil, fmt.Errorf("%w: native runtime Pod enrollment identity changed", store.ErrConflict)
 	}
+	topologySpec, err := runtimePoolBootTopologySpec(pod.Spec)
+	if err != nil {
+		return nil, err
+	}
 	topology := &AgentRuntimeReconciler{Client: r.Client, APIReader: r.APIReader}
-	if err := topology.validateAgentRuntimeRecoveryPodSpec(ctx, pod.Namespace, pod.Spec, runtimePoolBootContainerName, cfg.profile.ProviderKind); err != nil {
+	if err := topology.validateAgentRuntimeRecoveryPodSpec(ctx, pod.Namespace, topologySpec, runtimePoolBootContainerName, cfg.profile.ProviderKind); err != nil {
 		return nil, err
 	}
 	if pod.Spec.Containers[0].Image != pool.Spec.Runtime.Image {
@@ -258,7 +263,36 @@ func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context,
 	if err := validateRecoveryPodTemplate(deployment, rs, pod); err != nil {
 		return nil, nil, err
 	}
+	// The shared template check omits init containers because AgentRuntime
+	// recovery forbids them; toolbox pools render them, so pin them here.
+	if !reflect.DeepEqual(deployment.Spec.Template.Spec.InitContainers, pod.Spec.InitContainers) {
+		return nil, nil, fmt.Errorf("%w: native runtime Pod init containers differ from its Deployment", store.ErrConflict)
+	}
 	return deployment, rs, nil
+}
+
+// runtimePoolBootTopologySpec returns the Pod spec the shared recovery
+// topology check sees. Toolbox init containers are controller-rendered, run to
+// completion before the runtime container starts, and never share its process
+// namespace, so they and their read-only image volumes are removed from the
+// copy. Any other init container, including a restartable sidecar, still
+// fails closed.
+func runtimePoolBootTopologySpec(spec corev1.PodSpec) (corev1.PodSpec, error) {
+	topology := *spec.DeepCopy()
+	for _, container := range spec.InitContainers {
+		toolboxInit := container.Name == runtimePoolToolboxHandoffContainer || strings.HasPrefix(container.Name, runtimePoolToolboxCopyPrefix)
+		if !toolboxInit || container.RestartPolicy != nil {
+			return corev1.PodSpec{}, errors.New("runtime recovery permits only controller-rendered toolbox init containers")
+		}
+		if err := validateRecoveryContainer(container); err != nil {
+			return corev1.PodSpec{}, err
+		}
+	}
+	topology.InitContainers = nil
+	topology.Volumes = slices.DeleteFunc(topology.Volumes, func(volume corev1.Volume) bool {
+		return volume.Image != nil && strings.HasPrefix(volume.Name, runtimePoolToolboxVolumePrefix)
+	})
+	return topology, nil
 }
 
 func runtimePoolWitnessPod(w runtimePoolBootWitness, pod *corev1.Pod) (*corev1.ContainerStateTerminated, error) {
@@ -267,7 +301,11 @@ func runtimePoolWitnessPod(w runtimePoolBootWitness, pod *corev1.Pod) (*corev1.C
 		pod.Labels[runtimePoolUIDLabel] != string(w.PoolUID) || pod.Labels[runtimePoolNameLabel] != w.PoolName || pod.Labels[runtimePoolNamespaceLabel] != w.PoolNamespace {
 		return nil, fmt.Errorf("%w: native runtime Pod enrollment ownership changed", store.ErrConflict)
 	}
-	return witnessedContainerTermination(w.physicalWitness(), pod)
+	topology, err := runtimePoolBootTopologySpec(pod.Spec)
+	if err != nil {
+		return nil, err
+	}
+	return witnessedContainerTerminationWithTopology(w.physicalWitness(), pod, topology)
 }
 
 func runtimePoolWitnessRunning(w runtimePoolBootWitness, pod *corev1.Pod) bool {
