@@ -151,7 +151,7 @@ The controller checks every child against its parent's Agent before the child ru
 
 | Field | Default | What happens |
 | --- | --- | --- |
-| `allowedAgents` | `[]` | A child for an Agent not on the list fails, unless the parent created that Agent with `create_agent`. |
+| `allowedAgents` | `[]` | A child for an Agent not on the list fails. With an empty list, the coordinator can delegate only to Agents it created itself with `create_agent`. |
 | `maxDepth` | `3` | A child deeper than this fails. The top-level coordinator is depth 0. |
 | `maxConcurrentChildren` | `5` | A child beyond this limit waits, and starts when a sibling finishes. It does not fail. |
 
