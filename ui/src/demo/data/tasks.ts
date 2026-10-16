@@ -223,6 +223,18 @@ The rollback was declined, so nothing was changed in production.
 
 Posted both options to #incidents for the on-call engineer.`
 
+const LATENCY_PLAN_DOC = `# INC-518: checkout-service p99 latency
+
+1. [x] Find the cause: #1477 lowered DB_MAX_CONNS from 50 to 20
+2. [x] Roll back checkout-service to v3.18.2 (approved)
+3. [x] Confirm p99 recovered: 205 ms`
+
+const LATENCY_DECLINED_PLAN_DOC = `# INC-518: checkout-service p99 latency
+
+1. [x] Find the cause: #1477 lowered DB_MAX_CONNS from 50 to 20
+2. [x] Propose a rollback to v3.18.2 (declined)
+3. [x] Post mitigation options to #incidents`
+
 const latencyInvestigation: Story = {
   timing: { kind: 'running', played: 22, remainingSec: 75 },
   beats: [
@@ -258,6 +270,8 @@ const latencyInvestigation: Story = {
     ...tool('datadog_query', { query: 'p99:trace.http.request{service:checkout-service,env:prod}', from: 'now-10m' }, { now: '205ms', trend: 'recovering' }, { summary: 'datadog_query p99 after rollback', done: 'p99 back to 205 ms three minutes after the rollout', secs: 12 }),
     ...llm(incident, 19800, 1180, { message: LATENCY_RESULT }),
     ...tool('slack_post', { channel: '#incidents', thread: 'INC-518', text: 'Rolled back to v3.18.2; p99 is 205 ms. Summary and follow-ups posted to INC-518.' }, { ok: true }, { summary: 'slack_post resolution to #incidents', done: 'Posted resolution to the incident thread' }),
+    // Autonomous coordination: marking the goal complete ends the loop.
+    plan(1, 1, 100, 'Incident mitigated: rolled back to v3.18.2', LATENCY_PLAN_DOC, true),
     resultSubmitted(LATENCY_RESULT.length),
     workerCompleted,
   ],
@@ -267,6 +281,7 @@ const latencyInvestigation: Story = {
       ev(2, 'ToolCallCompleted', 'request_approval: declined', { toolName: 'request_approval', toolCallID: 'call_rollback_checkout', content: { result: { approved: false } } }),
       ...llm(incident, 17110, 820, { message: LATENCY_DECLINED_RESULT }),
       ...tool('slack_post', { channel: '#incidents', thread: 'INC-518', text: 'Rollback declined. Options: roll back to v3.18.2, or hot-patch DB_MAX_CONNS=40 via the config service.' }, { ok: true }, { summary: 'slack_post options to #incidents', done: 'Posted mitigation options to the incident thread' }),
+      plan(1, 1, 100, 'Rollback declined; mitigation options posted', LATENCY_DECLINED_PLAN_DOC, true),
       resultSubmitted(LATENCY_DECLINED_RESULT.length),
       workerCompleted,
     ],
