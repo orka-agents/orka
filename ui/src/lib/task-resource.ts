@@ -18,7 +18,8 @@ function withoutCredentials(value: string): string {
   } catch {
     return HIDDEN_VALUE
   }
-  if (WEBHOOK_URL.test(value)) return `${url.origin}/${HIDDEN_VALUE}`
+  // Checked without userinfo, which would otherwise hide the webhook host.
+  if (WEBHOOK_URL.test(`${url.protocol}//${url.host}${url.pathname}`)) return `${url.origin}/${HIDDEN_VALUE}`
   if (!url.username && !url.password && !url.search && !url.hash) return value
   const userinfo = url.username || url.password ? `${HIDDEN_VALUE}@` : ''
   return `${url.protocol}//${userinfo}${url.host}${url.pathname}${url.search ? `?${HIDDEN_VALUE}` : ''}${url.hash ? `#${HIDDEN_VALUE}` : ''}`
