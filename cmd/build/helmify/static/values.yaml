@@ -193,8 +193,15 @@ controller:
   # OAuth provider must register exactly callbackBaseUrl + /api/v1/connections/callback.
   connectors:
     enabled: false
-    # Absolute https origin people reach the dashboard on, for example https://orka.example.com.
+    # Absolute https origin people reach the Orka API on, for example https://orka.example.com.
+    # Consent finishes there: in the dashboard when it is enabled, otherwise on a plain page that
+    # shows the `orka connection complete` command.
     callbackBaseUrl: ""
+
+  # Web dashboard served by the controller on the API port. Off by default: the API and the
+  # orka CLI work without it, and `orka dashboard` needs it.
+  dashboard:
+    enabled: false
 
   # OIDC/JWT authentication for external API requests
   oidc:

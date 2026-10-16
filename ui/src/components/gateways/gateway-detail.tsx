@@ -8,6 +8,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useGateway, useGatewayBindings, useGatewayDeliveries, useGatewayEvents, useGatewayLedgerPagination } from '@/hooks/use-gateways'
 import { GatewayLedgerPagination } from './gateway-pagination'
 import { ListAccessError } from '@/components/ui/list-access-error'
+import { Button } from '@/components/ui/button'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewaySessionQueue } from './gateway-session-queue'
 import { GatewayBindingsTable, GatewayDeliveriesTable, GatewayEventsTable, GatewayStatusBadge } from './gateway-tables'
@@ -23,8 +26,20 @@ export function GatewayDetail({ name }: { name: string }) {
   const deliveries = useGatewayDeliveries({ gateway: name, continue: deliveryPage.cursor })
 
   if (gateway.isLoading) return <Skeleton className="h-96 rounded-xl" />
-  if (gateway.error) return <ListAccessError resource="Gateway" error={gateway.error} />
-  if (!gateway.data) return <Card><CardContent className="py-12 text-center text-muted-foreground">Gateway not found.</CardContent></Card>
+  const backToGateways = <Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>
+  if (gateway.error && !isNotFoundError(gateway.error) && (isForbiddenError(gateway.error) || !gateway.data)) {
+    return <AccessErrorView title="Could not load Gateway" resource={`Gateway ${name}`} error={gateway.error} action={backToGateways} />
+  }
+  if (isNotFoundError(gateway.error) || !gateway.data) {
+    return (
+      <NotFoundView
+        title="Gateway not found"
+        headline={`No Gateway named "${name}"`}
+        hint="It may have been deleted, or it belongs to another namespace."
+        action={backToGateways}
+      />
+    )
+  }
 
   const item = gateway.data
   const observed = item.status?.observedCapabilities
@@ -70,12 +85,15 @@ export function GatewayDetail({ name }: { name: string }) {
       </div>
 
       <Tabs defaultValue="events" className="gap-4">
-        <TabsList variant="line">
-          <TabsTrigger value="queues">Session queues</TabsTrigger>
-          <TabsTrigger value="events">Event timeline</TabsTrigger>
-          <TabsTrigger value="deliveries">Deliveries</TabsTrigger>
-          <TabsTrigger value="bindings">Bindings</TabsTrigger>
-        </TabsList>
+        {/* pb-1 leaves room for the active-tab underline so the scroller never scrolls vertically. */}
+        <div className="overflow-x-auto pb-1">
+          <TabsList variant="line" onFocusCapture={(event) => (event.target as HTMLElement).scrollIntoView?.({ block: 'nearest', inline: 'nearest' })}>
+            <TabsTrigger value="queues">Session queues</TabsTrigger>
+            <TabsTrigger value="events">Event timeline</TabsTrigger>
+            <TabsTrigger value="deliveries">Deliveries</TabsTrigger>
+            <TabsTrigger value="bindings">Bindings</TabsTrigger>
+          </TabsList>
+        </div>
         <TabsContent value="queues" className="space-y-3">
           {events.error ? <ListAccessError resource="gateway Session queues" error={events.error} /> : <>
             <GatewaySessionQueue events={events.data?.items ?? []} loading={events.isLoading} />

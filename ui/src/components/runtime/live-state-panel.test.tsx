@@ -49,6 +49,23 @@ describe('LiveStatePanel', () => {
     expect(screen.getByText('read-only')).toBeInTheDocument()
   })
 
+  it('wraps a long unbroken condition message and keeps the status badge beside the type', () => {
+    const approvalID = 'a'.repeat(64)
+    render(<LiveStatePanel task={{
+      ...minimalTask,
+      status: {
+        phase: 'Running',
+        conditions: [{ type: 'WaitingForApproval', status: 'True', message: `waiting for approval ${approvalID}` }],
+      },
+    }} />)
+    expect(screen.getByText(`waiting for approval ${approvalID}`)).toHaveClass('wrap-anywhere')
+    const badge = screen.getByText('True')
+    expect(badge).toHaveClass('shrink-0')
+    const type = screen.getByText('WaitingForApproval')
+    expect(type).toHaveClass('min-w-0', 'wrap-anywhere')
+    expect(type.parentElement).toContainElement(badge)
+  })
+
   it('treats legacy result references as available', () => {
     render(<LiveStatePanel task={{
       ...minimalTask,

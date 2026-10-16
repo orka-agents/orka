@@ -6,9 +6,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SonarPing } from '@/components/ui/sonar-ping'
 import { EmptyState } from '@/components/ui/empty-state'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { useTaskListAll, useTaskEvents } from '@/hooks/use-tasks'
-import { ApiError } from '@/lib/api-client'
+import { ApiError, isForbiddenError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import { isLiveTask, selectActiveTask, type LatestActivityByTask } from '@/lib/runtime-activity'
 import type { Task } from '@/schemas/task'
@@ -45,7 +46,10 @@ export function RuntimeCanvas() {
   const namespace = useUIStore((s) => s.namespace)
   const queryClient = useQueryClient()
   const [following, setFollowing] = useState(true)
-  const { data, isLoading, error: taskListError, refetch: refetchTasks } = useTaskListAll('100', following ? 10000 : false)
+  const { data, isLoading, error: listError, refetch: refetchTasks } = useTaskListAll('100', following ? 10000 : false)
+  // A 403 always replaces the canvas; any other failure only blocks a canvas
+  // that never loaded, so a failed background refresh keeps the last one.
+  const taskListError = listError && (isForbiddenError(listError) || !data) ? listError : null
 
   const tasks = data?.items ?? []
   // The full-list walk is bounded; beyond that the roster is a prefix and
@@ -102,7 +106,7 @@ export function RuntimeCanvas() {
     <div className="space-y-4">
       <PageHeader
         title="Runtime Canvas"
-        description={`${runningTasks.length} active · namespace ${namespace}`}
+        description={taskListError ? `namespace ${namespace}` : `${runningTasks.length} active · namespace ${namespace}`}
         action={controls}
       />
 
@@ -113,9 +117,15 @@ export function RuntimeCanvas() {
         </div>
       ) : taskListError ? (
         <Card>
-          <CardContent className="flex flex-col items-center gap-3 py-12">
-            <p className="text-sm font-medium text-destructive" role="alert">Failed to load tasks</p>
-            <Button variant="outline" size="sm" onClick={() => refetchTasks()}>Retry</Button>
+          <CardContent>
+            {/* A 403 stays denied for this token, so it gets no Retry. */}
+            <ListAccessError
+              error={taskListError}
+              resource="tasks"
+              action={isForbiddenError(taskListError)
+                ? undefined
+                : <Button variant="outline" size="sm" onClick={() => refetchTasks()}>Retry</Button>}
+            />
           </CardContent>
         </Card>
       ) : tasks.length === 0 ? (
@@ -141,12 +151,14 @@ export function RuntimeCanvas() {
               Task roster is truncated: only the first pages of this namespace were loaded, so active tasks may be missing.
             </p>
           ) : null}
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="space-y-4 lg:col-span-2">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-3">
+          <div className="min-w-0 space-y-4 lg:col-span-2">
             <ActiveSpotlight task={active} following={following} />
             <TaskFlowPanel task={active} tasks={runningTasks} />
           </div>
-          <AgentsRoster tasks={runningTasks} activeTaskName={active?.metadata.name} latestActivity={latestActivity} />
+          <div className="min-w-0">
+            <AgentsRoster tasks={runningTasks} activeTaskName={active?.metadata.name} latestActivity={latestActivity} />
+          </div>
         </div>
         </>
       )}

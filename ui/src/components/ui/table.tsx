@@ -2,11 +2,25 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+function Table({
+  className,
+  scrollRegionLabel,
+  ...props
+}: React.ComponentProps<"table"> & {
+  /**
+   * Names the sideways-scrolling container and makes it a focusable region,
+   * so a wide table can be scrolled from the keyboard. Unset, the container
+   * adds no tab stop.
+   */
+  scrollRegionLabel?: string
+}) {
   return (
     <div
       data-slot="table-container"
       className="relative w-full overflow-x-auto"
+      {...(scrollRegionLabel
+        ? { role: "region", "aria-label": scrollRegionLabel, tabIndex: 0 }
+        : {})}
     >
       <table
         data-slot="table"

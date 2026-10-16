@@ -41,6 +41,13 @@ type SessionMetadata struct {
 	ActiveTaskUID string
 }
 
+// SessionPageCursor is the position a ListSessionsPage page ended at: the
+// creation time and name of its last session.
+type SessionPageCursor struct {
+	CreatedAt time.Time
+	Name      string
+}
+
 // SessionMessage is a single transcript entry.
 type SessionMessage struct {
 	ID         string            `json:"id"`

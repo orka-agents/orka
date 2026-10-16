@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@/test/test-utils'
 import { http, HttpResponse } from 'msw'
+import { render as rawRender } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { server } from '@/test/mocks/server'
 
 vi.mock('zustand/middleware', () => ({
@@ -153,7 +155,7 @@ describe('KanbanBoard', () => {
     }
   })
 
-  it('count chips use token tint/text classes, not pastels', async () => {
+  it('count chips use the status text token on the card surface, not pastels', async () => {
     server.use(
       http.get('/api/v1/tasks', () =>
         HttpResponse.json({
@@ -176,7 +178,9 @@ describe('KanbanBoard', () => {
       expect(chip).toHaveTextContent('1')
     })
     expect(chip).toHaveClass('text-status-running')
-    expect(chip).toHaveClass('bg-status-running-bg')
+    // Not the column's own tint: tint on tint fails AA contrast.
+    expect(chip).toHaveClass('bg-card')
+    expect(chip).not.toHaveClass('bg-status-running-bg')
     expect(chip.className).not.toMatch(/bg-(yellow|blue|green|red)-/)
   })
 
@@ -197,5 +201,71 @@ describe('KanbanBoard', () => {
       const header = screen.getByText(terminal).parentElement!
       expect(header.querySelector('[data-testid="live-indicator"]')).toBeNull()
     }
+  })
+
+  it('follows continue tokens so tasks past the first page are counted', async () => {
+    server.use(
+      http.get('/api/v1/tasks', ({ request }) => {
+        const url = new URL(request.url)
+        if (url.searchParams.get('continue') === 'page-2') {
+          return HttpResponse.json({
+            items: [{ metadata: { name: 'second-page-task', namespace: 'default', uid: 'p2' }, spec: { type: 'ai' }, status: { phase: 'Running' } }],
+            metadata: {},
+          })
+        }
+        return HttpResponse.json({
+          items: [{ metadata: { name: 'first-page-task', namespace: 'default', uid: 'p1' }, spec: { type: 'ai' }, status: { phase: 'Running' } }],
+          metadata: { continue: 'page-2' },
+        })
+      }),
+    )
+    render(<KanbanBoard />)
+    expect(await screen.findByText('second-page-task')).toBeInTheDocument()
+    expect(screen.getByText('first-page-task')).toBeInTheDocument()
+    const chip = screen.getByText('Running').parentElement!.querySelector('span:last-child')!
+    expect(chip).toHaveTextContent('2')
+    expect(screen.queryByText(/More tasks exist/)).not.toBeInTheDocument()
+  })
+
+  it('shows a not-authorized panel instead of empty columns on 403', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+    render(<KanbanBoard />)
+    expect(await screen.findByText('Not authorized to view tasks')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('not authorized')
+    expect(screen.queryByText('No pending tasks')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Pending' })).not.toBeInTheDocument()
+  })
+
+  it('shows the server error instead of empty columns when the walk fails', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({ error: { code: 500, message: 'etcd unavailable' } }, { status: 500 }),
+      ),
+    )
+    // The hook retries server errors; skip the backoff so the error settles.
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } })
+    rawRender(<QueryClientProvider client={client}><KanbanBoard /></QueryClientProvider>)
+    expect(await screen.findByText('Could not load tasks')).toBeInTheDocument()
+    expect(screen.getByText('etcd unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('No pending tasks')).not.toBeInTheDocument()
+  })
+
+  it('says the counts are partial when the bounded walk stops early', async () => {
+    let page = 0
+    server.use(
+      http.get('/api/v1/tasks', () => {
+        page += 1
+        return HttpResponse.json({
+          items: [{ metadata: { name: `task-${page}`, namespace: 'default', uid: `u-${page}` }, spec: { type: 'ai' }, status: { phase: 'Succeeded' } }],
+          metadata: { continue: `page-${page + 1}` },
+        })
+      }),
+    )
+    render(<KanbanBoard />)
+    expect(await screen.findByText('Column counts use 20 loaded tasks in resource-key order. More tasks exist.')).toBeInTheDocument()
   })
 })

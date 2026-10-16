@@ -169,6 +169,9 @@ spec:
             - {{ printf "--connector-callback-base-url=%s" .callbackBaseUrl | quote }}
             {{- end }}
             {{- end }}
+            {{- if dig "dashboard" "enabled" false .Values.controller }}
+            - --dashboard-enabled=true
+            {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
             - {{ printf "--oidc-issuer=%s" .issuer | quote }}

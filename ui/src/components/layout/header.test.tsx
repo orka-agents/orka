@@ -32,6 +32,11 @@ describe('Header', () => {
     expect(screen.getByText('default')).toBeInTheDocument()
   })
 
+  it('names the namespace selector', () => {
+    render(<Header />)
+    expect(screen.getByRole('combobox', { name: 'Namespace' })).toHaveTextContent('default')
+  })
+
   it('renders theme toggle button', () => {
     render(<Header />)
     // In light mode, Moon icon is shown; there are 2 buttons (theme toggle + logout)

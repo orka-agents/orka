@@ -59,7 +59,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 - **Memory Store**: Persists durable memories, memory proposals, and transcript search data in SQLite for namespace-scoped agent context
 - **Priority Queue**: Schedules tasks based on priority (0-1000)
 - **Webhook Notifier**: Delivers completion notifications via HTTP callbacks
-- **Embedded Web UI**: The React dashboard is compiled into the controller binary
+- **Embedded Web UI**: The React dashboard is compiled into the controller binary and served on the API port only with `--dashboard-enabled`
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 

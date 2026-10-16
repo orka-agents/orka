@@ -6,6 +6,9 @@ vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
 }))
 
+import { http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
+import { isForbiddenError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import { useSecretNames } from './use-secrets'
 
@@ -27,5 +30,17 @@ describe('useSecretNames', () => {
     const { result } = renderHook(() => useSecretNames(), { wrapper: createWrapper() })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(result.current.data).toEqual({ items: [] })
+  })
+
+  it('reports a forbidden list at once instead of retrying it', async () => {
+    let requests = 0
+    server.use(http.get('/api/v1/secrets', () => {
+      requests += 1
+      return HttpResponse.json({ error: { code: 403, message: 'forbidden' } }, { status: 403 })
+    }))
+    const { result } = renderHook(() => useSecretNames(), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(isForbiddenError(result.current.error)).toBe(true)
+    expect(requests).toBe(1)
   })
 })

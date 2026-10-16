@@ -94,6 +94,61 @@ func TestSessionTurnFinalizationTaskOwnership(t *testing.T) {
 	}
 }
 
+func TestSessionTurnFinalizationRecordsTaskTokenUsageOnce(t *testing.T) {
+	const taskUID = "token-turn-task-uid"
+	for _, persistenceOnly := range []bool{true, false} {
+		t.Run(fmt.Sprintf("persistence=%v", persistenceOnly), func(t *testing.T) {
+			ctx := context.Background()
+			s := setupTestStore(t)
+			request := sessionTurnFinalizationOwnershipFixture(t, s, persistenceOnly, taskUID)
+			for i, observation := range []struct {
+				attemptID, counterID string
+				input, output        int64
+			}{
+				// An earlier attempt's usage belongs to that attempt's own turn.
+				{attemptID: "0/earlier-prompt", counterID: taskUID + "/earlier-prompt", input: 500, output: 50},
+				// This turn's cumulative counter counts its final value once.
+				{attemptID: "1/prompt", counterID: taskUID + "/prompt", input: 30, output: 4},
+				{attemptID: "1/prompt", counterID: taskUID + "/prompt", input: 120, output: 9},
+			} {
+				input, output := observation.input, observation.output
+				if err := s.RecordUsage(ctx, store.UsageObservation{
+					Namespace: "ns", TaskUID: taskUID, TaskName: "task-name", ID: fmt.Sprintf("usage-%d", i),
+					AttemptID: observation.attemptID, CounterID: observation.counterID,
+					Scope: store.UsageScopeAttempt, Source: store.UsageSourceAgent, InputTokens: &input, OutputTokens: &output,
+					Status: "running", ObservedAt: request.FinalizedAt.Add(time.Duration(i-3) * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Replaying the finalization must not count the turn again.
+			for range 2 {
+				var err error
+				if persistenceOnly {
+					_, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+						Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence,
+						ExpectedTurnVersion: request.ExpectedTurnVersion, FinalizationDigest: request.FinalizationDigest,
+						TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
+						Projection: request.Projection, FinalizedAt: request.FinalizedAt,
+					})
+				} else {
+					_, err = s.FinalizeSessionTurn(ctx, request)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			session, err := s.GetSession(ctx, "ns", "session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if session.InputTokens != 120 || session.OutputTokens != 9 {
+				t.Fatalf("session tokens = %d/%d, want the turn's 120/9 once", session.InputTokens, session.OutputTokens)
+			}
+		})
+	}
+}
+
 func sessionTurnFinalizationOwnershipFixture(t *testing.T, s *Store, persistenceOnly bool, taskUID string) store.FinalizeSessionTurnRequest {
 	t.Helper()
 	ctx := context.Background()

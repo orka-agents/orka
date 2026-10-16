@@ -172,6 +172,12 @@ describe('useTaskResult', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(result.current.data).toEqual({ result: 'task output' })
   })
+
+  it('fetches on its own once enabled', async () => {
+    const { result } = renderHook(() => useTaskResult('my-task', true), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toEqual({ result: 'task output' })
+  })
 })
 
 
