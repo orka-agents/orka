@@ -68,9 +68,12 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
-`POST /api/v1/tasks` takes `name`, `namespace`, and the [Task](resources.md#task) fields,
-either under `spec` or flat at the top level as in the [example](#example-usage) below. Agent
-repository settings go in [`workspace`](resources.md#workspace).
+`POST /api/v1/tasks` takes `name`, `namespace`, and a `spec` with the full set of
+[Task](resources.md#task) fields. As a shorthand, common fields — `type`, `agentRef`,
+`prompt`, `image`, `command`, `args`, `env`, `timeout`, `priority`, `retryPolicy`,
+`workspace`, `agentRuntime`, `sessionRef`, `schedule`, and a few more — can also go at the
+top level, as in the [example](#example-usage) below. Fields outside that set, such as
+`resources` or the schedule history limits, take effect only under `spec`.
 
 Task and Session event history, live streams, traces, forks, and approvals have their own
 endpoints, described in [Execution events](execution-events.md).

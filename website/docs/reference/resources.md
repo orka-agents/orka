@@ -208,7 +208,8 @@ See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md), [Agent Substrate W
 Reusable configuration that Tasks point at. An Agent is either **native** — it names a
 Provider and model and runs on Orka's AI worker — or a **runtime** Agent that runs a
 coding-agent CLI. A runtime Agent sets `spec.runtime` and must not set `providerRef`; see
-[Agent with runtime](#agent-with-runtime).
+[Agent with runtime](#agent-with-runtime). Fields marked "native Agents only" make a runtime
+Agent's Tasks fail before a session starts.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -249,12 +250,12 @@ spec:
 | `providerRef` | The [Provider](#provider) for a native Agent. Mutually exclusive with `runtime`. |
 | `model` | `name` (optional when the Provider sets `defaultModel`), `temperature` (0–2), `maxTokens`, `contextWindow`, and [`fallbacks`](#model-fallbacks). |
 | `systemPrompt` | `inline` text, or `configMapRef` to read it from a ConfigMap key. |
-| `tools` | Tools the Agent may call: [built-in tools](built-in-tools.md) and custom [Tool](#tool) resources by name. An entry with `enabled: false` is skipped. |
-| `skills` | [Skills](#skill) whose content is added to the system prompt. |
-| `coordination` | Lets the Agent delegate to other Agents. See [Coordination](#coordination). |
+| `tools` | Native Agents only. Tools the Agent may call: [built-in tools](built-in-tools.md) and custom [Tool](#tool) resources by name. An entry with `enabled: false` is skipped. Runtime Agents use `runtime.defaultAllowedTools` instead. |
+| `skills` | Native Agents only. [Skills](#skill) whose content is added to the system prompt. |
+| `coordination` | Native Agents only. Lets the Agent delegate to other Agents. See [Coordination](#coordination). |
 | `runtime` | Makes this a coding-agent Agent. See [Agent with runtime](#agent-with-runtime). |
-| `execution` | Default runtime class and placement for the Agent's native worker Pods. See [Execution](#execution). |
-| `resources` | Default CPU and memory for the Agent's worker Pods. |
+| `execution` | Native Agents only. Default runtime class and placement for the Agent's worker Pods. See [Execution](#execution). |
+| `resources` | Native Agents only. Default CPU and memory for the Agent's worker Pods. |
 | `session` | Session defaults, such as `maxMessages`. |
 | `secretRef` | A Secret injected into native worker Pods as environment variables. Runtime Agents must not set it. |
 | `ttlAfterLastTask` | Delete the Agent this long after its last Task completes. Unset keeps it. |

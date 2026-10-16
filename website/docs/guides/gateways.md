@@ -66,14 +66,17 @@ with a runtime produces a `type: agent` Task.
 ## Set up a gateway
 
 Gateways are enabled by default. Create everything in the namespace the controller watches.
-The manifests below match the samples in
+The manifests below are adapted from the samples in
 [`config/samples`](https://github.com/orka-agents/orka/tree/main/config/samples); follow your
 adapter's own guide for deploying the adapter itself.
 
 ### 1. Declare the protocol
 
 A `GatewayClass` is cluster-scoped. It names the protocol and the capabilities a Gateway's
-adapter must advertise before Orka considers it ready:
+adapter must advertise before Orka considers it ready. Require only what your adapter
+supports: this class leaves out `threads`, which the Telegram adapter does not advertise, so
+it works with any of the adapters above. Add `threads: true` for thread-aware adapters and
+`thread` or `thread-sender` Session modes.
 
 ```yaml
 apiVersion: gateway.orka.ai/v1alpha1
@@ -86,7 +89,6 @@ spec:
   capabilities:
     inboundText: true
     outboundText: true
-    threads: true
     senderIdentity: true
     idempotentDelivery: true
   allowedMetadataKeys:

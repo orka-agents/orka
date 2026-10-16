@@ -18,8 +18,10 @@ configures the Agents, Secrets, and monitor for this workflow.
 
 1. A maintainer labels an issue `orka:implement`, or runs
    `orka monitor issue implement <monitor> <number>`.
-2. Orka verifies the webhook signature and the sender's current GitHub permission, then
-   records a durable command event.
+2. Orka checks who asked, then records a durable command event. For a label, it verifies the
+   webhook signature and the sender's current GitHub permission. For the CLI or API, it uses
+   your Orka API authorization (`orka:monitors:operate` and `orka:monitors:write` under
+   transaction-token authorization; see [Create monitor command](../reference/api-reference.md#create-monitor-command)).
 3. A workflow action is queued, bound to the monitor generation, a snapshot digest of the
    issue, a dedupe key, and the command ID.
 4. Orka reads the issue and computes a content digest that excludes Orka's own labels and

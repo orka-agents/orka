@@ -14,8 +14,9 @@ result through a REST API, a CLI, a web dashboard, or the chat and editor tools 
 already uses.
 
 Model API keys and Git credentials stay in the cluster. People, CI jobs, and agents get
-scoped Kubernetes tokens instead, and the platform team decides which models, tools, and
-repositories are allowed.
+[scoped client credentials](concepts/security.md#authentication) — Kubernetes
+ServiceAccount tokens, OIDC tokens, or transaction tokens — instead, and the platform team
+decides which models, tools, and repositories are allowed.
 
 :::tip[See it before you install it]
 The [dashboard demo](pathname:///demo/) runs the real Orka dashboard
@@ -117,8 +118,8 @@ and the [Glossary](reference/glossary.md) defines every term.
 
 ### Stay in control
 
-- **Keep credentials away from agents.** Model keys sit behind a proxy, and Git credentials
-  go only to the publisher. [Security](concepts/security.md)
+- **Keep credentials away from coding agents.** Their model keys sit behind a proxy, and Git
+  credentials go only to the publisher. [Security](concepts/security.md)
 - **Approve consequential actions** before they run. [Human approval](guides/human-approval-v2.md)
 - **Give agents your own tools** — HTTP APIs and MCP servers — behind outbound access
   policies. [Agents, skills, and tools](guides/agents-skills-and-tools.md)

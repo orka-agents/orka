@@ -6,10 +6,13 @@ description: "Credential and network boundaries for ACP runtimes, native workers
 # Security
 
 Orka's security model rests on one idea: each credential lives only with the component that
-needs it, for only as long as it needs it. Model keys stay behind a proxy, Git credentials go
-to a separate publisher one operation at a time, and the agent — the part most exposed to
-prompt injection — holds neither. On top of that, every API call is authenticated and
-authorized, Tasks carry verified provenance, and work is scoped to a namespace.
+needs it, for only as long as it needs it. For coding-agent Tasks, model keys stay behind a
+proxy, Git credentials go to a separate publisher one operation at a time, and the agent —
+the part most exposed to prompt injection — holds neither. Native `type: ai` Tasks are
+different: Orka's own AI worker receives its Provider's API key from a Secret and calls the
+model directly, so that worker is part of the trusted platform (see
+[Native worker Pods](#native-worker-pods)). On top of that, every API call is authenticated and authorized, Tasks carry verified
+provenance, and work is scoped to a namespace.
 
 This page describes each boundary. For the permissions behind every API route, see
 [API authorization](../reference/api-authorization.md); for the trust boundary around

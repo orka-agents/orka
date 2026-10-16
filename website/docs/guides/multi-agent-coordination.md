@@ -151,7 +151,7 @@ The controller checks every child against its parent's Agent before the child ru
 
 | Field | Default | What happens |
 | --- | --- | --- |
-| `allowedAgents` | `[]` | A child for an Agent not on the list fails. |
+| `allowedAgents` | `[]` | A child for an Agent not on the list fails, unless the parent created that Agent with `create_agent`. |
 | `maxDepth` | `3` | A child deeper than this fails. The top-level coordinator is depth 0. |
 | `maxConcurrentChildren` | `5` | A child beyond this limit waits, and starts when a sibling finishes. It does not fail. |
 
@@ -239,36 +239,43 @@ child's `status.delivery`. The reviewer reads that published branch. The pull re
 then act with the coder Task's `forgeCredentialRef`, or with the requester's
 [linked account](connectors.md); the push credential is never used for the GitHub API.
 
+A delegated child can create a branch but cannot update one that already exists: updating a
+branch needs `workspace.expectedRemoteSHA`, which `delegate_task` does not expose. So each
+revision publishes to a new branch, starting from the previous revision's branch, and the
+coordinator stops once the pull request exists. Repairs to an open pull request belong to a
+[repository monitor](repository-monitors.md#pr-repair-and-readiness) or to a direct repair Task
+that sets `expectedRemoteSHA`; the
+[`github-cicd` example](https://github.com/orka-agents/orka/tree/main/examples/github-cicd)
+shows both.
+
 A coordinator prompt for this loop:
 
 ```text
 You are a coordinator agent. Follow this protocol:
 
 1. DELEGATE implementation to the coder agent with workspace.intent = write,
-   gitRepo, publicationGitRepo, pushBranch, and prBaseBranch, and four distinct
-   Secrets: readCredentialRef (clone), publicationReadCredentialRef (verify),
-   publicationCredentialRef (push), and forgeCredentialRef (pull request API).
-   Tell the coder to edit only.
+   gitRepo, publicationGitRepo, a new pushBranch (for example feature-x-1),
+   and four distinct Secrets: readCredentialRef (clone),
+   publicationReadCredentialRef (verify), publicationCredentialRef (push), and
+   forgeCredentialRef (pull request API). Tell the coder to edit only.
 2. WAIT for the coder's result and require a verified delivery receipt.
-3. DELEGATE review to the reviewer agent (workspace.intent = read on the
-   PUBLISHED head: publicationGitRepo — or gitRepo for same-repository
-   publication — at branch = pushBranch, with a readCredentialRef that can
-   read it). The coder's verified changes live only on pushBranch.
+3. DELEGATE review to the reviewer agent with workspace.intent = read on the
+   PUBLISHED branch: publicationGitRepo (or gitRepo for same-repository
+   publication) at branch = that revision's pushBranch.
 4. WAIT for the reviewer's verdict.
-5. IF verdict == "CHANGES_NEEDED" AND iteration < 3:
-   DELEGATE the fix to the coder agent again (workspace.intent = write) with the
-   reviewer feedback in the prompt. Go to step 2.
+5. IF verdict == "CHANGES_NEEDED" AND revision < 3:
+   DELEGATE the fix to the coder agent again (workspace.intent = write) with
+   branch = the previous pushBranch, a NEW pushBranch (feature-x-2, ...), and
+   the reviewer feedback in the prompt. Go to step 2.
 6. IF verdict == "APPROVED":
-   Call create_pull_request with the coder's task name and pushBranch.
-   Call check_pull_request_ci to verify CI status.
-   If CI failed, delegate a focused repair task to the coder on the PR branch,
-   then check CI again before reporting the PR as ready.
-   Call merge_pull_request or auto_merge_pull_request only if the user asked to merge.
-7. Report the final result with the PR URL, review result, and CI status.
+   Call create_pull_request with the last coder task's name and pushBranch,
+   then call check_pull_request_ci.
+7. Report the PR URL, the review result, and the CI status, and stop. Do not
+   delegate further writes to the PR branch.
 ```
 
-Require a terminal verified delivery receipt before creating or merging a pull request. A
-model saying it changed or pushed files is not evidence. [Write and publication
+Require a terminal verified delivery receipt before creating a pull request. A model saying
+it changed or pushed files is not evidence. [Write and publication
 Tasks](../concepts/agent-runtimes.md#write-and-publication-task) describe the receipt.
 
 For a pull request flow that runs without a coordinator — on every PR, or from an issue

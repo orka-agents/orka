@@ -45,7 +45,9 @@ followed; repository overviews were not useful. In practice:
 ## Add skills
 
 A [Skill](../reference/resources.md#skill) is a reusable block of instructions, in the Agent
-Skills format, that an Agent or AI Task lists by name. Create one from a `SKILL.md` file:
+Skills format, that a native Agent or AI Task lists by name. Runtime Agents do not accept
+Skills; put that guidance in their system prompt or the Task prompt. Create a Skill from a
+`SKILL.md` file:
 
 ```bash
 orka skill init ./my-skill --name my-skill --description "My skill"
@@ -63,6 +65,9 @@ Agent, so each one costs tokens on every request:
 - Audit Skills regularly and remove instructions the agent already follows by default.
 
 ## Give the agent tools
+
+The first four options below are for native Agents, which list tools in `spec.tools`. Runtime
+Agents reject `spec.tools`; see [coding-agent tools](#coding-agent-tools).
 
 **Built-in tools.** List names such as `web_search`, `code_exec`, `web_fetch`, `file_read`, and
 `file_write` in the Agent's `spec.tools`. Orka adds memory tools to every native Task, and
@@ -83,7 +88,9 @@ runs ([Remote MCP tools](../concepts/remote-mcp.md)), or an MCP server Orka host
 through a trusted gateway, or act with the requesting person's own linked account, while the
 credential stays out of the agent's reach.
 
-**Coding-agent tools.** Runtime Agents use their CLI's tools — `Read`, `Grep`, `Glob`, `Edit`,
+### Coding-agent tools
+
+Runtime Agents use their CLI's tools — `Read`, `Grep`, `Glob`, `Edit`,
 `Bash`, and so on. Set defaults with `runtime.defaultAllowedTools` and
 `runtime.defaultAllowBash`, and narrow them per Task with `agentRuntime.allowedTools`,
 `disallowedTools`, and `allowBash`.
