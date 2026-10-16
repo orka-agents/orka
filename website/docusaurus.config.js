@@ -71,7 +71,7 @@ const config = {
           },
           {
             to: 'pathname:///demo/',
-            label: 'Live demo',
+            label: 'Dashboard demo',
             position: 'left',
           },
           {
@@ -109,7 +109,7 @@ const config = {
             title: 'Try it',
             items: [
               {
-                label: 'Live dashboard demo',
+                label: 'Interactive dashboard demo',
                 to: 'pathname:///demo/',
               },
               {
