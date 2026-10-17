@@ -63,7 +63,7 @@ func decodeAgentExecutionSnapshotKey(raw []byte) ([]byte, error) {
 // chart-created Secret, minting one on the first start. The chart never
 // renders key material, so a fresh install finds an empty Secret; the
 // controller writes 32 random bytes into it and every later start reuses
-// them. When the SQLite store already exists but the Secret holds no key, the
+// them. When durable dataset history requires a key but the Secret has none, the
 // key was lost and minting a new one would orphan every retained snapshot, so
 // startup fails closed instead. Concurrent writers are reconciled through the
 // Secret's resourceVersion: whoever loses the update reuses the winner's key.
@@ -73,7 +73,7 @@ func ensureAgentExecutionSnapshotKey(
 	writer client.Writer,
 	namespace string,
 	o agentExecutionSnapshotSecretOptions,
-	storePreexisted bool,
+	canBootstrap bool,
 ) ([]byte, error) {
 	if err := validateAgentExecutionSnapshotSecretOptions(o); err != nil {
 		return nil, err
@@ -102,8 +102,8 @@ func ensureAgentExecutionSnapshotKey(
 			}
 			return key, nil
 		}
-		if storePreexisted {
-			return nil, fmt.Errorf("the SQLite store already exists but snapshot key Secret %s has no %q item; "+
+		if !canBootstrap {
+			return nil, fmt.Errorf("the SQLite dataset requires an existing key but snapshot key Secret %s has no %q item; "+
 				"restore the Secret from backup rather than minting a new key, which would make every retained "+
 				"execution snapshot unreadable", ref, item)
 		}

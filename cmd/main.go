@@ -1336,44 +1336,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The snapshot key is settled before the database file exists. A database
-	// without a key can then only mean the key was lost, never an interrupted
-	// first start, so the bootstrap can fail closed on that condition.
-	_, storeStatErr := os.Stat(storePath)
-	if storeStatErr != nil && !os.IsNotExist(storeStatErr) {
-		// Anything but a clean "absent" must not be mistaken for a first
-		// start, or a fresh key could be minted over an unreadable database.
-		setupLog.Error(storeStatErr, "unable to check for an existing SQLite store", "path", storePath)
-		os.Exit(1)
-	}
-	storePreexisted := storeStatErr == nil
-	var snapshotKey []byte
-	if agentExecutionSnapshotSecretOpts.enabled() {
-		key, keyErr := ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
-			currentPodNamespace(), agentExecutionSnapshotSecretOpts, storePreexisted)
-		if keyErr != nil {
-			setupLog.Error(keyErr, "unable to bootstrap the agent execution snapshot key; snapshot encryption fails closed",
-				"secret", agentExecutionSnapshotSecretOpts.Name)
-			os.Exit(1)
+	// Acquire SQLite exclusivity and validate durable dataset history before
+	// deciding whether an absent snapshot key may be created.
+	sqliteStore, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
+		if agentExecutionSnapshotSecretOpts.enabled() {
+			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
+				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
 		}
-		snapshotKey = key
-	} else {
-		key, keyErr := loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
-		if keyErr != nil {
-			setupLog.Error(keyErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
-				"path", agentExecutionSnapshotKeyFile)
-			os.Exit(1)
-		}
-		snapshotKey = key
-	}
-	snapshotCipher, cipherErr := sqlite.NewAgentExecutionSnapshotCipher(snapshotKey)
-	if cipherErr != nil {
-		setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed")
-		os.Exit(1)
-	}
-	sqliteStore, err := sqlite.OpenLockedStore(storePath)
+		return loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
+	})
 	if err != nil {
-		setupLog.Error(err, "unable to acquire and initialize the exclusive SQLite store", "path", storePath)
+		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)
 	}
 	if err := sqliteStore.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
@@ -1390,11 +1363,6 @@ func main() {
 	}
 	if err := mgr.Add(&usage.Retention{Store: sqliteStore, Period: usageRetention}); err != nil {
 		setupLog.Error(err, "unable to add usage retention")
-		os.Exit(1)
-	}
-	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
-		setupLog.Error(cipherErr, "unable to activate agent execution snapshot key; snapshot encryption fails closed",
-			"path", agentExecutionSnapshotKeyFile)
 		os.Exit(1)
 	}
 	agentExecutionSnapshotStore := sqliteStore

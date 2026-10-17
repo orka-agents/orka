@@ -36,10 +36,41 @@ Object counts alone do not establish compatibility.
 
 | Source layout | Representative revision | Transition |
 | --- | --- | --- |
-| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes. |
-| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes. |
-| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables. |
-| 166 objects (current) | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Validate only; no migration or automatic backup. |
+| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector/native-session tables and dataset metadata. |
+| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector/native-session tables and dataset metadata. |
+| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables and dataset metadata. |
+| 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Add dataset metadata. |
+| 167 objects (current), schema version 1 | Dataset identity layout | Validate schema, version and identity; no migration or automatic backup. |
+
+The four historical source layouts have SQLite `user_version = 0`. A nonzero
+marker on an otherwise historical layout is refused rather than adopted.
+
+### Dataset identity and key bootstrap
+
+The current database records a stable dataset UUID, whether it was freshly
+created or adopted during upgrade, and whether key bootstrap completed.
+`PRAGMA user_version = 1` records this metadata layout; the controller also checks
+every actual schema definition. Unknown versions and missing or malformed
+established identity are refused without regenerating metadata or replacing data.
+
+The controller acquires the SQLite process lock before inspecting this history
+or loading the key. It may populate an empty managed snapshot-key Secret only
+for a new, unfinished dataset containing no application records. It never mints
+a key for an adopted dataset, even an empty one, or after bootstrap completed.
+Restore a missing key for such a dataset from backup. Key-file mode always
+requires an operator-supplied key.
+
+An interrupted first start can resume with the same dataset identity. A key
+already committed to the Secret is reused; bootstrap completes only after the
+key authenticates retained execution snapshots, native sessions and connector
+custody under the existing retention and consent-expiry rules. Key-load/authentication failure releases the database lock and
+stops startup before consumers run. Deleting ordinary records does not reset the
+bootstrap history.
+
+Dataset identity is stored inside the database. It does not detect replacement
+of the entire database, restoration of older history, or establish an independent
+installation binding. Preserve the volume, Kubernetes state and key together;
+this metadata is not a backup/restore protocol.
 
 ### Unsupported intermediate connector layout
 
