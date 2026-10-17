@@ -214,7 +214,7 @@ type GatewayMessageBudget struct {
 // callers must authorize the live Task and Gateway identity before entering the writer.
 // If current readiness/capability denies admission, ReplayOnly permits only receipt recovery.
 // MaxMessages and MaxAttempts are positive controller policy, not worker input.
-// Replays compare identity and Text, not mutable retry policy or request time.
+// Replays compare identity, Text and canonical Metadata, not mutable retry policy or request time.
 type GatewayMessageEnqueue struct {
 	Namespace    string
 	NamespaceUID string
@@ -223,7 +223,8 @@ type GatewayMessageEnqueue struct {
 	TaskUID      string
 	RequestID    string
 	Text         string
-	ReplayOnly   bool // Controller-only control bit; never persisted or accepted from workers.
+	Metadata     map[string]string // Controller-derived projection, never arbitrary worker input.
+	ReplayOnly   bool              // Controller-only control bit; never persisted or accepted from workers.
 	MaxMessages  int
 	MaxAttempts  int
 	Now          time.Time

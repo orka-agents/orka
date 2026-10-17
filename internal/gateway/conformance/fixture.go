@@ -149,5 +149,11 @@ func (f DeliveryFixture) maskResultFields(
 	result.ProtocolVersion = mask(result.ProtocolVersion)
 	result.AdapterName = mask(result.AdapterName)
 	result.AdapterVersion = mask(result.AdapterVersion)
+	result.Capabilities.Extensions = nil
+	for _, value := range capabilities.Capabilities.Extensions {
+		if mask(value) == value {
+			result.Capabilities.Extensions = append(result.Capabilities.Extensions, value)
+		}
+	}
 	return message, &result
 }

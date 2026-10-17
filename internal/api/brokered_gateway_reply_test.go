@@ -55,7 +55,8 @@ func newBrokeredReplyFixture(t *testing.T) (*brokeredDataFixture, *gatewayruntim
 		}
 		guard, ok := controller.ACPMCPTaskDataGuardFromContext(ctx)
 		require.True(t, ok)
-		return &tools.ToolContext{Namespace: task.Namespace, TaskID: task.Name, TaskUID: string(task.UID), OperationID: string(request.Metadata.OperationID), GatewayReplySender: NewBrokeredGatewayReplySender(f.kube, service, client.ObjectKeyFromObject(task), string(task.UID), guard)}, nil
+		descriptor, _ := request.Authorization.ToolPolicy.Descriptor(request.Call.ToolName)
+		return &tools.ToolContext{Namespace: task.Namespace, TaskID: task.Name, TaskUID: string(task.UID), OperationID: string(request.Metadata.OperationID), GatewayReplySender: NewBrokeredGatewayReplySenderForDescriptor(f.kube, service, client.ObjectKeyFromObject(task), string(task.UID), guard, descriptor)}, nil
 	}}
 	f.request.Call.Arguments = json.RawMessage(`{"content":"working privately"}`)
 	replyRequestDigest(t, f)
@@ -67,6 +68,39 @@ func replyRequestDigest(t *testing.T, f *brokeredDataFixture) {
 	var err error
 	f.request.Metadata.RequestDigest, err = harnessv2.CanonicalRequestDigest(f.request)
 	require.NoError(t, err)
+}
+
+func TestBrokeredGatewayMeetingDraftLegacyConstructorIsContentOnly(t *testing.T) {
+	f, service := newBrokeredReplyFixture(t)
+	g := &gatewayv1alpha1.Gateway{}
+	require.NoError(t, service.Client.Get(t.Context(), client.ObjectKey{Namespace: f.task.Namespace, Name: "chat"}, g))
+	g.Status.ObservedCapabilities.Capabilities.Extensions = []string{"meetingDraft.v1"}
+	require.NoError(t, service.Client.Update(t.Context(), g))
+	executor := f.broker.Executor.(controller.RegistryACPMCPToolExecutor)
+	factory := executor.ContextFactory
+	executor.ContextFactory = func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {
+		tc, err := factory(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		guard, ok := controller.ACPMCPTaskDataGuardFromContext(ctx)
+		require.True(t, ok)
+		tc.GatewayReplySender = NewBrokeredGatewayReplySender(f.kube, service, client.ObjectKeyFromObject(f.task), string(f.task.UID), guard)
+		return tc, nil
+	}
+	f.broker.Executor = executor
+	f.request.Call.Arguments = json.RawMessage(`{"content":"Draft above","meetingDraft":` + apiMeetingDraft + `}`)
+	replyRequestDigest(t, f)
+	result := f.call(t)
+	require.Equal(t, http.StatusOK, result.Code, result.Body.String())
+	var response harnessv2.MCPBrokerCallResponse
+	require.NoError(t, json.Unmarshal(result.Body.Bytes(), &response))
+	require.True(t, response.IsError, result.Body.String())
+	require.Contains(t, result.Body.String(), "does not support meeting drafts")
+	require.NotContains(t, result.Body.String(), "unknown")
+	rows, err := f.data.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: f.task.Namespace})
+	require.NoError(t, err)
+	require.Empty(t, rows)
 }
 
 func TestBrokeredGatewayReplyAcceptReplayAndCap(t *testing.T) {

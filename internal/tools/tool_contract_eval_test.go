@@ -1654,7 +1654,117 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 	}
 
+	cases = append(cases, evalMeetingDraftLimitCases()...)
 	evalRunLimitCases(t, cases)
+}
+
+// evalMeetingDraftArgs supplies semantic values that the attendee union and
+// timestamp format cannot derive from primitive schema types.
+func evalMeetingDraftArgs() map[string]any {
+	return map[string]any{
+		"subject": "Planning", "agenda": []any{"Next steps"}, "durationMinutes": 30,
+		"attendees":       map[string]any{"mode": "everyone"},
+		"preferredWindow": "Tomorrow morning", "suggestedStart": "2026-07-01T09:00:00Z",
+	}
+}
+
+func evalMeetingDraftCall() (Tool, context.Context) {
+	sender := &meetingReplySender{replySenderStub: replySenderStub{budget: GatewayReplyBudget{Limit: 10}}}
+	return NewReplyInConversationTool(), replyContext(sender)
+}
+
+// Meeting validation intentionally does not echo the leaf or its value. Only
+// use this for a single meetingDraft mutation of a successful control; require
+// the typed, bounded invalid-request diagnostic, not an unsupported host or an
+// unrelated admission failure. Generic all-tool field checks stay unchanged.
+func evalRejectsMeetingDraft(ctx context.Context, tool Tool, args string) (bool, string) {
+	result, panicked, err := evalToolExecute(ctx, tool, args)
+	if panicked != nil {
+		return false, fmt.Sprintf("panicked: %v", panicked)
+	}
+	failed, message := evalToolFailure(result, err)
+	if !failed {
+		return false, "accepted " + args
+	}
+	var rejection *GatewayReplyRejection
+	if !errors.As(err, &rejection) || rejection.Error() != NewGatewayReplyRejection("invalid_request", nil).Error() {
+		return false, fmt.Sprintf("rejected %s for another reason: %s", args, message)
+	}
+	return true, ""
+}
+
+func TestToolEvalMeetingDraftRejection(t *testing.T) {
+	invalid := NewGatewayReplyRejection("invalid_request", nil)
+	for _, tc := range []struct {
+		name, result string
+		err          error
+		ok           bool
+	}{
+		{name: "invalid request", err: invalid, ok: true},
+		{name: "wrapped invalid request", err: fmt.Errorf("reply: %w", invalid), ok: true},
+		{name: "unsupported sender", err: NewGatewayReplyRejection("meeting_drafts_unsupported", nil)},
+		{name: "quota rejection", err: NewGatewayReplyRejection("limit_reached", nil)},
+		{name: "untyped diagnostic", err: errors.New(invalid.Error())},
+		{name: "structured diagnostic", result: fmt.Sprintf(`{"error":%q}`, invalid.Error())},
+		{name: "accepted", result: `{"success":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := &mockTool{
+				name: "reply_in_conversation", parameters: json.RawMessage(`{"type":"object"}`),
+				executeFunc: func(context.Context, json.RawMessage) (string, error) { return tc.result, tc.err },
+			}
+			ok, detail := evalRejectsMeetingDraft(context.Background(), tool, `{}`)
+			if ok != tc.ok || (ok && detail != "") || (!ok && detail == "") {
+				t.Errorf("meeting rejection check = (%v, %q), want accepted rejection %v", ok, detail, tc.ok)
+			}
+		})
+	}
+}
+
+func evalMeetingDraftLimitCases() []evalLimitCase {
+	args := func(field string, value any, omit bool) string {
+		draft := evalMeetingDraftArgs()
+		if omit {
+			delete(draft, field)
+		} else {
+			draft[field] = value
+		}
+		raw, _ := json.Marshal(map[string]any{"content": "Draft proposal", "meetingDraft": draft})
+		return string(raw)
+	}
+	specs := []struct {
+		field, limit   string
+		valid, invalid any
+		omit           bool
+	}{
+		{"extra", " additionalProperties=false", nil, "other-room", false},
+		{"subject", ".subject required", "Planning", nil, true},
+		{"agenda", ".agenda required", []any{"Next steps"}, nil, true},
+		{"attendees", ".attendees required", map[string]any{"mode": "everyone"}, nil, true},
+		{"subject", ".subject minLength=1", "x", "", false},
+		{"agenda", ".agenda minItems=1", []any{"x"}, []any{}, false},
+		{"agenda", ".agenda maxItems=5", []any{"a", "b", "c", "d", "e"}, []any{"a", "b", "c", "d", "e", "f"}, false},
+		{"agenda", ".agenda[] minLength=1", []any{"x"}, []any{""}, false},
+		{"durationMinutes", ".durationMinutes minimum=1", 1, 0, false},
+		{"durationMinutes", ".durationMinutes maximum=480", 480, 481, false},
+		{"preferredWindow", ".preferredWindow minLength=1", "x", "", false},
+	}
+	cases := make([]evalLimitCase, 0, len(specs))
+	for _, tc := range specs {
+		cases = append(cases, evalLimitCase{
+			name:   "worker reply_in_conversation meetingDraft" + tc.limit,
+			limits: []string{"worker/reply_in_conversation.meetingDraft" + tc.limit},
+			check: func(t *testing.T) (bool, string) {
+				valid := args(tc.field, tc.valid, tc.field == "extra")
+				if ok, detail := evalSucceeds(evalMeetingDraftCall, valid); !ok {
+					return false, detail
+				}
+				tool, ctx := evalMeetingDraftCall()
+				return evalRejectsMeetingDraft(ctx, tool, args(tc.field, tc.invalid, tc.omit))
+			},
+		})
+	}
+	return cases
 }
 
 // evalLimitCase checks that one or more declared schema limits are enforced.
@@ -1977,7 +2087,7 @@ func evalArgumentControl(t *testing.T, label, name string, schema map[string]any
 		tc.MessageStore = &recordingMessageStore{}
 		memory := &brokerMemoryStore{}
 		tc.MemoryReader, tc.MemoryProposalWriter, tc.TranscriptSearcher = memory, memory, memory
-		tc.GatewayReplySender = &replySenderStub{budget: GatewayReplyBudget{Limit: 10}}
+		tc.GatewayReplySender = &meetingReplySender{replySenderStub: replySenderStub{budget: GatewayReplyBudget{Limit: 10}}}
 		tc.ApprovalEmitter = func(context.Context, approvals.ApprovalTarget) error { return nil }
 		tc.Requester = &corev1alpha1.RequestedBy{Issuer: "https://example.com", Subject: "eval-person"}
 		switch tool := tool.(type) {
@@ -2035,6 +2145,8 @@ func evalArgumentControl(t *testing.T, label, name string, schema map[string]any
 // cannot describe, including local paths and tool-specific enum choices.
 func evalArgumentSemanticValues(label, name, localURL string) map[string]any {
 	switch name {
+	case "reply_in_conversation":
+		return map[string]any{"meetingDraft": evalMeetingDraftArgs()}
 	case "create_pr_monitor":
 		return map[string]any{"repo_url": testOrgTestRepoURL, "schedule": "0 * * * *", "readCredentialRef": "eval-read"}
 	case "create_agent":
@@ -2139,6 +2251,12 @@ func evalNestedTypeProbes(schema map[string]any, visit func([]string, map[string
 func evalArgumentValue(path []string, schema map[string]any) any {
 	key := strings.Join(path, ".")
 	switch key {
+	case "meetingDraft":
+		return evalMeetingDraftArgs()
+	case "meetingDraft.attendees":
+		return map[string]any{"mode": "everyone"}
+	case "meetingDraft.suggestedStart":
+		return "2026-07-01T09:00:00Z"
 	case "workspace":
 		value := map[string]any{"gitRepo": testOrgTestRepoURL, "intent": "write", "publicationCredentialRef": "eval-write", "prBaseBranch": "main", "forgeCredentialRef": "eval-forge"}
 		properties, _ := schema["properties"].(map[string]any)
@@ -2269,6 +2387,12 @@ func TestToolEvalNullRequiredFields(t *testing.T) {
 					invalid := evalSetArgumentPath(valid, schema, path, nil, nil)
 					invalidRaw, _ := json.Marshal(invalid)
 					fresh, ctx := call()
+					if name == "reply_in_conversation" && path[0] == "meetingDraft" {
+						if ok, detail := evalRejectsMeetingDraft(ctx, fresh, string(invalidRaw)); !ok {
+							violations[key] = detail
+						}
+						return
+					}
 					failed, message := evalArgumentFailure(t, label, ctx, fresh, string(invalidRaw))
 					fieldName := path[len(path)-1]
 					if fieldName == "tasks" {

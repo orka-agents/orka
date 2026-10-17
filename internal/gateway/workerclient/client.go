@@ -48,6 +48,7 @@ type Client struct {
 }
 
 var _ tools.GatewayReplySender = (*Client)(nil)
+var _ tools.GatewayMeetingDraftSender = (*Client)(nil)
 
 func New(cfg Config) (*Client, error) {
 	invalid := errors.New("gateway reply client configuration is invalid")
@@ -112,14 +113,29 @@ func (c *Client) Budget(ctx context.Context, requestID string) (tools.GatewayRep
 }
 
 func (c *Client) Enqueue(ctx context.Context, requestID, content string) (tools.GatewayReplyReceipt, error) {
+	return c.enqueue(ctx, requestID, content, nil)
+}
+
+func (c *Client) EnqueueMeetingDraft(ctx context.Context, requestID, content string, draft protocol.MeetingDraft) (tools.GatewayReplyReceipt, error) {
+	if _, err := draft.Metadata(); err != nil {
+		return tools.GatewayReplyReceipt{}, tools.NewGatewayReplyRejection("invalid_request", nil)
+	}
+	if draft.DurationMinutes == 0 {
+		draft.DurationMinutes = 30
+	}
+	return c.enqueue(ctx, requestID, content, &draft)
+}
+
+func (c *Client) enqueue(ctx context.Context, requestID, content string, draft *protocol.MeetingDraft) (tools.GatewayReplyReceipt, error) {
 	var receipt tools.GatewayReplyReceipt
 	if !validIdentity(requestID) || !utf8.ValidString(content) || len(content) > protocol.MaxInterimTextBytes || strings.TrimSpace(protocol.SanitizeMessage(content, 0)) == "" {
 		return receipt, errors.New("gateway reply request is invalid")
 	}
 	body, err := json.Marshal(struct {
-		Content   string `json:"content"`
-		RequestID string `json:"requestID"`
-	}{content, requestID})
+		Content      string                 `json:"content"`
+		RequestID    string                 `json:"requestID"`
+		MeetingDraft *protocol.MeetingDraft `json:"meetingDraft,omitempty"`
+	}{content, requestID, draft})
 	if err != nil {
 		return receipt, errors.New("gateway reply request is invalid")
 	}
@@ -190,7 +206,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body []by
 // convert a transport/backend failure into a definitive non-admission result.
 func gatewayRejectionStatus(code string) int {
 	switch code {
-	case "interim_delivery_unsupported", "conflict":
+	case "interim_delivery_unsupported", "meeting_drafts_unsupported", "conflict":
 		return http.StatusConflict
 	case "limit_reached":
 		return http.StatusTooManyRequests

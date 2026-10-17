@@ -244,6 +244,21 @@ func ValidateDeliveryRequest(request *DeliveryRequest) error {
 	default:
 		return fmt.Errorf("unsupported delivery kind %q", request.Kind)
 	}
+	// Structured messages enforce these bounds at enqueue and dispatch. Keep
+	// legacy final/error validation unchanged; adapters own their wire checks.
+	if request.Kind == DeliveryKindMessage {
+		if err := validateOptionalIdentity("threadId", request.ThreadID); err != nil {
+			return err
+		}
+		if len(request.Metadata) > MaxMetadataEntries {
+			return errors.New("delivery metadata exceeds entry bound")
+		}
+		for key, value := range request.Metadata {
+			if key == "" || len(key) > MaxMetadataKeyBytes || !metadataKeyPattern.MatchString(key) || len(value) > MaxMetadataValueBytes || !utf8.ValidString(value) || containsUnsafeControl(value, false) {
+				return errors.New("delivery metadata is invalid")
+			}
+		}
+	}
 	if request.Text == "" || len(request.Text) > textLimit || !utf8.ValidString(request.Text) || containsUnsafeControl(request.Text, true) {
 		return errors.New("delivery text is invalid")
 	}

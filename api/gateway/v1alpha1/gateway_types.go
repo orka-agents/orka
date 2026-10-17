@@ -40,6 +40,11 @@ type GatewayCapabilities struct {
 	// +optional
 	InterimDelivery bool `json:"interimDelivery,omitempty"`
 
+	// Extensions lists versioned structured-message schemas the adapter renders.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Extensions []string `json:"extensions,omitempty"`
+
 	// Threads indicates that thread identity is preserved.
 	// +optional
 	Threads bool `json:"threads,omitempty"`

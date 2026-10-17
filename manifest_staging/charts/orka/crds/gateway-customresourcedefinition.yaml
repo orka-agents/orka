@@ -238,6 +238,13 @@ spec:
                         description: ExplicitSessions indicates that explicit Session
                           names are supported by bindings.
                         type: boolean
+                      extensions:
+                        description: Extensions lists versioned structured-message
+                          schemas the adapter renders.
+                        items:
+                          type: string
+                        maxItems: 16
+                        type: array
                       idempotentDelivery:
                         description: IdempotentDelivery indicates that repeated delivery
                           IDs do not create duplicate provider sends.
