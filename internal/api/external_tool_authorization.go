@@ -29,10 +29,12 @@ import (
 )
 
 const (
-	externalToolAgentResource = "agents"
-	externalToolTaskResource  = "tasks"
-	externalToolCreateVerb    = "create"
-	externalToolDeleteVerb    = "delete"
+	externalToolAgentResource    = "agents"
+	externalToolTaskResource     = "tasks"
+	externalToolCreateVerb       = "create"
+	externalToolDeleteVerb       = "delete"
+	externalToolRBACSuggestion   = "Check RBAC permissions"
+	externalToolPermissionDenied = "permission_denied"
 )
 
 // authorizeExternalToolContext keeps API tool calls on the caller's resource
@@ -41,6 +43,9 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 	authorizedClient := newExternalToolClient(tc.Client, tc.KubeClient, userInfo, tc.Namespace, tc.WatchNamespace, tc.EnforceNamespaceIsolation, events)
 	authorization := authorizedClient.authorization
 	tc.Client = authorizedClient
+	if tc.PolicyReader != nil {
+		tc.PolicyReader = externalToolReferenceReader{Reader: tc.PolicyReader, client: authorizedClient}
+	}
 	if tc.ResultStore != nil {
 		tc.ResultStore = &externalToolResultReader{reader: tc.ResultStore, client: authorizedClient}
 	}
@@ -51,6 +56,41 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 		return authorization.authorize(ctx, namespace, "get", "", "pods/log", podName)
 	}
 	if userInfo != nil && userInfo.AuthType == AuthTypeTokenReview {
+		agentCreate := tc.AuthorizeAgentCreate
+		tc.AuthorizeAgentCreate = func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			if err := authorization.authorize(ctx, agent.Namespace, externalToolCreateVerb, corev1alpha1.GroupVersion.Group, externalToolAgentResource, ""); err != nil {
+				return &tools.ChatToolError{Type: externalToolPermissionDenied, Message: err.Error(), Suggestion: externalToolRBACSuggestion}
+			}
+			if agentCreate != nil {
+				return agentCreate(ctx, agent)
+			}
+			return nil
+		}
+		agentReference := tc.AuthorizeAgentReference
+		tc.AuthorizeAgentReference = func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			for _, permission := range []struct{ verb, resource, name string }{
+				{externalToolCreateVerb, externalToolTaskResource, ""},
+				{gatewayVerbGet, externalToolAgentResource, agent.Name},
+			} {
+				if err := authorization.authorize(ctx, agent.Namespace, permission.verb, corev1alpha1.GroupVersion.Group, permission.resource, permission.name); err != nil {
+					return &tools.ChatToolError{Type: externalToolPermissionDenied, Message: err.Error(), Suggestion: externalToolRBACSuggestion}
+				}
+			}
+			if agentReference != nil {
+				return agentReference(ctx, agent)
+			}
+			return nil
+		}
+		taskCreate := tc.AuthorizeTaskCreate
+		tc.AuthorizeTaskCreate = func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+			if err := authorization.authorize(ctx, task.Namespace, externalToolCreateVerb, corev1alpha1.GroupVersion.Group, externalToolTaskResource, ""); err != nil {
+				return &tools.ChatToolError{Type: externalToolPermissionDenied, Message: err.Error(), Suggestion: externalToolRBACSuggestion}
+			}
+			if taskCreate != nil {
+				return taskCreate(ctx, task)
+			}
+			return nil
+		}
 		tc.RequireGitHubTaskCredentials = true
 		tc.AuthorizeCodeExecResources = func(ctx context.Context, objects []client.Object) error {
 			for _, obj := range objects {
@@ -70,12 +110,29 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 				{externalToolDeleteVerb, externalToolAgentResource, agent.Name},
 			} {
 				if err := authorization.authorize(ctx, agent.Namespace, permission.verb, corev1alpha1.GroupVersion.Group, permission.resource, permission.name); err != nil {
-					return &tools.ChatToolError{Type: "permission_denied", Message: err.Error(), Suggestion: "Check RBAC permissions"}
+					return &tools.ChatToolError{Type: externalToolPermissionDenied, Message: err.Error(), Suggestion: externalToolRBACSuggestion}
 				}
 			}
 			return nil
 		}
 	}
+}
+
+// Direct policy reads preserve freshness, but Agent and Provider references
+// supplied by an API caller must not bypass the caller's get permission.
+type externalToolReferenceReader struct {
+	client.Reader
+	client *externalToolClient
+}
+
+func (r externalToolReferenceReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	switch obj.(type) {
+	case *corev1alpha1.Agent, *corev1alpha1.Provider:
+		if err := r.client.authorize(ctx, obj, key.Namespace, "get", key.Name); err != nil {
+			return err
+		}
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
 // The proxy's GitHub tools retain their constructor client. Bind those two

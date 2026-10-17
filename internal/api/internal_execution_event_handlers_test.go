@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -134,6 +135,100 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	)
 	if mismatchResp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("mismatched session status = %d, want 400", mismatchResp.StatusCode)
+	}
+}
+
+func TestInternalSubmitExecutionEventAttributesChatSessionTasks(t *testing.T) {
+	// A chat-created Task has no sessionRef; its orka.ai/chat-session label
+	// attributes its events to that chat Session so the chat's timeline is
+	// not empty. The label counts only for an existing chat Session.
+	ctx := context.Background()
+	sqliteStore := newInternalExecutionEventStore(t)
+	for _, session := range []*store.SessionRecord{
+		{Namespace: "default", Name: "chat-1", SessionType: store.SessionTypeChat},
+		{Namespace: "default", Name: "task-session", SessionType: "task"},
+	} {
+		if err := sqliteStore.CreateSession(ctx, session); err != nil {
+			t.Fatalf("CreateSession(%s): %v", session.Name, err)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		label       string
+		sessionRef  string
+		wantSession string
+	}{
+		{name: "chat session label", label: "chat-1", wantSession: "chat-1"},
+		{name: "sessionRef wins over the label", label: "chat-1", sessionRef: "task-session", wantSession: "task-session"},
+		{name: "label naming a non-chat session", label: "task-session", wantSession: ""},
+		{name: "label naming a missing session", label: "deleted-chat", wantSession: ""},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			taskName := fmt.Sprintf("chat-task-%d", i)
+			task, job, pod := testInternalExecutionEventOwnedWorkerObjects(taskName)
+			task.Labels = map[string]string{labels.LabelChatSession: tt.label}
+			if tt.sessionRef != "" {
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: tt.sessionRef}
+			}
+			h := NewInternalHandlers(nil, sqliteStore, nil, nil, nil, InternalHandlersConfig{
+				Client:              testInternalExecutionEventClient(t, task, job, pod),
+				ExecutionEventStore: sqliteStore,
+			})
+			app := setupInternalExecutionEventAppWithHandler(h, testInternalExecutionEventWorkerUser(taskName+"-pod"))
+
+			resp := doJSONRequest(t, app, "/internal/v1/events/default/task/"+taskName,
+				map[string]any{"type": events.ExecutionEventTypeWorkerStarted})
+			if resp.StatusCode != http.StatusCreated {
+				t.Fatalf("status = %d, want 201", resp.StatusCode)
+			}
+			stored, err := sqliteStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+				Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: taskName, Limit: 10,
+			})
+			if err != nil {
+				t.Fatalf("ListExecutionEvents: %v", err)
+			}
+			if len(stored) != 1 || stored[0].SessionName != tt.wantSession {
+				t.Fatalf("stored = %#v, want one event attributed to session %q", stored, tt.wantSession)
+			}
+		})
+	}
+
+	// The chat Session's timeline now lists the chat-created Task's event.
+	sessionHandlers := NewHandlers(HandlersConfig{SessionStore: sqliteStore, ExecutionEventStore: sqliteStore})
+	app := fiber.New()
+	app.Get("/sessions/:id/events", sessionHandlers.ListSessionEvents)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions/chat-1/events?namespace=default", nil))
+	if err != nil {
+		t.Fatalf("list session events: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list session events status = %d, want 200", resp.StatusCode)
+	}
+	var listed ListSessionExecutionEventsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode session events: %v", err)
+	}
+	if len(listed.Events) != 1 || listed.Events[0].TaskName != "chat-task-0" || listed.Events[0].Seq != 1 || listed.LatestSeq != 1 {
+		t.Fatalf("chat session timeline = %#v, want the chat-created task's event", listed)
+	}
+}
+
+func TestExecutionEventSessionNameWithoutSessionStore(t *testing.T) {
+	// Without a store a sessionRef is taken as given, but a chat label cannot
+	// be shown to name a chat Session and attributes nothing.
+	labeled := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelChatSession: "chat-1"}}}
+	if got, err := executionEventSessionName(context.Background(), nil, "default", labeled); err != nil || got != "" {
+		t.Fatalf("chat-labeled session = %q, %v; want none", got, err)
+	}
+	referenced := labeled.DeepCopy()
+	referenced.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-1"}
+	if got, err := executionEventSessionName(context.Background(), nil, "default", referenced); err != nil || got != "session-1" {
+		t.Fatalf("sessionRef session = %q, %v; want session-1", got, err)
+	}
+	if got, err := executionEventSessionName(context.Background(), nil, "default", nil); err != nil || got != "" {
+		t.Fatalf("nil task session = %q, %v; want none", got, err)
 	}
 }
 

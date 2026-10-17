@@ -39,7 +39,7 @@ func (t *CreateAgentTaskTool) Description() string {
 }
 
 func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the agent"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent name with runtime configured"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, "maxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: minMaxTurns, jsonSchemaMaximumField: maxMaxTurns, jsonSchemaDescriptionField: "Maximum agent loop iterations"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the agent"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent name with runtime configured"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, "maxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: minMaxTurns, jsonSchemaMaximumField: maxMaxTurns, jsonSchemaDescriptionField: "Maximum agent loop iterations"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
 		"intent":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{"read", "write"}, jsonSchemaDescriptionField: "Workspace intent. Defaults to read; publication fields require write. Write intent requires gitRepo and publicationCredentialRef."},
 		"gitRepo":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL as a credential-free HTTPS URL, e.g. https://github.com/owner/repo. GitHub SSH roots (git@github.com:owner/repo) are converted automatically; other schemes and embedded credentials are rejected. Required for write intent."},
 		branchField:                    map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist), as a short branch name or refs/heads/... ref. Omit with ref to resolve and freeze the repository's advertised default branch. Requires gitRepo."},
@@ -57,7 +57,7 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo as a relative slash-separated path (no leading /, no . or .. segments, max 1024 bytes). Requires gitRepo."},
 	},
 	}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
-	}, jsonSchemaRequiredField: []string{nameField, promptField, agentRefField},
+	}, jsonSchemaRequiredField: []string{promptField, agentRefField},
 	})
 }
 
@@ -90,13 +90,6 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
-	policyReader := toolPolicyReader(ctx, tc.Client)
-	agent, err := loadAgent(ctx, policyReader, namespace, agentRef)
-	if err != nil {
-		result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
-		return result, nil
-	}
-
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      tc.GenerateTaskName(),
@@ -112,6 +105,25 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		},
 	}
 
+	// Check only the reference before lookup. Full Task authorization needs the
+	// external runtime's materialized tool policy and runs after construction.
+	if tc.AuthorizeAgentReference != nil {
+		reference := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: agentRef, Namespace: namespace}}
+		if err := tc.AuthorizeAgentReference(ctx, reference); err != nil {
+			return ChatToolErrorResult(err.Type, err.Message, err.Suggestion)
+		}
+	}
+	policyReader := toolPolicyReader(ctx, tc.Client)
+	agent, err := loadAgent(ctx, policyReader, namespace, agentRef)
+	if err != nil {
+		result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
+		return result, nil
+	}
+	if agent != nil && agent.Spec.Runtime == nil {
+		return ChatToolErrorResult(invalidArgumentsErrorType,
+			fmt.Sprintf("agent %q has no runtime; create_agent_task only runs Agents with a runtime", agentRef),
+			fmt.Sprintf("Use create_ai_task with agentRef=%q instead", agentRef))
+	}
 	if d, errResult, ok := parseTimeoutArg(a); !ok {
 		return errResult, nil
 	} else if d > 0 {

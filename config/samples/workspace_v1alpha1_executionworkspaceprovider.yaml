@@ -1,16 +1,18 @@
+# Registration for the fake provider bundle in orka-workspace (providers/fake),
+# which installs FakeProviderConfig and this ServiceAccount.
 apiVersion: workspace.orka.ai/v1alpha1
 kind: ExecutionWorkspaceProvider
 metadata:
-  name: example-provider
+  name: fake
 spec:
-  controllerName: example.workspace.orka.ai
+  controllerName: fake.workspace.orka.ai
   parametersRef:
-    group: example.workspace.orka.ai
-    kind: ExampleProviderConfig
-    name: local
+    group: fake.workspace.orka.ai
+    kind: FakeProviderConfig
+    name: fake
   serviceAccountRef:
-    namespace: example-provider-system
-    name: example-provider
+    namespace: orka-workspace-system
+    name: orka-workspace-fake
   lifecycleState: Active
   requiredContracts:
     - workspace.orka.ai/v1

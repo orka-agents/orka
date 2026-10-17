@@ -107,6 +107,19 @@ func TestACPAssistantMessagePhaseAllowsOnlyCodexProtocolEnums(t *testing.T) {
 	}
 }
 
+// The runtime advertises ACP session notices, so the pinned codex-acp sends
+// Codex warnings in this shape; they never reach the agent's reply.
+func TestMapACPUpdateDropsSessionNotices(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"notice",
+		"severity":"warning",
+		"title":"Model metadata for ` + "`gpt-5.4-nano`" + ` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+	}`)})
+	if err != nil || ok || update != nil || text != "" {
+		t.Fatalf("notice mapped to update=%+v text=%q ok=%v err=%v", update, text, ok, err)
+	}
+}
+
 func TestMapACPUpdatePreservesWhitespaceChunk(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"agent_message_chunk",

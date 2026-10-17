@@ -19,7 +19,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -66,9 +65,11 @@ func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.Po
 		env := container.Env[:0]
 		for _, variable := range container.Env {
 			switch variable.Name {
-			case "ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL", "ORKA_ACP_POD_NAMESPACE":
+			case "ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL", "ORKA_ACP_POD_NAME", "ORKA_ACP_POD_NAMESPACE":
 				// The native adapter uses supervisor defaults and SystemInfo
-				// identity instead of these Pod-specific overrides.
+				// identity instead of these Pod-specific overrides. The
+				// supervisor never reads the Pod name or namespace; dropping
+				// them keeps headroom under the backend's 32-entry limit.
 				continue
 			case "ORKA_ACP_LISTEN_ADDRESS":
 				variable = corev1.EnvVar{Name: variable.Name, Value: ":80"}
@@ -516,16 +517,3 @@ func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error
 }
 
 const runtimePoolWorkspaceResumeLostAnnotation = "orka.ai/workspace-resume-lost"
-
-// External allocation defaults cover resources represented by the lifecycle
-// contract. Kubernetes ephemeral-storage quotas cannot bound native processes;
-// the ordinary Deployment defaults retain their separate storage quotas.
-func externalRuntimePoolResourceRequirements(resourceClass string) corev1.ResourceRequirements {
-	if resourceClass != runtimePoolResourceClassStandard {
-		return corev1.ResourceRequirements{}
-	}
-	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
-	}
-}

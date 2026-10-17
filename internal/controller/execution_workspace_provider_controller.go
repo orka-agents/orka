@@ -183,9 +183,11 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 // The shared checkpoint policy authorizes the exact registration named by its
 // routing label. Core cannot replace that name with a hash or annotation.
 // Core treats workspaces and checkpoints labeled with the legacy ACP routing
-// identity as legacy-owned, so no registration may claim it as controllerName.
+// identity as legacy-owned, and legacy registrations under the original route
+// must retire under the previous release, so no registration may claim either
+// form as controllerName.
 func workspaceProviderControllerReserved(controllerName string) bool {
-	return controllerName == acpWorkspaceControllerLabelValue
+	return controllerName == acpWorkspaceControllerLabelValue || controllerName == acpWorkspaceProviderControllerName
 }
 
 func workspaceProviderNameSupportsRouting(name string) bool {

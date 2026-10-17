@@ -584,6 +584,7 @@ rules:
   verbs:
   - get
   - list
+  - create
   - update
   - delete
 - apiGroups:
@@ -2132,6 +2133,19 @@ metadata:
   name: orka-workspace-parameter-reader
 rules: []
 ---
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-provider-config-reader
+rules: []
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -2299,6 +2313,22 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: orka-v2-controller-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-provider-config-reader-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-workspace-provider-config-reader
 subjects:
 - kind: ServiceAccount
   name: orka-controller-manager
@@ -2707,6 +2737,13 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /healthz
+            port: 8081
+          periodSeconds: 10
+          timeoutSeconds: 1
         volumeMounts:
         - mountPath: /data
           name: store
@@ -3105,6 +3142,54 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-acp-workspace-lease-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.?name.orValue('').startsWith('acp-suspend-quota-') || request.?name.orValue('').startsWith('acp-retention-fence-')
+      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+      || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
+    name: reserved-acp-workspace-lease-name
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: orka-system
+    resourceRules:
+    - apiGroups:
+      - coordination.k8s.io
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - leases
+  validations:
+  - expression: request.userInfo.username == variables.controllerUser || (request.operation
+      == 'DELETE' && variables.cleanupController)
+    message: only the Orka controller may create, update, or delete ACP workspace
+      coordination Leases
+  variables:
+  - expression: '''orka-system'''
+    name: controllerNamespace
+  - expression: '''orka-controller-manager'''
+    name: controllerServiceAccount
+  - expression: '''system:serviceaccount:'' + variables.controllerNamespace + '':''
+      + variables.controllerServiceAccount'
+    name: controllerUser
+  - expression: |-
+      request.userInfo.username in [
+
+        'system:serviceaccount:kube-system:generic-garbage-collector',
+        'system:serviceaccount:kube-system:garbage-collector',
+        'system:serviceaccount:kube-system:namespace-controller',
+        'system:kube-controller-manager']
+    name: cleanupController
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-checkpoint-source-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3453,6 +3538,15 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-acp-workspace-lease-protection
+spec:
+  policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

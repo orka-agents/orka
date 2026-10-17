@@ -21,6 +21,7 @@ func main() {
 		logger.Error("invalid workspace publisher configuration", "error", err)
 		os.Exit(1)
 	}
+	config.Logger = logger
 	server, err := publisherservice.New(config)
 	if err != nil {
 		logger.Error("create workspace publisher", "error", err)

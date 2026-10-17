@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import { AlertTriangle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { SonarPing } from '@/components/ui/sonar-ping'
 import { StatusDot } from '@/components/ui/status-dot'
@@ -7,6 +8,8 @@ import { useFreshness } from '@/hooks/use-freshness'
 import { cn } from '@/lib/utils'
 import { elapsedSeconds, formatElapsed, UNASSIGNED_AGENT } from '@/lib/runtime-activity'
 import { isTerminal } from '@/lib/runtime-validation'
+import { isWaitingForApproval, podWaitingMessage } from '@/components/tasks/task-state'
+import { TaskStateBadges } from '@/components/tasks/task-state-badges'
 import type { Task } from '@/schemas/task'
 import type { ExecutionEvent } from '@/schemas/execution-event'
 
@@ -29,7 +32,12 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
   const [now, setNow] = useState(() => Date.now())
   const phase = task?.status?.phase
   const running = phase === 'Running'
-  const headline = running
+  // A task parked on an approval or on a Pod that cannot start says so in
+  // status.message; the last event ("AI worker completed", "Task started
+  // with Job ...") would read as if it were still progressing.
+  const waitingForApproval = task ? isWaitingForApproval(task) : false
+  const podWaiting = task ? podWaitingMessage(task) : undefined
+  const headline = running && !waitingForApproval && !podWaiting
     ? latestEvent?.summary ?? task?.status?.message
     : task?.status?.message ?? latestEvent?.summary
   const justUpdated = useFreshness(headline)
@@ -89,21 +97,35 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
           <Link
             to="/tasks/$taskId"
             params={{ taskId: task.metadata.name }}
+            title={task.metadata.name}
             className="truncate font-mono text-lg font-semibold hover:underline"
           >
             {task.metadata.name}
           </Link>
           <StatusDot phase={task.status?.phase} />
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>{agent}</span>
+        {/* The row wraps as a whole (badges drop below on a phone); the
+            agent name stays on one line and truncates, full name in its
+            title, instead of breaking mid-name. */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <span className="min-w-0 max-w-full truncate" title={agent}>{agent}</span>
           <span aria-hidden="true">·</span>
           <span className="tabular-nums">{elapsed}</span>
+          <TaskStateBadges task={task} />
         </div>
         {eventError && (
           <p className="text-sm text-destructive" role="alert">Unable to load events</p>
         )}
-        {headline && <p className="truncate text-sm text-muted-foreground">{headline}</p>}
+        {podWaiting ? (
+          // The pull or config error detail is the actionable part, so it
+          // wraps instead of truncating.
+          <p className="flex items-start gap-1.5 break-words text-sm text-status-pending" role="status">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            <span className="min-w-0">{podWaiting}</span>
+          </p>
+        ) : (
+          headline && <p className="truncate text-sm text-muted-foreground">{headline}</p>
+        )}
       </CardContent>
     </Card>
   )

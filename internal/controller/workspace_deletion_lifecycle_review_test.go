@@ -232,3 +232,33 @@ func TestWorkspaceMaxLifetimePoolFirstReconcileDeletesAndFinalizesWorkspace(t *t
 	}
 	assertPreRequestResourcesGone(t, f, secret, lease)
 }
+
+func TestDeletedDesiredStateDeletesAndFinalizesWorkspace(t *testing.T) {
+	ctx := context.Background()
+	f, secret, lease := preRequestDeletionFixture(t)
+	// Deleting a linked RuntimePool retires the workspace this way without
+	// deleting the object.
+	w := f.currentWorkspace(t)
+	w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	w.Spec.Attachment = nil
+	if err := f.r.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)}
+	core := &ExecutionWorkspaceReconciler{Client: f.r.Client, APIReader: f.r.Client}
+	if _, err := core.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	current := f.currentWorkspace(t)
+	if current.UID != w.UID || current.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(current, executionWorkspaceFinalizer) {
+		t.Fatal("a Deleted desired state did not request finalizer-held deletion of the exact workspace")
+	}
+	observePreRequestDeleted(t, f)
+	for range 4 {
+		if _, err := core.Reconcile(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	assertPreRequestResourcesGone(t, f, secret, lease)
+}

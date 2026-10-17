@@ -36,6 +36,14 @@ describe('ValidationSummary', () => {
     expect(screen.getByText('Not a formal evaluation')).toBeInTheDocument()
   })
 
+  it('lets the rollup badge wrap inside a narrow card instead of overflowing it', () => {
+    render(<ValidationSummary task={task('Failed', { message: 'boom' })} trace={trace()} />)
+    const badge = screen.getByText('Derived checks failing')
+    expect(badge).toHaveClass('shrink', 'whitespace-normal')
+    expect(badge).not.toHaveClass('shrink-0', 'whitespace-nowrap')
+    expect(badge.parentElement).toHaveClass('flex-wrap')
+  })
+
   it('rolls up to pass for a clean succeeded task', () => {
     render(
       <ValidationSummary
@@ -48,6 +56,34 @@ describe('ValidationSummary', () => {
     expect(screen.getByText('All derived checks pass')).toBeInTheDocument()
     expect(screen.getByText('Reached terminal state')).toBeInTheDocument()
     expect(screen.getByText('No errors')).toBeInTheDocument()
+  })
+
+  it('does not drag a succeeded task without artifacts to unknown', () => {
+    render(
+      <ValidationSummary
+        task={task('Succeeded', { resultRef: { available: true } })}
+        trace={trace()}
+        approvals={[]}
+        artifacts={[]}
+      />,
+    )
+    expect(screen.getByText('All derived checks pass')).toBeInTheDocument()
+    expect(screen.getByText('None published')).toBeInTheDocument()
+    expect(screen.getByText(/— Info/)).toBeInTheDocument()
+  })
+
+  it('does not flag a cleanly running task as needing attention', () => {
+    render(<ValidationSummary task={task('Running')} trace={trace()} approvals={[]} />)
+    expect(screen.queryByText('Derived checks need attention')).not.toBeInTheDocument()
+    expect(screen.getByText('Phase Running; still in progress')).toBeInTheDocument()
+  })
+
+  it('flags a running task stuck on an image pull instead of reading all-pass', () => {
+    const message = 'pod waiting: ImagePullBackOff - Back-off pulling image "ghcr.io/example/missing:v1"'
+    render(<ValidationSummary task={task('Running', { message })} trace={trace()} approvals={[]} />)
+    expect(screen.getByText('Derived checks need attention')).toBeInTheDocument()
+    expect(screen.queryByText('All derived checks pass')).not.toBeInTheDocument()
+    expect(screen.getByText(`Phase Running; ${message}`)).toBeInTheDocument()
   })
 
   it('rolls up to fail when the trace has errors', () => {
@@ -79,7 +115,7 @@ describe('ValidationSummary', () => {
   it('keeps the failing rollup badge foreground readable', () => {
     render(<ValidationSummary task={task('Failed')} trace={trace({ errors: [{ message: 'boom' }] })} />)
     const badge = screen.getByText('Derived checks failing').closest('[data-slot="badge"]')
-    expect(badge?.className).toContain('text-white')
+    expect(badge?.className).toContain('text-destructive-foreground')
     expect(badge?.className).not.toContain('text-status-failed')
   })
 

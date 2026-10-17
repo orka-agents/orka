@@ -1,9 +1,11 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
-import { pageParams, retryUnlessForbidden, walkAllPages, type ListResponse } from '@/lib/list-api'
+import { api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
+import { pageParams, pollUnlessForbidden, retryUnlessForbidden, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
-import type { Agent } from '@/schemas/agent'
+import type { Agent, AgentSystemPrompt } from '@/schemas/agent'
+
+const AGENT_POLL_INTERVAL_MS = 10_000
 
 interface AgentListOptions {
   namespace?: string
@@ -19,6 +21,9 @@ export function useAgentList(options: AgentListOptions = {}) {
     queryFn: () => api.get<ListResponse<Agent>>('/agents', { namespace }),
     enabled: Boolean(token) && (options.enabled ?? true),
     retry: retryUnlessForbidden,
+    // Active task counts and readiness change server-side; poll like the
+    // other resource lists so they do not go stale.
+    refetchInterval: pollUnlessForbidden(AGENT_POLL_INTERVAL_MS),
   })
 }
 
@@ -43,6 +48,23 @@ export function useAgent(name: string) {
   return useQuery({
     queryKey: ['agent', name, namespace],
     queryFn: () => api.get<Agent>(`/agents/${name}`, { namespace }),
+    // A forbidden or deleted Agent stays that way; polling it only spams the API.
+    refetchInterval: (query) =>
+      isForbiddenError(query.state.error) || isNotFoundError(query.state.error) ? false : AGENT_POLL_INTERVAL_MS,
+  })
+}
+
+/** Reads the ConfigMap key an Agent's system prompt references; null skips the request. */
+export function useAgentSystemPrompt(name: string, configMapRef: { name: string; key: string } | null | undefined) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['agent', name, namespace, 'system-prompt', configMapRef?.name, configMapRef?.key],
+    queryFn: () => api.get<AgentSystemPrompt>(`/agents/${name}/system-prompt`, { namespace }),
+    enabled: Boolean(configMapRef),
+    retry: retryUnlessForbidden,
+    // The ConfigMap can change without the Agent changing, so poll it like the Agent.
+    refetchInterval: (query) =>
+      isForbiddenError(query.state.error) || isNotFoundError(query.state.error) ? false : AGENT_POLL_INTERVAL_MS,
   })
 }
 

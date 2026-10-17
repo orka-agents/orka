@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -72,7 +71,10 @@ type ChatConfig struct {
 	Enabled bool
 	// ConnectorsEnabled mirrors --connectors-enabled: without it the
 	// linked-account surfaces (list_connections) are not offered at all.
-	ConnectorsEnabled      bool
+	ConnectorsEnabled bool
+	// DashboardEnabled mirrors --dashboard-enabled, so linked-account
+	// guidance names the dashboard page only when this controller serves it.
+	DashboardEnabled       bool
 	Provider               string
 	Model                  string
 	MaxIterations          int
@@ -214,6 +216,7 @@ type chatStreamRequest struct {
 	turnDeadline   time.Time
 	finalizeTurn   func()
 	provider       llm.Provider
+	providerName   string // the Provider resource's name; provider.Name() is only its type
 	messages       []llm.Message
 	systemPrompt   string
 	tools          []llm.Tool
@@ -402,6 +405,21 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
+	promptBuilder.SetChatProvider(providerInfo.Name)
+	// The tool list itself is built later; filter the names the same way now
+	// so the prompt only describes tools this caller is offered.
+	chatToolNames := chattools.ChatToolNames()
+	chatToolStubs := make([]llm.Tool, 0, len(chatToolNames))
+	for _, name := range chatToolNames {
+		chatToolStubs = append(chatToolStubs, llm.Tool{Name: name})
+	}
+	if !ch.config.ConnectorsEnabled {
+		chatToolStubs = filterCompletionToolsExcluding(chatToolStubs, chattools.ListConnectionsToolName)
+	}
+	offeredChatTools := completionToolNames(filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, chatToolStubs))
+	if len(offeredChatTools) < len(chatToolStubs) {
+		promptBuilder.SetAvailableChatTools(offeredChatTools)
+	}
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
@@ -420,40 +438,28 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 	persistedCount := len(messages)
 
-	// Append user message — if an agentRef is set and the agent has a runtime,
-	// prepend context so the LLM knows to use create_agent_task.
+	// Append user message — if an agentRef is set, prepend context so the LLM
+	// knows which agent the user selected and which task tool runs it.
 	userContent := req.Message
 	if req.AgentRef != "" {
 		agentObj := &corev1alpha1.Agent{}
 		if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agentObj); err == nil {
-			if agentObj.Spec.Runtime != nil {
+			switch {
+			case agentObj.Spec.Runtime != nil && slices.Contains(offeredChatTools, "create_agent_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has runtime %q — use create_agent_task with agent=%q for this request.]\n\n%s",
-					req.AgentRef, agentObj.Spec.Runtime.Type, req.AgentRef, req.Message)
+					req.AgentRef, agentRuntimeLabel(agentObj.Spec.Runtime), req.AgentRef, req.Message)
+			case agentObj.Spec.Runtime == nil && slices.Contains(offeredChatTools, "create_ai_task"):
+				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
+					req.AgentRef, req.AgentRef, req.Message)
+			default:
+				// The tool that runs this agent is not offered; keep the selection
+				// visible without telling the model to call it.
+				userContent = fmt.Sprintf("[Using agent %q. The tool that runs it is not available in this conversation.]\n\n%s",
+					req.AgentRef, req.Message)
 			}
 		}
 	}
 
-	// Auto-route to dev-coordinator for issue/PR workflows.
-	// Chat just creates the coordinator — the coordinator creates its own specialist agents.
-	if req.AgentRef == "" && looksLikeIssueWorkflow(req.Message) {
-		userContent = fmt.Sprintf("[System: This is an issue workflow. "+
-			"You MUST create a dev-coordinator agent using create_agent with initialPrompt (one-shot pattern). "+
-			"Set coordination.enabled=true, providerRef=\"copilot\", model.name=\"gpt-5.4\", maxDepth=3, maxConcurrentChildren=5. "+
-			"CRITICAL: The dev-coordinator must NOT have a runtime — it must be a plain AI agent with providerRef. "+
-			"The coordinator system prompt must instruct it to: "+
-			"1) Use create_agent to create any specialist agents it needs (coder as copilot runtime, reviewers as copilot runtime with different models like claude-opus-4.6, gpt-5.4, gemini-3-pro). "+
-			"Set allowedAgents to include the agents it creates. "+
-			"2) Follow this adaptive workflow: "+
-			"Phase 1 — ANALYZE: Read the issue and determine what phases are needed. "+
-			"Phase 2 — PLAN & DESIGN: If needed, delegate design/planning to a coder agent, then review with multiple reviewer agents in parallel. "+
-			"Phase 3 — CODE: Delegate implementation to the coder agent with a pushBranch. "+
-			"Phase 4 — VALIDATE: Before review, determine the validation image and command from repository evidence such as CI workflows, toolchain files, Dockerfiles/devcontainers, Makefiles, and docs. Run validation with create_container_task on an immutable ref when available. If the environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED. Allow up to 6 validation repair tasks before reporting VALIDATION_BLOCKED. "+
-			"Phase 5 — REVIEW LOOP: Delegate parallel reviews to reviewer agents, then delegate coder repairs on the same branch until validation passes and all reviewers approve. Bound this to at most 8 review repair tasks. "+
-			"Phase 6 — PR + CI LOOP: After validation passes and reviewers approve, create or update the PR, then call check_pull_request_ci once with wait_timeout=\"30m\" and poll_interval=\"30s\". If checks fail, delegate a focused CI repair task to the coder on the PR branch, then re-run validation and reviewers before re-checking CI. Bound this to at most 3 CI repair tasks; if the CI check times out while still pending, report CI_PENDING. "+
-			"Phase 7 — APPROVE: Post final approval only after validation passes, reviewers approve, and CI is green. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Report VALIDATION_BLOCKED, REVIEW_BLOCKED, CI_BLOCKED, or CI_PENDING when a bounded loop is exhausted. Do not merge unless the user explicitly asks. "+
-			"Use initialPrompt to pass the user's request so the coordinator starts immediately. "+
-			"Include the gitRepo URL in the initialPrompt.]\n\n%s", req.Message)
-	}
 	messages = append(messages, llm.Message{
 		Role:    chatRoleUser,
 		Content: userContent,
@@ -466,12 +472,17 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.requester = requesterFromUserInfo(userInfo)
 	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
 	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
+	executor.dashboardEnabled = ch.config.DashboardEnabled
 	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
+	executor.providerNamespace = providerInfo.Namespace
 	executor.providerType = providerInfo.Type
 	authorizationReader := ch.contextTokenAuthorizationReader()
 	executor.SetPolicyReader(authorizationReader)
+	executor.authorizeAgentReference = func(_ context.Context, agent *corev1alpha1.Agent) error {
+		return authorizeContextTokenAgentTaskReference(contextToken, ch.contextTokenAuthorization, agent.Namespace, agent.Name)
+	}
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
 		return authorizeAndStampToolTaskCreate(ctx, authorizationReader, ch.kubeClient, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
@@ -540,6 +551,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		turnDeadline:   activeChat.turnDeadline,
 		finalizeTurn:   activeChat.finish,
 		provider:       provider,
+		providerName:   providerInfo.Name,
 		messages:       messages,
 		systemPrompt:   systemPrompt,
 		tools:          tools,
@@ -605,9 +617,13 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		emitSSE := func(event, data string) {
 			_ = writeSSE(w, event, data)
 		}
+		providerName := req.providerName
+		if providerName == "" {
+			providerName = req.provider.Name()
+		}
 		statusData, _ := json.Marshal(map[string]string{
 			"sessionId":     req.sessionID,
-			chatProviderKey: req.provider.Name(),
+			chatProviderKey: providerName,
 			chatModelKey:    req.model,
 		})
 		emitSSE("status", string(statusData))
@@ -1563,6 +1579,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 		if fbProviderCRD.Spec.Azure != nil {
 			fbConfig.AzureAPIVersion = fbProviderCRD.Spec.Azure.APIVersion
+			fbConfig.AzureDeploymentName = fbProviderCRD.Spec.Azure.DeploymentName
 		}
 
 		fbProvider, err := llm.NewProvider(string(fbProviderCRD.Spec.Type), fbConfig)
@@ -1632,27 +1649,15 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 	return false
 }
 
-// looksLikeIssueWorkflow checks if the user message contains patterns suggesting
-// a GitHub issue implementation workflow (fix, implement, create PR).
-// Uses word-boundary matching to avoid false positives from substrings.
-func looksLikeIssueWorkflow(message string) bool {
-	lower := strings.ToLower(message)
-	// Must mention a GitHub issue
-	hasIssue := strings.Contains(lower, "/issues/") ||
-		strings.Contains(lower, "issue #") ||
-		strings.Contains(lower, "issue#")
-	if !hasIssue {
-		return false
+// agentRuntimeLabel names an Agent's runtime for the model: its built-in
+// type, or the external AgentRuntime it references.
+func agentRuntimeLabel(runtime *corev1alpha1.AgentCLIRuntime) string {
+	switch {
+	case runtime.Type != "":
+		return string(runtime.Type)
+	case runtime.RuntimeRef != nil:
+		return "external AgentRuntime " + runtime.RuntimeRef.Name
+	default:
+		return "unspecified"
 	}
-	// Must suggest implementation work — use multi-word phrases or word boundaries
-	// to avoid false positives (e.g., "pr" in "problem", "fix" in "prefix")
-	actionPhrases := []string{"pick up", "work on", "pull request", "create a pr", "open a pr", "make a pr"}
-	for _, phrase := range actionPhrases {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	// Single-word actions need word boundary checks
-	actionWordsPattern := regexp.MustCompile(`\b(fix|implement|resolve|address)\b`)
-	return actionWordsPattern.MatchString(lower)
 }

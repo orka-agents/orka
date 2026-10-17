@@ -5,10 +5,10 @@ metadata:
   namespace: default
 spec:
   providerRef:
-    name: example-provider
+    name: fake
   parametersRef:
-    group: example.workspace.orka.ai
-    kind: ExamplePoolParameters
+    group: fake.workspace.orka.ai
+    kind: FakePoolParameters
     name: coding-pool
   capacity:
     minReady: 2

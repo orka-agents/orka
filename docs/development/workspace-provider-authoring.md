@@ -14,7 +14,8 @@ ACP classes may select any independently deployed adapter that supports
 ServiceAccount must hold the registration-scoped virtual `provider-status`
 permission. The class uses the adapter's own configuration/profile kinds; core
 resolves and freezes their UIDs, generations, and functional hashes through the
-REST mapper. Grant read access to both kinds used in that resolution.
+REST mapper. Grant read access to both kinds used in that resolution through
+the separate profile and provider-config aggregates described below.
 
 Core admits and attaches the exact materialized workspace before publishing
 physical demand. The provider acknowledges attachment without waiting for a
@@ -23,11 +24,17 @@ the workspace. The provider reports exact instance and request-revision evidence
 core independently checks accessible compute/storage, performs the sealed
 bootstrap exchange, and opens admission only after the authenticated v2 probe.
 Generation acknowledgement is asynchronous and does not authorize prompt dispatch.
+When a provider operation fails, the provider keeps `Provisioned` Unknown with
+reason `ProviderOperationFailed` and a bounded one-line cause. Core appends that
+cause to the RuntimePool status message; it never copies provider text into Task
+status.
 
 `runtime.native-process` declares a fresh writable container filesystem, exact
 process startup evidence, and operator-managed infrastructure/router ingress.
 Core freezes that capability before hashing the request, omits Kubernetes scratch
-mounts, and publishes only runtime Egress policy. The native supervisor intent
+mounts and resource requirements, and publishes only runtime Egress policy. The
+Actor inherits the infrastructure template's CPU and memory sizing, which the
+operator matches to the WorkerPool. The native supervisor intent
 declares UID/GID 0 and its exact capability set. The pinned gVisor backend does not
 support Kubernetes seccomp profiles or allowPrivilegeEscalation controls, so Core
 omits those fields and its Pod node selector from fresh native requests. Native
@@ -35,9 +42,10 @@ placement uses the provider's pinned Linux WorkerPool. Core freezes the native
 bootstrap listener at port 80 and omits Kubernetes probes, lifecycle hooks and
 termination grace periods; the provider owns Actor readiness and exact retirement.
 Native requests use supervisor session-directory defaults and SystemInfo identity,
-and omit the Pod namespace and configured Core MCP broker environment overrides.
+and omit the Pod name, Pod namespace and configured Core MCP broker environment
+overrides, which keeps them within the backend's 32-entry environment limit.
 Pod-backed requests retain their health and shutdown settings,
-scratch mounts and Ingress/Egress policy. Existing admitted requests keep their
+size-limited scratch mounts, ephemeral-storage quotas and Ingress/Egress policy. Existing admitted requests keep their
 original layout and cannot switch startup evidence kinds. Native operators must
 confine worker and router ingress while permitting Orka's authenticated routes.
 
@@ -46,12 +54,17 @@ the attested allocation ID and instance ID. Providers must use label-safe
 identities and birth labels unique to that allocation and incarnation. Before
 granting ingress, Core requires that only the exact attested worker Pod matches
 the full selector, including during deletion, and re-reads its UID and labels
-through the authoritative API. Core freezes its two endpoint policy targets
-before creation, verifies exact ownership and permissions on retries, and
-deletes only its known policies with UID/resourceVersion preconditions. Cold
-resume removes predecessor grants before saving the replacement evidence.
-A later workload cannot change those targets within the same pool; retire the
-exact pool and create a new one to change endpoint namespaces or permissions.
+through the authoritative API. Core freezes both endpoint targets (the provider
+proxy and the controller) before creation, but grants ingress only on the
+provider proxy, whose shipped policy is already isolated. Core never creates a
+policy selecting the controller: that would isolate it and block its other
+clients, such as the Publisher. Operators who isolate controller ingress must
+admit native workers and Publisher callbacks themselves. Core verifies exact
+ownership and permissions on retries, and deletes only its known policies with
+UID/resourceVersion preconditions. Cold resume removes predecessor grants
+before saving the replacement evidence. A later workload cannot change those
+targets within the same pool; retire the exact pool and create a new one to
+change endpoint namespaces or permissions.
 
 Fresh native requests freeze an opaque Core runtime identity from the exact pool
 UID, workspace UID and workload sequence before admission. Raw provider process
@@ -64,7 +77,13 @@ retire those instances before continuing with a fresh opaque identity.
 Private runtime credentials stay core-owned. Retirement closes admission and
 drains the authenticated instance before the provider receives exact sequence
 and instance authorization. A missing provider response retains both ownership
-fences and finalizers. Independent checkpoint restore additionally binds the
+fences and finalizers. A lost native process cannot answer that drain. When the
+provider reports the exact bound native instance `Failed` with startup withdrawn,
+Core treats the instance as terminal: it never publishes a replacement, writes an
+exact `Stop` retirement, and releases credentials only after the provider reports
+that instance `Stopped`. Task settlement keeps a failed incarnation that was
+cold-resumed from verified retained data, so `recoverLastCheckpoint` can export
+its checkpoint; idle and maximum-lifetime retention still bound it. Independent checkpoint restore additionally binds the
 checkpoint UID, digest, class, and provider revision; the provider must acquire
 durable artifact ownership before native creation.
 
@@ -92,16 +111,26 @@ it does not set the provider's checkpoint phase or claim artifact cleanup.
 An existing unrouted checkpoint bound to an unsupported provider name receives
 `ProviderNameUnsupported` in that same Core-owned annotation. It acquires no
 provider status or retained-artifact ownership. Install a supported registration
-and use a new workspace and checkpoint to retry that case. Create a new checkpoint
-request from a live exact source to retry source loss.
+and use a new workspace and checkpoint to retry that case. When the source
+provider's current status omits the `checkpoint` feature, Core records
+`CheckpointUnsupported`; create a new checkpoint once the provider supports it.
+Create a new checkpoint request from a live exact source to retry source loss.
 Deleting sources and API outages remain retryable. Already routed checkpoints
 and retained artifacts keep their provider ownership after source deletion.
 With `--enable-workspace-provider-api=false`, Core preserves checkpoint requests
 and existing routes without assigning a provider or writing routing diagnostics.
 Runtime retirement and workspace retention cleanup remain active.
 
+Cross-namespace Core Services and disruption budgets have no Kubernetes owner
+reference. Core persists their deterministic key and acknowledged creation UID
+before using or deleting them; matching labels and specifications are not
+ownership evidence. Objects from an older controller without a receipt remain
+untouched. An issued create with a lost response or unsaved UID blocks automatic
+reuse and finalization until an operator verifies and reconciles the exact
+creation outcome. Core never reconstructs a child UID from public metadata.
+
 The shared repository contains the [provider installation and retirement
-guide](https://github.com/orka-agents/orka-workspace/blob/v0.1.0-alpha.2/docs/external-providers.md),
+guide](https://github.com/orka-agents/orka-workspace/blob/c10e4ee498903ce1ae6b79df64e0ccde43b81eb4/docs/external-providers.md),
 provider-specific prerequisites, and conformance/live proof scripts. External ACP
 providers use the generic workspace API and ACP dispatch flags. Legacy ACP
 cleanup belongs to the previous release; the removal release retains only pooled
@@ -135,11 +164,54 @@ rules:
   verbs: ["get", "list", "watch"]
 ```
 
-The Orka installation binds its controller ServiceAccount to an aggregated
-`workspace-parameter-reader` ClusterRole. Removing an adapter also removes its
-specific read grant without changing Orka core RBAC. Provider configuration and
-pool parameter CRDs remain adapter-owned and are not granted through this class
-profile reader unless the adapter explicitly requires them for class resolution.
+The Orka installation binds only its controller ServiceAccount to the aggregated
+`workspace-parameter-reader` ClusterRole through a RoleBinding in the controller's
+watch namespace. This grants profile reads only in that namespace, not across
+tenants. Keep this label and binding for namespaced profile permissions.
+
+`ExecutionWorkspaceProvider.spec.parametersRef` instead references a cluster-scoped
+provider configuration. Each adapter installation must create a separate
+ClusterRole with `workspace.orka.ai/aggregate-to-provider-config-reader: "true"`
+and explicit read-only access to its provider-config CRD. For Substrate and Sandbox:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: substrate-workspace-provider-config-reader
+  labels:
+    workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+rules:
+- apiGroups: ["substrate.workspace.orka.ai"]
+  resources: ["substrateproviderconfigs"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-workspace-provider-config-reader
+  labels:
+    workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+rules:
+- apiGroups: ["sandbox.workspace.orka.ai"]
+  resources: ["sandboxproviderconfigs"]
+  verbs: ["get", "list", "watch"]
+```
+
+Use the exact API group and plural resource name of the adapter's cluster-scoped
+config CRD. Orka binds only its controller ServiceAccount to the separate
+`workspace-provider-config-reader` aggregate through a ClusterRoleBinding.
+Never add namespaced profile or pool permissions to this aggregate or put both
+aggregation labels on the same ClusterRole. Doing so grants those permissions
+across tenant namespaces. Neither aggregate ships fixed provider permissions or
+wildcards; adapter grants must remain read-only and name only the required CRDs.
+Removing an adapter's reader roles removes its grants without changing core RBAC.
+
+The canonical kustomize installation wires both aggregates and their separate
+bindings. Helm renders both only when `rbac.create=true`,
+`controller.mode=harness-v2`, and `controller.executionWorkspace.dispatchEnabled=true`.
+Helm prefixes the role names for the release and uses the selected controller
+ServiceAccount in the release namespace for both bindings.
 
 ## Workspace-agent process identity and capability contract
 
@@ -195,7 +267,7 @@ implementations must also preserve the data-plane protocol described above.
 
 The external provider API and binaries are installed from the same
 `orka-workspace` revision that Orka pins in its Go module. The [shared installation
-and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/v0.1.0-alpha.2/docs/external-providers.md)
+and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/c10e4ee498903ce1ae6b79df64e0ccde43b81eb4/docs/external-providers.md)
 lists the supported Kubernetes and backend versions and the provider-owned schemas.
 
 Before replacing Orka or applying the new RuntimePool CRD, drain every legacy ACP

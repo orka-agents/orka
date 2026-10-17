@@ -230,10 +230,15 @@ func TestExternalNativeIngressUsesUncachedFrozenTargetsAndRecoversLostCreate(t *
 		t.Fatalf("pre-create target/worker fences missing or credentials used: %v", err)
 	}
 	runtimePoolReconcile(t, f.r, f.pool)
-	if cl.cachedReads != 0 || transport.calls != 1 || len(cl.creates) != 2 {
+	if cl.cachedReads != 0 || transport.calls != 1 || len(cl.creates) != 1 {
 		t.Fatalf("out-of-cache namespace recovery failed: cached=%d creates=%v bootstrap=%d", cl.cachedReads, cl.creates, transport.calls)
 	}
-	for _, target := range targets {
+	// Only the isolated provider proxy gets a grant. A policy selecting the
+	// controller would isolate it and lock out its other clients.
+	if err := cl.Client.Get(t.Context(), types.NamespacedName{Namespace: targets[1].Namespace, Name: targets[1].Name}, &networkingv1.NetworkPolicy{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("native ingress created a policy selecting the controller: %v", err)
+	}
+	for _, target := range targets[:1] {
 		policy := &networkingv1.NetworkPolicy{}
 		if err := cl.Client.Get(t.Context(), types.NamespacedName{Namespace: target.Namespace, Name: target.Name}, policy); err != nil {
 			t.Fatal(err)
@@ -264,7 +269,7 @@ func TestExternalNativeIngressPoolFenceFailuresNeverSeedOrCreate(t *testing.T) {
 				t.Fatal("failed durable fence allowed policy creation or credential bootstrap")
 			}
 			runtimePoolReconcile(t, f.r, f.pool)
-			if len(cl.creates) != 2 || transport.calls != 1 {
+			if len(cl.creates) != 1 || transport.calls != 1 {
 				t.Fatalf("exact fence retry failed: creates=%v bootstrap=%d", cl.creates, transport.calls)
 			}
 		})
@@ -341,7 +346,7 @@ func TestExternalNativeIngressCleanupIgnoresForeignLabelsAndUsesFrozenNamespaces
 					t.Fatalf("visible pool labels authorized foreign policy deletion: %v", err)
 				}
 			}
-			for _, target := range targets {
+			for _, target := range targets[:1] {
 				options, ok := cl.deletes[target.Namespace+"/"+target.Name]
 				if !ok || options.Preconditions == nil || options.Preconditions.UID == nil || options.Preconditions.ResourceVersion == nil {
 					t.Fatal("native policy deletion lost its exact UID/resourceVersion fence")
@@ -536,7 +541,7 @@ func TestExternalNativeIngressColdResumeRetiresPredecessorBeforeBindingAndRecove
 	if transport.calls != 2 {
 		t.Fatal("exact current recovery never reached sealed bootstrap")
 	}
-	for _, target := range targets {
+	for _, target := range targets[:1] {
 		policy := &networkingv1.NetworkPolicy{}
 		if err := cl.Client.Get(t.Context(), types.NamespacedName{Namespace: target.Namespace, Name: target.Name}, policy); err != nil || cl.creates[target.Name] != 2 || !reflect.DeepEqual(policy.Spec, externalIngressPolicySpec(target, nextWorker.Namespace, nextWorker.Labels)) {
 			t.Fatalf("replacement ingress recovery changed worker fence or replayed Create: %v", err)

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/tools"
@@ -25,7 +26,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// Initialize the test process just as a controller-runtime application must.
+// Keep real diagnostics on the current stderr so captureNativeReplyStderr's
+// exact warning assertions still see them; only the missing-logger warning is
+// prevented, not filtered after the fact.
+func TestMain(m *testing.M) {
+	log.SetLogger(funcr.New(func(prefix, message string) {
+		if prefix != "" {
+			message = prefix + ": " + message
+		}
+		_, _ = fmt.Fprintln(os.Stderr, message)
+	}, funcr.Options{}))
+	os.Exit(m.Run())
+}
 
 // Catch a missing local bootstrap bound (including context-free lazy discovery):
 // the normal model must run while optional Kubernetes endpoints remain stalled.
@@ -362,6 +378,12 @@ func nativeReplyBootstrapFixture(t *testing.T) (workerenv.AIWorkerEnv, string) {
 		},
 		Tools: []string{"reply_in_conversation"}, GatewayReplyEnabled: true,
 	}, path
+}
+
+func TestNativeReplyStderrCapturesControllerRuntimeLogs(t *testing.T) {
+	logs := captureNativeReplyStderr(t)
+	log.Log.WithName("native-reply-fixture").Info("fixture logging diagnostic")
+	require.Contains(t, logs(), "fixture logging diagnostic", "logger setup must retain stderr diagnostics")
 }
 
 func captureNativeReplyStderr(t *testing.T) func() string {

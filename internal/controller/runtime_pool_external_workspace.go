@@ -87,12 +87,14 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true"
+	// A provider-reported Failed instance is terminal: retire it, never replace it.
+	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
+		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
 	if stopping {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
 	if r.CleanupOnly || r.WorkspaceCleanupOnly {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace dispatch is disabled")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace dispatch is disabled")
 	}
 	if r.Epochs != nil {
 		if current, ready := r.Epochs.Current(); !ready || current.Epoch <= 0 {
@@ -104,22 +106,36 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	}
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, provider); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is unavailable")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is unavailable")
 	}
-	if provider.UID != w.Spec.ProviderBinding.UID || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is not usable")
+	if !externalProviderServesBinding(provider, w) {
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is not usable")
 	}
 	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil && acpRuntimePoolImageRequiresHistoricalRecovery(pool, r.AllowedImages) {
+		if historicalConfig, historicalErr := r.runtimePoolConfigForDrain(pool); historicalErr == nil {
+			authorized, authorizationErr := r.historicalRuntimePoolImageAuthorized(ctx, pool, historicalConfig)
+			if authorizationErr != nil {
+				return ctrl.Result{}, authorizationErr
+			}
+			if authorized {
+				cfg, err = historicalConfig, nil
+			}
+		}
+	}
 	if err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime configuration is not admitted")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime configuration is not admitted")
+	}
+	if len(cfg.profile.Toolboxes) > 0 {
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "execution-workspace RuntimePools cannot mount toolboxes")
 	}
 	if w.Spec.Workload != nil && (w.Status.Allocation == nil || w.Status.Allocation.State != workspacev1alpha1.AllocationStopped) {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil {
-			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
 		}
 		frozenPool, frozen, err := runtimePoolPodTemplateValidationTarget(pool, w.Spec.Workload.Runtime.Template)
 		if err != nil {
-			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted runtime fence is invalid")
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted runtime fence is invalid")
 		}
 		if frozen.controllerEpoch != cfg.controllerEpoch || frozen.providerProxy.tokenGeneration != cfg.providerProxy.tokenGeneration || frozenPool.Generation != pool.Generation || frozenPool.Spec.Runtime.Profile.Digest != pool.Spec.Runtime.Profile.Digest {
 			before := pool.DeepCopy()
@@ -138,7 +154,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	}
 	auth, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "private runtime credentials are unavailable")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "private runtime credentials are unavailable")
 	}
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
 		return ctrl.Result{}, err
@@ -163,24 +179,24 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.publishExternalWorkspaceWorkload(ctx, pool, cfg, w, auth, providerSecret)
 	}
 	if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
 	}
 	request := w.Spec.Workload
 	if request.Runtime == nil || request.Runtime.PoolBinding.UID != pool.UID || request.Runtime.PoolBinding.Name != pool.Name {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workload refers to a different RuntimePool")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workload refers to a different RuntimePool")
 	}
 	if w.Spec.Retirement != nil {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, false)
 	}
 	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) && !externalNativeRuntimeHasOpaqueIdentity(request) {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "native workload requires retirement before opaque runtime identity admission")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "native workload requires retirement before opaque runtime identity admission")
 	}
 	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil || w.Status.ObservedGeneration != w.Generation {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
 	}
 	pod, err := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup)
 	if err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
 	}
 	if w.Status.Allocation.Startup.Process != nil {
 		if err := r.ensureExternalProcessIngress(ctx, pool, cfg, w); err != nil {
@@ -188,10 +204,10 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		}
 	}
 	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
 	}
 	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, auth, pod.UID); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
 	}
 	nonce := string(auth.Data[runtimePoolBootstrapNonceKey])
 	if w.Status.Allocation.Startup.Process != nil {
@@ -224,6 +240,29 @@ func allocationOrEmpty(w *workspacev1alpha1.ExecutionWorkspace) workspacev1alpha
 	return *w.Status.Allocation
 }
 
+// externalProviderOperationFailedReason marks a workspace Provisioned condition
+// whose message carries the provider's last operation error.
+const externalProviderOperationFailedReason = "ProviderOperationFailed"
+
+// externalPoolWorkspaceProgress adds the provider's current operation error to
+// startup and degraded progress. The workspace shares the pool's namespace and
+// already carries that message; Task status never receives provider text.
+func (r *RuntimePoolReconciler) externalPoolWorkspaceProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
+	if report := externalProviderOperationReport(w); report != "" {
+		message += "; provider reports: " + report
+	}
+	return r.externalPoolProgress(ctx, pool, lifecycle, message)
+}
+
+func externalProviderOperationReport(w *workspacev1alpha1.ExecutionWorkspace) string {
+	condition := workspaceprovider.FindCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceProvisioned))
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != externalProviderOperationFailedReason ||
+		condition.ObservedGeneration != w.Generation || w.Status.ObservedGeneration != w.Generation {
+		return ""
+	}
+	return sanitizeStatusValue(condition.Message, 512)
+}
+
 func (r *RuntimePoolReconciler) externalPoolProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
 	status := r.baseRuntimePoolStatus(pool, pool.Status.CurrentReplicas)
 	status.ActiveInstance = pool.Status.ActiveInstance
@@ -237,8 +276,7 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, registration); err != nil {
 		return ctrl.Result{}, err
 	}
-	if registration.UID != w.Spec.ProviderBinding.UID || registration.Spec.ControllerName != w.Labels[workspacev1alpha1.ProviderControllerLabel] ||
-		registration.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(registration) {
+	if registration.Spec.ControllerName != w.Labels[workspacev1alpha1.ProviderControllerLabel] || !externalProviderServesBinding(registration, w) {
 		return ctrl.Result{}, fmt.Errorf("workspace provider no longer matches the admitted identity and capabilities")
 	}
 	required, err := externalWorkspaceRuntimeRequiredFeatures(pool, w)
@@ -254,13 +292,12 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		return ctrl.Result{}, err
 	}
 	template := r.runtimePoolPodTemplate(pool, cfg, cfg.labels, auth.Name, provider.Name)
-	template.Spec.Containers[0].Resources = externalRuntimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass)
-	// Scratch volume size caps are Kubernetes quotas, not a native storage
-	// contract. Select unbounded scratch defaults before publishing admission.
-	for i := range template.Spec.Volumes {
-		if scratch := template.Spec.Volumes[i].EmptyDir; scratch != nil {
-			scratch.SizeLimit = nil
-		}
+	if nativeProcess {
+		// A native Actor inherits its infrastructure template's sizing, which
+		// the operator matches to the WorkerPool; the native template below
+		// also drops Pod scratch volumes. Pod-backed requests keep the
+		// resource and scratch size quotas of an in-cluster pool.
+		template.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
 	}
 	template.Spec.Containers[0].Command = []string{"/usr/local/bin/orka-acp-runtime"}
 	template.Spec.RestartPolicy = corev1.RestartPolicyNever
@@ -584,10 +621,12 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
 		return err
 	}
-	for _, target := range targets {
-		if err := r.ensureExternalIngressPolicy(ctx, pool, cfg, target, worker); err != nil {
-			return err
-		}
+	// Only the provider proxy ships ingress isolation, so only it needs a
+	// grant (targets[0]). A controller grant would itself isolate the
+	// controller and lock out its other clients; operators who isolate the
+	// controller admit native workers themselves.
+	if err := r.ensureExternalIngressPolicy(ctx, pool, cfg, targets[0], worker); err != nil {
+		return err
 	}
 	_, err = r.externalUniqueIngressWorker(ctx, process, w.Status.Allocation.Identity)
 	return err
@@ -668,13 +707,26 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		return r.externalPoolStopped(ctx, pool)
 	}
 	if w.Spec.Retirement == nil {
-		if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
+		// Queued demand needs the replacement boot, not the retiring instance.
+		// Terminal deletion and scale-down still wait for queued Tasks to settle.
+		replacing := !deleting && pool.Spec.DesiredReplicas > 0 &&
+			w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			pool.Annotations["orka.ai/external-runtime-retirement-requested"] == booleanTrueValue
+		queuedWorkSettled := replacing || pool.Status.Capacity.QueuedTasks == 0
+		if !queuedWorkSettled || !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for controller reservations and settlement before retirement")
 		}
 		if pool.Status.ActiveInstance != nil {
 			terminated, err := r.externalActivePodTerminationProven(ctx, pool, w)
 			if err != nil {
 				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "independent runtime termination observation is unavailable")
+			}
+			if !terminated && externalNativeInstanceFailed(pool, w) {
+				// A lost native process cannot answer an authenticated drain.
+				// Its Task already settled without replay, and the provider can
+				// stop that exact Actor on its own, so its terminal Failed report
+				// may authorize the Stop below. Credentials stay until it confirms.
+				terminated = true
 			}
 			if !terminated {
 				if a.Startup == nil {
@@ -706,7 +758,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 					}
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for authenticated drain settlement")
 				}
-				if !runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
+				if !queuedWorkSettled || !runtimePoolRolloutProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for runtime drain settlement")
 				}
 				if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
@@ -720,10 +772,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	// Suspend authorization that a Suspend-capable class otherwise receives. Providers
 	// act on quarantine only through a Stop (or Delete) authorization.
 	quarantined := w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	// A failed instance has no new data to capture; its last verified
+	// checkpoint stays with the provider for explicit recovery.
+	failed := w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
 	action := workspacev1alpha1.WorkloadRetirementStop
 	if deleting {
 		action = workspacev1alpha1.WorkloadRetirementDelete
-	} else if !quarantined && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)) {
+	} else if !quarantined && !failed && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)) {
 		action = workspacev1alpha1.WorkloadRetirementSuspend
 	}
 	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
@@ -946,6 +1001,18 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
+// externalProviderServesBinding reports whether a provider may still act for
+// the workspace's frozen binding. Like Task dispatch, an Active provider must
+// still be the frozen generation; Draining keeps serving the workspace it
+// already bound.
+func externalProviderServesBinding(provider *workspacev1alpha1.ExecutionWorkspaceProvider, w *workspacev1alpha1.ExecutionWorkspace) bool {
+	bound := w.Spec.ProviderBinding.Generation
+	generationMatches := provider.Generation == bound ||
+		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining && bound > 0 && bound <= provider.Generation
+	return provider.UID == w.Spec.ProviderBinding.UID && generationMatches &&
+		provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderDisabled && externalProviderUsable(provider)
+}
+
 func externalProviderUsable(provider *workspacev1alpha1.ExecutionWorkspaceProvider) bool {
 	if provider.Status.ObservedGeneration != provider.Generation || provider.Status.Adapter == nil || provider.Status.Adapter.Version == "" {
 		return false
@@ -1041,10 +1108,21 @@ func runtimePoolWorkspaceCleanupEndpoint(ctx context.Context, reader client.Read
 	return endpoint, nil
 }
 
+// externalNativeInstanceFailed reports a provider's terminal Failed claim for
+// the exact native instance Core bound and admitted, with startup withdrawn.
+func externalNativeInstanceFailed(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
+	evidence, err := externalRuntimeEvidence(pool)
+	a := w.Status.Allocation
+	return err == nil && evidence != nil && evidence.NativeProcess && a != nil && a.Startup == nil &&
+		w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed && w.Status.ObservedGeneration == w.Generation &&
+		evidence.WorkspaceUID == w.UID && evidence.Sequence == a.Sequence && evidence.Identity == a.Identity &&
+		w.Spec.Workload != nil && a.Sequence == w.Spec.Workload.Sequence && a.Key == w.Spec.Workload.Key
+}
+
 // Loss of an independently observed runtime Pod makes authenticated drain
 // impossible. Its exact UID's absence can release retirement intent only after
-// controller work is quiescent. Provider assertions and infrastructure worker
-// Pods cannot establish this exception for a native process.
+// controller work is quiescent. Infrastructure worker Pods cannot establish
+// this exception for a native process; see externalNativeInstanceFailed.
 func (r *RuntimePoolReconciler) externalActivePodTerminationProven(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
 	evidence, err := externalRuntimeEvidence(pool)
 	if err != nil {

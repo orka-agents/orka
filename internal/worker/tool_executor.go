@@ -118,6 +118,10 @@ type ToolExecutor struct {
 	// resolution and immediately before the request leaves the process.
 	sendGate func(context.Context) error
 
+	remoteMu               sync.Mutex
+	remoteBindings         map[string][32]byte
+	remotePreparationFence func(context.Context, *corev1alpha1.Tool) error
+
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
 	ttsClientKey string
@@ -328,6 +332,11 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 
 // Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
+	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, RemoteMCPTimeout(tool))
+		defer cancel()
+	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, tool.Spec.HTTP.Timeout.Duration)
@@ -467,6 +476,9 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		}
 	}
 
+	if prepared.remote != nil {
+		return e.executeRemoteMCPSession(ctx, httpClient, prepared, false)
+	}
 	if prepared.mcp {
 		result, err := e.executeMCPToolCall(ctx, httpClient, prepared)
 		if err != nil && prepared.gateway {
@@ -653,6 +665,16 @@ type gatewayMCPError struct{ Err error }
 func (e gatewayMCPError) Error() string { return "gateway MCP request failed" }
 func (e gatewayMCPError) Unwrap() error { return e.Err }
 
+// ToolErrorDiagnostic returns err's text for operator logs. Unlike Error, it
+// keeps the cause a gateway MCP failure leaves out of its message. Callers
+// still redact and bound it before logging.
+func ToolErrorDiagnostic(err error) string {
+	if gatewayErr, ok := errors.AsType[gatewayMCPError](err); ok && gatewayErr.Err != nil {
+		return err.Error() + ": " + gatewayErr.Err.Error()
+	}
+	return err.Error()
+}
+
 // ToolRequestAttemptedError wraps errors that occur after a custom tool request
 // may already have reached the remote endpoint.
 type ToolRequestAttemptedError struct {
@@ -672,6 +694,19 @@ type ToolExecutionError struct {
 
 func (e ToolExecutionError) Error() string { return e.Err.Error() }
 func (e ToolExecutionError) Unwrap() error { return e.Err }
+
+// ToolHTTPStatusError reports the non-2xx status a custom tool endpoint, or
+// the gateway in front of it, answered the tool request with. Redirected
+// reports that the status answered a followed redirect, not the original
+// request, which may already have taken effect.
+type ToolHTTPStatusError struct {
+	StatusCode int
+	Redirected bool
+	Err        error
+}
+
+func (e ToolHTTPStatusError) Error() string { return e.Err.Error() }
+func (e ToolHTTPStatusError) Unwrap() error { return e.Err }
 
 // ToolRequestWasAttempted reports whether err happened after the custom tool send path began.
 func ToolRequestWasAttempted(err error) bool {
@@ -764,10 +799,13 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, suppress
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// A request created by a followed redirect carries the response that
+		// caused it.
+		redirected := resp.Request != nil && resp.Request.Response != nil
 		if suppressErrorBody {
-			return nil, fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)
+			return nil, ToolHTTPStatusError{StatusCode: resp.StatusCode, Redirected: redirected, Err: fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)}
 		}
-		err := fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))
+		err := ToolHTTPStatusError{StatusCode: resp.StatusCode, Redirected: redirected, Err: fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))}
 		// A completed API failure can be delivered to the model as a tool
 		// result. Redirect and authentication failures remain protocol errors.
 		if resp.StatusCode >= 400 && resp.StatusCode < 600 && resp.StatusCode != http.StatusUnauthorized &&
@@ -814,6 +852,7 @@ func toolIdempotencyKeyFromContext(ctx context.Context) string {
 }
 
 type preparedToolRequest struct {
+	remote           *corev1alpha1.Tool
 	httpConfig       corev1alpha1.HTTPExecution
 	request          *http.Request
 	authToken        string
@@ -854,6 +893,9 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 
 //nolint:gocyclo // Request preparation centralizes auth, protocol, transaction, and outbound policy invariants.
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
+		return e.prepareRemoteMCPRequest(ctx, tool, args, false)
+	}
 	params, err := decodeToolArguments(args)
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
@@ -1092,7 +1134,7 @@ func (e *ToolExecutor) applyGatewayOutboundAccess(
 		return errors.New("gateway outbound access could not resolve request authorities")
 	}
 	if !e.skipDirectPublicValidation {
-		trustedActorRoute := prepared.mcp && strings.TrimSpace(prepared.request.Host) != ""
+		trustedActorRoute := prepared.trustedActorRoute
 		if err := validateGatewayOriginalTarget(
 			ctx,
 			prepared.request.URL,

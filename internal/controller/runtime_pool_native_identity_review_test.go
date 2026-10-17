@@ -323,6 +323,9 @@ func assertNativeLegacyCleanupRecovery(t *testing.T, f *externalRuntimePoolFixtu
 		t.Fatal("fresh admission authenticated or exposed a legacy provider fence")
 	}
 	task := runtimePoolRetirementTask(t, pool, "existing-legacy-task")
+	// A Task bound to a workspace pool always carries its class request, which
+	// keeps native-pool retirement evidence out of its recovery.
+	task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}
 	if err := f.r.Create(t.Context(), task); err != nil {
 		t.Fatal(err)
 	}

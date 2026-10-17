@@ -7,12 +7,13 @@ ARG TARGETARCH
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY internal/harness/v2/ internal/harness/v2/
 COPY cmd/orka-harness-v2-e2e-fixture/ cmd/orka-harness-v2-e2e-fixture/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags="-s -w" \
     -o /out/orka-harness-v2-e2e-fixture ./cmd/orka-harness-v2-e2e-fixture
 

@@ -58,7 +58,8 @@ func (c ExecutionModeConfig) controller(username string) bool {
 }
 
 // RegisterExecutionModeWebhooks registers the static execution-mode boundary
-// for Orka resources. Namespace claim immutability is a ValidatingAdmissionPolicy.
+// for Orka resources. Namespace claim immutability and ACP workspace
+// coordination Lease ownership are ValidatingAdmissionPolicies.
 func RegisterExecutionModeWebhooks(
 	server webhook.Server,
 	scheme *runtime.Scheme,
@@ -78,9 +79,6 @@ func RegisterExecutionModeWebhooks(
 	}})
 	server.Register(WorkspaceAttachmentSecretWebhookPath, &ctrladmission.Webhook{Handler: &WorkspaceAttachmentSecretValidator{
 		decoder: decoder, config: config,
-	}})
-	server.Register(ACPSuspendQuotaLeaseWebhookPath, &ctrladmission.Webhook{Handler: &ACPSuspendQuotaLeaseValidator{
-		config: config,
 	}})
 }
 
@@ -201,7 +199,7 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 	if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task execution authority: %w", err))
 	}
-	if taskHasExecutionAuthority(oldObject) && !reflect.DeepEqual(oldObject.Spec, object.Spec) {
+	if taskHasExecutionAuthority(oldObject) && !taskSpecUnchangedForAuthority(oldObject, object) {
 		return ctrladmission.Denied("Task spec is immutable after execution authority is recorded")
 	}
 	if taskHasExecutionAuthority(oldObject) && slices.Contains(oldObject.Finalizers, labels.TaskFinalizer) &&
@@ -211,6 +209,16 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 		}
 	}
 
+	if oldObject.Status.SoulBinding != nil && !reflect.DeepEqual(oldObject.Status.SoulBinding, object.Status.SoulBinding) {
+		return ctrladmission.Denied("AI soul binding is write-once and immutable")
+	}
+	// Match the live generation when first binding, not when preserving a
+	// binding: deletion can advance metadata.generation without changing spec.
+	// The immutable spec/binding and finalizer ownership checks above still apply.
+	if binding := object.Status.SoulBinding; binding != nil && (object.Spec.Type != corev1alpha1.TaskTypeAI ||
+		oldObject.Status.SoulBinding == nil && (binding.TaskGeneration != object.Generation || !object.DeletionTimestamp.IsZero())) {
+		return ctrladmission.Denied("AI soul binding does not match the Task identity")
+	}
 	oldBinding, newBinding := oldObject.Status.AgentExecutionBinding, object.Status.AgentExecutionBinding
 	if response, handled := taskStatusWriteResponse(v.config, req.UserInfo.Username, oldObject, object); handled {
 		return response
@@ -300,7 +308,7 @@ func agentUsesBuiltInRuntime(agent *corev1alpha1.Agent) bool {
 }
 
 func taskHasExecutionAuthority(task *corev1alpha1.Task) bool {
-	return task != nil && task.Status.AgentExecutionBinding != nil
+	return task != nil && (task.Status.AgentExecutionBinding != nil || task.Status.SoulBinding != nil)
 }
 
 func admissionReadError(operation string, err error) ctrladmission.Response {
@@ -308,4 +316,14 @@ func admissionReadError(operation string, err error) ctrladmission.Response {
 		return ctrladmission.Denied(operation + ": referenced object does not exist")
 	}
 	return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("%s: %w", operation, err))
+}
+
+// taskSpecUnchangedForAuthority applies the same freeze as the Task CRD rule:
+// an ACP execution binding freezes the whole spec, while a soul-only binding
+// freezes the execution inputs and leaves control fields such as suspend mutable.
+func taskSpecUnchangedForAuthority(oldObject, object *corev1alpha1.Task) bool {
+	if oldObject.Status.AgentExecutionBinding != nil {
+		return reflect.DeepEqual(oldObject.Spec, object.Spec)
+	}
+	return reflect.DeepEqual(oldObject.Spec.ExecutionInputs(), object.Spec.ExecutionInputs())
 }

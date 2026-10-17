@@ -32,28 +32,29 @@ describe('Header', () => {
     expect(screen.getByText('default')).toBeInTheDocument()
   })
 
-  it('renders theme toggle button', () => {
+  it('names the namespace selector', () => {
     render(<Header />)
-    // In light mode, Moon icon is shown; there are 2 buttons (theme toggle + logout)
-    const buttons = screen.getAllByRole('button')
-    expect(buttons.length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByRole('combobox', { name: 'Namespace' })).toHaveTextContent('default')
   })
 
   it('exposes accessible names on the icon-only theme + logout buttons', () => {
     render(<Header />)
-    // Light theme → the toggle offers to switch to dark.
-    expect(
-      screen.getByRole('button', { name: /switch to dark theme/i }),
-    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Theme: Light' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /log out/i })).toBeInTheDocument()
   })
 
-  it('theme toggle accessible name reflects the current theme', () => {
-    useUIStore.setState({ theme: 'dark' })
+  it('offers System, Light and Dark, and records the pick', async () => {
+    const user = userEvent.setup()
+    useUIStore.setState({ theme: 'system' })
     render(<Header />)
-    expect(
-      screen.getByRole('button', { name: /switch to light theme/i }),
-    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Theme: System' }))
+    const options = await screen.findAllByRole('menuitemradio')
+    expect(options.map((option) => option.textContent)).toEqual(['System', 'Light', 'Dark'])
+    expect(screen.getByRole('menuitemradio', { name: 'System' })).toHaveAttribute('aria-checked', 'true')
+
+    await user.click(screen.getByRole('menuitemradio', { name: 'Dark' }))
+    expect(useUIStore.getState().theme).toBe('dark')
+    expect(screen.getByRole('button', { name: 'Theme: Dark' })).toBeInTheDocument()
   })
 
   it('logout button calls clearToken on auth store', async () => {

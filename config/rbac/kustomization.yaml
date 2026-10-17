@@ -10,6 +10,8 @@ resources:
 - static_controller_cluster_role.yaml
 - workspace_parameter_reader_role.yaml
 - workspace_parameter_reader_role_binding.yaml
+- workspace_parameter_reader_config_role.yaml
+- workspace_parameter_reader_config_role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect

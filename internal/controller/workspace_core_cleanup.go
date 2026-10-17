@@ -129,6 +129,15 @@ func (r *workspaceCoreCleanup) ensureLinkedRuntimePoolDeleted(
 	// cached miss must never let core finalize the workspace while the pool
 	// and its physical workspace remain live.
 	reader := uncachedReader(r.APIReader, r.Client)
+	linked := func(pool *corev1alpha1.RuntimePool) bool {
+		if !runtimePoolHasExternalWorkspace(pool) || workspace.UID == "" {
+			return false
+		}
+		ref := pool.Spec.ExecutionWorkspace.WorkspaceRef
+		return pool.Namespace == workspace.Namespace && ref.Name == workspace.Name && ref.UID == workspace.UID &&
+			pool.Labels[acpExecutionWorkspaceLinkLabel] == workspace.Name &&
+			pool.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID)
+	}
 	if poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation]); poolName != "" {
 		pool := &corev1alpha1.RuntimePool{}
 		err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)
@@ -136,11 +145,10 @@ func (r *workspaceCoreCleanup) ensureLinkedRuntimePoolDeleted(
 		case apierrors.IsNotFound(err):
 		case err != nil:
 			return false, false, err
-		case pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name || pool.Spec.ExecutionWorkspace == nil ||
-			pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID):
+		case !linked(pool):
 			// The mutable name link is not ownership: only the controller-
-			// stamped workspace-incarnation pin proves this pool serves
-			// exactly this workspace. A same-name pool without it is foreign
+			// stamped incarnation pin and immutable workspaceRef prove this
+			// pool serves exactly this workspace. A pool without them is foreign
 			// and never deleted.
 			foreign = true
 		default:
@@ -166,8 +174,8 @@ func (r *workspaceCoreCleanup) ensureLinkedRuntimePoolDeleted(
 		if pool.Spec.ExecutionWorkspace == nil {
 			continue
 		}
-		if pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(workspace.UID) {
-			// Reverse-linked but not pinned to this incarnation: refuse to
+		if !linked(pool) {
+			// Visible metadata is not an immutable reverse link: refuse to
 			// delete it and hold the finalizer fail-closed.
 			foreign = true
 			continue

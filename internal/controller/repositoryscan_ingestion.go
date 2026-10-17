@@ -85,6 +85,7 @@ func (r *RepositoryScanReconciler) applyScanTaskIngestion(
 				completed := task.Status.CompletionTime.Time
 				current.CompletedAt = &completed
 			}
+			stampFailedScanRunCompletion(current)
 		}
 		return nil
 	})

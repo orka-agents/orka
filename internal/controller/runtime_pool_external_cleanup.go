@@ -4,8 +4,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -49,6 +51,15 @@ func externalCoreServiceMatches(cfg runtimePoolConfig, service *corev1.Service) 
 
 func (r *RuntimePoolReconciler) deleteExternalCoreDiscoveryResources(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) (bool, error) {
 	reader := uncachedReader(r.APIReader, r.Client)
+	intents, err := externalDiscoveryIntents(pool)
+	if err != nil {
+		return false, err
+	}
+	for _, intent := range intents {
+		if intent.CreateIssued && intent.UID == "" {
+			return false, fmt.Errorf("discovery resource creation identity is unresolved: %w", workspaceprovider.ErrStaleIdentity)
+		}
+	}
 	remaining := false
 	for _, object := range []client.Object{
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: cfg.namespace, Name: cfg.baseName}},
@@ -60,7 +71,11 @@ func (r *RuntimePoolReconciler) deleteExternalCoreDiscoveryResources(ctx context
 			}
 			return false, err
 		}
-		if !externalCoreResourceOwned(pool, cfg, object) {
+		owned, err := externalDiscoveryResourceOwned(pool, cfg, object)
+		if err != nil {
+			return false, err
+		}
+		if !owned {
 			continue
 		}
 		switch typed := object.(type) {

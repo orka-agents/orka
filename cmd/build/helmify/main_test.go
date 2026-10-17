@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
@@ -156,6 +157,25 @@ func TestStaticChartGatewayInterimMessagesPerTask(t *testing.T) {
 	}
 }
 
+func TestStaticChartDashboardFlag(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Contains(rendered, "--dashboard-enabled") {
+		t.Fatalf("the dashboard must be off by default:\n%s", rendered)
+	}
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.dashboard.enabled=true")
+	if strings.Count(rendered, "- --dashboard-enabled=true\n") != 1 {
+		t.Fatalf("enabling the dashboard must render exactly one --dashboard-enabled=true:\n%s", rendered)
+	}
+	// helm upgrade --reuse-values keeps a release's older values, which
+	// have no controller.dashboard map. Rendering evaluates NOTES.txt as
+	// well, so this covers both templates that read it.
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml", "--set", "controller.dashboard=null")
+	if strings.Contains(rendered, "--dashboard-enabled") {
+		t.Fatalf("a release without controller.dashboard must leave the dashboard off:\n%s", rendered)
+	}
+}
+
 func TestStaticChartConnectorsFlags(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
 	if strings.Contains(rendered, "--connectors-enabled") || strings.Contains(rendered, "--connector-callback-base-url") {
@@ -230,7 +250,7 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 		clientRole = clientRole[:end]
 	}
 	const wantClient = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n" +
-		"    verbs: [\"get\", \"list\", \"update\", \"delete\"]"
+		"    verbs: [\"get\", \"list\", \"create\", \"update\", \"delete\"]"
 	if !strings.Contains(clientRole, wantClient) {
 		t.Fatalf("client Role is missing the Session API rule %q:\n%s", wantClient, clientRole)
 	}
@@ -273,7 +293,7 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 			for resource, verbs := range map[string][]string{
 				"tasks":                           {"get", "list", "create", "delete", "patch"},
 				"tasks/approvals":                 {"update"},
-				"sessions":                        {"get", "list", "update", "delete"},
+				"sessions":                        {"get", "list", "create", "update", "delete"},
 				"chats":                           {"create"},
 				"chats/config":                    {"get"},
 				"memories":                        {"get", "list"},
@@ -1130,11 +1150,26 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 			t.Fatalf("controller deployment is missing rotation marker %q:\n%s", marker, deployment)
 		}
 	}
-	// cert-controller writes only the Secret; the kubelet must project it into
-	// the cert directory, so generated mode mounts the whole generated Secret.
 	volume := renderedVolume(t, deployment, "webhook-tls")
-	if !strings.Contains(volume, `secretName: "test-orka-webhook-tls"`) || strings.Contains(volume, "items:") {
-		t.Fatalf("generated webhook TLS must mount the whole generated Secret:\n%s", volume)
+	if !strings.Contains(volume, "emptyDir:") || !strings.Contains(volume, "medium: Memory") ||
+		strings.Contains(volume, "secret:") {
+		t.Fatalf("generated webhook TLS needs API-synchronized memory storage, not Secret projection:\n%s", volume)
+	}
+	var decoded appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(deployment), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	mounts := 0
+	for _, mount := range decoded.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "webhook-tls" {
+			mounts++
+			if mount.MountPath != "/var/run/orka/webhook/tls" || mount.ReadOnly {
+				t.Fatal("generated webhook TLS storage must be writable at /var/run/orka/webhook/tls")
+			}
+		}
+	}
+	if mounts != 1 {
+		t.Fatalf("generated webhook TLS needs exactly one mount, got %d", mounts)
 	}
 
 	webhook := requireRenderedDocument(t, rendered,

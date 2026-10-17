@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -69,6 +70,16 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if !controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {
 		controllerutil.AddFinalizer(workspace, executionWorkspaceFinalizer)
 		if err := r.Update(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted && workspaceHasACPControllerOwnership(workspace) {
+		// Deleting a linked RuntimePool makes Deleted terminal without deleting
+		// the object. Delete it too so finalization frees the deterministic
+		// Session name instead of leaving a workspace no Task can attach.
+		if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
+			!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil

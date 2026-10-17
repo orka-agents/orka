@@ -58,17 +58,6 @@ func resolveSubstrateActorPoolReference(
 	if err := validateSubstrateActorPoolTargetActors(poolNamespace, poolName, pool.Spec.TargetActors, false); err != nil {
 		return nil, err
 	}
-	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
-		updater, ok := reader.(client.Client)
-		if !ok {
-			return nil, fmt.Errorf("substrate actor poolRef %q in namespace %q cannot persist cleanup finalizer", poolName, poolNamespace)
-		}
-		patch := client.MergeFrom(pool.DeepCopy())
-		controllerutil.AddFinalizer(pool, substrateActorPoolFinalizer)
-		if err := updater.Patch(ctx, pool, patch); err != nil {
-			return nil, fmt.Errorf("failed to persist cleanup finalizer for substrate actor poolRef %q in namespace %q: %w", poolName, poolNamespace, err)
-		}
-	}
 	poolTemplateNamespace := strings.TrimSpace(pool.Spec.TemplateRef.Namespace)
 	if poolTemplateNamespace == "" {
 		poolTemplateNamespace = pool.Namespace
@@ -84,6 +73,17 @@ func resolveSubstrateActorPoolReference(
 			strings.TrimSpace(templateNamespace),
 			strings.TrimSpace(templateName),
 		)
+	}
+	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
+		updater, ok := reader.(client.Client)
+		if !ok {
+			return nil, fmt.Errorf("substrate actor poolRef %q in namespace %q cannot persist cleanup finalizer", poolName, poolNamespace)
+		}
+		patch := client.MergeFrom(pool.DeepCopy())
+		controllerutil.AddFinalizer(pool, substrateActorPoolFinalizer)
+		if err := updater.Patch(ctx, pool, patch); err != nil {
+			return nil, fmt.Errorf("failed to persist cleanup finalizer for substrate actor poolRef %q in namespace %q: %w", poolName, poolNamespace, err)
+		}
 	}
 	return pool, nil
 }

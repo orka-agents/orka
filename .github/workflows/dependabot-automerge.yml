@@ -8,7 +8,6 @@ on:
       - Helm Chart
       - Lint
       - Live Agent Sandbox E2E
-      - Live Copilot Proxy E2E
       - Repository Monitor Smoke
       - Security Scan E2E
       - Tests

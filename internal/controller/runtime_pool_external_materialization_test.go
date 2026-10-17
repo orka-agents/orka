@@ -47,6 +47,27 @@ func (f *externalRuntimePoolFixture) advertiseNativeProcess(t *testing.T) {
 	}
 }
 
+// The native backend admits at most 32 environment entries. Main's in-tree
+// native runtime fit its live conformance flags in that budget; keep it.
+func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimit(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.r.E2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
+	f.advertiseNativeProcess(t)
+	w := f.currentWorkspace(t)
+	w.Spec.Lifecycle.AllowedOnDetach = append(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	if err := f.r.Update(t.Context(), w); err != nil {
+		t.Fatal(err)
+	}
+	env := f.publish(t).Spec.Workload.Runtime.Template.Spec.Containers[0].Env
+	names := map[string]bool{}
+	for _, variable := range env {
+		names[variable.Name] = true
+	}
+	if len(env) > 32 || !names["ORKA_ACP_POD_UID"] || !names[runtimePoolE2EPromptWriteAmbiguity] || names["ORKA_ACP_POD_NAME"] || names["ORKA_ACP_POD_NAMESPACE"] {
+		t.Fatalf("native environment has %d entries (backend limit 32) or wrong identity variables: %v", len(env), names)
+	}
+}
+
 func TestExternalRuntimePoolFreezesMaterializationLayoutBeforeRevision(t *testing.T) {
 	data, err := os.ReadFile("../../config/crd/bases/workspace.orka.ai_executionworkspaces.yaml")
 	if err != nil {
@@ -142,9 +163,16 @@ func assertExternalRuntimePoolMaterializationLayout(t *testing.T, request *works
 	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) != native {
 		t.Fatal("request did not freeze native-process materialization capability")
 	}
+	wantResources := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	if native {
+		wantResources = corev1.ResourceRequirements{}
+	}
+	if !reflect.DeepEqual(request.Resources, wantResources) || !reflect.DeepEqual(container.Resources, wantResources) {
+		t.Fatalf("public resources do not match provider materialization: %#v", request.Resources)
+	}
 	volumes := map[string]bool{}
 	for _, volume := range request.Runtime.Template.Spec.Volumes {
-		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit != nil || native {
+		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit == nil || volume.EmptyDir.SizeLimit.IsZero() || native {
 			t.Fatalf("unexpected public volume: %s", volume.Name)
 		}
 		volumes[volume.Name] = true
@@ -247,7 +275,7 @@ func (r *externalMaterializationProviderReader) Get(ctx context.Context, key cli
 }
 
 func TestExternalRuntimePoolPublicationFencesAuthoritativeProvider(t *testing.T) {
-	for _, name := range []string{"native capability", "replaced UID", "changed route", "unavailable"} {
+	for _, name := range []string{"native capability", "replaced UID", "changed route", "unavailable", "advanced generation", "draining advanced generation"} {
 		t.Run(name, func(t *testing.T) {
 			f := newExternalRuntimePoolFixture(t)
 			cfg, err := f.r.runtimePoolConfig(f.pool)
@@ -267,6 +295,17 @@ func TestExternalRuntimePoolPublicationFencesAuthoritativeProvider(t *testing.T)
 				reader.provider.Spec.ControllerName = "other.workspace.orka.ai"
 			case "unavailable":
 				reader.err = errors.New("provider observation unavailable")
+			case "advanced generation", "draining advanced generation":
+				// The provider published current status for a newer generation
+				// after the reconcile-time fence.
+				reader.provider.Generation++
+				reader.provider.Status.ObservedGeneration = reader.provider.Generation
+				for i := range reader.provider.Status.Conditions {
+					reader.provider.Status.Conditions[i].ObservedGeneration = reader.provider.Generation
+				}
+				if name == "draining advanced generation" {
+					reader.provider.Spec.LifecycleState = workspacev1alpha1.ExecutionWorkspaceProviderDraining
+				}
 			}
 			f.r.APIReader = reader
 			_, err = f.r.publishExternalWorkspaceWorkload(t.Context(), f.pool, cfg, f.currentWorkspace(t), auth, providerSecret)
@@ -274,7 +313,11 @@ func TestExternalRuntimePoolPublicationFencesAuthoritativeProvider(t *testing.T)
 			if reader.reads == 0 {
 				t.Fatal("publication used cached provider capabilities")
 			}
-			if name == "native capability" {
+			if name == "draining advanced generation" {
+				if err != nil || w.Spec.Workload == nil {
+					t.Fatalf("draining provider stopped serving its bound workspace: %v", err)
+				}
+			} else if name == "native capability" {
 				if err != nil || w.Spec.Workload == nil || slices.Contains(w.Spec.Workload.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
 					t.Fatalf("late authoritative capability changed the frozen Pod kind: %v", err)
 				}

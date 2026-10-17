@@ -16,10 +16,14 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+var errSessionAdmissionRollback = errors.New("session admission rollback failed")
+
 type acpTaskSession struct {
 	Turn             *ACPSessionTurn
 	Binding          ACPRuntimeSessionBinding
 	Bootstrap        *ACPBootstrapTranscript
+	NativeSession    *store.NativeSessionRecord
+	NativeCapture    *store.NativeSessionRecord
 	UserPrompt       string
 	VerifiedBaseline *store.VerifiedBranchBaseline
 	Reused           bool
@@ -29,6 +33,11 @@ type acpTaskSession struct {
 }
 
 const acpPreSubmissionCleanupTimeout = 30 * time.Second
+
+// errACPSessionNotFound marks a sessionRef with create=false that names a
+// Session that does not exist. Retrying cannot create it, so the Task fails
+// instead of waiting for its deadline.
+var errACPSessionNotFound = errors.New("SessionNotFound")
 
 func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 	if attempt == nil {
@@ -151,8 +160,9 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	// cross-store activation tail (lease release, status projection, outbox
 	// activation). The Task controller can terminalize independently after
 	// that commit, so Task phase is never durable tail-completion proof.
-	// ResumeSessionTurnFinalization is idempotent, and its successful recovery
-	// records the immutable turn ID in the cache above.
+	// ResumeSessionTurnFinalization is idempotent. A successful live
+	// finalization, which runs the same tail, or a successful recovery records
+	// the immutable turn ID in the cache above.
 	return true, nil
 }
 
@@ -165,6 +175,9 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 ) error {
 	if session == nil || session.Turn == nil || session.finalized || session.requeued {
 		return nil
+	}
+	if errors.Is(cause, errNativeSessionInstallUnresolved) || task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
+		return errNativeSessionInstallUnresolved
 	}
 	attemptID := session.Turn.Turn.PromptAttemptID
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
@@ -196,7 +209,13 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 	default:
 		return fmt.Errorf("unsupported unfinalized ACP SessionTurn attempt state %s", attempt.ExecutionState)
 	}
-	return d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence)
+	if err := d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
+		return err
+	}
+	// Recovery reconstructs a separate SessionTurn. Reflect its completed
+	// durable finalization on the live turn before runtime cleanup examines it.
+	session.finalized = d.finalizedSessionTurnKnown(task.UID, session.Turn.Turn.ID)
+	return nil
 }
 
 type acpTaskSessionPreparation struct {
@@ -204,6 +223,7 @@ type acpTaskSessionPreparation struct {
 	current          *ACPRuntimeSessionBinding
 	plan             ACPRuntimeSessionPlan
 	bootstrap        *ACPBootstrapTranscript
+	nativeSession    *store.NativeSessionRecord
 	userPrompt       string
 	verifiedBaseline *store.VerifiedBranchBaseline
 }
@@ -288,6 +308,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 	runtimeInstanceID harnessv2.RuntimeInstanceID,
 	supervisorBootID harnessv2.SupervisorBootID,
 	lineage acpSessionLineageIdentity,
+	nativeSessionsSupported bool,
 ) (*acpTaskSession, error) {
 	if task.Spec.SessionRef == nil {
 		return nil, nil
@@ -303,6 +324,12 @@ func (d *ACPDispatcher) prepareTaskSession(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if preparation.nativeSession != nil && !nativeSessionsSupported {
+		return nil, errNativeSessionRuntimeUnsupported
+	}
+	if preparation.nativeSession != nil && !nativeRestoreHonorsHistoryBoundary(task.Spec.SessionRef, preparation.nativeSession) {
+		return nil, errNativeSessionHistoryBoundary
 	}
 	lease, turn, err := d.bindAndOpenTaskSessionTurn(
 		ctx, task, fence, runtimeInstanceID, preparation.control, preparation.userPrompt,
@@ -351,11 +378,22 @@ func (d *ACPDispatcher) prepareTaskSession(
 		"durableGeneration", preparation.control.RuntimeSessionGeneration,
 	)
 	return &acpTaskSession{
-		Turn: turn, Binding: preparation.plan.Binding, Bootstrap: preparation.bootstrap,
+		Turn: turn, Binding: preparation.plan.Binding, Bootstrap: preparation.bootstrap, NativeSession: preparation.nativeSession,
 		UserPrompt:       preparation.userPrompt,
 		VerifiedBaseline: preparation.verifiedBaseline, Reused: !preparation.plan.Recreate,
 		LeaseGeneration: lease.Key.LeaseGeneration,
 	}, nil
+}
+
+// rejectMissingTaskSession fails a Task whose sessionRef has create=false and
+// names a Session that does not exist. It runs before any Session binding.
+func (d *ACPDispatcher) rejectMissingTaskSession(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence) error {
+	reason := corev1alpha1.TaskExecutionReason(errACPSessionNotFound.Error())
+	message := fmt.Sprintf("session %s does not exist and sessionRef.create is false", strings.TrimSpace(task.Spec.SessionRef.Name))
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "session-not-found", reason, message); err != nil {
+		return err
+	}
+	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
 }
 
 func (d *ACPDispatcher) planTaskSession(
@@ -377,7 +415,7 @@ func (d *ACPDispatcher) planTaskSession(
 	if !task.Spec.SessionRef.Create && !transcriptBackedPrompt {
 		if _, err := d.Store.GetSessionControl(ctx, task.Namespace, name); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return nil, fmt.Errorf("session %s/%s does not exist and create=false", task.Namespace, name)
+				return nil, fmt.Errorf("%w: session %s/%s does not exist and sessionRef.create is false", errACPSessionNotFound, task.Namespace, name)
 			}
 			return nil, err
 		}
@@ -425,9 +463,13 @@ func (d *ACPDispatcher) planTaskSession(
 	if err != nil {
 		return nil, err
 	}
+	native, err := d.loadTaskNativeSession(ctx, task, control)
+	if err != nil {
+		return nil, err
+	}
 	var userPrompt string
 	var bootstrap *ACPBootstrapTranscript
-	if plan.BootstrapRequired {
+	if plan.BootstrapRequired && native == nil {
 		bootstrap, userPrompt, err = d.resolveTaskSessionBootstrap(ctx, task, control)
 	} else {
 		userPrompt, err = d.resolveTaskSessionPrompt(ctx, task, control)
@@ -442,7 +484,7 @@ func (d *ACPDispatcher) planTaskSession(
 	}
 	return &acpTaskSessionPreparation{
 		control: control, current: current, plan: plan, bootstrap: bootstrap, userPrompt: userPrompt,
-		verifiedBaseline: verifiedBaseline,
+		verifiedBaseline: verifiedBaseline, nativeSession: native,
 	}, nil
 }
 
@@ -614,8 +656,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	// failed after the Kubernetes-authoritative status CAS.
 	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
 	if err != nil {
-		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-		return nil, nil, errors.Join(err, requeueErr)
+		return nil, nil, d.requeueSessionLeaseFailure(ctx, task, attemptID, fence, err)
 	}
 	if lease.Key.LeaseGeneration != leaseGeneration {
 		err := fmt.Errorf("%w: acquired ACP Session lease generation changed after PromptAttempt binding", store.ErrConflict)
@@ -852,6 +893,9 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 			"namespace", task.Namespace, "task", task.Name)
 		return nil
 	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, session.NativeCapture); err != nil {
+		return err
+	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
 		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
@@ -877,13 +921,13 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 		return err
 	}
 	_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
-		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result,
+		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result, NativeSession: session.NativeCapture,
 		PublicationID: publicationID,
 		Projection:    ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt:   time.Now().UTC(),
 	})
 	if err == nil {
-		session.finalized = true
+		d.markTaskSessionFinalized(task, session)
 		// Only a complete binding may replace the live one: a recovered
 		// session that could not rebuild its generation must not clobber
 		// the binding the live path recorded.
@@ -897,6 +941,13 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence, session *acpTaskSession, reason string) error {
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
+	}
+	carried, err := d.carriedNativeCheckpoint(ctx, task, session)
+	if err != nil {
+		return err
+	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, carried); err != nil {
+		return err
 	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
 		State: corev1alpha1.TaskExecutionStateOutcomeUnknown, Outcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
@@ -914,15 +965,24 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 		return err
 	}
 	_, err = d.Sessions.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
-		SessionTurn: *session.Turn, Fence: fence, Reason: reason,
+		SessionTurn: *session.Turn, Fence: fence, Reason: reason, NativeSession: carried,
 		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
-		session.finalized = true
+		d.markTaskSessionFinalized(task, session)
 		d.removeRuntimeSessionBinding(session.Binding.SessionUID)
 	}
 	return err
+}
+
+// markTaskSessionFinalized records a turn whose finalization store call
+// succeeded. That call already completed the activation tail, so the recovery
+// sweep must not resume it: doing so reruns the tail and resettles the Task as
+// if its live settlement had been interrupted.
+func (d *ACPDispatcher) markTaskSessionFinalized(task *corev1alpha1.Task, session *acpTaskSession) {
+	session.finalized = true
+	d.rememberFinalizedSessionTurn(task.UID, session.Turn.Turn.ID)
 }
 
 func (d *ACPDispatcher) finalizeTaskSessionMarker(
@@ -937,7 +997,13 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
 	}
-	var err error
+	carried, err := d.carriedNativeCheckpoint(ctx, task, session)
+	if err != nil {
+		return err
+	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, carried); err != nil {
+		return err
+	}
 	execution, err = taskSessionProjectionExecution(task, execution)
 	if err != nil {
 		return err
@@ -950,12 +1016,12 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 		return err
 	}
 	_, err = d.Sessions.FinalizeOutcomeMarker(ctx, ACPFinalizeOutcomeMarkerRequest{
-		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason,
+		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason, NativeSession: carried,
 		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
-		session.finalized = true
+		d.markTaskSessionFinalized(task, session)
 		d.removeRuntimeSessionBinding(session.Binding.SessionUID)
 	}
 	return err
@@ -1046,9 +1112,10 @@ func (d *ACPDispatcher) removeRuntimeSessionBinding(sessionUID string) {
 func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(task *corev1alpha1.Task, attempt *store.PromptAttempt, binding ACPRuntimeSessionBinding) {
 	sessionUID := strings.TrimSpace(binding.SessionUID)
 	reusable := task != nil && attempt != nil && sessionUID != "" &&
+		!binding.RecreationRequired &&
 		attempt.ExecutionState == store.PromptExecutionSucceeded &&
 		(attempt.DeliveryState == store.PromptDeliveryNotRequested || attempt.DeliveryState == store.PromptDeliveryReadValidated) &&
-		task.Spec.SessionRef != nil &&
+		task.Spec.SessionRef != nil && task.Annotations[nativeCaptureIntentAnnotation] == "" &&
 		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite)
 	if reusable {
 		if binding.Generation > 0 {
@@ -1068,4 +1135,13 @@ func bootstrapPromptText(bootstrap *ACPBootstrapTranscript) string {
 		return ""
 	}
 	return "Orka canonical session transcript (JSONL; provider-native history is non-authoritative):\n" + string(bootstrap.Artifact)
+}
+
+func (d *ACPDispatcher) requeueSessionLeaseFailure(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
+	rollbackErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, cause)
+	if rollbackErr != nil && errors.Is(cause, store.ErrSessionConfigurationMismatch) {
+		// Candidate Session authority must be cleared before terminal settlement.
+		return errors.Join(errSessionAdmissionRollback, rollbackErr)
+	}
+	return errors.Join(cause, rollbackErr)
 }

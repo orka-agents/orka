@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,8 +19,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -34,7 +38,7 @@ func (t *ChatCreateAgentTool) Description() string {
 }
 
 func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, providerRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Provider CRD reference name. Omit for runtime Agents; provide explicitly for AI/coordinator Agents when a specific provider is required."}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "System prompt for the agent. Omit for OpenCode runtime Agents because OpenCode cannot enforce Agent system prompts; use initialPrompt or Task prompts instead."}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, "resources": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: `Optional Kubernetes resource requests/limits for tasks using this agent, e.g. {requests:{cpu:"100m",memory:"512Mi"},limits:{cpu:"1",memory:"2Gi"}}`, jsonSchemaPropertiesField: map[string]any{
+	return marshalAgentSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, providerRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Provider CRD reference name. Omit for runtime Agents; provide explicitly for AI/coordinator Agents when a specific provider is required."}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Role instructions for the agent. Built-in runtimes deliver these through their native instruction mechanism. Built-in harness v2 Copilot instructions cannot contain @ characters."}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, "resources": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: `Optional Kubernetes resource requests/limits for tasks using this agent, e.g. {requests:{cpu:"100m",memory:"512Mi"},limits:{cpu:"1",memory:"2Gi"}}`, jsonSchemaPropertiesField: map[string]any{
 		"requests": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 		"limits":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 	},
@@ -43,7 +47,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
 		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
 	},
-	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "CLI runtime configuration. OpenCode uses the built-in ACP RuntimePool profile and controller provider proxy.", jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, codex, or opencode"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Default max agent loop iterations"},
+	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "CLI runtime configuration. OpenCode uses the built-in ACP RuntimePool profile and controller provider proxy.", jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, codex, or opencode"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: minMaxTurns, jsonSchemaMaximumField: maxMaxTurns, jsonSchemaDescriptionField: "Default max agent loop iterations"},
 		"defaultAllowedTools": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Default CLI tools allowed for tasks using this runtime agent. OpenCode defaults to Read, Write, Edit, Bash, Glob, and Grep when omitted."},
 		"defaultAllowBash":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Whether bash is allowed by default for tasks using this runtime agent. OpenCode defaults to true when omitted."}, secretRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Deprecated legacy field. Built-in ACP runtimes are credential-free at the Agent boundary; OpenCode rejects it."},
 	},
@@ -52,7 +56,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 			enabledString:           map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Enable coordination (delegate_task/wait_for_tasks tools)"},
 			"maxConcurrentChildren": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max concurrent child tasks (default 5)"},
 			"maxDepth":              map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max delegation depth (default 3)"},
-			"allowedAgents":         map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "List of agent names this agent can delegate to. If empty, can delegate to any agent.", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent namespace (defaults to same namespace)"}}, jsonSchemaRequiredField: []string{nameField}}},
+			"allowedAgents":         map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "List of agent names this agent can delegate to. If empty, can delegate to any agent.", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription, jsonSchemaMinLengthField: 1, jsonSchemaPatternField: `\S`}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent namespace (defaults to same namespace)"}}, jsonSchemaRequiredField: []string{nameField}}},
 		},
 		},
 	}, jsonSchemaRequiredField: []string{nameField},
@@ -66,14 +70,19 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
-	var a map[string]any
-	if err := json.Unmarshal(args, &a); err != nil {
+	a, err := decodeChatCreateAgentArgs(args)
+	if err != nil {
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
 	name := chatGetStringArg(a, nameField)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide a name for the agent")
+	}
+	for _, key := range []string{"coordination", runtimeField} {
+		if r, ok := requireChatObjectArg(a, key); !ok {
+			return r, nil
+		}
 	}
 
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
@@ -101,10 +110,12 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			name := chatGetStringArg(m, nameField)
 			provider := chatGetStringArg(m, "provider")
 			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: name, Provider: provider}
-			if temp, ok := m["temperature"]; ok {
-				if tempF, ok := temp.(float64); ok {
-					agent.Spec.Model.Temperature = &tempF
+			if raw, supplied := m["temperature"]; supplied && raw != nil {
+				temperature, err := parseChatAgentTemperature(raw)
+				if err != nil {
+					return ChatToolErrorResult("invalid_arguments", err.Error(), "Use model.temperature between 0 and 2, or omit it.")
 				}
+				agent.Spec.Model.Temperature = &temperature
 			}
 			if raw, supplied := m["contextWindow"]; supplied {
 				contextWindow, err := parsePositiveAgentModelInt32("model.contextWindow", raw)
@@ -135,6 +146,9 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			} else {
 				agent.Spec.Model = &corev1alpha1.ModelConfig{Name: modelName}
 			}
+		case nil:
+		default:
+			return ChatToolErrorResult("invalid_arguments", "model must be an object or a provider/model string", "Pass model as a JSON object, or as a string such as openai/gpt-4.1")
 		}
 	}
 
@@ -147,6 +161,13 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		agent.Spec.Model.Provider = ""
 	}
 
+	if value, supplied := a["soul"]; supplied {
+		source, err := soulArgument(value)
+		if err != nil {
+			return ChatToolErrorResult("invalid_arguments", err.Error(), "Provide inline Markdown or a ConfigMap reference with an expected digest.")
+		}
+		agent.Spec.Soul = source
+	}
 	if systemPrompt := chatGetStringArg(a, systemPromptField); systemPrompt != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
 			Inline: systemPrompt,
@@ -175,7 +196,15 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			"Use the built-in runtime contract selected by this Orka installation.",
 		)
 	}
-	parseCoordinationConfig(a, agent)
+	if errResult, ok := parseCoordinationConfig(a, agent); !ok {
+		return errResult, nil
+	}
+	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use an AI worker Agent or a built-in orka.harness.v2 Agent; external runtimeRef and orka.harness.v1 Agents do not support souls.")
+	}
+	if err := agentcontext.ValidateInlineCopilotInstructions(agent); err != nil {
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Inline referenced text; built-in harness v2 Copilot role and soul instructions cannot contain @ characters.")
+	}
 
 	if chatGetStringArg(a, "initialPrompt") != "" && tc.AuthorizeAgentInitialTask != nil {
 		if err := tc.AuthorizeAgentInitialTask(ctx, agent); err != nil {
@@ -184,6 +213,13 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 	if result, ok := authorizeAgentCreate(ctx, tc, agent); !ok {
 		return result, nil
+	}
+	// Check existence only after authorization, so a scoped caller cannot use
+	// this error to probe Provider names it may not reference.
+	if agent.Spec.ProviderRef != nil {
+		if result, ok := requireExistingProvider(ctx, tc, namespace, agent.Spec.ProviderRef.Name); !ok {
+			return result, nil
+		}
 	}
 	if err := tc.Client.Create(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)
@@ -195,6 +231,132 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created"})
+}
+
+// decodeChatCreateAgentArgs preserves the number text only for fields whose
+// bounds must be checked before narrowing. Other fields retain json.Unmarshal's
+// float64 decoding, including model limits and coordination's existing parser.
+func decodeChatCreateAgentArgs(args json.RawMessage) (map[string]any, error) {
+	var values map[string]any
+	if err := json.Unmarshal(args, &values); err != nil {
+		return nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(args, &raw); err != nil {
+		return nil, err
+	}
+	for _, field := range [][2]string{{modelField, "temperature"}, {runtimeField, "defaultMaxTurns"}} {
+		object, ok := values[field[0]].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, numeric := object[field[1]].(float64); !numeric {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw[field[0]], &fields); err != nil {
+			return nil, err
+		}
+		var number json.Number
+		if err := json.Unmarshal(fields[field[1]], &number); err != nil {
+			return nil, err
+		}
+		object[field[1]] = number
+	}
+	return values, nil
+}
+
+func chatAgentNumber(raw any) (json.Number, bool) {
+	var text string
+	switch value := raw.(type) {
+	case json.Number:
+		text = value.String()
+	case string:
+		text = strings.TrimSpace(value)
+	case float64:
+		text = strconv.FormatFloat(value, 'g', -1, 64)
+	default:
+		return "", false
+	}
+	return json.Number(text), jsonNumberPattern.MatchString(text)
+}
+
+func parseChatAgentDefaultMaxTurns(raw any) (int32, error) {
+	number, ok := chatAgentNumber(raw)
+	if ok {
+		text, got := canonicalJSONInteger(number.String())
+		if got == "" {
+			turns, err := strconv.ParseInt(text, 10, 64)
+			// Mirror the Agent CRD's 1..1000 bounds before converting to int32.
+			if err == nil && turns >= minMaxTurns && turns <= maxMaxTurns {
+				return int32(turns), nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("runtime.defaultMaxTurns must be a whole number between %d and %d", minMaxTurns, maxMaxTurns)
+}
+
+func parseChatAgentTemperature(raw any) (float64, error) {
+	number, ok := chatAgentNumber(raw)
+	if ok && chatAgentTemperatureInRange(number.String()) {
+		if temperature, err := number.Float64(); err == nil {
+			return temperature, nil
+		}
+	}
+	return 0, fmt.Errorf("model.temperature must be a number between 0 and 2")
+}
+
+// chatAgentTemperatureInRange checks a valid JSON number's exact decimal value.
+// Comparing its decimal magnitude avoids both float64 boundary rounding and
+// allocating an arbitrary-precision rational for attacker-supplied exponents.
+func chatAgentTemperatureInRange(text string) bool {
+	mantissa, exponent, _ := strings.Cut(strings.ToLower(text), "e")
+	mantissa, negative := strings.CutPrefix(mantissa, "-")
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return true // Any spelling of zero, including negative zero.
+	}
+	if negative {
+		return false
+	}
+	exp := 0
+	if exponent != "" {
+		var err error
+		exp, err = strconv.Atoi(exponent)
+		if err != nil {
+			// An exponent beyond the machine integer range dwarfs the
+			// mantissa: a nonzero value is either below 2 or above it.
+			return strings.HasPrefix(exponent, "-")
+		}
+	}
+	// The value is digits * 10^(exp-len(fraction)). A value with exactly
+	// one whole digit needs a coefficient comparison; all others are
+	// strictly below or above 2. Compare exponents without adding them.
+	boundaryExp := len(fraction) - len(digits) + 1
+	if exp != boundaryExp {
+		return exp < boundaryExp
+	}
+	return digits[0] < '2' || (digits[0] == '2' && strings.Trim(digits[1:], "0") == "")
+}
+
+// requireExistingProvider rejects a providerRef that names no Provider, so the
+// model can correct it in the same turn instead of a later Task failing. The
+// error names no other Providers: this lookup uses controller credentials, and
+// the authorization-aware Providers API is the enumeration surface.
+func requireExistingProvider(ctx context.Context, tc *ToolContext, namespace, name string) (string, bool) {
+	err := toolPolicyReader(ctx, tc.Client).Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &corev1alpha1.Provider{})
+	if err == nil {
+		return "", true
+	}
+	if !apierrors.IsNotFound(err) {
+		result, _ := classifyChatK8sErr(err)
+		return result, false
+	}
+	result, _ := ChatToolErrorResult(invalidArgumentsErrorType,
+		fmt.Sprintf("provider %q not found in namespace %q", name, namespace),
+		"Use an existing Provider in this namespace, or omit providerRef")
+	return result, false
 }
 
 func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolContext, agent *corev1alpha1.Agent, namespace, initialPrompt string) (string, error) {
@@ -367,14 +529,7 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent, mode execut
 		return result, false
 	}
 	if resolvedRuntimeType == corev1alpha1.AgentRuntimeOpencode {
-		if agent.Spec.SystemPrompt != nil && strings.TrimSpace(agent.Spec.SystemPrompt.Inline) != "" {
-			result, _ := ChatToolErrorResult(
-				"invalid_arguments",
-				"opencode runtime does not support systemPrompt",
-				"Omit systemPrompt for OpenCode Agents and use initialPrompt or Task prompts for instructions.",
-			)
-			return result, false
-		}
+
 		if secretRef := strings.TrimSpace(chatGetStringArg(rtMap, secretRefField)); secretRef != "" {
 			result, _ := ChatToolErrorResult(
 				"invalid_arguments",
@@ -391,9 +546,13 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent, mode execut
 	if agent.Spec.Model != nil {
 		agent.Spec.Model.Provider = ""
 	}
-	if maxTurns, ok := rtMap["defaultMaxTurns"].(float64); ok && maxTurns > 0 {
-		maxTurnsInt := int32(maxTurns)
-		agent.Spec.Runtime.DefaultMaxTurns = &maxTurnsInt
+	if raw, supplied := rtMap["defaultMaxTurns"]; supplied && raw != nil {
+		maxTurns, err := parseChatAgentDefaultMaxTurns(raw)
+		if err != nil {
+			result, _ := ChatToolErrorResult("invalid_arguments", err.Error(), "Use a whole-number runtime.defaultMaxTurns between 1 and 1000, or omit it.")
+			return result, false
+		}
+		agent.Spec.Runtime.DefaultMaxTurns = &maxTurns
 	}
 	_, allowedToolsSupplied := rtMap["defaultAllowedTools"]
 	if allowedToolsSupplied {
@@ -420,39 +579,72 @@ func normalizeChatOpenCodeModel(agent *corev1alpha1.Agent) (string, bool) {
 	return "", true
 }
 
-// parseCoordinationConfig extracts coordination configuration from chat args into the agent spec.
-func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
+// parseCoordinationConfig extracts coordination configuration from chat args
+// into the agent spec. It returns an error result and false for a field with
+// the wrong JSON type or an allowed agent without a name. Ignoring either would
+// drop a restriction: an empty allowedAgents lets the Agent delegate to any
+// agent.
+func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	coord, ok := a["coordination"]
 	if !ok {
-		return
+		return "", true
 	}
 	coordMap, ok := coord.(map[string]any)
 	if !ok {
-		return
+		return "", true
+	}
+	invalid := func(field, want string) (string, bool) {
+		result, _ := ChatToolErrorResult(invalidArgumentsErrorType, "coordination."+field+" must be "+want, "Resend coordination."+field+" as "+want)
+		return result, false
 	}
 	coordCfg := &corev1alpha1.CoordinationConfig{}
-	if enabled, ok := coordMap[enabledString].(bool); ok {
+	if value := coordMap[enabledString]; value != nil {
+		enabled, ok := value.(bool)
+		if !ok {
+			return invalid(enabledString, "a boolean")
+		}
 		coordCfg.Enabled = enabled
 	}
-	if maxCC, ok := coordMap["maxConcurrentChildren"].(float64); ok {
-		coordCfg.MaxConcurrentChildren = int32(maxCC)
+	for _, limit := range []struct {
+		field  string
+		target *int32
+	}{{"maxConcurrentChildren", &coordCfg.MaxConcurrentChildren}, {"maxDepth", &coordCfg.MaxDepth}} {
+		value := coordMap[limit.field]
+		if value == nil {
+			continue
+		}
+		// Out-of-range values would wrap when narrowed to int32, possibly into
+		// the range the Agent CRD accepts.
+		number, ok := value.(float64)
+		if !ok || number != math.Trunc(number) || number < math.MinInt32 || number > math.MaxInt32 {
+			return invalid(limit.field, "a whole number")
+		}
+		*limit.target = int32(number)
 	}
-	if maxD, ok := coordMap["maxDepth"].(float64); ok {
-		coordCfg.MaxDepth = int32(maxD)
-	}
-	if allowed, ok := coordMap["allowedAgents"].([]any); ok {
-		for _, item := range allowed {
-			aMap, ok := item.(map[string]any)
-			if !ok {
-				continue
+	if value := coordMap["allowedAgents"]; value != nil {
+		allowed, ok := value.([]any)
+		if !ok {
+			return invalid("allowedAgents", "an array of agents")
+		}
+		for i, item := range allowed {
+			aMap, _ := item.(map[string]any)
+			nameValue, hasName := aMap[nameField]
+			name, ok := nameValue.(string)
+			if hasName && !ok {
+				return invalid(fmt.Sprintf("allowedAgents[%d].name", i), "a string")
 			}
-			aa := corev1alpha1.AllowedAgent{
-				Name:      chatGetStringArg(aMap, nameField),
-				Namespace: chatGetStringArg(aMap, namespaceField),
+			if strings.TrimSpace(name) == "" {
+				result, _ := ChatToolErrorResult(invalidArgumentsErrorType, fmt.Sprintf("coordination.allowedAgents[%d].name is required", i), "Give each allowed agent a name, or omit allowedAgents to allow any agent")
+				return result, false
 			}
-			if aa.Name != "" {
-				coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
+			namespace := ""
+			if value, supplied := aMap[namespaceField]; supplied {
+				namespace, ok = value.(string)
+				if !ok {
+					return invalid(fmt.Sprintf("allowedAgents[%d].namespace", i), "a string")
+				}
 			}
+			coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, corev1alpha1.AllowedAgent{Name: name, Namespace: namespace})
 		}
 	}
 	agent.Spec.Coordination = coordCfg
@@ -460,4 +652,5 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
 		agent.Spec.Runtime = nil
 		agent.Spec.SecretRef = nil
 	}
+	return "", true
 }

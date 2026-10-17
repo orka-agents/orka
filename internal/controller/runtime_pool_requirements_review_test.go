@@ -107,3 +107,36 @@ func TestExternalRuntimePoolPublishedLegacyPodSurvivesRestartAndResume(t *testin
 		t.Fatal("cold resume reselected legacy Pod intent from live native capability")
 	}
 }
+
+func TestExternalRuntimePoolRequiresFrozenProviderGenerationUnlessDraining(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     workspacev1alpha1.ExecutionWorkspaceProviderLifecycleState
+		published bool
+	}{
+		{name: "active provider advanced", state: workspacev1alpha1.ExecutionWorkspaceProviderActive},
+		{name: "draining provider advanced", state: workspacev1alpha1.ExecutionWorkspaceProviderDraining, published: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalRuntimePoolFixture(t)
+			provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+			if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(f.provider), provider); err != nil {
+				t.Fatal(err)
+			}
+			provider.Generation, provider.Spec.LifecycleState = 2, tc.state
+			provider.Status.ObservedGeneration = 2
+			for i := range provider.Status.Conditions {
+				provider.Status.Conditions[i].ObservedGeneration = 2
+			}
+			if err := f.r.Update(t.Context(), provider); err != nil {
+				t.Fatal(err)
+			}
+			for range 6 {
+				_, _ = f.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.pool)})
+			}
+			if published := f.currentWorkspace(t).Spec.Workload != nil; published != tc.published {
+				t.Fatalf("workload published=%v, want %v for a provider past the frozen generation", published, tc.published)
+			}
+		})
+	}
+}

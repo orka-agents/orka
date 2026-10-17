@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 var _ store.SessionTurnPersistenceStore = (*Store)(nil)
@@ -139,7 +141,10 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 		}
 	}
 	if err := finalizeSessionTranscriptTx(ctx, tx, normalized.Namespace, normalized.SessionName,
-		normalized.Key.TaskUID, messageCountDelta, normalized.FinalizedAt); err != nil {
+		normalized.Key, messageCountDelta, normalized.FinalizedAt); err != nil {
+		return nil, err
+	}
+	if err := s.commitNativeSessionFinalizationTx(ctx, tx, turn.ID, normalized.Namespace, normalized.SessionName, normalized.Key.SessionUID, normalized.NativeSession, normalized.NativeSessionCarried); err != nil {
 		return nil, err
 	}
 	turnResult, err := tx.ExecContext(ctx,
@@ -168,6 +173,7 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	turn.TerminalKind = normalized.TerminalKind
 	turn.TerminalContent = normalized.TerminalContent
 	turn.FinalizationDigest = normalized.FinalizationDigest
+	turn.NativeSessionDigest = store.NativeSessionCaptureDigest(normalized.NativeSession)
 	turn.PublicationID = normalized.PublicationID
 	turn.PublicationReceipt = clonePublicationReceipt(normalized.PublicationReceipt)
 	turn.ProjectionID = projection.ID
@@ -185,11 +191,23 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	return &turn, nil
 }
 
-func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name, taskUID string, messageCountDelta int, finalizedAt time.Time) error {
+func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name string, key store.SessionTurnKey, messageCountDelta int, finalizedAt time.Time) error {
+	taskUID := key.TaskUID
+	// A turn is finalized exactly once, so the usage of its prompt attempt is
+	// added to the Session's cumulative counters once; an earlier attempt of
+	// the same Task was counted by its own turn. Totals beyond the exact
+	// reporting range stay out of the counters rather than block finalization.
+	inputTokens, outputTokens, err := taskTokenUsage(ctx, tx, namespace, taskUID, fmt.Sprintf("%d/%s", key.Attempt, key.PromptID))
+	if errors.Is(err, usage.ErrTotalsOutOfRange) {
+		inputTokens, outputTokens = 0, 0
+	} else if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx,
-		`UPDATE sessions SET message_count = message_count + ?, updated_at = ?
+		`UPDATE sessions SET message_count = message_count + ?, input_tokens = input_tokens + ?,
+		     output_tokens = output_tokens + ?, updated_at = ?
 		 WHERE namespace = ? AND name = ?`,
-		messageCountDelta, finalizedAt, namespace, name,
+		messageCountDelta, inputTokens, outputTokens, finalizedAt, namespace, name,
 	)
 	if err != nil {
 		return err
@@ -311,6 +329,9 @@ func normalizeSessionTurnPersistenceFinalization(request store.CommitSessionTurn
 	if request.SkipTranscriptAppend && request.SkipUserPromptAppend {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, store.ValidationErrorf("session turn cannot combine full transcript suppression with user-prompt-only suppression")
 	}
+	if err := validateNativeFinalization(request.NativeSession, request.NativeSessionCarried, request.TerminalKind, request.SkipTranscriptAppend); err != nil {
+		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
+	}
 	if err := store.ValidateControlText("session turn terminal content", request.TerminalContent); err != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
 	}
@@ -414,6 +435,7 @@ func normalizeActivateSessionTurnProjectionRequest(request store.ActivateSession
 
 func sessionTurnPersistenceFinalizationMatches(turn store.SessionTurn, request store.CommitSessionTurnFinalizationRequest) bool {
 	return turn.FinalizationDigest == request.FinalizationDigest && turn.TerminalKind == request.TerminalKind &&
+		turn.NativeSessionDigest == store.NativeSessionCaptureDigest(request.NativeSession) &&
 		turn.TerminalContent == request.TerminalContent && turn.PublicationID == request.PublicationID &&
 		reflect.DeepEqual(turn.PublicationReceipt, request.PublicationReceipt) && turn.ProjectionID == request.Projection.ID &&
 		turn.ProjectionKind == request.Projection.ProjectionKind && turn.ProjectionDigest == request.Projection.PayloadDigest &&

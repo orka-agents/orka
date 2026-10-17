@@ -6,19 +6,21 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { ListTodo } from 'lucide-react'
 import type { Task } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
+import { TaskStateBadges } from '@/components/tasks/task-state-badges'
+import { loadProblemText, type LoadProblem } from '@/lib/load-problem'
 
 export function RecentTasks({
   tasks,
   isLoading,
-  forbiddenMessage,
+  problem,
   isTruncated,
 }: {
   tasks?: Task[]
   isLoading?: boolean
-  forbiddenMessage?: string
+  problem?: LoadProblem
   isTruncated?: boolean
 }) {
-  if (forbiddenMessage) {
+  if (problem) {
     return (
       <Card>
         <CardHeader>
@@ -26,7 +28,7 @@ export function RecentTasks({
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground" role="alert">
-            Not authorized to list tasks ({forbiddenMessage}).
+            {loadProblemText('tasks', problem)}
           </p>
         </CardContent>
       </Card>
@@ -84,8 +86,11 @@ export function RecentTasks({
                 params={{ taskId: task.metadata.name }}
                 className="flex items-center justify-between rounded-md p-2 hover:bg-accent"
               >
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">{task.metadata.name}</p>
+                <div className="min-w-0 space-y-1">
+                  <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                    <span>{task.metadata.name}</span>
+                    <TaskStateBadges task={task} />
+                  </p>
                   <p className="text-xs text-muted-foreground tabular-nums">
                     {task.spec.type} · {task.metadata.namespace} · {timeAgo(task.metadata.creationTimestamp)}
                   </p>

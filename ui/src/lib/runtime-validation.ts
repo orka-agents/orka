@@ -1,13 +1,17 @@
 import type { Task, TaskPhase } from '@/schemas/task'
 import type { TaskTrace, Approval } from '@/schemas/execution-event'
 import type { ArtifactMetadata } from '@/schemas/artifact'
+import { podWaitingMessage } from '@/components/tasks/task-state'
 
 /**
  * Derived runtime health checks — NOT a formal evaluation. These summarize
  * task/system health from real Orka status + trace data. Missing data yields
- * 'unknown', never a false pass. Pure functions, no fetching.
+ * 'unknown', never a false pass. 'info' is a neutral observation (a task
+ * still in progress, a task without artifacts) that does not affect the
+ * rollup. Pure functions, no fetching.
  */
-export type CheckStatus = 'pass' | 'fail' | 'warn' | 'unknown'
+export type CheckStatus = 'pass' | 'fail' | 'warn' | 'unknown' | 'info'
+export type RollupStatus = Exclude<CheckStatus, 'info'>
 
 export interface RuntimeCheck {
   id: string
@@ -37,20 +41,34 @@ export function deriveRuntimeChecks({ task, trace, approvals, artifacts }: Valid
   const phase = task.status?.phase
   const checks: RuntimeCheck[] = []
 
-  // Authoritative phase drives this check: Failed/Cancelled must fail/warn
-  // regardless of trace contents, so a terminal failure can't read as "pass"
-  // just because the trace is empty or stale.
+  // A Failed or Cancelled task did reach a terminal state, so that check
+  // passes and the outcome is its own check. A task still in progress is
+  // informational, not something that needs attention, unless its Pod is
+  // stuck waiting (an image pull or config failure): that needs a person.
+  const podWaiting = podWaitingMessage(task)
   checks.push({
     id: 'terminal',
     label: 'Reached terminal state',
-    status:
-      phase === 'Succeeded' ? 'pass'
-      : phase === 'Failed' ? 'fail'
-      : phase === 'Cancelled' ? 'warn'
-      : phase === 'Running' ? 'warn'
-      : 'unknown',
-    reason: phase ? `Phase ${phase}` : 'No phase yet',
+    status: isTerminal(phase) ? 'pass' : podWaiting ? 'warn' : phase ? 'info' : 'unknown',
+    reason: !phase
+      ? 'No phase yet'
+      : isTerminal(phase)
+        ? `Phase ${phase}`
+        : podWaiting
+          ? `Phase ${phase}; ${podWaiting}`
+          : `Phase ${phase}; still in progress`,
   })
+  // The authoritative phase drives the outcome: Failed/Cancelled must
+  // fail/warn regardless of trace contents, so a terminal failure can't read
+  // as "pass" just because the trace is empty or stale.
+  if (isTerminal(phase)) {
+    checks.push({
+      id: 'outcome',
+      label: 'Task succeeded',
+      status: phase === 'Succeeded' ? 'pass' : phase === 'Failed' ? 'fail' : 'warn',
+      reason: phase === 'Succeeded' ? 'Succeeded' : task.status?.message || `Phase ${phase}`,
+    })
+  }
 
   if (!trace) {
     checks.push({ id: 'errors', label: 'No trace errors', status: 'unknown', reason: 'Trace unavailable' })
@@ -113,21 +131,27 @@ export function deriveRuntimeChecks({ task, trace, approvals, artifacts }: Valid
   }
 
   if (artifacts !== undefined) {
+    // Many tasks legitimately publish no artifacts, so their absence is
+    // informational rather than unknown health.
     checks.push({
       id: 'artifacts',
-      label: 'Artifacts present',
-      status: artifacts.length > 0 ? 'pass' : 'unknown',
-      reason: artifacts.length > 0 ? `${artifacts.length} artifact(s)` : 'No artifacts',
+      label: 'Artifacts',
+      status: artifacts.length > 0 ? 'pass' : 'info',
+      reason: artifacts.length > 0 ? `${artifacts.length} artifact(s)` : 'None published',
     })
   }
 
   return checks
 }
 
-/** Roll up checks into a single banner status (fail > warn > unknown > pass). */
-export function rollupStatus(checks: RuntimeCheck[]): CheckStatus {
-  if (checks.some((c) => c.status === 'fail')) return 'fail'
-  if (checks.some((c) => c.status === 'warn')) return 'warn'
-  if (checks.every((c) => c.status === 'pass')) return 'pass'
+/**
+ * Roll up checks into a single banner status (fail > warn > unknown > pass).
+ * Informational checks never move the rollup.
+ */
+export function rollupStatus(checks: RuntimeCheck[]): RollupStatus {
+  const scored = checks.filter((c) => c.status !== 'info')
+  if (scored.some((c) => c.status === 'fail')) return 'fail'
+  if (scored.some((c) => c.status === 'warn')) return 'warn'
+  if (scored.length > 0 && scored.every((c) => c.status === 'pass')) return 'pass'
   return 'unknown'
 }

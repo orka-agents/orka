@@ -18,15 +18,17 @@ Validates an already deployed Orka harness v2 installation without printing Secr
 material. The kubectl context is required and is passed to every kubectl call.
 
 Modes:
-  Smoke (default)       Read/status/concurrency/cancel/restart/replacement checks.
-                        The final message explicitly reports incomplete release
-                        coverage when release-only scenarios are skipped.
-  RELEASE_GATE=1        In addition to smoke checks, requires API result/fork
-                        validation, drain/scale-to-zero/recovery, candidate-head
-                        checks, and immutable images for every ACP workload.
-                        The Kind wrapper also requires local Git publication
-                        and GitHub API fixture tests from the exact candidate.
-                        Live GitHub publication is an explicit local opt-in.
+  Smoke (default)       Read/continuation/concurrency/cancel/timeout/restart/
+                        replacement checks against real model providers.
+  RELEASE_GATE=1        Checks the shipped artifacts rather than runtime
+                        behavior: a workspace read with its API result for each
+                        runtime, unsafe workspace rejection, publisher authority,
+                        candidate-head checks, and immutable images for every
+                        ACP workload. The Go "Agent runtime lifecycle" e2e job
+                        covers runtime behavior on every PR. The Kind wrapper
+                        also requires local Git publication and GitHub API
+                        fixture tests from the exact candidate. Live GitHub
+                        publication is an explicit local opt-in.
 
 Common environment:
   ACP_E2E_NAMESPACE                  Unique test namespace
@@ -42,7 +44,7 @@ Common environment:
   ACP_E2E_OPENCODE_MAX_TOKENS        Reviewed OpenCode model output limit (required)
   ACP_E2E_COPILOT_MODEL              Copilot model (default: gpt-5.3-codex)
   ACP_E2E_CONCURRENCY_TASKS          Concurrent Codex task count (default: 6)
-  ACP_E2E_REQUIRE_PARALLEL=1         Require >=2 running prompts in smoke; release always requires it
+  ACP_E2E_REQUIRE_PARALLEL=1         Require >=2 running prompts in the smoke concurrency check
   ACP_E2E_BLOCKING_PROMPT            Prompt that remains Running long enough to cancel
   ACP_E2E_TASK_MAX_TURNS             Provider inference-request budget per Task (default 24)
   ACP_E2E_TIMEOUT_DURATION           Task timeout; Running must be observed before expiry (default: 90s)
@@ -50,6 +52,12 @@ Common environment:
   ACP_E2E_WAIT_SECONDS               Terminal wait bound (default: 900)
   ACP_E2E_STATE_WAIT_SECONDS         State transition wait bound (default: 300)
   ACP_E2E_API_LOCAL_PORT             Local controller port-forward port (default: run-scoped)
+  ACP_E2E_TOOLBOX_IMAGE              Digest-pinned static yq toolbox (/opt/yq-jq, bin); enables the
+                                     toolbox check against a controller with toolboxes enabled
+  ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE   Optional wrong-architecture toolbox (expects TOOLBOX_ARCH_MISMATCH)
+  ACP_E2E_TOOLBOX_FIFO_IMAGE         Optional toolbox with a FIFO (expects TOOLBOX_UNSUPPORTED_FILE_TYPE)
+  ACP_E2E_TOOLBOX_MISSING_IMAGE      Optional toolbox without /opt/missing-tool (expects TOOLBOX_SOURCE_OPEN)
+  ACP_E2E_TOOLBOX_HOSTILE_IMAGE      Optional hostile toolbox (setuid, file caps, device node): fails the copy, stays harmless as an image volume
 
 RELEASE_GATE=1 requires ACP_E2E_REPO, ACP_E2E_REF, and read-only GitHub API access.
   ACP_E2E_BASE_BRANCH                Candidate branch (default: main)
@@ -199,6 +207,17 @@ for command in kubectl jq awk sed grep cut tr sort date mktemp curl; do
   require_cmd "${command}"
 done
 
+toolbox_checksum_command=()
+if [[ -n "${ACP_E2E_TOOLBOX_IMAGE:-}" ]]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    toolbox_checksum_command=(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    toolbox_checksum_command=(shasum -a 256)
+  else
+    die "toolbox checks require sha256sum or shasum"
+  fi
+fi
+
 release_gate=0
 if bool_env "${RELEASE_GATE:-0}"; then
   release_gate=1
@@ -249,6 +268,9 @@ concurrency_tasks="${ACP_E2E_CONCURRENCY_TASKS:-6}"
 wait_seconds="${ACP_E2E_WAIT_SECONDS:-900}"
 state_wait_seconds="${ACP_E2E_STATE_WAIT_SECONDS:-300}"
 keep_resources="${ACP_E2E_KEEP_RESOURCES:-0}"
+# aimock replaces the live Vekil (see scripts/agent-runtime-kind-e2e.sh); its
+# fixtures echo fixed session nonces, so result checks keep their meaning.
+model_backend="${ACP_E2E_MODEL_BACKEND:-vekil}"
 require_parallel="${ACP_E2E_REQUIRE_PARALLEL:-1}"
 timeout_duration="${ACP_E2E_TIMEOUT_DURATION:-90s}"
 cancel_settle_seconds="${ACP_E2E_CANCEL_SETTLE_SECONDS:-120}"
@@ -260,6 +282,10 @@ task_max_turns="${ACP_E2E_TASK_MAX_TURNS:-24}"
 long_prompt="${ACP_E2E_LONG_PROMPT:-Read LICENSE, NOTICE.md, go.mod, Makefile, and the first ten Go source files you find. Compare their purpose and provide a detailed evidence-backed summary. Do not modify files.}"
 api_local_port="${ACP_E2E_API_LOCAL_PORT:-$((20000 + ($$ % 20000)))}"
 
+[[ "${model_backend}" == "vekil" || "${model_backend}" == "aimock" ]] || \
+  die "ACP_E2E_MODEL_BACKEND must be vekil or aimock"
+[[ "${model_backend}" == "vekil" || "${release_gate}" -eq 1 ]] || \
+  die "ACP_E2E_MODEL_BACKEND=aimock scripts only RELEASE_GATE=1; smoke checks need real models"
 is_uint "${opencode_context_window}" || die "ACP_E2E_OPENCODE_CONTEXT_WINDOW must be a positive integer"
 is_uint "${opencode_max_tokens}" || die "ACP_E2E_OPENCODE_MAX_TOKENS must be a positive integer"
 (( opencode_context_window > opencode_max_tokens )) || \
@@ -287,6 +313,30 @@ fi
 
 k() {
   kubectl --context "${context}" "$@"
+}
+
+# load_aimock_fixtures replaces the aimock fixture set with one runtime's
+# script. The read prompt is the same for every runtime, so each runtime's
+# read runs against its own set, which answers only after the runtime's file
+# tool returned the LICENSE line.
+load_aimock_fixtures() {
+  [[ "${model_backend}" == "aimock" ]] || return 0
+  local provider="$1" file loaded
+  file="${script_dir}/fixtures/agent-runtime-aimock/${provider}.json"
+  [[ -f "${file}" ]] || die "missing aimock fixtures for ${provider}: ${file}"
+  # shellcheck disable=SC2016 # This is a Node program.
+  loaded="$(k -n vekil-system exec -i deployment/vekil -- node -e '
+let body = "";
+process.stdin.on("data", (chunk) => { body += chunk; }).on("end", async () => {
+  const url = "http://127.0.0.1:1337/__aimock/fixtures";
+  await fetch(url, { method: "DELETE" });
+  const posted = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+  if (!posted.ok) { process.stderr.write(await posted.text()); process.exit(1); }
+  process.stdout.write(String((await (await fetch(url)).json()).count));
+});' <"${file}")" || die "failed to load aimock fixtures for ${provider}"
+  [[ "${loaded}" == "$(jq '.fixtures | length' "${file}")" ]] || \
+    die "aimock loaded ${loaded} fixtures for ${provider}, not the full set"
+  log "Loaded aimock fixtures for ${provider}"
 }
 
 resource_exists() {
@@ -1360,18 +1410,6 @@ api_task_result() {
   api_request GET "/api/v1/tasks/${task}/result?namespace=${namespace}" | jq -r '.result'
 }
 
-api_fork_task() {
-  local source_task="$1"
-  local new_task="$2"
-  local prompt="$3"
-  local body_file="${temp_root}/fork-request.json"
-  jq -n \
-    --arg name "${new_task}" \
-    --arg prompt "${prompt}" \
-    '{newTaskName:$name,prompt:$prompt}' >"${body_file}"
-  api_request POST "/api/v1/tasks/${source_task}/fork?namespace=${namespace}" "${body_file}"
-}
-
 github_repo_slug() {
   local url="$1"
   local path
@@ -1707,6 +1745,138 @@ apply_agent() {
     }' | k -n "${namespace}" apply -f - >/dev/null
 }
 
+# Toolbox Agents declare one digest-pinned toolbox. Codex keeps its native
+# unrestricted policy so the Task can run the mounted tool through Bash.
+apply_toolbox_agent() {
+  local model="$1"
+  local name="$2"
+  local image="$3"
+  local mount_path="$4"
+  local path_entry="${5:-}"
+  jq -n \
+    --arg model "${model}" \
+    --arg name "${name}" \
+    --arg run "${run_id}" \
+    --arg image "${image}" \
+    --arg mountPath "${mount_path}" \
+    --arg entry "${path_entry}" \
+    --argjson maxTurns "${task_max_turns}" \
+    '{
+      apiVersion:"core.orka.ai/v1alpha1",
+      kind:"Agent",
+      metadata:{name:$name,labels:{"orka.ai/acp-e2e-run":$run,"app.kubernetes.io/managed-by":"agent-runtime-e2e"}},
+      spec:{
+        runtime:{
+          type:"codex",
+          contractVersion:"orka.harness.v2",
+          defaultMaxTurns:$maxTurns,
+          toolboxes:[({image:$image,mountPath:$mountPath} + (if ($entry|length)>0 then {pathEntries:[$entry]} else {} end))]
+        },
+        model:{name:$model}
+      }
+    }' | k -n "${namespace}" apply -f - >/dev/null
+}
+
+# run_toolbox_check proves the toolbox contract live: a Codex agent runs the
+# mounted yq through PATH as a non-root process with NoNewPrivs and no
+# capabilities, and every negative fixture fails its Task with the documented
+# ToolboxUnavailable reason instead of waiting on a pool that never rolls out.
+run_toolbox_check() {
+  local model="$1"
+  local image="$2"
+  local agent task result
+  agent="$(sanitize_name "acp-codex-toolbox-${run_id}")"
+  task="$(sanitize_name "acp-codex-toolbox-run-${run_id}")"
+  apply_toolbox_agent "${model}" "${agent}" "${image}" /opt/yq-jq bin
+  apply_read_task "${task}" "${agent}" "" true \
+    "Run exactly these two shell commands and report their complete output verbatim, nothing else: \`yq --version\` and \`grep -E '^(NoNewPrivs|CapEff):' /proc/self/status\`. Do not modify any file." \
+    "12m" true
+  wait_task_terminal "${task}"
+  task_phase_is "${task}" Succeeded || die "toolbox Task/${task} did not succeed: $(safe_task_summary "${task}")"
+  result="$(api_task_result "${task}")"
+  grep -q 'yq (https://github.com/mikefarah/yq/) version v4.54.1' <<<"${result}" || \
+    die "toolbox Task/${task} result does not report the mounted yq version"
+  grep -Eq 'NoNewPrivs:[[:space:]]*1' <<<"${result}" || \
+    die "toolbox Task/${task} result does not prove NoNewPrivs=1 for agent processes"
+  grep -Eq 'CapEff:[[:space:]]*0{16}' <<<"${result}" || \
+    die "toolbox Task/${task} result does not prove an empty CapEff for agent processes"
+  # The copy-mode runtime Pod must carry hardened toolbox init containers; the
+  # image-volume mode mounts the image directly and has none.
+  if [[ "${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}" == "copy" ]]; then
+    k -n "${runtime_namespace}" get pod -l "orka.ai/runtime-pool-namespace=${namespace}" -o json | jq -e '
+      [.items[] | select(.spec.initContainers != null) | .spec.initContainers[] | select(.name == "toolbox-copy-0")
+        | select(.securityContext.runAsNonRoot == true and .securityContext.allowPrivilegeEscalation == false
+          and .securityContext.readOnlyRootFilesystem == true and (.securityContext.capabilities.drop // []) == ["ALL"])] | length >= 1
+    ' >/dev/null || die "no runtime Pod in ${runtime_namespace} carries a hardened toolbox-copy-0 init container"
+  fi
+  mark_task_validated "${task}"
+
+  # Expected reasons differ by mount method: the copier rejects special files
+  # and reports a missing source folder itself, while an image volume mounts
+  # files as they are (a FIFO is harmless and the Task succeeds) and a missing
+  # subPath fails inside the container runtime.
+  local mount_method="${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}"
+  # A syntactically valid digest that no registry serves: the pull must fail
+  # with TOOLBOX_IMAGE_PULL in both modes.
+  local unknown_image
+  unknown_image="${image%@sha256:*}@sha256:$(printf 'orka-toolbox-unknown-digest-%s' "${run_id}" | "${toolbox_checksum_command[@]}" | cut -c1-64)"
+  local case_name case_image case_reason case_mount case_entry negative_agent negative_task
+  for case_name in wrong-arch fifo missing unknown hostile; do
+    case "${case_name}" in
+      wrong-arch) case_image="${ACP_E2E_TOOLBOX_WRONG_ARCH_IMAGE:-}"; case_reason=TOOLBOX_ARCH_MISMATCH; case_mount=/opt/yq-jq; case_entry=bin ;;
+      fifo) case_image="${ACP_E2E_TOOLBOX_FIFO_IMAGE:-}"; case_reason=TOOLBOX_UNSUPPORTED_FILE_TYPE; case_mount=/opt/fifo-tool; case_entry=bin ;;
+      missing) case_image="${ACP_E2E_TOOLBOX_MISSING_IMAGE:-}"; case_reason=TOOLBOX_SOURCE_OPEN; case_mount=/opt/missing-tool; case_entry="" ;;
+      unknown) case_image="${unknown_image}"; case_reason=TOOLBOX_IMAGE_PULL; case_mount=/opt/yq-jq; case_entry=bin ;;
+      hostile) case_image="${ACP_E2E_TOOLBOX_HOSTILE_IMAGE:-}"; case_reason=TOOLBOX_UNSUPPORTED_FILE_TYPE; case_mount=/opt/hostile; case_entry=bin ;;
+    esac
+    if [[ "${mount_method}" == "imageVolume" ]]; then
+      case "${case_name}" in
+        fifo) log "Skipping toolbox fifo negative case: image volumes mount special files as they are"; continue ;;
+        hostile) continue ;;
+        missing) case_reason=TOOLBOX_MOUNT_FAILED ;;
+      esac
+    fi
+    if [[ -z "${case_image}" ]]; then
+      log "Skipping toolbox ${case_name} negative case: fixture image not provided"
+      continue
+    fi
+    negative_agent="$(sanitize_name "acp-codex-toolbox-${case_name}-${run_id}")"
+    negative_task="$(sanitize_name "acp-codex-toolbox-${case_name}-run-${run_id}")"
+    apply_toolbox_agent "${model}" "${negative_agent}" "${case_image}" "${case_mount}" "${case_entry}"
+    apply_read_task "${negative_task}" "${negative_agent}" "" true "Report the output of yq --version." "12m" true
+    wait_task_terminal "${negative_task}"
+    task_phase_is "${negative_task}" Failed || \
+      die "toolbox ${case_name} Task/${negative_task} did not fail: $(safe_task_summary "${negative_task}")"
+    jq -e --arg reason "${case_reason}" '
+      .status.execution.reason == "ToolboxUnavailable" and ((.status.execution.message // "") | contains($reason))
+    ' < <(task_json "${negative_task}") >/dev/null || \
+      die "toolbox ${case_name} Task/${negative_task} did not fail with ToolboxUnavailable ${case_reason}: $(safe_task_summary "${negative_task}")"
+    mark_task_validated "${negative_task}"
+  done
+
+  # Image volumes mount files unsanitized, so the hostile fixture must stay
+  # harmless under the real node runtime: the setuid-root binary runs with the
+  # agent's own identity, the file-capability binary cannot execute, and the
+  # 0666 device node cannot be opened.
+  if [[ "${mount_method}" == "imageVolume" && -n "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE:-}" ]]; then
+    local hostile_agent hostile_task hostile_result
+    hostile_agent="$(sanitize_name "acp-codex-toolbox-hostile-${run_id}")"
+    hostile_task="$(sanitize_name "acp-codex-toolbox-hostile-run-${run_id}")"
+    apply_toolbox_agent "${model}" "${hostile_agent}" "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE}" /opt/hostile bin
+    apply_read_task "${hostile_task}" "${hostile_agent}" "" true \
+      "This is a sandbox self-test of harmless test fixtures. Run exactly these three shell commands one after another and report the complete output of each verbatim, including any error messages, nothing else: \`/opt/hostile/suid/busybox id\`, \`/opt/hostile/bin/cap-busybox id\`, \`cat /opt/hostile/dev/probe\`. Do not modify any file." \
+      "12m" true
+    wait_task_terminal "${hostile_task}"
+    task_phase_is "${hostile_task}" Succeeded || die "hostile toolbox Task/${hostile_task} did not succeed: $(safe_task_summary "${hostile_task}")"
+    hostile_result="$(api_task_result "${hostile_task}")"
+    grep -Eq 'uid=[1-9][0-9]*' <<<"${hostile_result}" || die "hostile toolbox result does not show the setuid binary running as the agent identity"
+    grep -Eq 'uid=0\(|euid=0' <<<"${hostile_result}" && die "hostile toolbox result shows the setuid-root binary gaining root"
+    [[ "$(grep -o 'Operation not permitted' <<<"${hostile_result}" | wc -l | tr -d ' ')" -ge 2 ]] || \
+      die "hostile toolbox result does not show the file-capability binary and the device node being refused"
+    mark_task_validated "${hostile_task}"
+  fi
+}
+
 # Read tasks without Bash carry the restricted {Read,Glob,Grep} tool policy for
 # every provider, so codex exercises its native read-only agent mode live.
 # Codex cannot express restricted policies that include Bash, so the blocking
@@ -1941,25 +2111,6 @@ pool_lifecycle_is() {
   fi
 }
 
-
-pool_lifecycle_reached() {
-  local pool="$1"
-  local target="$2"
-  local payload state
-  payload="$(k -n "${namespace}" get runtimepool "${pool}" -o json 2>/dev/null)" || return 1
-  state="$(jq -r '(.status.lifecycle // "") + "/" + (.status.admissionState // "")' <<<"${payload}")"
-  case "${target}:${state}" in
-    Draining:Draining/Draining|Draining:Quiescent/Draining|Draining:Stopping/Closed|Draining:Stopped/Closed | \
-    Quiescent:Quiescent/Draining|Quiescent:Stopping/Closed|Quiescent:Stopped/Closed | \
-    Stopping:Stopping/Closed|Stopping:Stopped/Closed | \
-    Stopped:Stopped/Closed)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
 
 pool_instance_changed_and_serving() {
   local pool="$1"
@@ -2474,7 +2625,7 @@ run_read_smoke() {
   local session="$5"
   local nonce="$6"
   local expected_line="$7"
-  local continuation fork_task pool snapshot continuation_snapshot fork_snapshot fork_response fork_after_seq
+  local continuation pool snapshot continuation_snapshot
   apply_agent "${provider}" "${model}" "${agent}"
   apply_read_task "${task}" "${agent}" "${session}" true \
     "Read LICENSE. Remember the session nonce ${nonce}. Report the nonce and the first non-empty LICENSE line exactly. Do not modify any file." \
@@ -2484,6 +2635,13 @@ run_read_smoke() {
   snapshot="${temp_root}/${task}-pool.json"
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${snapshot}"
   assert_task_succeeded_read "${task}" "${snapshot}" "${read_repo_commit}" "${nonce}" "${expected_line}"
+  read_smoke_pool="${pool}"
+  if [[ "${release_gate}" -eq 1 ]]; then
+    # The release gate checks each shipped runtime image; continuation and
+    # forks run on every PR in the Go "Agent runtime lifecycle" e2e job.
+    acp_report_update '.runtime.providers[$provider] = {read:true,result:true}' --arg provider "${provider}"
+    return 0
+  fi
 
   continuation="$(sanitize_name "${task}-continue")"
   [[ "${continuation}" != "${task}" ]] || die "continuation Task name collided with source Task name"
@@ -2497,46 +2655,22 @@ run_read_smoke() {
   capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${continuation_snapshot}"
   assert_task_succeeded_read "${continuation}" "${continuation_snapshot}" "${read_repo_commit}" "${nonce}" ""
 
-  local first_uid first_generation continued_uid continued_generation
+  local first_uid first_generation first_retired expected_generation continued_uid continued_generation
   first_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   first_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
+  first_retired="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionRecreationPending}')"
+  expected_generation="${first_generation}"
+  if [[ "${first_retired}" == true ]]; then
+    # Native checkpointing retires the writer before the next cold continuation.
+    expected_generation="$((first_generation + 1))"
+  fi
   continued_uid="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
   continued_generation="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ -n "${first_uid}" && "${first_uid}" == "${continued_uid}" ]] || \
     die "create:false continuation did not preserve RuntimeSession UID"
-  [[ "${first_generation}" == "${continued_generation}" ]] || \
-    die "create:false continuation unexpectedly changed RuntimeSession generation without replacement"
+  [[ "${expected_generation}" == "${continued_generation}" ]] || \
+    die "create:false continuation did not honor the prior Task's RuntimeSession retirement fence"
 
-  if [[ "${release_gate}" -eq 1 ]]; then
-    fork_task="$(sanitize_name "${task}-fork")"
-    [[ "${fork_task}" != "${task}" && "${fork_task}" != "${continuation}" ]] || \
-      die "forked Task name collided with source or continuation Task name"
-    fork_response="$(api_fork_task "${continuation}" "${fork_task}" \
-      "Return the session nonce represented in the source task timeline. Do not modify files.")" || \
-      die "Task fork API request failed"
-    jq -e --arg source "${continuation}" --arg fork "${fork_task}" --arg ns "${namespace}" '
-      .namespace == $ns and .sourceTaskName == $source and .newTaskName == $fork and .afterSeq >= 1
-    ' <<<"${fork_response}" >/dev/null || die "Task fork API response did not identify the requested checkpoint fork"
-    fork_after_seq="$(jq -r '.afterSeq' <<<"${fork_response}")"
-    if ! k -n "${namespace}" patch task "${fork_task}" --type=merge \
-        -p "$(jq -cn --arg run "${run_id}" '{metadata:{labels:{"orka.ai/acp-e2e-run":$run}}}')" >/dev/null; then
-      die "failed to mark forked Task/${fork_task} as owned by this release-gate run"
-    fi
-    wait_until "forked Task/${fork_task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${fork_task}"
-    [[ "$(wait_task_pool_name_value "${fork_task}")" == "${pool}" ]] || \
-      die "forked Task/${fork_task} selected a different RuntimePool"
-    fork_snapshot="${temp_root}/${fork_task}-pool.json"
-    capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${fork_snapshot}"
-    assert_task_succeeded_read "${fork_task}" "${fork_snapshot}" "${read_repo_commit}" "${nonce}" ""
-    jq -e --arg source "${continuation}" --arg seq "${fork_after_seq}" '
-      .metadata.annotations["orka.ai/fork-source-task"] == $source
-      and .metadata.annotations["orka.ai/fork-source-seq"] == $seq
-    ' < <(task_json "${fork_task}") >/dev/null || die "forked Task/${fork_task} does not bind to the API checkpoint sequence"
-    acp_report_update '.runtime.providers[$provider] = {read:true,continuation:true,result:true,fork:true}' \
-      --arg provider "${provider}"
-  fi
-
-  read_smoke_pool="${pool}"
   read_smoke_session_uid="${continued_uid}"
   read_smoke_session_generation="${continued_generation}"
 }
@@ -2745,10 +2879,7 @@ run_concurrency_check() {
   if (( concurrency_tasks > limit && queued_seen < 1 )); then
     die "capacity burst never exposed durable queued demand"
   fi
-  if [[ "${release_gate}" -eq 1 && "${max_seen}" -lt 2 ]]; then
-    die "release gate did not observe at least two concurrent running prompts"
-  fi
-  if [[ "${release_gate}" -eq 0 ]] && bool_env "${require_parallel}" && (( max_seen < 2 )); then
+  if bool_env "${require_parallel}" && (( max_seen < 2 )); then
     die "parallel prompt execution was not observed (max=${max_seen})"
   fi
 
@@ -2886,8 +3017,6 @@ run_controller_restart_check() {
     die "controller restart continuation did not advance RuntimeSession generation"
 }
 
-replacement_session_uid=""
-replacement_session_generation=""
 run_pool_replacement_check() {
   require_runtimepool_mutation_scope || return 1
   local provider="$1"
@@ -2925,53 +3054,6 @@ run_pool_replacement_check() {
   after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${after_uid}" == "${before_uid}" ]] || die "Pod replacement changed logical RuntimeSession UID"
   (( after_generation > before_generation )) || die "Pod replacement did not advance RuntimeSession generation"
-  replacement_session_uid="${after_uid}"
-  replacement_session_generation="${after_generation}"
-}
-
-run_scale_to_zero_recovery_check() {
-  require_runtimepool_mutation_scope || return 1
-  local provider="$1"
-  local model="$2"
-  local agent="$3"
-  local pool="$4"
-  local session="$5"
-  local nonce="$6"
-  local before_snapshot after_snapshot before_instance before_pool_uid task after_uid after_generation
-  log "Validating authenticated drain: Serving -> Draining -> Quiescent -> Stopping -> Stopped"
-  before_snapshot="${temp_root}/scale-zero-before.json"
-  capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${before_snapshot}"
-  before_instance="$(jq -r '.runtimeInstanceID' "${before_snapshot}")"
-  before_pool_uid="$(jq -r '.poolUID' "${before_snapshot}")"
-
-  k -n "${namespace}" patch runtimepool "${pool}" --type=merge \
-    -p '{"spec":{"desiredReplicas":0}}' >/dev/null
-  wait_until_fast "RuntimePool/${pool} Draining or later" "${state_wait_seconds}" pool_lifecycle_reached "${pool}" Draining
-  wait_until_fast "RuntimePool/${pool} Quiescent or later" "${state_wait_seconds}" pool_lifecycle_reached "${pool}" Quiescent
-  wait_until_fast "RuntimePool/${pool} Stopping or later" "${state_wait_seconds}" pool_lifecycle_reached "${pool}" Stopping
-  wait_until "RuntimePool/${pool} Stopped with zero authenticated/controller counters" "${wait_seconds}" pool_stopped "${pool}"
-
-  log "Validating 0 -> 1 recovery of the same logical Session"
-  task="$(sanitize_name "acp-scale-zero-recovery-${run_id}")"
-  apply_read_task "${task}" "${agent}" "${session}" false \
-    "Continue the existing session after scale-to-zero. Return the original session nonce from the durable transcript. Do not modify files." \
-    "12m" false
-  wait_until "Task/${task} RuntimePool assignment" "${state_wait_seconds}" wait_task_pool_name_value "${task}"
-  [[ "$(wait_task_pool_name_value "${task}")" == "${pool}" ]] || \
-    die "scale-to-zero recovery selected a different logical RuntimePool"
-  after_snapshot="${temp_root}/scale-zero-after.json"
-  capture_pool_snapshot "${pool}" "${provider}" "${model}" read "${after_snapshot}"
-  [[ "$(jq -r '.poolUID' "${after_snapshot}")" == "${before_pool_uid}" ]] || \
-    die "0 -> 1 recovery replaced the logical RuntimePool object"
-  [[ "$(jq -r '.runtimeInstanceID' "${after_snapshot}")" != "${before_instance}" ]] || \
-    die "0 -> 1 recovery reused the stopped runtime instance"
-  assert_task_succeeded_read "${task}" "${after_snapshot}" "${read_repo_commit}" "${nonce}" ""
-  after_uid="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
-  after_generation="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
-  [[ "${after_uid}" == "${replacement_session_uid}" ]] || \
-    die "scale-to-zero recovery changed the logical RuntimeSession UID"
-  (( after_generation > replacement_session_generation )) || \
-    die "scale-to-zero recovery did not advance RuntimeSession generation"
 }
 
 release_source_slug=""
@@ -3664,8 +3746,12 @@ if [[ "${release_gate}" -eq 1 ]]; then
   read_repo_commit="$(gh api "repos/${read_repo_slug}/commits/${repo_ref}" --jq '.sha')"
   [[ "$(lower "${read_repo_commit}")" == "$(lower "${repo_ref}")" ]] || \
     die "ACP_E2E_REF did not resolve to the requested immutable commit"
-  expected_license_line="$(gh_raw_file "${read_repo_slug}" LICENSE "${read_repo_commit}" | awk 'NF { print; exit }')"
+  # Read to EOF: exiting at the first line can SIGPIPE gh, which pipefail
+  # then reports as a failed gate.
+  expected_license_line="$(gh_raw_file "${read_repo_slug}" LICENSE "${read_repo_commit}" | awk 'NF && !found { print; found = 1 }')"
   [[ -n "${expected_license_line}" ]] || die "could not independently read the first non-empty LICENSE line"
+  [[ "${model_backend}" == "vekil" || "${expected_license_line}" == "MIT License" ]] || \
+    die "the candidate LICENSE starts with '${expected_license_line}', but scripts/fixtures/agent-runtime-aimock scripts 'MIT License'; update the fixtures"
 fi
 
 if resource_exists get namespace "${namespace}"; then
@@ -3713,12 +3799,16 @@ start_api_forward
 
 session_nonce="nonce-${run_id}-${RANDOM}-${RANDOM}"
 restart_nonce="restart-${run_id}-${RANDOM}-${RANDOM}"
+if [[ "${model_backend}" == "aimock" ]]; then
+  session_nonce="nonce-aimock-codex"
+fi
+load_aimock_fixtures codex
 
 codex_agent="$(sanitize_name "acp-codex-${run_id}")"
 codex_task="$(sanitize_name "acp-codex-read-${run_id}")"
 codex_session="$(sanitize_name "acp-codex-session-${run_id}")"
 if [[ "${release_gate}" -eq 1 ]]; then
-  log "Running Codex read, result, continuation, and Task-fork validation"
+  log "Running Codex read and result validation"
 else
   log "Running Codex read and continuation smoke validation"
 fi
@@ -3728,32 +3818,8 @@ codex_pool="${read_smoke_pool}"
 
 assert_unsafe_workspace_rejected "${codex_agent}"
 acp_report_update '.runtime.checks.unsafeWorkspace = true'
-run_concurrency_check "${codex_agent}" codex "${codex_model}" "${codex_pool}"
-acp_report_update '.runtime.checks.concurrency = true'
-if runtimepool_mutations_allowed; then
-  park_runtimepool "${codex_pool}"
-fi
 codex_tool_agent="$(sanitize_name "acp-codex-tools-${run_id}")"
-apply_agent codex "${codex_model}" "${codex_tool_agent}" 12 true
-run_timeout_check codex "${codex_model}" "${codex_tool_agent}"
-acp_report_update '.runtime.checks.timeout = true'
-run_explicit_cancel_check codex "${codex_model}" "${codex_tool_agent}"
-acp_report_update '.runtime.checks.cancellation = true'
-if runtimepool_mutations_allowed; then
-  run_controller_restart_check codex "${codex_model}" "${codex_tool_agent}" "${restart_nonce}"
-  acp_report_update '.runtime.checks.controllerRestart = true'
-  park_provider_runtimepools_except codex "${codex_pool}"
-  resume_runtimepool "${codex_pool}"
-  run_pool_replacement_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
-  acp_report_update '.runtime.checks.poolReplacement = true'
-else
-  shared_mutation_checks_skipped=1
-  log "Shared watch namespace: skipping controller restart and RuntimePool parking, resume, and replacement checks"
-fi
-
 if [[ "${release_gate}" -eq 1 ]]; then
-  run_scale_to_zero_recovery_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
-  acp_report_update '.runtime.checks.scaleToZeroRecovery = true'
   park_runtimepool "${codex_pool}"
   if acp_live_github_enabled; then
     run_write_release_gate "${codex_agent}"
@@ -3767,6 +3833,29 @@ if [[ "${release_gate}" -eq 1 ]]; then
     fi
     remote_cleanup_required=0
   fi
+else
+  run_concurrency_check "${codex_agent}" codex "${codex_model}" "${codex_pool}"
+  if runtimepool_mutations_allowed; then
+    park_runtimepool "${codex_pool}"
+  fi
+  apply_agent codex "${codex_model}" "${codex_tool_agent}" 12 true
+  run_timeout_check codex "${codex_model}" "${codex_tool_agent}"
+  run_explicit_cancel_check codex "${codex_model}" "${codex_tool_agent}"
+  if [[ -n "${ACP_E2E_TOOLBOX_IMAGE:-}" ]]; then
+    log "Running Codex toolbox mount and failure-reason validation"
+    run_toolbox_check "${codex_model}" "${ACP_E2E_TOOLBOX_IMAGE}"
+  else
+    log "Skipping toolbox validation: ACP_E2E_TOOLBOX_IMAGE not set"
+  fi
+  if runtimepool_mutations_allowed; then
+    run_controller_restart_check codex "${codex_model}" "${codex_tool_agent}" "${restart_nonce}"
+    park_provider_runtimepools_except codex "${codex_pool}"
+    resume_runtimepool "${codex_pool}"
+    run_pool_replacement_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
+  else
+    shared_mutation_checks_skipped=1
+    log "Shared watch namespace: skipping controller restart and RuntimePool parking, resume, and replacement checks"
+  fi
 fi
 
 remove_provider_resources codex "${codex_agent}" "${codex_tool_agent}"
@@ -3776,16 +3865,25 @@ opencode_agent="$(sanitize_name "acp-opencode-${run_id}")"
 opencode_task="$(sanitize_name "acp-opencode-read-${run_id}")"
 opencode_session="$(sanitize_name "acp-opencode-session-${run_id}")"
 opencode_nonce="opencode-${run_id}-${RANDOM}-${RANDOM}"
-log "Running OpenCode native ACP read, continuation, and read-policy validation"
+if [[ "${model_backend}" == "aimock" ]]; then
+  opencode_nonce="nonce-aimock-opencode"
+fi
+load_aimock_fixtures opencode
+if [[ "${release_gate}" -eq 1 ]]; then
+  log "Running OpenCode native ACP read and result validation"
+else
+  log "Running OpenCode native ACP read, continuation, and read-policy validation"
+fi
 run_read_smoke opencode "${opencode_model}" "${opencode_agent}" "${opencode_task}" "${opencode_session}" \
   "${opencode_nonce}" "${expected_license_line}"
 if runtimepool_mutations_allowed; then
   park_runtimepool "${read_smoke_pool}"
 fi
 opencode_policy_agent="$(sanitize_name "acp-opencode-policy-agent-${run_id}")"
-apply_agent opencode "${opencode_model}" "${opencode_policy_agent}" 12 true
-run_opencode_read_policy_check "${opencode_policy_agent}" "${opencode_model}"
-acp_report_update '.runtime.checks.opencodeReadPolicy = true'
+if [[ "${release_gate}" -eq 0 ]]; then
+  apply_agent opencode "${opencode_model}" "${opencode_policy_agent}" 12 true
+  run_opencode_read_policy_check "${opencode_policy_agent}" "${opencode_model}"
+fi
 assert_all_tasks_validated
 remove_provider_resources opencode "${opencode_agent}" "${opencode_policy_agent}"
 [[ "${namespace_shared:-0}" -eq 1 ]] || wait_until "OpenCode runtime children removal" 300 runtime_children_absent
@@ -3794,6 +3892,10 @@ claude_agent="$(sanitize_name "acp-claude-${run_id}")"
 claude_task="$(sanitize_name "acp-claude-read-${run_id}")"
 claude_session="$(sanitize_name "acp-claude-session-${run_id}")"
 claude_nonce="claude-${run_id}-${RANDOM}-${RANDOM}"
+if [[ "${model_backend}" == "aimock" ]]; then
+  claude_nonce="nonce-aimock-claude"
+fi
+load_aimock_fixtures claude
 log "Running Claude only after all Codex gates and cleanup completed"
 run_read_smoke claude "${claude_model}" "${claude_agent}" "${claude_task}" "${claude_session}" \
   "${claude_nonce}" "${expected_license_line}"
@@ -3806,6 +3908,10 @@ copilot_agent="$(sanitize_name "acp-copilot-${run_id}")"
 copilot_task="$(sanitize_name "acp-copilot-read-${run_id}")"
 copilot_session="$(sanitize_name "acp-copilot-session-${run_id}")"
 copilot_nonce="copilot-${run_id}-${RANDOM}-${RANDOM}"
+if [[ "${model_backend}" == "aimock" ]]; then
+  copilot_nonce="nonce-aimock-copilot"
+fi
+load_aimock_fixtures copilot
 log "Running GitHub Copilot only after all Claude gates and cleanup completed"
 run_read_smoke copilot "${copilot_model}" "${copilot_agent}" "${copilot_task}" "${copilot_session}" \
   "${copilot_nonce}" "${expected_license_line}"
@@ -3829,6 +3935,6 @@ else
   if [[ "${shared_mutation_checks_skipped}" -eq 1 ]]; then
     log "Orka harness v2 shared-namespace smoke validation passed on context ${context}; controller restart and RuntimePool lifecycle/replacement checks were skipped. Use an isolated namespace for complete smoke acceptance."
   else
-    log "Orka harness v2 smoke validation passed on context ${context}; Task result/fork, scale-to-zero, and required publication tests were skipped. Use RELEASE_GATE=1 with the Kind wrapper for release acceptance."
+    log "Orka harness v2 smoke validation passed on context ${context}; API results, image digests, and required publication tests were skipped. Use RELEASE_GATE=1 with the Kind wrapper for release acceptance."
   fi
 fi

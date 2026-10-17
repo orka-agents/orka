@@ -322,10 +322,10 @@ func codexReasoningEffort(metadata map[string]string) (string, error) {
 		return "", nil
 	}
 	switch effort {
-	case "low", "medium", "high", "xhigh":
+	case "none", "low", "medium", "high", "xhigh":
 		return effort, nil
 	default:
-		return "", fmt.Errorf("invalid %s %q: expected low, medium, high, or xhigh", codexReasoningEffortEnv, effort)
+		return "", fmt.Errorf("invalid %s %q: expected none, low, medium, high, or xhigh", codexReasoningEffortEnv, effort)
 	}
 }
 

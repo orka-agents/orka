@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:demo": "tsc -b && vite build --mode demo --outDir dist-demo",
+    "dev:demo": "vite --mode demo",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
@@ -25,6 +27,7 @@
     "react-dom": "19",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.4.0",
+    "yaml": "2.8.1",
     "zod": "3",
     "zustand": "5"
   },

@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { api, isNotFoundError } from '@/lib/api-client'
 import { recordedTokens, usageNumber, type UsageOther, type UsageOtherSummary, type UsagePage as UsagePagination, type UsageReport, type UsageSelection, type UsageSummary, type UsageTask, type UsageTotals, type UsageWork, type UsageWorkSummary } from '@/lib/usage'
 import { useUIStore } from '@/stores/ui'
 import { PageHeader } from '@/components/layout/page-header'
@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import type { Task } from '@/schemas/task'
 
 function initialFilters() {
   const now = new Date()
@@ -28,6 +29,7 @@ export function UsagePage() {
 function UsagePageContent({ namespace }: { namespace: string }) {
   const [filters, setFilters] = useState(initialFilters)
   const [draft, setDraft] = useState(filters)
+  const [rangeError, setRangeError] = useState<string | null>(null)
   const [page, setPage] = useState({ offset: 0, asOf: '' })
   const { data, error, isPending, isFetching } = useQuery({
     queryKey: ['usage', namespace, filters, page],
@@ -38,6 +40,13 @@ function UsagePageContent({ namespace }: { namespace: string }) {
   })
   function apply(event: FormEvent) {
     event.preventDefault()
+    // ISO dates compare as strings; an empty or inverted range would only
+    // come back as a server error.
+    if (draft.from >= draft.until) {
+      setRangeError('The start date must be before the exclusive end date.')
+      return
+    }
+    setRangeError(null)
     setFilters({ ...draft })
     setPage({ offset: 0, asOf: '' })
   }
@@ -49,10 +58,10 @@ function UsagePageContent({ namespace }: { namespace: string }) {
       <PageHeader title="Usage and PR outcomes" description="Follow recorded model usage from the original issue through review and merge." />
       <form onSubmit={apply} className="grid items-end gap-3 rounded-lg border bg-card p-4 sm:grid-cols-2 xl:grid-cols-4">
         <label className="space-y-1 text-sm">Requests started from
-          <Input aria-label="Requests started from" type="date" required value={draft.from} onChange={(e) => setDraft({ ...draft, from: e.target.value })} />
+          <Input aria-label="Requests started from" type="date" required value={draft.from} aria-invalid={rangeError ? true : undefined} aria-describedby={rangeError ? 'usage-range-error' : undefined} onChange={(e) => { setRangeError(null); setDraft({ ...draft, from: e.target.value }) }} />
         </label>
         <label className="space-y-1 text-sm">Started before, exclusive
-          <Input aria-label="Started before, exclusive" type="date" required value={draft.until} onChange={(e) => setDraft({ ...draft, until: e.target.value })} />
+          <Input aria-label="Started before, exclusive" type="date" required value={draft.until} aria-invalid={rangeError ? true : undefined} aria-describedby={rangeError ? 'usage-range-error' : undefined} onChange={(e) => { setRangeError(null); setDraft({ ...draft, until: e.target.value }) }} />
         </label>
         <label className="space-y-1 text-sm">Team namespace
           <Input aria-label="Team namespace" aria-describedby="usage-team-scope" placeholder={namespace || 'Current namespace'} value={draft.teams} onChange={(e) => setDraft({ ...draft, teams: e.target.value })} />
@@ -70,6 +79,7 @@ function UsagePageContent({ namespace }: { namespace: string }) {
           </select>
         </label>
         <Button type="submit" disabled={isFetching} className="sm:col-start-2 xl:col-start-4">Apply filters</Button>
+        {rangeError && <p id="usage-range-error" role="alert" className="text-sm text-destructive sm:col-span-2 xl:col-span-4">{rangeError}</p>}
       </form>
       {isPending && <p role="status">Loading usage report...</p>}
       {error && <p role="alert" className="text-destructive">Usage report unavailable. {error.message}</p>}
@@ -82,7 +92,7 @@ function UsagePageContent({ namespace }: { namespace: string }) {
         <OutcomeSummary summary={data.summary} />
         <Card>
           <CardHeader><CardTitle>Team summary</CardTitle></CardHeader>
-          <CardContent><Table>
+          <CardContent><Table scrollRegionLabel="Team summary">
             <TableHeader><TableRow>
               <TableHead>Team</TableHead><TableHead>Requests</TableHead><TableHead>Recorded tokens</TableHead>
               <TableHead>PRs opened</TableHead><TableHead>Ready now</TableHead><TableHead>Merged</TableHead><TableHead>Tokens / merged PR</TableHead>
@@ -250,6 +260,24 @@ function OtherContent({ group, namespace, selection, onPaginate }: { group: Usag
   </>
 }
 
+// Task names are reused, so a usage record links to the live Task only when
+// it is the same object (by UID). Checked once, when the record is expanded.
+function TaskRecordLink({ task, taskName }: { task: UsageTask; taskName: string }) {
+  const setNamespace = useUIStore((s) => s.setNamespace)
+  const { data, error, isPending } = useQuery({
+    queryKey: ['usage-task-identity', task.namespace, taskName],
+    queryFn: () => api.get<Task>(`/tasks/${encodeURIComponent(taskName)}`, { namespace: task.namespace }),
+    retry: false,
+    staleTime: 30_000,
+  })
+  if (isPending) return <span className="text-muted-foreground">Checking Task {taskName}…</span>
+  if (isNotFoundError(error)) return <span className="text-muted-foreground">Task {taskName} no longer exists</span>
+  if (data?.metadata.uid && task.taskUID && data.metadata.uid !== task.taskUID) {
+    return <span className="text-muted-foreground">Previous run of {taskName}; a newer Task now uses this name</span>
+  }
+  return <Link to="/tasks/$taskId" params={{ taskId: taskName }} onClick={() => setNamespace(task.namespace)} className="text-primary underline">Open Task {taskName}</Link>
+}
+
 function TaskDetails({ task, onPaginate }: { task: UsageTask; onPaginate: () => void }) {
   const [open, setOpen] = useState(false)
   const setNamespace = useUIStore((s) => s.setNamespace)
@@ -258,7 +286,7 @@ function TaskDetails({ task, onPaginate }: { task: UsageTask; onPaginate: () => 
       <span className="ml-3 font-mono">{recordedTokens(task.usage)}</span>{task.shared && <Badge variant="outline" className="ml-2">Shared work</Badge>}
     </summary>
     {open && <div className="mt-3 space-y-3">
-      {task.taskName && <Link to="/tasks/$taskId" params={{ taskId: task.taskName }} onClick={() => setNamespace(task.namespace)} className="text-primary underline">Open Task {task.taskName}</Link>}
+      {task.taskName && <TaskRecordLink task={task} taskName={task.taskName} />}
       {task.sessionName && <Link to="/sessions/$sessionId" params={{ sessionId: task.sessionName }} onClick={() => setNamespace(task.namespace)} className="ml-3 text-primary underline">Session {task.sessionName}</Link>}
       <PagedItems label="Measurements" items={task.measurements} onPaginate={onPaginate} renderItem={(m) => <div key={m.id} className="space-y-1 border-t pt-3">
         <p>{m.provider || 'Provider unavailable'} / {m.model || 'Model unavailable'} · {m.source} · {m.scope} · {m.status}</p>

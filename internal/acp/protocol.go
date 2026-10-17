@@ -13,11 +13,24 @@ const (
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
 	MethodSessionNew        = "session/new"
+	MethodSessionLoad       = "session/load"
+	MethodSessionResume     = "session/resume"
+	MethodSessionClose      = "session/close"
 	MethodSessionPrompt     = "session/prompt"
 	MethodSessionCancel     = "session/cancel"
 	MethodSessionUpdate     = "session/update"
 	MethodRequestPermission = "session/request_permission"
 	MethodCancelRequest     = "$/cancel_request"
+)
+
+const (
+	// SessionCapabilityResume is the ACP sessionCapabilities key for
+	// session/resume: reconnecting to an existing provider session without a
+	// history replay (stable in ACP v1 since 2026-04).
+	SessionCapabilityResume = "resume"
+	// SessionCapabilityClose is the ACP sessionCapabilities key for
+	// session/close: an explicit graceful end of a provider session.
+	SessionCapabilityClose = "close"
 )
 
 type Meta map[string]any
@@ -88,6 +101,18 @@ type AgentCapabilities struct {
 	Meta                Meta               `json:"_meta,omitempty"`
 }
 
+// SessionCapability accepts the ACP capability object or a boolean true.
+func (c AgentCapabilities) SessionCapability(name string) bool {
+	switch value := c.SessionCapabilities[name].(type) {
+	case bool:
+		return value
+	case map[string]any:
+		return value != nil
+	default:
+		return false
+	}
+}
+
 type AuthMethod struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -151,6 +176,46 @@ type NewSessionRequest struct {
 
 type NewSessionResponse struct {
 	SessionID     string            `json:"sessionId"`
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+// ResumeSessionRequest reconnects without replaying conversation history.
+type ResumeSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+type ResumeSessionResponse struct {
+	SessionID     string            `json:"sessionId,omitempty"`
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	Models        json.RawMessage   `json:"models,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+type CloseSessionRequest struct {
+	SessionID string `json:"sessionId"`
+	Meta      Meta   `json:"_meta,omitempty"`
+}
+
+type CloseSessionResponse struct {
+	Meta Meta `json:"_meta,omitempty"`
+}
+
+type LoadSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+type LoadSessionResponse struct {
 	Modes         json.RawMessage   `json:"modes,omitempty"`
 	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
 	Meta          Meta              `json:"_meta,omitempty"`

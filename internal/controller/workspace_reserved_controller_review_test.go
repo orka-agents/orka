@@ -72,7 +72,7 @@ func TestExternalWorkspaceClassRejectsReservedLegacyControllerRoute(t *testing.T
 // ACP routing identity either: Core treats workspaces and checkpoints carrying
 // it as legacy-owned and skips their generic routing.
 func TestGenericWorkspaceProviderRejectsReservedLegacyControllerRoute(t *testing.T) {
-	for _, controllerName := range []string{acpWorkspaceControllerLabelValue, "generic." + acpWorkspaceControllerLabelValue} {
+	for _, controllerName := range []string{acpWorkspaceControllerLabelValue, acpWorkspaceProviderControllerName, "generic." + acpWorkspaceControllerLabelValue} {
 		t.Run(controllerName, func(t *testing.T) {
 			class, provider, w := workspacePolicyReviewFixture(t)
 			provider.Spec.ControllerName = controllerName
@@ -81,7 +81,7 @@ func TestGenericWorkspaceProviderRejectsReservedLegacyControllerRoute(t *testing
 			mapper, profile := testParameterMapping(class.Namespace, class.Spec.ParametersRef)
 			c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).WithStatusSubresource(class, provider, w).
 				WithObjects(class, provider, w, profile).Build()
-			reserved := controllerName == acpWorkspaceControllerLabelValue
+			reserved := controllerName == acpWorkspaceControllerLabelValue || controllerName == acpWorkspaceProviderControllerName
 
 			workspaceReconciler := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
 			for range 4 {

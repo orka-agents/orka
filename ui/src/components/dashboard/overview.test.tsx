@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@/test/test-utils'
+import { act, render, screen, waitFor, within } from '@/test/test-utils'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
 
@@ -33,6 +33,12 @@ describe('Overview', () => {
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
   })
 
+  it('sizes the phase distribution card to its content instead of the recent-tasks column', async () => {
+    render(<Overview />)
+    const title = await screen.findByText('Phase Distribution')
+    expect(title.closest('[data-slot="card"]')).toHaveClass('lg:self-start')
+  })
+
   it('renders without crashing', () => {
     render(<Overview />)
     expect(screen.getByText('Overview of your Orka workspace')).toBeInTheDocument()
@@ -63,6 +69,26 @@ describe('Overview', () => {
     expect(screen.getAllByText(/lacks/).map((el) => el.textContent)).toEqual(
       expect.arrayContaining([expect.stringContaining('agents'), expect.stringContaining('tools'), expect.stringContaining('tasks')]),
     )
+  })
+
+  it('says the task list failed instead of showing zero counts and "No tasks yet"', async () => {
+    server.use(http.get('/api/v1/tasks', () =>
+      HttpResponse.json({ error: { code: 500, message: 'store unavailable' } }, { status: 500 })))
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render(<Overview />)
+      // The list walk retries a failed load before giving up.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    await waitFor(() => {
+      expect(screen.getAllByText(/Could not load tasks \(store unavailable\)/)).toHaveLength(2)
+    })
+    expect(screen.getAllByText('Could not load').length).toBeGreaterThanOrEqual(4)
+    expect(screen.queryByText(/No tasks yet/)).not.toBeInTheDocument()
   })
 
   it('includes Scheduled and Cancelled tasks in the phase distribution', async () => {

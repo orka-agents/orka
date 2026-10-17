@@ -514,7 +514,8 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		execute = func(callCtx context.Context) (string, error) {
 			execCtx := workerexecutor.WithToolCallID(callCtx, request.Call.CallID)
 			execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, string(request.Metadata.OperationID))
-			return executor.Execute(execCtx, tool, request.Call.Arguments)
+			result, err := executor.Execute(execCtx, tool, request.Call.Arguments)
+			return result, customToolNoEffectError(err)
 		}
 	default:
 		return nil, fmt.Errorf("MCP tool %q is not broker-executable", descriptor.Name)
@@ -523,6 +524,29 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		result, err := execute(callCtx)
 		return acpMCPToolExecutionResult(callCtx, descriptor, result, err)
 	}, nil
+}
+
+// customToolNoEffectError marks a custom Tool failure that provably had no
+// effect: the executor marks every send of the tool request, so an error
+// without that mark stopped before the request left, and a 4xx other than
+// 408 answering the original request (not a followed redirect) is a refusal.
+// Upstream bodies stay out of the summary. Failures the executor delivers as
+// tool results and all other errors are unchanged.
+func customToolNoEffectError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, delivered := errors.AsType[workerexecutor.ToolExecutionError](err); delivered {
+		return err
+	}
+	if !workerexecutor.ToolRequestWasAttempted(err) {
+		return &tools.NoEffectError{Summary: "The tool stopped before sending its request.", Err: err}
+	}
+	if status, ok := errors.AsType[workerexecutor.ToolHTTPStatusError](err); ok && !status.Redirected &&
+		status.StatusCode >= 400 && status.StatusCode < 500 && status.StatusCode != http.StatusRequestTimeout {
+		return &tools.NoEffectError{Summary: fmt.Sprintf("The tool endpoint refused the request (HTTP %d).", status.StatusCode), Err: err}
+	}
+	return err
 }
 
 func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPToolDescriptor, result string, err error) (json.RawMessage, error) {
@@ -535,6 +559,16 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 				IsError bool   `json:"isError"`
 				Error   string `json:"error"`
 			}{true, rejection.Error()})
+		}
+		if argErr, ok := errors.AsType[*tools.ToolArgumentError](err); ok {
+			// The registry rejected the arguments before the tool ran, so the
+			// call had no effect and the agent can resend it. The message names
+			// only the field and JSON types.
+			return json.Marshal(struct {
+				IsError bool   `json:"isError"`
+				Code    string `json:"code"`
+				Error   string `json:"error"`
+			}{true, "invalid_arguments", argErr.Error()})
 		}
 		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
 		// A read-only Tool may reach its own request deadline while the

@@ -236,9 +236,8 @@ acp_report_qualified() {
       and .checks.publisherBrokeredAuthority == true and .checks.baseUnchanged == true
       and (["preflight", "completion"] | all(.[]; $r.observations.baseHeads[.] == $r.candidateSHA))
       and (["codex", "opencode", "claude", "copilot"] | all(.[];
-        $r.runtime.providers[.] | .read == true and .continuation == true and .result == true and .fork == true))
-      and (["unsafeWorkspace", "concurrency", "timeout", "cancellation", "controllerRestart",
-        "poolReplacement", "scaleToZeroRecovery", "opencodeReadPolicy"] | all(.[]; $r.runtime.checks[.] == true))
+        $r.runtime.providers[.] | .read == true and .result == true))
+      and $r.runtime.checks.unsafeWorkspace == true
       and (["controller", "publisher", "codex", "opencode", "claude", "copilot"] | all(.[];
         . as $role | $r.images[$role] | .verified == true
         and (.actualDigest | digest) and (.podUID | present)

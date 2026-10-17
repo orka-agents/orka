@@ -94,6 +94,9 @@ func TestACPDispatcherSessionTerminalMessagePrecedesLifecycleEvent(t *testing.T)
 				if err := dispatcher.finishNonSuccessWithCancellationReason(ctx, task, attempt.ID, fence, session, test.terminal, test.cancel); err != nil {
 					t.Fatal(err)
 				}
+				if !dispatcher.finalizedSessionTurnKnown(task.UID, turn.Turn.ID) {
+					t.Fatal("live terminal finalization left the turn for the recovery sweep to resettle")
+				}
 				latest := &corev1alpha1.Task{}
 				if err := kube.Get(ctx, clientObjectKey(task), latest); err != nil {
 					t.Fatal(err)

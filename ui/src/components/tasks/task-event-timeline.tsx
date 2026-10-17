@@ -203,7 +203,7 @@ export function TaskEventTimeline({ taskId, taskPhase, taskUid }: TaskEventTimel
 
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <EventTimeline
           title="Execution timeline"
           events={events}

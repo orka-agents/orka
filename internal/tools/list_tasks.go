@@ -18,6 +18,11 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
+const (
+	defaultListTasksLimit = 20
+	maxListTasksLimit     = 100
+)
+
 // ListTasksTool lists Task CRDs with optional status filter.
 type ListTasksTool struct{}
 
@@ -28,7 +33,7 @@ func (t *ListTasksTool) Description() string {
 }
 
 func (t *ListTasksTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, statusField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Filter by status: Pending, Running, Succeeded, Failed"}, limitField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max results to return (default 20)"}}})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, statusField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Filter by status: Pending, Running, Succeeded, Failed"}, limitField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max results to return (default 20, maximum 100)", jsonSchemaDefaultField: defaultListTasksLimit, jsonSchemaMaximumField: maxListTasksLimit}}})
 }
 
 func (t *ListTasksTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
@@ -44,7 +49,11 @@ func (t *ListTasksTool) Execute(ctx context.Context, args json.RawMessage) (stri
 
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	statusFilter := chatGetStringArg(a, statusField)
-	limit := chatGetIntArg(a, limitField, 20)
+	limit := chatGetIntArg(a, limitField, defaultListTasksLimit)
+	if limit <= 0 {
+		limit = defaultListTasksLimit
+	}
+	limit = min(limit, maxListTasksLimit)
 
 	taskList := &corev1alpha1.TaskList{}
 	if err := tc.Client.List(ctx, taskList, client.InNamespace(namespace)); err != nil {

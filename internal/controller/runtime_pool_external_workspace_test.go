@@ -244,6 +244,26 @@ func TestExternalRuntimePoolProviderOutagePreservesFenceAndClosesAdmission(t *te
 	}
 }
 
+func TestExternalRuntimePoolRejectsToolboxProfileBeforePublishing(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.r.ToolboxPolicy = acpTestToolboxPolicy()
+	current := runtimePoolTestGetPool(t, f.r, f.pool)
+	current.Spec.Runtime.Profile = runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...).Spec.Runtime.Profile
+	if err := f.r.Update(context.Background(), &current); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	status := runtimePoolTestGetPool(t, f.r, f.pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(status.Message, "cannot mount toolboxes") {
+		t.Fatalf("toolbox profile was not rejected: %s: %s", status.Lifecycle, status.Message)
+	}
+	if f.currentWorkspace(t).Spec.Workload != nil {
+		t.Fatal("published a workload request for a toolbox profile")
+	}
+}
+
 func TestExternalRuntimePoolRejectsMaterializationChangedDuringAuthenticatedProbe(t *testing.T) {
 	for _, evidenceChanged := range []bool{false, true} {
 		name := "Pod spec changed"
@@ -622,48 +642,46 @@ func TestExternalRuntimePoolPublicResourceDefaultsAndFrozenRevalidation(t *testi
 	f := newExternalRuntimePoolFixture(t)
 	w := f.publish(t)
 	request := w.Spec.Workload
-	if len(request.Resources.Requests) != 2 || len(request.Resources.Limits) != 2 ||
-		!reflect.DeepEqual(request.Resources, externalRuntimePoolResourceRequirements(runtimePoolResourceClassStandard)) ||
-		!reflect.DeepEqual(request.Resources, request.Runtime.Template.Spec.Containers[0].Resources) {
-		t.Fatalf("external public resources differ from CPU/memory admission: %#v", request.Resources)
+	plain := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	if plain.Requests.StorageEphemeral().Cmp(resource.MustParse("1Gi")) != 0 || plain.Limits.StorageEphemeral().Cmp(resource.MustParse("5Gi")) != 0 {
+		t.Fatal("plain Deployment storage quotas changed")
+	}
+	if !reflect.DeepEqual(request.Resources, plain) || !reflect.DeepEqual(request.Resources, request.Runtime.Template.Spec.Containers[0].Resources) {
+		t.Fatalf("Pod-backed public resources differ from in-cluster pool quotas: %#v", request.Resources)
 	}
 	if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil {
 		t.Fatal(err)
+	}
+	cfg, err := f.r.runtimePoolConfig(f.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := map[string]*resource.Quantity{}
+	for _, volume := range f.r.runtimePoolPodTemplate(f.pool, cfg, cfg.labels, "auth", "provider").Spec.Volumes {
+		if volume.EmptyDir != nil {
+			limits[volume.Name] = volume.EmptyDir.SizeLimit
+		}
 	}
 	scratchVolumes := 0
 	for _, volume := range request.Runtime.Template.Spec.Volumes {
 		if volume.EmptyDir != nil {
 			scratchVolumes++
-			if volume.EmptyDir.SizeLimit != nil {
-				t.Fatal("external request carries a Kubernetes scratch storage quota")
+			if volume.EmptyDir.SizeLimit == nil || limits[volume.Name] == nil || volume.EmptyDir.SizeLimit.Cmp(*limits[volume.Name]) != 0 {
+				t.Fatalf("Pod-backed scratch volume %s lost its in-cluster size quota", volume.Name)
 			}
 		}
 	}
 	if scratchVolumes == 0 {
 		t.Fatal("external workload has no isolated scratch volumes")
 	}
-	cfg, err := f.r.runtimePoolConfig(f.pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plainTemplate := f.r.runtimePoolPodTemplate(f.pool, cfg, cfg.labels, "auth", "provider")
-	for _, volume := range plainTemplate.Spec.Volumes {
-		if volume.EmptyDir != nil && volume.EmptyDir.SizeLimit == nil {
-			t.Fatal("plain Deployment lost its scratch quota")
-		}
-	}
-	plain := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
-	if plain.Requests.StorageEphemeral().Cmp(resource.MustParse("1Gi")) != 0 || plain.Limits.StorageEphemeral().Cmp(resource.MustParse("5Gi")) != 0 {
-		t.Fatal("plain Deployment storage quotas changed")
-	}
 
-	// A persisted request made by an earlier release retains every positively
-	// admitted quota. New defaults must never rewrite or weaken that request.
-	request.Resources = plain
-	request.Runtime.Template.Spec.Containers[0].Resources = plain
+	// Revalidation never rewrites a persisted request, even one whose quotas
+	// differ from the current defaults.
+	request.Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}}
+	request.Runtime.Template.Spec.Containers[0].Resources = request.Resources
 	for i := range request.Runtime.Template.Spec.Volumes {
 		if volume := request.Runtime.Template.Spec.Volumes[i].EmptyDir; volume != nil {
-			volume.SizeLimit = new(resource.MustParse("1Gi"))
+			volume.SizeLimit = nil
 		}
 	}
 	request.Revision, err = workspacev1alpha1.WorkloadRevision(*request)
@@ -680,7 +698,7 @@ func TestExternalRuntimePoolPublicResourceDefaultsAndFrozenRevalidation(t *testi
 	runtimePoolReconcile(t, f.r, f.pool)
 	got := f.currentWorkspace(t).Spec.Workload
 	if !reflect.DeepEqual(got, request) {
-		t.Fatal("revalidation weakened a persisted resource request")
+		t.Fatal("revalidation rewrote a persisted resource request")
 	}
 }
 
@@ -905,5 +923,59 @@ func TestExternalRuntimePoolQuarantineAuthorizesStopForSuspendCapableClass(t *te
 	}
 	if err := workspaceprovider.ValidateWorkloadRetirement(workspace.Spec.Workload, workspace.Status.Allocation, workspace.Spec.Retirement, workspacev1alpha1.WorkloadRetirementStop); err != nil {
 		t.Fatalf("provider Stop validation rejects the quarantine authorization: %v", err)
+	}
+}
+
+func TestExternalRuntimePoolReportsCurrentProviderOperationFailure(t *testing.T) {
+	const cause = `runtime labels select unadmitted egress permissions in NetworkPolicy "widen"`
+	for _, tc := range []struct {
+		name               string
+		status             metav1.ConditionStatus
+		reason             string
+		staleCondition     bool
+		staleObservation   bool
+		wantProviderReport bool
+	}{
+		{name: "current operation failure", status: metav1.ConditionUnknown, reason: externalProviderOperationFailedReason, wantProviderReport: true},
+		{name: "ordinary progress", status: metav1.ConditionFalse, reason: string(workspacev1alpha1.ReasonProgressing)},
+		{name: "other unknown reason", status: metav1.ConditionUnknown, reason: string(workspacev1alpha1.ReasonProgressing)},
+		{name: "condition for an older generation", status: metav1.ConditionUnknown, reason: externalProviderOperationFailedReason, staleCondition: true},
+		{name: "unobserved generation", status: metav1.ConditionUnknown, reason: externalProviderOperationFailedReason, staleObservation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalRuntimePoolFixture(t)
+			w := f.publish(t)
+			conditionGeneration, observedGeneration := w.Generation, w.Generation
+			if tc.staleCondition {
+				conditionGeneration--
+			}
+			if tc.staleObservation {
+				observedGeneration--
+			}
+			w.Status.ObservedGeneration = observedGeneration
+			workspaceprovider.SetCondition(&w.Status.Conditions, metav1.Condition{Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: tc.status, Reason: tc.reason,
+				Message: "provider allocation could not be verified: " + cause, ObservedGeneration: conditionGeneration})
+			if err := f.r.Status().Update(context.Background(), w); err != nil {
+				t.Fatal(err)
+			}
+			runtimePoolReconcile(t, f.r, f.pool)
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			if !strings.HasPrefix(pool.Status.Message, "waiting for current exact-instance startup evidence") {
+				t.Fatalf("unexpected pool progress: %q", pool.Status.Message)
+			}
+			if strings.Contains(pool.Status.Message, cause) != tc.wantProviderReport {
+				t.Fatalf("provider report presence = %v, want %v: %q", !tc.wantProviderReport, tc.wantProviderReport, pool.Status.Message)
+			}
+			if tc.wantProviderReport && pool.Status.Message != "waiting for current exact-instance startup evidence; provider reports: provider allocation could not be verified: "+cause {
+				t.Fatalf("unexpected provider report: %q", pool.Status.Message)
+			}
+		})
+	}
+	w := &workspacev1alpha1.ExecutionWorkspace{}
+	w.Generation, w.Status.ObservedGeneration = 1, 1
+	w.Status.Conditions = []metav1.Condition{{Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionUnknown, Reason: externalProviderOperationFailedReason,
+		Message: strings.Repeat("x", 4096), ObservedGeneration: 1}}
+	if report := externalProviderOperationReport(w); len(report) > 512 || report == "" {
+		t.Fatalf("provider report is not bounded: %d bytes", len(report))
 	}
 }

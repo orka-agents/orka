@@ -1,0 +1,628 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package api
+
+// Model-free evals for the chat orchestrator. A scripted provider stands in for
+// the LLM, so these run in milliseconds and check what the real HandleChat path
+// sends to the model and how Orka handles the decisions a model makes. They do
+// not measure model judgment.
+//
+// A case with knownDefect documents a check that fails on current code. It
+// passes while the defect reproduces and fails once the defect is fixed, so the
+// fix also removes the knownDefect marker.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"maps"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/llm"
+	chattools "github.com/orka-agents/orka/internal/tools"
+)
+
+const (
+	chatEvalProviderType = "chat-eval-scripted"
+	chatEvalNamespace    = "team-eval"
+	// chatEvalMaxModelContextBytes bounds the system prompt plus tool schemas
+	// for the seeded eval fixture, not every possible namespace. Raise it
+	// deliberately when that fixture or its prompt must grow.
+	chatEvalMaxModelContextBytes = 40000
+)
+
+// evalRecordingProvider records every completion request the chat loop sends.
+type evalRecordingProvider struct {
+	chatMockProvider
+	requests []*llm.CompletionRequest
+}
+
+func (p *evalRecordingProvider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	recorded := *req
+	recorded.Messages = slices.Clone(req.Messages)
+	recorded.Tools = slices.Clone(req.Tools)
+	p.requests = append(p.requests, &recorded)
+	return p.chatMockProvider.Complete(ctx, req)
+}
+
+// chatEvalCluster seeds each namespace with the same Providers and Agents:
+// a runtime coding agent, a plain AI reviewer, and a non-runtime coordinator.
+func chatEvalCluster(t *testing.T, namespaces ...string) client.Client {
+	t.Helper()
+	objs := make([]runtime.Object, 0, 8*len(namespaces))
+	for _, ns := range namespaces {
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns, UID: types.UID("uid-" + ns)}})
+		objs = append(objs, providerCRD("openai", ns, chatEvalProviderType, "eval-model")...)
+		objs = append(objs, providerCRD("secondary", ns, chatEvalProviderType, "eval-model")...)
+		objs = append(objs,
+			&corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: ns},
+				Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+			},
+			&corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: ns},
+				Spec:       corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: "openai"}},
+			},
+			&corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "dev-coordinator", Namespace: ns},
+				Spec: corev1alpha1.AgentSpec{
+					ProviderRef:  &corev1alpha1.ProviderReference{Name: "openai"},
+					Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+				},
+			},
+		)
+	}
+	return fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objs...).Build()
+}
+
+// runChatEvalTurn sends one chat request through HandleChat with a scripted
+// model and returns the recorded model requests and the chat response.
+func runChatEvalTurn(t *testing.T, c client.Client, req ChatRequest, responses ...*llm.CompletionResponse) (*evalRecordingProvider, ChatResponse) {
+	t.Helper()
+	provider := &evalRecordingProvider{chatMockProvider: chatMockProvider{name: chatEvalProviderType, responses: responses}}
+	llm.RegisterProvider(chatEvalProviderType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
+
+	cfg := DefaultChatConfig()
+	cfg.MaxIterations = 3
+	// Exercise the full chat-tool catalog, including flag-gated connector tools.
+	cfg.ConnectorsEnabled = true
+	cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
+	ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
+	app := fiber.New()
+	app.Post("/api/v1/chat", ch.HandleChat)
+
+	if req.SessionID == "" {
+		req.SessionID = "chat-eval"
+	}
+	if req.Provider == "" {
+		req.Provider = "openai"
+	}
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	resp, err := app.Test(httpReq)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	data, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", data)
+
+	var chatResp ChatResponse
+	require.NoError(t, json.Unmarshal(data, &chatResp))
+	require.NotEmpty(t, provider.requests, "chat turn made no model call")
+	return provider, chatResp
+}
+
+// chatEvalModelInput is everything the model reads on a turn except the static
+// tool schemas.
+func chatEvalModelInput(req *llm.CompletionRequest) string {
+	var sb strings.Builder
+	sb.WriteString(req.SystemPrompt)
+	for _, m := range req.Messages {
+		sb.WriteString("\n")
+		sb.WriteString(m.Role)
+		sb.WriteString(": ")
+		sb.WriteString(m.Content)
+	}
+	return sb.String()
+}
+
+// expectChatEvalCheck applies the knownDefect contract described at the top
+// of this file.
+func expectChatEvalCheck(t *testing.T, ok bool, detail, knownDefect string) {
+	t.Helper()
+	switch {
+	case ok && knownDefect != "":
+		t.Errorf("known defect no longer reproduces; remove knownDefect: %s", knownDefect)
+	case !ok && knownDefect == "":
+		t.Errorf("check failed: %s", detail)
+	case !ok:
+		t.Logf("known defect still present: %s (%s)", knownDefect, detail)
+	}
+}
+
+// TestChatEvalRequestContextReachesModel checks that request fields the prompt
+// tells the model to act on change what the model sees. Identical model input
+// for different requests means the model cannot follow that instruction.
+func TestChatEvalFeatureGateDoesNotRestrictUnscopedPrompt(t *testing.T) {
+	for _, connectorsEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("connectors=%v", connectorsEnabled), func(t *testing.T) {
+			provider := &evalRecordingProvider{chatMockProvider: chatMockProvider{
+				name: chatEvalProviderType, responses: []*llm.CompletionResponse{{Content: "done"}},
+			}}
+			llm.RegisterProvider(chatEvalProviderType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
+			cfg := DefaultChatConfig()
+			cfg.ConnectorsEnabled = connectorsEnabled
+			ch := newTestChatHandler(t, chatEvalCluster(t, defaultNamespace), newTestSessionStore(t), newTestResultStore(t), cfg)
+			app := fiber.New()
+			app.Post("/api/v1/chat", ch.HandleChat)
+			body, err := json.Marshal(ChatRequest{Message: "hello", Provider: "openai"})
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Len(t, provider.requests, 1)
+			require.Contains(t, provider.requests[0].SystemPrompt, "<capabilities>")
+			require.NotContains(t, provider.requests[0].SystemPrompt, "<available_chat_tools>")
+			require.Equal(t, connectorsEnabled, slices.Contains(completionToolNames(provider.requests[0].Tools), chattools.ListConnectionsToolName))
+		})
+	}
+}
+
+func TestChatEvalRequestContextReachesModel(t *testing.T) {
+	const message = "review the design doc at https://example.com/design.md and list the top 3 risks"
+	tests := []struct {
+		name        string
+		base        ChatRequest
+		variant     ChatRequest
+		knownDefect string
+	}{
+		{
+			name:    "runtime agent selection",
+			base:    ChatRequest{Message: message},
+			variant: ChatRequest{Message: message, AgentRef: "coder"},
+		},
+		{
+			name:    "non-runtime agent selection",
+			base:    ChatRequest{Message: message},
+			variant: ChatRequest{Message: message, AgentRef: "reviewer"},
+		},
+		{
+			name:    "request namespace",
+			base:    ChatRequest{Message: message, Namespace: defaultNamespace},
+			variant: ChatRequest{Message: message, Namespace: chatEvalNamespace},
+		},
+		{
+			name:    "session provider",
+			base:    ChatRequest{Message: message, Provider: "openai"},
+			variant: ChatRequest{Message: message, Provider: "secondary"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := chatEvalCluster(t, defaultNamespace, chatEvalNamespace)
+			base, _ := runChatEvalTurn(t, c, tt.base, &llm.CompletionResponse{Content: "ok"})
+			again, _ := runChatEvalTurn(t, c, tt.base, &llm.CompletionResponse{Content: "ok"})
+			require.Equal(t, chatEvalModelInput(base.requests[0]), chatEvalModelInput(again.requests[0]),
+				"identical requests must produce identical model input for this comparison to mean anything")
+			variant, _ := runChatEvalTurn(t, c, tt.variant, &llm.CompletionResponse{Content: "ok"})
+			differs := chatEvalModelInput(base.requests[0]) != chatEvalModelInput(variant.requests[0])
+			expectChatEvalCheck(t, differs, "model input is identical for both requests", tt.knownDefect)
+		})
+	}
+}
+
+// TestChatEvalScopedCallerPromptMatchesTools checks that a caller whose token
+// limits the tools it may use is not told to call the tools it lost. Chat tool
+// names in the model input must be among the tools offered on the turn, and a
+// selected agent must stay visible even when its tool is not offered.
+func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
+	tests := []struct {
+		name               string
+		allowedTools       []string
+		agentRef           string
+		connectorsDisabled bool
+		knownDefect        string
+	}{
+		{name: "all chat tools allowed", allowedTools: chattools.ChatToolNames()},
+		{
+			name:               "connectors disabled despite connector read scope",
+			allowedTools:       []string{"list_tasks", chattools.ListConnectionsToolName},
+			connectorsDisabled: true,
+		},
+		{
+			name:         "read-only tools allowed",
+			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
+		},
+		{
+			name:         "polling tools without a task creation tool",
+			allowedTools: []string{"wait_for_task", "fetch_task_output"},
+		},
+		{
+			name:         "selected runtime agent without its task tool",
+			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
+			agentRef:     "coder",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oidc := newTestOIDCProvider(t)
+			token := issueTestContextToken(t, oidc, nil, map[string]any{
+				"scope": strings.Join([]string{ContextTokenScopeToolsUse, ContextTokenScopeProvidersUse, ContextTokenScopeAgentsRead, ContextTokenScopeSessionsRead, ContextTokenScopeSessionsWrite, ContextTokenScopeConnectorsRead}, " "),
+				"tctx":  map[string]any{"allowedTools": tt.allowedTools},
+			})
+			authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+			require.NoError(t, err)
+
+			provider := &evalRecordingProvider{chatMockProvider: chatMockProvider{name: chatEvalProviderType, responses: []*llm.CompletionResponse{{Content: "ok"}}}}
+			llm.RegisterProvider(chatEvalProviderType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
+			c := chatEvalCluster(t, defaultNamespace)
+			cfg := DefaultChatConfig()
+			cfg.ConnectorsEnabled = !tt.connectorsDisabled
+			cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
+			ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
+			ch.contextTokenAuthorization = authz
+			app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+			app.Use(NewAuthMiddleware(c, AuthConfig{ContextTokens: testContextTokenConfig(t, oidc, "")}))
+			app.Post("/api/v1/chat", ch.HandleChat)
+
+			body, err := json.Marshal(ChatRequest{SessionID: "chat-eval", Message: "list the pods in kube-system", Provider: "openai", AgentRef: tt.agentRef})
+			require.NoError(t, err)
+			httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Accept", "application/json")
+			httpReq.Header.Set(TransactionTokenHeaderName, token)
+			resp, err := app.Test(httpReq, fiber.TestConfig{Timeout: 10 * time.Second})
+			require.NoError(t, err)
+			defer func() { require.NoError(t, resp.Body.Close()) }()
+			data, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "%s", data)
+			require.NotEmpty(t, provider.requests, "chat turn made no model call")
+
+			req := provider.requests[0]
+			offered := map[string]bool{}
+			for _, tool := range req.Tools {
+				offered[tool.Name] = true
+			}
+			expectedTools := slices.Clone(tt.allowedTools)
+			if tt.connectorsDisabled {
+				expectedTools = slices.DeleteFunc(expectedTools, func(name string) bool { return name == chattools.ListConnectionsToolName })
+			}
+			require.Equal(t, slices.Sorted(slices.Values(expectedTools)), slices.Sorted(maps.Keys(offered)),
+				"offered chat tools must match authorized and enabled tools")
+			var unavailable []string
+			for _, name := range chattools.ChatToolNames() {
+				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(chatEvalModelInput(req)) {
+					unavailable = append(unavailable, name)
+				}
+			}
+			taskCreator := func(name string) bool { return strings.HasPrefix(name, "create_") && strings.HasSuffix(name, "_task") }
+			if !slices.ContainsFunc(tt.allowedTools, taskCreator) && strings.Contains(chatEvalModelInput(req), "create_*_task") {
+				unavailable = append(unavailable, "create_*_task")
+			}
+			expectChatEvalCheck(t, len(unavailable) == 0, "model input names tools the caller cannot use: "+strings.Join(unavailable, ","), tt.knownDefect)
+			if tt.agentRef != "" {
+				require.Contains(t, req.Messages[len(req.Messages)-1].Content, fmt.Sprintf("%q", tt.agentRef), "the selected agent must stay visible to the model")
+			}
+		})
+	}
+}
+
+var chatEvalProviderRefPattern = regexp.MustCompile(`providerRef\\?"?\s*[=:]\s*\\?"?([A-Za-z0-9][A-Za-z0-9._-]*)`)
+
+func chatEvalProviderRefs(text string) []string {
+	matches := chatEvalProviderRefPattern.FindAllStringSubmatch(text, -1)
+	refs := make([]string, 0, len(matches))
+	for _, m := range matches {
+		refs = append(refs, m[1])
+	}
+	return refs
+}
+
+func TestChatEvalProviderRefExtraction(t *testing.T) {
+	tests := []struct {
+		text string
+		want []string
+	}{
+		{text: `Set coordination.enabled=true, providerRef="copilot", model.name="gpt-5.4"`, want: []string{"copilot"}},
+		{text: `create_ai_task (prompt: "...", providerRef: "openai")`, want: []string{"openai"}},
+		{text: `{"providerRef":"team-llm"}`, want: []string{"team-llm"}},
+		{text: `providerRef=local.v1 and providerRef = "b"`, want: []string{"local.v1", "b"}},
+		{text: `set providerRef to an available provider name`, want: []string{}},
+	}
+	for _, tt := range tests {
+		require.Equal(t, tt.want, chatEvalProviderRefs(tt.text), tt.text)
+	}
+}
+
+// TestChatEvalInjectedDirectivesReferenceExistingProviders checks text that
+// HandleChat adds to the user's message. Those directives are mandatory for the
+// model, so every Provider they name must exist in the namespace. Without a
+// selected agent, the message must reach the model unchanged.
+func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
+	tests := []struct {
+		name          string
+		req           ChatRequest
+		wantDirective bool
+	}{
+		{
+			name:          "runtime agent hint",
+			req:           ChatRequest{Message: "refactor the auth middleware in https://github.com/acme/api", AgentRef: "coder"},
+			wantDirective: true,
+		},
+		{
+			name:          "non-runtime agent hint",
+			req:           ChatRequest{Message: "review the design doc at https://example.com/design.md", AgentRef: "reviewer"},
+			wantDirective: true,
+		},
+		{
+			name: "issue request without an agent",
+			req:  ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := chatEvalCluster(t, defaultNamespace)
+			provider, _ := runChatEvalTurn(t, c, tt.req, &llm.CompletionResponse{Content: "ok"})
+			messages := provider.requests[0].Messages
+			require.NotEmpty(t, messages)
+			content := messages[len(messages)-1].Content
+			require.True(t, strings.HasSuffix(content, tt.req.Message), "user message was not preserved: %q", content)
+			injected := strings.TrimSuffix(content, tt.req.Message)
+			if !tt.wantDirective {
+				require.Empty(t, injected, "HandleChat rewrote a message that selects no agent")
+				return
+			}
+			require.NotEmpty(t, strings.TrimSpace(injected), "expected HandleChat to inject a directive")
+
+			var providers corev1alpha1.ProviderList
+			require.NoError(t, c.List(t.Context(), &providers, client.InNamespace(defaultNamespace)))
+			existing := map[string]bool{}
+			for i := range providers.Items {
+				existing[providers.Items[i].Name] = true
+			}
+			var missing []string
+			for _, ref := range chatEvalProviderRefs(injected) {
+				if !existing[ref] {
+					missing = append(missing, ref)
+				}
+			}
+			require.Empty(t, missing, "injected directive names Providers that do not exist")
+		})
+	}
+}
+
+// Names followed by = or : are tool arguments such as wait_timeout="30m".
+var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file|request|reply|recall|propose|search|remember|merge|auto|comment|post|review)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*|remember)\b(\s*"?\s*[=:])?`)
+
+// TestChatEvalPromptBuiltInToolReferencesExist catches model-message, system-prompt,
+// or tool-schema text that still names a renamed or removed built-in tool.
+// Custom Tool CRD identifiers are outside this built-in vocabulary check.
+// Coordinator-only tools may be mentioned because the prompt describes what
+// coordinator Agents will do.
+func TestChatEvalPromptBuiltInToolReferencesExist(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		req           ChatRequest
+		wantDirective string
+	}{
+		{name: "plain chat", req: ChatRequest{Message: "hello"}},
+		{
+			name:          "selected runtime agent directive",
+			req:           ChatRequest{Message: "refactor the auth middleware", AgentRef: "coder"},
+			wantDirective: `[Using agent "coder" which has runtime`,
+		},
+		{
+			// Issue workflows no longer get a synthetic coordinator directive.
+			name: "issue PR workflow",
+			req:  ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := chatEvalCluster(t, defaultNamespace)
+			provider, _ := runChatEvalTurn(t, c, tt.req,
+				&llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "eval-call", Name: "list_agents", Arguments: json.RawMessage(`{}`)}}},
+				&llm.CompletionResponse{Content: "ok"},
+			)
+			require.Len(t, provider.requests, 2, "expected to scan the initial and post-tool model requests")
+			if tt.wantDirective != "" {
+				messages := provider.requests[0].Messages
+				require.NotEmpty(t, messages)
+				content := messages[len(messages)-1].Content
+				require.True(t, strings.HasSuffix(content, tt.req.Message), "user message was not preserved: %q", content)
+				require.Contains(t, strings.TrimSuffix(content, tt.req.Message), tt.wantDirective,
+					"expected HandleChat to inject the selected-agent directive")
+			}
+
+			for i, req := range provider.requests {
+				offered := map[string]bool{}
+				for _, tool := range req.Tools {
+					offered[tool.Name] = true
+				}
+				for _, name := range chattools.ChatToolNames() {
+					require.True(t, offered[name], "chat tool %s is not offered to the model in request %d", name, i)
+				}
+
+				text := make([]string, 0, 1+len(req.Tools))
+				text = append(text, chatEvalModelInput(req))
+				for _, tool := range req.Tools {
+					schema, err := json.Marshal(tool.Parameters)
+					require.NoError(t, err)
+					text = append(text, tool.Description, string(schema))
+				}
+				require.Empty(t, chatEvalUnknownBuiltInToolReferences(strings.Join(text, "\n")),
+					"model messages, system prompt, or tool schemas in request %d name built-in tools that are not registered", i)
+			}
+		})
+	}
+}
+
+func chatEvalUnknownBuiltInToolReferences(text string) []string {
+	known := map[string]bool{}
+	for _, name := range chattools.KnownBuiltInToolNames() {
+		known[name] = true
+	}
+	var stale []string
+	for _, m := range chatEvalToolMentionPattern.FindAllStringSubmatch(text, -1) {
+		name, isArgument := m[1], m[2] != ""
+		if !isArgument && !known[name] && !slices.Contains(stale, name) {
+			stale = append(stale, name)
+		}
+	}
+	return stale
+}
+
+func TestChatEvalUnknownBuiltInToolReferences(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want []string
+	}{
+		{name: "registered worker tools", text: "Use code_exec, web_fetch, file_read, file_write, request_approval, and reply_in_conversation."},
+		{name: "stale code tool", text: "Use code_missing_tool.", want: []string{"code_missing_tool"}},
+		{name: "stale web tool", text: "Use web_missing_tool.", want: []string{"web_missing_tool"}},
+		{name: "registered memory tools", text: "Use recall_memory, propose_memory, search_transcript, and remember."},
+		{name: "stale forge tools", text: "Use merge_removed_request, auto_removed_merge, comment_removed_issue, post_removed_review, and review_removed_request.", want: []string{"merge_removed_request", "auto_removed_merge", "comment_removed_issue", "post_removed_review", "review_removed_request"}},
+		{name: "stale memory tools", text: "Use recall_removed_memory, propose_removed_memory, search_removed_transcript, and remember_removed_memory.", want: []string{"recall_removed_memory", "propose_removed_memory", "search_removed_transcript", "remember_removed_memory"}},
+		{name: "stale request tool", text: "Use request_missing_tool.", want: []string{"request_missing_tool"}},
+		{name: "stale reply tool", text: "Use reply_missing_tool.", want: []string{"reply_missing_tool"}},
+		{name: "nested schema tool reference", text: `{"properties":{"mode":{"description":"Use request_removed_approval.","enum":["reply_removed_conversation"]}}}`, want: []string{"request_removed_approval", "reply_removed_conversation"}},
+		{name: "stale file tool", text: "Use file_missing_tool.", want: []string{"file_missing_tool"}},
+		{name: "stale versioned tool", text: "Use create_agent_v2.", want: []string{"create_agent_v2"}},
+		{name: "stale tool with numeric segment", text: "Use create_agent_2.", want: []string{"create_agent_2"}},
+		{name: "schema property keys are not tools", text: `{"review_event":{},"wait_timeout2":"30m","file_path":"x"}`},
+		{name: "arguments are not tools", text: `file_path="x" wait_timeout: "30m" file_path_v2="x" wait_timeout2: "30m"`},
+		{name: "custom identifiers are outside the built-in scan", text: "Use custom-tool or custom_tool."},
+		{name: "other identifiers are not tools", text: "model_v2 task_create_agent_v2 createAgentV2 get_42"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, chatEvalUnknownBuiltInToolReferences(tt.text))
+		})
+	}
+}
+
+// New built-in families must participate in the scan rather than being silently
+// ignored. This pins coverage to the actual registry, including single-word tools.
+func TestChatEvalEveryKnownBuiltInToolNameIsScanned(t *testing.T) {
+	for _, name := range chattools.KnownBuiltInToolNames() {
+		t.Run(name, func(t *testing.T) {
+			match := chatEvalToolMentionPattern.FindStringSubmatch(name)
+			require.Len(t, match, 3, "registered built-in is outside the tool-reference scan")
+			require.Equal(t, name, match[1])
+			require.Empty(t, chatEvalUnknownBuiltInToolReferences(name))
+		})
+	}
+}
+
+func TestChatEvalModelContextBudget(t *testing.T) {
+	c := chatEvalCluster(t, defaultNamespace)
+	provider, _ := runChatEvalTurn(t, c, ChatRequest{Message: "hello"}, &llm.CompletionResponse{Content: "ok"})
+	req := provider.requests[0]
+	tools, err := json.Marshal(req.Tools)
+	require.NoError(t, err)
+	size := len(req.SystemPrompt) + len(tools)
+	t.Logf("system prompt %d bytes, %d tools as %d bytes of JSON, total %d bytes", len(req.SystemPrompt), len(req.Tools), len(tools), size)
+	require.LessOrEqual(t, size, chatEvalMaxModelContextBytes, "chat model context grew past the budget")
+}
+
+// TestChatEvalModelDecisionsFailFast replays tool calls a model can make and
+// checks that Orka rejects bad ones immediately, in a result the model can act
+// on, instead of accepting them and failing minutes later. Bad decisions are
+// paired with a valid control so a check cannot pass by rejecting everything.
+func TestChatEvalModelDecisionsFailFast(t *testing.T) {
+	tests := []struct {
+		name        string
+		tool        string
+		args        string
+		wantReject  bool
+		knownDefect string
+	}{
+		{
+			name: "create agent with an existing provider",
+			tool: "create_agent",
+			args: `{"name":"planner","providerRef":"openai","coordination":{"enabled":true}}`,
+		},
+		{
+			name:       "create agent with a missing provider",
+			tool:       "create_agent",
+			args:       `{"name":"planner","providerRef":"copilot","coordination":{"enabled":true}}`,
+			wantReject: true,
+		},
+		{
+			name:       "create an agent that already exists",
+			tool:       "create_agent",
+			args:       `{"name":"dev-coordinator","providerRef":"openai","coordination":{"enabled":true}}`,
+			wantReject: true,
+		},
+		{
+			name: "agent task for a runtime agent",
+			tool: "create_agent_task",
+			args: `{"name":"refactor-auth","agentRef":"coder","prompt":"refactor the auth middleware","timeout":"20m"}`,
+		},
+		{
+			name:       "agent task for a non-runtime agent",
+			tool:       "create_agent_task",
+			args:       `{"name":"review-doc","agentRef":"reviewer","prompt":"review the design doc","timeout":"20m"}`,
+			wantReject: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := chatEvalCluster(t, defaultNamespace)
+			var agentsBefore corev1alpha1.AgentList
+			var tasksBefore corev1alpha1.TaskList
+			require.NoError(t, c.List(context.Background(), &agentsBefore))
+			require.NoError(t, c.List(context.Background(), &tasksBefore))
+			_, resp := runChatEvalTurn(t, c, ChatRequest{Message: "eval"},
+				&llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "eval-call", Name: tt.tool, Arguments: json.RawMessage(tt.args)}}},
+				&llm.CompletionResponse{Content: "done"},
+			)
+			require.Len(t, resp.ToolCalls, 1)
+			var result ToolResult
+			require.NoError(t, json.Unmarshal(resp.ToolCalls[0].Result, &result))
+			if !tt.wantReject {
+				require.True(t, result.Success, "valid decision was rejected: %s %s", result.ErrorType, result.Error)
+				return
+			}
+			rejected := !result.Success && strings.TrimSpace(result.Error) != ""
+			expectChatEvalCheck(t, rejected, "tool accepted the decision", tt.knownDefect)
+			if rejected {
+				var agentsAfter corev1alpha1.AgentList
+				var tasksAfter corev1alpha1.TaskList
+				require.NoError(t, c.List(context.Background(), &agentsAfter))
+				require.NoError(t, c.List(context.Background(), &tasksAfter))
+				require.Equal(t, agentsBefore.Items, agentsAfter.Items, "rejected call changed Agents")
+				require.Equal(t, tasksBefore.Items, tasksAfter.Items, "rejected call changed Tasks")
+			}
+		})
+	}
+}

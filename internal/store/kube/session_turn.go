@@ -148,6 +148,8 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		PublicationReceipt:   plan.receipt,
 		Projection:           normalized.Projection,
 		FinalizedAt:          normalized.FinalizedAt,
+		NativeSession:        normalized.NativeSession,
+		NativeSessionCarried: normalized.NativeSessionCarried,
 	})
 	if err != nil {
 		return nil, err
@@ -660,6 +662,12 @@ func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnReq
 	if request.SkipTranscriptAppend && request.SkipUserPromptAppend {
 		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("session turn cannot combine full transcript suppression with user-prompt-only suppression")
 	}
+	if request.NativeSessionCarried && (request.NativeSession == nil || request.TerminalKind != store.SessionTurnOutcomeMarker) {
+		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("carried native checkpoint requires the existing record and an outcome-marker finalization")
+	}
+	if request.NativeSession != nil && (request.SkipTranscriptAppend || !request.NativeSessionCarried && request.TerminalKind != store.SessionTurnAssistantResult) {
+		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("native capture requires canonical assistant-result finalization; native state cannot skip transcript append")
+	}
 	if err := store.ValidateControlText("session turn terminal content", request.TerminalContent); err != nil {
 		return store.FinalizeSessionTurnRequest{}, "", err
 	}
@@ -772,6 +780,7 @@ func sessionTurnRequestMatchesFinalized(turn store.SessionTurn, request store.Fi
 		availableAt = request.FinalizedAt
 	}
 	return turn.FinalizationDigest == request.FinalizationDigest && turn.TerminalKind == request.TerminalKind && turn.TerminalContent == request.TerminalContent && turn.PublicationID == request.PublicationID &&
+		turn.NativeSessionDigest == store.NativeSessionCaptureDigest(request.NativeSession) &&
 		turn.ProjectionID == request.Projection.ID && turn.ProjectionKind == request.Projection.ProjectionKind && turn.ProjectionDigest == request.Projection.PayloadDigest && turn.ProjectionAvailableAt.Equal(availableAt)
 }
 

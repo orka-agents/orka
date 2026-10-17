@@ -195,9 +195,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if blocked {
 		return "", false, nil
 	}
-	if !workspace.DeletionTimestamp.IsZero() {
-		// The predecessor detach is still deleting the deterministic-name
-		// workspace; the replacement is created once deletion completes.
+	if !workspace.DeletionTimestamp.IsZero() || workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
+		// The predecessor is being deleted (a Deleted desired state precedes
+		// the object deletion); the replacement is created once deletion
+		// completes.
 		return "", false, nil
 	}
 	if err := verifyACPClassWorkspace(workspace, task, binding, plan.PoolName); err != nil {
@@ -429,6 +430,22 @@ func validateACPClassWorkspaceAttachmentAttempt(
 		return nil
 	}
 	return err
+}
+
+// failedACPWorkspaceRetainsCheckpoint reports whether a failed incarnation
+// still has a verified checkpoint to recover. The provider owns that
+// checkpoint, but Core cold-resumes an incarnation only from verified retained
+// data, so the immutable request proves one exists. Deleting the workspace
+// would release it.
+func failedACPWorkspaceRetainsCheckpoint(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) bool {
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
+		return false
+	}
+	if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, now); bounded && remaining <= 0 {
+		return false
+	}
+	request := workspace.Spec.Workload
+	return request != nil && request.RetainedData != nil && request.RetainedData.Valid()
 }
 
 // recordACPWorkspaceDetachAction records the attached Task's frozen effective
@@ -1024,7 +1041,9 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		}
 		return false, err
 	}
-	if !workspace.DeletionTimestamp.IsZero() {
+	// A Deleted desired state is terminal: the workspace is already being
+	// destroyed and no detach action can apply to it.
+	if !workspace.DeletionTimestamp.IsZero() || workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 		return true, nil
 	}
 	// The link label is mutable Task metadata: revalidate that the named
@@ -1197,6 +1216,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// changed after this read, and a Task that attached in between settles at
 	// its own settle time anyway.
 	terminallyFailed := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if terminallyFailed && workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+		failedACPWorkspaceRetainsCheckpoint(workspace, time.Now()) {
+		// The provider stops the failed attempt without capturing or replaying
+		// it. Keep the source Failed for explicit recovery export; existing
+		// idle/maxLifetime retention still owns its deadline.
+		return true, r.markACPTaskWorkspaceSettled(ctx, task)
+	}
 
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		!terminallyFailed {

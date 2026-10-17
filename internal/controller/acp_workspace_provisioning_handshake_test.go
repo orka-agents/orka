@@ -110,6 +110,10 @@ func TestExternalWorkspacePoolHandshakeWaitsForGenerationAcknowledgement(t *test
 	}{
 		{name: "provider acknowledgement pending", pending: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) { w.Status.ObservedGeneration-- }},
 		{name: "new workload needs core admission", pending: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) { w.Generation++ }},
+		{name: "core re-admission in flight", pending: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Generation++
+			w.Status.Conditions[0].ObservedGeneration = w.Generation + 1
+		}},
 		{name: "provider outage", pending: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
 			w.Status.Conditions[0].Status = metav1.ConditionFalse
 			w.Status.Conditions[0].Reason = reasonClassNotReady

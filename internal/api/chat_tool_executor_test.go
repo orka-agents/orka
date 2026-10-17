@@ -21,7 +21,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
@@ -72,7 +74,7 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
 		SessionDeleter:            e.sessionManager,
-		GenerateTaskName:          e.generateTaskName,
+		GenerateTaskName:          func() string { return e.generateTaskName(ctx) },
 		TaskLabels:                e.taskLabels,
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
@@ -242,7 +244,7 @@ func (f *fakeSessionStore) ListSessions(_ context.Context, _ string) ([]store.Se
 	return nil, nil
 }
 
-func (f *fakeSessionStore) ListSessionsPage(_ context.Context, _, _ string, _ int, _ string) ([]store.SessionMetadata, bool, error) {
+func (f *fakeSessionStore) ListSessionsPage(_ context.Context, _ string, _ *store.SessionPageCursor, _ int, _ string) ([]store.SessionMetadata, bool, error) {
 	return nil, false, nil
 }
 func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) error {
@@ -483,8 +485,8 @@ func TestNewToolExecutor(t *testing.T) {
 
 func TestGenerateTaskName(t *testing.T) {
 	e := newTestExecutor()
-	name1 := e.generateTaskName()
-	name2 := e.generateTaskName()
+	name1 := e.generateTaskName(context.Background())
+	name2 := e.generateTaskName(context.Background())
 
 	if !strings.HasPrefix(name1, "chat-sess-12345678-") {
 		t.Errorf("name1 = %q, expected prefix chat-sess-12345678-", name1)
@@ -494,14 +496,105 @@ func TestGenerateTaskName(t *testing.T) {
 	}
 }
 
+func TestExecute_RetriesTaskNameSeedAfterListFailure(t *testing.T) {
+	ctx := context.Background()
+	e := newTestExecutor()
+	base := e.client
+	failed := false
+	e.client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, tasks := list.(*corev1alpha1.TaskList); tasks && !failed {
+				failed = true
+				return errors.New("apiserver unavailable")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	create := func() string {
+		t.Helper()
+		result, err := e.Execute(ctx, llm.ToolCall{
+			ID: "create", Name: "create_ai_task", Arguments: mustJSON(map[string]any{"prompt": "hello"}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tr ToolResult
+		if err := json.Unmarshal([]byte(result), &tr); err != nil {
+			t.Fatal(err)
+		}
+		if !tr.Success {
+			t.Fatalf("create failed: %s", result)
+		}
+		return tr.Data.(map[string]any)["name"].(string)
+	}
+
+	prefix := "chat-sess-12345678-" + e.taskNameHash() + "-"
+	// The failed lookup must not restart numbering at 1, which would collide
+	// with an earlier turn's Tasks; a random suffix is used instead.
+	first := create()
+	if !strings.HasPrefix(first, prefix+"r") || first == prefix+"1" {
+		t.Fatalf("first name = %q, want a random suffix after the failed lookup", first)
+	}
+	// The next name retries the lookup and continues the numbering.
+	if second := create(); second != prefix+"1" {
+		t.Fatalf("second name = %q, want %q once the lookup succeeds", second, prefix+"1")
+	}
+}
+
+func TestExecute_CreatesTaskInEachTurnOfSession(t *testing.T) {
+	ctx := context.Background()
+	turn1 := newTestExecutor()
+	// A Task of another session must not advance this session's sequence.
+	other := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "chat-other-00000000-7", Namespace: "other",
+		Labels: map[string]string{labels.LabelChatSession: "other"},
+	}}
+	if err := turn1.client.Create(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	var names []string
+	for turn := range 3 {
+		// Each chat turn builds a fresh executor for the same session.
+		e := turn1
+		if turn > 0 {
+			e = newTestExecutor()
+			e.client = turn1.client
+		}
+		for range turn + 1 {
+			result, err := e.Execute(ctx, llm.ToolCall{
+				ID: "create", Name: "create_ai_task", Arguments: mustJSON(map[string]any{"prompt": "hello"}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr ToolResult
+			if err := json.Unmarshal([]byte(result), &tr); err != nil {
+				t.Fatal(err)
+			}
+			if !tr.Success {
+				t.Fatalf("turn %d create failed: %s", turn+1, result)
+			}
+			names = append(names, tr.Data.(map[string]any)["name"].(string))
+		}
+	}
+
+	prefix := "chat-sess-12345678-" + newTestExecutor().taskNameHash() + "-"
+	for i, name := range names {
+		if want := prefix + fmt.Sprint(i+1); name != want {
+			t.Fatalf("task %d name = %q, want %q (all: %v)", i+1, name, want, names)
+		}
+	}
+}
+
 func TestGenerateTaskName_AvoidsCrossSessionCollisions(t *testing.T) {
 	e1 := newTestExecutor()
 	e1.sessionID = "demo-magic-chat-pr-one"
 	e2 := newTestExecutor()
 	e2.sessionID = "demo-magic-chat-pr-two"
 
-	name1 := e1.generateTaskName()
-	name2 := e2.generateTaskName()
+	name1 := e1.generateTaskName(context.Background())
+	name2 := e2.generateTaskName(context.Background())
 
 	if name1 == name2 {
 		t.Fatalf("expected distinct names for different sessions, got %q", name1)
@@ -518,7 +611,7 @@ func TestGenerateTaskNameTruncatesLongSessionToDNSLabelLimit(t *testing.T) {
 	e := newTestExecutor()
 	e.sessionID = strings.Repeat("a", 80)
 
-	name := e.generateTaskName()
+	name := e.generateTaskName(context.Background())
 
 	if len(name) > 63 {
 		t.Fatalf("len(name) = %d, want <= 63: %q", len(name), name)
@@ -632,6 +725,7 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 		namespace    any
 		sessionRef   string
 		schedule     any
+		nullFields   []string
 		isolation    bool
 		watchNS      string
 		wantError    string
@@ -644,6 +738,8 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 		{name: "stringified namespace permits same name", namespace: 789, sessionRef: "sess-12345678", wantTaskNS: "789"},
 		{name: "same namespace permits other session", sessionRef: "child-session", wantTaskNS: "default"},
 		{name: "empty schedule rejects active session", sessionRef: "sess-12345678", schedule: "", wantError: "invalid_arguments"},
+		{name: "null schedule rejects active session", sessionRef: "sess-12345678", nullFields: []string{"schedule"}, wantError: "invalid_arguments"},
+		{name: "null namespace rejects active session", sessionRef: "sess-12345678", nullFields: []string{"namespace"}, wantError: "invalid_arguments"},
 		{name: "scheduled parent permits active session", sessionRef: "sess-12345678", schedule: "0 */6 * * *", wantTaskNS: "default", wantSchedule: "0 */6 * * *"},
 		{name: "stringified schedule permits active session", sessionRef: "sess-12345678", schedule: 123, wantTaskNS: "default", wantSchedule: "123"},
 		{name: "namespace isolation remains enforced", namespace: "other", sessionRef: "sess-12345678", isolation: true, wantError: "permission_denied"},
@@ -659,6 +755,9 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 			}
 			if tt.namespace != nil {
 				args["namespace"] = tt.namespace
+			}
+			for _, field := range tt.nullFields {
+				args[field] = nil
 			}
 			result, err := e.Execute(context.Background(), llm.ToolCall{
 				ID: "child-call", Name: "create_ai_task", Arguments: mustJSON(args),
@@ -1487,9 +1586,16 @@ func TestExecuteListTools_WithTools(t *testing.T) {
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
+	// list_tools also reports the built-in tools; count only the Tool CRDs.
 	toolsData := r.Data.([]any)
-	if len(toolsData) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(toolsData))
+	custom := 0
+	for _, item := range toolsData {
+		if item.(map[string]any)["builtin"] == false {
+			custom++
+		}
+	}
+	if custom != 1 {
+		t.Fatalf("expected 1 custom tool, got %d of %d tools", custom, len(toolsData))
 	}
 }
 
@@ -2009,7 +2115,7 @@ func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 }
 
 func TestHandleInitialPrompt_WithProviderRef(t *testing.T) {
-	e := newTestExecutor()
+	e := newTestExecutor(&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "my-provider", Namespace: testDefaultNamespace}})
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{
 		"name":          "ai-agent",
 		"providerRef":   "my-provider",
@@ -2240,5 +2346,80 @@ func TestExecuteListTasks_WithLimit(t *testing.T) {
 	data := r.Data.([]any)
 	if len(data) != 2 {
 		t.Errorf("expected 2 tasks (limit), got %d", len(data))
+	}
+}
+
+func TestExecuteReportsWrongArgumentTypesAsInvalidArguments(t *testing.T) {
+	e := newTestExecutor()
+	out, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":{"k":"v"}}`)})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var r ToolResult
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Success || r.ErrorType != "invalid_arguments" || !strings.Contains(r.Error, "prompt must be a string, got an object") {
+		t.Fatalf("result = %#v, want invalid_arguments naming prompt", r)
+	}
+}
+
+func TestExecuteHonorsNumericStringsForNumberFields(t *testing.T) {
+	e := newTestExecutor()
+	if _, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":"p","priority":"10"}`)}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := e.client.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Spec.Priority == nil || *tasks.Items[0].Spec.Priority != 10 {
+		t.Fatalf("tasks = %#v, want one Task with priority 10", tasks.Items)
+	}
+}
+
+// A numeric string the registry converts must still be range-checked before it
+// is narrowed to int32, where 4294967296 would wrap to priority 0.
+func TestExecuteRejectsPriorityThatWouldWrap(t *testing.T) {
+	e := newTestExecutor()
+	result, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":"p","priority":"4294967296"}`)})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(result, "priority must be a whole number from 0 to 1000") {
+		t.Fatalf("Execute() = %s, want the priority range error", result)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := e.client.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks, want none", len(tasks.Items))
+	}
+}
+
+type recordingChatTool struct{ args json.RawMessage }
+
+func (r *recordingChatTool) Name() string        { return "record_args" }
+func (r *recordingChatTool) Description() string { return "records its arguments" }
+func (r *recordingChatTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"pr_number":{"type":"integer"}}}`)
+}
+func (r *recordingChatTool) Execute(_ context.Context, args json.RawMessage) (string, error) {
+	r.args = args
+	return tools.ChatToolSuccess(map[string]any{})
+}
+
+// The chat executor passes arguments to the registry as sent, so an integer
+// beyond float64 precision is not rounded on the way.
+func TestExecutePreservesPreciseIntegers(t *testing.T) {
+	e := newTestExecutor()
+	recorder := &recordingChatTool{}
+	e.registry.Register(recorder)
+	if _, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "record_args", Arguments: json.RawMessage(`{"pr_number":9007199254740993}`)}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(string(recorder.args), "9007199254740993") {
+		t.Fatalf("tool received %s, want pr_number 9007199254740993", recorder.args)
 	}
 }

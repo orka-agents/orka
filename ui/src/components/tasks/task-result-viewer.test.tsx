@@ -18,6 +18,52 @@ describe('TaskResultViewer', () => {
     useAuthStore.setState({ token: 'test-token' })
   })
 
+  it('loads a terminal task result without a click and keeps a manual refresh', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => {
+        calls += 1
+        return HttpResponse.json({ result: `final answer ${calls}` })
+      }),
+    )
+    const user = userEvent.setup()
+    const { container } = render(<TaskResultViewer taskId="done-task" taskPhase="Succeeded" taskUid="u1" />)
+    expect(await screen.findByText('final answer 1')).toBeInTheDocument()
+    expect(screen.queryByText('Load Result')).not.toBeInTheDocument()
+    // Long results grow with the page and wrap instead of hiding behind a short cap.
+    const pre = container.querySelector('pre')!
+    expect(pre.className).not.toMatch(/max-h-/)
+    expect(pre).toHaveClass('break-words')
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('final answer 2')).toBeInTheDocument()
+  })
+
+  it('says a terminal task recorded no result on 404', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ message: 'not found' }, { status: 404 })),
+    )
+    render(<TaskResultViewer taskId="failed-task" taskPhase="Failed" />)
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toHaveTextContent('No result was recorded for this task.')
+    })
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument()
+  })
+
+  it('waits for an explicit load while the task is still running', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => {
+        calls += 1
+        return HttpResponse.json({ result: 'partial' })
+      }),
+    )
+    render(<TaskResultViewer taskId="running-task" taskPhase="Running" />)
+    expect(screen.getByText('Load Result')).toBeInTheDocument()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(calls).toBe(0)
+  })
+
   it('initial state shows "Load Result" button', () => {
     render(<TaskResultViewer taskId="task-1" />)
     expect(screen.getByText('Load Result')).toBeInTheDocument()

@@ -21,6 +21,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -936,6 +937,194 @@ func TestUpdateRepositoryScanRejectsRepositoryChange(t *testing.T) {
 	require.Equal(t, securityTestRepoURL, got.Spec.RepoURL)
 }
 
+func TestRepositoryScanMutationsRejectUnclonableRepositoryURL(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	send := func(t *testing.T, app *fiber.App, method, path, body string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set(TransactionTokenHeaderName, token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close() //nolint:errcheck
+		data, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return resp.StatusCode, string(data)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		repoURL string
+		want    string
+	}{
+		{name: "not a url", repoURL: "not a url", want: "spec.repoURL must be a GitHub repository URL"},
+		{name: "other forge", repoURL: "https://gitlab.com/a/b", want: "spec.repoURL must be a GitHub repository URL"},
+		{name: "owner only", repoURL: "https://github.com/owner", want: "spec.repoURL must include GitHub owner and repository"},
+		{name: "embedded credentials", repoURL: "https://token@github.com/owner/repo", want: "spec.repoURL must not include credentials"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			existing := securityAuthzTestRepositoryScan("legacy-scan", tt.repoURL)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff, existing)
+
+			body, err := json.Marshal(CreateRepositoryScanRequest{
+				Name: "new-scan", Namespace: "demo",
+				Spec: corev1alpha1.RepositoryScanSpec{RepoURL: tt.repoURL, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"}},
+			})
+			require.NoError(t, err)
+			status, message := send(t, app, http.MethodPost, "/security/repositories", string(body))
+			require.Equal(t, http.StatusBadRequest, status)
+			require.Contains(t, message, tt.want)
+			err = handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "new-scan"}, &corev1alpha1.RepositoryScan{})
+			require.True(t, apierrors.IsNotFound(err), "an invalid repository must not create a RepositoryScan")
+
+			// Scans admitted before validation can neither be saved nor run.
+			body, err = json.Marshal(UpdateRepositoryScanRequest{
+				Spec: corev1alpha1.RepositoryScanSpec{RepoURL: tt.repoURL, Branch: "dev", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"}},
+			})
+			require.NoError(t, err)
+			status, message = send(t, app, http.MethodPut, "/security/repositories/legacy-scan?namespace=demo", string(body))
+			require.Equal(t, http.StatusBadRequest, status)
+			require.Contains(t, message, tt.want)
+			status, message = send(t, app, http.MethodPost, "/security/repositories/legacy-scan/scans?namespace=demo", "")
+			require.Equal(t, http.StatusBadRequest, status)
+			require.Contains(t, message, tt.want)
+			tasks := &corev1alpha1.TaskList{}
+			require.NoError(t, handlers.client.List(ctx, tasks))
+			require.Empty(t, tasks.Items)
+		})
+	}
+}
+
+func TestRepositoryScanMutationsRejectInvalidValues(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	for _, tt := range []struct {
+		name string
+		spec string
+		want string
+	}{
+		{name: "negative history days", spec: `"historyDays":-1`, want: "spec.historyDays must not be negative"},
+		{name: "negative max findings", spec: `"maxFindingsPerRun":-5`, want: "spec.maxFindingsPerRun must not be negative"},
+		{name: "negative validation findings", spec: `"validationMaxFindingsPerRun":-1`, want: "spec.validationMaxFindingsPerRun must not be negative"},
+		{name: "minute out of range", spec: `"schedule":"61 * * * *"`, want: "spec.schedule is invalid"},
+		{name: "minute far out of range", spec: `"schedule":"99 * * * *"`, want: "spec.schedule is invalid"},
+		{name: "not a cron expression", spec: `"schedule":"every day"`, want: "spec.schedule is invalid"},
+		{name: "zero every interval", spec: `"schedule":"@every 0s"`, want: "@every interval must be at least 1 minute"},
+		{name: "negative every interval", spec: `"schedule":"@every -5m"`, want: "@every interval must be at least 1 minute"},
+		{name: "one second every interval", spec: `"schedule":"@every 1s"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval", spec: `"schedule":"@every 30s"`, want: "@every interval must be at least 1 minute"},
+		{name: "malformed every interval", spec: `"schedule":"@every soon"`, want: "spec.schedule is invalid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			existing := securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff, existing)
+			spec := fmt.Sprintf(`{"repoURL":%q,"analysisAgentRef":{"name":"analysis"},%s}`, securityTestRepoURL, tt.spec)
+			for _, req := range []struct{ method, path, body string }{
+				{http.MethodPost, "/security/repositories", `{"name":"new-scan","namespace":"demo","spec":` + spec + `}`},
+				{http.MethodPut, "/security/repositories/scan-1?namespace=demo", `{"spec":` + spec + `}`},
+			} {
+				httpReq := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
+				httpReq.Header.Set(TransactionTokenHeaderName, token)
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(httpReq)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, req.method)
+				require.Contains(t, readRespBody(t, resp), tt.want)
+			}
+			err := handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "new-scan"}, &corev1alpha1.RepositoryScan{})
+			require.True(t, apierrors.IsNotFound(err), "an invalid spec must not create a RepositoryScan")
+			var got corev1alpha1.RepositoryScan
+			require.NoError(t, handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "scan-1"}, &got))
+			require.Equal(t, existing.Spec, got.Spec)
+		})
+	}
+}
+
+func TestCreateRepositoryScanAcceptsStandardSchedules(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff)
+	for i, schedule := range []string{"*/15 * * * *", "0 3 * * 1-5", "@daily", "@every 1m", "@every 5m", "@every 1h30m"} {
+		body := fmt.Sprintf(`{"name":"scan-%d","namespace":"demo","spec":{"repoURL":%q,"analysisAgentRef":{"name":"analysis"},"schedule":%q}}`, i, securityTestRepoURL, schedule)
+		req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
+		req.Header.Set(TransactionTokenHeaderName, token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, schedule)
+	}
+}
+
+func TestRepositoryScanMutationsRequireAgentRuntime(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	agent := func(name string, cli *corev1alpha1.AgentCLIRuntime) *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"}, Spec: corev1alpha1.AgentSpec{Runtime: cli}}
+	}
+	agents := []runtime.Object{
+		agent("assistant", nil),
+		agent("empty-runtime", &corev1alpha1.AgentCLIRuntime{}),
+		agent("claude", &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}),
+		agent("external", &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "byo"}}),
+	}
+	for _, tt := range []struct {
+		name string
+		refs string
+		want string
+	}{
+		{name: "native analysis agent", refs: `"analysisAgentRef":{"name":"assistant"}`, want: `spec.analysisAgentRef agent "assistant" has no runtime configured`},
+		{name: "analysis agent with empty runtime", refs: `"analysisAgentRef":{"name":"empty-runtime"}`, want: `spec.analysisAgentRef agent "empty-runtime" has no runtime configured`},
+		{name: "native patch agent", refs: `"analysisAgentRef":{"name":"claude"},"patchAgentRef":{"name":"assistant"}`, want: `spec.patchAgentRef agent "assistant" has no runtime configured`},
+		{name: "built-in runtime agent", refs: `"analysisAgentRef":{"name":"claude"}`},
+		{name: "external runtime agent", refs: `"analysisAgentRef":{"name":"external"},"patchAgentRef":{"name":"claude"}`},
+		{name: "missing agent", refs: `"analysisAgentRef":{"name":"not-created-yet"},"patchAgentRef":{"name":"also-missing"}`},
+		{name: "agent in another namespace", refs: `"analysisAgentRef":{"name":"assistant","namespace":"other"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			existing := securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff, append([]runtime.Object{existing}, agents...)...)
+			spec := fmt.Sprintf(`{"repoURL":%q,%s}`, securityTestRepoURL, tt.refs)
+			for _, req := range []struct {
+				method, path, body string
+				success            int
+			}{
+				{http.MethodPost, "/security/repositories", `{"name":"new-scan","namespace":"demo","spec":` + spec + `}`, http.StatusCreated},
+				{http.MethodPut, "/security/repositories/scan-1?namespace=demo", `{"spec":` + spec + `}`, http.StatusOK},
+			} {
+				httpReq := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
+				httpReq.Header.Set(TransactionTokenHeaderName, token)
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(httpReq)
+				require.NoError(t, err)
+				message := readRespBody(t, resp)
+				if tt.want == "" {
+					require.Equal(t, req.success, resp.StatusCode, message)
+					continue
+				}
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, req.method)
+				require.Contains(t, message, tt.want)
+				require.Contains(t, message, "spec.runtime.type or spec.runtime.runtimeRef")
+			}
+			if tt.want == "" {
+				return
+			}
+			err := handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "new-scan"}, &corev1alpha1.RepositoryScan{})
+			require.True(t, apierrors.IsNotFound(err), "a scan with a runtime-less agent must not be created")
+			var got corev1alpha1.RepositoryScan
+			require.NoError(t, handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "scan-1"}, &got))
+			require.Equal(t, existing.Spec, got.Spec)
+		})
+	}
+}
+
 func TestListRepositoryScans_ContextTokenFiltersMismatchedScansInEnforceMode(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
@@ -1087,6 +1276,71 @@ func TestThreatModelRejectsBlankSanitizedEdit(t *testing.T) {
 			require.Equal(t, int64(1), model.Version)
 		})
 	}
+}
+
+func TestThreatModelExpectedVersionRejectsLostUpdate(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app, handlers := setupSecurityHandlersWithAuthzFixture(
+		t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce,
+		securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL),
+	)
+	ctx := context.Background()
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecurityWrite,
+		"tctx":  securityAuthzTestTctx(securityTestRepoURL),
+	})
+	put := func(t *testing.T, request UpdateThreatModelRequest) (int, string) {
+		t.Helper()
+		body, err := json.Marshal(request)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPut, "/security/repositories/scan-1/threat-model?namespace=demo", strings.NewReader(string(body)))
+		req.Header.Set(TransactionTokenHeaderName, token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close() //nolint:errcheck
+		data, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return resp.StatusCode, string(data)
+	}
+	requireStored := func(t *testing.T, content string, version int64) {
+		t.Helper()
+		model, err := handlers.securityStore.GetLatestThreatModel(ctx, "demo", "scan-1")
+		require.NoError(t, err)
+		require.Equal(t, content, model.Content)
+		require.Equal(t, version, model.Version)
+	}
+
+	version := func(v int64) *int64 { return &v }
+
+	// Two editors load the repository before any model exists; the first
+	// save creates version 1 and the second must not overwrite it.
+	status, _ := put(t, UpdateThreatModelRequest{Content: "Generated model.", ExpectedVersion: version(0)})
+	require.Equal(t, http.StatusOK, status)
+	requireStored(t, "Generated model.", 1)
+	status, message := put(t, UpdateThreatModelRequest{Content: "Second creator.", ExpectedVersion: version(0)})
+	require.Equal(t, http.StatusConflict, status)
+	require.Contains(t, message, "threat model changed since it was loaded")
+	requireStored(t, "Generated model.", 1)
+
+	// Two editors load version 1; the first save wins and the second conflicts.
+	status, _ = put(t, UpdateThreatModelRequest{Content: "First editor.", ExpectedVersion: version(1)})
+	require.Equal(t, http.StatusOK, status)
+	requireStored(t, "First editor.", 2)
+	status, message = put(t, UpdateThreatModelRequest{Content: "Second editor.", ExpectedVersion: version(1)})
+	require.Equal(t, http.StatusConflict, status)
+	require.Contains(t, message, "threat model changed since it was loaded")
+	requireStored(t, "First editor.", 2)
+
+	status, _ = put(t, UpdateThreatModelRequest{Content: "Negative version.", ExpectedVersion: version(-1)})
+	require.Equal(t, http.StatusBadRequest, status)
+	requireStored(t, "First editor.", 2)
+
+	// Clients that send no expected version keep last-write-wins behavior.
+	status, _ = put(t, UpdateThreatModelRequest{Content: "Legacy client."})
+	require.Equal(t, http.StatusOK, status)
+	requireStored(t, "Legacy client.", 3)
 }
 
 func TestThreatModel_ContextTokenRepositoryScanAuthorizationDenials(t *testing.T) {

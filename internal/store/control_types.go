@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
+	"hash"
 	"path"
 	"strconv"
 	"strings"
@@ -584,6 +584,7 @@ type SessionTurn struct {
 	TerminalKind          SessionTurnTerminalKind `json:"terminalKind,omitempty"`
 	TerminalContent       string                  `json:"terminalContent,omitempty"`
 	FinalizationDigest    string                  `json:"finalizationDigest,omitempty"`
+	NativeSessionDigest   string                  `json:"nativeSessionDigest,omitempty"`
 	PublicationID         string                  `json:"publicationId,omitempty"`
 	PublicationReceipt    *PublicationReceipt     `json:"publicationReceipt,omitempty"`
 	ProjectionID          string                  `json:"projectionId,omitempty"`
@@ -623,6 +624,10 @@ type FinalizeSessionTurnRequest struct {
 	BlockReason            string                  `json:"blockReason,omitempty"`
 	Projection             OutboxProjection        `json:"projection"`
 	FinalizedAt            time.Time               `json:"finalizedAt"`
+	NativeSession          *NativeSessionRecord    `json:"-"`
+	// NativeSessionCarried marks NativeSession as the Session's existing checkpoint
+	// carried across a non-success outcome marker, not a fresh capture.
+	NativeSessionCarried bool `json:"-"`
 }
 
 // ResumeSessionTurnFinalizationRequest resumes only the Kubernetes and outbox
@@ -1195,7 +1200,7 @@ func CanonicalControlID(kind string, components ...string) string {
 	return kind + ":sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-func writeCanonicalComponent(w io.Writer, value string) {
+func writeCanonicalComponent(w hash.Hash, value string) {
 	_, _ = fmt.Fprintf(w, "%d:", len(value))
 	_, _ = w.Write([]byte(value))
 }

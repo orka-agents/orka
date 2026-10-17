@@ -225,8 +225,9 @@ func TestOpenCodeProviderSessionProjectionValidatesImmutableAgentConfiguration(t
 		true,
 	)
 	request.Profile.ModelLimits = testOpenCodeModelLimits()
-	if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "systemPrompt") {
-		t.Fatalf("OpenCode systemPrompt projection error = %v, want rejection", err)
+	projection, err := profile.ProjectSession(request, paths, proxy)
+	if err != nil || projection.Instructions == nil || projection.Instructions.Content != request.AgentConfiguration.SystemPrompt || projection.Instructions.RelativePath != ".orka/agent-instructions.md" {
+		t.Fatalf("OpenCode native instruction projection failed: %v", err)
 	}
 
 	request.AgentConfiguration = nil

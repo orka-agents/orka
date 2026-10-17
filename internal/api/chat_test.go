@@ -1892,6 +1892,40 @@ func TestHandleChat(t *testing.T) {
 		assert.Contains(t, events, "done")
 	})
 
+	t.Run("SSE status names the Provider resource", func(t *testing.T) {
+		// The status line reads "Connected to <provider>/<model>": the
+		// provider is the Provider the caller chose, not its type.
+		objs := providerCRD("vekil", "default", "test-type", "test-model")
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+		ch := newTestChatHandler(t, fakeClient, newTestSessionStore(t), newTestResultStore(t), DefaultChatConfig())
+
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello", Provider: "vekil"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var status map[string]string
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			if scanner.Text() != "event: status" || !scanner.Scan() {
+				continue
+			}
+			data, ok := strings.CutPrefix(scanner.Text(), "data: ")
+			require.True(t, ok, "status event without data: %q", scanner.Text())
+			require.NoError(t, json.Unmarshal([]byte(data), &status))
+			break
+		}
+		require.NotNil(t, status, "stream carried no status event")
+		assert.Equal(t, "vekil", status[chatProviderKey])
+		assert.Equal(t, "test-model", status[chatModelKey])
+		assert.NotEmpty(t, status["sessionId"])
+	})
+
 	t.Run("no provider returns 400", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)

@@ -6,6 +6,9 @@ interface ChatState {
   messages: ChatMessage[]
   currentSessionId: string | null
   isStreaming: boolean
+  // Set by the Stop control while a turn streams; the in-flight turn watches
+  // it and cancels itself server-side. Cleared whenever streaming starts or ends.
+  stopRequested: boolean
   // Provider CRD name and model sent with each turn; empty means "server default".
   // These mirror `selections[activeNamespace]`: Providers are namespace-scoped,
   // so the persisted picker choice is keyed by namespace and swapped in with
@@ -23,8 +26,9 @@ interface ChatState {
   selectNamespace: (namespace: string) => void
   addMessage: (message: ChatMessage) => void
   updateLastAssistantMessage: (content: string) => void
-  setSessionId: (id: string) => void
+  setSessionId: (id: string | null) => void
   setStreaming: (streaming: boolean) => void
+  requestStop: () => void
   newSession: () => void
   resetForIdentityChange: () => void
   setUsageOnLastAssistant: (usage: ChatUsage, tasksCreatedNames?: string[]) => void
@@ -89,6 +93,7 @@ export const useChatStore = create<ChatState>()(
   messages: [],
   currentSessionId: null,
   isStreaming: false,
+  stopRequested: false,
   provider: '',
   model: '',
   activeNamespace: '',
@@ -117,7 +122,7 @@ export const useChatStore = create<ChatState>()(
         activeNamespace: namespace,
         provider: selection?.provider ?? '',
         model: selection?.model ?? '',
-        ...(switching ? { messages: [], currentSessionId: null, isStreaming: false, turnEpoch: state.turnEpoch + 1 } : {}),
+        ...(switching ? { messages: [], currentSessionId: null, isStreaming: false, stopRequested: false, turnEpoch: state.turnEpoch + 1 } : {}),
       }
     }),
 
@@ -137,8 +142,9 @@ export const useChatStore = create<ChatState>()(
     }),
 
   setSessionId: (id) => set({ currentSessionId: id }),
-  setStreaming: (streaming) => set({ isStreaming: streaming }),
-  newSession: () => set((state) => ({ messages: [], currentSessionId: null, isStreaming: false, turnEpoch: state.turnEpoch + 1 })),
+  setStreaming: (streaming) => set({ isStreaming: streaming, stopRequested: false }),
+  requestStop: () => set((state) => (state.isStreaming ? { stopRequested: true } : {})),
+  newSession: () => set((state) => ({ messages: [], currentSessionId: null, isStreaming: false, stopRequested: false, turnEpoch: state.turnEpoch + 1 })),
 
   // Chat state belongs to the identity that created it. On a token change the
   // transcript, session, provider/model choices, and their persisted
@@ -149,6 +155,7 @@ export const useChatStore = create<ChatState>()(
       messages: [],
       currentSessionId: null,
       isStreaming: false,
+      stopRequested: false,
       provider: '',
       model: '',
       selections: {},

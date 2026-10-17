@@ -29,6 +29,8 @@ type Client struct {
 	TxnToken   string
 	Namespace  string
 	HTTPClient *http.Client
+	// NativeSessionMaxBytes bounds migration bundles independently of ordinary API responses.
+	NativeSessionMaxBytes int
 }
 
 // NewWithNamespace creates a new Orka API client with a default namespace.
@@ -155,7 +157,7 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		_ = resp.Body.Close()
-		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): try 'orka login' or provide --token")
+		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): provide --token, save one with 'orka config set-token', or check your kubeconfig credentials")
 	}
 
 	if resp.StatusCode != http.StatusOK {

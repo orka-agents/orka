@@ -10,9 +10,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,8 +31,8 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/uiembed"
 )
 
 var log = logf.Log.WithName("api-server")
@@ -77,6 +77,7 @@ type ServerConfig struct {
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	NativeSessionMaxBytes     int
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
@@ -99,6 +100,10 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
+	// port serve the embedded web dashboard and answer unrouted non-API
+	// paths with its index page.
+	DashboardEnabled bool
 }
 
 // Server is the REST API server
@@ -126,12 +131,14 @@ type Server struct {
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
+	config.Chat.DashboardEnabled = config.DashboardEnabled
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
 		StreamRequestBody: true,
 		ErrorHandler:      customErrorHandler,
 	})
+	redactRequestParseErrors(app)
 
 	server := &Server{
 		app:                 app,
@@ -158,6 +165,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
+		NativeSessionMaxBytes:     config.NativeSessionMaxBytes,
 		SessionManager:            sessionManager,
 		PlanStore:                 config.PlanStore,
 		KubeClient:                config.Clientset,
@@ -191,6 +199,10 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 }
 
 func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	return requestBodyConfigWithNativeSessionLimit(header, harnessv2.DefaultMaxNativeSessionBytes)
+}
+
+func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nativeSessionMaxBytes int) fasthttp.RequestConfig {
 	if string(header.Method()) != fiber.MethodPost {
 		return fasthttp.RequestConfig{}
 	}
@@ -201,6 +213,13 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	}
 	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
+	}
+	// Use Fiber's fasthttp path semantics for the streaming exemption, including
+	// fragment handling. net/url would retain a literal '#' in the path and
+	// leave a routed native import without its bounded read deadline.
+	var nativeURI fasthttp.URI
+	if nativeURI.Parse(header.Host(), header.RequestURI()) == nil && isNativeSessionImportPath(string(nativeURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: harnessv2.NativeSessionJSONLimit(nativeSessionMaxBytes), ReadTimeout: 30 * time.Second}
 	}
 	// Internal broker endpoints authorize against per-pool secrets that are
 	// only resolvable from the request body, so unauthenticated peers cannot
@@ -217,7 +236,7 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
-	config := requestBodyConfig(header)
+	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
 	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
 	// net/url's request-target parsing differs for a literal '#' character.
 	var uri fasthttp.URI
@@ -240,6 +259,9 @@ func isGatewayIngressPath(path string) bool {
 
 // setupMiddleware configures middleware for the server
 func (s *Server) setupMiddleware() {
+	// Outermost, so it runs after every handler and middleware has returned.
+	s.app.Use(drainUnreadRequestBody)
+
 	// Recovery middleware
 	s.app.Use(recover.New())
 
@@ -344,6 +366,8 @@ func (s *Server) setupRoutes() {
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
 	api.Get("/sessions/:id", s.handlers.GetSession)
+	api.Get("/sessions/:id/native", s.handlers.ExportNativeSession)
+	api.Post("/sessions/:id/native", s.handlers.ImportNativeSession)
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
@@ -407,6 +431,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/agents", s.handlers.CreateAgent)
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
+	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
@@ -543,6 +568,7 @@ func (s *Server) setupRoutes() {
 		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
+		internal.Post("/tasks/:namespace/:taskName/children/:child/cancel", s.internalHandlers.CancelChildTask)
 		internal.Get("/tasks/:namespace/:taskName/gateway-messages/budget", s.internalHandlers.GetGatewayMessageBudget)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
@@ -622,31 +648,21 @@ func routeLookupPath(path string) string {
 	return folded
 }
 
+// staticAssetRoot holds the hashed build output. A missing file under it is a
+// stale or mistyped chunk reference: answering with index.html would hand the
+// browser HTML where it expects JavaScript or CSS, so it stays a 404.
+const staticAssetRoot = "/assets"
+
 // spaFallbackEligible reports whether a 404 for path is served as the SPA
 // index page instead of a JSON error. Telemetry middleware uses the same
 // predicate so the recorded status matches what the client receives.
 func spaFallbackEligible(path string) bool {
 	folded := routeLookupPath(path)
-	for _, root := range apiPathRoots {
-		if folded == root || strings.HasPrefix(folded, root+"/") {
-			return false
-		}
+	underRoot := func(root string) bool { return folded == root || strings.HasPrefix(folded, root+"/") }
+	if slices.ContainsFunc(apiPathRoots, underRoot) || underRoot(staticAssetRoot) {
+		return false
 	}
 	return folded != "/healthz" && folded != "/readyz"
-}
-
-// spaIndexHTML returns the embedded SPA index page, or false when the UI
-// assets are unavailable.
-func spaIndexHTML() ([]byte, bool) {
-	distFS, err := uiembed.FS()
-	if err != nil {
-		return nil, false
-	}
-	data, err := fs.ReadFile(distFS, "index.html")
-	if err != nil {
-		return nil, false
-	}
-	return data, true
 }
 
 // customErrorHandler handles errors returned by handlers and produces a
@@ -676,12 +692,13 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 		code = e.Code
 		message = e.Message
 	}
+	// Every error body is JSON or the SPA page; neither may be sniffed.
+	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 
 	// For 404s on non-API paths, serve the SPA index.html
-	if code == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
-		if data, ok := spaIndexHTML(); ok {
-			c.Set("Content-Type", "text/html; charset=utf-8")
-			return c.Status(fiber.StatusOK).Send(data)
+	if code == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
+		if page, ok := embeddedSPAIndexPage(); ok {
+			return page.send(c)
 		}
 	}
 
