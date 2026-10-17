@@ -28,8 +28,8 @@ func validateAgentRuntimeFoundryRelay(old, relay agentRuntimeBootWitness) error 
 	// A rollout changes the template and container image. The replacement is
 	// independently authenticated and revalidated only as a retirement relay;
 	// it never inherits the old boot's admission or execution authority.
-	if recoveryProviderKind(old.Spec) != agentRuntimeFoundryProvider || old.FoundryBroker == nil ||
-		old.FoundryBroker.Validate() != nil || recoveryProviderKind(relay.Spec) != agentRuntimeFoundryProvider ||
+	if !agentRuntimeUsesLifecycleBroker(recoveryProviderKind(old.Spec)) || old.FoundryBroker == nil ||
+		old.FoundryBroker.Validate() != nil || recoveryProviderKind(relay.Spec) != recoveryProviderKind(old.Spec) ||
 		relay.FoundryBroker == nil || *old.FoundryBroker != *relay.FoundryBroker ||
 		old.Namespace != relay.Namespace || old.RuntimeName != relay.RuntimeName || old.RuntimeUID != relay.RuntimeUID ||
 		old.DeploymentName != relay.DeploymentName || old.DeploymentUID != relay.DeploymentUID ||

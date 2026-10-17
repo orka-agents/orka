@@ -23,6 +23,15 @@ const (
 	foundryModelEnv           = "ORKA_FOUNDRY_ACP_MODEL"
 	foundryConfigDigestEnv    = "ORKA_FOUNDRY_ACP_AGENT_CONFIGURATION_DIGEST"
 
+	providerKindKagent       = "kagent"
+	EnvKagentAdapterDigest   = "ORKA_ACP_KAGENT_ADAPTER_DIGEST"
+	kagentAdapterName        = "kagent-serve-acp"
+	kagentConfigPath         = "/agent/kagent.json"
+	kagentProviderBaseURLEnv = "ORKA_KAGENT_ACP_PROVIDER_BASE_URL"
+	kagentProviderTokenEnv   = "ORKA_KAGENT_ACP_PROVIDER_TOKEN"
+	kagentModelEnv           = "ORKA_KAGENT_ACP_MODEL"
+	kagentConfigDigestEnv    = "ORKA_KAGENT_ACP_AGENT_CONFIGURATION_DIGEST"
+
 	providerKindAgentKit       = "agentkit"
 	EnvAgentKitAdapterDigest   = "ORKA_ACP_AGENTKIT_ADAPTER_DIGEST"
 	agentKitAdapterName        = "agentkit-serve-acp"
@@ -62,6 +71,14 @@ var (
 		baseURLEnv: foundryProviderBaseURLEnv, tokenEnv: foundryProviderTokenEnv,
 		modelEnv: foundryModelEnv, configDigestEnv: foundryConfigDigestEnv,
 	}
+	kagentAdapter = externalACPAdapter{
+		kind: providerKindKagent, digestEnv: EnvKagentAdapterDigest, adapterName: kagentAdapterName,
+		command:    "/orka-runtime-kagent",
+		args:       []string{"--protocol", acpCommandProtocol, "--config", kagentConfigPath},
+		label:      "external kagent",
+		baseURLEnv: kagentProviderBaseURLEnv, tokenEnv: kagentProviderTokenEnv,
+		modelEnv: kagentModelEnv, configDigestEnv: kagentConfigDigestEnv,
+	}
 	agentKitAdapter = externalACPAdapter{
 		kind: providerKindAgentKit, digestEnv: EnvAgentKitAdapterDigest, adapterName: agentKitAdapterName,
 		command:    "/opt/agentkit/bin/agentkit-serve",
@@ -76,6 +93,8 @@ func externalACPAdapterFor(kind string) (externalACPAdapter, bool) {
 	switch kind {
 	case providerKindFoundry:
 		return foundryAdapter, true
+	case providerKindKagent:
+		return kagentAdapter, true
 	case providerKindAgentKit:
 		return agentKitAdapter, true
 	default:

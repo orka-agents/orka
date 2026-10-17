@@ -13,6 +13,7 @@ ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
 ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
 ACP_AGENTKIT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-agentkit-runtime:latest
 ACP_FOUNDRY_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-foundry-runtime:latest
+ACP_KAGENT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-kagent-runtime:latest
 # AgentKit images contain the framework runtime plus one frozen
 # /agent/agent.yaml. The Orka layer requires an immutable source image.
 AGENTKIT_RUNTIME_IMAGE ?=
@@ -387,6 +388,14 @@ docker-build-acp-foundry-runtime: ## Layer the Orka supervisor onto a digest-pin
 		-t ${ACP_FOUNDRY_RUNTIME_IMG} \
 		-f workers/acp/images/foundry/Dockerfile .
 
+.PHONY: docker-build-acp-kagent-runtime
+docker-build-acp-kagent-runtime: ## Layer the Orka supervisor onto a digest-pinned configured kagent image.
+	$(CONTAINER_TOOL) build \
+		--build-arg KAGENT_RUNTIME_IMAGE="$(KAGENT_RUNTIME_IMAGE)" \
+		--build-arg KAGENT_ADAPTER_DIGEST="$(KAGENT_ADAPTER_DIGEST)" \
+		-t ${ACP_KAGENT_RUNTIME_IMG} \
+		-f workers/acp/images/kagent/Dockerfile .
+
 .PHONY: docker-build-workspace-publisher
 docker-build-workspace-publisher: ## Build the clean-room workspace publisher image.
 	$(CONTAINER_TOOL) build -t ${WORKSPACE_PUBLISHER_IMG} -f workers/publisher/Dockerfile .
@@ -418,6 +427,10 @@ docker-push-acp-agentkit-runtime: ## Push an AgentKit ACP runtime image built fr
 .PHONY: docker-push-acp-foundry-runtime
 docker-push-acp-foundry-runtime: ## Push a Foundry ACP runtime image built from a frozen configured image.
 	$(CONTAINER_TOOL) push ${ACP_FOUNDRY_RUNTIME_IMG}
+
+.PHONY: docker-push-acp-kagent-runtime
+docker-push-acp-kagent-runtime: ## Push a kagent ACP runtime image built from a frozen configured image.
+	$(CONTAINER_TOOL) push ${ACP_KAGENT_RUNTIME_IMG}
 
 # acp-provider-uc maps an ACP runtime provider word to the uppercase form used
 # in its image variable name (ACP_<PROVIDER>_RUNTIME_IMG).

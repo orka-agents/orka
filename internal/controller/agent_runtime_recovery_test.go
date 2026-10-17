@@ -447,8 +447,8 @@ func TestAgentRuntimeRecoveryContainerFallbackExcludesRemoteProviders(t *testing
 	f := newRuntimeRecoveryFixture(t)
 	f.reconcile(t)
 	witness := f.witness(t)
-	for _, provider := range []string{"codex", "claude", "copilot", "opencode", "agentkit", "foundry", "other"} {
-		local := provider != "foundry" && provider != "other"
+	for _, provider := range []string{"codex", "claude", "copilot", "opencode", "agentkit", "foundry", "kagent", "other"} {
+		local := provider != "foundry" && provider != "kagent" && provider != "other"
 		if agentRuntimeLocalContainerRetirementAllowed(provider) != local {
 			t.Fatalf("container retirement locality for %s is wrong", provider)
 		}

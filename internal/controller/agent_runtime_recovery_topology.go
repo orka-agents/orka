@@ -15,11 +15,18 @@ import (
 
 const (
 	agentRuntimeFoundryProvider     = "foundry"
+	agentRuntimeKagentProvider      = "kagent"
 	agentRuntimeFoundryBroker       = "broker"
 	agentRuntimeRecoveryPodKind     = "Pod"
 	agentRuntimeDurableWorkspaceEnv = "ORKA_ACP_DURABLE_WORKSPACE_DIR"
 	agentRuntimeAllCapabilities     = corev1.Capability("ALL")
 )
+
+// agentRuntimeUsesLifecycleBroker reports providers whose supervisor relays
+// to a broker sidecar speaking the Foundry lifecycle broker protocol.
+func agentRuntimeUsesLifecycleBroker(provider string) bool {
+	return provider == agentRuntimeFoundryProvider || provider == agentRuntimeKagentProvider
+}
 
 func recoveryProviderKind(spec corev1alpha1.AgentRuntimeRegistrySpec) string {
 	if spec.Capabilities == nil || spec.Capabilities.Profile == nil {
@@ -56,10 +63,10 @@ func validateAgentRuntimeRecoveryPodSpec(spec corev1.PodSpec, containerName, pro
 	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
 		return errors.New("runtime recovery requires explicit automountServiceAccountToken=false")
 	}
-	foundry := provider == agentRuntimeFoundryProvider
-	if foundry {
+	broker := agentRuntimeUsesLifecycleBroker(provider)
+	if broker {
 		if containerName != "supervisor" || len(spec.Containers) != 2 {
-			return errors.New("runtime recovery for Foundry requires exactly the supervisor and broker containers")
+			return errors.New("runtime recovery for a lifecycle-broker runtime requires exactly the supervisor and broker containers")
 		}
 		if _, err := recoverySupervisorContainer(&spec, agentRuntimeFoundryBroker); err != nil {
 			return err
@@ -76,7 +83,7 @@ func validateAgentRuntimeRecoveryPodSpec(spec corev1.PodSpec, containerName, pro
 			return err
 		}
 	}
-	return validateRecoveryVolumes(spec.Volumes, *supervisor, foundry)
+	return validateRecoveryVolumes(spec.Volumes, *supervisor, broker)
 }
 
 // validateAgentRuntimeRecoveryPodSpec also resolves supervisor Secret references:
@@ -158,11 +165,11 @@ func validateRecoveryContainer(container corev1.Container) error {
 	return nil
 }
 
-func validateRecoveryVolumes(volumes []corev1.Volume, supervisor corev1.Container, foundry bool) error {
+func validateRecoveryVolumes(volumes []corev1.Volume, supervisor corev1.Container, broker bool) error {
 	for _, volume := range volumes {
 		if volume.PersistentVolumeClaim != nil {
-			if !foundry || recoveryContainerMounts(supervisor, volume.Name) {
-				return errors.New("runtime recovery permits a ledger PVC only in the Foundry broker")
+			if !broker || recoveryContainerMounts(supervisor, volume.Name) {
+				return errors.New("runtime recovery permits a ledger PVC only in the lifecycle broker")
 			}
 			continue
 		}

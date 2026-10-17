@@ -386,7 +386,7 @@ The CLI can create/read/list/update/delete the core resource types through the c
 | Resource | Typical commands |
 | --- | --- |
 | Providers | `orka provider create`, `get`, `list`, `update`, `delete` |
-| Agents | `orka agent create`, `get`, `list`, `update`, `delete` |
+| Agents | `orka agent create`, `get`, `list`, `update`, `delete`, `import kagent` |
 | Tools | `orka tool create`, `get`, `list`, `update`, `delete` |
 | Skills | `orka skill init`, `validate`, `import`, `content`, `get`, `list`, `update`, `delete` |
 | Secrets | `orka secret list` (metadata only; no Secret data is printed) |

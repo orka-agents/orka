@@ -76,6 +76,7 @@ Available Commands:
   create      Create an agent from a manifest
   delete      Delete an agent
   get         Get agent details
+  import      Import agents defined on another platform
   list        List agents
   update      Update an agent resource from a manifest
 
@@ -145,6 +146,151 @@ Usage:
 Flags:
   -h, --help            help for get
   -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent import`
+
+```text
+Import agents defined on another platform
+
+Usage:
+  orka agent import [command]
+
+Available Commands:
+  kagent      Wrap kagent Agents as Orka Agents
+
+Flags:
+  -h, --help   help for import
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka agent import [command] --help" for more information about a command.
+```
+
+## `orka agent import kagent`
+
+```text
+Create or update one Orka Agent per kagent Agent. Each Orka Agent references
+the AgentRuntime "<name>-kagent-runtime", which must be registered separately
+and serve exactly that kagent Agent. Re-running the import is safe: Agents that
+already wrap the same kagent Agent are left alone or updated, and any other
+existing Agent is an error.
+
+Accepts kagent v1 (api.kagent.dev/v1alpha3) and kagent v0 (kagent.dev/v1alpha2)
+Agents, including lists from "kubectl get -o yaml". Other objects are skipped.
+
+Each Agent is reported as governed or observed. A governed Agent has every
+model and tool endpoint pointing at the relay named by --relay-url, so Orka
+executes its tools and serves its model. Any other Agent is observed: kagent
+runs its tools, and Orka governs dispatch and lifecycle. An Agent with a kagent
+approval prompt (requireApproval) cannot be wrapped in either mode: a wrapped
+Agent cannot answer it. Include every AgentTemplate a v1 Agent references,
+subagent templates too, so the import can check them.
+
+kagent v1: a governed Agent runs on the ADK harness. Its latest successful
+kagent revision must be the one its current spec compiles to, and must have
+been compiled from the Harness, AgentTemplate, ModelConfig, and
+RemoteMCPServer objects in the input (--revision-sources). That revision's
+compiled egress (--revision-egress) may reach only the relay and the origins
+named by --accepted-egress. Dispatch control requires the kagent install to
+admit only kagent's controller to Substrate's actor router.
+
+kagent v0: only Declarative Agents on the Go runtime can be wrapped, because
+the Python runtime cannot cancel a task and saves request headers. An Agent
+must run exactly one replica, because kagent v0 cancels a task only in the
+pod that runs it. Nor can an Agent whose sandboxed code may reach the network
+(spec.sandbox.network.allowedDomains): kagent v0 points Agent pods at its
+controller, which accepts any caller's user ID. Its Deployment must set
+KAGENT_URL, naming the controller given by --control-plane-url, because the
+wrapper reads the Agent's sessions and tasks there. The wrapper pins the Agent Deployment's
+kagent.dev/config-hash, so kagent must have accepted the Agent's
+current generation, the Agent must be Ready, and its Deployment must run the
+Go runtime and be fully rolled out. A governed Agent is judged by the
+compiled configuration in its config Secret (named after the Agent), which
+with its ModelConfig's status.secretHash must hash to the pinned value: its
+model passes the caller's bearer through
+to the relay's /v1, and every tool server is the relay's /mcp and forwards
+Authorization. Its Deployment must load that configuration as kagent renders
+it, and persist sessions to the controller named by --control-plane-url; this
+is checked at import, so only kagent's controller may change Agent Deployments
+afterwards. That
+Secret holds any static tool headers in plain text, so include it only for
+Agents you mean to govern. v0 has no compiled revisions,
+so --revision-egress and --revision-sources do not apply. Dispatch control
+requires the agents' Services to admit only kagent's controller, and the
+controller to admit only the wrapper brokers and the wrapped Agents.
+
+See the orka-runtime-kagent README for both install requirements. Include the
+Agents' related objects in the input so the import can check them: Harness,
+AgentTemplate, ModelConfig, and RemoteMCPServer for v1; the Agent's
+Deployment, and to govern it its config Secret and ModelConfig, for v0.
+Translating a v0 Agent reads its ModelConfig.
+
+With --wrapper-config-dir, also writes each Agent's wrapper configuration,
+<name>.kagent.json, pinned to the Agent's latest successful revision (v1) or
+its Deployment's config hash (v0).
+
+With --translate, converts each kagent Agent into a native Orka Agent that Orka
+runs itself, with no kagent at run time. Translation maps only these fields
+and refuses everything else, listing every problem:
+
+  kagent v1 (api.kagent.dev/v1alpha3)     Orka Agent
+  template.inline.systemPrompt            spec.systemPrompt.inline
+  template.inline.systemPromptFrom        spec.systemPrompt.configMapRef
+  template.inline.description             not carried; Orka Agents have no description
+
+  kagent v0 (kagent.dev/v1alpha2)         Orka Agent
+  declarative.systemMessage               spec.systemPrompt.inline
+  declarative.systemMessageFrom
+    (type ConfigMap)                      spec.systemPrompt.configMapRef
+  description, iconUrl, documentationUrl,
+    version, provider                     not carried; Orka Agents have no agent card
+  declarative.stream, declarative.runtime,
+    deployment placement settings         not carried; kagent runtime details
+
+  Both versions                           Orka Agent
+  ModelConfig provider OpenAI/Anthropic   spec.model.provider openai/anthropic
+  ModelConfig model                       spec.model.name
+  ModelConfig openAI|anthropic
+    .temperature / .maxTokens             spec.model.temperature / .maxTokens
+  ModelConfig with a custom baseUrl       spec.providerRef (--provider-ref)
+  MCP tool <server>/<tool>                spec.tools (--tool <server>/<tool>=<Orka Tool>)
+  ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials
+  ModelConfig stream, openAI.apiFormat    not carried; wire details Orka's provider decides
+
+Usage:
+  orka agent import kagent -f <file> [flags]
+
+Flags:
+      --accepted-egress stringArray   Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)
+      --control-plane-url string      kagent controller base URL the wrapper calls (with --wrapper-config-dir); a governed kagent v0 Agent must persist sessions there
+      --dry-run                       Print the Orka Agent manifests instead of creating them
+  -f, --file string                   Path to kagent Agent YAML/JSON (use - for stdin)
+  -h, --help                          help for kagent
+      --model-upstream-model string   Model the relay calls for governed Agents
+      --model-upstream-url string     OpenAI-compatible base URL the relay serves governed Agents from
+      --provider-ref string           With --translate, the Orka Provider serving models that use a custom endpoint
+      --relay-url string              Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents
+      --revision-egress string        JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}
+      --revision-sources string       JSON object mapping each kagent revision to its source snapshot (kagent.agent_runtime_revision.source_snapshot)
+      --tool stringArray              With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)
+      --translate                     Convert the kagent Agents into native Orka Agents instead of wrapping them
+      --user-id-prefix string         Prefix of the per-session kagent user identity (with --wrapper-config-dir) (default "orka")
+      --wrapper-config-dir string     Write each Agent's wrapper configuration (<name>.kagent.json) to this directory
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
