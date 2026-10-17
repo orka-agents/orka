@@ -1,0 +1,265 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-after-loss]",
+        "toolResultContains": "ORKA_WSP_DURABLE_DATA"
+      },
+      "response": {
+        "content": "ORKA_WSP_READ_OK after-loss"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-after-loss]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "cat orka-wsp-data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-lost]"
+      },
+      "latency": 600000,
+      "response": {
+        "content": "ORKA_WSP_HELD_OK lost"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-after-restart]",
+        "toolResultContains": "ORKA_WSP_DURABLE_DATA"
+      },
+      "response": {
+        "content": "ORKA_WSP_READ_OK after-restart"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-after-restart]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "cat orka-wsp-data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-restart]"
+      },
+      "latency": 60000,
+      "response": {
+        "content": "ORKA_WSP_HELD_OK restart"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-after-provider-restart]",
+        "toolResultContains": "ORKA_WSP_DURABLE_DATA"
+      },
+      "response": {
+        "content": "ORKA_WSP_READ_OK after-provider-restart"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-after-provider-restart]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "cat orka-wsp-data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-provider-restart]",
+        "toolResultContains": "ORKA_WSP_DURABLE_DATA"
+      },
+      "response": {
+        "content": "ORKA_WSP_READ_OK provider-restart"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-provider-restart]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "cat orka-wsp-data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-resume]",
+        "toolResultContains": "ORKA_WSP_DURABLE_DATA"
+      },
+      "response": {
+        "content": "ORKA_WSP_READ_OK resume"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-resume]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "cat orka-wsp-data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-write]",
+        "toolResultContains": "ORKA_WSP_DURABLE_DATA"
+      },
+      "response": {
+        "content": "ORKA_WSP_WRITE_OK"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-write]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "set -eu; printf '%s\\n' ORKA_WSP_DURABLE_DATA > orka-wsp-data; cat orka-wsp-data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-restore]",
+        "toolResultContains": "ORKA_WSP_DURABLE_DATA"
+      },
+      "response": {
+        "content": "ORKA_WSP_READ_OK restore"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-restore]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "cat orka-wsp-data"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-timeout]"
+      },
+      "latency": 120000,
+      "response": {
+        "content": "ORKA_WSP_HELD_OK timeout"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-cancel]"
+      },
+      "latency": 300000,
+      "response": {
+        "content": "ORKA_WSP_HELD_OK cancel"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-lifetime]"
+      },
+      "latency": 300000,
+      "response": {
+        "content": "ORKA_WSP_HELD_OK lifetime"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-publish]",
+        "toolResultContains": "ORKA_WSP_PUBLISHED"
+      },
+      "response": {
+        "content": "ORKA_WSP_PUBLISH_DONE"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-publish]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "printf 'ORKA_WSP_PUBLISHED\\n' > WSP_PUBLISH.md && cat WSP_PUBLISH.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-egress]",
+        "toolResultContains": "ORKA_WSP_NET_Pe"
+      },
+      "response": {
+        "content": "ORKA_WSP_EGRESS_OK"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:wsp-egress]"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "node -e 'const net=require(\"net\");const r={};const done=(k,v)=>{if(k in r)return;r[k]=v;if(Object.keys(r).length===2)console.log(\"ORKA_WSP_NET_\"+(r.p?\"P\":\"p\")+(r.e?\"E\":\"e\"))};const probe=(k,host,port)=>{const s=net.connect(port,host);s.setTimeout(5000);s.on(\"connect\",()=>{done(k,1);s.destroy()});s.on(\"timeout\",()=>{done(k,0);s.destroy()});s.on(\"error\",()=>done(k,0))};probe(\"p\",\"orka-provider-auth-proxy.orka-system.svc\",8080);probe(\"e\",\"1.1.1.1\",443)'"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

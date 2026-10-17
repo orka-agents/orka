@@ -126,6 +126,10 @@ var _ = BeforeSuite(func() {
 	}
 	acpCodexRuntimeRef, err = pushImageToLocalRegistry(registry, acpCodexRuntimeImage, "orka/acp-codex-runtime:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish Codex ACP runtime image")
+	if host := strings.TrimSpace(os.Getenv("E2E_RUNTIME_REGISTRY_HOST")); host != "" {
+		// gVisor Actors pull the runtime through the registry's kind-network address.
+		acpCodexRuntimeRef = host + strings.TrimPrefix(acpCodexRuntimeRef, registry)
+	}
 	acpClaudeRuntimeRef, err = pushImageToLocalRegistry(registry, acpClaudeRuntimeImage, "orka/acp-claude-runtime:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish Claude ACP runtime image")
 	acpCopilotRuntimeRef, err = pushImageToLocalRegistry(registry, acpCopilotRuntimeImage, "orka/acp-copilot-runtime:e2e")
@@ -349,6 +353,11 @@ var _ = AfterSuite(func() {
 	step("deleting Tools before execution workspaces and actor pools", func() error {
 		return deleteAllE2EResources("tools.core.orka.ai", true, 45*time.Second)
 	})
+	// A routed checkpoint blocks its provider's deletion, and only a running
+	// provider releases its native data.
+	step("deleting execution workspace checkpoints while their providers run", func() error {
+		return deleteAllE2EResources("executionworkspacecheckpoints.workspace.orka.ai", true, 2*time.Minute)
+	})
 	step("deleting execution workspaces before workspace classes and providers", func() error {
 		return deleteAllE2EResources("executionworkspaces.workspace.orka.ai", true, 45*time.Second)
 	})
@@ -522,6 +531,16 @@ func prepareKindLocalRegistry() (string, string, error) {
 	cluster := strings.TrimSpace(os.Getenv("KIND_CLUSTER"))
 	if cluster == "" {
 		cluster = "kind"
+	}
+	// A prepared cluster (Substrate) already trusts its own registry. Reuse it
+	// and return no container name, so suite cleanup never removes it.
+	if shared := strings.TrimSpace(os.Getenv("E2E_KIND_REGISTRY")); shared != "" {
+		output, err := utils.Run(exec.Command("docker", "port", shared, "5000/tcp"))
+		if err != nil {
+			return "", "", err
+		}
+		hostPort := strings.TrimSpace(strings.Split(output, "\n")[0])
+		return "localhost:" + hostPort[strings.LastIndexByte(hostPort, ':')+1:], "", nil
 	}
 	containerName := sanitizeDockerName(cluster + "-e2e-registry")
 	_, _ = utils.Run(exec.Command("docker", "rm", "-f", containerName))

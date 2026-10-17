@@ -184,21 +184,16 @@ func mockLLMServedExternalCodexRead(requests []mockLLMRequest) bool {
 
 // Providers are nested Go modules and are not included in the shared module zip.
 // Fetch the complete immutable source revision, never a floating branch or tag.
-func buildExternalFakeWorkspaceProvider() (string, error) {
+func fetchPinnedOrkaWorkspaceSource(sourceDir string) error {
 	versionTemplate := "{{if .Replace}}replaced{{else}}{{.Version}}{{end}}"
 	output, err := utils.Run(exec.Command("go", "list", "-m", "-f", versionTemplate,
 		"github.com/orka-agents/orka-workspace"))
 	if err != nil {
-		return "", err
+		return err
 	}
 	if strings.TrimSpace(output) != externalFakeWorkspaceProviderVersion {
-		return "", fmt.Errorf("external fake provider source version does not match the pinned Core workspace module")
+		return fmt.Errorf("external provider source version does not match the pinned Core workspace module")
 	}
-	sourceDir, err := os.MkdirTemp("", "orka-e2e-fake-provider-")
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = os.RemoveAll(sourceDir) }()
 	for _, args := range [][]string{
 		{"init", "--quiet", sourceDir},
 		{"-C", sourceDir, "fetch", "--quiet", "--depth=1", "https://github.com/orka-agents/orka-workspace.git",
@@ -206,27 +201,39 @@ func buildExternalFakeWorkspaceProvider() (string, error) {
 		{"-C", sourceDir, "checkout", "--quiet", "--detach", "FETCH_HEAD"},
 	} {
 		if _, err := utils.Run(exec.Command("git", args...)); err != nil {
-			return "", err
+			return err
 		}
 	}
 	output, err = utils.Run(exec.Command("git", "-C", sourceDir, "rev-parse", "HEAD"))
 	if err != nil {
-		return "", err
+		return err
 	}
 	if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
-		return "", fmt.Errorf("external fake provider checkout did not resolve the exact pinned revision")
+		return fmt.Errorf("external provider checkout did not resolve the exact pinned revision")
 	}
 	// The module tag must name the exact commit built here.
 	if _, err := utils.Run(exec.Command("git", "-C", sourceDir, "fetch", "--quiet", "--depth=1",
 		"https://github.com/orka-agents/orka-workspace.git", "refs/tags/"+externalFakeWorkspaceProviderVersion)); err != nil {
-		return "", err
+		return err
 	}
 	output, err = utils.Run(exec.Command("git", "-C", sourceDir, "rev-parse", "FETCH_HEAD^{commit}"))
 	if err != nil {
-		return "", err
+		return err
 	}
 	if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
-		return "", fmt.Errorf("pinned Core workspace module tag does not resolve to the external fake provider revision")
+		return fmt.Errorf("pinned Core workspace module tag does not resolve to the external provider revision")
+	}
+	return nil
+}
+
+func buildExternalFakeWorkspaceProvider() (string, error) {
+	sourceDir, err := os.MkdirTemp("", "orka-e2e-fake-provider-")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(sourceDir) }()
+	if err := fetchPinnedOrkaWorkspaceSource(sourceDir); err != nil {
+		return "", err
 	}
 	image := "ghcr.io/orka-agents/orka/e2e-external-fake-provider:" + externalFakeWorkspaceProviderRevision[:12]
 	if _, err := utils.Run(exec.Command("docker", "build", "-t", image,

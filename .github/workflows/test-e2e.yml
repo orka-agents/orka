@@ -47,7 +47,7 @@ concurrency:
 
 jobs:
   test-e2e:
-    name: ${{ matrix.name }} (${{ matrix.part }}/2)
+    name: ${{ matrix.part && format('{0} ({1}/2)', matrix.name, matrix.part) || matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.job_timeout }}
     strategy:
@@ -61,7 +61,7 @@ jobs:
           - lane: general
             name: Run on Ubuntu
             cluster: orka-test-e2e
-            labels: "!agent-runtime"
+            labels: "!agent-runtime && !workspace-provider"
             # About half of the lane's spec time.
             split: '/(scheduled_task|coordination_advanced|fake_forge)_test\.go'
             idle_ttl: 5s
@@ -83,10 +83,32 @@ jobs:
             job_timeout: 75
             test_timeout: 60m
             ginkgo_timeout: 55m
+          # Real out-of-tree workspace providers, built from the orka-workspace
+          # revision Core pins, run the same lifecycle specs. Their lane values
+          # match no lane above, so each runs as one unsplit job.
+          - lane: workspace-sandbox
+            name: Workspace provider (agent-sandbox)
+            cluster: orka-test-e2e-wsp-sandbox
+            labels: workspace-provider
+            provider: sandbox
+            idle_ttl: 15m
+            job_timeout: 120
+            test_timeout: 100m
+            ginkgo_timeout: 95m
+          - lane: workspace-substrate
+            name: Workspace provider (Substrate)
+            cluster: orka-test-e2e-wsp-substrate
+            labels: workspace-provider
+            provider: substrate
+            idle_ttl: 15m
+            job_timeout: 150
+            test_timeout: 120m
+            ginkgo_timeout: 115m
     env:
       KIND_CLUSTER: ${{ matrix.cluster }}
       E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/${{ matrix.lane }}-${{ matrix.part }}
       E2E_GINKGO_LABEL_FILTER: ${{ matrix.labels }}
+      E2E_WORKSPACE_PROVIDER: ${{ matrix.provider }}
       E2E_GINKGO_FOCUS_FILE: ${{ matrix.part == 1 && matrix.split || '' }}
       E2E_GINKGO_SKIP_FILE: ${{ matrix.part == 2 && matrix.split || '' }}
       E2E_ACP_IDLE_POOL_TTL: ${{ matrix.idle_ttl }}
@@ -114,6 +136,15 @@ jobs:
 
       - name: Verify kind installation
         run: kind version
+
+      - name: Prepare the Substrate cluster
+        if: matrix.provider == 'substrate'
+        run: |
+          set -Eeuo pipefail
+          go install github.com/google/ko@v0.18.1
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+          PATH="$(go env GOPATH)/bin:${PATH}" bash scripts/workspace-substrate-cluster.sh
+          cat "bin/substrate-e2e-${KIND_CLUSTER}/e2e.env" >> "${GITHUB_ENV}"
 
       - name: Running Test e2e
         run: |
