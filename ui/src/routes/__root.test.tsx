@@ -17,13 +17,15 @@ vi.mock('@tanstack/react-router', async () => {
     createRootRoute: (opts: any) => opts,
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: mockPathname, searchStr: mockSearchStr }),
+    // Like the browser-history router, the fragment mirrors the address bar.
+    useLocation: () => ({ pathname: mockPathname, searchStr: mockSearchStr, hash: window.location.hash.slice(1) }),
     Outlet: () => <div data-testid="outlet" />,
   }
 })
 
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
+import { captureHashToken, takeHashToken } from '@/lib/login-return'
 import { Route } from './__root'
 
 describe('__root route', () => {
@@ -32,6 +34,7 @@ describe('__root route', () => {
     mockPathname = '/'
     mockSearchStr = ''
     sessionStorage.clear()
+    takeHashToken()
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     useAuthStore.setState({ token: 'test-token' })
     // jsdom doesn't implement matchMedia
@@ -53,6 +56,28 @@ describe('__root route', () => {
   it('exports a Route with a component', () => {
     expect(Route).toBeDefined()
     expect(Route.component).toBeDefined()
+  })
+
+  it('applies the system theme while the user follows it, and an explicit pick over it', () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(prefers-color-scheme: dark)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+    const RootComponent = Route.component!
+    useUIStore.setState({ theme: 'system' })
+    const { unmount } = render(<RootComponent />)
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    unmount()
+
+    useUIStore.setState({ theme: 'light' })
+    render(<RootComponent />)
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
   })
 
   it('renders layout when authenticated', () => {
@@ -79,6 +104,31 @@ describe('__root route', () => {
     render(<RootComponent />)
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/login', hash: 'completion=one-time' })
     expect(sessionStorage.getItem('orka-login-return')).toBe('/settings/connectors?status=pending&connection=github-1')
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('sends a deep-link #token= to the login page without the token in the address', () => {
+    useAuthStore.setState({ token: null })
+    window.history.replaceState(null, '', '/monitors/example?tab=runs#token=deep-link-token')
+    captureHashToken()
+    mockPathname = '/monitors/example'
+    mockSearchStr = '?tab=runs'
+    const RootComponent = Route.component!
+    render(<RootComponent />)
+    expect(window.location.href).not.toContain('deep-link-token')
+    expect(mockNavigate).toHaveBeenCalledWith({ to: '/login' })
+    expect(sessionStorage.getItem('orka-login-return')).toBe('/monitors/example?tab=runs')
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('treats a captured #token= as a sign-in request over an existing token', () => {
+    window.history.replaceState(null, '', '/tasks#token=new-token')
+    captureHashToken()
+    mockPathname = '/tasks'
+    const RootComponent = Route.component!
+    const { container } = render(<RootComponent />)
+    expect(mockNavigate).toHaveBeenCalledWith({ to: '/login' })
+    expect(container.querySelector('[data-testid="outlet"]')).not.toBeInTheDocument()
     window.history.replaceState(null, '', '/')
   })
 

@@ -14,7 +14,8 @@ The external provider is tested against unmodified upstream `agent-sandbox`
 `v1.0.3`. Install and operate that backend separately. For an existing v0.5
 installation, complete the upstream
 [storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)
-before installing v1.
+before installing v1. [Execution workspaces](execution-workspaces.md) compares it
+with Agent Substrate.
 
 :::tip[Video demo]
 Watch [Suspend an agent workspace and keep its files](https://www.youtube.com/watch?v=DyS9JioSRa0).

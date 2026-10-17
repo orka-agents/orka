@@ -330,6 +330,9 @@ func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "provider already exists")
 		}
+		if invalid := invalidObjectError("provider", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create provider: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(provider)
@@ -404,6 +407,9 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 		if apierrors.IsConflict(err) {
 			return fiber.NewError(fiber.StatusConflict, "provider was modified concurrently")
 		}
+		if invalid := invalidObjectError("provider", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update provider: %v", err))
 	}
 	return c.JSON(provider)
@@ -468,6 +474,9 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 	if err := h.client.Create(c.Context(), tool); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool already exists")
+		}
+		if invalid := invalidObjectError("tool", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create tool: %v", err))
 	}
@@ -550,6 +559,9 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 		}
 		if apierrors.IsConflict(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool was modified concurrently")
+		}
+		if invalid := invalidObjectError("tool", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
 	}
@@ -653,6 +665,9 @@ func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "substrate actor pool already exists")
 		}
+		if invalid := invalidObjectError("substrate actor pool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create substrate actor pool: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(pool)
@@ -682,6 +697,9 @@ func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 		updated = pool
 		return nil
 	}); err != nil {
+		if invalid := invalidObjectError("substrate actor pool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update substrate actor pool: %v", err))
 	}
 	if fetchErr != nil {

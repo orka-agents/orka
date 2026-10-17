@@ -1,47 +1,19 @@
-import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { isPaginationProtocolError, pageParams, pollUnlessForbidden, retryUnlessForbidden, maxListWalkPages, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
+import { useStickyQueryError } from './use-sticky-query-error'
 
 function fetchTaskListPage(namespace: string, limit: string, continueToken?: string) {
   return api.get<ListResponse<Task>>('/tasks', pageParams({ namespace, limit }, continueToken))
 }
 
-export function useTaskList(limit = '25', refetchInterval: number | false = 10000) {
-  const namespace = useUIStore((s) => s.namespace)
-  const token = useAuthStore((s) => s.token)
-  return useQuery({
-    queryKey: ['tasks', namespace, limit],
-    queryFn: () => fetchTaskListPage(namespace, limit),
-    enabled: Boolean(token),
-    retry: retryUnlessForbidden,
-    refetchInterval: pollUnlessForbidden(refetchInterval),
-  })
-}
-
-// Page-by-page task listing for the Tasks view: the first page loads on its
-// own and every later page follows metadata.continue on demand, so a
-// namespace with more tasks than one page is never silently truncated.
-export function useTaskListPages(limit = '25', refetchInterval: number | false = 10000) {
-  const namespace = useUIStore((s) => s.namespace)
-  const token = useAuthStore((s) => s.token)
-  return useInfiniteQuery({
-    queryKey: ['tasks', 'pages', namespace, limit],
-    queryFn: ({ pageParam }) => fetchTaskListPage(namespace, limit, pageParam || undefined),
-    initialPageParam: '',
-    getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
-    enabled: Boolean(token),
-    retry: retryUnlessForbidden,
-    refetchInterval: pollUnlessForbidden(refetchInterval),
-  })
-}
-
 export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)
-  return useQuery({
+  const query = useQuery({
     queryKey: ['tasks', 'all', namespace, pageLimit],
     enabled: Boolean(token),
     // Bounded by maxListWalkPages; views built on this walk are summaries and
@@ -58,6 +30,10 @@ export function useTaskListAll(pageLimit = '100', refetchInterval: number | fals
       !isForbiddenError(error) && !isPaginationProtocolError(error) && failureCount < 3,
     refetchInterval: pollUnlessForbidden(refetchInterval),
   })
+  // Views built on this walk show the error, not a skeleton, while a failed
+  // first load is retried by polling.
+  const error = useStickyQueryError(query)
+  return { ...query, error, isLoading: query.isLoading && !error }
 }
 
 export function useTask(id: string, refetchInterval: number | false = 5000) {
@@ -80,13 +56,28 @@ export function useTask(id: string, refetchInterval: number | false = 5000) {
   })
 }
 
-export function useTaskResult(id: string) {
+// The result loads on its own once `enabled` (the Result tab passes "task is
+// terminal"); otherwise it waits for an explicit refetch.
+export function useTaskResult(id: string, enabled = false, taskUID?: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
-    queryKey: ['taskResult', id, namespace],
+    queryKey: ['taskResult', id, namespace, taskUID ?? ''],
     queryFn: () =>
       api.get<{ result: string }>(`/tasks/${id}/result`, { namespace }),
-    enabled: false,
+    enabled: enabled && Boolean(id),
+  })
+}
+
+// Child Tasks the controller labeled with this parent: scheduled runs and
+// delegated children.
+export function useTaskChildren(id: string, enabled = true, taskUID?: string, refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['taskChildren', id, namespace, taskUID ?? ''],
+    queryFn: () => api.get<ListResponse<Task>>(`/tasks/${id}/children`, { namespace }),
+    enabled: enabled && Boolean(id),
+    retry: retryUnlessForbidden,
+    refetchInterval: pollUnlessForbidden(refetchInterval),
   })
 }
 

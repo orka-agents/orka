@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 /**
@@ -32,9 +32,39 @@ function tokenValue(body: string, name: string): string | undefined {
   return m?.[1].trim()
 }
 
+/** WCAG 2 contrast ratio of two #rrggbb colors. */
+function contrast(a: string, b: string): number {
+  const luminance = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5].map((i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+    })
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl
+  }
+  const [high, low] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (high + 0.05) / (low + 0.05)
+}
+
 describe('index.css design tokens', () => {
   const themeBody = block('@theme')
-  const darkBody = block('.dark')
+  // Anchored to the rule itself: the header comment also mentions ".dark".
+  const darkBody = block('\n.dark {')
+
+  it('defines every CSS variable the components read', () => {
+    // A variable that is never defined makes its whole declaration invalid, so a
+    // toast that reads one is drawn with no background at all.
+    const defined = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]))
+    const sources = readdirSync(__dirname, { recursive: true, encoding: 'utf8' })
+      .filter((file) => /\.(tsx?|css)$/.test(file) && !/\.test\.tsx?$/.test(file))
+    for (const file of sources) {
+      const text = readFileSync(path.resolve(__dirname, file), 'utf8')
+      for (const [, name] of text.matchAll(/var\((--[\w-]+)/g)) {
+        // Radix sets its --radix-* variables on the element at runtime.
+        if (name.startsWith('--radix-')) continue
+        expect(defined.has(name), `${file} reads ${name}`).toBe(true)
+      }
+    }
+  })
 
   it('card surface is distinct from the page background in light theme', () => {
     const card = tokenValue(themeBody, '--color-card')
@@ -86,6 +116,22 @@ describe('index.css design tokens', () => {
       }
     }
   })
+
+  it('gives native controls the color scheme of the app theme', () => {
+    expect(tokenValue(block('\n:root {'), 'color-scheme')).toBe('light')
+    expect(tokenValue(darkBody, 'color-scheme')).toBe('dark')
+    // Equal specificity, so the dark rule must come later to win.
+    expect(css.indexOf('\n:root {')).toBeLessThan(css.indexOf('\n.dark {'))
+  })
+
+  it.each(['status-pending', 'status-running', 'status-finalizing', 'status-succeeded', 'status-failed', 'live'])(
+    'keeps light-theme --color-%s text at WCAG AA contrast on cards and the page',
+    (name) => {
+      const color = tokenValue(themeBody, `--color-${name}`)!
+      expect(contrast(color, tokenValue(themeBody, '--color-card')!)).toBeGreaterThanOrEqual(4.5)
+      expect(contrast(color, tokenValue(themeBody, '--color-background')!)).toBeGreaterThanOrEqual(4.5)
+    },
+  )
 
   it('honors reduced motion globally', () => {
     expect(css).toMatch(/prefers-reduced-motion:\s*reduce/)

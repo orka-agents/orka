@@ -2,24 +2,48 @@ name: E2E Tests
 
 on:
   push:
-    paths-ignore:
-      - ".agents/**"
-      - ".claude/**"
-      - "website/**"
-      - '**.md'
-      - 'LICENSE'
-      - '.gitignore'
+    # Run only when something this lane builds or exercises changes. Later
+    # patterns override earlier ones, so the self and shared-action paths are
+    # re-included after .github is excluded. UI, docs, website, and example
+    # changes are covered by UI Lint/Tests, Website, Docs Check, and Go Tests.
+    paths:
+      - "**"
+      - "!.agents/**"
+      - "!.claude/**"
+      - "!.github/**"
+      - ".github/workflows/test-e2e.yml"
+      - ".github/actions/**"
+      - "!website/**"
+      - "!docs/**"
+      - "!ui/**"
+      - "!examples/**"
+      - "!**.md"
+      - "!LICENSE"
+      - "!.gitignore"
   pull_request:
-    paths-ignore:
-      - ".agents/**"
-      - ".claude/**"
-      - "website/**"
-      - '**.md'
-      - 'LICENSE'
-      - '.gitignore'
+    paths:
+      - "**"
+      - "!.agents/**"
+      - "!.claude/**"
+      - "!.github/**"
+      - ".github/workflows/test-e2e.yml"
+      - ".github/actions/**"
+      - "!website/**"
+      - "!docs/**"
+      - "!ui/**"
+      - "!examples/**"
+      - "!**.md"
+      - "!LICENSE"
+      - "!.gitignore"
 
 permissions:
   contents: read
+
+concurrency:
+  # Supersede earlier runs of the same pull request. Pushes get a unique
+  # group and never cancel.
+  group: ${{ github.event_name == 'pull_request' && format('test-e2e-pr-{0}', github.event.pull_request.number) || format('test-e2e-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test-e2e:

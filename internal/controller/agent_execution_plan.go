@@ -78,6 +78,9 @@ func (r *TaskReconciler) planAgentExecution(
 	agent = withEffectiveBuiltInContract(agent, r.Mode)
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+		if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, true, false); reason != "" {
+			return rejectAgentExecutionPlan(reason)
+		}
 		reader := uncachedReader(r.APIReader, r.Client)
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, runtime); err != nil {
@@ -129,6 +132,11 @@ func (r *TaskReconciler) planAgentExecution(
 	}
 
 	contract := agent.BuiltInContractVersion()
+	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(
+		task, agent, false, contract == corev1alpha1.AgentRuntimeContractHarnessV1,
+	); reason != "" {
+		return rejectAgentExecutionPlan(reason)
+	}
 	switch contract {
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
 		if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {

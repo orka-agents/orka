@@ -53,7 +53,7 @@ const (
 // agentRuntimeResultDiagnostics are CLI warnings that must not leak into a
 // Task result.
 var agentRuntimeResultDiagnostics = regexp.MustCompile(
-	`Info: (Disabled tools|Unknown tool name in the tool excludedlist)|Warning: Falling back from WebSockets`)
+	`Info: (Disabled tools|Unknown tool name in the tool excludedlist)|Warning: (Falling back from WebSockets|Model metadata for)`)
 
 type agentRuntimeProvider struct {
 	kind, model string

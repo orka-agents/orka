@@ -1223,6 +1223,9 @@ func (s *Server) createSession(
 		maps.Copy(envValues, values)
 	}
 	maps.Copy(envValues, projection.Environment)
+	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
+	}
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
@@ -1251,6 +1254,11 @@ func (s *Server) createSession(
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
+	if projection.Instructions != nil {
+		if err := acp.ProjectInstructions(paths, *projection.Instructions, gid); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("protected instruction projection", err)
+		}
+	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved
@@ -1264,7 +1272,9 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("read-only workspace protection", err)
 		}
 	}
-	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
+	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{
+		PATH: harnessv2.RuntimeToolboxChildPath(acp.DefaultChildPath, s.cfg.Toolboxes), Values: envValues,
+	})
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
 	}

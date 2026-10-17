@@ -13,6 +13,9 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a resource cannot be updated because it changed concurrently.
 var ErrConflict = errors.New("conflict")
 
+// ErrSessionConfigurationMismatch marks an immutable conflict, not lease contention.
+var ErrSessionConfigurationMismatch = errors.New("session configuration mismatch")
+
 // ErrControllerEpochMutationContention marks an exhausted mutation-lock
 // acquisition retry window. Errors carrying it also wrap ErrConflict;
 // definitive epoch authority failures do not carry this marker.
@@ -93,10 +96,11 @@ type SessionStore interface {
 	CreateSession(ctx context.Context, session *SessionRecord) error
 	GetSession(ctx context.Context, namespace, name string) (*SessionRecord, error)
 	ListSessions(ctx context.Context, namespace string) ([]SessionMetadata, error)
-	// ListSessionsPage returns up to limit sessions of the namespace in name
-	// order, starting strictly after afterName and skipping excludeType
-	// (empty = no exclusion). more reports whether further rows exist.
-	ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) (items []SessionMetadata, more bool, err error)
+	// ListSessionsPage returns up to limit sessions of the namespace newest
+	// first (creation time descending, then name), starting strictly after
+	// the after cursor (nil = first page) and skipping excludeType (empty =
+	// no exclusion). more reports whether further rows exist.
+	ListSessionsPage(ctx context.Context, namespace string, after *SessionPageCursor, limit int, excludeType string) (items []SessionMetadata, more bool, err error)
 	DeleteSession(ctx context.Context, namespace, name string) error
 
 	// Locking
@@ -137,6 +141,10 @@ type SessionTurnCommitter interface {
 type FencedSessionWriteStore interface {
 	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
 	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
+	// ReleaseLockWithTokenUsage adds a finished owner's token usage and
+	// releases its lock in one write, so a replayed completion cannot count the
+	// usage twice: either nothing was written or the lock is already gone.
+	ReleaseLockWithTokenUsage(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
 }
 
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.
@@ -238,6 +246,9 @@ type SecurityStore interface {
 
 	GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
+	// SaveThreatModelIfVersion saves model only while the latest stored
+	// version equals expectedVersion, and returns ErrConflict otherwise.
+	SaveThreatModelIfVersion(ctx context.Context, model *ThreatModel, expectedVersion int64) error
 
 	UpsertFinding(ctx context.Context, finding *Finding) error
 	UpsertObservedFinding(ctx context.Context, finding *Finding) error

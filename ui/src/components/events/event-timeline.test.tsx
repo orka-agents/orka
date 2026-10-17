@@ -18,6 +18,12 @@ describe('EventTimeline', () => {
     expect(screen.getByText('No execution events recorded.')).toBeInTheDocument()
   })
 
+  it('titles the timeline with an h2, the level below a detail page h1', () => {
+    render(<EventTimeline title="Execution timeline" events={[]} />)
+    expect(screen.getByRole('heading', { level: 2, name: 'Execution timeline' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { level: 3 })).not.toBeInTheDocument()
+  })
+
   it('renders a basic lifecycle timeline with seq, type, severity, and summary', () => {
     const events = [
       makeEvent({ seq: 1, type: 'TaskCreated', summary: 'task created' }),

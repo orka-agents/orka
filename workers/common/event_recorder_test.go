@@ -3,11 +3,15 @@ package common
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -396,5 +400,213 @@ func TestRecordEventStrictCapturesFakeEvent(t *testing.T) {
 		got[0].Type != events.ExecutionEventTypeApprovalRequested ||
 		got[0].ToolCallID != "approval-1" {
 		t.Fatalf("events = %#v", got)
+	}
+}
+
+// restartingControllerClient fails the first failures connections the way a
+// restarting controller's Service does, refusing them or, with hang, never
+// answering, then dials the requested address.
+func restartingControllerClient(t *testing.T, failures int32, hang bool) (*http.Client, *atomic.Int32) {
+	t.Helper()
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	refusedAddr := closed.Addr().String()
+	_ = closed.Close()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	var dials atomic.Int32
+	var dialer net.Dialer
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if dials.Add(1) <= failures {
+				if hang {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-stop:
+						return nil, net.ErrClosed
+					}
+				}
+				addr = refusedAddr
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}}, &dials
+}
+
+func stubRetryWait(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var slept []time.Duration
+	retryWait = func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	t.Cleanup(func() { retryWait = waitForRetry })
+	return &slept
+}
+
+func countingEventServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		handler(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server, &requests
+}
+
+func newTestHTTPEventRecorder(
+	t *testing.T, controllerURL string, client *http.Client, timeout time.Duration,
+) EventRecorder {
+	t.Helper()
+	return NewHTTPEventRecorder(HTTPEventRecorderConfig{
+		ControllerURL: controllerURL,
+		Namespace:     "default",
+		TaskName:      "task-1",
+		BearerPath:    writeTestSAToken(t, "value"),
+		Client:        client,
+		Timeout:       timeout,
+	})
+}
+
+func TestRecordEventStrictRetriesUntilControllerAcceptsConnections(t *testing.T) {
+	for name, hang := range map[string]bool{"refused": false, "timed out": true} {
+		t.Run(name, func(t *testing.T) {
+			slept := stubRetryWait(t)
+			server, requests := countingEventServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+			})
+			client, dials := restartingControllerClient(t, 3, hang)
+			recorder := newTestHTTPEventRecorder(t, server.URL, client, 200*time.Millisecond)
+
+			err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeModelUsageUpdated)
+			if err != nil {
+				t.Fatalf("RecordEventStrict() error = %v", err)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("controller requests = %d, want 1", got)
+			}
+			if got := dials.Load(); got != 4 {
+				t.Fatalf("dials = %d, want 4", got)
+			}
+			if want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}; !reflect.DeepEqual(*slept, want) {
+				t.Fatalf("backoff = %v, want %v", *slept, want)
+			}
+		})
+	}
+}
+
+func TestRecordEventStrictStopsRetryingUnreachableController(t *testing.T) {
+	slept := stubRetryWait(t)
+	server, requests := countingEventServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	client, dials := restartingControllerClient(t, math.MaxInt32, false)
+	recorder := newTestHTTPEventRecorder(t, server.URL, client, time.Second)
+
+	err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeModelUsageUpdated)
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("RecordEventStrict() error = %v, want connection refused", err)
+	}
+	if got := dials.Load(); got != strictEventConnectAttempts {
+		t.Fatalf("dials = %d, want %d", got, strictEventConnectAttempts)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("controller requests = %d, want 0", requests.Load())
+	}
+	var total time.Duration
+	for _, d := range *slept {
+		total += d
+	}
+	waits := len(*slept)
+	if waits != strictEventConnectAttempts-1 || (*slept)[waits-1] != strictEventMaxBackoff || total < 50*time.Second {
+		t.Fatalf("backoff = %v (total %v), want %d waits capped at %v covering a controller restart",
+			*slept, total, strictEventConnectAttempts-1, strictEventMaxBackoff)
+	}
+}
+
+func TestRecordEventStrictStopsRetryingWhenContextEnds(t *testing.T) {
+	retryWait = func(context.Context, time.Duration) error { return context.Canceled }
+	t.Cleanup(func() { retryWait = waitForRetry })
+	client, dials := restartingControllerClient(t, math.MaxInt32, false)
+	recorder := newTestHTTPEventRecorder(t, "http://controller.invalid", client, time.Second)
+
+	err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeModelUsageUpdated)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("RecordEventStrict() error = %v, want the dial failure and context.Canceled", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want 1", got)
+	}
+}
+
+func TestHTTPEventRecorderDoesNotRetryRequestsTheControllerReceived(t *testing.T) {
+	for name, handler := range map[string]http.HandlerFunc{
+		"server error": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		},
+		"connection dropped after the request": func(w http.ResponseWriter, _ *http.Request) {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			slept := stubRetryWait(t)
+			server, requests := countingEventServer(t, handler)
+			recorder := newTestHTTPEventRecorder(t, server.URL, nil, time.Second)
+
+			if err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeModelUsageUpdated); err == nil {
+				t.Fatal("RecordEventStrict() error = nil, want failure")
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("controller requests = %d, want 1 so the event is not appended twice", got)
+			}
+			if len(*slept) != 0 {
+				t.Fatalf("backoff = %v, want no retry", *slept)
+			}
+		})
+	}
+}
+
+func TestHTTPEventRecorderRecordDoesNotRetryDialFailures(t *testing.T) {
+	slept := stubRetryWait(t)
+	client, dials := restartingControllerClient(t, math.MaxInt32, false)
+	recorder := newTestHTTPEventRecorder(t, "http://controller.invalid", client, time.Second)
+
+	recorder.Record(context.Background(), events.ExecutionEventTypeTaskStarted)
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want 1 for a best-effort event", got)
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("backoff = %v, want no retry", *slept)
+	}
+}
+
+type eventRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f eventRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestRecordEventStrictDoesNotRetryThroughCustomTransport(t *testing.T) {
+	slept := stubRetryWait(t)
+	var calls atomic.Int32
+	// A custom RoundTripper may send the request without reporting GotConn.
+	client := &http.Client{Transport: eventRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("connection reset after sending")
+	})}
+	recorder := newTestHTTPEventRecorder(t, "http://controller.invalid", client, time.Second)
+
+	if err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeModelUsageUpdated); err == nil {
+		t.Fatal("RecordEventStrict() error = nil, want failure")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("round trips = %d, want 1 so the event is not appended twice", got)
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("backoff = %v, want no retry", *slept)
 	}
 }

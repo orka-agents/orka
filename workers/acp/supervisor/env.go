@@ -87,6 +87,12 @@ const (
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
 	EnvE2EPromptWriteAmbiguity   = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
+	// EnvToolboxes carries the frozen toolbox list as JSON. It is part of the
+	// runtime profile digest, so the controller and supervisor must agree.
+	EnvToolboxes = "ORKA_ACP_TOOLBOXES"
+	// EnvToolboxMountMethod names how the controller bound the toolboxes
+	// (copy or imageVolume). It is not part of the profile.
+	EnvToolboxMountMethod = "ORKA_ACP_TOOLBOX_MOUNT_METHOD"
 
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
@@ -145,6 +151,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	toolboxes, err := toolboxesFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:               harnessv2.ACPProfileV1,
 		ProviderKind:             providerKind,
@@ -158,6 +168,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProxyCredentialRole:      requiredEnv(EnvProxyCredentialRole),
 		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
 		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
+		Toolboxes:                toolboxes,
 	}
 	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
@@ -342,6 +353,8 @@ func LoadConfigFromEnv() (Config, error) {
 		ArtifactUploader:              artifactUploader,
 		E2EPromptWriteFaultRecorder:   e2ePromptWriteFaultRecorder,
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
+		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
+		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -609,8 +622,8 @@ func copilotSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	if request.AgentConfiguration.SystemPrompt != "" {
-		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot exactly enforce Agent systemPrompt")
+	if err := acp.ValidateCopilotInstructions(request.AgentConfiguration.SystemPrompt); err != nil {
+		return ProviderSessionProjection{}, err
 	}
 	if request.AgentConfiguration.ReasoningEffort != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot enforce reasoning effort")
@@ -649,10 +662,14 @@ func copilotSessionProjection(
 	}
 	// The CLI reports the exclusion list back as "Info:" agent message chunks
 	// at prompt start; the filter withholds exactly those chunks.
-	return ProviderSessionProjection{
+	projection := ProviderSessionProjection{
 		AdditionalArgs:        args,
 		AgentDiagnosticFilter: &AgentDiagnosticFilter{Startup: copilotStartupDiagnostic(excluded)},
-	}, nil
+	}
+	if prompt := request.AgentConfiguration.SystemPrompt; prompt != "" {
+		projection.Instructions = nativeInstructionProjection(providerKindCopilot, prompt)
+	}
+	return projection, nil
 }
 
 func openCodeSessionProjection(
@@ -678,9 +695,7 @@ func openCodeSessionProjection(
 		request.Profile.Model != model || request.AgentConfiguration.Model != model {
 		return ProviderSessionProjection{}, fmt.Errorf("provider session configuration does not match runtime profile")
 	}
-	if request.AgentConfiguration.SystemPrompt != "" {
-		return ProviderSessionProjection{}, fmt.Errorf("opencode ACP runtime cannot exactly enforce Agent systemPrompt")
-	}
+
 	if request.AgentConfiguration.ReasoningEffort != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("opencode ACP runtime cannot enforce reasoning effort")
 	}
@@ -697,7 +712,11 @@ func openCodeSessionProjection(
 			)
 		}
 	}
-	return ProviderSessionProjection{}, nil
+	projection := ProviderSessionProjection{}
+	if prompt := request.AgentConfiguration.SystemPrompt; prompt != "" {
+		projection.Instructions = nativeInstructionProjection(providerKindOpencode, prompt)
+	}
+	return projection, nil
 }
 
 func providerProfile(
@@ -927,6 +946,10 @@ func openCodeSessionConfig(
 		permissions[openCodeToolGrep] = openCodePermissionDeny
 		permissions[openCodeToolWrite] = openCodePermissionDeny
 	}
+	instructions := []string{openCodeRootInstructionPath, filepath.Join(paths.Workspace, "AGENTS.md")}
+	if request.AgentConfiguration != nil && request.AgentConfiguration.SystemPrompt != "" {
+		instructions = append(instructions, filepath.Join(paths.Home, ".orka", "agent-instructions.md"))
+	}
 	return json.Marshal(map[string]any{
 		// Native ACP returns before background title inference settles. Titles
 		// must not consume prompt quota or outlive the governed prompt.
@@ -935,7 +958,7 @@ func openCodeSessionConfig(
 		"autoupdate":        false,
 		"enabled_providers": []string{openCodeProviderID},
 		"formatter":         false,
-		"instructions":      []string{openCodeRootInstructionPath, filepath.Join(paths.Workspace, "AGENTS.md")},
+		"instructions":      instructions,
 		"lsp":               false,
 		"mcp":               map[string]any{},
 		"model":             openCodeProviderID + "/" + model,
@@ -1129,6 +1152,26 @@ func workspaceArtifactDownloadLimitFromEnv() (int64, error) {
 
 func requiredEnv(name string) string { return strings.TrimSpace(os.Getenv(name)) }
 
+// toolboxesFromEnv parses the frozen toolbox list. An absent or empty value
+// means no toolboxes and leaves the profile digest unchanged.
+func toolboxesFromEnv() ([]harnessv2.RuntimeToolbox, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvToolboxes))
+	if raw == "" {
+		return nil, nil
+	}
+	var toolboxes []harnessv2.RuntimeToolbox
+	if err := json.Unmarshal([]byte(raw), &toolboxes); err != nil {
+		return nil, fmt.Errorf("%s: %w", EnvToolboxes, err)
+	}
+	if len(toolboxes) == 0 {
+		return nil, nil
+	}
+	if err := harnessv2.ValidateRuntimeToolboxes(toolboxes); err != nil {
+		return nil, fmt.Errorf("%s: %w", EnvToolboxes, err)
+	}
+	return toolboxes, nil
+}
+
 func modelTokenLimitsFromEnv() (*harnessv2.ModelTokenLimits, error) {
 	contextValue := strings.TrimSpace(os.Getenv(EnvModelContextLimit))
 	outputValue := strings.TrimSpace(os.Getenv(EnvModelOutputLimit))
@@ -1201,4 +1244,18 @@ func readRequiredSecretFile(envName string) (string, error) {
 		return "", fmt.Errorf("%s file is empty", envName)
 	}
 	return value, nil
+}
+
+func nativeInstructionProjection(provider, prompt string) *acp.InstructionProjection {
+	if prompt == "" {
+		return nil
+	}
+	switch provider {
+	case providerKindCopilot:
+		return &acp.InstructionProjection{RelativePath: ".copilot/copilot-instructions.md", Content: prompt}
+	case providerKindOpencode:
+		return &acp.InstructionProjection{RelativePath: ".orka/agent-instructions.md", Content: prompt}
+	default:
+		return nil
+	}
 }

@@ -161,6 +161,8 @@ describe('RuntimeRegistry', () => {
     expect(screen.getByText('Serving')).toBeInTheDocument()
     expect(screen.getByText('Accepting')).toBeInTheDocument()
     expect(screen.getByText('3 / 10')).toBeInTheDocument()
+    // Capacity bars carry their name on an element role that allows it.
+    expect(screen.getAllByRole('img', { name: /capacity: 3 \/ 10/ }).length).toBeGreaterThan(0)
     expect(screen.getByText('2 / 4')).toBeInTheDocument()
     expect(screen.getByText('schema-v1.20.0')).toBeInTheDocument()
   })

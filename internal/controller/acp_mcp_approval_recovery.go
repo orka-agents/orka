@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -48,8 +49,9 @@ type acpMCPApprovalEffect struct {
 }
 
 // acpMCPApprovalReceiptOutcome interprets a saved tool response without granting
-// permission to repeat the call. Failed records are definitive pre-execution
-// denials; a completed tool that returned an error has a Succeeded effect.
+// permission to repeat the call. Failed records prove the call had no effect:
+// a denial before execution, or an approved call that sent nothing or was
+// refused. A completed tool that returned an error has a Succeeded effect.
 func acpMCPApprovalReceiptOutcome(effect *store.ExternalEffect, approvalID string) (string, string, json.RawMessage, error) {
 	if effect == nil {
 		return "", "", nil, errors.New("approval receipt is invalid")
@@ -92,7 +94,12 @@ func acpMCPApprovalReceiptOutcome(effect *store.ExternalEffect, approvalID strin
 		}
 		switch denial.Code {
 		case acpApprovalCodeDeclined, acpApprovalCodeExpired, acpApprovalCodeCancelled, acpApprovalCodeStale:
-			return "not_started", denial.Code, result, nil
+			return acpApprovalNotStarted, denial.Code, result, nil
+		case acpApprovalCodeNoEffect:
+			if strings.TrimSpace(denial.Error) == "" {
+				return "", "", nil, errors.New("approval failure receipt is invalid")
+			}
+			return acpApprovalOutcomeFailed, denial.Error, result, nil
 		default:
 			return "", "", nil, errors.New("approval denial receipt is invalid")
 		}
@@ -439,7 +446,7 @@ func mcpApprovalProjectionCurrent(approval approvals.Approval, outcome, reason s
 }
 
 func mcpApprovalRecoveryDecisionType(approval approvals.Approval, outcome, reason string) string {
-	if approval.Status != approvals.StatusPending || outcome != "not_started" {
+	if approval.Status != approvals.StatusPending || outcome != acpApprovalNotStarted {
 		return ""
 	}
 	switch reason {

@@ -14,7 +14,7 @@ The feature is GitHub-first and built on Orka's existing task, agent runtime, ar
 scheduling, and PR plumbing. Remediation (patch generation and PR creation) always requires
 an explicit user action.
 
-- For the CRD field reference, see [Configuration → RepositoryScan](../reference/configuration.md#repositoryscan).
+- For the CRD field reference, see [Resource reference → RepositoryScan](../reference/resources.md#repositoryscan).
 - For the REST endpoints, see [API Reference → Security](../reference/api-reference.md#security).
 - For the internal design and storage model, see [Repository Security Scanning Design](../development/security-scanning-design.md).
 
@@ -95,7 +95,7 @@ spec:
 
 For patch Tasks, the Workspace/Publisher—not the ACP child—prepares and publishes the branch.
 
-See [Configuration → RepositoryScan](../reference/configuration.md#repositoryscan) for every
+See [Resource reference → RepositoryScan](../reference/resources.md#repositoryscan) for every
 spec and status field, and [API Reference → Security](../reference/api-reference.md#security)
 for the endpoint and query-parameter reference, including the typical findings → validate →
 patch → pull-request remediation flow.
@@ -263,5 +263,5 @@ old repository-wide findings by itself.
 
 - [Repository Security Scanning Design](../development/security-scanning-design.md) — CRD,
   storage schema, controller ingestion, artifact contract, and prompt contracts.
-- [Configuration → RepositoryScan](../reference/configuration.md#repositoryscan)
+- [Resource reference → RepositoryScan](../reference/resources.md#repositoryscan)
 - [API Reference → Security](../reference/api-reference.md#security)

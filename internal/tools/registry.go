@@ -168,7 +168,11 @@ type ToolContext struct {
 	// AuthorizeConnectorRead gates list_connections for callers whose
 	// delegated token may not read the person's linked accounts.
 	AuthorizeConnectorRead func() *ChatToolError
-	IncrementTasks         func()
+	// DashboardEnabled reports that the controller serves the dashboard, so
+	// list_connections may send the person to its connector settings page.
+	// Unset, it names the CLI commands instead.
+	DashboardEnabled bool
+	IncrementTasks   func()
 	// CreatedTasks records the Tasks this turn's tools created: the only
 	// Tasks a linked account may be scoped by outside a Task. The API
 	// owns one per turn and shares it across the turn's tool calls; a

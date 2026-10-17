@@ -14,6 +14,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 var _ store.UsageStore = (*Store)(nil)
@@ -369,6 +370,66 @@ func (s *Store) LoadUsage(ctx context.Context, filter store.UsageFilter) (store.
 		return err
 	})
 	return result, err
+}
+
+// TaskTokenUsage returns the input and output tokens a Task consumed, exactly
+// as the usage report attributes them: each cumulative counter contributes its
+// final value once, and a counter shared across a runtime session's turns
+// contributes only this Task's increase.
+func (s *Store) TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error) {
+	var inputTokens, outputTokens int64
+	err := s.usageTransaction(ctx, func(ctx context.Context) error {
+		var err error
+		inputTokens, outputTokens, err = taskTokenUsage(ctx, s.taskDataExecutor(ctx), namespace, taskUID, "")
+		return err
+	})
+	return inputTokens, outputTokens, err
+}
+
+// taskTokenUsage sums a Task's attributed usage, limited to one prompt
+// attempt's measurements when attemptID is set.
+func taskTokenUsage(ctx context.Context, db taskDataExecutor, namespace, taskUID, attemptID string) (int64, int64, error) {
+	// Other Tasks' observations of the same counters are the baselines that
+	// keep their usage out of this Task's share.
+	observations, err := readUsageRows[store.UsageObservation](ctx, db,
+		`SELECT data FROM usage_observations INDEXED BY idx_usage_observations_counter
+		 WHERE namespace = ? AND counter_id IN (
+		   SELECT counter_id FROM usage_observations INDEXED BY idx_usage_observations_task
+		   WHERE namespace = ? AND task_uid = ?)
+		 ORDER BY observed_at, recorded_seq`,
+		namespace, namespace, taskUID)
+	if err != nil || len(observations) == 0 {
+		return 0, 0, err
+	}
+	asOf := time.Now().UTC().Add(time.Hour)
+	report, err := usage.Build(store.UsageData{Observations: observations}, store.UsageFilter{Until: asOf, AsOf: asOf})
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, group := range report.OtherWork {
+		for _, task := range group.Tasks {
+			if task.Namespace != namespace || task.TaskUID != taskUID {
+				continue
+			}
+			if attemptID == "" {
+				return task.Totals.InputTokens, task.Totals.OutputTokens, nil
+			}
+			var inputTokens, outputTokens int64
+			for _, measurement := range task.Measurements {
+				if measurement.AttemptID != attemptID {
+					continue
+				}
+				if measurement.InputTokens != nil {
+					inputTokens += *measurement.InputTokens
+				}
+				if measurement.OutputTokens != nil {
+					outputTokens += *measurement.OutputTokens
+				}
+			}
+			return inputTokens, outputTokens, nil
+		}
+	}
+	return 0, 0, nil
 }
 
 func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilter) (store.UsageData, error) {

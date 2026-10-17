@@ -157,6 +157,25 @@ func TestStaticChartGatewayInterimMessagesPerTask(t *testing.T) {
 	}
 }
 
+func TestStaticChartDashboardFlag(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Contains(rendered, "--dashboard-enabled") {
+		t.Fatalf("the dashboard must be off by default:\n%s", rendered)
+	}
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.dashboard.enabled=true")
+	if strings.Count(rendered, "- --dashboard-enabled=true\n") != 1 {
+		t.Fatalf("enabling the dashboard must render exactly one --dashboard-enabled=true:\n%s", rendered)
+	}
+	// helm upgrade --reuse-values keeps a release's older values, which
+	// have no controller.dashboard map. Rendering evaluates NOTES.txt as
+	// well, so this covers both templates that read it.
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml", "--set", "controller.dashboard=null")
+	if strings.Contains(rendered, "--dashboard-enabled") {
+		t.Fatalf("a release without controller.dashboard must leave the dashboard off:\n%s", rendered)
+	}
+}
+
 func TestStaticChartConnectorsFlags(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
 	if strings.Contains(rendered, "--connectors-enabled") || strings.Contains(rendered, "--connector-callback-base-url") {

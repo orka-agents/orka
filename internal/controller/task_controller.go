@@ -149,10 +149,13 @@ type TaskReconciler struct {
 	HarnessV1SettlementAcknowledger HarnessV1SettlementAcknowledger
 	ACPRuntimeEnabled               bool
 	ACPRuntimeImages                ACPRuntimeImages
-	ACPRuntimeNamespace             string
-	EnforceNamespaceIsolation       bool
-	MaxTasksPerNamespace            int32
-	WorkspaceProviderAPIEnabled     bool
+	// ACPToolboxPolicy repeats the Agent toolbox admission rules at planning
+	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
+	ACPToolboxPolicy            ACPToolboxPolicy
+	ACPRuntimeNamespace         string
+	EnforceNamespaceIsolation   bool
+	MaxTasksPerNamespace        int32
+	WorkspaceProviderAPIEnabled bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
 	// guards the reserved acp.workspace.orka.ai/ metadata settlement reads
 	// from. When false (a cleanup-only installation without the webhook),
@@ -469,11 +472,11 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 
 func (r *TaskReconciler) executionEventSessionName(ctx context.Context, task *corev1alpha1.Task) string {
 	sessionName := taskSessionName(task)
-	if sessionName == "" {
-		return ""
-	}
 	if r == nil || r.SessionManager == nil || r.SessionManager.store == nil {
 		return ""
+	}
+	if sessionName == "" {
+		return chatSessionEventAttribution(ctx, r.SessionManager.store, task)
 	}
 	if _, err := r.SessionManager.GetSession(ctx, task.Namespace, sessionName); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -496,6 +499,51 @@ func taskSessionName(task *corev1alpha1.Task) string {
 		return ""
 	}
 	return strings.TrimSpace(task.Spec.SessionRef.Name)
+}
+
+// sessionTypeReader reads a Session's type without loading its transcript.
+type sessionTypeReader interface {
+	GetSessionType(ctx context.Context, namespace, name string) (string, error)
+}
+
+// chatSessionEventAttribution names the chat Session a Task without a
+// spec.sessionRef attributes its execution events to, so the chat's timeline
+// lists the Tasks it created. The chat API names that Session in the
+// orka.ai/chat-session label, which API clients cannot set, and the label
+// counts only when it names an existing chat Session. It is for lifecycle
+// event attribution only: Session continuity follows spec.sessionRef alone,
+// and the ACP event journal keeps spec.sessionRef because a journal Session
+// with earlier text events redacts all later runtime text, which would blank
+// every chat-created ACP Task after the chat's first one.
+func chatSessionEventAttribution(ctx context.Context, sessions store.SessionStore, task *corev1alpha1.Task) string {
+	if task == nil || sessions == nil {
+		return ""
+	}
+	sessionName := strings.TrimSpace(task.Labels[labels.LabelChatSession])
+	if sessionName == "" {
+		return ""
+	}
+	var sessionType string
+	var err error
+	if reader, ok := sessions.(sessionTypeReader); ok {
+		sessionType, err = reader.GetSessionType(ctx, task.Namespace, sessionName)
+	} else {
+		var session *store.SessionRecord
+		if session, err = sessions.GetSession(ctx, task.Namespace, sessionName); err == nil {
+			sessionType = session.SessionType
+		}
+	}
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			logf.FromContext(ctx).Error(err, "failed to check chat session for execution event attribution",
+				"namespace", task.Namespace, "task", task.Name, "session", sessionName)
+		}
+		return ""
+	}
+	if sessionType != store.SessionTypeChat {
+		return ""
+	}
+	return sessionName
 }
 
 func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
@@ -732,6 +780,20 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleScheduledTask(ctx, task)
 	}
 
+	// A pause requested between autonomous iterations stops the next iteration
+	// before dispatch; handleAutonomousIteration covers a pause that arrives
+	// while a Job runs. Only autonomous iteration advances Iteration.
+	if task.Status.Iteration > 0 && task.Spec.Suspend != nil && *task.Spec.Suspend {
+		message := fmt.Sprintf("autonomous task suspended at iteration %d", task.Status.Iteration)
+		if task.Status.Message != message {
+			task.Status.Message = message
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	// A persisted execution binding is the sole routing and recovery authority.
 	// Do not resolve mutable Agent/configuration state, or acquire the legacy
 	// SQLite Session lock, after a Task has been bound to either harness plane.
@@ -828,6 +890,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		// Admission allows an omitted built-in contract. Use the same effective
+		// Agent for routing, SOUL validation and binding before its reconciler
+		// has had a chance to persist the namespace-mode default.
+		agent = withEffectiveBuiltInContract(agent, r.Mode)
 		plan := r.planAgentExecution(ctx, task, agent)
 		if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
 			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
@@ -1481,6 +1547,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
 			return ctrl.Result{}, err
 		}
+		if latest.Spec.Type == corev1alpha1.TaskTypeAI {
+			job := &batchv1.Job{}
+			err := reader.Get(ctx, client.ObjectKey{Namespace: latest.Namespace, Name: latest.Status.JobName}, job)
+			if err == nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
 	}
 	// Recheck the persisted deadline after the uncached read so an older
@@ -1508,9 +1584,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	jobTask := task
-	if validationTask {
-		// Render from the same fresh object whose immutable binding was just
-		// verified. This closes the gap between the reconcile read and Job build.
+	if validationTask || latest.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Validation tasks use the verified immutable binding. AI tasks use
+		// fresh status as well as spec so soul preparation cannot miss an
+		// existing binding or execution attempt from a stale cache snapshot.
 		jobTask = latest
 	}
 
@@ -1558,18 +1635,55 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			if latest.UID != task.UID || latest.Generation != task.Generation || task.Spec.AgentRef == nil || agent == nil {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
-			agentKey := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
-			if agentKey.Namespace == "" {
-				agentKey.Namespace = task.Namespace
-			}
-			latestAgent := &corev1alpha1.Agent{}
-			if err := reader.Get(ctx, agentKey, latestAgent); err != nil {
-				return ctrl.Result{}, fmt.Errorf("recheck gateway Job Agent: %w", err)
-			}
-			if latestAgent.UID != agent.UID || latestAgent.Generation != agent.Generation || !latestAgent.DeletionTimestamp.IsZero() {
-				return ctrl.Result{RequeueAfter: time.Second}, nil
+			if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+				return ctrl.Result{RequeueAfter: time.Second}, err
 			}
 		}
+	}
+
+	if (task.Spec.Type == corev1alpha1.TaskTypeAI || latest.Spec.Type == corev1alpha1.TaskTypeAI) &&
+		!existingGatewayJob && (task.UID != latest.UID || task.Generation != latest.Generation) {
+		// Agent/provider inputs belong to the caller's Task revision, even
+		// when its resolved Agent had no soul. Reconcile the complete tuple.
+		return ctrl.Result{}, aiSoulTaskChanged(task)
+	}
+	if !gatewayReplyEligible && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		task.Spec.AgentRef != nil && agent != nil {
+		// The first binding pins the Agent revision. A cached Agent can lag an
+		// update the API server accepted before this Task, so recheck it and
+		// let compatibility, Provider selection, and binding use one revision.
+		if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+	}
+
+	var aiSoul *resolvedAISoul
+	if existingGatewayJob && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		agent != nil && agent.Spec.Soul != nil {
+		// Bindings are persisted before Job creation, so an unbound existing Job
+		// ran without a soul even when its start-status write was lost. Retire it
+		// without binding: a new digest would misstate what already executed.
+		err = invalidAISoulConfiguration("AI Task cannot acquire a soul after execution has started; create a new Task")
+	} else {
+		aiSoul, err = r.prepareAISoul(ctx, jobTask, agent)
+	}
+	if err != nil {
+		if isPermanentAISoulConfigurationError(err) {
+			message := fmt.Sprintf("AI soul configuration: %v", err)
+			retired, retirementErr := r.retireAISoulTaskJob(ctx, jobTask, message)
+			if retirementErr != nil {
+				return ctrl.Result{}, retirementErr
+			}
+			if retired {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, message)
+		}
+		return ctrl.Result{}, err
+	}
+	if jobTask.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Keep the launch attempt count consistent with the fresh Job inputs.
+		task.Status = jobTask.Status
 	}
 
 	// Freeze the requester's Connections before anything is created, so a
@@ -1591,6 +1705,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		AISoul:                      aiSoul,
 		RepositoryMonitorValidation: validationTask,
 		ConnectionBindings:          connectionBindings,
 		ConnectionBindingsFrozen:    true,
@@ -1717,6 +1832,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		if err := r.reconcileRunningACPClassWorkspaceAttachment(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 		// The leader-elected ACPDispatcher owns the non-reconnectable prompt stream,
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -1744,9 +1862,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return ctrl.Result{}, err
 			}
 			if validationCommandStarted {
-				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 			}
-			return r.failTask(ctx, task, "task timed out")
+			return r.failTask(ctx, task, timedOutTaskMessage(task))
 		}
 	}
 
@@ -1844,7 +1962,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			}
 			if r.shouldRetry(task) {
 				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
-				return r.retryTask(ctx, task)
+				return r.retryTaskAfterFailure(ctx, task, "job not found")
 			}
 			log.Info("Job not found, task may have been cleaned up")
 			return r.failTask(ctx, task, "job not found")
@@ -1891,14 +2009,15 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
 			if !validationCommandFailed {
-				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 			}
-			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
-			log.Info("retrying task", "attempt", task.Status.Attempts)
-			return r.retryTask(ctx, task)
+			failure := r.diagnoseFailedJob(ctx, task)
+			log.Info("retrying task", "attempt", task.Status.Attempts, "failure", failure)
+			return r.retryTaskAfterFailure(ctx, task, failure)
 		}
 		// Inspect terminated containers for a specific cause (OOMKilled, non-zero
 		// exit code, etc.) so the coordinator that delegated this Task can read
@@ -1916,10 +2035,14 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
 		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err == nil {
+		podWaiting := ""
 		for i := range podList.Items {
 			pod := &podList.Items[i]
 			if pod.Status.Phase != corev1.PodPending {
 				continue
+			}
+			if podWaiting == "" && podBelongsToJob(pod, task.Status.JobName) {
+				podWaiting = podWaitingMessage(pod)
 			}
 			// Check waiting container statuses for unrecoverable errors
 			for _, cs := range pod.Status.ContainerStatuses {
@@ -1958,10 +2081,67 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
+		if err := r.syncPodWaitingMessage(ctx, task, podWaiting); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// podWaitingMessagePrefix marks a Running Task message that reports why its
+// Pod cannot start, so the controller can clear it once the Pod moves on.
+const podWaitingMessagePrefix = "pod waiting: "
+
+// podWaitingMessage reports a container waiting state that keeps the Pod from
+// starting, such as an image pull failure.
+func podWaitingMessage(pod *corev1.Pod) string {
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range statuses {
+			waiting := cs.State.Waiting
+			if waiting == nil {
+				continue
+			}
+			switch waiting.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError":
+				message := podWaitingMessagePrefix + waiting.Reason
+				if detail := strings.TrimSpace(waiting.Message); detail != "" {
+					message += " - " + detail
+				}
+				return sanitizeStatusMessage(message)
+			}
+		}
+	}
+	return ""
+}
+
+// syncPodWaitingMessage publishes the current Pod waiting reason as the
+// Running Task's message, and clears a previously published one after the
+// Pod stops waiting on it.
+func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1alpha1.Task, message string) error {
+	if message == task.Status.Message || (message == "" && !strings.HasPrefix(task.Status.Message, podWaitingMessagePrefix)) {
+		return nil
+	}
+	jobName := task.Status.JobName
+	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if t.Status.Phase != corev1alpha1.TaskPhaseRunning || t.Status.JobName != jobName {
+			return
+		}
+		if message == "" && !strings.HasPrefix(t.Status.Message, podWaitingMessagePrefix) {
+			return
+		}
+		t.Status.Message = message
+	})
+}
+
+// timedOutTaskMessage keeps the last published Pod waiting reason, such as an
+// image pull failure, in the timeout failure so the cause is not lost.
+func timedOutTaskMessage(task *corev1alpha1.Task) string {
+	if strings.HasPrefix(task.Status.Message, podWaitingMessagePrefix) {
+		return "task timed out; " + task.Status.Message
+	}
+	return "task timed out"
 }
 
 func taskManagedByHarnessV1(task *corev1alpha1.Task) bool {
@@ -2700,15 +2880,22 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	}
 
 	// Update session if configured
+	var inputTokens, outputTokens int64
 	if task.Spec.SessionRef != nil && task.Spec.SessionRef.Append {
 		if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
 			log.Error(err, "failed to append session messages")
 			// Continue anyway
 		}
+		var err error
+		if inputTokens, outputTokens, err = r.sessionTokenUsage(ctx, task); err != nil {
+			log.Error(err, "failed to read session token usage")
+			inputTokens, outputTokens = 0, 0
+		}
 	}
-	// Release session lock regardless of Append setting
+	// Release session lock regardless of Append setting, adding the Task's
+	// usage in the same write so a replayed completion counts nothing twice.
 	if task.Spec.SessionRef != nil {
-		if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
+		if err := r.SessionManager.ReleaseLockWithTokenUsage(ctx, task, inputTokens, outputTokens); err != nil {
 			log.Error(err, "failed to release session lock")
 		}
 	}
@@ -2868,6 +3055,24 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+// retryTaskAfterFailure schedules the next attempt and records why the
+// current one failed, so retried attempts are not silent in the timeline.
+func (r *TaskReconciler) retryTaskAfterFailure(ctx context.Context, task *corev1alpha1.Task, failure string) (ctrl.Result, error) {
+	attempt, jobName := task.Status.Attempts, task.Status.JobName
+	result, err := r.retryTask(ctx, task)
+	if err != nil {
+		return result, err
+	}
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		execevents.ExecutionEventTypeTaskPhaseChanged,
+		execevents.ExecutionEventSeverityWarning,
+		fmt.Sprintf("Attempt %d (Job %s) failed, retrying in %s: %s", attempt, jobName, result.RequeueAfter, failure),
+	)
+	return result, nil
 }
 
 // RequeueAfter does not prevent Task or owned Job events from reconciling
@@ -3206,6 +3411,10 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 	agent *corev1alpha1.Agent,
 	plan agentExecutionPlan,
 ) error {
+	// Soul compatibility applies to every new Agent Task path, not only runtimeRef.
+	if err := validateSoulRuntime(agent); err != nil {
+		return err
+	}
 	// planAgentExecution resolves runtimeRef before selecting the external path,
 	// so these v2-only checks cannot change harness v1 compatibility.
 	if plan.path != agentExecutionPathExternal {
@@ -4462,16 +4671,14 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 		return ctrl.Result{}, false, err
 	}
 	if len(pending) == 0 {
+		if setWaitingForApprovalCondition(task, nil) {
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, false, err
+			}
+		}
 		return ctrl.Result{}, false, nil
 	}
 	approval := pending[0]
-	target := approval.TargetTool
-	if target == "" {
-		target = approval.Action
-	}
-	if target == "" {
-		target = "requested action"
-	}
 	log.Info(
 		"autonomous task waiting for approval",
 		"approvalID", approval.ID,
@@ -4481,16 +4688,93 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 	waitingMessage := fmt.Sprintf(
 		"waiting for approval %s for %s at iteration %d",
 		approval.ID,
-		target,
+		approvalTargetName(approval),
 		task.Status.Iteration,
 	)
-	if task.Status.Message != waitingMessage {
+	conditionChanged := setWaitingForApprovalCondition(task, pending)
+	if task.Status.Message != waitingMessage || conditionChanged {
 		task.Status.Message = waitingMessage
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, false, err
 		}
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+}
+
+const (
+	waitingForApprovalReasonPending  = "ApprovalPending"
+	waitingForApprovalReasonResolved = "ApprovalResolved"
+)
+
+func approvalTargetName(approval approvals.Approval) string {
+	if approval.TargetTool != "" {
+		return approval.TargetTool
+	}
+	if approval.Action != "" {
+		return approval.Action
+	}
+	return "requested action"
+}
+
+// setWaitingForApprovalCondition reports a running Task as waiting while it
+// has a pending approval, naming the first one, and as no longer waiting once
+// a condition it set before is resolved. It returns whether status changed.
+func setWaitingForApprovalCondition(task *corev1alpha1.Task, pending []approvals.Approval) bool {
+	existing := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval)
+	condition := metav1.Condition{Type: ConditionTypeWaitingForApproval, ObservedGeneration: task.Generation, LastTransitionTime: metav1.Now()}
+	switch {
+	case len(pending) > 0:
+		condition.Status, condition.Reason = metav1.ConditionTrue, waitingForApprovalReasonPending
+		condition.Message = fmt.Sprintf("waiting for approval %s for %s", pending[0].ID, approvalTargetName(pending[0]))
+		if len(pending) > 1 {
+			condition.Message += fmt.Sprintf(" and %d more", len(pending)-1)
+		}
+	case existing != nil && existing.Status == metav1.ConditionTrue:
+		condition.Status, condition.Reason = metav1.ConditionFalse, waitingForApprovalReasonResolved
+		condition.Message = "no approval is pending"
+	default:
+		return false
+	}
+	if existing != nil && existing.Status == condition.Status && existing.Reason == condition.Reason &&
+		existing.Message == condition.Message && existing.ObservedGeneration == condition.ObservedGeneration {
+		return false
+	}
+	meta.SetStatusCondition(&task.Status.Conditions, condition)
+	return true
+}
+
+// syncACPWaitingForApproval mirrors pending brokered-tool approvals of a
+// running ACP Task into its WaitingForApproval condition. The controller's
+// MCP broker records those approvals in the Task's event stream.
+func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *corev1alpha1.Task) error {
+	if r == nil || r.ExecutionEventStore == nil {
+		return nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return err
+	}
+	// Brokered approvals carry an expiry; one past it no longer blocks.
+	pending := approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC())
+	if !setWaitingForApprovalCondition(task.DeepCopy(), pending) {
+		return nil
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+			return err
+		}
+		if current.UID != task.UID || current.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+			!setWaitingForApprovalCondition(current, pending) {
+			return nil
+		}
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		task.ResourceVersion, task.Status = current.ResourceVersion, current.Status
+		return nil
+	})
 }
 
 func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
@@ -4691,4 +4975,18 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// taskAgentRevisionChanged reports whether the Task's Agent differs from the
+// resolved revision on the uncached reader.
+func taskAgentRevisionChanged(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (bool, error) {
+	key := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
+	if key.Namespace == "" {
+		key.Namespace = task.Namespace
+	}
+	latest := &corev1alpha1.Agent{}
+	if err := reader.Get(ctx, key, latest); err != nil {
+		return false, fmt.Errorf("recheck Task Agent revision: %w", err)
+	}
+	return latest.UID != agent.UID || latest.Generation != agent.Generation || !latest.DeletionTimestamp.IsZero(), nil
 }

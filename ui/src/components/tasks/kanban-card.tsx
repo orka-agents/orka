@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { phaseStyle, typeStyle } from '@/lib/task-status'
 import { cn } from '@/lib/utils'
 import type { Task } from '@/schemas/task'
+import { TaskStateBadges } from './task-state-badges'
 
 function elapsed(startTime?: string): string {
   if (!startTime) return ''
@@ -31,12 +32,13 @@ export function KanbanCard({ task }: { task: Task }) {
           {/* Phase is encoded by the left-rail color; surface it to AT too. */}
           <span className="sr-only">Phase: {phase.label}</span>
           <div className="flex items-center justify-between gap-2">
-            <span className="font-semibold text-sm truncate">{task.metadata.name}</span>
+            <span className="font-semibold text-sm truncate" title={task.metadata.name}>{task.metadata.name}</span>
             <Badge className={type.tintClass} variant="secondary">
               <TypeIcon aria-hidden="true" />
               {type.label}
             </Badge>
           </div>
+          <TaskStateBadges task={task} />
           <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
             <span>{task.metadata.namespace}</span>
             {task.spec.agentRef?.name && (

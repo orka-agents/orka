@@ -244,6 +244,26 @@ func TestExternalRuntimePoolProviderOutagePreservesFenceAndClosesAdmission(t *te
 	}
 }
 
+func TestExternalRuntimePoolRejectsToolboxProfileBeforePublishing(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.r.ToolboxPolicy = acpTestToolboxPolicy()
+	current := runtimePoolTestGetPool(t, f.r, f.pool)
+	current.Spec.Runtime.Profile = runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...).Spec.Runtime.Profile
+	if err := f.r.Update(context.Background(), &current); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	status := runtimePoolTestGetPool(t, f.r, f.pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(status.Message, "cannot mount toolboxes") {
+		t.Fatalf("toolbox profile was not rejected: %s: %s", status.Lifecycle, status.Message)
+	}
+	if f.currentWorkspace(t).Spec.Workload != nil {
+		t.Fatal("published a workload request for a toolbox profile")
+	}
+}
+
 func TestExternalRuntimePoolRejectsMaterializationChangedDuringAuthenticatedProbe(t *testing.T) {
 	for _, evidenceChanged := range []bool{false, true} {
 		name := "Pod spec changed"

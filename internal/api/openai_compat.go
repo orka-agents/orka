@@ -317,6 +317,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			UserInfo:                  userInfo,
 			LinkedAccounts:            h.config.LinkedAccounts,
 			ConnectorsEnabled:         h.config.ConnectorsEnabled,
+			DashboardEnabled:          h.config.DashboardEnabled,
 		})
 
 	}

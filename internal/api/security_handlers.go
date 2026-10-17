@@ -18,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
@@ -43,6 +44,10 @@ type UpdateRepositoryScanRequest struct {
 type UpdateThreatModelRequest struct {
 	Content string `json:"content"`
 	Source  string `json:"source,omitempty"`
+	// ExpectedVersion is the threat model version the edit was based on, 0
+	// when it was loaded with no model; the save is rejected if the stored
+	// model changed since. Omitted, the edit replaces whatever is stored.
+	ExpectedVersion *int64 `json:"expectedVersion,omitempty"`
 }
 
 const (
@@ -70,6 +75,62 @@ func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScan
 	if spec.PRBaseBranch == "" && spec.Branch != "" {
 		spec.PRBaseBranch = spec.Branch
 	}
+}
+
+// validateRepositoryScanSpecValues rejects settings the controller cannot run.
+// The CRD schema leaves some of these limits unbounded.
+func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) error {
+	for _, limit := range []struct {
+		path  string
+		value *int32
+	}{
+		{path: "spec.historyDays", value: spec.HistoryDays},
+		{path: "spec.maxFindingsPerRun", value: spec.MaxFindingsPerRun},
+		{path: "spec.validationMaxFindingsPerRun", value: spec.ValidationMaxFindingsPerRun},
+	} {
+		if limit.value != nil && *limit.value < 0 {
+			return fiber.NewError(fiber.StatusBadRequest, limit.path+" must not be negative")
+		}
+	}
+	if spec.Schedule != "" {
+		if _, err := controller.ParseRepositoryScanSchedule(spec.Schedule); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.schedule is invalid: %v", err))
+		}
+	}
+	return nil
+}
+
+// validateRepositoryScanAgentRuntimes rejects analysis and patch agents in the
+// scan namespace that have no runtime, because every scan Task they run is a
+// type: agent Task. A missing Agent stays allowed so it can be created later.
+func (h *Handlers) validateRepositoryScanAgentRuntimes(ctx context.Context, namespace string, spec corev1alpha1.RepositoryScanSpec) error {
+	refs := []struct {
+		field string
+		ref   *corev1alpha1.AgentReference
+	}{
+		{field: "spec.analysisAgentRef", ref: &spec.AnalysisAgentRef},
+		{field: "spec.patchAgentRef", ref: spec.PatchAgentRef},
+	}
+	for _, candidate := range refs {
+		if candidate.ref == nil || strings.TrimSpace(candidate.ref.Name) == "" {
+			continue
+		}
+		if agentNamespace := strings.TrimSpace(candidate.ref.Namespace); agentNamespace != "" && agentNamespace != namespace {
+			continue
+		}
+		var agent corev1alpha1.Agent
+		if err := h.client.Get(ctx, types.NamespacedName{Name: candidate.ref.Name, Namespace: namespace}, &agent); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent %q: %v", candidate.ref.Name, err))
+		}
+		agentRuntime := agent.Spec.Runtime
+		if agentRuntime == nil || (strings.TrimSpace(string(agentRuntime.Type)) == "" && (agentRuntime.RuntimeRef == nil || strings.TrimSpace(agentRuntime.RuntimeRef.Name) == "")) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s agent %q has no runtime configured; repository scans run type: agent tasks, so the Agent must set spec.runtime.type or spec.runtime.runtimeRef", candidate.field, candidate.ref.Name))
+		}
+	}
+	return nil
 }
 
 func (h *Handlers) ensureSecurityStore() error {
@@ -706,6 +767,12 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 	h.normalizeRepositoryScanSpec(&req.Spec)
+	if err := security.ValidateRepositoryScanSource(req.Spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateRepositoryScanSpecValues(req.Spec); err != nil {
+		return err
+	}
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "createRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
@@ -728,9 +795,15 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	); err != nil {
 		return err
 	}
+	if err := h.validateRepositoryScanAgentRuntimes(c.Context(), namespace, scan.Spec); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), scan); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository scan already exists")
+		}
+		if invalid := invalidObjectError("repository scan", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository scan: %v", err))
 	}
@@ -770,6 +843,12 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	}
 
 	h.normalizeRepositoryScanSpec(&req.Spec)
+	if err := security.ValidateRepositoryScanSource(req.Spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateRepositoryScanSpecValues(req.Spec); err != nil {
+		return err
+	}
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "updateRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
@@ -789,7 +868,13 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	); err != nil {
 		return err
 	}
+	if err := h.validateRepositoryScanAgentRuntimes(c.Context(), namespace, updated.Spec); err != nil {
+		return err
+	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
+		if invalid := invalidObjectError("repository scan", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan: %v", err))
 	}
 	return c.JSON(updated)
@@ -859,6 +944,9 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if strings.TrimSpace(req.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
+	if req.ExpectedVersion != nil && *req.ExpectedVersion < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "expectedVersion must not be negative")
+	}
 
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -884,7 +972,17 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if model.Source == "" {
 		model.Source = "edited"
 	}
-	if err := h.securityStore.SaveThreatModel(c.Context(), model); err != nil {
+	// Without an expected version, the edit replaces whatever is stored, which
+	// keeps older clients working. Version 0 requires that no model exists yet.
+	if req.ExpectedVersion != nil {
+		err = h.securityStore.SaveThreatModelIfVersion(c.Context(), model, *req.ExpectedVersion)
+	} else {
+		err = h.securityStore.SaveThreatModel(c.Context(), model)
+	}
+	if errors.Is(err, store.ErrConflict) {
+		return fiber.NewError(fiber.StatusConflict, "threat model changed since it was loaded")
+	}
+	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save threat model: %v", err))
 	}
 	return c.JSON(model)
@@ -1002,6 +1100,9 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	}
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
+	}
+	if err := security.ValidateRepositoryScanSource(scan.Spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	active, err := h.hasActiveSecurityScanPipelineTask(c.Context(), scan)
 	if err != nil {
