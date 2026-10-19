@@ -93,10 +93,17 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	// fail closed. It must raise SchemaVersion and add a separate version-1
 	// path that, under the same lock and backup, accepts only the exact
 	// version-1 layout, keeps the existing identity row (never calling
-	// initializeDatasetRecord) and then writes the new user_version. Test that
-	// path from schemaVersion1StoreDB, not from historicalSchemaDB plus
-	// 166-to-167.sql: that fixture has user_version = 0 and no identity row,
-	// so it takes the adoption path that real version-1 stores never take.
+	// initializeDatasetRecord) and then writes the new user_version. A
+	// version-1 store can still have bootstrap_complete = 0 after an
+	// interrupted first start. The upgrade must leave DatasetInfo unchanged
+	// apart from SchemaVersion: the same ID and the CanBootstrapSnapshotKey
+	// recorded for each state in version1StoreStates. In particular it must
+	// add no rows, even implicitly as FTS5 does, to an empty incomplete new
+	// store, or that store could never mint its key. Test that path from
+	// schemaVersion1StoreDB for every state in version1StoreStates, not from
+	// historicalSchemaDB plus 166-to-167.sql alone: that fixture has
+	// user_version = 0 and no identity row, so it takes the adoption path that
+	// real version-1 stores never take.
 	if version != 0 {
 		return validationErr
 	}
