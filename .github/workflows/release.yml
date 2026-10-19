@@ -747,3 +747,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: go run ./cmd/build/release publish "${RUNNER_TEMP}/release-candidate"
+
+  homebrew-tap:
+    name: Update the Homebrew tap
+    needs: publish
+    if: ${{ !contains(inputs.release_version, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      # The tap verifies the signed CLI checksums itself, so this token only
+      # needs permission to dispatch to orka-agents/homebrew-tap. Without it, the
+      # tap's scheduled sync picks the release up within six hours.
+      - name: Dispatch the formula update
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; the tap's scheduled sync will publish ${RELEASE_VERSION}."
+            exit 0
+          fi
+          gh api repos/orka-agents/homebrew-tap/dispatches \
+            -f event_type=orka-release -f "client_payload[version]=${RELEASE_VERSION}"
