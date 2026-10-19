@@ -82,6 +82,21 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	if err != nil {
 		return err
 	}
+	// Only unversioned historical layouts (user_version = 0) reach the chain
+	// below. Every store this release writes, fresh or adopted, already has
+	// user_version = SchemaVersion (1) and an established store_dataset row,
+	// so it returns here; runSchemaMigrations also refuses any nonzero version
+	// and always inserts a new adopted identity.
+	//
+	// The next additive layout therefore cannot just append a step to
+	// schemaMigrations: no real installation would reach it, and startup would
+	// fail closed. It must raise SchemaVersion and add a separate version-1
+	// path that, under the same lock and backup, accepts only the exact
+	// version-1 layout, keeps the existing identity row (never calling
+	// initializeDatasetRecord) and then writes the new user_version. Test that
+	// path from schemaVersion1StoreDB, not from historicalSchemaDB plus
+	// 166-to-167.sql: that fixture has user_version = 0 and no identity row,
+	// so it takes the adoption path that real version-1 stores never take.
 	if version != 0 {
 		return validationErr
 	}
@@ -150,6 +165,7 @@ func runSchemaMigrations(ctx context.Context, conn *sql.Conn, source string, ste
 	if err := validateSchema(schema, currentSchemaStatements()); err != nil {
 		return err
 	}
+	// Version-0 sources only; see upgradeSchema for version-1 stores.
 	if err := initializeDatasetRecord(conn, datasetOriginAdopted); err != nil {
 		return err
 	}

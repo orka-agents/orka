@@ -7,9 +7,8 @@ the immutable `migrations/149-to-150.sql`, `150-to-162.sql` and `162-to-166.sql`
 transitions, never the current schema constructor. Their pinned fingerprints
 are asserted before exercising upgrades.
 
-`bootstrap-snapshot.sql` contains one synthetic execution-snapshot row retained
-from the SQLite bootstrap checkpoint `ac41d25ed4b16bc9d5cc8b4fc1f1e70fea642bc4`.
-It uses the unchanged pre-metadata snapshot format and a test-only 32-byte key
+`bootstrap-snapshot.sql` contains one synthetic execution-snapshot row. It
+uses the unchanged pre-metadata snapshot format and a test-only 32-byte key
 consisting of `0x42`. Its plaintext is `{"prompt":"retained encrypted prompt"}`,
 bound to Task UID `fixture-task-uid`. It contains no real credentials or user
 data. The controller bootstrap integration test loads this fixed ciphertext

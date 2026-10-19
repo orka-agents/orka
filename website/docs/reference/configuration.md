@@ -123,10 +123,16 @@ no secrets, and Helm leaves the controller-written data alone on upgrade. The
 Secret is kept on `helm uninstall` so a restored data volume can still be
 decrypted. Back it up with the data volume.
 
-If the controller finds its SQLite store already present but the Secret empty,
-the key was lost. It refuses to start rather than mint a new key that could not
-read the existing records. Restore the Secret from backup, or delete the data
-volume to start over.
+The controller decides whether it may mint a key from the dataset history recorded
+inside the SQLite database, not from whether the database file exists. It mints a
+key only for a new dataset that has never completed key bootstrap and holds no
+records. A dataset that completed bootstrap, or was adopted from an older layout
+during an upgrade, needs its existing key even if every record has since been
+deleted. If the Secret is empty for such a dataset, the key was lost, and the
+controller refuses to start rather than mint a new key that could not read the
+existing records. Restore the Secret from backup, or delete the data volume to
+start over. See
+[Dataset identity and key bootstrap](../operations/upgrading.md#dataset-identity-and-key-bootstrap).
 
 To bring your own key, create the Secret before installing and set
 `controller.agentExecutionSnapshot.existingSecret`. The item must hold exactly

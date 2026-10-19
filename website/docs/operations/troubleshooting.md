@@ -70,12 +70,42 @@ for the same reason. Treat the material as immutable yourself, and never use
 `helm upgrade --force`.
 :::
 
-### `the SQLite store already exists but snapshot key Secret ... has no "key" item`
+### `the SQLite dataset requires an existing key but snapshot key Secret ... has no "key" item`
 
-The controller-generated snapshot key is gone but the database that it encrypted
-is still there, so the controller refuses to mint a new key that could not read
-existing records. Restore the Secret from backup. If the data is expendable,
-delete the data volume and restart the controller to start over.
+The controller-generated snapshot key is gone, but the SQLite dataset it belongs
+to already completed key bootstrap or was adopted from an older layout during an
+upgrade. The dataset records that history itself, so this applies even if every
+ordinary record has since been deleted. The controller refuses to mint a new key
+that could not read existing records. Restore the Secret from backup. If the data
+is expendable, delete the data volume and restart the controller to start over.
+See [Dataset identity and key bootstrap](upgrading.md#dataset-identity-and-key-bootstrap).
+
+### `synchronize SQLite dataset metadata: checkpoint incomplete`
+
+At startup the controller forces a full SQLite checkpoint so dataset metadata is
+durable before it loads the key. The checkpoint could not finish because another
+process holds the database open, for example a `sqlite3` shell or a backup job
+reading the data volume. Stop that process and restart the controller. Nothing is
+lost: committed metadata is kept, and startup resumes from it.
+
+### `invalid SQLite dataset identity`
+
+The dataset metadata row inside the database is malformed. If the row is
+missing, the message is `SQLite dataset identity must contain exactly one record`
+instead. Either usually means the database was edited outside Orka. The
+controller never regenerates this row, because it decides whether a new snapshot
+key may be minted. Restore the data volume and its key from backup rather than
+editing the row by hand.
+
+### `unsupported SQLite schema version N`
+
+The database's schema version marker is one this controller does not support.
+Usually a newer Orka release wrote the database and the controller image was then
+downgraded. Migration is forward-only, so run the release that wrote the database.
+Rolling back further needs a coordinated restore of the database, its original key,
+configuration, and Kubernetes state; see
+[Automatic pre-upgrade backup](upgrading.md#automatic-pre-upgrade-backup). The
+controller leaves the database unchanged.
 
 ### The controller crashes immediately
 

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -275,6 +276,90 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 	}
 	require.Equal(t, want[revision], schemaFingerprint(schema))
 	return path, db
+}
+
+// schemaVersion1StoreDB returns a store written by this release's production
+// open path: user_version = 1 and one completed store_dataset identity row with
+// the given origin, plus seeded migration records. Upgrade tests for the next
+// layout must start from this, not from a historicalSchemaDB fixture extended
+// with 166-to-167.sql (see upgradeSchema).
+func schemaVersion1StoreDB(t *testing.T, origin string) (string, *sql.DB) {
+	t.Helper()
+	var path string
+	switch origin {
+	case datasetOriginNew:
+		path = filepath.Join(t.TempDir(), "store.db")
+	case datasetOriginAdopted:
+		var old *sql.DB
+		path, old = historicalSchemaDB(t, "abd2c040")
+		require.NoError(t, old.Close())
+	default:
+		t.Fatalf("unknown dataset origin %q", origin)
+	}
+	s, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+	seedMigrationRecords(t, s.db, path)
+	require.NoError(t, s.close())
+
+	db := rawMigrationDB(t, path)
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	require.Equal(t, schema167, schemaFingerprint(schema))
+	version, err := readSchemaVersion(db)
+	require.NoError(t, err)
+	require.Equal(t, SchemaVersion, version)
+	record, err := readDataset(db)
+	require.NoError(t, err)
+	require.Equal(t, origin, record.origin)
+	require.True(t, record.complete)
+	return path, db
+}
+
+// A 167-object fixture rebuilt from historical DDL plus 166-to-167.sql has the
+// current layout, but it is not a store this release writes. It passes the
+// version-0 migration gate and is adopted, while every real version-1 store is
+// refused there, so a future migration tested only on that fixture would pass
+// in tests and fail closed on real installations.
+func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
+	_, fixture := historicalSchemaDB(t, "abd2c040")
+	_, err := fixture.Exec(migration166To167)
+	require.NoError(t, err)
+	schema, err := readSchema(fixture)
+	require.NoError(t, err)
+	require.Equal(t, schema167, schemaFingerprint(schema))
+	version, err := readSchemaVersion(fixture)
+	require.NoError(t, err)
+	require.Zero(t, version)
+	_, err = readDataset(fixture)
+	require.ErrorContains(t, err, "exactly one record")
+	conn, err := fixture.Conn(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema167, nil))
+	require.NoError(t, conn.Close())
+
+	for _, origin := range []string{datasetOriginNew, datasetOriginAdopted} {
+		t.Run(origin, func(t *testing.T) {
+			path, db := schemaVersion1StoreDB(t, origin)
+			before, err := readDataset(db)
+			require.NoError(t, err)
+			backups := migrationBackups(t, path)
+
+			conn, err := db.Conn(t.Context())
+			require.NoError(t, err)
+			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema167, nil),
+				"unsupported SQLite schema version 1 before upgrade")
+			require.NoError(t, conn.Close())
+			validationErr := errors.New("validation failed")
+			require.ErrorIs(t, upgradeSchema(db, path, validationErr), validationErr)
+
+			require.Equal(t, backups, migrationBackups(t, path))
+			after, err := readDataset(db)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			assertMigrationRecords(t, db, path)
+		})
+	}
 }
 
 func rawMigrationDB(t *testing.T, path string) *sql.DB {
