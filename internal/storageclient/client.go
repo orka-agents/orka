@@ -10,6 +10,7 @@ package storageclient
 import (
 	"context"
 	"errors"
+	"reflect"
 
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
@@ -67,16 +68,14 @@ type Client struct {
 	storagev1.StateProvider
 	storagev1.ArtifactStore
 	Embedded
-
-	artifactHealth storagev1.HealthChecker
-	sameBackend    bool
 }
 
 // ErrSplitEmbeddedStore rejects a client whose embedded families would not
 // share the transaction scope of the state and artifact records they touch.
 var ErrSplitEmbeddedStore = errors.New("embedded storage families require state and artifacts on the same embedded store")
 
-// New composes a storage client. State, Artifacts and Embedded are required.
+// New composes a storage client. State, Artifacts and Embedded are required,
+// and while embedded families exist they must all be one store.
 func New(options Options) (*Client, error) {
 	if options.State == nil || options.Artifacts == nil || options.Embedded == nil {
 		return nil, store.ValidationErrorf("storage client requires state, artifact and embedded stores")
@@ -85,11 +84,9 @@ func New(options Options) (*Client, error) {
 		return nil, ErrSplitEmbeddedStore
 	}
 	return &Client{
-		StateProvider:  options.State,
-		ArtifactStore:  options.Artifacts,
-		Embedded:       options.Embedded,
-		artifactHealth: options.Artifacts,
-		sameBackend:    sameStore(options.State, options.Artifacts),
+		StateProvider: options.State,
+		ArtifactStore: options.Artifacts,
+		Embedded:      options.Embedded,
 	}, nil
 }
 
@@ -109,17 +106,19 @@ func NewEmbedded(backend EmbeddedStore) (*Client, error) {
 	return New(Options{State: backend, Artifacts: backend, Embedded: backend})
 }
 
-// HealthCheck verifies every selected provider.
+// HealthCheck verifies the selected provider. State, artifacts and the
+// embedded families share one store, so one check covers every binding.
 func (c *Client) HealthCheck(ctx context.Context) error {
-	if err := c.StateProvider.HealthCheck(ctx); err != nil {
-		return err
-	}
-	if c.sameBackend {
-		return nil
-	}
-	return c.artifactHealth.HealthCheck(ctx)
+	return c.StateProvider.HealthCheck(ctx)
 }
 
+// sameStore reports whether two provider values are provably the same store.
+// Values whose dynamic type cannot be compared are never treated as the same,
+// so New rejects them instead of panicking.
 func sameStore(a, b any) bool {
+	typeA := reflect.TypeOf(a)
+	if typeA == nil || typeA != reflect.TypeOf(b) || !typeA.Comparable() {
+		return false
+	}
 	return a == b
 }

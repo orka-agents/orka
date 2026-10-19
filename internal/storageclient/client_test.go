@@ -154,6 +154,21 @@ func TestNewRejectsMissingOrSplitEmbeddedStores(t *testing.T) {
 	}
 }
 
+// uncomparableStore is a value-typed provider whose dynamic type cannot be
+// compared with ==.
+type uncomparableStore struct {
+	*sqlite.Store
+	labels map[string]string
+}
+
+func TestNewRejectsProvidersItCannotProveAreOneStore(t *testing.T) {
+	backend := uncomparableStore{Store: openSQLite(t), labels: map[string]string{}}
+	_, err := storageclient.NewEmbedded(backend)
+	if !errors.Is(err, storageclient.ErrSplitEmbeddedStore) {
+		t.Fatalf("uncomparable provider error = %v, want %v", err, storageclient.ErrSplitEmbeddedStore)
+	}
+}
+
 func TestClientRoutesCallsToTheEmbeddedStore(t *testing.T) {
 	backend := openSQLite(t)
 	client, err := storageclient.NewEmbedded(backend)
