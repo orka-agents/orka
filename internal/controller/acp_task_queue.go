@@ -1498,11 +1498,6 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 			plan.PoolName,
 		)
 	}
-	poolRuntimeNamespace := strings.TrimSpace(pool.Spec.RuntimeNamespace)
-	if poolRuntimeNamespace == "" {
-		poolRuntimeNamespace = strings.TrimSpace(r.ACPRuntimeNamespace)
-	}
-
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
 			return nil, false, store.ValidationErrorf(

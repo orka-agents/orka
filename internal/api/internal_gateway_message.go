@@ -206,7 +206,7 @@ func sendGatewayMessageError(c fiber.Ctx, err error) error {
 	case fiber.StatusRequestEntityTooLarge:
 		code, message = "too_large", "gateway message exceeds the request or content limit"
 	case fiber.StatusTooManyRequests:
-		code, message = "limit_reached", "gateway message limit reached for this task"
+		code, message = limitReachedCode, "gateway message limit reached for this task"
 	case fiber.StatusServiceUnavailable:
 		code, message = "unavailable", "gateway message admission is temporarily unavailable"
 	}

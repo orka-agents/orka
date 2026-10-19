@@ -1349,6 +1349,7 @@ func testDigest(label string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+//nolint:gocyclo // Helper process dispatches every scripted supervisor scenario in one switch.
 func TestSupervisorACPHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_SUPERVISOR_ACP_HELPER") != "1" {
 		return

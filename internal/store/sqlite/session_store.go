@@ -494,6 +494,8 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 // AcquireChatTurn creates a chat Session when needed and reserves its current
 // transcript revision for one turn. Expired reservations may be reclaimed, but
 // Task locks and Gateway-owned Sessions are never taken over by chat.
+//
+//nolint:gocyclo // Turn acquisition validates every lease and fencing condition in one transaction.
 func (s *Store) AcquireChatTurn(
 	ctx context.Context,
 	session *store.SessionRecord,

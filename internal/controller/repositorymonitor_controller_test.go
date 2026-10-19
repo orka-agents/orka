@@ -4857,15 +4857,6 @@ func (s failingMonitorEventStore) CreateMonitorEvent(ctx context.Context, event 
 	return s.RepositoryMonitorStore.CreateMonitorEvent(ctx, event)
 }
 
-type failingReviewRecordLookupStore struct {
-	store.RepositoryMonitorStore
-	err error
-}
-
-func (s failingReviewRecordLookupStore) GetReviewRecord(context.Context, string, string) (*store.ReviewRecord, error) {
-	return nil, s.err
-}
-
 type statusPatchCountingClient struct {
 	crclient.Client
 	statusPatchCount int

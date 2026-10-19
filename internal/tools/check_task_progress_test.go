@@ -61,6 +61,7 @@ func TestCheckTaskProgressTool_Parameters(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // One table covers every task progress state.
 func TestCheckTaskProgressTool_Execute(t *testing.T) {
 	newToolCtx := func(fc client.Client) context.Context {
 		tc := &ToolContext{

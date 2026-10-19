@@ -43,7 +43,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 		"limits":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 	},
 	}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Model configuration; OpenCode requires a literal provider/model name plus reviewed contextWindow and maxTokens", jsonSchemaPropertiesField: map[string]any{
-		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name; OpenCode requires a literal provider/model ID"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2, jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
+		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name; OpenCode requires a literal provider/model ID"}, temperatureField: map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2, jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
 		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
 		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
 	},
@@ -110,7 +110,7 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			name := chatGetStringArg(m, nameField)
 			provider := chatGetStringArg(m, "provider")
 			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: name, Provider: provider}
-			if raw, supplied := m["temperature"]; supplied && raw != nil {
+			if raw, supplied := m[temperatureField]; supplied && raw != nil {
 				temperature, err := parseChatAgentTemperature(raw)
 				if err != nil {
 					return ChatToolErrorResult("invalid_arguments", err.Error(), "Use model.temperature between 0 and 2, or omit it.")
@@ -245,7 +245,7 @@ func decodeChatCreateAgentArgs(args json.RawMessage) (map[string]any, error) {
 	if err := json.Unmarshal(args, &raw); err != nil {
 		return nil, err
 	}
-	for _, field := range [][2]string{{modelField, "temperature"}, {runtimeField, "defaultMaxTurns"}} {
+	for _, field := range [][2]string{{modelField, temperatureField}, {runtimeField, "defaultMaxTurns"}} {
 		object, ok := values[field[0]].(map[string]any)
 		if !ok {
 			continue

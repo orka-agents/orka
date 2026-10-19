@@ -175,6 +175,8 @@ func titleCaseMode(mode string) string {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives repository scan lifecycle, task creation, and task ingestion.
+//
+//nolint:gocyclo // Scan reconciliation walks each phase transition in order.
 func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositoryscan")
 

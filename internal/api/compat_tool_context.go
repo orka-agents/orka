@@ -99,7 +99,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		},
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if tasksCreated >= maxProxyCreatedTasks {
-				return &tools.ChatToolError{Type: "limit_reached", Message: fmt.Sprintf("task creation limit reached (max %d)", maxProxyCreatedTasks), Suggestion: "Wait for existing tasks to complete"}
+				return &tools.ChatToolError{Type: limitReachedCode, Message: fmt.Sprintf("task creation limit reached (max %d)", maxProxyCreatedTasks), Suggestion: "Wait for existing tasks to complete"}
 			}
 			return nil
 		},

@@ -1366,6 +1366,7 @@ func (s *Service) deferProjection(ctx context.Context, event *store.GatewayEvent
 	)
 }
 
+//nolint:gocyclo // Terminal projection handles each delivery outcome explicitly.
 func (s *Service) projectTerminal(
 	ctx context.Context,
 	event *store.GatewayEvent,
@@ -1473,6 +1474,8 @@ func (s *Service) projectTerminal(
 }
 
 // DeliverOnce claims one due delivery and records the synchronous terminal adapter result.
+//
+//nolint:gocyclo // Delivery keeps claim, send, and settlement branches together under one lease.
 func (s *Service) DeliverOnce(ctx context.Context) error {
 	claimAt := time.Now().UTC()
 	delivery, err := s.DeliveryStore.ClaimNextGatewayDelivery(ctx, s.Config.Namespace, s.Owner, claimAt, s.Config.ClaimLease)

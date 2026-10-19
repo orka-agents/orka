@@ -55,6 +55,7 @@ func testConnectorProvider(namespace, name string) *corev1alpha1.ConnectorProvid
 	}
 }
 
+//nolint:unparam // Namespace is explicit to mirror the namespaced API contract.
 func connectorClientSecret(namespace string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "oauth", Namespace: namespace},

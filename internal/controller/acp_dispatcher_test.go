@@ -4019,6 +4019,7 @@ func newDispatcherRuntimeServerWithOptions(
 	)
 }
 
+//nolint:gocyclo // Fake runtime server routes every v2 endpoint the dispatcher tests exercise.
 func newDispatcherRuntimeServerForPoolWithOptions(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,

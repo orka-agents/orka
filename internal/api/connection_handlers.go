@@ -862,21 +862,22 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	ctx := c.Context()
 	nonce, err := connectors.VerifyState(h.connectors.StateKey, c.Query("state"))
 	if err != nil {
-		return h.connectorCallbackRedirect(c, "", "invalid_state", "")
+		return h.connectorCallbackRedirect(c, "invalid_state")
 	}
 	consent, err := h.connectors.Consents.ConsumeConnectorConsent(ctx, nonce)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return h.connectorCallbackRedirect(c, "", "consent_expired", "")
+			return h.connectorCallbackRedirect(c, "consent_expired")
 		}
-		return h.connectorCallbackRedirect(c, "", "storage_failed", "")
+		return h.connectorCallbackRedirect(c, "storage_failed")
 	}
 	if h.watchNamespace != "" && consent.Namespace != h.watchNamespace {
-		return h.connectorCallbackRedirect(c, "", "invalid_state", "")
+		return h.connectorCallbackRedirect(c, "invalid_state")
 	}
 	if providerError := strings.TrimSpace(c.Query("error")); providerError != "" {
-		reason := "access_denied"
-		if providerError != "access_denied" {
+		const accessDenied = "access_denied"
+		reason := accessDenied
+		if providerError != accessDenied {
 			reason = "provider_rejected"
 		}
 		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, reason, "")
@@ -1207,8 +1208,8 @@ func (h *Handlers) applyConnectionLinked(ctx context.Context, connection *corev1
 // fixed reason code and the Connection name travel in the query string. The
 // one-time completion token travels in the URL fragment, which browsers keep
 // out of requests, referrers, and server logs.
-func (h *Handlers) connectorCallbackRedirect(c fiber.Ctx, connectionName, reason, completionToken string) error {
-	return h.connectorCallbackRedirectTo(c, "", connectionName, reason, completionToken)
+func (h *Handlers) connectorCallbackRedirect(c fiber.Ctx, reason string) error {
+	return h.connectorCallbackRedirectTo(c, "", "", reason, "")
 }
 
 // connectorCallbackRedirectTo is connectorCallbackRedirect with the

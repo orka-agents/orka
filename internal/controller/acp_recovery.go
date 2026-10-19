@@ -697,6 +697,7 @@ func (d *ACPDispatcher) readRecoverableTask(
 	return latest, true, nil
 }
 
+//nolint:gocyclo // Stale-task recovery handles each persisted lifecycle phase under one fence.
 func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
 	if task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
 		return errNativeSessionInstallUnresolved

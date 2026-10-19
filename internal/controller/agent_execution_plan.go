@@ -65,6 +65,8 @@ func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agent
 // same ACP Task and RuntimeSession state machines without becoming managed
 // RuntimePools. There is no legacy turn or Job fallback, and no cross-mode
 // harness-v1 fallback for v2 work.
+//
+//nolint:gocyclo // Execution planning resolves every frozen input in one deterministic pass.
 func (r *TaskReconciler) planAgentExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,

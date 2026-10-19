@@ -544,7 +544,7 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	effectRequest := map[string]any{
 		taskUIDField: task.UID, attemptField: attempt.Attempt, "bindingDigest": attempt.BindingDigest,
 		snapshotDigestField: attempt.SnapshotDigest, "toolDefinitionDigest": frozenTool.DefinitionDigest,
-		"request": request,
+		requestKey: request,
 	}
 	result, _, err := runExternalEffectWithReplayCallTimeout(
 		ctx,
