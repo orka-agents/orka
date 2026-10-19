@@ -161,11 +161,46 @@ type uncomparableStore struct {
 	labels map[string]string
 }
 
+// wrappedStore has a comparable type, so whether == panics depends on the
+// provider it wraps.
+type wrappedStore struct {
+	storageclient.EmbeddedStore
+}
+
+// taggedStore has a comparable type, so whether == panics depends on the
+// value held in tag.
+type taggedStore struct {
+	*sqlite.Store
+	tag any
+}
+
 func TestNewRejectsProvidersItCannotProveAreOneStore(t *testing.T) {
-	backend := uncomparableStore{Store: openSQLite(t), labels: map[string]string{}}
-	_, err := storageclient.NewEmbedded(backend)
-	if !errors.Is(err, storageclient.ErrSplitEmbeddedStore) {
-		t.Fatalf("uncomparable provider error = %v, want %v", err, storageclient.ErrSplitEmbeddedStore)
+	for name, backend := range map[string]storageclient.EmbeddedStore{
+		"uncomparable type": uncomparableStore{Store: openSQLite(t), labels: map[string]string{}},
+		"comparable wrapper around uncomparable provider": wrappedStore{
+			EmbeddedStore: uncomparableStore{Store: openSQLite(t), labels: map[string]string{}},
+		},
+		"interface field holding a map": taggedStore{Store: openSQLite(t), tag: map[string]string{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := storageclient.NewEmbedded(backend)
+			if !errors.Is(err, storageclient.ErrSplitEmbeddedStore) {
+				t.Fatalf("NewEmbedded error = %v, want %v", err, storageclient.ErrSplitEmbeddedStore)
+			}
+		})
+	}
+}
+
+func TestNewAcceptsComparableValueProviders(t *testing.T) {
+	for name, backend := range map[string]storageclient.EmbeddedStore{
+		"wrapper around a store pointer":   wrappedStore{EmbeddedStore: openSQLite(t)},
+		"interface field holding a string": taggedStore{Store: openSQLite(t), tag: "primary"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := storageclient.NewEmbedded(backend); err != nil {
+				t.Fatalf("NewEmbedded error = %v, want nil", err)
+			}
+		})
 	}
 }
 

@@ -113,11 +113,15 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 }
 
 // sameStore reports whether two provider values are provably the same store.
-// Values whose dynamic type cannot be compared are never treated as the same,
-// so New rejects them instead of panicking.
+// Values that == cannot compare, including comparable types holding an
+// uncomparable value in an interface field, are never treated as the same, so
+// New rejects them instead of panicking.
 func sameStore(a, b any) bool {
-	typeA := reflect.TypeOf(a)
-	if typeA == nil || typeA != reflect.TypeOf(b) || !typeA.Comparable() {
+	valueA, valueB := reflect.ValueOf(a), reflect.ValueOf(b)
+	if !valueA.IsValid() || !valueB.IsValid() || valueA.Type() != valueB.Type() {
+		return false
+	}
+	if !valueA.Comparable() || !valueB.Comparable() {
 		return false
 	}
 	return a == b
