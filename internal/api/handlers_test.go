@@ -5403,8 +5403,7 @@ func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
 			}))
 
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
-			body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
-			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", strings.NewReader(`{}`))
 			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
@@ -5421,6 +5420,10 @@ func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+		return c.Next()
+	})
 	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 	proposal := &store.MemoryProposal{
@@ -5438,8 +5441,7 @@ func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 		Reviewer:  "reviewer",
 	}))
 
-	body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -5465,6 +5467,10 @@ func TestHandlers_ApplyMemoryProposalConflict(t *testing.T) {
 	h := NewHandlers(HandlersConfig{MemoryProposalStore: conflictApplyMemoryProposalStore{}})
 
 	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+		return c.Next()
+	})
 	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/mprop-conflict/apply?namespace=default", nil)
@@ -5509,6 +5515,10 @@ func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
 			h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+				return c.Next()
+			})
 			app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 			ctx := context.Background()

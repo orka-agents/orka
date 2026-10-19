@@ -34,7 +34,7 @@ func TestExternalAPIAuthorizesResolvedNamespace(t *testing.T) {
 		{"memory uses body namespace", "POST /api/v1/memories", "/api/v1/memories?namespace=default", `{"id":"created","content":"denied","namespace":"other"}`, http.StatusForbidden},
 		{"memory update query wins", "PUT /api/v1/memories/:id", "/api/v1/memories/protected?namespace=default", `{"namespace":"other","content":"updated"}`, http.StatusOK},
 		{"memory update query denies", "PUT /api/v1/memories/:id", "/api/v1/memories/protected?namespace=other", `{"namespace":"default","content":"denied"}`, http.StatusForbidden},
-		{"proposal review body wins", "POST /api/v1/memory-proposals/:id/review", "/api/v1/memory-proposals/protected/review?namespace=other", `{"namespace":"default","status":"accepted"}`, http.StatusNoContent},
+		{"proposal review body wins", "POST /api/v1/memory-proposals/:id/review", "/api/v1/memory-proposals/protected/review?namespace=other", `{"namespace":"default","status":"accepted"}`, http.StatusOK},
 		{"proposal review body denies", "POST /api/v1/memory-proposals/:id/review", "/api/v1/memory-proposals/protected/review?namespace=default", `{"namespace":"other","status":"accepted"}`, http.StatusForbidden},
 		{"proposal rejects namespace trimming", "POST /api/v1/memory-proposals/:id/review", "/api/v1/memory-proposals/protected/review", `{"namespace":" default ","status":"accepted"}`, http.StatusForbidden},
 		{"named update ignores body identity", "PUT /api/v1/tools/:name", "/api/v1/tools/protected?namespace=default", `{"namespace":"other","metadata":{"namespace":"other","name":"other"},"spec":{"description":"updated"}}`, http.StatusOK},

@@ -25,7 +25,7 @@ func TestCreateTaskJobGatewayReplyDefersUntilDurableLink(t *testing.T) {
 		gatewayruntime.TaskGatewayNameLabel: "chat", gatewayruntime.TaskGatewayBindingLabel: "room", gatewayruntime.TaskGatewayEventLabel: "gev-test",
 	}, Annotations: map[string]string{
 		gatewayruntime.TaskGatewayEventAnnotation: "gev-test", gatewayruntime.TaskGatewayExternalEvent: "external", gatewayruntime.TaskGatewaySession: "session", gatewayruntime.TaskGatewayNameAnnotation: "chat", gatewayruntime.TaskGatewayBindingAnnotation: "room",
-	}}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "assistant"}, SessionRef: &corev1alpha1.SessionReference{Name: "session", ThroughMessageID: "gateway:gev-test:user", PromptIncluded: true}, RequestedBy: &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/default/ns-uid/chat/gateway-uid", Subject: "sender", Groups: []string{"gateway:chat"}, Roles: []string{"gateway-sender"}}}}
+	}}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "assistant"}, SessionRef: &corev1alpha1.SessionReference{Name: "session", MaxMessages: store.GatewayTranscriptMessageLimit, ThroughMessageID: "gateway:gev-test:user", PromptIncluded: true}, RequestedBy: &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/default/ns-uid/chat/gateway-uid", Subject: "sender", Groups: []string{"gateway:chat"}, Roles: []string{"gateway-sender"}}}}
 	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default"}, Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "test-model"}}}
 	gateway := &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "default", UID: "gateway-uid", Generation: 1}, Status: gatewayv1alpha1.GatewayStatus{Ready: true, ObservedGeneration: 1, ObservedCapabilities: &gatewayv1alpha1.GatewayObservedCapabilities{ContractVersion: protocol.Version, Capabilities: gatewayv1alpha1.GatewayCapabilities{InterimDelivery: true}}}}
 	r := newUnitReconciler(scheme, task, agent, gateway, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "ns-uid"}})
@@ -40,6 +40,8 @@ func TestCreateTaskJobGatewayReplyDefersUntilDurableLink(t *testing.T) {
 	_, err = s.ClaimNextGatewayEvent(t.Context(), "default", "dispatch", now, time.Minute)
 	require.NoError(t, err)
 	r.GatewayService = gatewayruntime.NewService(r.Client, s, s, s, gatewayruntime.DefaultConfig())
+	r.SessionManager = NewSessionManager(s)
+	r.SessionManager.SetGatewayEventStore(s)
 	result, err := r.createTaskJob(t.Context(), task, agent, nil)
 	require.NoError(t, err)
 	require.Equal(t, time.Second, result.RequeueAfter)
@@ -48,6 +50,7 @@ func TestCreateTaskJobGatewayReplyDefersUntilDurableLink(t *testing.T) {
 	require.Empty(t, jobs.Items)
 	require.NotEqual(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)
 	require.NoError(t, s.MarkGatewayEventTaskCreated(t.Context(), "default", event.ID, task.Name, string(task.UID), "dispatch", now))
+	require.NoError(t, r.SessionManager.AcquireLock(t.Context(), task))
 	// Admission availability is not a planning-time origin discriminator. Freeze
 	// the tool into the real Job even if readiness/capability recovery is pending.
 	gateway.Status.Ready = false

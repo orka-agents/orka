@@ -63,9 +63,11 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen kustomize ## Generate canonical and staged manifests.
+manifests: controller-gen kustomize workspace-crds ## Generate canonical and staged manifests.
 	# A module pattern excludes nested provider checkouts used by local conformance.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
+	# controller-gen leaves removed kinds behind; Core no longer serves these provider APIs.
+	rm -f config/crd/bases/acp.workspace.orka.ai_*.yaml config/crd/bases/fake.workspace.orka.ai_*.yaml
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -91,6 +93,14 @@ manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 		tmp=""; \
 		trap - EXIT; \
 		if [[ -n "$$backup" ]]; then rm -rf "$$backup"; fi
+
+.PHONY: workspace-crds
+workspace-crds: ## Source workspace CRDs from the pinned shared module.
+	go mod download github.com/orka-agents/orka-workspace
+	@set -euo pipefail; \
+		workspace_module_dir="$$(go list -m -f '{{.Dir}}' github.com/orka-agents/orka-workspace)"; \
+		rm -f config/crd/bases/workspace.orka.ai_*.yaml; \
+		cp "$$workspace_module_dir"/config/crd/bases/workspace.orka.ai_*.yaml config/crd/bases/
 
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
@@ -176,6 +186,9 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
 E2E_GO_TEST_TIMEOUT ?= 50m
+# Keep interrupted specs and suite cleanup inside the outer Go deadline.
+E2E_GINKGO_TIMEOUT ?= 45m
+E2E_GINKGO_GRACE_PERIOD ?= 2m
 E2E_GINKGO_FOCUS ?=
 E2E_GINKGO_FOCUS_ARG = $(if $(E2E_GINKGO_FOCUS),-ginkgo.focus="$(E2E_GINKGO_FOCUS)",)
 E2E_GINKGO_LABEL_FILTER ?=
@@ -207,8 +220,8 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 
 .PHONY: test-e2e-run
 test-e2e-run: ## Run only the e2e suite on an existing Kind cluster: no regeneration, fmt, vet, or teardown.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG) \
-		$(E2E_GINKGO_FOCUS_FILE_ARG) $(E2E_GINKGO_SKIP_FILE_ARG)
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(E2E_GINKGO_TIMEOUT) -ginkgo.grace-period=$(E2E_GINKGO_GRACE_PERIOD) \
+		$(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG) $(E2E_GINKGO_FOCUS_FILE_ARG) $(E2E_GINKGO_SKIP_FILE_ARG)
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -235,7 +248,7 @@ lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform 
 ##@ Demos
 
 .PHONY: demo-cluster-up
-demo-cluster-up: ## Bootstrap a kind cluster with Orka + agent-sandbox
+demo-cluster-up: ## Bootstrap Orka + agent-sandbox demo assets; ACP providers installed separately
 	hack/demos/cluster/cluster-up.sh
 	hack/demos/cluster/install-agent-sandbox.sh
 	hack/demos/cluster/install-demo-model.sh
@@ -245,15 +258,15 @@ demo-cluster-down: ## Tear down the kind demo cluster
 	hack/demos/cluster/cluster-down.sh
 
 .PHONY: demo-substrate-up
-demo-substrate-up: ## Bootstrap a DEDICATED kind cluster with Agent Substrate + Orka (Demo 70)
+demo-substrate-up: ## Bootstrap a dedicated Substrate MCP Tools conformance cluster (no ACP provider)
 	hack/demos/cluster/install-substrate.sh
 
 .PHONY: demo-substrate-down
-demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
+demo-substrate-down: ## Tear down the Substrate MCP Tools conformance cluster
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-cluster-up-all
-demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local demos (00-40, 60-70)
+demo-cluster-up-all: ## Bootstrap Substrate MCP Tools + Orka demo assets; ACP providers installed separately
 	hack/demos/cluster/install-substrate.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-demo-model.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
@@ -441,8 +454,9 @@ endif
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	# Shared runtime Pod schemas exceed the client-side apply annotation limit.
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
-	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply -f -; else echo "No CRDs to install; skipping."; fi
+	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply --server-side -f -; else echo "No CRDs to install; skipping."; fi
 
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

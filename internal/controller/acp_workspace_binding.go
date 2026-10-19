@@ -20,9 +20,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -58,7 +58,7 @@ type ACPRuntimeWorkspaceBinding struct {
 	TemplateNamespace string
 	TemplateName      string
 	// Class is the frozen controller-first ExecutionWorkspaceClass binding for
-	// class-selected workspaces. It is nil for legacy provider-shaped requests.
+	// class-selected workspaces. Every nonnil workspace binding requires a class.
 	Class *ACPWorkspaceClassBinding
 	// RestoreFrom is a provider-neutral immutable Data checkpoint reference.
 	RestoreFrom *corev1alpha1.WorkspaceCheckpointReference
@@ -75,32 +75,10 @@ func acpSubstratePoolSuspendMode(binding *ACPRuntimeWorkspaceBinding) string {
 	return binding.Class.SuspendMode
 }
 
-func acpSubstratePoolSuspendModeMatches(binding *ACPRuntimeWorkspaceBinding, poolMode string) bool {
-	permittedMode := acpSubstratePoolSuspendMode(binding)
-	if poolMode == permittedMode {
-		return true
-	}
-	// RuntimePool executionWorkspace is API-immutable. Older controllers
-	// copied the profile's DataOnly mode even when a class allowed only Delete.
-	// Accept that exact encoding so a frozen session can continue; new pools
-	// use the empty executable mode, and every other mismatch stays rejected.
-	return permittedMode == "" &&
-		poolMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
-		binding != nil && binding.Provider == corev1alpha1.WorkspaceProviderSubstrate && binding.Class != nil &&
-		binding.Class.SuspendMode == string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) &&
-		!slices.Contains(binding.Class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend))
-}
-
-// resolveACPWorkspaceBindingWithClass distills a legacy provider-shaped or
-// class-shaped execution-workspace request into the canonical ACP binding. The
-// class-shaped path consumes the pre-resolved, frozen class data so the
-// function stays pure over its inputs.
-//
-//nolint:gocyclo // Every unsupported-capability rejection is audited in one place.
+// resolveACPWorkspaceBindingWithClass builds a canonical binding from a class
+// request and its pre-resolved, frozen class data.
 func resolveACPWorkspaceBindingWithClass(
 	task *corev1alpha1.Task,
-	defaultProvider corev1alpha1.WorkspaceProvider,
-	enforceNamespaceIsolation bool,
 	sessionUID string,
 	resolvedClass *acpResolvedWorkspaceClass,
 ) (*ACPRuntimeWorkspaceBinding, error) {
@@ -108,99 +86,17 @@ func resolveACPWorkspaceBindingWithClass(
 		return nil, nil
 	}
 	ws := task.Spec.Execution.Workspace
-	if ws.RestoreFrom != nil && ws.ClassRef == nil {
-		return nil, fmt.Errorf("execution workspace restoreFrom requires a Substrate DataOnly class")
+	if ws.ClassRef == nil || strings.TrimSpace(ws.ClassRef.Name) == "" {
+		return nil, fmt.Errorf("execution workspace classRef.name is required")
 	}
-	if ws.ClassRef != nil {
-		if resolvedClass == nil {
-			return nil, fmt.Errorf("execution workspace classRef requires a resolved workspace class before binding")
-		}
-		return resolveACPClassWorkspaceBinding(task, sessionUID, resolvedClass)
+	if resolvedClass == nil {
+		return nil, fmt.Errorf("execution workspace classRef requires a resolved workspace class before binding")
 	}
-	if resolvedClass != nil {
-		return nil, fmt.Errorf("a resolved workspace class was supplied without a classRef-shaped request")
-	}
-	if !ws.Enabled {
-		return nil, nil
-	}
-	if task.UID == "" {
-		return nil, fmt.Errorf("task UID is required for an execution workspace binding")
-	}
-	provider := resolveWorkspaceProvider(ws, defaultProvider)
-	templateNamespace := ""
-	templateName := ""
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if ws.TemplateRef != nil {
-			return nil, fmt.Errorf(
-				"execution workspace templateRef selects a legacy worker-path sandbox template; ACP RuntimeSessions run only in controller-rendered sandbox templates, so templateRef must be omitted",
-			)
-		}
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		// Substrate templates carry operator-owned infrastructure (worker pool
-		// placement, runsc build, snapshot location) that the controller cannot
-		// invent, so an explicit base template reference is required. The
-		// controller renders its own derived runtime template from it; the
-		// referenced template's containers never execute ACP work.
-		if ws.TemplateRef == nil || strings.TrimSpace(ws.TemplateRef.Name) == "" {
-			return nil, fmt.Errorf("execution workspace provider substrate requires templateRef.name naming the operator-owned infrastructure ActorTemplate")
-		}
-		templateName = strings.TrimSpace(ws.TemplateRef.Name)
-		templateNamespace = strings.TrimSpace(ws.TemplateRef.Namespace)
-		if templateNamespace == "" {
-			templateNamespace = task.Namespace
-		}
-		if err := validateSubstrateWorkspaceTemplateReference(templateNamespace, templateName); err != nil {
-			return nil, err
-		}
-		if enforceNamespaceIsolation && templateNamespace != task.Namespace {
-			return nil, fmt.Errorf(
-				"cross-namespace execution workspace templateRef is not allowed when namespace isolation is enforced: template %q is in namespace %q, task is in %q",
-				templateName, templateNamespace, task.Namespace,
-			)
-		}
-	default:
-		return nil, fmt.Errorf(
-			"execution workspace provider %q does not support ACP RuntimeSessions; there is no fallback execution path",
-			provider,
-		)
-	}
-	if ws.PoolRef != nil || ws.Boot || ws.Snapshot != nil || ws.Hibernation != nil {
-		return nil, fmt.Errorf("execution workspace boot, poolRef, snapshot, and hibernation options are not supported for ACP RuntimeSessions")
-	}
-	if ws.OnDetach != "" {
-		return nil, fmt.Errorf("execution workspace onDetach is not supported for ACP RuntimeSessions yet")
-	}
-	cleanup := ws.CleanupPolicy
-	if cleanup == "" {
-		cleanup = corev1alpha1.WorkspaceCleanupPolicyDelete
-	}
-	if cleanup != corev1alpha1.WorkspaceCleanupPolicyDelete {
-		return nil, fmt.Errorf(
-			"execution workspace cleanupPolicy %q is not supported for ACP RuntimeSessions; the execution workspace is always deleted after authenticated drain",
-			cleanup,
-		)
-	}
-	reuse, slot, sessionUID, sessionKey, err := resolveACPWorkspaceSessionScope(task, sessionUID)
-	if err != nil {
-		return nil, err
-	}
-	binding := &ACPRuntimeWorkspaceBinding{
-		Provider: provider, ReusePolicy: reuse, CleanupPolicy: cleanup,
-		WorkspaceSlot: slot, SessionUID: sessionUID, SessionKey: sessionKey,
-		TemplateNamespace: templateNamespace, TemplateName: templateName,
-	}
-	digest, err := acpWorkspaceBindingDigest(binding)
-	if err != nil {
-		return nil, err
-	}
-	binding.BindingDigest = digest
-	return binding, nil
+	return resolveACPClassWorkspaceBinding(task, sessionUID, resolvedClass)
 }
 
 // resolveACPWorkspaceSessionScope resolves the reuse policy, workspace slot,
-// immutable Session UID, and session key shared by the legacy and class-backed
-// binding paths.
+// immutable Session UID, and session key of a class binding.
 func resolveACPWorkspaceSessionScope(
 	task *corev1alpha1.Task,
 	sessionUID string,
@@ -243,20 +139,13 @@ func resolveACPWorkspaceSessionScope(
 	return reuse, slot, sessionUID, sessionKey, nil
 }
 
-// resolveACPClassWorkspaceBinding builds the canonical binding for a
-// class-shaped request from the pre-resolved class data. The CRD forbids
-// combining classRef with the legacy request fields; the checks here keep that
-// invariant fail-closed even without the admission layer.
+// resolveACPClassWorkspaceBinding builds the canonical class binding.
 func resolveACPClassWorkspaceBinding(
 	task *corev1alpha1.Task,
 	sessionUID string,
 	resolvedClass *acpResolvedWorkspaceClass,
 ) (*ACPRuntimeWorkspaceBinding, error) {
 	ws := task.Spec.Execution.Workspace
-	if ws.Enabled || ws.Provider != "" || ws.TemplateRef != nil || ws.CleanupPolicy != "" ||
-		ws.PoolRef != nil || ws.Boot || ws.Snapshot != nil || ws.Hibernation != nil {
-		return nil, fmt.Errorf("execution workspace classRef cannot be combined with legacy enabled, provider, template, pool, cleanup, boot, snapshot, or hibernation settings")
-	}
 	if task.UID == "" {
 		return nil, fmt.Errorf("task UID is required for an execution workspace binding")
 	}
@@ -280,24 +169,8 @@ func resolveACPClassWorkspaceBinding(
 			"execution workspace onDetach Suspend requires reusePolicy session; a per-Task workspace has no continuation to resume into",
 		)
 	}
-	templateNamespace := ""
-	templateName := ""
-	switch resolvedClass.Backend {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if resolvedClass.SubstrateTemplateNamespace != "" || resolvedClass.SubstrateTemplateName != "" {
-			return nil, fmt.Errorf("agent-sandbox execution workspace classes must not carry a Substrate template reference")
-		}
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		templateNamespace = resolvedClass.SubstrateTemplateNamespace
-		templateName = resolvedClass.SubstrateTemplateName
-		if err := validateSubstrateWorkspaceTemplateReference(templateNamespace, templateName); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf(
-			"execution workspace class backend %q does not support ACP RuntimeSessions; there is no fallback execution path",
-			resolvedClass.Backend,
-		)
+	if resolvedClass.Binding.ControllerName == "" || string(resolvedClass.Backend) != resolvedClass.Binding.ControllerName || resolvedClass.SubstrateTemplateNamespace != "" || resolvedClass.SubstrateTemplateName != "" {
+		return nil, fmt.Errorf("execution workspace bindings require a registered external provider; legacy bindings are cleanup-only")
 	}
 	class := resolvedClass.Binding
 	class.EffectiveOnDetach = string(effectiveOnDetach)
@@ -306,7 +179,6 @@ func resolveACPClassWorkspaceBinding(
 		ReusePolicy:   reuse,
 		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicyDelete,
 		WorkspaceSlot: slot, SessionUID: sessionUID, SessionKey: sessionKey,
-		TemplateNamespace: templateNamespace, TemplateName: templateName,
 		Class:       &class,
 		RestoreFrom: ws.RestoreFrom.DeepCopy(),
 	}
@@ -331,13 +203,11 @@ func validateSubstrateWorkspaceTemplateReference(namespace, name string) error {
 	return nil
 }
 
-// validateACPWorkspaceBindingRequestWithClass validates a legacy or
-// class-shaped request with a validation-only Session placeholder that is
+// validateACPWorkspaceBindingRequestWithClass validates a class request with
+// a validation-only Session placeholder that is
 // never persisted or used for pool identity.
 func validateACPWorkspaceBindingRequestWithClass(
 	task *corev1alpha1.Task,
-	defaultProvider corev1alpha1.WorkspaceProvider,
-	enforceNamespaceIsolation bool,
 	resolvedClass *acpResolvedWorkspaceClass,
 ) (*ACPRuntimeWorkspaceBinding, error) {
 	validationSessionUID := ""
@@ -345,12 +215,11 @@ func validateACPWorkspaceBindingRequestWithClass(
 		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
 		validationSessionUID = "validation-only"
 	}
-	return resolveACPWorkspaceBindingWithClass(task, defaultProvider, enforceNamespaceIsolation, validationSessionUID, resolvedClass)
+	return resolveACPWorkspaceBindingWithClass(task, validationSessionUID, resolvedClass)
 }
 
 func acpWorkspaceSessionIdentityRequest(task *corev1alpha1.Task) (string, string, bool, error) {
 	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
-		(!task.Spec.Execution.Workspace.Enabled && task.Spec.Execution.Workspace.ClassRef == nil) ||
 		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
 		return "", "", false, nil
 	}
@@ -467,8 +336,7 @@ func (r *TaskReconciler) ensureACPWorkspaceSessionUID(
 }
 
 // acpWorkspaceBindingDigest canonically digests the binding identity fields.
-// Class-path keys are added only for class-backed bindings so every legacy
-// binding digest remains byte-identical to its pre-class encoding.
+// The encoded fields are unchanged so stored class bindings retain their digest.
 func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, error) {
 	return acpWorkspaceBindingDigestWithClassOnDetach(binding, false)
 }
@@ -507,6 +375,20 @@ func acpWorkspaceBindingDigestWithClassOnDetach(
 		fields["classProviderName"] = binding.Class.ProviderName
 		fields["classProviderUID"] = binding.Class.ProviderUID
 		fields["classProviderConfigUID"] = binding.Class.ProviderConfigUID
+		if binding.Class.ControllerName != "" {
+			externalDigest, err := acpDomainDigest("external-workspace-binding", map[string]any{
+				"controllerName":            binding.Class.ControllerName,
+				"lifecycleContractVersion":  binding.Class.LifecycleContractVersion,
+				"providerConfigRef":         binding.Class.ProviderConfigRef,
+				"providerConfigBinding":     binding.Class.ProviderConfigBinding,
+				workspaceParametersRefField: binding.Class.ParametersRef,
+				"parametersBinding":         binding.Class.ParametersBinding,
+			})
+			if err != nil {
+				return "", err
+			}
+			fields["classExternalBinding"] = externalDigest
+		}
 		if includeClassOnDetach {
 			fields["classOnDetach"] = binding.Class.EffectiveOnDetach
 		}
@@ -708,23 +590,33 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 	if binding == nil {
 		return nil
 	}
+	if binding.Class == nil {
+		return fmt.Errorf("frozen execution workspace binding requires a class; direct provider bindings are no longer supported")
+	}
 	if err := validateACPWorkspaceRestoreReference(binding); err != nil {
 		return err
 	}
-	switch binding.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if binding.TemplateNamespace != "" || binding.TemplateName != "" {
-			return fmt.Errorf("frozen agent-sandbox execution workspace binding must not carry a template reference")
+	external := binding.Class.ControllerName != ""
+	if external {
+		if string(binding.Provider) != binding.Class.ControllerName || binding.TemplateNamespace != "" || binding.TemplateName != "" {
+			return fmt.Errorf("external workspace binding has a mismatched controller identity or native template")
 		}
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		if strings.TrimSpace(binding.TemplateNamespace) == "" || strings.TrimSpace(binding.TemplateName) == "" {
-			return fmt.Errorf("frozen substrate execution workspace binding is missing the infrastructure template reference")
+	} else {
+		switch binding.Provider {
+		case corev1alpha1.WorkspaceProviderAgentSandbox:
+			if binding.TemplateNamespace != "" || binding.TemplateName != "" {
+				return fmt.Errorf("frozen agent-sandbox execution workspace binding must not carry a template reference")
+			}
+		case corev1alpha1.WorkspaceProviderSubstrate:
+			if strings.TrimSpace(binding.TemplateNamespace) == "" || strings.TrimSpace(binding.TemplateName) == "" {
+				return fmt.Errorf("frozen substrate execution workspace binding is missing the infrastructure template reference")
+			}
+			if err := validateSubstrateWorkspaceTemplateReference(binding.TemplateNamespace, binding.TemplateName); err != nil {
+				return fmt.Errorf("frozen substrate execution workspace binding is invalid: %w", err)
+			}
+		default:
+			return fmt.Errorf("frozen execution workspace provider %q is not supported", binding.Provider)
 		}
-		if err := validateSubstrateWorkspaceTemplateReference(binding.TemplateNamespace, binding.TemplateName); err != nil {
-			return fmt.Errorf("frozen substrate execution workspace binding is invalid: %w", err)
-		}
-	default:
-		return fmt.Errorf("frozen execution workspace provider %q is not supported", binding.Provider)
 	}
 	if binding.Class != nil && strings.TrimSpace(binding.Class.ProviderConfigUID) == "" {
 		return fmt.Errorf("frozen class-backed execution workspace binding is missing the provider config identity")
@@ -755,17 +647,19 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 		return err
 	}
 	if binding.Class != nil && binding.Class.EffectiveOnDetach == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
-		switch binding.Provider {
-		case corev1alpha1.WorkspaceProviderSubstrate:
-			if binding.Class.SandboxVolume != nil {
-				return fmt.Errorf("frozen substrate execution workspace binding must not carry an agent-sandbox durable volume")
+		if !external {
+			switch binding.Provider {
+			case corev1alpha1.WorkspaceProviderSubstrate:
+				if binding.Class.SandboxVolume != nil {
+					return fmt.Errorf("frozen substrate execution workspace binding must not carry an agent-sandbox durable volume")
+				}
+			case corev1alpha1.WorkspaceProviderAgentSandbox:
+				if binding.Class.SandboxVolume == nil {
+					return fmt.Errorf("frozen agent-sandbox execution workspace binding permits Suspend without a frozen durable volume")
+				}
+			default:
+				return fmt.Errorf("frozen execution workspace binding permits Suspend for provider %q", binding.Provider)
 			}
-		case corev1alpha1.WorkspaceProviderAgentSandbox:
-			if binding.Class.SandboxVolume == nil {
-				return fmt.Errorf("frozen agent-sandbox execution workspace binding permits Suspend without a frozen durable volume")
-			}
-		default:
-			return fmt.Errorf("frozen execution workspace binding permits Suspend for provider %q", binding.Provider)
 		}
 		if binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
 			return fmt.Errorf("frozen execution workspace binding permits Suspend without session reuse")
@@ -786,14 +680,26 @@ func validateACPWorkspaceRestoreReference(binding *ACPRuntimeWorkspaceBinding) e
 	if ref == nil {
 		return nil
 	}
-	if binding.Provider != corev1alpha1.WorkspaceProviderSubstrate || binding.Class == nil ||
-		acpSubstratePoolSuspendMode(binding) != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
+	if binding.Class != nil && binding.Class.ControllerName != "" {
+		if binding.Class.LifecycleContractVersion != workspacev1alpha1.LifecycleContractV1 || binding.Class.SuspendMode != "DataOnly" ||
+			!slices.Contains(binding.Class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) {
+			return fmt.Errorf("restoreFrom requires an external lifecycle class permitting DataOnly suspension")
+		}
+	} else if binding.Provider != corev1alpha1.WorkspaceProviderSubstrate || binding.Class == nil ||
+		acpSubstratePoolSuspendMode(binding) != acpWorkspaceSuspendDataOnly {
 		return fmt.Errorf("restoreFrom requires a Substrate class permitting DataOnly suspension")
 	}
 	if len(validation.IsDNS1123Subdomain(ref.Name)) != 0 || strings.TrimSpace(ref.UID) == "" || len(ref.UID) > 128 || !validSHA256Digest(ref.Digest) {
 		return fmt.Errorf("restoreFrom requires a valid checkpoint name, exact UID, and SHA-256 digest")
 	}
 	return nil
+}
+
+func acpWorkspaceWorkloadCheckpointReference(ref *corev1alpha1.WorkspaceCheckpointReference) *workspacev1alpha1.WorkloadCheckpointReference {
+	if ref == nil {
+		return nil
+	}
+	return &workspacev1alpha1.WorkloadCheckpointReference{Name: ref.Name, UID: types.UID(ref.UID), Digest: ref.Digest}
 }
 
 // validateSnapshotACPWorkspaceBindingValues accepts the prior schema-v1 class

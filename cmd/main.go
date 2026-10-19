@@ -37,8 +37,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/version"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,14 +51,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
-	fakeworkspacev1alpha1 "github.com/orka-agents/orka/api/fake.workspace/v1alpha1"
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
@@ -104,11 +103,7 @@ func init() {
 
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(gatewayv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(sandboxv1beta1.AddToScheme(scheme))
-	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
 	utilruntime.Must(workspacev1alpha1.AddToScheme(scheme))
-	utilruntime.Must(acpworkspacev1alpha1.AddToScheme(scheme))
-	utilruntime.Must(fakeworkspacev1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -178,7 +173,7 @@ func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
 	return true, nil
 }
 
-func substrateCheckpointAPIInstalled(mapper meta.RESTMapper) (bool, error) {
+func workspaceCheckpointAPIInstalled(mapper meta.RESTMapper) (bool, error) {
 	gvk := workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")
 	if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
 		if meta.IsNoMatchError(err) {
@@ -197,8 +192,6 @@ func validateDisabledSubstrateRecoveryConfig(
 	ctx context.Context,
 	reader crclient.Reader,
 	watchNamespace string,
-	controllerNamespace string,
-	acpRuntimeEnabled bool,
 	cfg controller.SubstrateConfig,
 	configErr error,
 ) error {
@@ -209,20 +202,7 @@ func validateDisabledSubstrateRecoveryConfig(
 	recoveryState := ""
 	// Only registered cleanup controllers can service these obligations.
 	// MCP Tool and actor-pool cleanup is independent of the ACP runtime mode.
-	if acpRuntimeEnabled {
-		pools := &corev1alpha1.RuntimePoolList{}
-		if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
-			return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
-		}
-		for i := range pools.Items {
-			workspace := pools.Items[i].Spec.ExecutionWorkspace
-			if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
-				continue
-			}
-			recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
-			break
-		}
-	}
+
 	if recoveryState == "" {
 		var err error
 		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
@@ -230,20 +210,14 @@ func validateDisabledSubstrateRecoveryConfig(
 			return err
 		}
 	}
-	if recoveryState == "" && acpRuntimeEnabled {
-		var err error
-		recoveryState, err = controller.FindSubstrateRecoveryJournal(ctx, reader, controllerNamespace)
-		if err != nil {
-			return err
-		}
-	}
+
 	if recoveryState == "" {
 		return nil
 	}
 	if configErr != nil {
 		return fmt.Errorf("parse substrate recovery configuration for existing %s: %w", recoveryState, configErr)
 	}
-	if err := cfg.ValidateACPRuntimePool(); err != nil {
+	if err := cfg.ValidateMCPTools(); err != nil {
 		return fmt.Errorf("existing substrate %s requires valid recovery configuration: %w", recoveryState, err)
 	}
 	return nil
@@ -334,9 +308,12 @@ func main() {
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
 	var acpE2EPromptWriteAmbiguityMarker string
-	var agentSandboxEnabled bool
+	var acpToolboxesEnabled bool
+	var acpToolboxAllowedRegistries string
+	var acpToolboxImagePullSecrets string
+	var acpToolboxNodeSelector string
+	var acpToolboxMountMethod string
 	var acpWorkspaceDispatchEnabled bool
-	var agentSandboxCleanupPolicy string
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
@@ -389,16 +366,10 @@ func main() {
 	var outboundAccessTrustedTokenEndpointServices string
 	var enableTracing bool
 	var workspaceProviderAPIEnabled bool
-	var fakeWorkspaceProviderEnabled bool
 	var tlsOpts []func(*tls.Config)
 
-	executionWorkspaceDefaultProvider := controller.ExecutionWorkspaceDefaultProviderFromEnv(os.Getenv)
-	executionWorkspaceDefaultProviderFlag := string(executionWorkspaceDefaultProvider)
-	agentSandboxEnabled = strings.EqualFold(os.Getenv("ORKA_AGENT_SANDBOX_ENABLED"), "true")
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
-	agentSandboxConfig, agentSandboxConfigErr := controller.AgentSandboxConfigFromEnv(os.Getenv)
-	agentSandboxCleanupPolicy = string(agentSandboxConfig.CleanupPolicy)
-	substrateEnabled := strings.EqualFold(os.Getenv("ORKA_SUBSTRATE_ENABLED"), "true")
+	substrateMCPToolsEnabled := strings.EqualFold(os.Getenv("ORKA_SUBSTRATE_MCP_TOOLS_ENABLED"), "true")
 	substrateConfig, substrateConfigErr := controller.SubstrateConfigFromEnv(os.Getenv)
 	substrateCleanupPolicy := string(substrateConfig.CleanupPolicy)
 
@@ -466,9 +437,6 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
-	flag.BoolVar(&fakeWorkspaceProviderEnabled, "enable-fake-workspace-provider",
-		envBool("ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER"),
-		"Enable the development-only fake.workspace.orka.ai/v1 adapter; requires --enable-workspace-provider-api.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -602,36 +570,20 @@ func main() {
 		"Mounted file containing the authenticated provider proxy bearer token.")
 	flag.StringVar(&acpE2EPromptWriteAmbiguityMarker, "acp-e2e-prompt-write-ambiguity-marker", os.Getenv("ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"),
 		"Test-only exact prompt marker that aborts a fully validated ACP prompt request before acceptance is recorded.")
-	flag.StringVar(&executionWorkspaceDefaultProviderFlag, "execution-workspace-default-provider",
-		executionWorkspaceDefaultProviderFlag,
-		"Default execution workspace provider when Task execution.workspace.provider is omitted (agent-sandbox, substrate).")
-	flag.BoolVar(&agentSandboxEnabled, "agent-sandbox-enabled", agentSandboxEnabled,
-		"Enable experimental agent sandbox workspace execution for agent Tasks.")
+	flag.BoolVar(&acpToolboxesEnabled, "acp-toolboxes-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_TOOLBOXES_ENABLED"), "true"),
+		"Allow built-in Agents to declare runtime.toolboxes (read-only tool images bound into runtime Pods). Off by default.")
+	flag.StringVar(&acpToolboxAllowedRegistries, "acp-toolbox-allowed-registries", os.Getenv("ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES"),
+		"Comma-separated registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing.")
+	flag.StringVar(&acpToolboxImagePullSecrets, "acp-toolbox-image-pull-secrets", os.Getenv("ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS"),
+		"Comma-separated Secret names in the runtime namespace added to runtime Pod imagePullSecrets when toolboxes are bound.")
+	flag.StringVar(&acpToolboxNodeSelector, "acp-toolbox-node-selector", os.Getenv("ORKA_ACP_TOOLBOX_NODE_SELECTOR"),
+		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
+	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
+		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
-		"Admit workspace-provider-backed ACP RuntimeSession dispatch (requires the matching --agent-sandbox-enabled or --substrate-enabled provider flag); when false, Task.spec.execution.workspace agent Tasks fail closed.")
-	flag.StringVar(&agentSandboxConfig.RouterURL, "agent-sandbox-router-url", agentSandboxConfig.RouterURL,
-		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
-	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
-		agentSandboxConfig.DefaultTemplate,
-		"Default agent-sandbox SandboxWarmPool name used when a Task omits execution.workspace.templateRef.name.")
-	flag.StringVar(&agentSandboxConfig.WarmPoolPolicy, "agent-sandbox-warm-pool-policy",
-		agentSandboxConfig.WarmPoolPolicy,
-		"Agent sandbox warm pool policy (disabled, template).")
-	flag.StringVar(&agentSandboxConfig.NamespaceStrategy, "agent-sandbox-namespace-strategy",
-		agentSandboxConfig.NamespaceStrategy,
-		"Agent sandbox namespace strategy (task, controller).")
-	flag.DurationVar(&agentSandboxConfig.ClaimTimeout, "agent-sandbox-claim-timeout",
-		agentSandboxConfig.ClaimTimeout,
-		"Timeout for agent sandbox workspace claim and readiness operations.")
-	flag.DurationVar(&agentSandboxConfig.CommandTimeout, "agent-sandbox-command-timeout",
-		agentSandboxConfig.CommandTimeout,
-		"Timeout for agent runtime execution inside the sandbox.")
-	flag.StringVar(&agentSandboxCleanupPolicy, "agent-sandbox-cleanup-policy", agentSandboxCleanupPolicy,
-		"Default agent sandbox workspace cleanup policy (delete, retain).")
-	flag.BoolVar(&substrateEnabled, "substrate-enabled", substrateEnabled,
-		"Enable experimental Substrate execution workspace provider for agent Tasks.")
-	flag.BoolVar(&substrateConfig.DirectEgressEnabled, "substrate-direct-egress-enabled", substrateConfig.DirectEgressEnabled,
-		"Acknowledge that Substrate ateapi uses --egress-gateway-address= so worker NetworkPolicies enforce ACP egress; required for native ACP admission, not cleanup.")
+		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
+		"Enable in-tree Substrate MCP Tool actors and actor pools.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
 		"Substrate native control API endpoint.")
 	flag.StringVar(&substrateConfig.APICAFile, "substrate-api-ca-file", substrateConfig.APICAFile,
@@ -650,10 +602,10 @@ func main() {
 	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
 		"DNS suffix used to route HTTP requests to active Substrate actors.")
 	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
-		"Default Substrate ActorTemplate name used when a Task omits execution.workspace.templateRef.name.")
+		"Default Substrate ActorTemplate for direct administrator integrations. Task workspaces select a class.")
 	flag.StringVar(&substrateConfig.DefaultTemplateNS, "substrate-default-template-namespace",
 		substrateConfig.DefaultTemplateNS,
-		"Default Substrate ActorTemplate namespace used when a Task omits execution.workspace.templateRef.namespace.")
+		"Default Substrate ActorTemplate namespace for direct administrator integrations.")
 	flag.StringVar(&substrateConfig.BootstrapSecretName, "substrate-bootstrap-token-secret-name",
 		substrateConfig.BootstrapSecretName,
 		"Kubernetes Secret name containing the Substrate workspace daemon bootstrap token in each Task namespace.")
@@ -873,7 +825,7 @@ func main() {
 		gatewayEnabled = false
 		workspaceProviderAPIEnabled = false
 		workspaceClassUseAdmissionEnabled = false
-		fakeWorkspaceProviderEnabled = false
+
 	}
 	if !enableLeaderElection {
 		fmt.Fprintln(os.Stderr, "--leader-elect=true is required for an isolated controller installation")
@@ -964,32 +916,14 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 
-	executionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProvider(executionWorkspaceDefaultProviderFlag)
-	if !controller.WorkspaceProviderSupported(executionWorkspaceDefaultProvider) {
-		setupLog.Error(fmt.Errorf("unsupported execution workspace default provider %q", executionWorkspaceDefaultProvider),
-			"invalid execution workspace configuration")
-		os.Exit(1)
-	}
-	agentSandboxConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(agentSandboxCleanupPolicy)
-	agentSandboxConfig = agentSandboxConfig.WithDefaults()
-	if agentSandboxEnabled {
-		if agentSandboxConfigErr != nil {
-			setupLog.Error(agentSandboxConfigErr, "invalid agent sandbox configuration from environment")
-			os.Exit(1)
-		}
-		if err := agentSandboxConfig.Validate(); err != nil {
-			setupLog.Error(err, "invalid agent sandbox configuration")
-			os.Exit(1)
-		}
-	}
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
 	substrateConfig = substrateConfig.WithDefaults()
-	if substrateEnabled {
+	if substrateMCPToolsEnabled {
 		if substrateConfigErr != nil {
 			setupLog.Error(substrateConfigErr, "invalid substrate configuration from environment")
 			os.Exit(1)
 		}
-		if err := validateEnabledSubstrateConfig(substrateConfig, workspaceProviderAPIEnabled); err != nil {
+		if err := substrateConfig.ValidateMCPTools(); err != nil {
 			setupLog.Error(err, "invalid substrate configuration")
 			os.Exit(1)
 		}
@@ -1177,6 +1111,12 @@ func main() {
 		acpOpencodeRuntimeImage = images.Opencode
 	}
 	restConfig := ctrl.GetConfigOrDie()
+	acpToolboxPolicy, err := resolveACPToolboxPolicy(restConfig, acpToolboxesEnabled, acpToolboxAllowedRegistries,
+		acpToolboxImagePullSecrets, acpToolboxNodeSelector, acpToolboxMountMethod)
+	if err != nil {
+		setupLog.Error(err, "invalid ACP toolbox configuration")
+		os.Exit(1)
+	}
 	mgrOptions := ctrl.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsServerOptions,
@@ -1234,14 +1174,12 @@ func main() {
 		os.Exit(1)
 	}
 	// Actor-pool cleanup remains registered even when ACP execution is disabled.
-	if !substrateEnabled {
+	if !substrateMCPToolsEnabled {
 		checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := validateDisabledSubstrateRecoveryConfig(
 			checkCtx,
 			mgr.GetAPIReader(),
 			watchNamespace,
-			currentPodNamespace(),
-			acpRuntimeEnabled,
 			substrateConfig,
 			substrateConfigErr,
 		)
@@ -1534,9 +1472,7 @@ func main() {
 		// does not run the admission loop.
 		sessionCleanupDispatcher := &controller.ACPDispatcher{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: sqliteStore,
-			Snapshots:               agentExecutionSnapshotStore,
-			SubstrateRouterURL:      substrateConfig.RouterURL,
-			SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
+			Snapshots: agentExecutionSnapshotStore,
 		}
 		controlStoreOptions := []storekube.Option{
 			storekube.WithAPIReader(mgr.GetAPIReader()),
@@ -1700,19 +1636,15 @@ func main() {
 			setupLog.Info("auto-discovered controller URL", "url", jobBuilder.ControllerURL)
 		}
 	}
-	if agentSandboxConfig.NamespaceStrategy == controller.AgentSandboxNamespaceStrategyController &&
-		agentSandboxConfig.ControllerNamespace == "" {
-		agentSandboxConfig.ControllerNamespace = currentPodNamespace()
-	}
 
-	substrateCheckpointsEnabled := false
 	var runtimeAvailability api.ACPRuntimeAvailability
 	if acpRuntimeEnabled {
 		runtimePoolReconciler := &controller.RuntimePoolReconciler{
-			Client:           mgr.GetClient(),
-			APIReader:        mgr.GetAPIReader(),
-			Scheme:           mgr.GetScheme(),
-			RuntimeNamespace: acpRuntimeNamespace,
+			Client:               mgr.GetClient(),
+			APIReader:            mgr.GetAPIReader(),
+			Scheme:               mgr.GetScheme(),
+			RuntimeNamespace:     acpRuntimeNamespace,
+			WorkspaceCleanupOnly: !workspaceProviderAPIEnabled,
 		}
 		providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
 		if err != nil {
@@ -1731,15 +1663,16 @@ func main() {
 			BearerTokenFile: acpProviderProxyTokenFile,
 		}
 		runtimePoolReconciler.Epochs = controllerEpochManager
+		runtimePoolReconciler.ControlStore = durableControlStore
 		runtimePoolReconciler.EnablePDB = true
 		runtimePoolReconciler.EnableTelemetry = enableTracing
 		runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
-		runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
-		runtimePoolReconciler.SubstrateEnabled = substrateEnabled
+		runtimePoolReconciler.ToolboxPolicy = acpToolboxPolicy
+
 		// Keep the provider connection and trust configuration available after
 		// admission is disabled so existing Substrate-backed pools can still
 		// destroy actors and release their finalizers.
-		runtimePoolReconciler.SubstrateConfig = substrateConfig
+
 		runtimePoolReconciler.AllowedImages = controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
@@ -1750,25 +1683,6 @@ func main() {
 		if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
 			os.Exit(1)
-		}
-		// Keep reference and template cleanup running when new workspace
-		// admission is disabled, just like RuntimePool finalization. Minimal
-		// and controller-first upgrades may not have the optional checkpoint CRD.
-		checkpointAPIInstalled, err := substrateCheckpointAPIInstalled(mgr.GetRESTMapper())
-		if err != nil {
-			setupLog.Error(err, "unable to discover substrate checkpoint API")
-			os.Exit(1)
-		}
-		checkpointReconciler := &controller.SubstrateCheckpointReconciler{
-			RuntimePools: runtimePoolReconciler, CheckpointAPIInstalled: checkpointAPIInstalled,
-		}
-		if err := checkpointReconciler.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
-			os.Exit(1)
-		}
-		substrateCheckpointsEnabled = checkpointAPIInstalled
-		if !checkpointAPIInstalled {
-			setupLog.Info("checkpoint CRD is not installed; substrate catalog and template cleanup remain enabled")
 		}
 	}
 
@@ -1809,19 +1723,16 @@ func main() {
 			Opencode: acpOpencodeRuntimeImage,
 		},
 		ACPRuntimeNamespace:         acpRuntimeNamespace,
+		ACPToolboxPolicy:            acpToolboxPolicy,
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
-		EnforceNamespaceIsolation:         enforceNamespaceIsolation,
-		MaxTasksPerNamespace:              maxTasksPerNamespaceValue,
-		ExecutionWorkspaceDefaultProvider: executionWorkspaceDefaultProvider,
-		WorkspaceProviderAPIEnabled:       workspaceProviderAPIEnabled,
-		WorkspaceSettlementProtected:      taskProvenanceProtected,
-		ACPWorkspaceDispatchEnabled:       acpWorkspaceDispatchEnabled,
-		AgentSandboxEnabled:               agentSandboxEnabled,
-		AgentSandboxConfig:                agentSandboxConfig,
-		SubstrateEnabled:                  substrateEnabled,
-		SubstrateConfig:                   substrateConfig,
+		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
+		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
+		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
+		WorkspaceSettlementProtected: taskProvenanceProtected,
+		ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+
 		AIWorkerServiceAccountName:        aiWorkerServiceAccountName,
 		VendorWorkerServiceAccountName:    vendorWorkerServiceAccountName,
 		ContainerWorkerServiceAccountName: containerWorkerServiceAccountName,
@@ -1915,8 +1826,7 @@ func main() {
 			// Keep routing available after new Substrate admission is disabled:
 			// existing Tasks and RuntimeSessions still need authenticated recovery,
 			// cancellation, finalization, drain, and cleanup against their actors.
-			SubstrateRouterURL:      substrateConfig.RouterURL,
-			SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
+
 		}
 		if err := mgr.Add(acpDispatcher); err != nil {
 			setupLog.Error(err, "unable to add ACP dispatcher")
@@ -1930,7 +1840,7 @@ func main() {
 			&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: sqliteStore},
 			acpAdmissionGate, acpUpgradeDrainOptions,
 		)
-		upgradeDrain.SubstrateConfig = substrateConfig
+
 		upgradeDrain.ControllerNamespace = controlNamespace
 		if err := mgr.Add(upgradeDrain); err != nil {
 			setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
@@ -1991,10 +1901,11 @@ func main() {
 	}
 
 	if err := (&controller.ToolReconciler{
-		Client:                      mgr.GetClient(),
-		Scheme:                      mgr.GetScheme(),
-		SubstrateEnabled:            substrateEnabled,
-		SubstrateConfig:             substrateConfig,
+		SubstrateMCPToolsEnabled: substrateMCPToolsEnabled,
+		SubstrateConfig:          substrateConfig,
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+
 		EnforceNamespaceIsolation:   enforceNamespaceIsolation,
 		WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
 		OutboundAccessTrust:         outboundAccessTrust,
@@ -2008,22 +1919,15 @@ func main() {
 	}
 
 	if err := (&controller.SubstrateActorPoolReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		SubstrateEnabled: substrateEnabled,
-		SubstrateConfig:  substrateConfig,
+		SubstrateMCPToolsEnabled: substrateMCPToolsEnabled,
+		SubstrateConfig:          substrateConfig,
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SubstrateActorPool")
 		os.Exit(1)
 	}
 
-	if fakeWorkspaceProviderEnabled && !workspaceProviderAPIEnabled {
-		setupLog.Error(
-			fmt.Errorf("fake workspace provider requires workspace provider API"),
-			"invalid workspace provider feature gates",
-		)
-		os.Exit(1)
-	}
 	registerWorkspaceCoreControllers := acpRuntimeEnabled && workspaceProviderAPIEnabled
 	if acpRuntimeEnabled && !workspaceProviderAPIEnabled {
 		workspaceAPIsInstalled, err := workspaceCleanupAPIsInstalled(mgr.GetRESTMapper())
@@ -2077,28 +1981,23 @@ func main() {
 		}
 	}
 	if registerWorkspaceCoreControllers && acpRuntimeEnabled {
-		// The in-tree ACP RuntimePool workspace adapter serves class-backed
-		// execution workspaces. It registers even when dispatch or provider
-		// flags are off so existing workspaces keep converging toward cleanup;
-		// provider advertisement itself fails closed on the flags.
-		if err := (&controller.ACPWorkspaceProviderAdapterReconciler{
-			Client:                       mgr.GetClient(),
-			AgentSandboxEnabled:          agentSandboxEnabled,
-			SubstrateEnabled:             substrateEnabled,
-			SubstrateDirectEgressEnabled: substrateConfig.DirectEgressEnabled,
-			SubstrateCheckpointsEnabled:  substrateCheckpointsEnabled,
-			ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
-			WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceProviderAdapter")
+		checkpointAPIInstalled, err := workspaceCheckpointAPIInstalled(mgr.GetRESTMapper())
+		if err != nil {
+			setupLog.Error(err, "unable to discover workspace checkpoint API")
 			os.Exit(1)
 		}
-		if err := (&controller.ACPExecutionWorkspaceAdapterReconciler{
-			Client:           mgr.GetClient(),
-			APIReader:        mgr.GetAPIReader(),
-			RuntimeNamespace: acpRuntimeNamespace,
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "ACPExecutionWorkspaceAdapter")
+		if checkpointAPIInstalled {
+			if err := (&controller.WorkspaceCheckpointRoutingReconciler{
+				Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), CleanupOnly: !workspaceProviderAPIEnabled,
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "WorkspaceCheckpointRouting")
+				os.Exit(1)
+			}
+		} else {
+			setupLog.Info("workspace checkpoint CRD is not installed; skipping checkpoint routing controller")
+		}
+		if err := (&controller.WorkspaceRuntimePoolReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "WorkspaceRuntimePool")
 			os.Exit(1)
 		}
 		if err := (&controller.ACPWorkspaceRetentionReconciler{
@@ -2111,35 +2010,12 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if workspaceProviderAPIEnabled {
-		if fakeWorkspaceProviderEnabled {
-			if err := (&controller.FakeExecutionWorkspaceProviderReconciler{
-				Client: mgr.GetClient(),
-			}).SetupWithManager(mgr); err != nil {
-				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspaceProvider")
-				os.Exit(1)
-			}
-			if err := (&controller.FakeExecutionWorkspacePoolReconciler{
-				Client: mgr.GetClient(),
-			}).SetupWithManager(mgr); err != nil {
-				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspacePool")
-				os.Exit(1)
-			}
-			if err := (&controller.FakeExecutionWorkspaceReconciler{
-				Client:     mgr.GetClient(),
-				APIReader:  mgr.GetAPIReader(),
-				RESTMapper: mgr.GetRESTMapper(),
-			}).SetupWithManager(mgr); err != nil {
-				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspace")
-				os.Exit(1)
-			}
-		}
-	}
 
 	if err := (&controller.AgentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Mode:   mode,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Mode:          mode,
+		ToolboxPolicy: acpToolboxPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -2388,18 +2264,15 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
+	if err := controller.ValidateExternalWorkspaceUpgrade(processCtx, mgr.GetAPIReader()); err != nil {
+		setupLog.Error(err, "workspace upgrade preflight rejected startup")
+		os.Exit(1)
+	}
 	if err := mgr.Start(processCtx); err != nil {
 		stopProcess()
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
-}
-
-func validateEnabledSubstrateConfig(cfg controller.SubstrateConfig, legacyWorkspaceProviderAPIEnabled bool) error {
-	if legacyWorkspaceProviderAPIEnabled {
-		return cfg.Validate()
-	}
-	return cfg.ValidateACPRuntimePool()
 }
 
 func newBrokeredDelegateTaskSubjectTokenResolver(
@@ -2521,6 +2394,71 @@ func envDurationDefault(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+// resolveACPToolboxPolicy builds the controller-wide toolbox policy. With the
+// imageVolume mount method it reads the API server version through discovery
+// (readable by every authenticated client) and, below 1.36, marks toolbox
+// mounting unavailable instead of silently falling back to copying.
+func resolveACPToolboxPolicy(
+	restConfig *rest.Config,
+	enabled bool,
+	allowedRegistries, imagePullSecrets, nodeSelector, mountMethod string,
+) (controller.ACPToolboxPolicy, error) {
+	method, err := controller.ParseACPToolboxMountMethod(mountMethod)
+	if err != nil {
+		return controller.ACPToolboxPolicy{}, err
+	}
+	policy := controller.ACPToolboxPolicy{
+		Enabled:           enabled,
+		AllowedRegistries: splitCommaList(allowedRegistries),
+		ImagePullSecrets:  splitCommaList(imagePullSecrets),
+		MountMethod:       method,
+	}
+	if strings.TrimSpace(nodeSelector) != "" {
+		selector, err := parseExactLabels(nodeSelector)
+		if err != nil {
+			return controller.ACPToolboxPolicy{}, fmt.Errorf("--acp-toolbox-node-selector: %w", err)
+		}
+		if err := controller.ValidateACPToolboxNodeSelector(selector); err != nil {
+			return controller.ACPToolboxPolicy{}, fmt.Errorf("--acp-toolbox-node-selector: %w", err)
+		}
+		policy.NodeSelector = selector
+	}
+	if !enabled || method != controller.ACPToolboxMountImageVolume {
+		return policy, nil
+	}
+	// Only imageVolume toolboxes depend on this capability check, so a failed
+	// discovery read must not take the whole controller down: fail closed by
+	// marking toolbox mounting unavailable and keep every other workload
+	// running. Toolbox Agents then get the stable ToolboxUnavailable result.
+	unavailable := func(err error) controller.ACPToolboxPolicy {
+		policy.UnavailableReason = fmt.Sprintf(
+			"could not verify image-volume support from the API server version (%v); check the controller's API server connectivity and discovery access, then restart it, or use --acp-toolbox-mount-method=copy", err,
+		)
+		setupLog.Error(err, "toolbox image volumes are unavailable; Agents with toolboxes are rejected until the controller restarts")
+		return policy
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		return unavailable(fmt.Errorf("create discovery client: %w", err)), nil
+	}
+	serverVersion, err := discoveryClient.ServerVersion()
+	if err != nil {
+		return unavailable(fmt.Errorf("read API server version: %w", err)), nil
+	}
+	parsed, err := version.ParseGeneric(serverVersion.GitVersion)
+	if err != nil {
+		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err)), nil
+	}
+	if parsed.LessThan(version.MustParseGeneric(controller.ACPToolboxImageVolumeMinimumServerVersion)) {
+		policy.UnavailableReason = fmt.Sprintf(
+			"image volumes need Kubernetes %s or newer; this API server is %s. Use --acp-toolbox-mount-method=copy or upgrade the cluster",
+			controller.ACPToolboxImageVolumeMinimumServerVersion, serverVersion.GitVersion,
+		)
+		setupLog.Error(errors.New(policy.UnavailableReason), "toolbox image volumes are unavailable; Agents with toolboxes are rejected")
+	}
+	return policy, nil
 }
 
 func parseExactLabels(raw string) (map[string]string, error) {

@@ -200,7 +200,7 @@ func TestRemoteMCPBackendTransitionClearsAccepted(t *testing.T) {
 				if err := r.Update(t.Context(), tool); err != nil {
 					t.Fatal(err)
 				}
-				r.WorkspaceProviderAPIEnabled, r.SubstrateEnabled = true, true
+				r.WorkspaceProviderAPIEnabled, r.SubstrateMCPToolsEnabled = true, true
 				r.SubstrateConfig = SubstrateConfig{RouterURL: server.URL, ActorDNSSuffix: "actors.example.com"}
 				r.SubstrateTemplateValidator = func(context.Context, *ExecutionWorkspaceRequest) error { return nil }
 				r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {

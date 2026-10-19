@@ -84,7 +84,7 @@ function LoginPage() {
           <CardTitle className="text-2xl">Orka</CardTitle>
           <CardDescription>
             {import.meta.env.MODE === 'demo'
-              ? 'This demo runs on sample data in your browser and needs no token.'
+              ? "A demo of Orka's optional web dashboard on mock data in your browser. It needs no token, and everything you see or do in it can be done with the orka CLI or kubectl."
               : <>Enter your Kubernetes service account token or use <code className="text-xs">orka dashboard</code> from the CLI.</>}
           </CardDescription>
         </CardHeader>

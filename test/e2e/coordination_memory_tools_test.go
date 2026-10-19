@@ -315,19 +315,18 @@ After the tools have been called, reply with exactly %[3]s and nothing else.`, p
 		By("reviewing memory proposals without applying them to durable memory")
 		acceptedProposal := reviewMemoryProposalViaAPI(apiBaseURL, token, proposals[0].ID, store.MemoryProposalReview{
 			Status:     "accepted",
-			Reviewer:   "e2e-coordination",
 			ReviewNote: "Accepted during coordination memory E2E coverage.",
 		})
 		rejectedProposal := reviewMemoryProposalViaAPI(apiBaseURL, token, proposals[1].ID, store.MemoryProposalReview{
 			Status:     "rejected",
-			Reviewer:   "e2e-coordination",
 			ReviewNote: "Rejected during coordination memory E2E coverage.",
 		})
+		reviewer := "system:serviceaccount:" + namespace + ":" + serviceAccountName
 		Expect(acceptedProposal.Status).To(Equal("accepted"))
-		Expect(acceptedProposal.Reviewer).To(Equal("e2e-coordination"))
+		Expect(acceptedProposal.Reviewer).To(Equal(reviewer))
 		Expect(acceptedProposal.ReviewedAt).NotTo(BeNil())
 		Expect(rejectedProposal.Status).To(Equal("rejected"))
-		Expect(rejectedProposal.Reviewer).To(Equal("e2e-coordination"))
+		Expect(rejectedProposal.Reviewer).To(Equal(reviewer))
 		Expect(rejectedProposal.ReviewedAt).NotTo(BeNil())
 
 		By("verifying reviewed proposals still were not applied as durable memory")

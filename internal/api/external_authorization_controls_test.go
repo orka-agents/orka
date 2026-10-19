@@ -127,7 +127,7 @@ func TestExternalAPIAuthorizedMemoryLifecycle(t *testing.T) {
 
 	f.allowRoute(t, "POST /api/v1/memory-proposals/:id/review")
 	status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/protected/review", `{"status":"accepted"}`)
-	require.Equal(t, http.StatusNoContent, status, body)
+	require.Equal(t, http.StatusOK, status, body)
 	proposal, err = f.store.GetMemoryProposal(t.Context(), "default", "protected")
 	require.NoError(t, err)
 	require.Equal(t, "accepted", proposal.Status)

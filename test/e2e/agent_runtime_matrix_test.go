@@ -219,6 +219,46 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 		verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, codexTaskReadName)
 	})
 
+	It("should run Codex through an external workspace class against a pinned read workspace", func() {
+		if live {
+			Skip("the external workspace smoke uses the deterministic aimock provider proxy")
+		}
+		names := deployExternalFakeWorkspaceProvider()
+		taskName, agentName := names.Class+"-read", names.Class+"-agent"
+		var identity externalCodexWorkspaceIdentity
+		DeferCleanup(func() {
+			cleanupLiveRuntimeTask(apiBaseURL, token, taskName, agentName)
+			if identity.poolName != "" {
+				waitForExternalCodexWorkspaceCleanup(identity)
+			}
+		})
+
+		By("using the real Codex runtime with a separately provided execution workspace")
+		Expect(applyManifestJSON(runtimeAgentManifest(agentName, "codex", gptModel, 5, nil))).To(Succeed())
+		Expect(applyManifestJSON(externalCodexReadTaskManifest(taskName, agentName, names.Class))).To(Succeed())
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind: "codex", Model: gptModel, RuntimeImage: acpCodexRuntimeRef,
+			WorkspaceIntent: "read", MaxTurns: acpInt32(4),
+			Workspace: &acpWorkspaceExpectation{Intent: "read", GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
+		}, 2*time.Minute)
+		identity = waitForExternalCodexWorkspace(taskName, names.Class, names.Provider)
+
+		By("requiring the real README tool result before aimock can return success")
+		Expect(waitForTaskCompletion(taskName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		summary := strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName))
+		Expect(summary).To(HaveSuffix(liveRuntimeRepoSentinel))
+		Eventually(func(g Gomega) {
+			served, err := providerProxyMockLLM.servedFor(externalCodexReadMarker)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(mockLLMServedExternalCodexRead(served)).To(BeTrue(),
+				"the provider-proxy aimock must see the read tool result")
+		}, 30*time.Second, time.Second).Should(Succeed())
+		verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, taskName)
+
+		By("observing exact runtime, workspace, journal, and credential cleanup after Delete detach")
+		waitForExternalCodexWorkspaceCleanup(identity)
+	})
+
 	It("should run OpenCode through Orka harness v2 and enforce read intent", func() {
 		if opencodeModel == "" {
 			Skip("Skipping OpenCode runtime live proxy check: " + opencodeModelSkipReason)

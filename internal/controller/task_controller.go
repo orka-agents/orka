@@ -44,8 +44,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
@@ -140,20 +140,22 @@ type TaskReconciler struct {
 	HarnessV1Enabled             bool
 	// Mode is the controller's static execution mode; it classifies built-in
 	// Agents that omitted contractVersion.
-	Mode                              executionmode.Mode
-	HarnessV1Endpoint                 string
-	HarnessV1AuthSecretNamespace      string
-	HarnessV1AuthSecretName           string
-	HarnessV1AuthSecretKey            string
-	HarnessV1Attempts                 store.HarnessV1AttemptStore
-	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
-	ACPRuntimeEnabled                 bool
-	ACPRuntimeImages                  ACPRuntimeImages
-	ACPRuntimeNamespace               string
-	EnforceNamespaceIsolation         bool
-	MaxTasksPerNamespace              int32
-	ExecutionWorkspaceDefaultProvider corev1alpha1.WorkspaceProvider
-	WorkspaceProviderAPIEnabled       bool
+	Mode                            executionmode.Mode
+	HarnessV1Endpoint               string
+	HarnessV1AuthSecretNamespace    string
+	HarnessV1AuthSecretName         string
+	HarnessV1AuthSecretKey          string
+	HarnessV1Attempts               store.HarnessV1AttemptStore
+	HarnessV1SettlementAcknowledger HarnessV1SettlementAcknowledger
+	ACPRuntimeEnabled               bool
+	ACPRuntimeImages                ACPRuntimeImages
+	// ACPToolboxPolicy repeats the Agent toolbox admission rules at planning
+	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
+	ACPToolboxPolicy            ACPToolboxPolicy
+	ACPRuntimeNamespace         string
+	EnforceNamespaceIsolation   bool
+	MaxTasksPerNamespace        int32
+	WorkspaceProviderAPIEnabled bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
 	// guards the reserved acp.workspace.orka.ai/ metadata settlement reads
 	// from. When false (a cleanup-only installation without the webhook),
@@ -165,10 +167,6 @@ type TaskReconciler struct {
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.
 	ACPWorkspaceDispatchEnabled       bool
-	AgentSandboxEnabled               bool
-	AgentSandboxConfig                AgentSandboxConfig
-	SubstrateEnabled                  bool
-	SubstrateConfig                   SubstrateConfig
 	AIWorkerServiceAccountName        string
 	VendorWorkerServiceAccountName    string
 	ContainerWorkerServiceAccountName string
@@ -212,14 +210,9 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
-// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // The Events-v1 retention recorder needs write verbs: recording emits create
 // and patch requests that the read-only grant rejects at the API server.
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
 
 // updateStatusWithRetry updates the task status with retry on conflict.
 // It re-fetches the task on conflict, applies the mutate function, and retries.
@@ -787,6 +780,20 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleScheduledTask(ctx, task)
 	}
 
+	// A pause requested between autonomous iterations stops the next iteration
+	// before dispatch; handleAutonomousIteration covers a pause that arrives
+	// while a Job runs. Only autonomous iteration advances Iteration.
+	if task.Status.Iteration > 0 && task.Spec.Suspend != nil && *task.Spec.Suspend {
+		message := fmt.Sprintf("autonomous task suspended at iteration %d", task.Status.Iteration)
+		if task.Status.Message != message {
+			task.Status.Message = message
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	// A persisted execution binding is the sole routing and recovery authority.
 	// Do not resolve mutable Agent/configuration state, or acquire the legacy
 	// SQLite Session lock, after a Task has been bound to either harness plane.
@@ -883,6 +890,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		// Admission allows an omitted built-in contract. Use the same effective
+		// Agent for routing, SOUL validation and binding before its reconciler
+		// has had a chance to persist the namespace-mode default.
+		agent = withEffectiveBuiltInContract(agent, r.Mode)
 		plan := r.planAgentExecution(ctx, task, agent)
 		if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
 			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
@@ -1493,7 +1504,6 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 	return status != "" && status != approvals.StatusApproved
 }
 
-// createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
 // missingToolPolicyGrace bounds how long a native dispatch waits for an
 // OutboundAccessPolicy that one of the Task's Tools references but that does
 // not exist. Tools are classified strictly (a missing policy cannot be judged
@@ -1517,6 +1527,9 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 	return result, true, failErr
 }
 
+// createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
+//
+//nolint:gocyclo // Job creation revalidates provenance, credentials and runtime contract immediately before creation.
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -1533,6 +1546,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	if taskJobIdentityRejected(latest) {
 		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
 			return ctrl.Result{}, err
+		}
+		if latest.Spec.Type == corev1alpha1.TaskTypeAI {
+			job := &batchv1.Job{}
+			err := reader.Get(ctx, client.ObjectKey{Namespace: latest.Namespace, Name: latest.Status.JobName}, job)
+			if err == nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
 		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
 	}
@@ -1561,9 +1584,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	jobTask := task
-	if validationTask {
-		// Render from the same fresh object whose immutable binding was just
-		// verified. This closes the gap between the reconcile read and Job build.
+	if validationTask || latest.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Validation tasks use the verified immutable binding. AI tasks use
+		// fresh status as well as spec so soul preparation cannot miss an
+		// existing binding or execution attempt from a stale cache snapshot.
 		jobTask = latest
 	}
 
@@ -1611,18 +1635,55 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			if latest.UID != task.UID || latest.Generation != task.Generation || task.Spec.AgentRef == nil || agent == nil {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
-			agentKey := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
-			if agentKey.Namespace == "" {
-				agentKey.Namespace = task.Namespace
-			}
-			latestAgent := &corev1alpha1.Agent{}
-			if err := reader.Get(ctx, agentKey, latestAgent); err != nil {
-				return ctrl.Result{}, fmt.Errorf("recheck gateway Job Agent: %w", err)
-			}
-			if latestAgent.UID != agent.UID || latestAgent.Generation != agent.Generation || !latestAgent.DeletionTimestamp.IsZero() {
-				return ctrl.Result{RequeueAfter: time.Second}, nil
+			if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+				return ctrl.Result{RequeueAfter: time.Second}, err
 			}
 		}
+	}
+
+	if (task.Spec.Type == corev1alpha1.TaskTypeAI || latest.Spec.Type == corev1alpha1.TaskTypeAI) &&
+		!existingGatewayJob && (task.UID != latest.UID || task.Generation != latest.Generation) {
+		// Agent/provider inputs belong to the caller's Task revision, even
+		// when its resolved Agent had no soul. Reconcile the complete tuple.
+		return ctrl.Result{}, aiSoulTaskChanged(task)
+	}
+	if !gatewayReplyEligible && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		task.Spec.AgentRef != nil && agent != nil {
+		// The first binding pins the Agent revision. A cached Agent can lag an
+		// update the API server accepted before this Task, so recheck it and
+		// let compatibility, Provider selection, and binding use one revision.
+		if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+	}
+
+	var aiSoul *resolvedAISoul
+	if existingGatewayJob && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		agent != nil && agent.Spec.Soul != nil {
+		// Bindings are persisted before Job creation, so an unbound existing Job
+		// ran without a soul even when its start-status write was lost. Retire it
+		// without binding: a new digest would misstate what already executed.
+		err = invalidAISoulConfiguration("AI Task cannot acquire a soul after execution has started; create a new Task")
+	} else {
+		aiSoul, err = r.prepareAISoul(ctx, jobTask, agent)
+	}
+	if err != nil {
+		if isPermanentAISoulConfigurationError(err) {
+			message := fmt.Sprintf("AI soul configuration: %v", err)
+			retired, retirementErr := r.retireAISoulTaskJob(ctx, jobTask, message)
+			if retirementErr != nil {
+				return ctrl.Result{}, retirementErr
+			}
+			if retired {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, message)
+		}
+		return ctrl.Result{}, err
+	}
+	if jobTask.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Keep the launch attempt count consistent with the fresh Job inputs.
+		task.Status = jobTask.Status
 	}
 
 	// Freeze the requester's Connections before anything is created, so a
@@ -1644,6 +1705,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		AISoul:                      aiSoul,
 		RepositoryMonitorValidation: validationTask,
 		ConnectionBindings:          connectionBindings,
 		ConnectionBindingsFrozen:    true,
@@ -2365,7 +2427,7 @@ func (r *TaskReconciler) handleFinalizing(
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
 		revocationEpoch := workspaceStatus.AttachedEpoch
-		acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+		acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 		if acpWorkspace {
 			revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 			// Attach and the Task epoch annotation are separate API writes.
@@ -2407,7 +2469,7 @@ func (r *TaskReconciler) handleFinalizing(
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
 			revocationEpoch := workspaceStatus.AttachedEpoch
-			acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+			acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 			if acpWorkspace {
 				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
@@ -2734,10 +2796,6 @@ func (r *TaskReconciler) completeExecutedTask(
 
 func taskExecutionWorkspaceNeedsFinalization(task *corev1alpha1.Task) bool {
 	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
-		return false
-	}
-	request := task.Spec.Execution.Workspace
-	if !request.Enabled && request.ClassRef == nil {
 		return false
 	}
 	status := task.Status.ExecutionWorkspace
@@ -3255,42 +3313,16 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	}
 
 	ws := task.Spec.Execution.Workspace
-	if ws.ClassRef != nil {
-		if strings.TrimSpace(ws.ClassRef.Name) == "" {
-			return fmt.Errorf("execution workspace classRef.name is required")
-		}
-		if !r.WorkspaceProviderAPIEnabled {
-			return fmt.Errorf("execution workspace classRef requires the workspace provider API")
-		}
-		if task.Spec.Type != corev1alpha1.TaskTypeAgent {
-			return fmt.Errorf("execution workspace classRef is only supported for type: agent tasks")
-		}
-		// Class resolution, policy validation, and provider gating run on the
-		// ACP execution plan path, which owns every class-shaped rejection.
-		return validateExecutionWorkspacePolicyShape(task, ws)
+	if ws.ClassRef == nil || strings.TrimSpace(ws.ClassRef.Name) == "" {
+		return fmt.Errorf("execution workspace classRef.name is required")
 	}
-	if !ws.Enabled {
-		return nil
-	}
-	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
-
-	if err := validateExecutionWorkspaceBasics(task, provider); err != nil {
-		return err
-	}
-	return validateExecutionWorkspacePolicyShape(task, ws)
-}
-
-func validateExecutionWorkspaceBasics(
-	task *corev1alpha1.Task,
-	provider corev1alpha1.WorkspaceProvider,
-) error {
-	if !supportedWorkspaceProvider(provider) {
-		return fmt.Errorf("unsupported execution workspace provider %q", provider)
+	if !r.WorkspaceProviderAPIEnabled {
+		return fmt.Errorf("execution workspace classRef requires the workspace provider API")
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
 	}
-	return nil
+	return validateExecutionWorkspacePolicyShape(task, ws)
 }
 
 func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
@@ -3298,9 +3330,6 @@ func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1al
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
 
-	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
-		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
-	}
 	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
 		return fmt.Errorf("execution workspace reusePolicy %q requires spec.sessionRef.name", ws.ReusePolicy)
 	}
@@ -3309,8 +3338,7 @@ func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1al
 }
 
 func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Context, task *corev1alpha1.Task, validationErr error) error {
-	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
-		(!task.Spec.Execution.Workspace.Enabled && task.Spec.Execution.Workspace.ClassRef == nil) {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return nil
 	}
 
@@ -3324,54 +3352,14 @@ func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Cont
 		Message:    message,
 		ObservedAt: &now,
 	}
-	// A class-shaped request has no author-selected provider or template; the
-	// backend is resolved through the class and stays out of a failed
-	// projection so a wrong default is never displayed.
-	provider := corev1alpha1.WorkspaceProvider("")
-	if ws.ClassRef == nil {
-		provider = resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
-		if supportedWorkspaceProvider(provider) {
-			failure.Provider = provider
-			failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
-		}
-	}
 	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
 		failure.ReusePolicy = reusePolicy
-	}
-	if cleanupPolicy, ok := r.executionWorkspaceStatusCleanupPolicy(ws, provider); ok {
-		failure.CleanupPolicy = cleanupPolicy
 	}
 	status := statusrules.ValidationFailedStatus(failure)
 
 	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.ExecutionWorkspace = status
 	})
-}
-
-func (r *TaskReconciler) executionWorkspaceStatusTemplateRef(task *corev1alpha1.Task, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.WorkspaceTemplateReference {
-	ws := task.Spec.Execution.Workspace
-	var name string
-	var namespace string
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		cfg := r.AgentSandboxConfig.WithDefaults()
-		name = executionWorkspaceTemplateName(ws, cfg)
-		namespace = executionWorkspaceTemplateNamespace(ws, task.Namespace, cfg)
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		cfg := r.SubstrateConfig.WithDefaults()
-		name = substrateTemplateName(ws, cfg)
-		namespace = substrateTemplateNamespace(ws, task.Namespace, cfg)
-	default:
-		return nil
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
-	return &corev1alpha1.WorkspaceTemplateReference{
-		Name:      name,
-		Namespace: strings.TrimSpace(namespace),
-	}
 }
 
 func executionWorkspaceStatusReusePolicy(ws *corev1alpha1.ExecutionWorkspaceSpec) (corev1alpha1.WorkspaceReusePolicy, bool) {
@@ -3384,29 +3372,6 @@ func executionWorkspaceStatusReusePolicy(ws *corev1alpha1.ExecutionWorkspaceSpec
 	default:
 		return "", false
 	}
-}
-
-func (r *TaskReconciler) executionWorkspaceStatusCleanupPolicy(ws *corev1alpha1.ExecutionWorkspaceSpec, provider corev1alpha1.WorkspaceProvider) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	if ws != nil && ws.CleanupPolicy != "" {
-		switch ws.CleanupPolicy {
-		case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-			return ws.CleanupPolicy, true
-		default:
-			return "", false
-		}
-	}
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		return executionWorkspaceStatusValidCleanupPolicy(r.AgentSandboxConfig.WithDefaults().CleanupPolicy)
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		return executionWorkspaceStatusValidCleanupPolicy(r.SubstrateConfig.WithDefaults().CleanupPolicy)
-	default:
-		return corev1alpha1.WorkspaceCleanupPolicyDelete, true
-	}
-}
-
-func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	return statusrules.StatusCleanupPolicy(cleanupPolicy, "")
 }
 
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -3446,6 +3411,10 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 	agent *corev1alpha1.Agent,
 	plan agentExecutionPlan,
 ) error {
+	// Soul compatibility applies to every new Agent Task path, not only runtimeRef.
+	if err := validateSoulRuntime(agent); err != nil {
+		return err
+	}
 	// planAgentExecution resolves runtimeRef before selecting the external path,
 	// so these v2-only checks cannot change harness v1 compatibility.
 	if plan.path != agentExecutionPathExternal {
@@ -3527,8 +3496,7 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	default:
 		return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 	}
-	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil &&
-		(agent.Spec.Execution.Workspace.Enabled || agent.Spec.Execution.Workspace.ClassRef != nil) {
+	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil {
 		return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
 	}
 	if agent.Spec.ProviderRef != nil {
@@ -5007,4 +4975,18 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// taskAgentRevisionChanged reports whether the Task's Agent differs from the
+// resolved revision on the uncached reader.
+func taskAgentRevisionChanged(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (bool, error) {
+	key := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
+	if key.Namespace == "" {
+		key.Namespace = task.Namespace
+	}
+	latest := &corev1alpha1.Agent{}
+	if err := reader.Get(ctx, key, latest); err != nil {
+		return false, fmt.Errorf("recheck Task Agent revision: %w", err)
+	}
+	return latest.UID != agent.UID || latest.Generation != agent.Generation || !latest.DeletionTimestamp.IsZero(), nil
 }

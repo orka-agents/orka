@@ -77,16 +77,6 @@ rules:
   - gatewayclasses/finalizers
   verbs:
   - update
-# Native Substrate template selectors resolve WorkerPools across provider
-# namespaces. Workload mutation requires a RoleBinding in each worker namespace.
-- apiGroups:
-  - ate.dev
-  resources:
-  - workerpools
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - workspace.orka.ai
   resources:
@@ -97,6 +87,12 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - admit
 - apiGroups:
   - workspace.orka.ai
   resources:
@@ -119,27 +115,16 @@ rules:
   - executionworkspaceclasses
   - executionworkspacepools
   - executionworkspaces
+  - executionworkspacecheckpoints
   verbs:
   - list
-# The ACP workspace-provider adapter resolves cluster-scoped
-# RuntimeProviderConfig parameters for reserved-controllerName providers; the
-# namespaced manager RoleBinding cannot grant cluster-scope reads.
+# Generic retirement independently lists realized network-policy permissions.
 - apiGroups:
-  - acp.workspace.orka.ai
+  - networking.k8s.io
   resources:
-  - runtimeproviderconfigs
+  - networkpolicies
   verbs:
-  - get
   - list
-  - watch
-- apiGroups:
-  - storage.k8s.io
-  resources:
-  - storageclasses
-  verbs:
-  - get
-  - list
-  - watch
 # The bound durable PV's provenance and reclaim policy are verified before a
 # PVC-backed pool is admitted; PVs are cluster-scoped and read-only here.
 - apiGroups:

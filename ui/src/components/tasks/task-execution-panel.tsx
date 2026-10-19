@@ -96,27 +96,6 @@ function ElapsedTime({ startTime, completionTime }: { startTime?: string; comple
   return <span data-testid="elapsed-time">{elapsed}</span>
 }
 
-function ChildTaskSummary({ childTasks }: { childTasks: NonNullable<Task['status']>['childTasks'] }) {
-  if (!childTasks?.length) return null
-  const running = childTasks.filter((child) => child.phase === 'Running').length
-  const succeeded = childTasks.filter((child) => child.phase === 'Succeeded').length
-  const failed = childTasks.filter((child) => child.phase === 'Failed').length
-  const pending = childTasks.filter((child) => child.phase === 'Pending').length
-
-  return (
-    <div data-testid="child-task-summary">
-      <span className="text-sm text-muted-foreground">Child Tasks: </span>
-      <span className="text-sm">
-        {childTasks.length} total
-        {pending > 0 && <span className="text-yellow-600 dark:text-yellow-400"> · {pending} pending</span>}
-        {running > 0 && <span className="text-blue-600 dark:text-blue-400"> · {running} running</span>}
-        {succeeded > 0 && <span className="text-green-600 dark:text-green-400"> · {succeeded} succeeded</span>}
-        {failed > 0 && <span className="text-red-600 dark:text-red-400"> · {failed} failed</span>}
-      </span>
-    </div>
-  )
-}
-
 function DurableExecution({ task }: { task: Task }) {
   const execution = task.status?.execution
   if (!execution) return null
@@ -280,7 +259,6 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
           </div>
         )}
 
-        <ChildTaskSummary childTasks={task.status?.childTasks} />
       </CardContent>
     </Card>
   )

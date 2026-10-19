@@ -1,0 +1,728 @@
+{
+  "baseline": "1cd16c88b43410e0ea46463f8a39b473d8e5250e",
+  "fixtures": [
+    {
+      "name": "fake-direct",
+      "class": {
+        "metadata": {
+          "name": "fake-direct",
+          "namespace": "workspaces",
+          "uid": "fake-direct-class-uid",
+          "generation": 1
+        },
+        "spec": {
+          "providerRef": {
+            "name": "fake-direct"
+          },
+          "parametersRef": {
+            "group": "fake.workspace.orka.ai",
+            "kind": "FakePoolParameters",
+            "name": "profile"
+          },
+          "mode": "Interactive",
+          "requiredFeatures": [
+            "tls",
+            "exec"
+          ],
+          "allowedReuseScopes": [
+            "Session",
+            "None"
+          ],
+          "lifecycle": {
+            "defaultOnDetach": "Delete",
+            "allowedOnDetach": [
+              "Delete"
+            ],
+            "detachTimeout": "2m0s",
+            "deletionPolicy": {
+              "providerResources": "Delete",
+              "persistentVolumes": "Delete",
+              "checkpoints": "Delete"
+            }
+          }
+        },
+        "status": {}
+      },
+      "provider": {
+        "metadata": {
+          "name": "fake-direct",
+          "uid": "fake-direct-provider-uid",
+          "generation": 1
+        },
+        "spec": {
+          "controllerName": "fake.workspace.orka.ai/v1",
+          "parametersRef": {
+            "group": "fake.workspace.orka.ai",
+            "kind": "FakeProviderConfig",
+            "name": "default"
+          },
+          "lifecycleState": "Active",
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        "status": {}
+      },
+      "providerConfig": {
+        "kind": "FakeProviderConfig",
+        "apiVersion": "fake.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "default",
+          "uid": "fake-direct-config-uid",
+          "generation": 1
+        },
+        "spec": {}
+      },
+      "parameters": {
+        "kind": "FakePoolParameters",
+        "apiVersion": "fake.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "profile",
+          "namespace": "workspaces",
+          "uid": "fake-direct-parameters-uid",
+          "generation": 7
+        },
+        "spec": {}
+      },
+      "resolved": [
+        {
+          "uid": "fake-direct-provider-uid",
+          "controllerName": "fake.workspace.orka.ai/v1",
+          "parametersRef": {
+            "group": "fake.workspace.orka.ai",
+            "kind": "FakeProviderConfig",
+            "name": "default"
+          },
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        {
+          "apiVersion": "fake.workspace.orka.ai/v1alpha1",
+          "kind": "FakePoolParameters",
+          "uid": "fake-direct-parameters-uid",
+          "generation": 7,
+          "spec": {}
+        }
+      ],
+      "hash": "sha256:62040e08cff396683b245021dd8b936e2c7a79dd5c83dd85f94e25026ce66a1b"
+    },
+    {
+      "name": "fake-pool",
+      "class": {
+        "metadata": {
+          "name": "fake-pool",
+          "namespace": "workspaces",
+          "uid": "fake-pool-class-uid",
+          "generation": 1
+        },
+        "spec": {
+          "poolRef": {
+            "name": "pool"
+          },
+          "mode": "Interactive",
+          "requiredFeatures": [
+            "tls",
+            "exec"
+          ],
+          "allowedReuseScopes": [
+            "Session",
+            "None"
+          ],
+          "lifecycle": {
+            "defaultOnDetach": "Delete",
+            "allowedOnDetach": [
+              "Delete"
+            ],
+            "detachTimeout": "2m0s",
+            "deletionPolicy": {
+              "providerResources": "Delete",
+              "persistentVolumes": "Delete",
+              "checkpoints": "Delete"
+            }
+          }
+        },
+        "status": {}
+      },
+      "provider": {
+        "metadata": {
+          "name": "fake-pool",
+          "uid": "fake-pool-provider-uid",
+          "generation": 1
+        },
+        "spec": {
+          "controllerName": "fake.workspace.orka.ai/v1",
+          "parametersRef": {
+            "group": "fake.workspace.orka.ai",
+            "kind": "FakeProviderConfig",
+            "name": "default"
+          },
+          "lifecycleState": "Active",
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        "status": {}
+      },
+      "providerConfig": {
+        "kind": "FakeProviderConfig",
+        "apiVersion": "fake.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "default",
+          "uid": "fake-pool-config-uid",
+          "generation": 1
+        },
+        "spec": {}
+      },
+      "pool": {
+        "metadata": {
+          "name": "pool",
+          "namespace": "workspaces",
+          "uid": "pool-uid",
+          "generation": 2
+        },
+        "spec": {
+          "providerRef": {
+            "name": "fake-pool"
+          },
+          "parametersRef": {
+            "group": "fake.workspace.orka.ai",
+            "kind": "FakePoolParameters",
+            "name": "profile"
+          },
+          "capacity": {
+            "minReady": 1,
+            "maxSize": 5
+          }
+        },
+        "status": {}
+      },
+      "parameters": {
+        "kind": "FakePoolParameters",
+        "apiVersion": "fake.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "profile",
+          "namespace": "workspaces",
+          "uid": "fake-pool-parameters-uid",
+          "generation": 7
+        },
+        "spec": {}
+      },
+      "resolved": [
+        {
+          "uid": "fake-pool-provider-uid",
+          "controllerName": "fake.workspace.orka.ai/v1",
+          "parametersRef": {
+            "group": "fake.workspace.orka.ai",
+            "kind": "FakeProviderConfig",
+            "name": "default"
+          },
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        {
+          "uid": "pool-uid",
+          "providerRef": {
+            "name": "fake-pool"
+          },
+          "parametersRef": {
+            "group": "fake.workspace.orka.ai",
+            "kind": "FakePoolParameters",
+            "name": "profile"
+          },
+          "parameterUID": "fake-pool-parameters-uid",
+          "parameterGeneration": 7,
+          "parameterSpec": {}
+        }
+      ],
+      "hash": "sha256:e0704b4169247b673460454af3e86760adb834990298344892bf224aae7e2bd9"
+    },
+    {
+      "name": "agent-sandbox-default",
+      "class": {
+        "metadata": {
+          "name": "agent-sandbox-default",
+          "namespace": "workspaces",
+          "uid": "agent-sandbox-default-class-uid",
+          "generation": 1
+        },
+        "spec": {
+          "providerRef": {
+            "name": "agent-sandbox-default"
+          },
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeWorkspaceProfile",
+            "name": "profile"
+          },
+          "mode": "Interactive",
+          "requiredFeatures": [
+            "tls",
+            "exec"
+          ],
+          "allowedReuseScopes": [
+            "Session",
+            "None"
+          ],
+          "lifecycle": {
+            "defaultOnDetach": "Delete",
+            "allowedOnDetach": [
+              "Delete"
+            ],
+            "detachTimeout": "2m0s",
+            "deletionPolicy": {
+              "providerResources": "Delete",
+              "persistentVolumes": "Delete",
+              "checkpoints": "Delete"
+            }
+          }
+        },
+        "status": {}
+      },
+      "provider": {
+        "metadata": {
+          "name": "agent-sandbox-default",
+          "uid": "agent-sandbox-default-provider-uid",
+          "generation": 1
+        },
+        "spec": {
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "lifecycleState": "Active",
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        "status": {}
+      },
+      "providerConfig": {
+        "kind": "RuntimeProviderConfig",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "default",
+          "uid": "agent-sandbox-default-config-uid",
+          "generation": 1
+        },
+        "spec": {
+          "backend": "agent-sandbox"
+        }
+      },
+      "parameters": {
+        "kind": "RuntimeWorkspaceProfile",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "profile",
+          "namespace": "workspaces",
+          "uid": "agent-sandbox-default-parameters-uid",
+          "generation": 7
+        },
+        "spec": {}
+      },
+      "resolved": [
+        {
+          "uid": "agent-sandbox-default-provider-uid",
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        {
+          "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+          "kind": "RuntimeWorkspaceProfile",
+          "uid": "agent-sandbox-default-parameters-uid",
+          "generation": 7,
+          "spec": {}
+        }
+      ],
+      "hash": "sha256:ac95f518fbb6309896d5841406ec34ec88e88c351ea910dc4011560c6a7c6558"
+    },
+    {
+      "name": "agent-sandbox-durable",
+      "class": {
+        "metadata": {
+          "name": "agent-sandbox-durable",
+          "namespace": "workspaces",
+          "uid": "agent-sandbox-durable-class-uid",
+          "generation": 1
+        },
+        "spec": {
+          "providerRef": {
+            "name": "agent-sandbox-durable"
+          },
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeWorkspaceProfile",
+            "name": "profile"
+          },
+          "mode": "Interactive",
+          "requiredFeatures": [
+            "tls",
+            "exec"
+          ],
+          "allowedReuseScopes": [
+            "Session",
+            "None"
+          ],
+          "lifecycle": {
+            "defaultOnDetach": "Suspend",
+            "allowedOnDetach": [
+              "Suspend",
+              "Delete"
+            ],
+            "detachTimeout": "2m0s",
+            "maxLifetime": "24h0m0s",
+            "deletionPolicy": {
+              "providerResources": "Delete",
+              "persistentVolumes": "Delete",
+              "checkpoints": "Delete"
+            }
+          }
+        },
+        "status": {}
+      },
+      "provider": {
+        "metadata": {
+          "name": "agent-sandbox-durable",
+          "uid": "agent-sandbox-durable-provider-uid",
+          "generation": 1
+        },
+        "spec": {
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "lifecycleState": "Active",
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        "status": {}
+      },
+      "providerConfig": {
+        "kind": "RuntimeProviderConfig",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "default",
+          "uid": "agent-sandbox-durable-config-uid",
+          "generation": 1
+        },
+        "spec": {
+          "backend": "agent-sandbox"
+        }
+      },
+      "parameters": {
+        "kind": "RuntimeWorkspaceProfile",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "profile",
+          "namespace": "workspaces",
+          "uid": "agent-sandbox-durable-parameters-uid",
+          "generation": 7
+        },
+        "spec": {
+          "agentSandbox": {
+            "suspend": {
+              "mode": "DataOnly",
+              "volume": {
+                "capacity": "1Gi"
+              }
+            }
+          }
+        }
+      },
+      "resolved": [
+        {
+          "uid": "agent-sandbox-durable-provider-uid",
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        {
+          "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+          "kind": "RuntimeWorkspaceProfile",
+          "uid": "agent-sandbox-durable-parameters-uid",
+          "generation": 7,
+          "spec": {
+            "agentSandbox": {
+              "suspend": {
+                "mode": "DataOnly",
+                "volume": {
+                  "capacity": "1Gi"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "hash": "sha256:8da4dc32b22c6b4fd83f86e366334dacc38a61de41597bfb3ace41a508ee4fe6"
+    },
+    {
+      "name": "substrate-default",
+      "class": {
+        "metadata": {
+          "name": "substrate-default",
+          "namespace": "workspaces",
+          "uid": "substrate-default-class-uid",
+          "generation": 1
+        },
+        "spec": {
+          "providerRef": {
+            "name": "substrate-default"
+          },
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeWorkspaceProfile",
+            "name": "profile"
+          },
+          "mode": "Interactive",
+          "requiredFeatures": [
+            "tls",
+            "exec"
+          ],
+          "allowedReuseScopes": [
+            "Session",
+            "None"
+          ],
+          "lifecycle": {
+            "defaultOnDetach": "Delete",
+            "allowedOnDetach": [
+              "Delete"
+            ],
+            "detachTimeout": "2m0s",
+            "deletionPolicy": {
+              "providerResources": "Delete",
+              "persistentVolumes": "Delete",
+              "checkpoints": "Delete"
+            }
+          }
+        },
+        "status": {}
+      },
+      "provider": {
+        "metadata": {
+          "name": "substrate-default",
+          "uid": "substrate-default-provider-uid",
+          "generation": 1
+        },
+        "spec": {
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "lifecycleState": "Active",
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        "status": {}
+      },
+      "providerConfig": {
+        "kind": "RuntimeProviderConfig",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "default",
+          "uid": "substrate-default-config-uid",
+          "generation": 1
+        },
+        "spec": {
+          "backend": "substrate"
+        }
+      },
+      "parameters": {
+        "kind": "RuntimeWorkspaceProfile",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "profile",
+          "namespace": "workspaces",
+          "uid": "substrate-default-parameters-uid",
+          "generation": 7
+        },
+        "spec": {
+          "substrate": {
+            "templateRef": {
+              "name": "runtime"
+            }
+          }
+        }
+      },
+      "resolved": [
+        {
+          "uid": "substrate-default-provider-uid",
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        {
+          "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+          "kind": "RuntimeWorkspaceProfile",
+          "uid": "substrate-default-parameters-uid",
+          "generation": 7,
+          "spec": {
+            "substrate": {
+              "templateRef": {
+                "name": "runtime"
+              }
+            }
+          }
+        }
+      ],
+      "hash": "sha256:df1303ed90a51e2f3d2ca9db2453376c9f7606d524457416c0bdfd9fdc545aea"
+    },
+    {
+      "name": "substrate-data-only",
+      "class": {
+        "metadata": {
+          "name": "substrate-data-only",
+          "namespace": "workspaces",
+          "uid": "substrate-data-only-class-uid",
+          "generation": 1
+        },
+        "spec": {
+          "providerRef": {
+            "name": "substrate-data-only"
+          },
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeWorkspaceProfile",
+            "name": "profile"
+          },
+          "mode": "Interactive",
+          "requiredFeatures": [
+            "tls",
+            "exec"
+          ],
+          "allowedReuseScopes": [
+            "Session",
+            "None"
+          ],
+          "lifecycle": {
+            "defaultOnDetach": "Suspend",
+            "allowedOnDetach": [
+              "Suspend",
+              "Delete"
+            ],
+            "detachTimeout": "2m0s",
+            "maxLifetime": "24h0m0s",
+            "deletionPolicy": {
+              "providerResources": "Delete",
+              "persistentVolumes": "Delete",
+              "checkpoints": "Delete"
+            }
+          }
+        },
+        "status": {}
+      },
+      "provider": {
+        "metadata": {
+          "name": "substrate-data-only",
+          "uid": "substrate-data-only-provider-uid",
+          "generation": 1
+        },
+        "spec": {
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "lifecycleState": "Active",
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        "status": {}
+      },
+      "providerConfig": {
+        "kind": "RuntimeProviderConfig",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "default",
+          "uid": "substrate-data-only-config-uid",
+          "generation": 1
+        },
+        "spec": {
+          "backend": "substrate"
+        }
+      },
+      "parameters": {
+        "kind": "RuntimeWorkspaceProfile",
+        "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+        "metadata": {
+          "name": "profile",
+          "namespace": "workspaces",
+          "uid": "substrate-data-only-parameters-uid",
+          "generation": 7
+        },
+        "spec": {
+          "substrate": {
+            "templateRef": {
+              "name": "runtime",
+              "namespace": "infrastructure"
+            },
+            "suspend": {
+              "mode": "DataOnly"
+            }
+          }
+        }
+      },
+      "resolved": [
+        {
+          "uid": "substrate-data-only-provider-uid",
+          "controllerName": "acp.workspace.orka.ai/runtime-pool",
+          "parametersRef": {
+            "group": "acp.workspace.orka.ai",
+            "kind": "RuntimeProviderConfig",
+            "name": "default"
+          },
+          "requiredContracts": [
+            "workspace.orka.ai/v1"
+          ]
+        },
+        {
+          "apiVersion": "acp.workspace.orka.ai/v1alpha1",
+          "kind": "RuntimeWorkspaceProfile",
+          "uid": "substrate-data-only-parameters-uid",
+          "generation": 7,
+          "spec": {
+            "substrate": {
+              "suspend": {
+                "mode": "DataOnly"
+              },
+              "templateRef": {
+                "name": "runtime",
+                "namespace": "infrastructure"
+              }
+            }
+          }
+        }
+      ],
+      "hash": "sha256:4dd8110d146f75fad6198adf50ece52f723a03aefe79bff27fb1c79d6da79a46"
+    }
+  ]
+}

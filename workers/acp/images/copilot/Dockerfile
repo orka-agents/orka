@@ -50,7 +50,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 # This pinned Node base supplies the glibc/libstdc++ runtime required by the
 # official Copilot binary. Node and its package managers are removed below.
-FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
+FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e
 LABEL org.opencontainers.image.title="Orka ACP GitHub Copilot runtime" \
       org.opencontainers.image.description="Orka harness v2 ACP supervisor with GitHub Copilot CLI 1.0.96" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \

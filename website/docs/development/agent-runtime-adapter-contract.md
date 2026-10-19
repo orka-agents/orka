@@ -172,13 +172,16 @@ Final tool errors use `isError: true` and an allowlisted `code` in the MCP
 | `approval_cancelled` | The review or Task was cancelled before execution. |
 | `approval_stale` | The original run, policy, tool definition, or ownership changed. |
 | `tool_execution_failed` | The approved tool returned a recorded execution error. |
+| `tool_failed_without_effect` | The approved tool sent nothing or the remote system refused the request; nothing changed. |
 | `tool_outcome_unknown` | Execution may have occurred, but a reliable result is unavailable. |
 
-Adapters preserve these codes with fixed safe messages. On
-`tool_outcome_unknown`, they must stop automatic tool/model continuation and
-must not repeat the action. An exact broker redelivery can return a committed
-receipt; it cannot reclaim an unreceipted started action, even after its
-execution lease expires.
+Adapters preserve these codes with fixed safe messages. The
+`tool_failed_without_effect` message is a bounded, redacted summary the
+controller writes, such as the HTTP status GitHub refused the request with,
+and adapters may forward it. On `tool_outcome_unknown`, they must stop
+automatic tool/model continuation and must not repeat the action. An exact
+broker redelivery can return a committed receipt; it cannot reclaim an
+unreceipted started action, even after its execution lease expires.
 
 Orka injects `AGENTKIT_MCP_TIMEOUT=900` for approval-enabled direct AgentKit
 sessions. Foundry reserves 900 seconds for MCP `tools/call` while discovery

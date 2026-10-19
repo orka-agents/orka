@@ -1,18 +1,36 @@
 ---
-description: "Review an exact AgentKit or Foundry tool call before Orka executes it."
+description: "Hold a consequential tool call for a person's decision, then run exactly the action they approved."
 ---
 
-# Human approval for v2 tools
+# Human approval
 
-Orka can let an agent look up inventory automatically and require a person to
-approve a proposed work order. The controller saves the exact action before
-showing it for review. The tool has not run at that point. Approval lets Orka
-execute that stored action and return its real result to the waiting agent.
+Some actions should not happen unattended: creating a work order, deploying, spending money,
+writing to someone's account. Orka can hold such a call until a person approves or declines
+it, then run exactly the stored action — never a regenerated one — and return the real result
+to the agent.
+
+Approvals appear in three places:
+
+| Where | What gets approved | Set up |
+| --- | --- | --- |
+| Native autonomous coordinators (`type: ai`) | Custom Tools listed in `coordination.approvalRequiredTools`, and requests the agent makes with `request_approval`. The Task parks until a decision arrives. | [Autonomous tasks](autonomous-tasks.md#human-approvals) |
+| External runtimes, such as AgentKit and Foundry agents | Orka-executed tools in the runtime's `approvalRequiredTools`. The tool call stays open while it waits. | This page |
+| Linked accounts | Every write tool that acts through a person's [connector](connectors.md) | Automatic |
+
+People decide in the Task's **Approvals** tab in the dashboard, with `orka task approve` and
+`orka task decline`, or through the API. The rest of this page covers the external-runtime
+path.
+
+## Approvals for external runtimes
+
+Orka can let an agent look up inventory automatically and require a person to approve a
+proposed work order. The controller saves the exact action before showing it for review.
+The tool has not run at that point. Approval lets Orka execute that stored action and return
+its real result to the waiting agent.
 
 This applies to tools executed by Orka for qualified AgentKit and Foundry
 `orka.harness.v2` runtimes. Runtime-native shell and file permissions are a
-separate capability. Existing `type: ai` autonomous approvals keep their
-worker parking behavior; v2 approvals keep the original tool call open.
+separate capability.
 
 :::tip[Video demo]
 Watch [Human approval before an agent takes action](https://www.youtube.com/watch?v=KgzcvW1WznE).
@@ -87,8 +105,12 @@ The panel separates the review decision from execution. An approved action
 can still fail, become stale before starting, or have an unknown outcome.
 History records the reviewer and decision, then `not_started`, `running`,
 `succeeded`, `failed`, or `unknown` as execution evidence becomes available.
-An unknown outcome means the action may have run. Check the target system
-before choosing whether to make a new request.
+When the tool sent nothing or the remote system refused the request, the
+outcome is `failed` and its reason says why, for example the HTTP status and
+message GitHub refused a missing permission with; nothing changed. An unknown
+outcome means the action may have run. Check the target system before
+choosing whether to make a new request. The controller logs the redacted
+cause of both.
 
 ## Waiting and cancellation
 

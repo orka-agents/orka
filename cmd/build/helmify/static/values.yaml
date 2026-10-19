@@ -110,6 +110,23 @@ controller:
       pollInterval: 1s
       triggerTimeout: 5m15s
       terminationGracePeriodSeconds: 360
+    # Toolboxes: read-only tool images bound into built-in runtime Pods
+    # (Agent spec.runtime.toolboxes). Off by default. Nothing from a toolbox
+    # runs as root; images must be digest-pinned and from allowedRegistries.
+    toolboxes:
+      enabled: false
+      # Registry hosts or host/path prefixes, for example
+      # ["registry.example.com", "ghcr.io/my-org/tools"]. Empty allows nothing.
+      allowedRegistries: []
+      # Secret names in the runtime namespace added to runtime Pod imagePullSecrets.
+      imagePullSecrets: []
+      # Node selector merged into runtime Pods that bind toolboxes.
+      nodeSelector: {}
+      # copy: an init-container copier sanitizes each toolbox into a scratch
+      #       volume; works on every supported Kubernetes version.
+      # imageVolume: mounts the toolbox image directly; needs Kubernetes 1.36+
+      #       with containerd 2.2+ or CRI-O 1.33+ on the selected nodes.
+      mountMethod: copy
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
@@ -130,37 +147,15 @@ controller:
     pollInterval: 500ms
     batchSize: 25
 
-  # Experimental agent sandbox workspace support (disabled by default)
+  # External ACP providers own compute; Orka owns runtime admission and retirement.
   executionWorkspace:
-    # Enables dispatch of ACP Tasks into configured execution-workspace providers.
     dispatchEnabled: false
-    # Default provider used when Task execution.workspace.provider is omitted.
-    defaultProvider: agent-sandbox
+    # Exact provider worker namespaces where Orka independently reads Pod identity.
+    workerNamespaces: []
 
-  agentSandbox:
-    # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
-    enabled: false
-    # Optional upstream agent-sandbox router base URL used for workspace claims.
-    routerUrl: ""
-    # Optional default execution workspace template name used when a Task omits execution.workspace.templateRef.name.
-    defaultTemplate: ""
-    # Warm pool policy: disabled, template.
-    warmPoolPolicy: disabled
-    # Namespace strategy: task, controller.
-    namespaceStrategy: task
-    # Timeout for workspace claim and readiness operations.
-    claimTimeout: 2m
-    # Timeout for agent runtime execution inside the sandbox.
-    commandTimeout: 30m
-    # Default cleanup policy: delete, retain.
-    cleanupPolicy: delete
-
-  # Experimental Substrate execution workspace support (disabled by default)
+  # Retained in-tree Substrate MCP Tool actors and pools only.
   substrate:
-    enabled: false
-    # Set only after configuring ateapi with --egress-gateway-address= so
-    # worker NetworkPolicies can enforce ACP destinations. Not needed for cleanup.
-    directEgressEnabled: false
+    mcpToolsEnabled: false
     apiEndpoint: api.ate-system.svc:443
     apiCertFile: ""
     apiKeyFile: ""
@@ -176,9 +171,6 @@ controller:
       privateKeyKey: ""
       bearerTokenKey: ""
       caKey: ""
-    # Dedicated provider namespaces where ACP may read/delete exact worker Pods
-    # and manage confinement NetworkPolicies. Keep until all pools are deleted.
-    workerNamespaces: []
     routerUrl: http://atenet-router.ate-system.svc
     actorDnsSuffix: actors.resources.substrate.ate.dev
     defaultTemplate: ""

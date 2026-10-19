@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -271,7 +272,7 @@ func TestCreateTaskJobGatewayReplyOldJobUIDDoesNotBypassFreshness(t *testing.T) 
 	}
 }
 
-func TestCreateTaskJobNonGatewayAIFreshnessUnchanged(t *testing.T) {
+func TestCreateTaskJobNonGatewayAIDefersStaleTask(t *testing.T) {
 	for _, referencedAgent := range []bool{true, false} {
 		t.Run(map[bool]string{true: "stale Agent", false: "no Agent reference"}[referencedAgent], func(t *testing.T) {
 			r, task, agent := newGatewayReplyFreshnessFixture(t)
@@ -282,15 +283,14 @@ func TestCreateTaskJobNonGatewayAIFreshnessUnchanged(t *testing.T) {
 			}
 			latest := task.DeepCopy()
 			latest.Generation++
-			// No live Agent is available; non-gateway behavior must not gain a new fence.
+			// An edited Task cannot use the previous revision's resolved Agent/provider.
 			r.APIReader = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(latest).Build()
 			_, err := r.createTaskJob(t.Context(), task, agent, nil)
-			require.NoError(t, err)
-			require.Equal(t, corev1alpha1.TaskPhaseRunning, task.Status.Phase)
+			require.True(t, apierrors.IsConflict(err))
+			require.Equal(t, corev1alpha1.TaskPhasePending, task.Status.Phase)
 			jobs := &batchv1.JobList{}
 			require.NoError(t, r.List(t.Context(), jobs))
-			require.Len(t, jobs.Items, 1)
-			requireGatewayJobReplyGrant(t, &jobs.Items[0], false)
+			require.Empty(t, jobs.Items)
 		})
 	}
 }
@@ -345,7 +345,7 @@ func newGatewayReplyFreshnessFixture(t *testing.T) (*TaskReconciler, *corev1alph
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "assistant"},
-			SessionRef:  &corev1alpha1.SessionReference{Name: "session", ThroughMessageID: "gateway:gev-test:user", PromptIncluded: true},
+			SessionRef:  &corev1alpha1.SessionReference{Name: "session", MaxMessages: store.GatewayTranscriptMessageLimit, ThroughMessageID: "gateway:gev-test:user", PromptIncluded: true},
 			RequestedBy: &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/default/ns-uid/chat/gateway-uid", Subject: "sender", Groups: []string{"gateway:chat"}, Roles: []string{"gateway-sender"}},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
@@ -380,6 +380,9 @@ func newGatewayReplyFreshnessFixture(t *testing.T) (*TaskReconciler, *corev1alph
 	_, err = s.ClaimNextGatewayEvent(t.Context(), "default", "dispatch", now, time.Minute)
 	require.NoError(t, err)
 	require.NoError(t, s.MarkGatewayEventTaskCreated(t.Context(), "default", event.ID, task.Name, string(task.UID), "dispatch", now))
+	r.SessionManager = NewSessionManager(s)
+	r.SessionManager.SetGatewayEventStore(s)
+	require.NoError(t, r.SessionManager.AcquireLock(t.Context(), task))
 	r.GatewayService = gatewayruntime.NewService(r.Client, s, s, s, gatewayruntime.DefaultConfig())
 	return r, task, agent
 }

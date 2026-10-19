@@ -30,8 +30,8 @@ import (
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 
+	workspaceagent "github.com/orka-agents/orka-workspace/sdk/workspaceagent"
 	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
-	workspaceagent "github.com/orka-agents/orka/pkg/workspaceagent"
 )
 
 const (
