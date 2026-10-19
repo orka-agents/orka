@@ -18,8 +18,9 @@ brew install orka-agents/tap/orka
 orka version
 ```
 
-The formula always tracks the latest stable release and installs shell completions.
-For any other version, use the release archives below.
+The formula follows the latest stable release, possibly a few hours after it is published,
+and installs shell completions. Check `orka version` after installing; for any other
+version, use the release archives below.
 
 Download the CLI from [GitHub Releases](https://github.com/orka-agents/orka/releases).
 Choose a published release that matches your installed Helm chart and controller version.
