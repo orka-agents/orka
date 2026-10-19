@@ -1,9 +1,11 @@
 # Storage ownership and bootstrap
 
-This inventory describes the production wiring in `cmd/main.go`. It prepares the
-boundary for [#512](https://github.com/orka-agents/orka/issues/512); it does not
-introduce a provider API. SQLite remains the only application database and
-artifact store, with one active controller.
+This inventory describes the production wiring in `cmd/main.go` for
+[#512](https://github.com/orka-agents/orka/issues/512). Application consumers
+reach storage through one storage client over the public provider contract
+described below. SQLite remains the only application database and artifact
+store, with one active controller; there is no network adapter or backend
+selection.
 
 ## Dataset metadata
 
@@ -95,6 +97,57 @@ than assuming every durable byte lives in the database.
 Kubernetes workspaces/checkpoints and publication resources are also separate.
 Keeping artifact bytes and metadata together does not make deletion across
 those resources a database transaction.
+
+## Storage client and provider contract
+
+`pkg/storage/v1` is the public storage extension contract, version
+`orka.storage.v1`. It defines the provider-facing records, errors, execution
+event vocabulary and two provider interfaces:
+
+- `StateProvider` serves `state.v1`: results and prompt result receipts, plans,
+  messages, Sessions and transcripts (including turn commits, owner-fenced
+  writes, soul pinning and lineage), harness-v1 attempts, Session cleanup
+  persistence, the controller epoch mirror, outbox persistence, Task Job
+  revocations, execution events, gateway records, security records, repository
+  monitors and usage.
+- `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
+
+`internal/store` keeps aliases for the moved names, so Orka callers keep their
+existing types. The contract and its test suite do not import Orka's internal
+packages.
+
+`cmd/main.go` builds one `internal/storageclient.Client` over the SQLite store
+and passes it to every application consumer. The SQLite store itself is used
+only for its process lock, bootstrap and key setup, configuration and manager
+lifecycle. The client composes the state and artifact providers and serves the
+remaining families through `storageclient.Embedded`, which only the SQLite
+store implements:
+
+| Embedded family | Why it is outside the provider contract |
+| --- | --- |
+| `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Snapshot bodies arrive in plaintext; SQLite encrypts them. |
+| `NativeSessionImportStore`, `SessionTurnPersistenceStore` | Native session bytes arrive in plaintext, including the native capture in turn finalization. |
+| `ConnectorCredentialStore`, `ConnectorConsentStore` | Tokens arrive in plaintext; SQLite performs row-bound sealing. |
+| `MemoryStore`, `MemoryProposalStore` | Redaction runs inside SQLite, and proposal application calls `AuthorizeExistingMemory`. |
+| `TaskDataTransactionStore` transaction methods | Go callbacks run inside a database transaction. |
+| `SecurityStore.ApplyScanTaskIngestion` | Go callbacks run inside a database transaction. |
+| `harness.RuntimeSessionStore` | Its records are defined in `internal/harness`. |
+
+Embedded families share transactions with state and artifact records (a
+task-data transaction context also covers `SaveArtifact`, for example), so the
+client refuses a configuration that would place them on different stores.
+The SQLite provider also still applies Orka's execution event payload
+sanitization on append.
+
+`pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
+`RunArtifacts` exercise each provider family through the public interfaces.
+The SQLite provider runs it directly, and the storage client runs it over
+SQLite.
+
+SQLite also implements the duplicate SQL control-record methods described in
+the next section. They are not part of the provider contract or the client. A
+client test fails if any other SQLite method is missing from the client, so a
+consumer's type assertion cannot silently lose a capability.
 
 ## Kubernetes control authority and retained SQL compatibility
 
