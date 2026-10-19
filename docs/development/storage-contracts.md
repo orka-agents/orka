@@ -137,7 +137,12 @@ Embedded families share transactions with state and artifact records (a
 task-data transaction context also covers `SaveArtifact`, for example), so the
 client refuses a configuration that would place them on different stores.
 The SQLite provider also still applies Orka's execution event payload
-sanitization on append.
+sanitization on append, and derives token usage observations from appended
+model usage events using the controller-only `ExecutionEvent.Internal` keys
+`usageTaskUID` and `harnessV2UsageModel`. That field is not serialized, and the
+provider suite does not cover the derivation, so a provider that implements
+only the documented contract would record no usage from execution events. Both
+behaviors move above the client in follow-up work.
 
 `pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
 `RunArtifacts` exercise each provider family through the public interfaces.
