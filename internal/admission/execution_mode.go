@@ -181,6 +181,7 @@ type TaskExecutionAuthorityValidator struct {
 	config  ExecutionModeConfig
 }
 
+//nolint:gocyclo // Admission checks every execution-authority invariant in one fail-closed pass.
 func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
 	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
 		return ctrladmission.Allowed("not a Task execution-authority write")

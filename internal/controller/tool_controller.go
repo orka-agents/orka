@@ -321,6 +321,7 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) e
 	return nil
 }
 
+//nolint:gocyclo // Each HTTP auth mode has its own validation branch.
 func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1alpha1.Tool) error {
 	if tool == nil || tool.Spec.HTTP == nil {
 		return nil

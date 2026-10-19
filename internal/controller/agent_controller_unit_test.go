@@ -1495,6 +1495,7 @@ func strContains(s, substr string) bool {
 	return false
 }
 
+//nolint:unparam // Callers name the condition type they assert on.
 func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
 	for i := range conditions {
 		if conditions[i].Type == condType {

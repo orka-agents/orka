@@ -2048,7 +2048,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			for _, cs := range pod.Status.ContainerStatuses {
 				if cs.State.Waiting != nil {
 					reason := cs.State.Waiting.Reason
-					if reason == "CreateContainerConfigError" || reason == "ErrImageNeverPull" {
+					if reason == podWaitingReasonCreateContainerConfig || reason == "ErrImageNeverPull" {
 						msg := fmt.Sprintf("pod stuck: %s - %s", reason, cs.State.Waiting.Message)
 						log.Info("failing task due to unrecoverable pod error", "reason", reason)
 						return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
@@ -2104,7 +2104,7 @@ func podWaitingMessage(pod *corev1.Pod) string {
 				continue
 			}
 			switch waiting.Reason {
-			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError":
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", podWaitingReasonCreateContainerConfig:
 				message := podWaitingMessagePrefix + waiting.Reason
 				if detail := strings.TrimSpace(waiting.Message); detail != "" {
 					message += " - " + detail
