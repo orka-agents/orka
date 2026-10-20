@@ -758,16 +758,16 @@ jobs:
     steps:
       # The tap verifies the signed CLI checksums itself, so the Orka Homebrew
       # Tap app is installed only on orka-agents/homebrew-tap with Contents:
-      # write, enough to dispatch. Without its key, the tap's scheduled sync
+      # write, enough to dispatch. Without its credentials, the tap's scheduled sync
       # picks the release up within six hours.
-      - name: Check for the tap app key
+      - name: Check for the tap app credentials
         id: app
         env:
-          HAS_KEY: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY != '' }}
+          HAS_APP: ${{ vars.HOMEBREW_TAP_APP_CLIENT_ID != '' && secrets.HOMEBREW_TAP_APP_PRIVATE_KEY != '' }}
           RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
-          if [[ "${HAS_KEY}" != true ]]; then
-            echo "::notice::HOMEBREW_TAP_APP_PRIVATE_KEY is not set; the tap's scheduled sync will publish ${RELEASE_VERSION}."
+          if [[ "${HAS_APP}" != true ]]; then
+            echo "::notice::HOMEBREW_TAP_APP_CLIENT_ID or HOMEBREW_TAP_APP_PRIVATE_KEY is not set; the tap's scheduled sync will publish ${RELEASE_VERSION}."
             exit 0
           fi
           echo "enabled=true" >>"${GITHUB_OUTPUT}"
