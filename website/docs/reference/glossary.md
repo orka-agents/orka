@@ -82,8 +82,8 @@ version describes Orka's contract, independently of the ACP protocol version.
 See [installation ownership](../operations/harness-modes.md).
 
 **Producer** — anything that creates Tasks: a person with the CLI, CI, a webhook, another
-agent. The term matters during a v1-to-v2 migration, where you point producers at one
-installation's endpoint or the other.
+agent. When a cluster runs several installations, each producer points at one
+installation's endpoint.
 
 ## Safety and correctness
 
