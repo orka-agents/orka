@@ -454,9 +454,9 @@ func recordRejectedToolCall(ctx context.Context, toolCall llm.ToolCall, result s
 	if strings.TrimSpace(toolCall.Name) == "" || result == "" {
 		return
 	}
-	failed, errType, message := tools.FailedToolResultForTelemetry(result)
+	failed, errType := tools.FailedToolResultForTelemetry(result)
 	if !failed {
 		return
 	}
-	tools.RecordRejectedToolCall(ctx, toolCall.Name, toolCall.ID, errType, message)
+	tools.RecordRejectedToolCall(ctx, toolCall.Name, toolCall.ID, errType)
 }

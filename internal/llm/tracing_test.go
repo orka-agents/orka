@@ -524,7 +524,7 @@ func TestTracingProviderCompleteFailureStopReasonSetsError(t *testing.T) {
 }
 
 func TestStopReasonErrorType(t *testing.T) {
-	for _, reason := range []string{"length", "max_tokens", "incomplete", "pause_turn", "content_filter", "refusal", "failed", "cancelled", "unexpected"} {
+	for _, reason := range []string{"length", "max_tokens", "incomplete", "pause_turn", "content_filter", "refusal", "failed", "cancelled", "model_context_window_exceeded", "in_progress", "queued"} {
 		t.Run(reason, func(t *testing.T) {
 			if got := stopReasonErrorType(reason); got != reason {
 				t.Fatalf("stopReasonErrorType(%q) = %q, want %q", reason, got, reason)
@@ -532,8 +532,10 @@ func TestStopReasonErrorType(t *testing.T) {
 		})
 	}
 
-	if got := stopReasonErrorType(""); got != unknownStopReasonErrorType {
-		t.Fatalf("stopReasonErrorType(empty) = %q, want unknown_stop_reason", got)
+	for _, reason := range []string{"", "unexpected", "SYNTHETIC_TOKEN error body"} {
+		if got := stopReasonErrorType(reason); got != unknownStopReasonErrorType {
+			t.Fatalf("stopReasonErrorType(%q) = %q, want unknown_stop_reason", reason, got)
+		}
 	}
 
 	for _, reason := range []string{"stop", "end_turn", "tool_use", "tool_calls"} {
@@ -553,7 +555,8 @@ func TestCompletionResponseErrorType(t *testing.T) {
 	}{
 		{name: "nil response", want: unknownStopReasonErrorType},
 		{name: "missing reason", resp: &CompletionResponse{}, want: unknownStopReasonErrorType},
-		{name: "unknown reason", resp: &CompletionResponse{StopReason: "unexpected"}, want: "unexpected"},
+		{name: "unknown reason", resp: &CompletionResponse{StopReason: "unexpected"}, want: unknownStopReasonErrorType},
+		{name: "unclassified provider reason", resp: &CompletionResponse{StopReason: "model_context_window_exceeded"}, want: "model_context_window_exceeded"},
 		{name: "tool reason without calls", resp: &CompletionResponse{StopReason: "tool_calls"}, want: "tool_calls"},
 		{name: "completed", resp: &CompletionResponse{StopReason: "stop", Content: "done"}},
 	}
@@ -839,11 +842,11 @@ func TestTracingProviderStreamCancellationPreservesContextError(t *testing.T) {
 	if len(spans) != 1 {
 		t.Fatalf("ended spans = %d, want 1", len(spans))
 	}
-	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != context.Canceled.Error() {
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != "context.canceled" {
 		t.Fatalf("status = %#v, want context cancellation", spans[0].Status())
 	}
 	attrs := spanAttrs(spans[0])
-	assertStringAttr(t, attrs, genai.AttrErrorType, errorType(context.Canceled))
+	assertStringAttr(t, attrs, genai.AttrErrorType, "context.canceled")
 }
 
 func TestTracingProviderStreamEmitsFirstChunk(t *testing.T) {

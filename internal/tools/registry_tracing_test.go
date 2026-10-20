@@ -194,7 +194,6 @@ func TestFailedToolResultForTelemetry(t *testing.T) {
 		result      string
 		wantFailed  bool
 		wantErrType string
-		wantMessage string
 	}{
 		{
 			name:   "success true skips failure",
@@ -205,14 +204,12 @@ func TestFailedToolResultForTelemetry(t *testing.T) {
 			result:      `{"success":false,"error":"bad input","errorType":"invalid_arguments"}`,
 			wantFailed:  true,
 			wantErrType: "invalid_arguments",
-			wantMessage: "bad input",
 		},
 		{
 			name:        "escaped success key keeps structured failure semantics",
 			result:      `{"\u0073uccess":false}`,
 			wantFailed:  true,
 			wantErrType: "tool_error",
-			wantMessage: "tool_error",
 		},
 		{
 			name:   "case variant is not structured failure",
@@ -226,15 +223,12 @@ func TestFailedToolResultForTelemetry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotFailed, gotErrType, gotMessage := FailedToolResultForTelemetry(tt.result)
+			gotFailed, gotErrType := FailedToolResultForTelemetry(tt.result)
 			if gotFailed != tt.wantFailed {
 				t.Fatalf("failed = %v, want %v", gotFailed, tt.wantFailed)
 			}
 			if gotErrType != tt.wantErrType {
 				t.Fatalf("errType = %q, want %q", gotErrType, tt.wantErrType)
-			}
-			if gotMessage != tt.wantMessage {
-				t.Fatalf("message = %q, want %q", gotMessage, tt.wantMessage)
 			}
 		})
 	}

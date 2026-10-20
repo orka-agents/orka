@@ -29,7 +29,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -533,8 +532,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
 		}
 		return c.JSON(ChatResponse{
@@ -981,8 +979,7 @@ func (ch *ChatHandler) runToolLoop(
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			err := fmt.Errorf("chat turn interrupted: %w", iterCtx.Err())
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, err
 		default:
@@ -994,8 +991,7 @@ func (ch *ChatHandler) runToolLoop(
 		); hit {
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err
@@ -1016,8 +1012,7 @@ func (ch *ChatHandler) runToolLoop(
 		messages = updatedMsgs
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
 		}
@@ -1048,8 +1043,7 @@ func (ch *ChatHandler) runToolLoop(
 			)
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err

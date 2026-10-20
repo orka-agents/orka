@@ -53,6 +53,12 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 			}
 			_, span := tracer.Start(context.Background(), "acp.supervisor.test")
 			span.End()
+			func() {
+				defer func() { _ = recover() }()
+				_, panicking := tracer.Start(context.Background(), "acp.supervisor.panic")
+				defer panicking.End()
+				panic("SYNTHETIC_TOKEN_PANIC_VALUE")
+			}()
 			if err := shutdown(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -64,6 +70,18 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 				attrs := request.ResourceSpans[0].Resource.Attributes
 				if len(attrs) != 1 || attrs[0].Key != "service.name" || attrs[0].Value.GetStringValue() != "orka-acp-supervisor" {
 					t.Fatal("ambient resource attributes crossed supervisor exporter boundary")
+				}
+				exported := 0
+				for _, scope := range request.ResourceSpans[0].ScopeSpans {
+					for _, span := range scope.Spans {
+						exported++
+						if len(span.Events) != 0 {
+							t.Fatalf("span %q exported %d events, want none", span.Name, len(span.Events))
+						}
+					}
+				}
+				if exported != 2 {
+					t.Fatalf("exported spans = %d, want 2", exported)
 				}
 			default:
 				t.Fatal("no real OTLP gRPC export")
