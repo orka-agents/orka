@@ -123,6 +123,17 @@ func newHarnessArtifactFixture(t *testing.T) *harnessArtifactFixture {
 	return f
 }
 
+// artifactOwnerRecorder records the owner of each saved artifact.
+type artifactOwnerRecorder struct {
+	*sqlite.Store
+	owners []store.ArtifactOwner
+}
+
+func (r *artifactOwnerRecorder) SaveArtifact(ctx context.Context, request store.SaveArtifactRequest) error {
+	r.owners = append(r.owners, request.Owner)
+	return r.Store.SaveArtifact(ctx, request)
+}
+
 func (f *harnessArtifactFixture) advanceAttempt(t *testing.T, state store.HarnessV1AttemptState) {
 	t.Helper()
 	key := store.HarnessV1AttemptKey{Namespace: f.attempt.Namespace, TaskUID: f.attempt.TaskUID, Attempt: f.attempt.Attempt}
@@ -249,6 +260,8 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHarnessArtifactFixture(t)
+			recorder := &artifactOwnerRecorder{Store: f.data}
+			f.handlers.artifactStore = recorder
 			if tc.change != nil {
 				tc.change(t, f)
 			}
@@ -274,6 +287,8 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 				stored, _, err := f.data.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task-a"}, Filename: f.upload.Filename})
 				require.NoError(t, err)
 				require.Equal(t, f.upload.Data, stored)
+				require.Len(t, recorder.owners, 1)
+				require.Equal(t, string(f.task.UID), recorder.owners[0].TaskUID, "the validated Task UID reaches the artifact owner")
 			} else {
 				require.Equal(t, http.StatusForbidden, response.StatusCode)
 				_, _, err := f.data.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task-a"}, Filename: f.upload.Filename})

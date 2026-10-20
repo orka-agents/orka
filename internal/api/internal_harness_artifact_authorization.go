@@ -18,47 +18,49 @@ import (
 // Resolve Kubernetes authority before reserving the store writer. The returned
 // database-only check revalidates the immutable attempt identity, active state,
 // and capability before committing the artifact.
-func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c fiber.Ctx, upload harness.ArtifactUpload) (func(context.Context) error, error) {
+// prepareHarnessV1ArtifactUpload authorizes a capability upload. It returns the
+// commit-time verification and the validated Task UID.
+func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c fiber.Ctx, upload harness.ArtifactUpload) (func(context.Context) error, string, error) {
 	denied := fiber.NewError(fiber.StatusForbidden, "harness artifact authorization failed")
 	authorizer := h.internalCallerAuthorizer()
 	if authorizer.k8sReader == nil {
-		return nil, denied
+		return nil, "", denied
 	}
 	task := &corev1alpha1.Task{}
 	if err := authorizer.k8sReader.Get(ctx, types.NamespacedName{Namespace: upload.Namespace, Name: upload.TaskName}, task); err != nil {
-		return nil, denied
+		return nil, "", denied
 	}
 	binding := task.Status.AgentExecutionBinding
 	if task.UID == "" || task.Spec.Type != corev1alpha1.TaskTypeAgent || !activeInternalWorkerTask(task) ||
 		binding == nil || binding.SchemaVersion != 1 || binding.Task.UID != task.UID ||
 		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
 		binding.Backend != corev1alpha1.AgentExecutionBackendHarnessWrapper || task.Status.JobName != "" {
-		return nil, denied
+		return nil, "", denied
 	}
 	latest, err := h.latestHarnessV1ArtifactAttempt(ctx, task.Namespace, string(task.UID))
 	if err != nil || !activeHarnessV1ArtifactAttempt(task, latest) {
-		return nil, denied
+		return nil, "", denied
 	}
 	if err := authorizer.verifyHarnessWrapperPod(ctx, GetUserInfo(c), latest); err != nil {
-		return nil, denied
+		return nil, "", denied
 	}
 	secret := &corev1.Secret{}
 	if err := authorizer.k8sReader.Get(ctx, types.NamespacedName{Namespace: latest.AuthSecretNamespace, Name: latest.AuthSecretName}, secret); err != nil {
-		return nil, denied
+		return nil, "", denied
 	}
 	if string(secret.UID) != latest.AuthSecretUID || secret.ResourceVersion != latest.AuthSecretResourceVersion || !secret.DeletionTimestamp.IsZero() {
-		return nil, denied
+		return nil, "", denied
 	}
 	// Cancellation and deletion can start while workload and Secret checks run.
 	// Recheck the live Task before reserving the writer; durable attempt state
 	// and the cleanup generation still fence the database access itself.
 	currentTask := &corev1alpha1.Task{}
 	if err := authorizer.k8sReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, currentTask); err != nil {
-		return nil, denied
+		return nil, "", denied
 	}
 	if currentTask.UID != task.UID || !activeInternalWorkerTask(currentTask) || currentTask.Status.JobName != "" ||
 		currentTask.Status.AgentExecutionBinding == nil || !activeHarnessV1ArtifactAttempt(currentTask, latest) {
-		return nil, denied
+		return nil, "", denied
 	}
 	task = currentTask
 	upload.TaskUID, upload.TurnID, upload.BindingDigest = string(task.UID), latest.TurnID, latest.BindingDigest
@@ -74,7 +76,7 @@ func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c
 			return denied
 		}
 		return nil
-	}, nil
+	}, string(task.UID), nil
 }
 
 func (h *InternalHandlers) latestHarnessV1ArtifactAttempt(ctx context.Context, namespace, taskUID string) (*store.HarnessV1Attempt, error) {

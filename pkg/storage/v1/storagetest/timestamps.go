@@ -64,6 +64,32 @@ func runTimestamps(t *testing.T, newProvider StateFactory) {
 		requireSameInstant(t, timestampNanos, got.CreatedAt, "OutboxProjection.CreatedAt")
 	})
 
+	t.Run("usage records", func(t *testing.T) {
+		provider := newProvider(t)
+		ctx := t.Context()
+		require.NoError(t, provider.RegisterUsageWork(ctx, storagev1.UsageWorkRequest{Namespace: workflowNamespace,
+			MonitorName: workflowMonitor, MonitorUID: "monitor-uid", Repository: "org/repo", Kind: "issue", Number: 1,
+			StartedAt: timestampNanos}))
+		require.NoError(t, provider.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, TaskUID: "task-1",
+			TaskName: "task-1", Phase: "Running", StartedAt: timestampNanos, PhaseObservedAt: timestampNanos}))
+		input, output := int64(1), int64(2)
+		require.NoError(t, provider.RecordUsage(ctx, storagev1.UsageObservation{ID: "observation-1", Namespace: workflowNamespace,
+			TaskUID: "task-1", TaskName: "task-1", CounterID: "counter", Scope: storagev1.UsageScopeCall,
+			Source: storagev1.UsageSourceAgent, Model: "model", InputTokens: &input, OutputTokens: &output, Status: "running",
+			ObservedAt: timestampNanos}))
+
+		data, err := provider.LoadUsage(ctx, storagev1.UsageFilter{Namespaces: []string{workflowNamespace}, AsOf: time.Now().UTC()})
+		require.NoError(t, err)
+		require.Len(t, data.Works, 1)
+		requireSameInstant(t, timestampNanos, data.Works[0].StartedAt, "UsageWorkRequest.StartedAt")
+		require.Len(t, data.Tasks, 1)
+		requireSameInstant(t, timestampNanos, data.Tasks[0].StartedAt, "UsageTask.StartedAt")
+		require.NotEmpty(t, data.Tasks[0].PhaseHistory)
+		requireSameInstant(t, timestampNanos, data.Tasks[0].PhaseHistory[0].ObservedAt, "UsageTaskPhase.ObservedAt")
+		require.Len(t, data.Observations, 1)
+		requireSameInstant(t, timestampNanos, data.Observations[0].ObservedAt, "UsageObservation.ObservedAt")
+	})
+
 	t.Run("repository monitor and security runs", func(t *testing.T) {
 		provider := newProvider(t)
 		ctx := t.Context()

@@ -196,7 +196,7 @@ func backupSchemaDatabase(ctx context.Context, conn *sql.Conn, path string) (str
 	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, backup); err != nil {
 		return "", err
 	}
-	copyDB, err := sql.Open("sqlite", backup)
+	copyDB, err := sql.Open("sqlite", sqliteDSN(backup))
 	if err != nil {
 		return "", err
 	}

@@ -253,12 +253,13 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 	}
 
 	var verifyHarnessAttempt func(context.Context) error
+	var capabilityTaskUID string
 	if err := withInternalTaskDataTransaction(c, h.artifactStore, taskName, func(ctx context.Context) error {
 		if authorizedWorker != nil {
 			return h.internalCallerAuthorizer().revalidateTaskCaller(c, authorizedWorker)
 		}
 		var err error
-		verifyHarnessAttempt, err = h.prepareHarnessV1ArtifactUpload(ctx, c, harness.ArtifactUpload{
+		verifyHarnessAttempt, capabilityTaskUID, err = h.prepareHarnessV1ArtifactUpload(ctx, c, harness.ArtifactUpload{
 			Namespace: namespace, TaskName: taskName, Filename: filename, ContentType: contentType, Data: data,
 		})
 		return err
@@ -268,7 +269,7 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 				return err
 			}
 		}
-		owner := store.ArtifactOwner{Namespace: namespace, TaskName: taskName}
+		owner := store.ArtifactOwner{Namespace: namespace, TaskName: taskName, TaskUID: capabilityTaskUID}
 		if authorizedWorker != nil {
 			owner.TaskUID = string(authorizedWorker.UID)
 		}

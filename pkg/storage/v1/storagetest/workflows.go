@@ -17,7 +17,7 @@ const (
 	workflowMonitor        = "monitor"
 )
 
-var workflowBase = time.Date(2026, time.January, 2, 3, 4, 5, 987654321, time.UTC)
+var workflowBase = time.Date(2026, time.January, 2, 3, 4, 5, 987654321, time.FixedZone("AEST", 10*60*60))
 
 func workflowAt(minutes int) time.Time { return workflowBase.Add(time.Duration(minutes) * time.Minute) }
 

@@ -50,11 +50,13 @@ additional protocols.
 
 ## Application persistence
 
-The proposed `state.v1` ownership below means all database-owned application
-state other than public artifacts. `artifacts.v1` owns artifact bytes and their
-metadata together. These are planning boundaries, not enabled configuration or
-versioned interfaces. The current SQLite database contains both. Kubernetes
-authority remains separate from either boundary.
+The `state.v1` ownership below means all database-owned application state
+other than public artifacts. `artifacts.v1` owns artifact bytes and their
+metadata together. Both are interfaces of the `orka.storage.v1` contract in
+`pkg/storage/v1` (see "Storage client and provider contract"), which stays
+unstable until a release advertises storage extension support. Backend
+selection is not enabled. The current SQLite database contains both.
+Kubernetes authority remains separate from either boundary.
 
 | Production interfaces | Records and ownership | Main consumers and constraints |
 | --- | --- | --- |
@@ -192,9 +194,12 @@ the observable parts.
   provider that rounds to microseconds (PostgreSQL `timestamptz`, for example)
   must store the nanoseconds separately. The suite round-trips nanosecond
   times given in a non-UTC zone through Sessions, transcripts, gateway events,
-  outbox projections, monitor runs and scan runs, and nanosecond UTC times
-  through the workflow families. SQLite stores these times in UTC because its
-  queries compare times as text.
+  outbox projections, usage records, monitor runs, scan runs and the workflow
+  families. SQLite opens its database with the driver's `_timezone=UTC`
+  option, so every time column is written and read in UTC, including rows
+  written earlier in another zone; its queries compare times as text, so one
+  zone also keeps those comparisons correct. Usage records are stored as JSON,
+  so SQLite converts their times to UTC when it writes and reads them.
 - **Records are not the wire format.** Records carry JSON tags for Orka's API.
   Persisted fields such as gateway claim ownership, lease expiry, the frozen
   Task tool policy, usage phase history, scan-run cancellation state and
