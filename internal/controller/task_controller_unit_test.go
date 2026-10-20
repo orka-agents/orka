@@ -97,12 +97,7 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 	if err != nil {
 		panic(err)
 	}
-	// Production consumers reach SQLite through the storage client, which
-	// applies Orka's redaction and usage attribution.
-	ss, err := storageclient.NewEmbedded(sqlite.NewStore(db, ":memory:"))
-	if err != nil {
-		panic(err)
-	}
+	ss := sqlite.NewStore(db, ":memory:")
 	sessionManager := NewSessionManager(ss)
 	sessionManager.SetGatewayEventStore(ss)
 	return &TaskReconciler{
@@ -4138,6 +4133,13 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
+	// Task token attribution runs in the storage client, as production wires
+	// the reconciler.
+	storage, err := storageclient.NewEmbedded(r.ExecutionEventStore.(*sqlite.Store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
 	now := time.Now().UTC()
 	if err := sessions.CreateSession(ctx, &store.SessionRecord{

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -346,13 +347,20 @@ func TestClientDerivesWorkerUsageOnlyForTheAttributedTask(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, [2]int64{7, 3}, [2]int64{input, output})
 
-	// An invalid worker report fails the append rather than being dropped.
+	// An invalid worker report fails the append rather than being dropped,
+	// and counts as an append failure.
+	failures := func() float64 {
+		return metrics.CounterVecValue(metrics.ExecutionEventAppendFailuresTotal,
+			store.ExecutionEventStreamTypeTask, events.ExecutionEventTypeModelMessage)
+	}
+	before := failures()
 	invalid, err := json.Marshal(map[string]any{"usage": map[string]any{"id": "bad", "counterID": "c", "status": "unknown"}})
 	require.NoError(t, err)
 	_, err = client.AppendExecutionEvent(store.WithUsageAttribution(ctx, store.UsageAttribution{TaskUID: "task-uid"}),
 		&store.ExecutionEvent{Namespace: "tenant", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "invalid",
 			TaskName: "invalid", Type: events.ExecutionEventTypeModelMessage, Content: invalid})
 	require.ErrorIs(t, err, store.ErrValidation)
+	require.InDelta(t, before+1, failures(), 0)
 }
 
 func TestClientTaskTokenUsageAttributesOnlyTheTaskShare(t *testing.T) {

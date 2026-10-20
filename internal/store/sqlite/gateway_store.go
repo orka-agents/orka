@@ -205,25 +205,11 @@ func prepareGatewayEventAdmission(admission store.GatewayEventAdmission) (store.
 	if !store.IsValidGatewayEventState(event.State) {
 		return store.GatewayEvent{}, false, "", time.Time{}, store.ValidationErrorf("unsupported gateway event state %q", event.State)
 	}
-	event.StateMessage = sanitizeGatewayStoreText(event.StateMessage, 1024)
-	event.SenderDisplayName = sanitizeGatewayStoreText(event.SenderDisplayName, 256)
-	event.Metadata = normalizeGatewayStoreMetadata(event.Metadata)
 	metadataJSON, err := marshalStringMap(event.Metadata)
 	if err != nil {
 		return store.GatewayEvent{}, false, "", time.Time{}, err
 	}
 	return event, appendUserMessage, metadataJSON, now, nil
-}
-
-func normalizeGatewayStoreMetadata(metadata map[string]string) map[string]string {
-	if len(metadata) == 0 {
-		return nil
-	}
-	normalized := make(map[string]string, len(metadata))
-	for key, value := range metadata {
-		normalized[key] = sanitizeGatewayStoreText(value, 256)
-	}
-	return normalized
 }
 
 func applyGatewayPendingLimit(
@@ -412,10 +398,6 @@ func (s *Store) GetGatewayEventDuplicate(
 	if candidate == nil {
 		return nil, store.ValidationErrorf("gateway event is required")
 	}
-	normalized := *candidate
-	normalized.SenderDisplayName = sanitizeGatewayStoreText(normalized.SenderDisplayName, 256)
-	normalized.Metadata = normalizeGatewayStoreMetadata(normalized.Metadata)
-	candidate = &normalized
 	if err := validateGatewayEvent(candidate); err != nil {
 		return nil, err
 	}
@@ -805,7 +787,6 @@ func (s *Store) MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, 
 
 // RetryGatewayEvent returns a failed dispatch to the FIFO queue and releases its reservation.
 func (s *Store) RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -869,7 +850,6 @@ func (s *Store) ExpireGatewayEvent(
 	namespace, id, owner, reason string,
 	now time.Time,
 ) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
 	now = now.UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -898,7 +878,7 @@ func (s *Store) ExpireGatewayEventWithDelivery(
 	if err := validateGatewayDelivery(&projection.Delivery); err != nil {
 		return nil, false, err
 	}
-	reason := sanitizeGatewayStoreText(projection.Reason, 1024)
+	reason := projection.Reason
 	now := projection.CompletedAt.UTC()
 	if now.IsZero() {
 		return nil, false, store.ValidationErrorf("completion time is required")
@@ -959,7 +939,6 @@ func (s *Store) ExpireGatewayEventWithDelivery(
 func (s *Store) MarkExpiredGatewayEventDeadLettered(
 	ctx context.Context, namespace, id, reason string, now time.Time,
 ) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
 	result, err := s.db.ExecContext(ctx, `UPDATE gateway_events SET state = ?, state_message = ?, updated_at = ?
 		WHERE namespace = ? AND id = ? AND state = ? AND delivery_id = ''`,
 		store.GatewayEventDeadLettered, reason, now.UTC(), namespace, id, store.GatewayEventExpired)
@@ -1359,7 +1338,6 @@ func (s *Store) ClaimNextGatewayDelivery(ctx context.Context, namespace, owner s
 
 // MarkGatewayDeliveryDelivered records one successful provider send.
 func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error {
-	providerMessageID = sanitizeGatewayStoreText(providerMessageID, 256)
 	now = now.UTC()
 	s.executionEventMu.Lock()
 	defer s.executionEventMu.Unlock()
@@ -1485,7 +1463,6 @@ func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id,
 
 // ScheduleGatewayDeliveryRetry records a retryable adapter result.
 func (s *Store) ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
 	result, err := s.db.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = ?, next_attempt_at = ?,
 		claim_owner = '', claim_until = NULL, updated_at = ? WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?`,
 		store.GatewayDeliveryRetryScheduled, reason, nextAttemptAt.UTC(), time.Now().UTC(), namespace, id,
@@ -1506,7 +1483,6 @@ func (s *Store) ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id,
 
 // MarkGatewayDeliveryTerminal records a permanent, dead-lettered, or expired result.
 func (s *Store) MarkGatewayDeliveryTerminal(ctx context.Context, namespace, id, owner string, state store.GatewayDeliveryState, reason string, now time.Time) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
 	switch state {
 	case store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired:
 	default:
@@ -2048,8 +2024,6 @@ func validateGatewayDelivery(delivery *store.GatewayDelivery) error {
 	if delivery.GatewayGeneration <= 0 {
 		return store.ValidationErrorf("gateway delivery gatewayGeneration must be positive")
 	}
-	delivery.LastError = sanitizeGatewayStoreText(delivery.LastError, 1024)
-	delivery.ProviderMessageID = sanitizeGatewayStoreText(delivery.ProviderMessageID, 256)
 	if delivery.State == "" {
 		delivery.State = store.GatewayDeliveryPending
 	}
@@ -2061,7 +2035,6 @@ func validateGatewayDelivery(delivery *store.GatewayDelivery) error {
 	if delivery.Kind != gatewayDeliveryKindFinal && delivery.Kind != gatewayDeliveryKindError {
 		return store.ValidationErrorf("unsupported gateway delivery kind %q", delivery.Kind)
 	}
-	delivery.Metadata = normalizeGatewayStoreMetadata(delivery.Metadata)
 	if delivery.MaxAttempts <= 0 {
 		delivery.MaxAttempts = 10
 	}
@@ -2086,11 +2059,7 @@ func marshalStringMap(value map[string]string) (string, error) {
 	if len(value) == 0 {
 		return "{}", nil
 	}
-	safe := make(map[string]string, len(value))
-	for key, item := range value {
-		safe[key] = sanitizeGatewayStoreText(item, 256)
-	}
-	data, err := json.Marshal(safe)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}

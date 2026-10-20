@@ -310,8 +310,9 @@ persist:
 
 - **Execution events.** The client redacts and bounds each event's summary,
   text and JSON content, records the redaction and truncation metrics once
-  for each newly appended event, and stamps the creation time when the caller
-  left it unset. A provider only requires structured content to be valid
+  for each newly appended event, counts an event it refuses before calling
+  the provider as an append failure, and stamps the creation time when the
+  caller left it unset. A provider only requires structured content to be valid
   JSON.
 - **Usage from execution events.** The client derives the usage observation
   that a worker usage report or the controller's ACP journal carries and
@@ -338,6 +339,13 @@ persist:
 - **Threat models.** The client sanitizes threat model content before
   `SaveThreatModel` and `SaveThreatModelIfVersion`, including writes that a
   scan ingestion callback makes through its transaction-scoped store.
+- **Gateway text.** The client redacts, trims and bounds the text Orka and
+  adapters attach to gateway records: an event's state message, sender
+  display name and metadata (also when it looks up a duplicate), expiry, retry
+  and dead-letter reasons, a delivery's last error, provider message ID and
+  metadata, and the metadata of a terminal transcript message. Gateway
+  identifiers that the protocol already bounds are stored as received, now
+  including the copies in a gateway user message's transcript metadata.
 - **Memory.** The client redacts memory content, every free-text proposal
   field, review fields and the applier. Proposal application still
   re-applies the redaction rule when it copies a stored proposal into a

@@ -24,10 +24,11 @@ import (
 // Embedded is the part of the application store that is not yet expressed in
 // the public provider contract. These families either receive plaintext
 // protected data (execution snapshots, native sessions, connector custody,
-// unredacted memory, turn finalization with native capture) or run Orka
-// callbacks inside a database transaction (task data transactions, scan
-// ingestion and memory proposal application). Only the in-process SQLite store
-// implements Embedded, and it must be the same store that serves both
+// turn finalization with native capture) or run Orka callbacks inside a
+// database transaction (task data transactions, scan ingestion and memory
+// proposal application, which keeps the memory families here; the client
+// redacts memory content before it reaches them). Only the in-process SQLite
+// store implements Embedded, and it must be the same store that serves both
 // contracts so transaction-scoped contexts reach every participating record.
 type Embedded interface {
 	store.AgentExecutionSnapshotStore

@@ -21,8 +21,10 @@ const unknownMetricLabel = "unknown"
 
 // AppendExecutionEvent sanitizes the event payload before appending it.
 func (c *Client) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	started := time.Now()
 	prepared, err := c.prepareExecutionEvent(ctx, event)
 	if err != nil {
+		recordExecutionEventRejection(event, started)
 		return nil, err
 	}
 	appended, err := c.StateProvider.AppendExecutionEvent(ctx, prepared)
@@ -40,8 +42,10 @@ func (c *Client) AppendExecutionEventIfAbsent(
 	event *store.ExecutionEvent,
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
+	started := time.Now()
 	prepared, err := c.prepareExecutionEvent(ctx, event)
 	if err != nil {
+		recordExecutionEventRejection(event, started)
 		return nil, false, err
 	}
 	appended, isNew, err := c.StateProvider.AppendExecutionEventIfAbsent(ctx, prepared, dedupeKey)
@@ -62,8 +66,10 @@ func (c *Client) AppendExecutionEventWithPlanIfAbsent(
 	dedupeKey string,
 	plan *store.PlanState,
 ) (*store.ExecutionEvent, bool, error) {
+	started := time.Now()
 	prepared, err := c.prepareExecutionEvent(ctx, event)
 	if err != nil {
+		recordExecutionEventRejection(event, started)
 		return nil, false, err
 	}
 	appended, isNew, err := c.StateProvider.AppendExecutionEventWithPlanIfAbsent(ctx, prepared, dedupeKey, plan)
@@ -122,6 +128,15 @@ func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {
 		event.Truncation = &truncation
 	}
 	return event
+}
+
+// recordExecutionEventRejection counts an append the client refused before
+// calling the provider, such as a payload that cannot be sanitized or an
+// invalid worker usage report, in the same append failure and duration
+// metrics the provider records for its own failures.
+func recordExecutionEventRejection(event *store.ExecutionEvent, started time.Time) {
+	streamType, eventType := executionEventMetricLabels(event)
+	metrics.RecordExecutionEventAppend(streamType, eventType, false, time.Since(started).Seconds())
 }
 
 // recordExecutionEventSanitization counts redaction and truncation once per

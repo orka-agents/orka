@@ -169,6 +169,16 @@ func runExecutionEvents(t *testing.T, newProvider StateFactory) {
 		recorded := observations()
 		require.Len(t, recorded, 1)
 		require.True(t, at.Equal(recorded[0].ObservedAt), "a retried report keeps its first receipt time")
+
+		plan := &storagev1.PlanState{Namespace: eventsTenant, TaskName: "task-usage"}
+		_, appended, err = p.AppendExecutionEventWithPlanIfAbsent(ctx, withUsage(usage("planned", 3, at)), "planned", plan)
+		require.NoError(t, err)
+		require.True(t, appended)
+		require.Len(t, observations(), 2, "a plan append records its carried usage")
+		_, appended, err = p.AppendExecutionEventWithPlanIfAbsent(ctx, withUsage(usage("planned-replay", 4, at)), "planned", plan)
+		require.NoError(t, err)
+		require.False(t, appended)
+		require.Len(t, observations(), 2, "a deduplicated plan append records no usage")
 	})
 
 	t.Run("deduplication keys are scoped to one stream", func(t *testing.T) {
