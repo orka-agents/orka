@@ -352,6 +352,7 @@ func runSecurity(t *testing.T, newProvider StateFactory) {
 		withEvidence.PublicationEvidence = evidence
 		require.ErrorIs(t, p.CreatePatchProposal(ctx, &withEvidence), storagev1.ErrValidation)
 		require.NoError(t, p.CreatePatchProposal(ctx, proposal))
+		require.ErrorIs(t, p.CreatePatchProposal(ctx, proposal), storagev1.ErrConflict, "a reused patch proposal ID conflicts")
 		require.ErrorIs(t, p.UpdatePatchProposal(ctx, &withEvidence), storagev1.ErrValidation)
 
 		number := 42

@@ -175,8 +175,8 @@ the observable parts.
   `ProviderInfo`: the contract version and parts served, the dataset ID and
   its origin (`new`, `adopted` or `migrated`), the provider's schema version,
   optional capabilities beyond the contract parts (none in v1), size limits
-  and the durability class. Startup validation, installation binding and
-  migration use it.
+  and the durability class. It is there for startup validation (step 4),
+  installation binding (step 5) and migration; nothing in Orka calls it yet.
 - **Times.** A provider preserves every caller-supplied time exactly, to the
   nanosecond, and returns stored times in UTC. Connector consent and
   completion encryption bind `ExpiresAt.UTC().UnixNano()` into associated

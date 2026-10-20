@@ -70,8 +70,9 @@ type ProviderLimits struct {
 	MaxValueBytes int64
 }
 
-// ProviderInfo describes a provider and the dataset it serves. Orka reads it
-// at startup to validate a storage binding before it serves traffic.
+// ProviderInfo describes a provider and the dataset it serves. It exists for
+// startup validation of a storage binding, installation binding and
+// migration; Orka does not read it yet.
 type ProviderInfo struct {
 	// ContractVersion is the contract the provider implements, ContractVersion
 	// for this package.
