@@ -255,6 +255,7 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now().UTC()
 	}
+	run.StartedAt, run.CompletedAt = run.StartedAt.UTC(), utcTimePtr(run.CompletedAt)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO monitor_runs
 		 (id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id, phase,
@@ -272,6 +273,7 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 
 // UpdateMonitorRun updates a monitor run.
 func (s *Store) UpdateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
+	run.StartedAt, run.CompletedAt = run.StartedAt.UTC(), utcTimePtr(run.CompletedAt)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE monitor_runs
 		 SET trigger = ?, target_kind = ?, target_number = ?, target_sha = ?, command_event_id = ?, phase = ?,

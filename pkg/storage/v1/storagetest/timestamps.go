@@ -9,8 +9,9 @@ import (
 )
 
 // timestampNanos has a non-zero sub-microsecond part, so a provider that
-// stores microseconds or milliseconds changes it.
-var timestampNanos = time.Date(2026, time.March, 4, 5, 6, 7, 123456789, time.UTC)
+// stores microseconds or milliseconds changes it, and a non-UTC offset, so a
+// provider that keeps the caller's zone instead of returning UTC fails.
+var timestampNanos = time.Date(2026, time.March, 4, 5, 6, 7, 123456789, time.FixedZone("AEST", 10*60*60))
 
 // requireSameInstant checks that a stored time round-trips exactly, to the
 // nanosecond, and comes back in UTC.

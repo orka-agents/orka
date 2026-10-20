@@ -67,6 +67,51 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, fmt.Sprintf("task-%d", winner), got.ActiveTask, "the stored Session is the winner's")
 	})
 
+	t.Run("Session reads see one snapshot during appends", func(t *testing.T) {
+		provider := newProvider(t)
+		createSessionFixture(t, provider, "tenant-a", "busy", sessionsTypeTask, time.Now().UTC())
+		const appends = 50
+		failures := make(chan error, concurrentCallers)
+		appended := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			defer close(appended)
+			for i := range appends {
+				if err := provider.AppendMessages(t.Context(), "tenant-a", "busy", []storagev1.SessionMessage{
+					{ID: fmt.Sprintf("message-%d", i), Role: "user", Content: "hello"},
+				}); err != nil {
+					failures <- err
+					return
+				}
+			}
+		})
+		for range concurrentCallers - 1 {
+			wg.Go(func() {
+				for {
+					select {
+					case <-appended:
+						return
+					default:
+					}
+					session, err := provider.GetSession(t.Context(), "tenant-a", "busy")
+					if err != nil {
+						failures <- err
+						return
+					}
+					if session.MessageCount != len(session.Messages) {
+						failures <- fmt.Errorf("session reports %d messages but returned %d", session.MessageCount, len(session.Messages))
+						return
+					}
+				}
+			})
+		}
+		wg.Wait()
+		close(failures)
+		for err := range failures {
+			require.NoError(t, err)
+		}
+	})
+
 	t.Run("parallel chat turns admit one", func(t *testing.T) {
 		provider := newProvider(t)
 		expires := time.Now().UTC().Add(time.Hour)

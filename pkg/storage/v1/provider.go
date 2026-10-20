@@ -25,7 +25,9 @@
 // at a time, in an order consistent with when they were made. A method that
 // reads and then writes, such as claiming a gateway event, reserving a chat
 // turn or recording a terminal approval, keeps that guarantee across its read
-// and its write. A nil error means the change is durable: it survives a
+// and its write, and a method that returns several records, such as a Session
+// with its transcript, reads them from one snapshot. A nil error means the
+// change is durable: it survives a
 // provider restart and any failover the provider declares automatic (see
 // [DurabilityClass]). No operation or transaction spans state.v1 and
 // artifacts.v1.
@@ -36,7 +38,7 @@
 // callers can branch with errors.Is: [ErrNotFound], [ErrConflict] (including a
 // reused identifier), [ErrFenced], [ErrValidation] (including an invalid
 // cursor), [ErrTooLarge], [ErrCapacity], [ErrNotReady], or a family error such
-// as [ErrDuplicateMismatch]. A provider that could not run an operation
+// as [ErrDuplicateMismatch] or [ErrGatewaySessionCleanupPending]. A provider that could not run an operation
 // returns [ErrUnavailable] only when nothing was committed. When a write may
 // have committed, it returns [ErrOutcomeUnknown], never success.
 //

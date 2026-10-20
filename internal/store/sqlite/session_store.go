@@ -70,8 +70,22 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 
 // GetSession loads a session with all its messages.
 func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	var session *store.SessionRecord
+	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var err error
+		session, err = getSession(ctx, q, namespace, name)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+// getSession reads a Session and its transcript through q, which must be one
+// snapshot so the message count matches the messages returned.
+func getSession(ctx context.Context, q taskDataExecutor, namespace, name string) (*store.SessionRecord, error) {
 	session := &store.SessionRecord{}
-	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at
 		 FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
@@ -87,7 +101,7 @@ func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.
 		return nil, err
 	}
 
-	messages, err := s.LoadTranscript(ctx, namespace, name, 0)
+	messages, err := loadTranscriptFrom(ctx, q, namespace, name, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -923,7 +937,7 @@ func insertSessionMessagesTx(
 		if err != nil {
 			return 0, err
 		}
-		ts := msg.Timestamp
+		ts := msg.Timestamp.UTC()
 		if ts.IsZero() {
 			ts = time.Now().UTC()
 		}
@@ -1003,20 +1017,36 @@ func (s *Store) LoadTranscriptThrough(
 	namespace, name, throughMessageID string,
 	maxMessages int,
 ) ([]store.SessionMessage, error) {
-	var throughOrder int64
-	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT sort_order FROM session_messages
-		WHERE namespace = ? AND session_name = ? AND message_id = ?`,
-		namespace, name, throughMessageID,
-	).Scan(&throughOrder); errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	} else if err != nil {
-		return nil, err
-	}
-	return s.loadTranscript(ctx, namespace, name, throughOrder, maxMessages)
+	var messages []store.SessionMessage
+	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var throughOrder int64
+		if err := q.QueryRowContext(ctx, `SELECT sort_order FROM session_messages
+			WHERE namespace = ? AND session_name = ? AND message_id = ?`,
+			namespace, name, throughMessageID,
+		).Scan(&throughOrder); errors.Is(err, sql.ErrNoRows) {
+			return store.ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		var err error
+		messages, err = loadTranscriptFrom(ctx, q, namespace, name, throughOrder, maxMessages)
+		return err
+	})
+	return messages, err
 }
 
 func (s *Store) loadTranscript(
 	ctx context.Context,
+	namespace, name string,
+	throughOrder int64,
+	maxMessages int,
+) ([]store.SessionMessage, error) {
+	return loadTranscriptFrom(ctx, s.taskDataExecutor(ctx), namespace, name, throughOrder, maxMessages)
+}
+
+func loadTranscriptFrom(
+	ctx context.Context,
+	q taskDataExecutor,
 	namespace, name string,
 	throughOrder int64,
 	maxMessages int,
@@ -1039,7 +1069,7 @@ func (s *Store) loadTranscript(
 	} else {
 		query = `SELECT ` + baseColumns + ` FROM session_messages WHERE ` + where + ` ORDER BY sort_order, id`
 	}
-	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

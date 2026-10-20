@@ -3,14 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"time"
 )
-
-// ErrGatewaySessionCleanupPending leaves a new ingress event retryable while
-// retention is retiring its previous Session incarnation.
-var ErrGatewaySessionCleanupPending = errors.New("gateway session cleanup is pending")
 
 const GatewaySessionCleanupOperationPrefix = "gateway-retention-v1-"
 

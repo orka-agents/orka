@@ -260,6 +260,7 @@ var (
 	ErrOutcomeUnknown               = storagev1.ErrOutcomeUnknown
 	ErrFenced                       = storagev1.ErrFenced
 	ErrTooLarge                     = storagev1.ErrTooLarge
+	ErrGatewaySessionCleanupPending = storagev1.ErrGatewaySessionCleanupPending
 )
 
 func FencedErrorf(format string, args ...any) error {

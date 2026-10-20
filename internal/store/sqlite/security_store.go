@@ -1426,16 +1426,26 @@ func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchPr
 
 // ListPatchProposals lists patch proposals for a finding, newest first.
 func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
+	var proposals []store.PatchProposal
+	err := s.securityReadSnapshot(ctx, func(q securityDB) error {
+		var err error
+		proposals, err = listPatchProposals(ctx, q, namespace, findingID)
+		return err
+	})
+	return proposals, err
+}
+
+func listPatchProposals(ctx context.Context, q securityDB, namespace, findingID string) ([]store.PatchProposal, error) {
 	canonicalID := findingID
 	var duplicateOf string
-	if err := s.securityDB().QueryRowContext(ctx, `SELECT duplicate_of FROM security_findings WHERE namespace = ? AND id = ?`, namespace, findingID).Scan(&duplicateOf); err == nil {
+	if err := q.QueryRowContext(ctx, `SELECT duplicate_of FROM security_findings WHERE namespace = ? AND id = ?`, namespace, findingID).Scan(&duplicateOf); err == nil {
 		if strings.TrimSpace(duplicateOf) != "" {
 			canonicalID = duplicateOf
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	rows, err := s.securityDB().QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact,
 		        status, reason, pr_number, pr_url, publication_evidence_json, created_at, updated_at
 		 FROM security_patch_proposals

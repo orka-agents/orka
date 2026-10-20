@@ -292,6 +292,25 @@ func requireRejected(t *testing.T, err error) {
 func runGatewayEvents(t *testing.T, newProvider StateFactory) {
 	now := time.Now().UTC().Truncate(time.Second)
 
+	t.Run("admission waits while the target Session is being cleaned up", func(t *testing.T) {
+		p := newProvider(t)
+		event := gatewayEvent(now, eventsTenant, "cleanup-pending")
+		createControlSession(t, p, event.Namespace, event.SessionName, "chat")
+		_, err := p.PrepareSessionCleanup(t.Context(), storagev1.SessionCleanupIntent{
+			Namespace: event.Namespace, SessionName: event.SessionName, OperationID: "retire-session",
+			OperationDigest: controlDigest("retire-session"), PreparedAt: now,
+		})
+		require.NoError(t, err)
+
+		_, _, err = p.AdmitGatewayEvent(t.Context(), storagev1.GatewayEventAdmission{
+			Event: event, AppendUserMessage: true, PendingLimit: 100,
+		})
+		require.ErrorIs(t, err, storagev1.ErrGatewaySessionCleanupPending)
+		require.NotErrorIs(t, err, storagev1.ErrConflict, "a pending cleanup is retryable, not a rejection")
+		_, err = p.GetGatewayEvent(t.Context(), event.Namespace, event.ID)
+		require.ErrorIs(t, err, storagev1.ErrNotFound, "a deferred admission stores nothing")
+	})
+
 	t.Run("admission deduplicates the event and its transcript message", func(t *testing.T) {
 		p := newProvider(t)
 		event := gatewayEvent(now, eventsTenant, "dedupe")

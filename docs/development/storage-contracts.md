@@ -129,10 +129,15 @@ the observable parts.
   PostgreSQL provider at the default `READ COMMITTED` isolation could pass a
   serial suite and still let two dispatchers claim one gateway event, because
   claims, chat-turn reservations and terminal approvals read and then write.
-  The suite's concurrency cases release eight callers at once against Session
+  A method that returns several records, such as a Session with its
+  transcript, reads them from one snapshot; SQLite does this for `GetSession`,
+  `LoadTranscriptThrough`, `ReadSessionSoul`, `GetGatewayQueueStats` and
+  `ListPatchProposals`, the read methods found issuing more than one query. The
+  suite's concurrency cases release eight callers at once against Session
   creation, chat-turn reservation, deduplicated event appends, terminal
   approvals and gateway claims, and require exactly one winner (or one claim
-  per event).
+  per event). Another case reads a Session while messages are appended and
+  requires its message count to match the messages returned.
 - **Durability.** A nil error means the change survives a provider restart and
   any failover the provider declares automatic. `Describe` reports a
   `DurabilityClass` so Orka can refuse automatic continuation after a failover
@@ -149,7 +154,10 @@ the observable parts.
   `ErrNotFound`, `ErrConflict` (including a reused identifier or a duplicate
   dedupe key), `ErrFenced`, `ErrValidation` (including an invalid cursor),
   `ErrTooLarge`, `ErrCapacity`, `ErrNotReady`, or a family error such as
-  `ErrDuplicateMismatch`. A provider that could not run an operation returns
+  `ErrDuplicateMismatch` or `ErrGatewaySessionCleanupPending` (gateway
+  admission deferred while the target Session is being cleaned up; the
+  gateway answers 503 and the event is retried, unlike `ErrConflict`, which
+  rejects it). A provider that could not run an operation returns
   `ErrUnavailable` only when nothing was committed; when a write may have
   committed, it returns `ErrOutcomeUnknown` and never success. `ErrFenced`
   marks a stale controller epoch or owner: the caller must stop rather than
@@ -183,8 +191,10 @@ the observable parts.
   data, and usage pull-request observations key on a nanosecond time, so a
   provider that rounds to microseconds (PostgreSQL `timestamptz`, for example)
   must store the nanoseconds separately. The suite round-trips nanosecond
-  times through Sessions, transcripts, gateway events, outbox projections,
-  monitor runs, scan runs and the workflow families.
+  times given in a non-UTC zone through Sessions, transcripts, gateway events,
+  outbox projections, monitor runs and scan runs, and nanosecond UTC times
+  through the workflow families. SQLite stores these times in UTC because its
+  queries compare times as text.
 - **Records are not the wire format.** Records carry JSON tags for Orka's API.
   Persisted fields such as gateway claim ownership, lease expiry, the frozen
   Task tool policy, usage phase history, scan-run cancellation state and

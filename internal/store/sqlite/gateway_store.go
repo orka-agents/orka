@@ -187,6 +187,10 @@ func prepareGatewayEventAdmission(admission store.GatewayEventAdmission) (store.
 	if event.ExpiresAt.IsZero() {
 		return store.GatewayEvent{}, false, "", time.Time{}, store.ValidationErrorf("gateway event expiresAt is required")
 	}
+	// SQL compares these times as text, so every stored time shares one zone.
+	event.UpdatedAt, event.ReceivedAt = event.UpdatedAt.UTC(), event.ReceivedAt.UTC()
+	event.NextAttemptAt, event.ExpiresAt = event.NextAttemptAt.UTC(), event.ExpiresAt.UTC()
+	event.OccurredAt, event.CompletedAt = utcTimePtr(event.OccurredAt), utcTimePtr(event.CompletedAt)
 	appendUserMessage := admission.AppendUserMessage
 	if appendUserMessage {
 		event.State = store.GatewayEventQueued
@@ -1563,14 +1567,20 @@ func (s *Store) RetryGatewayDelivery(ctx context.Context, namespace, id string, 
 func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (store.GatewayQueueStats, error) {
 	var stats store.GatewayQueueStats
 	var oldestEvent, oldestDelivery sqliteNullableTime
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), MIN(received_at) FROM gateway_events
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return stats, err
+	}
+	// One snapshot keeps the event and delivery counts consistent.
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), MIN(received_at) FROM gateway_events
 		WHERE (? = '' OR namespace = ?) AND state IN (?, ?, ?, ?)`,
 		namespace, namespace, store.GatewayEventAccepted, store.GatewayEventQueued,
 		store.GatewayEventDispatching, store.GatewayEventTaskCreated,
 	).Scan(&stats.PendingEvents, &oldestEvent); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), MIN(next_attempt_at) FROM gateway_deliveries
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), MIN(next_attempt_at) FROM gateway_deliveries
 		WHERE (? = '' OR namespace = ?) AND state IN (?, ?, ?)`,
 		namespace, namespace, store.GatewayDeliveryPending, store.GatewayDeliveryRetryScheduled, store.GatewayDeliverySending,
 	).Scan(&stats.PendingDeliveries, &oldestDelivery); err != nil {

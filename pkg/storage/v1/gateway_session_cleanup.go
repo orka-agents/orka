@@ -2,8 +2,15 @@ package v1
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrGatewaySessionCleanupPending is returned by gateway admission while a
+// Session cleanup intent is retiring the target Session's previous
+// incarnation. Nothing is committed, and the caller retries the event later.
+// It is distinct from ErrConflict, which rejects the event.
+var ErrGatewaySessionCleanupPending = errors.New("gateway session cleanup is pending")
 
 // GatewaySessionCleanupProof freezes the owner and retention boundary of one
 // Gateway transcript. It is internal cleanup authority, never a Session API flag.
