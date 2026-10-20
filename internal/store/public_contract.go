@@ -164,6 +164,12 @@ type (
 	UsageFilter                               = storagev1.UsageFilter
 	UsageData                                 = storagev1.UsageData
 	UsageStore                                = storagev1.UsageStore
+	Memory                                    = storagev1.Memory
+	MemoryFilter                              = storagev1.MemoryFilter
+	MemoryProposal                            = storagev1.MemoryProposal
+	MemoryProposalFilter                      = storagev1.MemoryProposalFilter
+	MemoryProposalReview                      = storagev1.MemoryProposalReview
+	MemoryStore                               = storagev1.MemoryStore
 	TaskUsageObservationReader                = storagev1.TaskUsageObservationReader
 )
 
@@ -243,6 +249,15 @@ const (
 	UsagePRCreated                    = storagev1.UsagePRCreated
 	UsagePRAssisted                   = storagev1.UsagePRAssisted
 	UsagePRReview                     = storagev1.UsagePRReview
+	MemorySourceManual                = storagev1.MemorySourceManual
+	MemorySourceProposal              = storagev1.MemorySourceProposal
+	MemoryProposalTypeSkill           = storagev1.MemoryProposalTypeSkill
+	MemoryProposalTypeMemory          = storagev1.MemoryProposalTypeMemory
+	MemoryProposalStatusPending       = storagev1.MemoryProposalStatusPending
+	MemoryProposalStatusAccepted      = storagev1.MemoryProposalStatusAccepted
+	MemoryProposalStatusRejected      = storagev1.MemoryProposalStatusRejected
+	MemoryProposalStatusArchived      = storagev1.MemoryProposalStatusArchived
+	MemoryProposalStatusApplied       = storagev1.MemoryProposalStatusApplied
 	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
 )
 

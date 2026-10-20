@@ -117,6 +117,9 @@ type StateProvider interface {
 	GatewayTaskCleanupReceiptMaintenanceStore
 	GatewaySessionCleanupCandidateStore
 
+	MemoryStore
+	MemoryProposalStore
+
 	SecurityStore
 	RepositoryMonitorStore
 	UsageStore

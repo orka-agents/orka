@@ -111,7 +111,8 @@ event vocabulary and two provider interfaces:
   writes, soul pinning and lineage), harness-v1 attempts, Session cleanup
   persistence, the controller epoch mirror, outbox persistence, Task Job
   revocations, execution events, gateway records, security records, repository
-  monitors and usage.
+  monitors, usage, and memories with their proposals (creation, review and
+  archiving; applying a proposal is still an embedded family).
 - `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
 
 `internal/store` keeps aliases for the moved names, so Orka callers keep their
@@ -280,7 +281,7 @@ store implements:
 | `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Snapshot bodies arrive in plaintext; SQLite encrypts them. |
 | `NativeSessionImportStore`, `SessionTurnPersistenceStore` | Native session bytes arrive in plaintext, including the native capture in turn finalization. |
 | `ConnectorCredentialStore`, `ConnectorConsentStore` | Tokens arrive in plaintext; SQLite performs row-bound sealing. |
-| `MemoryStore`, `MemoryProposalStore` | Proposal application calls `AuthorizeExistingMemory` inside the database transaction. |
+| `MemoryProposalStore.ApplyMemoryProposal` | Proposal application calls `AuthorizeExistingMemory` inside the database transaction. |
 | `TaskDataTransactionStore` transaction methods | Go callbacks run inside a database transaction. |
 | `SecurityStore.ApplyScanTaskIngestion` | Go callbacks run inside a database transaction. |
 | `harness.RuntimeSessionStore` | Its records are defined in `internal/harness`. |

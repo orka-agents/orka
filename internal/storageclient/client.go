@@ -26,21 +26,19 @@ import (
 // protected data (execution snapshots, native sessions, connector custody,
 // turn finalization with native capture) or run Orka callbacks inside a
 // database transaction (task data transactions, scan ingestion and memory
-// proposal application, which keeps the memory families here; the client
-// redacts memory content before it reaches them). Only the in-process SQLite
-// store implements Embedded, and it must be the same store that serves both
-// contracts so transaction-scoped contexts reach every participating record.
+// proposal application). Only the in-process SQLite store implements
+// Embedded, and it must be the same store that serves both contracts so
+// transaction-scoped contexts reach every participating record.
 type Embedded interface {
 	store.AgentExecutionSnapshotStore
 	store.AgentExecutionSnapshotLifecycleStore
 	store.NativeSessionImportStore
 	store.ConnectorCredentialStore
 	store.ConnectorConsentStore
-	store.MemoryStore
-	store.MemoryProposalStore
 	store.SessionTurnPersistenceStore
 	harness.RuntimeSessionStore
 
+	ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error)
 	WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error
 	WithAuthorizedTaskDataTransaction(
 		ctx context.Context,

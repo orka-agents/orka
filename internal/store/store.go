@@ -12,24 +12,12 @@ import (
 // definitive epoch authority failures do not carry this marker.
 var ErrControllerEpochMutationContention = errors.New("controller epoch mutation contention")
 
-// MemoryStore handles durable namespace-scoped memory persistence.
-type MemoryStore interface {
-	CreateMemory(ctx context.Context, memory *Memory) error
-	GetMemory(ctx context.Context, namespace, id string) (*Memory, error)
-	ListMemories(ctx context.Context, filter MemoryFilter) ([]Memory, error)
-	UpdateMemory(ctx context.Context, memory *Memory) error
-	DeleteMemory(ctx context.Context, namespace, id string) error
-	SetMemoryDisabled(ctx context.Context, namespace, id string, disabled bool) error
-}
-
-// MemoryProposalStore handles governance for worker-proposed memory/skill changes.
+// MemoryProposalStore adds proposal application to the provider contract's
+// proposal family. Application runs Orka's authorization callback inside the
+// embedded store's transaction.
 type MemoryProposalStore interface {
-	CreateMemoryProposal(ctx context.Context, proposal *MemoryProposal) error
-	GetMemoryProposal(ctx context.Context, namespace, id string) (*MemoryProposal, error)
-	ListMemoryProposals(ctx context.Context, filter MemoryProposalFilter) ([]MemoryProposal, error)
-	ReviewMemoryProposal(ctx context.Context, review MemoryProposalReview) error
+	storagev1.MemoryProposalStore
 	ApplyMemoryProposal(ctx context.Context, apply MemoryProposalApply) (*Memory, error)
-	ArchiveMemoryProposal(ctx context.Context, namespace, id string) error
 }
 
 // SecurityStore handles repository security scanning persistence. It extends

@@ -28,14 +28,14 @@ const (
 	defaultTranscriptSnippetLen = 360
 	maxTranscriptSnippetLen     = 1000
 
-	memorySourceProposal = "memory_proposal"
-	proposalTypeMemory   = "memory"
+	memorySourceProposal = store.MemorySourceProposal
+	proposalTypeMemory   = store.MemoryProposalTypeMemory
 
-	proposalStatusPending  = "pending"
-	proposalStatusAccepted = "accepted"
-	proposalStatusRejected = "rejected"
-	proposalStatusArchived = "archived"
-	proposalStatusApplied  = "applied"
+	proposalStatusPending  = store.MemoryProposalStatusPending
+	proposalStatusAccepted = store.MemoryProposalStatusAccepted
+	proposalStatusRejected = store.MemoryProposalStatusRejected
+	proposalStatusArchived = store.MemoryProposalStatusArchived
+	proposalStatusApplied  = store.MemoryProposalStatusApplied
 )
 
 type rowScanner interface {
@@ -57,7 +57,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.ID = "mem-" + uuid.NewString()
 	}
 	if memory.Source == "" {
-		memory.Source = "manual"
+		memory.Source = store.MemorySourceManual
 	}
 	now := time.Now()
 	if memory.CreatedAt.IsZero() {
@@ -305,7 +305,7 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	}
 	proposal.Type = strings.ToLower(strings.TrimSpace(proposal.Type))
 	if proposal.Type == "" {
-		proposal.Type = "skill"
+		proposal.Type = store.MemoryProposalTypeSkill
 	}
 	if strings.TrimSpace(proposal.Title) == "" {
 		return store.ValidationErrorf("title is required")
@@ -317,11 +317,11 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	if proposal.Status == "" {
 		proposal.Status = proposalStatusPending
 	}
-	if !isKnownProposalStatus(proposal.Status) {
-		return store.ValidationErrorf("invalid proposal status %q", proposal.Status)
+	if proposal.Status != proposalStatusPending {
+		return store.ValidationErrorf("a new proposal starts pending; status %q is recorded by review or apply", proposal.Status)
 	}
-	if proposal.Status == proposalStatusApplied && proposal.AppliedMemoryID == "" {
-		return store.ValidationErrorf("invalid applied proposal without applied memory id")
+	if field := proposalDecisionField(proposal); field != "" {
+		return store.ValidationErrorf("a new proposal cannot carry %s; review and apply record it", field)
 	}
 	now := time.Now()
 	if proposal.CreatedAt.IsZero() {
@@ -850,12 +850,25 @@ func normalizeProposalStatus(status string) string {
 	return strings.ToLower(strings.TrimSpace(status))
 }
 
-func isKnownProposalStatus(status string) bool {
-	switch normalizeProposalStatus(status) {
-	case proposalStatusPending, proposalStatusAccepted, proposalStatusRejected, proposalStatusArchived, proposalStatusApplied:
-		return true
+// proposalDecisionField names the first review or apply outcome a proposal
+// carries, or returns "" when it carries none.
+func proposalDecisionField(proposal *store.MemoryProposal) string {
+	switch {
+	case strings.TrimSpace(proposal.Reviewer) != "":
+		return "reviewer"
+	case strings.TrimSpace(proposal.ReviewNote) != "":
+		return "reviewNote"
+	case proposal.ReviewedAt != nil:
+		return "reviewedAt"
+	case proposal.AppliedMemoryID != "":
+		// Review and archive treat any nonempty ID, even whitespace, as applied.
+		return "appliedMemoryId"
+	case strings.TrimSpace(proposal.AppliedBy) != "":
+		return "appliedBy"
+	case proposal.AppliedAt != nil:
+		return "appliedAt"
 	default:
-		return false
+		return ""
 	}
 }
 

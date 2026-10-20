@@ -172,7 +172,7 @@ func (c *Client) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		return store.ValidationErrorf("memory is required")
 	}
 	memory.Content = redact.SensitiveText(memory.Content)
-	return c.Embedded.CreateMemory(ctx, memory)
+	return c.StateProvider.CreateMemory(ctx, memory)
 }
 
 // UpdateMemory redacts the memory content before storing it.
@@ -181,7 +181,7 @@ func (c *Client) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 		return store.ValidationErrorf("memory is required")
 	}
 	memory.Content = redact.SensitiveText(memory.Content)
-	return c.Embedded.UpdateMemory(ctx, memory)
+	return c.StateProvider.UpdateMemory(ctx, memory)
 }
 
 // CreateMemoryProposal redacts every free-text proposal field before storing
@@ -197,14 +197,14 @@ func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.Memor
 	proposal.Reviewer = redact.SensitiveText(proposal.Reviewer)
 	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
 	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
-	return c.Embedded.CreateMemoryProposal(ctx, proposal)
+	return c.StateProvider.CreateMemoryProposal(ctx, proposal)
 }
 
 // ReviewMemoryProposal redacts the reviewer and review note.
 func (c *Client) ReviewMemoryProposal(ctx context.Context, review store.MemoryProposalReview) error {
 	review.Reviewer = redact.SensitiveText(review.Reviewer)
 	review.ReviewNote = redact.SensitiveText(review.ReviewNote)
-	return c.Embedded.ReviewMemoryProposal(ctx, review)
+	return c.StateProvider.ReviewMemoryProposal(ctx, review)
 }
 
 // ApplyMemoryProposal redacts the applier identity before applying a proposal.

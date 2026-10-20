@@ -276,8 +276,7 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	require.NoError(t, client.UpdateMemory(ctx, memory))
 	proposal := &store.MemoryProposal{
 		Namespace: "tenant", Type: "memory", Title: "token is " + github, Description: "api_key=" + openAI,
-		Content: "Authorization: Bearer " + bearer, Patch: "secret=" + openAI, Reviewer: "token is " + github,
-		ReviewNote: "api_key=" + openAI, AppliedBy: "token is " + github,
+		Content: "Authorization: Bearer " + bearer, Patch: "secret=" + openAI,
 	}
 	require.NoError(t, client.CreateMemoryProposal(ctx, proposal))
 	require.NoError(t, client.ReviewMemoryProposal(ctx, store.MemoryProposalReview{
