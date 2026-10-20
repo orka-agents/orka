@@ -225,8 +225,9 @@ func TestOpenCodeProviderSessionProjectionValidatesImmutableAgentConfiguration(t
 		true,
 	)
 	request.Profile.ModelLimits = testOpenCodeModelLimits()
-	if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "systemPrompt") {
-		t.Fatalf("OpenCode systemPrompt projection error = %v, want rejection", err)
+	projection, err := profile.ProjectSession(request, paths, proxy)
+	if err != nil || projection.Instructions == nil || projection.Instructions.Content != request.AgentConfiguration.SystemPrompt || projection.Instructions.RelativePath != ".orka/agent-instructions.md" {
+		t.Fatalf("OpenCode native instruction projection failed: %v", err)
 	}
 
 	request.AgentConfiguration = nil
@@ -446,7 +447,7 @@ func TestOpenCodeDefaultProtocolLimitUsesRuntimeUpdateRate(t *testing.T) {
 	// 100/s protocol default; the controller enforced the advertised limit,
 	// broke the stream at the terminal event, and a completed prompt was lost
 	// as RuntimeLost. Every built-in runtime advertises the burst ceiling.
-	if got := defaultProtocolLimits(providerKindOpencode).MaxUpdateEventsPerSecond; got != runtimeMaxUpdateEventsPerSecond {
+	if got := defaultProtocolLimits().MaxUpdateEventsPerSecond; got != runtimeMaxUpdateEventsPerSecond {
 		t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, runtimeMaxUpdateEventsPerSecond)
 	}
 }

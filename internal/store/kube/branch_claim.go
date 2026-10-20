@@ -12,8 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var _ store.BranchClaimCreationStore = (*Store)(nil)
-
 // CreateBranchClaim creates the cluster-scoped canonical repository/ref claim.
 func (s *Store) CreateBranchClaim(ctx context.Context, claim *store.BranchClaim, fence store.ControllerEpochFence) (*store.BranchClaim, error) {
 	created, _, err := s.CreateBranchClaimWithResult(ctx, claim, fence)

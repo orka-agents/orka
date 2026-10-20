@@ -9,6 +9,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
@@ -267,6 +268,44 @@ func TestACPNoWorkspaceTerminalProjectionSettlesStatusAndFinalizer(t *testing.T)
 	}
 	if len(finalizerStore.reclaimRequests) != 1 || finalizerStore.reclaimRequests[0].TerminalProjectionID != projection.ID {
 		t.Fatalf("finalizer reclamation requests = %#v, want delivered projection %q", finalizerStore.reclaimRequests, projection.ID)
+	}
+}
+
+func TestACPOutboxProjectorClearsWaitingForApprovalOnTerminalPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: types.UID("task-uid")},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1},
+			Conditions: []metav1.Condition{{
+				Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionTrue, Reason: waitingForApprovalReasonPending,
+				Message: "waiting for approval a for deploy", LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	payload, err := json.Marshal(taskTerminalProjection{
+		Namespace: "default", Task: "task", TaskUID: "task-uid", Attempt: 1, Phase: corev1alpha1.TaskPhaseSucceeded,
+		Execution: corev1alpha1.TaskExecutionStatus{Attempt: 1, State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector := &ACPOutboxProjector{Client: kubeClient}
+	if _, err := projector.deliver(context.Background(), store.OutboxProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "task"}, updated); err != nil {
+		t.Fatal(err)
+	}
+	waiting := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeWaitingForApproval)
+	if waiting == nil || waiting.Status != metav1.ConditionFalse || waiting.Reason != "TaskSucceeded" || waiting.Message != taskTerminalMessage {
+		t.Fatalf("WaitingForApproval = %+v, want False after the terminal projection", waiting)
 	}
 }
 

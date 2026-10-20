@@ -98,6 +98,8 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 
 // Reconcile validates one exact external runtime and publishes condition-ready status.
+//
+//nolint:gocyclo // Registration, conformance, and readiness are reconciled as one lifecycle.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	runtime := &corev1alpha1.AgentRuntime{}
@@ -463,7 +465,7 @@ func (r *AgentRuntimeReconciler) releaseUncommittedAgentRuntimeCleanupFinalizer(
 		return false, fmt.Errorf("list Tasks for uncommitted AgentRuntime cleanup recovery: %w", err)
 	}
 	for i := range tasks.Items {
-		binding := executionBinding(&tasks.Items[i], corev1alpha1.AgentRuntimeContractHarnessV2)
+		binding := executionBinding(&tasks.Items[i])
 		if binding != nil && binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint &&
 			binding.RuntimeRef != nil && binding.RuntimeRef.Name == current.Name && binding.RuntimeRef.UID == current.UID {
 			return false, fmt.Errorf(
@@ -545,7 +547,7 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 	authority drainedAgentRuntimeTaskAuthority,
 	canRecordNewProof bool,
 ) (bool, error) {
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || binding.RuntimeRef.Name != authority.name || binding.RuntimeRef.UID != authority.uid {
 		return true, nil
@@ -1217,7 +1219,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	}
 	if !probe.Passed {
 		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "",
-			sanitizeAgentRuntimeStatusMessage(probe.Message)
+			sanitizeStatusMessage(probe.Message)
 	}
 	if err := r.requireCurrentAgentRuntimeAuthMaterial(ctx, runtime, auth); err != nil {
 		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
@@ -2213,10 +2215,10 @@ func observedCapabilitiesFromConformance(
 	observed := &corev1alpha1.AgentRuntimeObservedCapabilities{}
 	if capabilities := probe.ObservedCapabilities; capabilities != nil {
 		base := capabilities.CapabilitiesResponse
-		observed.ProtocolVersion = sanitizeAgentRuntimeCapabilityValue(base.Protocol)
-		observed.Transport = sanitizeAgentRuntimeCapabilityValue(base.Transport)
-		observed.ACPVersion = sanitizeAgentRuntimeCapabilityValue(base.ACPVersion)
-		observed.RuntimeProfileDigest = sanitizeAgentRuntimeCapabilityValue(string(base.RuntimeProfileDigest))
+		observed.ProtocolVersion = sanitizeStatusValue(base.Protocol, 512)
+		observed.Transport = sanitizeStatusValue(base.Transport, 512)
+		observed.ACPVersion = sanitizeStatusValue(base.ACPVersion, 512)
+		observed.RuntimeProfileDigest = sanitizeStatusValue(string(base.RuntimeProfileDigest), 512)
 		observed.ProfileDigestSchemaVersion = int32(base.ProfileDigestSchemaVersion)
 		limits := agentRuntimeObservedProtocolLimits(base.Limits)
 		observed.Limits = &limits
@@ -2235,23 +2237,23 @@ func observedCapabilitiesFromConformance(
 		}
 		if len(base.AdapterDigests) == 1 {
 			for name, digest := range base.AdapterDigests {
-				observed.AdapterName = sanitizeAgentRuntimeCapabilityValue(name)
-				observed.AdapterDigest = sanitizeAgentRuntimeCapabilityValue(digest)
+				observed.AdapterName = sanitizeStatusValue(name, 512)
+				observed.AdapterDigest = sanitizeStatusValue(digest, 512)
 			}
 		}
 		// Conformance already proved that the registered provider and model are
 		// members of the advertised capability sets. Persist that exact selected
 		// identity even when the runtime advertises additional supported values.
-		observed.ProviderKind = sanitizeAgentRuntimeCapabilityValue(registeredProfile.ProviderKind)
-		observed.Model = sanitizeAgentRuntimeCapabilityValue(registeredProfile.Model)
+		observed.ProviderKind = sanitizeStatusValue(registeredProfile.ProviderKind, 512)
+		observed.Model = sanitizeStatusValue(registeredProfile.Model, 512)
 	}
 	if status := probe.ObservedStatus; status != nil {
-		observed.RuntimeInstanceID = sanitizeAgentRuntimeCapabilityValue(string(status.Fence.RuntimeInstanceID))
-		observed.SupervisorBootID = sanitizeAgentRuntimeCapabilityValue(string(status.Fence.SupervisorBootID))
+		observed.RuntimeInstanceID = sanitizeStatusValue(string(status.Fence.RuntimeInstanceID), 512)
+		observed.SupervisorBootID = sanitizeStatusValue(string(status.Fence.SupervisorBootID), 512)
 		observed.ControllerEpoch = int64(status.Fence.ControllerEpoch)
-		observed.RuntimePoolUID = sanitizeAgentRuntimeCapabilityValue(string(status.Fence.RuntimePoolUID))
+		observed.RuntimePoolUID = sanitizeStatusValue(string(status.Fence.RuntimePoolUID), 512)
 		observed.RuntimePoolGeneration = int64(status.Fence.RuntimePoolGeneration)
-		observed.Lifecycle = sanitizeAgentRuntimeCapabilityValue(string(status.Lifecycle))
+		observed.Lifecycle = sanitizeStatusValue(string(status.Lifecycle), 512)
 	}
 	return observed
 }
@@ -2312,7 +2314,7 @@ func (r *AgentRuntimeReconciler) writeAgentRuntimeStatus(
 	runtime.Status.ObservedControllerAuthRefResourceVersion = controllerAuthResourceVersion
 	runtime.Status.ObservedOperationCapabilityRefResourceVersion = capabilityAuthResourceVersion
 	runtime.Status.LastValidated = &now
-	runtime.Status.Message = sanitizeAgentRuntimeStatusMessage(message)
+	runtime.Status.Message = sanitizeStatusMessage(message)
 	condition := metav1.Condition{
 		Type:               agentRuntimeReadyCondition,
 		ObservedGeneration: runtime.Generation,
@@ -2339,16 +2341,6 @@ func sanitizeAgentRuntimeEndpointForStatus(endpoint string) string {
 		return events.RedactExecutionEventText(strings.TrimSpace(endpoint))
 	}
 	return parsed.Scheme + "://" + parsed.Host
-}
-
-func sanitizeAgentRuntimeStatusMessage(message string) string {
-	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
-}
-
-func sanitizeAgentRuntimeCapabilityValue(value string) string {
-	value = events.RedactExecutionEventText(strings.TrimSpace(value))
-	return truncateUTF8(strings.ToValidUTF8(value, "�"), 512)
 }
 
 // SetupWithManager sets up the controller with the Manager.

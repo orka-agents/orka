@@ -486,7 +486,7 @@ func TestTaskStatusRendersPoolDeliveryAndUnknownReplayPolicy(t *testing.T) {
 	root := newRootCmd()
 	root.SetOut(&out)
 	root.SetErr(&out)
-	root.SetArgs([]string{"--server", server.URL, "--token", "test-token", "task", "status", "uncertain"})
+	root.SetArgs([]string{"--server", server.URL, "--token", "test-token", "task", "status", "uncertain", "--verbose"})
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}

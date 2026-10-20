@@ -1,17 +1,18 @@
 # Build stage
-FROM golang:1.27.1 AS builder
+FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
 
 WORKDIR /workspace
 
 # Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source
 COPY . .
 
 # Build the worker
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o worker ./workers/general
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -o worker ./workers/general
 
 # Runtime stage
 FROM alpine:3.24

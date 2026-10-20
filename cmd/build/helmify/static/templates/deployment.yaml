@@ -1,17 +1,13 @@
 {{- include "orka.validateControllerMode" . }}
 {{- include "orka.validateProviderProxyConfig" . }}
 {{- include "orka.validateSQLiteController" . }}
-{{- include "orka.validateAgentExecutionSnapshot" . }}
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
-{{- fail "controller.image.digest must be a sha256 digest" }}
-{{- end }}
-
-{{- if or (not .Values.publisher.enabled) (not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.publisher.image.digest | default ""))) }}
-{{- fail "publisher must be enabled with publisher.image.digest set when controller.mode=harness-v2" }}
+{{- $startupProbe := .Values.controller.startupProbe | default dict -}}
+{{- if not .Values.publisher.enabled }}
+{{- fail "publisher must be enabled when controller.mode=harness-v2" }}
 {{- end }}
 {{- if not .Values.store.persistence.enabled }}
 {{- fail "store.persistence.enabled must be true when controller.mode=harness-v2" }}
@@ -20,10 +16,6 @@
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.claudeImage" "ref" .Values.controller.acpRuntime.claudeImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.copilotImage" "ref" .Values.controller.acpRuntime.copilotImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.opencodeImage" "ref" .Values.controller.acpRuntime.opencodeImage) }}
-{{- if not .Values.providerProxy.enabled }}
-{{- fail "providerProxy.enabled must be true when controller.mode=harness-v2" }}
-{{- end }}
-
 {{- $gatewayCRDsReady := false -}}
 {{- if and .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
 {{- $gatewayClassCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gatewayclasses.gateway.orka.ai" -}}
@@ -89,18 +81,27 @@ spec:
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
-            - --watch-namespace={{ .Values.controller.watchNamespace }}
+            - --watch-namespace={{ include "orka.watchNamespace" . }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --controller-mode={{ .Values.controller.mode }}
             - {{ printf "--execution-mode-controller-usernames=%s" (include "orka.controllerUsername" .) | quote }}
             - --webhook-cert-path=/var/run/orka/webhook/tls
             - {{ printf "--webhook-cert-name=%s" .Values.webhooks.tls.certKey | quote }}
             - {{ printf "--webhook-cert-key=%s" .Values.webhooks.tls.privateKeyKey | quote }}
+            {{- if include "orka.webhookTLSGenerated" . }}
+            - {{ printf "--webhook-cert-rotation-secret=%s" (include "orka.webhookTLSSecretName" .) | quote }}
+            - {{ printf "--webhook-cert-rotation-webhook=%s" (include "orka.controllerWebhookName" .) | quote }}
+            - {{ printf "--webhook-cert-rotation-dns-name=%s.%s.svc" (include "orka.controllerWebhookServiceName" .) .Release.Namespace | quote }}
+            {{- end }}
             - --task-provenance-admission-enabled=true
             - {{ printf "--task-provenance-admission-trusted-users=%s" (include "orka.controllerUsername" .) | quote }}
             - --workspace-class-use-admission-enabled=true
 
             - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+            {{- if include "orka.agentExecutionSnapshotGenerated" . }}
+            - {{ printf "--agent-execution-snapshot-secret=%s" (include "orka.agentExecutionSnapshotSecretName" .) | quote }}
+            - {{ printf "--agent-execution-snapshot-secret-key=%s" (include "orka.agentExecutionSnapshotSecretKey" .) | quote }}
+            {{- end }}
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
 
@@ -131,9 +132,35 @@ spec:
             {{- if .Values.controller.acpRuntime.opencodeImage }}
             - {{ printf "--acp-opencode-runtime-image=%s" .Values.controller.acpRuntime.opencodeImage | quote }}
             {{- end }}
+            {{- with .Values.controller.acpRuntime.toolboxes }}
+            {{- if .enabled }}
+            - --acp-toolboxes-enabled=true
+            {{- if .allowedRegistries }}
+            - {{ printf "--acp-toolbox-allowed-registries=%s" (join "," .allowedRegistries) | quote }}
+            {{- end }}
+            {{- if .imagePullSecrets }}
+            - {{ printf "--acp-toolbox-image-pull-secrets=%s" (join "," .imagePullSecrets) | quote }}
+            {{- end }}
+            {{- if .nodeSelector }}
+            {{- $selector := list }}
+            {{- range $key, $value := .nodeSelector }}
+            {{- if not $value }}
+            {{- fail (printf "controller.acpRuntime.toolboxes.nodeSelector[%q] must have a non-empty value" $key) }}
+            {{- end }}
+            {{- if and (eq $key "kubernetes.io/os") (ne $value "linux") }}
+            {{- fail (printf "controller.acpRuntime.toolboxes.nodeSelector[%q]=%q conflicts with the Linux-only runtime Pods" $key $value) }}
+            {{- end }}
+            {{- $selector = append $selector (printf "%s=%s" $key $value) }}
+            {{- end }}
+            - {{ printf "--acp-toolbox-node-selector=%s" (join "," $selector) | quote }}
+            {{- end }}
+            - --acp-toolbox-mount-method={{ .mountMethod | default "copy" }}
+            {{- end }}
+            {{- end }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
             - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}
+            - --gateway-interim-messages-per-task={{ .Values.controller.gateway.interimMessagesPerTask }}
             - --gateway-max-records-per-gateway={{ .Values.controller.gateway.maxRecordsPerGateway }}
             - --gateway-max-rejected-records-per-gateway={{ .Values.controller.gateway.maxRejectedRecordsPerGateway }}
             - --gateway-event-expiry={{ .Values.controller.gateway.eventExpiry }}
@@ -143,6 +170,18 @@ spec:
             - --gateway-claim-lease={{ .Values.controller.gateway.claimLease }}
             - --gateway-poll-interval={{ .Values.controller.gateway.pollInterval }}
             - --gateway-batch-size={{ .Values.controller.gateway.batchSize }}
+            {{- with .Values.controller.connectors }}
+            {{- if .enabled }}
+            - --connectors-enabled=true
+            {{- if not .callbackBaseUrl }}
+            {{- fail "controller.connectors.callbackBaseUrl is required when controller.connectors.enabled=true" }}
+            {{- end }}
+            - {{ printf "--connector-callback-base-url=%s" .callbackBaseUrl | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if dig "dashboard" "enabled" false .Values.controller }}
+            - --dashboard-enabled=true
+            {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
             - {{ printf "--oidc-issuer=%s" .issuer | quote }}
@@ -243,6 +282,12 @@ spec:
             {{- if .monitorOperate }}
             - {{ printf "--context-token-monitor-operate-scopes=%s" .monitorOperate | quote }}
             {{- end }}
+            {{- if .connectorRead }}
+            - {{ printf "--context-token-connector-read-scopes=%s" .connectorRead | quote }}
+            {{- end }}
+            {{- if .connectorManage }}
+            - {{ printf "--context-token-connector-manage-scopes=%s" .connectorManage | quote }}
+            {{- end }}
             {{- if .skillRead }}
             - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}
             {{- end }}
@@ -296,8 +341,8 @@ spec:
             {{- end }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
-            - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
-            - --general-worker-image={{ .Values.workers.general.image.repository }}:{{ .Values.workers.general.image.tag }}
+            - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
+            - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
             - --ai-worker-service-account-name={{ include "orka.aiWorkerServiceAccountName" . }}
             - --vendor-worker-service-account-name={{ include "orka.vendorWorkerServiceAccountName" . }}
             - --container-worker-service-account-name={{ include "orka.containerWorkerServiceAccountName" . }}
@@ -310,32 +355,13 @@ spec:
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
             {{- if .Values.controller.executionWorkspace.dispatchEnabled }}
+            - --enable-workspace-provider-api=true
             - --acp-workspace-dispatch-enabled=true
             {{- end }}
-            {{- with .Values.controller.executionWorkspace }}
-            - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
-            {{- end }}
-            {{- with .Values.controller.agentSandbox }}
-            {{- if .enabled }}
-            - --agent-sandbox-enabled=true
-            {{- if .routerUrl }}
-            - {{ printf "--agent-sandbox-router-url=%s" .routerUrl | quote }}
-            {{- end }}
-            {{- if .defaultTemplate }}
-            - {{ printf "--agent-sandbox-default-template=%s" .defaultTemplate | quote }}
-            {{- end }}
-            - --agent-sandbox-warm-pool-policy={{ .warmPoolPolicy | default "disabled" }}
-            - --agent-sandbox-namespace-strategy={{ .namespaceStrategy | default "task" }}
-            - --agent-sandbox-claim-timeout={{ .claimTimeout | default "2m" }}
-            - --agent-sandbox-command-timeout={{ .commandTimeout | default "30m" }}
-            - --agent-sandbox-cleanup-policy={{ .cleanupPolicy | default "delete" }}
-            {{- end }}
-            {{- end }}
             {{- with .Values.controller.substrate }}
-            {{- if .enabled }}
-            - --substrate-enabled=true
+            {{- if .mcpToolsEnabled }}
+            - --substrate-mcp-tools-enabled=true
             {{- end }}
-            - --substrate-direct-egress-enabled={{ .directEgressEnabled | default false }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
             {{- if $substrateCredentials.existingSecret }}
             {{- if $substrateCredentials.certKey }}
@@ -410,36 +436,6 @@ spec:
                   name: {{ .Values.github.webhook.secretName | quote }}
                   key: {{ .Values.github.webhook.secretKey | quote }}
             {{- end }}
-            {{- if .Values.github.labelTrigger.agent }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_AGENT
-              value: {{ .Values.github.labelTrigger.agent | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.namespace }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE
-              value: {{ .Values.github.labelTrigger.namespace | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.gitSecret }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET
-              value: {{ .Values.github.labelTrigger.gitSecret | quote }}
-            {{- end }}
-            {{- if or .Values.github.webhook.secretName .Values.github.labelTrigger.agent .Values.github.labelTrigger.namespace .Values.github.labelTrigger.gitSecret .Values.github.labelTrigger.agents }}
-            {{- if .Values.github.labelTrigger.prefix }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_PREFIX
-              value: {{ .Values.github.labelTrigger.prefix | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.timeout }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT
-              value: {{ .Values.github.labelTrigger.timeout | quote }}
-            {{- end }}
-            {{- if .Values.github.labelTrigger.maxTurns }}
-            - name: ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS
-              value: {{ .Values.github.labelTrigger.maxTurns | quote }}
-            {{- end }}
-            {{- end }}
-            {{- range $action, $agent := .Values.github.labelTrigger.agents }}
-            - name: ORKA_GITHUB_LABEL_AGENT_{{ regexReplaceAll "[^A-Z0-9]+" (upper $action) "_" | trimAll "_" }}
-              value: {{ $agent | quote }}
-            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}
@@ -462,6 +458,13 @@ spec:
                   - {{ printf "--acp-upgrade-drain-trigger-url=http://127.0.0.1:%v%s" .Values.controller.acpRuntime.upgradeDrain.port "/acp/upgrade-drain" | quote }}
                   - {{ printf "--acp-upgrade-drain-trigger-timeout=%s" .Values.controller.acpRuntime.upgradeDrain.triggerTimeout | quote }}
           {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: {{ $startupProbe.failureThreshold | default 60 }}
+            periodSeconds: {{ $startupProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ $startupProbe.timeoutSeconds | default 1 }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -512,8 +515,7 @@ spec:
               readOnly: true
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
-              readOnly: true
-
+              readOnly: {{ if include "orka.webhookTLSGenerated" . }}false{{ else }}true{{ end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -576,12 +578,24 @@ spec:
         {{- end }}
         - name: agent-execution-snapshot-key
           secret:
-            secretName: {{ .Values.controller.agentExecutionSnapshot.existingSecret | quote }}
+            secretName: {{ include "orka.agentExecutionSnapshotSecretName" . | quote }}
             defaultMode: 0400
+            {{- if include "orka.agentExecutionSnapshotGenerated" . }}
+            # Empty until the controller mints the key on first start; the Pod
+            # must be able to start with the item absent.
+            optional: true
+            {{- end }}
             items:
-              - key: {{ .Values.controller.agentExecutionSnapshot.key | quote }}
+              - key: {{ include "orka.agentExecutionSnapshotSecretKey" . | quote }}
                 path: key
         - name: webhook-tls
+          {{- if include "orka.webhookTLSGenerated" . }}
+          # The API syncer publishes validated pairs here without waiting for
+          # kubelet Secret projection, using a memory-backed volume.
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+          {{- else }}
           secret:
             secretName: {{ .Values.webhooks.tls.existingSecret | quote }}
             defaultMode: 0400
@@ -590,7 +604,7 @@ spec:
                 path: {{ .Values.webhooks.tls.certKey | quote }}
               - key: {{ .Values.webhooks.tls.privateKeyKey | quote }}
                 path: {{ .Values.webhooks.tls.privateKeyKey | quote }}
-
+          {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

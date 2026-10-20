@@ -1,4 +1,5 @@
 ---
+sidebar_label: Installation ownership
 description: "Namespace and resource ownership for a harness v2 installation."
 ---
 
@@ -12,8 +13,13 @@ validation before work starts.
 
 ## Namespace identity
 
-Each controller watches exactly one non-empty namespace. Create that namespace
-with its installation label before starting the controller:
+Each controller watches exactly one non-empty namespace that carries the
+`orka.ai/controller-mode: harness-v2` label. On first start the controller
+labels an unlabeled namespace itself, so a Helm install with
+`--create-namespace` needs no preparation. A namespace labeled with any other
+mode fails startup. To require an operator-applied label instead, run the
+controller with `--claim-namespace-mode=false` and create the namespace with
+its label:
 
 ```bash
 kubectl create -f - <<'EOF'
@@ -26,19 +32,23 @@ metadata:
 EOF
 ```
 
-A missing or incompatible label fails startup. Existing unlabeled namespaces
-cannot be adopted in place. Do not relabel a namespace to take resources from
-another installation.
+:::warning[The claim is immutable]
+Each release installs a ValidatingAdmissionPolicy for its namespace. Once the
+label exists it can never change or be removed, and only that release's
+controller ServiceAccount may add it to an existing namespace. Do not relabel a
+namespace to take resources from another installation; create a new
+installation in a new namespace instead.
+:::
 
 The Helm release namespace must equal `controller.watchNamespace`.
 `controller.acpRuntime.namespace` must name a different namespace dedicated to
 that installation's runtime Pods. The controller's leader-election Lease lives
 in its watched namespace, and leader election is required.
 
-The [installation guide](../getting-started.md#install) includes the image
-digests, provider proxy, webhook certificate, snapshot key, and storage needed
-for a runnable deployment. The guarded Kustomize deployment uses
-`config/acp-production` and verifies namespace identity before writing resources.
+The [installation guide](installation.md) covers the images, provider proxy,
+webhook certificate, snapshot key, and storage needed for a runnable
+deployment. The guarded Kustomize deployment uses `config/acp-production` and
+verifies namespace identity before writing resources.
 
 ## Resource ownership
 

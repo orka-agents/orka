@@ -5,7 +5,7 @@ ARG FOUNDRY_ADAPTER_DIGEST
 
 FROM --platform=$TARGETPLATFORM ${FOUNDRY_RUNTIME_IMAGE} AS foundry
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS supervisor-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG FOUNDRY_RUNTIME_IMAGE
@@ -44,8 +44,8 @@ ARG FOUNDRY_ADAPTER_DIGEST
 LABEL org.opencontainers.image.title="Orka ACP Foundry runtime" \
       org.opencontainers.image.description="Orka harness v2 supervisor with a Foundry ACP child" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
-      io.orka.acp.provider="foundry" \
-      io.orka.acp.adapter.name="foundry-serve-acp"
+      ai.orka.acp.provider="foundry" \
+      ai.orka.acp.adapter.name="foundry-serve-acp"
 ENV ORKA_ACP_PROVIDER=foundry \
     ORKA_ACP_FOUNDRY_ADAPTER_DIGEST=${FOUNDRY_ADAPTER_DIGEST}
 COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime

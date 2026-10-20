@@ -8,18 +8,21 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-type remoteArtifactUploader struct {
+// RemoteArtifactUploader persists frozen workspace deltas through the
+// controller artifact API. A nil uploader means the artifact API is not
+// configured and write deltas fail closed.
+type RemoteArtifactUploader struct {
 	client *ArtifactClient
 }
 
-func NewRemoteArtifactUploader(client *ArtifactClient) (ArtifactUploader, error) {
+func NewRemoteArtifactUploader(client *ArtifactClient) (*RemoteArtifactUploader, error) {
 	if client == nil {
 		return nil, fmt.Errorf("artifact client is required")
 	}
-	return &remoteArtifactUploader{client: client}, nil
+	return &RemoteArtifactUploader{client: client}, nil
 }
 
-func (u *remoteArtifactUploader) UploadWorkspaceDelta(
+func (u *RemoteArtifactUploader) UploadWorkspaceDelta(
 	ctx context.Context,
 	request harnessv2.CreateWorkspaceDeltaRequest,
 	artifact []byte,

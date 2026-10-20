@@ -56,7 +56,7 @@ func (f *postP0FakeSessionStore) GetSession(ctx context.Context, namespace, name
 func (f *postP0FakeSessionStore) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	return nil, nil
 }
-func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
 	return nil, false, nil
 }
 func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {

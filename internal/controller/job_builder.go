@@ -10,6 +10,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -24,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	distributionref "github.com/distribution/reference"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
@@ -40,6 +44,20 @@ import (
 	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
+)
+
+const (
+	workerBinaryPath              = "/worker"
+	workerHomePath                = "/home/worker"
+	workerTempPath                = "/tmp"
+	runtimePoolTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	runtimePoolMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+	sessionDataVolumeName         = "session-data"
+	workspaceRootPath             = "/workspace"
+	// workerArtifactsDirEnv names the directory whose top-level files a
+	// worker uploads as Task artifacts; workers default to /tmp/artifacts.
+	workerArtifactsDirEnv = "ORKA_ARTIFACTS_DIR"
+	skillsVolumeName      = "skills"
 )
 
 const (
@@ -425,7 +443,7 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 	if len(prefix) > maxPrefixLength {
 		prefix = strings.Trim(prefix[:maxPrefixLength], "-")
 		if prefix == "" {
-			prefix = "task"
+			prefix = acpCancelLogKeyTask
 		}
 	}
 
@@ -435,8 +453,36 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
+	AISoul *resolvedAISoul
+
+	// GatewayReplyEligible is resolved from an exact durable event/TaskUID binding.
+	GatewayReplyEligible        bool
 	ResolvedApprovalsJSON       string
 	RepositoryMonitorValidation bool
+	// ConnectionBindings are the requester's Connections frozen for this
+	// dispatch; they are carried on the Job so recovery and the controller's
+	// connector endpoint judge the Job's own bindings, never a later freeze.
+	ConnectionBindings []corev1alpha1.ConnectionBinding
+	// Reader, when set, is the uncached reader the dispatch froze its
+	// bindings through; connector visibility and dispatch digests are read
+	// through the same reader so one Job never mixes revisions.
+	Reader client.Reader
+	// ConnectionBindingsFrozen marks ConnectionBindings as this dispatch's
+	// freeze: link modes come from them, and a connector tool whose policy
+	// no longer matches its binding fails the build so the dispatch retries.
+	ConnectionBindingsFrozen bool
+	// ConnectorToolDigests are the per-tool dispatch digests of the
+	// classification the freeze was made from; with a frozen dispatch,
+	// every tool must classify the same way again or the build fails.
+	ConnectorToolDigests map[string]string
+}
+
+// connectorReader is the reader connector dispatch data is derived from.
+func (b *JobBuilder) connectorReader(opts JobBuildOptions) client.Reader {
+	if opts.Reader != nil {
+		return opts.Reader
+	}
+	return b.Client
 }
 
 // Build creates a Job for the given Task.
@@ -449,7 +495,16 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
-	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent); err != nil {
+	if task.Spec.Type == corev1alpha1.TaskTypeAI {
+		if err := validatePreparedAISoul(task, agent, opts.AISoul); err != nil {
+			return nil, err
+		}
+	}
+	var promptOverride []string
+	if opts.AISoul != nil {
+		promptOverride = []string{literalKubernetesPrompt(opts.AISoul.Prompt)}
+	}
+	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent, promptOverride...); err != nil {
 		return nil, err
 	}
 
@@ -457,6 +512,10 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
+	container, err := b.buildContainerWithOptions(ctx, task, agent, provider, opts)
+	if err != nil {
+		return nil, err
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -481,7 +540,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
-						b.buildContainerWithOptions(ctx, task, agent, provider, opts),
+						container,
 					},
 				},
 			},
@@ -509,6 +568,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
 		b.addWorkspaceVolumes(job, task, validationTask)
+	} else if task.Spec.Type == corev1alpha1.TaskTypeAI {
+		addAIOutputWorkspace(job)
 	}
 
 	if taskNeedsWorkspaceInitContainer(task) {
@@ -579,13 +640,17 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 }
 
 // buildContainerWithOptions builds the main container for the Job.
-func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) corev1.Container {
+func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (corev1.Container, error) {
+	workerEnv, err := b.buildEnvVarsWithOptions(ctx, task, agent, provider, opts)
+	if err != nil {
+		return corev1.Container{}, err
+	}
 	container := corev1.Container{
-		Name:            "worker",
+		Name:            workerContainerName,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
-		Env:             b.buildEnvVarsWithOptions(ctx, task, agent, provider, opts),
+		Env:             workerEnv,
 		VolumeMounts:    []corev1.VolumeMount{},
 	}
 
@@ -593,7 +658,8 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
 		container.Image = b.AIWorkerImage
-		container.Command = []string{"/worker"}
+		container.ImagePullPolicy = platformImagePullPolicy(container.Image)
+		container.Command = []string{workerBinaryPath}
 		container.Args = []string{"--mode=ai"}
 	case corev1alpha1.TaskTypeContainer:
 		if task.Spec.Image != "" {
@@ -601,7 +667,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			if effectiveWorkspace(task) != nil {
 				container.WorkingDir = workspaceWorkingDir(task)
 				if !envVarExists(container.Env, "HOME") {
-					container.Env = append(container.Env, corev1.EnvVar{Name: "HOME", Value: "/home/worker"})
+					container.Env = append(container.Env, corev1.EnvVar{Name: "HOME", Value: workerHomePath})
 				}
 			}
 			if len(task.Spec.Command) > 0 {
@@ -626,7 +692,8 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			}
 		} else {
 			container.Image = b.GeneralWorkerImage
-			container.Command = []string{"/worker"}
+			container.ImagePullPolicy = platformImagePullPolicy(container.Image)
+			container.Command = []string{workerBinaryPath}
 			// Pass the user command as args to the worker binary
 			workerArgs := make([]string, 0, len(task.Spec.Command)+len(task.Spec.Args))
 			workerArgs = append(workerArgs, task.Spec.Command...)
@@ -638,10 +705,21 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 	// Add tmp volume mount for read-only root filesystem
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      runtimePoolTempVolume,
-		MountPath: "/tmp",
+		MountPath: workerTempPath,
 	})
 
-	return container
+	return container, nil
+}
+
+// platformImagePullPolicy refreshes mutable platform images and caches valid digest references.
+func platformImagePullPolicy(image string) corev1.PullPolicy {
+	named, err := distributionref.ParseNormalizedNamed(image)
+	if err == nil {
+		if _, pinned := named.(distributionref.Digested); pinned {
+			return corev1.PullIfNotPresent
+		}
+	}
+	return corev1.PullAlways
 }
 
 func resolveExecution(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *corev1alpha1.ExecutionSpec {
@@ -736,7 +814,7 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 }
 
 // buildEnvVarsWithOptions builds the environment variables for the container using additional options.
-func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) []corev1.EnvVar {
+func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) ([]corev1.EnvVar, error) {
 	baseEnv := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
@@ -768,6 +846,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
 	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
+	envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "")
 	envVars = setControllerEnvValue(envVars, workerenv.CoordinationEnabled, "")
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
@@ -806,19 +885,36 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
-		envVars = b.addAIEnvVars(ctx, envVars, task, agent, provider)
+		aiEnvVars, err := b.addAIEnvVars(ctx, envVars, task, agent, provider, opts)
+		if err != nil {
+			return nil, err
+		}
+		envVars = aiEnvVars
+		if opts.AISoul != nil {
+			envVars = setControllerEnvValue(envVars, workerenv.AISystemPrompt, literalKubernetesPrompt(opts.AISoul.Prompt))
+			envVars = setControllerEnvValue(envVars, workerenv.AIPrompt, literalKubernetesPrompt(opts.AISoul.UserPrompt))
+		}
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
+	frozenBindings := ""
+	if len(opts.ConnectionBindings) > 0 {
+		encoded, err := json.Marshal(opts.ConnectionBindings)
+		if err != nil {
+			return nil, fmt.Errorf("encode frozen connection bindings: %w", err)
+		}
+		frozenBindings = string(encoded)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.ConnectionBindings, frozenBindings)
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
 
-	return envVars
+	return envVars, nil
 }
 
 func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
@@ -838,9 +934,9 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 	// credentials, and certificate env vars are file paths whose source files are
 	// not mounted into worker Pods by the controller.
 	for _, name := range []string{
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		runtimePoolTelemetryEndpointEnv,
+		runtimePoolTracesEndpointEnv,
+		runtimePoolMetricsEndpointEnv,
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
@@ -972,15 +1068,16 @@ func setTransactionCredentialAuthorizationEnv(
 
 // aiConfig holds resolved AI configuration from provider, agent, and task.
 type aiConfig struct {
-	providerType    string
-	model           string
-	temperature     string
-	maxTokens       string
-	prompt          string
-	systemPrompt    string
-	baseURL         string
-	azureAPIVersion string
-	tools           []string
+	providerType        string
+	model               string
+	temperature         string
+	maxTokens           string
+	prompt              string
+	systemPrompt        string
+	baseURL             string
+	azureAPIVersion     string
+	azureDeploymentName string
+	tools               []string
 }
 
 // resolveAIConfig merges AI configuration from provider, agent, and task (in priority order).
@@ -994,6 +1091,7 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 		cfg.baseURL = providerCRD.Spec.BaseURL
 		if providerCRD.Spec.Azure != nil {
 			cfg.azureAPIVersion = providerCRD.Spec.Azure.APIVersion
+			cfg.azureDeploymentName = providerCRD.Spec.Azure.DeploymentName
 		}
 	}
 
@@ -1057,7 +1155,7 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 }
 
 // addCoordinationEnvVars appends coordination-related environment variables.
-func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
+func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, connectorWrite []string) []corev1.EnvVar {
 	agentNames := make([]string, 0, len(agent.Spec.Coordination.AllowedAgents))
 	for _, a := range agent.Spec.Coordination.AllowedAgents {
 		agentNames = append(agentNames, a.Name)
@@ -1081,13 +1179,27 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 	}).EnvVars() {
 		envVars = setControllerEnvValue(envVars, envVar.Name, envVar.Value)
 	}
-	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(agent.Spec.Coordination.ApprovalRequiredTools))
+	required := append([]string(nil), agent.Spec.Coordination.ApprovalRequiredTools...)
+	required = append(required, connectorWrite...)
+	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(sortedUnique(required)))
 }
+
+// workerContainerName is the Job container the worker runs in; the
+// controller reads the frozen dispatch policy from its environment.
+const workerContainerName = "worker"
+
+// ErrConnectorToolResolution marks a Job build that could not determine which
+// tools are connector-backed. It is transient: the Task controller requeues
+// rather than failing the Task.
+var ErrConnectorToolResolution = errors.New("connector tool resolution failed")
 
 // addAIEnvVars adds AI-specific environment variables
 func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
-	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
+	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider, opts JobBuildOptions) ([]corev1.EnvVar, error) {
 	cfg := resolveAIConfig(task, agent, providerCRD)
+	if opts.AISoul != nil {
+		cfg.systemPrompt = opts.AISoul.Prompt
+	}
 
 	// Resolve system prompt from ConfigMapRef if not already set inline
 	if cfg.systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.ConfigMapRef != nil {
@@ -1095,15 +1207,16 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	for _, envVar := range (workerenv.AIWorkerEnv{
-		Provider:        cfg.providerType,
-		Model:           cfg.model,
-		Temperature:     cfg.temperature,
-		MaxTokens:       cfg.maxTokens,
-		Prompt:          cfg.prompt,
-		SystemPrompt:    cfg.systemPrompt,
-		BaseURL:         cfg.baseURL,
-		AzureAPIVersion: cfg.azureAPIVersion,
-		ControllerMode:  string(b.ControllerMode),
+		Provider:            cfg.providerType,
+		Model:               cfg.model,
+		Temperature:         cfg.temperature,
+		MaxTokens:           cfg.maxTokens,
+		Prompt:              cfg.prompt,
+		SystemPrompt:        cfg.systemPrompt,
+		BaseURL:             cfg.baseURL,
+		AzureAPIVersion:     cfg.azureAPIVersion,
+		AzureDeploymentName: cfg.azureDeploymentName,
+		ControllerMode:      string(b.ControllerMode),
 	}).EnvVars() {
 		switch envVar.Name {
 		case workerenv.AITemperature, workerenv.AIMaxTokens:
@@ -1114,65 +1227,70 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			envVars = append(envVars, envVar)
 		}
 	}
+	// Reserve the deployment even when omitted, so Task env and Agent Secret
+	// EnvFrom cannot override Provider routing or the logical model default.
+	envVars = setControllerEnvValue(envVars, workerenv.AIAzureDeploymentName, cfg.azureDeploymentName)
 
-	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
+	cfg.tools = aitools.ResolveWithGatewayReply(task, agent, opts.GatewayReplyEligible)
+	coordinationConfigured := agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
 
-	// Auto-inject coordination tools when coordination is enabled, unless the
-	// task deliberately supplies a narrower explicit tool set.
-	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableCoordinationToolInjection {
-		for _, ct := range []string{
-			"delegate_task",
-			"wait_for_tasks",
-			"create_container_task",
-			"cancel_task",
-			"send_message",
-			"check_messages",
-			"recall_memory",
-			"remember",
-			"propose_memory",
-			"search_transcript",
-			"create_pull_request",
-			"list_pull_requests",
-			"check_pr_review_marker",
-			"check_pull_request_ci",
-			"merge_pull_request",
-			"auto_merge_pull_request",
-			"review_pull_request",
-			"post_review_comment",
-			"create_agent",
-			"delete_agent",
-			"update_plan",
-		} {
-			if !slices.Contains(cfg.tools, ct) {
-				cfg.tools = append(cfg.tools, ct)
-			}
-		}
-		if agent.Spec.Coordination.Autonomous && !slices.Contains(cfg.tools, "request_approval") {
-			cfg.tools = append(cfg.tools, "request_approval")
-		}
+	// Connector-backed write tools are hidden from readOnly links and
+	// otherwise always require approval. A read failure here fails the Job
+	// build so dispatch retries: starting the worker with a connector write
+	// tool advertised but missing from the approval set would let it run
+	// without the promised approval.
+	// Visibility, the approval set, and the dispatch digests all come from
+	// one classification against the registry the native worker resolves
+	// tools with; a dispatch that froze bindings supplies the link modes.
+	visible, connectorWrite, digests, err := nativeConnectorDispatch(ctx, b.connectorReader(opts), NativeWorkerToolRegistry(task, agent),
+		task, cfg.tools, opts.ConnectionBindings, opts.ConnectorToolDigests, opts.ConnectionBindingsFrozen)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
+	}
+	cfg.tools = visible
+	// Only an autonomous coordination Task can park on an approval and
+	// resume to execute the approved call; any other native Task would
+	// request approval and then finish without it. Such Tasks never see
+	// connector write tools at all: no write without a resumable approval.
+	if (!coordinationConfigured || !agent.Spec.Coordination.Autonomous) && len(connectorWrite) > 0 {
+		cfg.tools = withoutTools(cfg.tools, connectorWrite)
+		connectorWrite = nil
 	}
 
-	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
-	// so they can communicate with sibling tasks via send_message/check_messages
-	_, isChildTask := task.Labels[labels.LabelParentTask]
-	if isChildTask && !disableCoordinationToolInjection {
-		for _, ct := range []string{"send_message", "check_messages"} {
-			if !slices.Contains(cfg.tools, ct) {
-				cfg.tools = append(cfg.tools, ct)
-			}
+	// The tool list is always controller-owned, even when empty, so Task env
+	// and Agent Secret EnvFrom cannot supply it.
+	envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	if slices.Contains(cfg.tools, aitools.GatewayReplyToolName) {
+		envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
+	}
+	// The controller executes a connector-backed tool only as it was defined
+	// when the worker was dispatched with it. A write tool withdrawn above
+	// keeps no digest, so it can never be executed for this Job.
+	for name := range digests {
+		if !slices.Contains(cfg.tools, name) {
+			delete(digests, name)
 		}
 	}
+	frozenDigests := ""
+	if len(digests) > 0 {
+		encoded, err := json.Marshal(digests)
+		if err != nil {
+			return nil, fmt.Errorf("encode connector tool digests: %w", err)
+		}
+		frozenDigests = string(encoded)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.ConnectorToolDigests, frozenDigests)
 
-	if len(cfg.tools) > 0 {
-		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	if coordinationConfigured {
+		envVars = b.addCoordinationEnvVars(envVars, task, agent, connectorWrite)
+	} else if len(connectorWrite) > 0 {
+		envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(connectorWrite))
 	}
 
-	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		envVars = b.addCoordinationEnvVars(envVars, task, agent)
-	}
-
-	// Enable coordination in worker for child tasks so messaging tools are registered
-	if isChildTask && (agent == nil || agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled) {
+	// Child identity enables the coordination registry even when implicit tool
+	// injection is disabled, so explicitly selected coordination tools resolve to
+	// the platform implementations rather than Tool CRs.
+	if aitools.RegistersCoordinationTools(task, agent) && !coordinationConfigured {
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue})
 	}
 
@@ -1183,6 +1301,9 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			Value: fmt.Sprintf("%d", len(agent.Spec.Model.Fallbacks)),
 		})
 		for i, fb := range agent.Spec.Model.Fallbacks {
+			// Unresolvable configured slots must not retain a spoofed deployment.
+			deploymentKey := workerenv.FallbackAzureDeploymentNameKey(i)
+			envVars = setControllerEnvValue(envVars, deploymentKey, "")
 			// Resolve the fallback Provider CRD
 			fbProvider := &corev1alpha1.Provider{}
 			if err := b.Get(ctx, client.ObjectKey{
@@ -1198,9 +1319,10 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			}
 			if fbProvider.Spec.Azure != nil {
 				fallbackEnv.AzureAPIVersion = fbProvider.Spec.Azure.APIVersion
+				fallbackEnv.AzureDeploymentName = fbProvider.Spec.Azure.DeploymentName
 			}
 			envVars = append(envVars, fallbackEnv.EnvVars(i)...)
-
+			envVars = setControllerEnvValue(envVars, deploymentKey, fallbackEnv.AzureDeploymentName)
 		}
 	}
 
@@ -1218,7 +1340,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		})
 	}
 
-	return envVars
+	return envVars, nil
 }
 
 func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {
@@ -1272,8 +1394,8 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 				SecretName:  secretName,
 				DefaultMode: &defaultMode,
 				Items: []corev1.KeyToPath{{
-					Key:  "token",
-					Path: "token",
+					Key:  defaultACPWorkspaceCredentialKey,
+					Path: defaultACPWorkspaceCredentialKey,
 				}},
 			},
 		},
@@ -1473,9 +1595,9 @@ func reservedAIWorkerTelemetryEnvNames() []string {
 		workerenv.TraceParent,
 		workerenv.TraceState,
 		workerenv.TraceBaggage,
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		runtimePoolTelemetryEndpointEnv,
+		runtimePoolTracesEndpointEnv,
+		runtimePoolMetricsEndpointEnv,
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
@@ -1628,7 +1750,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 
 	// Add shared emptyDir volume for session data
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "session-data",
+		Name: sessionDataVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
@@ -1638,7 +1760,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "session-data",
+			Name:      sessionDataVolumeName,
 			MountPath: "/session",
 			ReadOnly:  true,
 		},
@@ -1648,12 +1770,8 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	transcriptURL := fmt.Sprintf("%s/internal/v1/sessions/%s/%s/transcript?taskName=%s",
 		b.ControllerURL, url.PathEscape(task.Namespace), url.PathEscape(sessionName), url.QueryEscape(task.Name))
 
-	volumeMounts := []corev1.VolumeMount{
-		{
-			Name:      "session-data",
-			MountPath: "/session",
-		},
-	}
+	volumeMounts := make([]corev1.VolumeMount, 0, 2)
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: sessionDataVolumeName, MountPath: "/session"})
 	// Always project a short-lived token exclusively into the trusted init container.
 	// This keeps transcript loading available even when the main pod disables automount.
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
@@ -1663,7 +1781,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 				Sources: []corev1.VolumeProjection{
 					{
 						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-							Path:              "token",
+							Path:              defaultACPWorkspaceCredentialKey,
 							ExpirationSeconds: new(int64(3600)),
 						},
 					},
@@ -1681,7 +1799,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	initContainer := corev1.Container{
 		Name:            "fetch-session",
 		Image:           b.InitImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.InitImage),
 		SecurityContext: b.buildContainerSecurityContext(),
 		Command:         []string{"sh", "-c", sessionTranscriptFetchCommand()},
 		Env: []corev1.EnvVar{
@@ -1754,9 +1872,9 @@ done`
 
 func workerReachableOTLPEndpointConfigured(getenv func(string) string) bool {
 	for _, name := range []string{
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		runtimePoolTelemetryEndpointEnv,
+		runtimePoolTracesEndpointEnv,
+		runtimePoolMetricsEndpointEnv,
 	} {
 		if isWorkerReachableOTLPEndpoint(getenv(name)) {
 			return true
@@ -1913,7 +2031,7 @@ func (b *JobBuilder) addWorkspaceEnvVars(
 	envVars = append(envVars,
 		corev1.EnvVar{Name: workerenv.GitConfigCount, Value: "1"},
 		corev1.EnvVar{Name: workerenv.GitConfigKey0, Value: "safe.directory"},
-		corev1.EnvVar{Name: workerenv.GitConfigValue0, Value: "/workspace"},
+		corev1.EnvVar{Name: workerenv.GitConfigValue0, Value: workspaceRootPath},
 	)
 	if ws.Branch != "" {
 		envVars = append(envVars, corev1.EnvVar{
@@ -1962,7 +2080,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
 			Name:      taskWorkspaceVolume,
-			MountPath: "/workspace",
+			MountPath: workspaceRootPath,
 			ReadOnly:  validationTask,
 		},
 	)
@@ -1976,7 +2094,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
 			Name:      runtimePoolHomeVolume,
-			MountPath: "/home/worker",
+			MountPath: workerHomePath,
 		},
 	)
 
@@ -1997,6 +2115,24 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 				corev1.VolumeMount{Name: volumeName, MountPath: "/secrets/git", ReadOnly: true},
 			)
 		}
+	}
+}
+
+// addAIOutputWorkspace gives an AI task without a repository a writable
+// /workspace, the default root of its file tools, and makes it the artifact
+// directory so files the agent writes at its top level become Task artifacts.
+func addAIOutputWorkspace(job *batchv1.Job) {
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name:         taskWorkspaceVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	container := &job.Spec.Template.Spec.Containers[0]
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      taskWorkspaceVolume,
+		MountPath: workspaceRootPath,
+	})
+	if !envVarExists(container.Env, workerArtifactsDirEnv) {
+		container.Env = append(container.Env, corev1.EnvVar{Name: workerArtifactsDirEnv, Value: workspaceRootPath})
 	}
 }
 
@@ -2125,15 +2261,15 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 	initContainer := corev1.Container{
 		Name:            workspacePreparationInitContainerName,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args:            []string{"--prepare-workspace-only"},
 		Env:             b.workspaceInitEnvVars(task, validationTask),
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: taskWorkspaceVolume, MountPath: "/workspace"},
-			{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
-			{Name: runtimePoolTempVolume, MountPath: "/tmp"},
+			{Name: taskWorkspaceVolume, MountPath: workspaceRootPath},
+			{Name: runtimePoolHomeVolume, MountPath: workerHomePath},
+			{Name: runtimePoolTempVolume, MountPath: workerTempPath},
 		},
 	}
 	if workspace := effectiveWorkspace(task); workspace != nil && workspace.ReadCredentialRef != nil {
@@ -2154,9 +2290,9 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationNetworkProbeContainer,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args: []string{
 			repositoryMonitorValidationNetworkProbeWorkerMode,
 			probeAddress,
@@ -2179,9 +2315,9 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationNetworkGateContainer,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args: []string{
 			repositoryMonitorValidationNetworkGateWorkerMode,
 			path.Join(repositoryMonitorValidationNetworkGateMount, repositoryMonitorValidationNetworkGateKey),
@@ -2236,9 +2372,9 @@ func (b *JobBuilder) addRepositoryMonitorValidationCommand(job *batchv1.Job, tas
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
 		Name:            repositoryMonitorValidationCommandContainer,
 		Image:           b.GeneralWorkerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args: []string{
 			repositoryMonitorValidationCommandWorkerMode,
 			sourcePath,
@@ -2299,9 +2435,9 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTas
 func workspaceWorkingDir(task *corev1alpha1.Task) string {
 	ws := effectiveWorkspace(task)
 	if ws != nil && ws.SubPath != "" {
-		return path.Join("/workspace", ws.SubPath)
+		return path.Join(workspaceRootPath, ws.SubPath)
 	}
-	return "/workspace"
+	return workspaceRootPath
 }
 
 // addSkillVolumes reads Skill CRs referenced by the agent and task, creates a ConfigMap
@@ -2418,7 +2554,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			Namespace: job.Namespace,
 			Labels: map[string]string{
 				labels.LabelTask:    labels.SelectorValue(task.Name),
-				labels.LabelPurpose: "skills",
+				labels.LabelPurpose: skillsVolumeName,
 				labels.LabelManaged: scheduledRunLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{
@@ -2443,12 +2579,12 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			}
 		}
 	} else {
-		logger.Info("Created skill ConfigMap", "configmap", skillCM.Name, "skills", len(skillRefs))
+		logger.Info("Created skill ConfigMap", "configmap", skillCM.Name, skillsVolumeName, len(skillRefs))
 	}
 
 	// Mount the ConfigMap into the worker pod
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "skills",
+		Name: skillsVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{
@@ -2461,7 +2597,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "skills",
+			Name:      skillsVolumeName,
 			MountPath: "/workspace/.skills",
 			ReadOnly:  true,
 		},
@@ -2478,7 +2614,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 // message instead of a dead container.
 const maxContainerDeliveredPromptBytes = 110 * 1024
 
-func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, promptOverride ...string) error {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
 		// Only AI worker Jobs export prompts through the process
 		// environment; a container Task's unused optional prompt fields must
@@ -2499,6 +2635,9 @@ func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, t
 	systemPrompt := ""
 	if task.Spec.AI != nil {
 		systemPrompt = task.Spec.AI.SystemPrompt
+	}
+	if len(promptOverride) > 0 {
+		systemPrompt = promptOverride[0]
 	}
 	if systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil {
 		systemPrompt = agent.Spec.SystemPrompt.Inline

@@ -30,13 +30,35 @@ spec:
     expression: "'VENDOR_WORKER_SA'"
   - name: containerWorkerServiceAccount
     expression: "'CONTAINER_WORKER_SA'"
+  - name: garbageCollector
+    expression: >-
+      request.userInfo.username in [
+        'system:serviceaccount:kube-system:generic-garbage-collector',
+        'system:serviceaccount:kube-system:garbage-collector',
+        'system:kube-controller-manager']
+  # The API server may rewrite managedFields while applying the finalizer patch.
+  # All other Task content and metadata must remain unchanged.
+  - name: foregroundFinalizerRemoval
+    expression: >-
+      request.operation == 'UPDATE' &&
+      (!has(request.subResource) || request.subResource == '') &&
+      variables.garbageCollector &&
+      has(oldObject.metadata.deletionTimestamp) && oldObject.metadata.deletionTimestamp != null &&
+      has(oldObject.metadata.finalizers) && 'foregroundDeletion' in oldObject.metadata.finalizers &&
+      (has(object.metadata.finalizers) ? object.metadata.finalizers : []) ==
+        oldObject.metadata.finalizers.filter(f, f != 'foregroundDeletion') &&
+      dyn(object).all(k, k == 'metadata' ||
+        (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+      dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) &&
+      dyn(object.metadata).all(k, k == 'finalizers' || k == 'managedFields' ||
+        (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+      dyn(oldObject.metadata).all(k, k == 'finalizers' || k == 'managedFields' || k in dyn(object.metadata))
   validations:
   - expression: >-
       (request.operation == 'DELETE' &&
-        (request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' ||
-         request.userInfo.username == 'system:serviceaccount:kube-system:garbage-collector' ||
-         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' ||
-         request.userInfo.username == 'system:kube-controller-manager')) ||
+        (variables.garbageCollector ||
+         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller')) ||
+      variables.foregroundFinalizerRemoval ||
       request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount ||
       request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount ||
       request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount ||

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestAIWorkerEnvRoundTrip(t *testing.T) {
@@ -54,7 +53,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 
 	parsed := ParseAIWorkerEnv(func(name string) string { return values[name] })
-	if err := parsed.ValidateRequired(); err != nil {
+	if err := parsed.ValidateRequired(false); err != nil {
 		t.Fatalf("ValidateRequired() returned error: %v", err)
 	}
 	if parsed.BaseEnv != env.BaseEnv {
@@ -216,16 +215,26 @@ func TestRequireTokenFileEnvUnset(t *testing.T) {
 
 func TestAIWorkerEnvValidateRequired(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		env  AIWorkerEnv
-		want string
+		name             string
+		env              AIWorkerEnv
+		hasSessionPrompt bool
+		want             string
 	}{
 		{name: "missing provider", env: AIWorkerEnv{Model: "m", Prompt: "p"}, want: AIProvider},
 		{name: "missing model", env: AIWorkerEnv{Provider: "p", Prompt: "prompt"}, want: AIModel},
 		{name: "missing prompt", env: AIWorkerEnv{Provider: "p", Model: "m"}, want: AIPrompt},
+		{name: "transcript prompt", env: AIWorkerEnv{Provider: "p", Model: "m"}, hasSessionPrompt: true},
+		{name: "transcript still requires provider", env: AIWorkerEnv{Model: "m"}, hasSessionPrompt: true, want: AIProvider},
+		{name: "transcript still requires model", env: AIWorkerEnv{Provider: "p"}, hasSessionPrompt: true, want: AIModel},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.env.ValidateRequired()
+			err := tt.env.ValidateRequired(tt.hasSessionPrompt)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -233,128 +242,6 @@ func TestAIWorkerEnvValidateRequired(t *testing.T) {
 				t.Fatalf("error = %q, want %q", err.Error(), tt.want+" is required")
 			}
 		})
-	}
-}
-
-func TestAgentSandboxEnvVarsDisabledReturnsEmpty(t *testing.T) {
-	if got := (AgentSandboxEnv{}).EnvVars(); len(got) != 0 {
-		t.Fatalf("disabled AgentSandboxEnv.EnvVars() length = %d, want 0", len(got))
-	}
-}
-
-func TestExecutionWorkspaceEnvRender(t *testing.T) {
-	env := ExecutionWorkspaceEnv{
-		Enabled:           true,
-		Provider:          "substrate",
-		TemplateName:      "orka-codex",
-		TemplateNamespace: "ate-demo",
-		ClaimNamespace:    "ate-demo",
-		ClaimName:         "orka-s-abc",
-		ReusePolicy:       "session",
-		ReuseKey:          "session-1",
-		CleanupPolicy:     "retain",
-		Boot:              true,
-		ClaimTimeout:      2 * time.Minute,
-		CommandTimeout:    30 * time.Minute,
-		StatusEndpoint:    "http://orka/internal/v1/tasks/default/task/execution-workspace/status",
-		Depth:             0,
-	}
-
-	values := map[string]string{}
-	for _, envVar := range env.EnvVars() {
-		values[envVar.Name] = envVar.Value
-	}
-
-	want := map[string]string{
-		ExecutionWorkspaceEnabled:               "true",
-		ExecutionWorkspaceProvider:              env.Provider,
-		ExecutionWorkspaceClaimName:             env.ClaimName,
-		ExecutionWorkspaceBoot:                  "true",
-		ExecutionWorkspaceClaimTimeoutSeconds:   "120",
-		ExecutionWorkspaceCommandTimeoutSeconds: "1800",
-		ExecutionWorkspaceStatusEndpoint:        env.StatusEndpoint,
-		ExecutionWorkspaceDepth:                 "0",
-	}
-	for name, wantValue := range want {
-		if values[name] != wantValue {
-			t.Fatalf("%s = %q, want %q", name, values[name], wantValue)
-		}
-	}
-}
-
-func TestSubstrateEnvRender(t *testing.T) {
-	env := SubstrateEnv{
-		APIEndpoint:             "api.ate-system.svc:443",
-		APICAFile:               "/var/run/orka/substrate/ca.crt",
-		APIInsecureSkipVerify:   true,
-		RouterURL:               "http://atenet-router.ate-system.svc",
-		ActorDNSSuffix:          "actors.resources.substrate.ate.dev",
-		SessionIdentityToken:    "session-identity-token",
-		SessionIdentityRequired: true,
-		SessionIdentityAudience: "orka-workspace-daemon,custom-audience",
-		SessionIdentityAppID:    "orka",
-		SessionIdentityUserID:   "orka-worker",
-	}
-
-	values := map[string]string{}
-	for _, envVar := range env.EnvVars() {
-		values[envVar.Name] = envVar.Value
-	}
-
-	want := map[string]string{
-		SubstrateAPIEndpoint:             env.APIEndpoint,
-		SubstrateAPIInsecureSkipVerify:   "true",
-		SubstrateRouterURL:               env.RouterURL,
-		SubstrateSessionIdentityToken:    env.SessionIdentityToken,
-		SubstrateSessionIdentityRequired: "true",
-		SubstrateSessionIdentityAudience: env.SessionIdentityAudience,
-		SubstrateSessionIdentityAppID:    env.SessionIdentityAppID,
-		SubstrateSessionIdentityUserID:   env.SessionIdentityUserID,
-	}
-	for name, wantValue := range want {
-		if values[name] != wantValue {
-			t.Fatalf("%s = %q, want %q", name, values[name], wantValue)
-		}
-	}
-}
-
-func TestAgentSandboxEnvRender(t *testing.T) {
-	env := AgentSandboxEnv{
-		Enabled:           true,
-		RouterURL:         "http://sandbox-router",
-		TemplateName:      "agent-template",
-		TemplateNamespace: "sandbox-system",
-		ClaimNamespace:    "sandbox-system",
-		ReusePolicy:       "session",
-		ReuseKey:          "session-1",
-		CleanupPolicy:     "retain",
-		WarmPoolPolicy:    "template",
-		NamespaceStrategy: "task",
-		ClaimTimeout:      2 * time.Minute,
-		CommandTimeout:    30 * time.Minute,
-	}
-
-	values := map[string]string{}
-	for _, envVar := range env.EnvVars() {
-		values[envVar.Name] = envVar.Value
-	}
-
-	want := map[string]string{
-		AgentSandboxEnabled:               "true",
-		AgentSandboxDepth:                 "0",
-		AgentSandboxTemplateName:          env.TemplateName,
-		AgentSandboxTemplateNamespace:     env.TemplateNamespace,
-		AgentSandboxClaimNamespace:        env.ClaimNamespace,
-		AgentSandboxReusePolicy:           env.ReusePolicy,
-		AgentSandboxReuseKey:              env.ReuseKey,
-		AgentSandboxCleanupPolicy:         env.CleanupPolicy,
-		AgentSandboxClaimTimeoutSeconds:   "120",
-		AgentSandboxCommandTimeoutSeconds: "1800",
-	}
-	for name, wantValue := range want {
-		if values[name] != wantValue {
-			t.Fatalf("%s = %q, want %q", name, values[name], wantValue)
-		}
 	}
 }
 

@@ -10,6 +10,7 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -44,7 +45,10 @@ func otelCollectorServiceAddr() string {
 }
 
 var _ = Describe("OpenTelemetry GenAI export", Ordered, Serial, func() {
-	var controllerSnapshot otelControllerSnapshot
+	var (
+		controllerSnapshot         otelControllerSnapshot
+		controllerTelemetryPatched bool
+	)
 
 	BeforeAll(func() {
 		By("snapshotting controller telemetry settings")
@@ -59,38 +63,57 @@ var _ = Describe("OpenTelemetry GenAI export", Ordered, Serial, func() {
 		waitForOTelDeploymentAvailable(otelFakeOpenAIName, 2*time.Minute)
 
 		By("enabling controller telemetry against the local collector")
+		controllerTelemetryPatched = true
 		enableControllerTelemetryForE2E(controllerSnapshot)
+
+		By("waiting for the controller API Service to be ready from a task-network Pod")
+		waitForOTelControllerAPIReady()
 	})
 
 	AfterAll(func() {
 		By("cleaning up OpenTelemetry GenAI test resources")
 		cmd := exec.Command("kubectl", "delete", "tasks", "-l", fmt.Sprintf("orka.ai/parent-task=%s", otelTopologyTaskName), "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		for _, resource := range []struct {
+		type otelResource struct {
 			kind string
 			name string
-		}{
-			{kind: "task", name: otelTaskName},
-			{kind: "task", name: otelTopologyTaskName},
-			{kind: "agent", name: otelTopologyCoordAgent},
-			{kind: "agent", name: otelTopologyWorkerAgent},
-			{kind: "provider", name: otelTopologyProviderName},
-			{kind: "secret", name: otelTopologyProviderAuthRefName},
-			{kind: "provider", name: otelProviderName},
-			{kind: "secret", name: otelProviderAuthRefName},
-			{kind: "deployment", name: otelCollectorName},
-			{kind: "service", name: otelCollectorName},
-			{kind: "configmap", name: otelCollectorName + "-config"},
-			{kind: "deployment", name: otelFakeOpenAIName},
-			{kind: "service", name: otelFakeOpenAIName},
-			{kind: "configmap", name: otelFakeOpenAIName + "-server"},
-		} {
-			cmd := exec.Command("kubectl", "delete", resource.kind, resource.name, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
 		}
+		deleteOTelResources := func(resources ...otelResource) {
+			for _, resource := range resources {
+				cmd := exec.Command("kubectl", "delete", resource.kind, resource.name, "-n", namespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			}
+		}
+		deleteOTelResources(
+			otelResource{kind: "task", name: otelTaskName},
+			otelResource{kind: "task", name: otelTopologyTaskName},
+			otelResource{kind: "agent", name: otelTopologyCoordAgent},
+			otelResource{kind: "agent", name: otelTopologyWorkerAgent},
+			otelResource{kind: "provider", name: otelTopologyProviderName},
+			otelResource{kind: "secret", name: otelTopologyProviderAuthRefName},
+			otelResource{kind: "provider", name: otelProviderName},
+			otelResource{kind: "secret", name: otelProviderAuthRefName},
+		)
+
+		// The readiness probe below runs in the fake OpenAI Pod, so delete these
+		// last, and also when the restore or the probe fails.
+		defer deleteOTelResources(
+			otelResource{kind: "deployment", name: otelCollectorName},
+			otelResource{kind: "service", name: otelCollectorName},
+			otelResource{kind: "configmap", name: otelCollectorName + "-config"},
+			otelResource{kind: "deployment", name: otelFakeOpenAIName},
+			otelResource{kind: "service", name: otelFakeOpenAIName},
+			otelResource{kind: "configmap", name: otelFakeOpenAIName + "-server"},
+		)
 
 		By("restoring controller telemetry settings")
 		restoreOTelControllerSnapshot(controllerSnapshot)
+		if controllerTelemetryPatched {
+			// Restoring restarts the controller just as enabling did, so the
+			// next spec's workers need the same API readiness.
+			By("waiting for the restored controller API Service to be ready from a task-network Pod")
+			waitForOTelControllerAPIReady()
+		}
 	})
 
 	AfterEach(func() {
@@ -283,6 +306,30 @@ func waitForOTelDeploymentAvailable(name string, timeout time.Duration) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "deployment %s did not become available", name)
 }
 
+func waitForOTelControllerAPIReady() {
+	// Rollout readiness probes the manager directly on 8081. Workers use the
+	// API Service on 8080, whose routes can lag a Recreate rollout. Probe that
+	// path from an existing Pod, not through an API-server proxy or port-forward.
+	endpoint := fmt.Sprintf("http://%s.%s.svc:8080/readyz", controllerAPIService, namespace)
+	const probe = `import sys, urllib.request
+with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
+    print(response.read().decode("utf-8"))
+`
+	Eventually(func(g Gomega) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "kubectl", "exec", "deployment/"+otelFakeOpenAIName,
+			"-n", namespace, "-c", "fake-openai", "--", "python", "-c", probe, endpoint)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred(), "controller API Service is not ready from the task network")
+		var ready struct {
+			Status string `json:"status"`
+		}
+		g.Expect(json.Unmarshal([]byte(output), &ready)).To(Succeed())
+		g.Expect(ready.Status).To(Equal("ok"))
+	}, 30*time.Second, time.Second).Should(Succeed())
+}
+
 func createOTelSecretOrFail(name string, data map[string]string) {
 	cmd := exec.Command("kubectl", "delete", "secret", name, "-n", namespace, "--ignore-not-found")
 	_, _ = utils.Run(cmd)
@@ -375,6 +422,15 @@ func patchOTelControllerManager(deploymentName string, containerIndex int, args 
 	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+deploymentName, "-n", namespace, "--timeout=5m")
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed waiting for controller-manager rollout")
+
+	// The rollout reports done once the new Pod is Ready, which can precede
+	// both the API listener and the Service endpoints; a worker started in
+	// that window fails its first API call. Wait until the API answers
+	// through its Service.
+	EventuallyWithOffset(1, func() error {
+		_, err := fetchServiceProxyBody(namespace, controllerAPIService, 8080, "/healthz")
+		return err
+	}, 2*time.Minute, time.Second).Should(Succeed(), "controller API did not answer through its Service after the rollout")
 }
 
 type otelEnvVar struct {

@@ -13,7 +13,6 @@ import (
 )
 
 var _ store.ExternalEffectStore = (*Store)(nil)
-var _ store.ExternalEffectIdentityReader = (*Store)(nil)
 
 // ReserveExternalEffect creates or returns a durable same-digest effect identity.
 func (s *Store) ReserveExternalEffect(ctx context.Context, request store.ReserveExternalEffectRequest) (*store.ExternalEffect, error) {

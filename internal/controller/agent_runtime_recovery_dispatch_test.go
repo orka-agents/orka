@@ -224,6 +224,10 @@ func (*missingRuntimeExposureStore) GetExternalEffect(context.Context, string) (
 	return nil, store.ErrNotFound
 }
 
+func (*missingRuntimeExposureStore) GetExternalEffectByIdentity(context.Context, store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
+	return nil, store.ErrNotFound
+}
+
 func TestAgentRuntimeRecoveryFirstEnrollmentAtOldEpoch(t *testing.T) {
 	f := newRuntimeRecoveryFixture(t)
 	f.advanceEpoch(t)

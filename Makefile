@@ -1,7 +1,6 @@
-# Current application release version. Chart.yaml has its own version and may
-# advance independently for chart-only changes. Release preparation aligns both
-# versions for a tagged application release.
-VERSION := v0.1.1
+# Source checkouts are development builds. Release preparation stamps the
+# requested application and chart versions on the release branch.
+VERSION ?= v0.0.0-dev
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
@@ -63,9 +62,11 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen kustomize ## Generate canonical and staged manifests.
+manifests: controller-gen kustomize workspace-crds ## Generate canonical and staged manifests.
 	# A module pattern excludes nested provider checkouts used by local conformance.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
+	# controller-gen leaves removed kinds behind; Core no longer serves these provider APIs.
+	rm -f config/crd/bases/acp.workspace.orka.ai_*.yaml config/crd/bases/fake.workspace.orka.ai_*.yaml
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -92,10 +93,18 @@ manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 		trap - EXIT; \
 		if [[ -n "$$backup" ]]; then rm -rf "$$backup"; fi
 
+.PHONY: workspace-crds
+workspace-crds: ## Source workspace CRDs from the pinned shared module.
+	go mod download github.com/orka-agents/orka-workspace
+	@set -euo pipefail; \
+		workspace_module_dir="$$(go list -m -f '{{.Dir}}' github.com/orka-agents/orka-workspace)"; \
+		rm -f config/crd/bases/workspace.orka.ai_*.yaml; \
+		cp "$$workspace_module_dir"/config/crd/bases/workspace.orka.ai_*.yaml config/crd/bases/
+
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
 	@test -n "$(NEWVERSION)" || { echo "NEWVERSION is required" >&2; exit 2; }
-	python3 scripts/update-release-version.py "$(NEWVERSION)"
+	go run ./cmd/build/release update-version "$(NEWVERSION)"
 	$(MAKE) manifests
 
 .PHONY: promote-staging-manifest
@@ -165,12 +174,8 @@ repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonito
 repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
 	bash scripts/repository-monitor-validate.sh
 
-.PHONY: repository-monitor-live-preflight
-repository-monitor-live-preflight: ## Check prerequisites for live GitHub label trigger E2E without changing the cluster
-	bash scripts/live-github-label-trigger-e2e.sh --preflight-only
-
 .PHONY: repository-monitor-completion-audit
-repository-monitor-completion-audit: ensure-ui-embed ## Run local validation plus live preflight audit for RepositoryMonitor plan completion
+repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMonitor validation and report remaining live validation
 	bash scripts/repository-monitor-completion-audit.sh
 
 .PHONY: test
@@ -180,8 +185,18 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
 E2E_GO_TEST_TIMEOUT ?= 50m
+# Keep interrupted specs and suite cleanup inside the outer Go deadline.
+E2E_GINKGO_TIMEOUT ?= 45m
+E2E_GINKGO_GRACE_PERIOD ?= 2m
 E2E_GINKGO_FOCUS ?=
 E2E_GINKGO_FOCUS_ARG = $(if $(E2E_GINKGO_FOCUS),-ginkgo.focus="$(E2E_GINKGO_FOCUS)",)
+E2E_GINKGO_LABEL_FILTER ?=
+E2E_GINKGO_LABEL_FILTER_ARG = $(if $(E2E_GINKGO_LABEL_FILTER),-ginkgo.label-filter="$(E2E_GINKGO_LABEL_FILTER)",)
+# Regular expressions matched against spec file paths, without "$" or ":".
+E2E_GINKGO_FOCUS_FILE ?=
+E2E_GINKGO_FOCUS_FILE_ARG = $(if $(E2E_GINKGO_FOCUS_FILE),-ginkgo.focus-file="$(E2E_GINKGO_FOCUS_FILE)",)
+E2E_GINKGO_SKIP_FILE ?=
+E2E_GINKGO_SKIP_FILE_ARG = $(if $(E2E_GINKGO_SKIP_FILE),-ginkgo.skip-file="$(E2E_GINKGO_SKIP_FILE)",)
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -199,8 +214,13 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG)
+	$(MAKE) test-e2e-run
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-run
+test-e2e-run: ## Run only the e2e suite on an existing Kind cluster: no regeneration, fmt, vet, or teardown.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(E2E_GINKGO_TIMEOUT) -ginkgo.grace-period=$(E2E_GINKGO_GRACE_PERIOD) \
+		$(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG) $(E2E_GINKGO_FOCUS_FILE_ARG) $(E2E_GINKGO_SKIP_FILE_ARG)
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -226,7 +246,7 @@ lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform 
 ##@ Demos
 
 .PHONY: demo-cluster-up
-demo-cluster-up: ## Bootstrap a kind cluster with Orka + agent-sandbox
+demo-cluster-up: ## Bootstrap Orka + agent-sandbox demo assets; ACP providers installed separately
 	hack/demos/cluster/cluster-up.sh
 	hack/demos/cluster/install-agent-sandbox.sh
 	hack/demos/cluster/install-demo-model.sh
@@ -236,15 +256,15 @@ demo-cluster-down: ## Tear down the kind demo cluster
 	hack/demos/cluster/cluster-down.sh
 
 .PHONY: demo-substrate-up
-demo-substrate-up: ## Bootstrap a DEDICATED kind cluster with Agent Substrate + Orka (Demo 70)
+demo-substrate-up: ## Bootstrap a dedicated Substrate MCP Tools conformance cluster (no ACP provider)
 	hack/demos/cluster/install-substrate.sh
 
 .PHONY: demo-substrate-down
-demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
+demo-substrate-down: ## Tear down the Substrate MCP Tools conformance cluster
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-cluster-up-all
-demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local demos (00-40, 60-70)
+demo-cluster-up-all: ## Bootstrap Substrate MCP Tools + Orka demo assets; ACP providers installed separately
 	hack/demos/cluster/install-substrate.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-demo-model.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
@@ -424,8 +444,9 @@ endif
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	# Shared runtime Pod schemas exceed the client-side apply annotation limit.
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
-	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply -f -; else echo "No CRDs to install; skipping."; fi
+	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply --server-side -f -; else echo "No CRDs to install; skipping."; fi
 
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
@@ -454,6 +475,8 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 		agentruntimes.core.orka.ai \
 		agents.core.orka.ai \
 		branchclaims.core.orka.ai \
+		connections.core.orka.ai \
+		connectorproviders.core.orka.ai \
 		controllerepochs.core.orka.ai \
 		executionworkspaceclasses.workspace.orka.ai \
 		executionworkspacepools.workspace.orka.ai \
@@ -562,7 +585,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.14.0
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)

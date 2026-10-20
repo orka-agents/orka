@@ -15,6 +15,13 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	riskLevelMedium        = "medium"
+	familyProcessExecution = "process-execution"
+	familyService          = "service"
+	familySupplyChain      = "supply-chain"
+)
+
 type MapperOptions struct {
 	RepositoryScan string
 	SubPath        string
@@ -209,7 +216,7 @@ func (b *sliceBuilder) add(slice store.ReviewSlice) {
 		slice.Kind = "unknown"
 	}
 	if slice.Confidence == "" {
-		slice.Confidence = "medium"
+		slice.Confidence = riskLevelMedium
 	}
 	if slice.Status == "" {
 		slice.Status = "pending"
@@ -407,8 +414,10 @@ func addNodeSlices(builder *sliceBuilder, root string, files []repoFile) {
 				tests = append(tests, store.ReviewSliceTest{Path: file.Path, Command: cmd})
 			}
 		}
-		owned := []store.ReviewSliceFile{fileRef(file, "package manifest")}
-		for _, candidate := range nodeFilesForDir(file.Dir, files) {
+		nodeFiles := nodeFilesForDir(file.Dir, files)
+		owned := make([]store.ReviewSliceFile, 0, len(nodeFiles)+1)
+		owned = append(owned, fileRef(file, "package manifest"))
+		for _, candidate := range nodeFiles {
 			owned = append(owned, fileRef(candidate, "node/typescript source"))
 		}
 		titleDir := file.Dir
@@ -424,8 +433,8 @@ func addNodeSlices(builder *sliceBuilder, root string, files []repoFile) {
 			OwnedFiles:      owned,
 			Tests:           tests,
 			Tags:            []string{"language:typescript", "language:javascript"},
-			TrustBoundaries: []string{"process-execution"},
-			Confidence:      "medium",
+			TrustBoundaries: []string{familyProcessExecution},
+			Confidence:      riskLevelMedium,
 		})
 	}
 	addNodeRouteSlices(builder, files)
@@ -471,7 +480,7 @@ func nodeFilesForDir(dir string, files []repoFile) []repoFile {
 func nodeKind(dir string) string {
 	switch topLevel(dir) {
 	case "apps", "services":
-		return "service"
+		return familyService
 	default:
 		return "library"
 	}
@@ -498,7 +507,7 @@ func addNodeRouteSlices(builder *sliceBuilder, files []repoFile) {
 			OwnedFiles:      owned,
 			Tags:            []string{"language:typescript", "route"},
 			TrustBoundaries: []string{"network"},
-			Confidence:      "medium",
+			Confidence:      riskLevelMedium,
 		})
 	}
 }
@@ -539,14 +548,14 @@ func addPythonSlices(builder *sliceBuilder, files []repoFile) {
 			Source:          "deterministic-python-package",
 			Title:           "Python module " + dir,
 			Summary:         "Python source and tests.",
-			Kind:            "service",
+			Kind:            familyService,
 			Entrypoints:     []store.ReviewSliceFile{owned[0]},
 			OwnedFiles:      owned,
 			ContextFiles:    contextFiles,
 			Tests:           dedupeTests(tests),
 			Tags:            []string{"language:python"},
 			TrustBoundaries: []string{"network"},
-			Confidence:      "medium",
+			Confidence:      riskLevelMedium,
 		})
 	}
 }
@@ -572,7 +581,7 @@ func addWorkflowAndScriptSlices(builder *sliceBuilder, files []repoFile) {
 			Entrypoints:     []store.ReviewSliceFile{workflows[0]},
 			OwnedFiles:      workflows,
 			Tags:            []string{"workflow", "ci-cd"},
-			TrustBoundaries: []string{"process-execution", "supply-chain"},
+			TrustBoundaries: []string{familyProcessExecution, familySupplyChain},
 			Confidence:      "high",
 		})
 	}
@@ -581,12 +590,12 @@ func addWorkflowAndScriptSlices(builder *sliceBuilder, files []repoFile) {
 			Source:          "deterministic-scripts",
 			Title:           "Repository scripts",
 			Summary:         "Shell scripts and process execution surfaces.",
-			Kind:            "service",
+			Kind:            familyService,
 			Entrypoints:     []store.ReviewSliceFile{scripts[0]},
 			OwnedFiles:      scripts,
 			Tags:            []string{"shell"},
-			TrustBoundaries: []string{"process-execution", "filesystem"},
-			Confidence:      "medium",
+			TrustBoundaries: []string{familyProcessExecution, "filesystem"},
+			Confidence:      riskLevelMedium,
 		})
 	}
 }
@@ -609,9 +618,9 @@ func addConfigSlices(builder *sliceBuilder, files []repoFile) {
 		Kind:            "config",
 		Entrypoints:     []store.ReviewSliceFile{owned[0]},
 		OwnedFiles:      owned,
-		Tags:            []string{"config", "supply-chain"},
-		TrustBoundaries: []string{"supply-chain"},
-		Confidence:      "medium",
+		Tags:            []string{"config", familySupplyChain},
+		TrustBoundaries: []string{familySupplyChain},
+		Confidence:      riskLevelMedium,
 	})
 }
 

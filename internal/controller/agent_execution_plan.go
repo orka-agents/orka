@@ -53,12 +53,14 @@ func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agent
 }
 
 // planAgentExecution owns the controller routing decision for type: agent
-// Tasks. Built-in Codex, Claude, Copilot, and OpenCode runtimes use only the ACP v2
+// Tasks. Built-in Codex, Claude, Copilot, and OpenCode runtimes use only the Orka harness v2
 // RuntimePool path; a Task.spec.execution.workspace request additionally binds
 // that path to a workspace-provider-backed RuntimePool when enabled and fails
 // closed otherwise. Strict-governed external runtimeRef registrations use the
 // same ACP Task and RuntimeSession state machines without becoming managed
 // RuntimePools. Unsupported contracts fail before work starts.
+//
+//nolint:gocyclo // Execution planning resolves every frozen input in one deterministic pass.
 func (r *TaskReconciler) planAgentExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -69,12 +71,13 @@ func (r *TaskReconciler) planAgentExecution(
 	if agent == nil || agent.Spec.Runtime == nil {
 		return rejectAgentExecutionPlan("agent runtime configuration is required")
 	}
+	agent = withEffectiveBuiltInContract(agent, r.Mode)
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
-		reader := r.APIReader
-		if reader == nil {
-			reader = r.Client
+		if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, true); reason != "" {
+			return rejectAgentExecutionPlan(reason)
 		}
+		reader := uncachedReader(r.APIReader, r.Client)
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, runtime); err != nil {
 			if !apierrors.IsNotFound(err) {
@@ -113,6 +116,9 @@ func (r *TaskReconciler) planAgentExecution(
 	}
 
 	contract := agent.BuiltInContractVersion()
+	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false); reason != "" {
+		return rejectAgentExecutionPlan(reason)
+	}
 	switch contract {
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
 		if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
@@ -132,11 +138,10 @@ func (r *TaskReconciler) planAgentExecution(
 	}
 }
 
-// taskRequestsExecutionWorkspace reports whether the Task carries an enabled
-// legacy-shaped or class-shaped execution-workspace request.
+// taskRequestsExecutionWorkspace treats every present workspace as a request.
+// Malformed or pruned requests must fail validation rather than run normally.
 func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
-		(task.Spec.Execution.Workspace.Enabled || task.Spec.Execution.Workspace.ClassRef != nil)
+	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 }
 
 // rejectUnsupportedACPWorkspacePlan fails closed on every workspace request the
@@ -157,33 +162,21 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, 
 	}
 	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
-		if errors.Is(err, errACPWorkspacePlanningTransient) {
-			// A brief API-server or control-store outage must requeue, not
-			// permanently reject new capped-Suspend Tasks. Actual quota
-			// exhaustion and validation failures stay rejections.
+		if errors.Is(err, errACPWorkspacePlanningTransient) || isRetryableACPWorkspaceClassResolutionError(err) {
+			// API, provider-authorization and control-store outages requeue.
+			// Actual quota exhaustion and validation failures stay rejections.
 			return agentExecutionPlan{path: agentExecutionPathRejected, transientError: err}, true
 		}
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}
-	binding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
+	binding, err := validateACPWorkspaceBindingRequestWithClass(task, resolvedClass)
 	if err != nil {
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}
 	if binding == nil {
 		return agentExecutionPlan{}, false
 	}
-	switch binding.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if !r.AgentSandboxEnabled {
-			err := fmt.Errorf("execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled")
-			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
-		}
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		if !r.SubstrateEnabled {
-			err := fmt.Errorf("execution workspace provider substrate is disabled; enable --substrate-enabled")
-			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
-		}
-	}
+
 	if !r.ACPWorkspaceDispatchEnabled {
 		err := fmt.Errorf("workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled to host this Task's RuntimeSession in a %s workspace", binding.Provider)
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
@@ -299,19 +292,13 @@ func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent)
 // recovery reach it through the queue chokepoint, so a flag disabled after
 // the binding froze can never create new RuntimePool demand.
 func (r *TaskReconciler) frozenWorkspaceDispatchDisabledReason(binding *ACPRuntimeWorkspaceBinding) string {
+	if binding != nil && (binding.Class == nil || binding.Class.ControllerName == "") {
+		return "legacy execution workspace bindings are cleanup-only and must retire under their original controller before upgrade"
+	}
 	if binding == nil {
 		return ""
 	}
-	switch binding.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if !r.AgentSandboxEnabled {
-			return "execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled"
-		}
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		if !r.SubstrateEnabled {
-			return "execution workspace provider substrate is disabled; enable --substrate-enabled"
-		}
-	}
+
 	if !r.ACPWorkspaceDispatchEnabled {
 		return "workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled"
 	}

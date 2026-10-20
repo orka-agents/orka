@@ -8,12 +8,13 @@ controller:
   # Number of controller replicas
   replicas: 1
 
-  # Controller image
+  # Latest validated main build. Use commit-specific tags or digests for an
+  # exact source checkout; release preparation supplies the release tag.
   image:
     repository: ghcr.io/orka-agents/orka
-    tag: "0.1.1"
+    tag: "0.0.0-dev"
     digest: ""
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
 
   # Resource limits. The controller serves the REST API, the ACP dispatcher,
   # and the single-writer SQLite journal from one process; a 500m CPU cap
@@ -27,8 +28,9 @@ controller:
       cpu: 250m
       memory: 256Mi
 
-  # Required exclusive tenant namespace. Label it with
-  # orka.ai/controller-mode matching controller.mode before startup.
+  # Defaults to the Helm release namespace. On first start the controller
+  # labels it orka.ai/controller-mode=<controller.mode>; a namespace already
+  # labeled for another mode fails startup, and the label never changes.
   watchNamespace: ""
 
   # API server port
@@ -39,6 +41,13 @@ controller:
 
   # Health probe port
   healthPort: 8082
+
+  # Allow about ten minutes for initialization before /healthz is available.
+  # Increase this budget for large SQLite migrations or slow persistent volumes.
+  startupProbe:
+    failureThreshold: 60
+    periodSeconds: 10
+    timeoutSeconds: 1
 
   # Leader election is mandatory for the singleton SQLite controller.
   leaderElect: true
@@ -56,15 +65,19 @@ controller:
     secret: ""
     maxBytes: 536870912
 
-  # Encryption key for immutable agent execution snapshots. When either agent
-  # execution protocol is enabled, both fields must reference an existing
-  # Secret. The selected value must contain exactly 32 raw bytes or its base64
-  # encoding. The Secret name, item key, and selected key material must remain
-  # unchanged for the lifetime of the release so retained snapshots stay
-  # decryptable.
+  # AES-256 key that encrypts immutable agent execution snapshots at rest.
+  # Leave existingSecret empty and the chart renders an empty release-owned
+  # Secret named <fullname>-agent-execution-snapshot; the controller mints the
+  # key into it on first start, reuses it afterwards, and the chart keeps the
+  # Secret on uninstall. No key material is ever rendered. To bring your own key,
+  # set existingSecret to a Secret whose item holds exactly 32 raw bytes or
+  # their base64 encoding. Either way the Secret name, item key, and key
+  # material must never change for the lifetime of the release; retained
+  # snapshots become unreadable otherwise. Back the Secret up with the
+  # controller's data volume.
   agentExecutionSnapshot:
     existingSecret: ""
-    key: ""
+    key: key
     # A snapshot must remain unreferenced for this full period before GC.
     retention: 720h
     # Reference-aware GC scan cadence.
@@ -77,13 +90,14 @@ controller:
     # The chart-managed provider proxy always runs in the Helm release namespace.
     # Leave empty or set exactly to .Release.Namespace; other values are rejected.
     providerProxyNamespace: ""
-    # Configure each provider that should be available with an immutable
-    # repository@sha256:<digest> reference. Empty providers remain unavailable
-    # and Tasks selecting them fail closed.
-    codexImage: ""
-    claudeImage: ""
-    copilotImage: ""
-    opencodeImage: ""
+    # Latest validated main builds. Override with a matching commit-specific
+    # tag or repository@sha256:<digest> for an exact source checkout. Tags are
+    # resolved to digests at controller startup.
+    # An empty image disables that provider.
+    codexImage: ghcr.io/orka-agents/orka/acp-codex-runtime:0.0.0-dev
+    claudeImage: ghcr.io/orka-agents/orka/acp-claude-runtime:0.0.0-dev
+    copilotImage: ghcr.io/orka-agents/orka/acp-copilot-runtime:0.0.0-dev
+    opencodeImage: ghcr.io/orka-agents/orka/acp-opencode-runtime:0.0.0-dev
     # Planned controller upgrades use a same-binary preStop child to call a
     # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
     # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.
@@ -94,6 +108,23 @@ controller:
       pollInterval: 1s
       triggerTimeout: 5m15s
       terminationGracePeriodSeconds: 360
+    # Toolboxes: read-only tool images bound into built-in runtime Pods
+    # (Agent spec.runtime.toolboxes). Off by default. Nothing from a toolbox
+    # runs as root; images must be digest-pinned and from allowedRegistries.
+    toolboxes:
+      enabled: false
+      # Registry hosts or host/path prefixes, for example
+      # ["registry.example.com", "ghcr.io/my-org/tools"]. Empty allows nothing.
+      allowedRegistries: []
+      # Secret names in the runtime namespace added to runtime Pod imagePullSecrets.
+      imagePullSecrets: []
+      # Node selector merged into runtime Pods that bind toolboxes.
+      nodeSelector: {}
+      # copy: an init-container copier sanitizes each toolbox into a scratch
+      #       volume; works on every supported Kubernetes version.
+      # imageVolume: mounts the toolbox image directly; needs Kubernetes 1.36+
+      #       with containerd 2.2+ or CRI-O 1.33+ on the selected nodes.
+      mountMethod: copy
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
@@ -102,6 +133,8 @@ controller:
     # Set true only when an offline renderer cannot use lookup and CRDs are applied separately.
     crdsReadyOverride: false
     pendingPerSession: 100
+    # Lifetime cap for distinct accepted interim messages per Task; retries do not count.
+    interimMessagesPerTask: 10
     maxRecordsPerGateway: 1000
     maxRejectedRecordsPerGateway: 250
     eventExpiry: 24h
@@ -112,37 +145,15 @@ controller:
     pollInterval: 500ms
     batchSize: 25
 
-  # Experimental agent sandbox workspace support (disabled by default)
+  # External ACP providers own compute; Orka owns runtime admission and retirement.
   executionWorkspace:
-    # Enables dispatch of ACP Tasks into configured execution-workspace providers.
     dispatchEnabled: false
-    # Default provider used when Task execution.workspace.provider is omitted.
-    defaultProvider: agent-sandbox
+    # Exact provider worker namespaces where Orka independently reads Pod identity.
+    workerNamespaces: []
 
-  agentSandbox:
-    # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
-    enabled: false
-    # Optional upstream agent-sandbox router base URL used for workspace claims.
-    routerUrl: ""
-    # Optional default execution workspace template name used when a Task omits execution.workspace.templateRef.name.
-    defaultTemplate: ""
-    # Warm pool policy: disabled, template.
-    warmPoolPolicy: disabled
-    # Namespace strategy: task, controller.
-    namespaceStrategy: task
-    # Timeout for workspace claim and readiness operations.
-    claimTimeout: 2m
-    # Timeout for agent runtime execution inside the sandbox.
-    commandTimeout: 30m
-    # Default cleanup policy: delete, retain.
-    cleanupPolicy: delete
-
-  # Experimental Substrate execution workspace support (disabled by default)
+  # Retained in-tree Substrate MCP Tool actors and pools only.
   substrate:
-    enabled: false
-    # Set only after configuring ateapi with --egress-gateway-address= so
-    # worker NetworkPolicies can enforce ACP destinations. Not needed for cleanup.
-    directEgressEnabled: false
+    mcpToolsEnabled: false
     apiEndpoint: api.ate-system.svc:443
     apiCertFile: ""
     apiKeyFile: ""
@@ -158,9 +169,6 @@ controller:
       privateKeyKey: ""
       bearerTokenKey: ""
       caKey: ""
-    # Dedicated provider namespaces where ACP may read/delete exact worker Pods
-    # and manage confinement NetworkPolicies. Keep until all pools are deleted.
-    workerNamespaces: []
     routerUrl: http://atenet-router.ate-system.svc
     actorDnsSuffix: actors.resources.substrate.ate.dev
     defaultTemplate: ""
@@ -170,6 +178,20 @@ controller:
     claimTimeout: 2m
     commandTimeout: 30m
     cleanupPolicy: delete
+
+  # Per-user connectors (ConnectorProvider and Connection). When enabled, the
+  # OAuth provider must register exactly callbackBaseUrl + /api/v1/connections/callback.
+  connectors:
+    enabled: false
+    # Absolute https origin people reach the Orka API on, for example https://orka.example.com.
+    # Consent finishes there: in the dashboard when it is enabled, otherwise on a plain page that
+    # shows the `orka connection complete` command.
+    callbackBaseUrl: ""
+
+  # Web dashboard served by the controller on the API port. Off by default: the API and the
+  # orka CLI work without it, and `orka dashboard` needs it.
+  dashboard:
+    enabled: false
 
   # OIDC/JWT authentication for external API requests
   oidc:
@@ -221,6 +243,8 @@ controller:
       monitorRead: ""
       monitorWrite: ""
       monitorOperate: ""
+      connectorRead: ""
+      connectorManage: ""
       skillRead: ""
       skillWrite: ""
       gatewayRead: ""
@@ -254,12 +278,18 @@ controller:
 # certificate must authenticate <release>-orka-webhook.<namespace>.svc.
 webhooks:
   tls:
-    # Required. The chart never generates webhook certificates.
+    # Leave empty and the controller manages the certificate: the chart renders
+    # an empty Secret named <fullname>-webhook-tls, the controller fills it with
+    # a self-signed CA and serving certificate, renews it before expiry, and
+    # keeps the webhook configuration's caBundle in sync. Set an existing
+    # kubernetes.io/tls Secret to bring your own certificate instead; then
+    # caBundle or caInjectionAnnotations below is required.
     existingSecret: ""
     certKey: tls.crt
     privateKeyKey: tls.key
-  # Base64-encoded PEM CA bundle. Leave empty when an injector annotation is
-  # configured below.
+  # Base64-encoded PEM CA bundle for an operator-supplied certificate. Leave
+  # empty when an injector annotation is configured below or the controller
+  # manages the certificate.
   caBundle: ""
   # For example: cert-manager.io/inject-ca-from-secret: orka-v2/orka-webhook-tls
   caInjectionAnnotations: {}
@@ -270,9 +300,9 @@ publisher:
   enabled: true
   image:
     repository: ghcr.io/orka-agents/orka/workspace-publisher
-    tag: "0.1.1"
+    tag: "0.0.0-dev"
     digest: ""
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   allowedSCMHosts: github.com
   githubPR:
     enabled: true
@@ -342,13 +372,20 @@ scmEgressProxy:
       memory: 256Mi
       ephemeral-storage: 128Mi
 
-# Authenticated boundary in front of the otherwise unauthenticated Vekil
-# service. ACP RuntimePods can reach only this Service, never Vekil directly.
+# Optional authenticated boundary for built-in coding agents. Configure your
+# model gateway before enabling it; no gateway, provider, or model is installed.
 providerProxy:
   enabled: false
-  # Only this chart-supported Vekil Service endpoint is accepted. One trailing
-  # slash is normalized; alternate hosts, namespaces, and ports are rejected.
-  upstreamBaseURL: http://vekil.vekil-system.svc:1337
+  # HTTP(S) endpoint of your credential-injecting model gateway.
+  upstreamBaseURL: ""
+  # Kubernetes NetworkPolicy egress rules allowing the proxy to reach that
+  # gateway. Leave empty when upstreamBaseURL names an in-cluster Service as
+  # http(s)://<service>.<namespace>.svc[:port]: at install time the chart reads
+  # that Service and derives the rule from its selector and target port.
+  # Set explicit rules for gateways outside the cluster, Services with named
+  # target ports, or offline renders. DNS access is always added. Gateway
+  # ingress and provider credentials remain under your control.
+  egress: []
   # Mounted Secret files are reloaded atomically; no proxy Pod restart is
   # required for token changes. Reload failures make readiness fail and disable
   # all authenticated forwarding until both files are valid again.
@@ -392,13 +429,15 @@ workers:
   ai:
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
-      tag: "0.1.1"
-      pullPolicy: IfNotPresent
+      tag: "0.0.0-dev"
+      digest: ""
+      pullPolicy: Always
 
   general:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
-      tag: "0.1.1"
+      tag: "0.0.0-dev"
+      digest: ""
 
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.
@@ -407,19 +446,6 @@ github:
     # Kubernetes Secret containing the GitHub webhook shared secret.
     secretName: ""
     secretKey: secret
-  labelTrigger:
-    # Default runtime Agent CR used for labels such as agent:implement.
-    agent: ""
-    # Optional namespace for created Tasks; defaults to controller.watchNamespace or default.
-    namespace: ""
-    # Optional Secret name mounted into agent workspaces for git/GitHub auth.
-    gitSecret: ""
-    # Label prefix that marks an Orka trigger.
-    prefix: "agent:"
-    timeout: "30m"
-    maxTurns: 100
-    # Optional action-specific Agent overrides, e.g. implement: codex-agent.
-    agents: {}
 
 # Service configuration
 service:

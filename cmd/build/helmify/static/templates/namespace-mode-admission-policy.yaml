@@ -1,0 +1,52 @@
+{{- /*
+The release namespace's execution-mode claim is enforced by CEL rather than a
+controller-served webhook so the controller can claim its own namespace on first
+start and so namespace edits never depend on the controller being up. The claim
+is immutable once present; only this release's controller may add it to an
+existing namespace; anyone may create the namespace with it already set.
+*/ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-namespace-mode
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: release-namespace
+      expression: "object.metadata.name == '{{ .Release.Namespace }}'"
+  variables:
+    - name: label
+      expression: "'orka.ai/controller-mode'"
+    - name: mode
+      expression: "'{{ .Values.controller.mode }}'"
+    - name: controllerUser
+      expression: "'{{ include "orka.controllerUsername" . }}'"
+    - name: newClaim
+      expression: "object.metadata.?labels[variables.label].orValue('')"
+    - name: oldClaim
+      expression: "request.operation == 'UPDATE' ? oldObject.metadata.?labels[variables.label].orValue('') : ''"
+  validations:
+    - expression: "variables.newClaim == '' || variables.newClaim == variables.mode"
+      messageExpression: "'namespace ' + object.metadata.name + ' belongs to execution mode ' + variables.mode + '; the orka.ai/controller-mode label cannot name another mode'"
+    - expression: "variables.oldClaim == '' || variables.newClaim == variables.oldClaim"
+      message: namespace execution-mode claim is immutable; recreate the installation in a different namespace
+    - expression: "variables.oldClaim != '' || variables.newClaim == '' || request.operation == 'CREATE' || request.userInfo.username == variables.controllerUser"
+      message: only the release's controller may claim an existing namespace for an execution mode; create a new namespace for another installation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-namespace-mode
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-namespace-mode
+  validationActions: [Deny]

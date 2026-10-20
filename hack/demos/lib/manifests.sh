@@ -601,6 +601,7 @@ EOF
 : "${DEMO_SANDBOX_SCOUT_AGENT:=demo-sandbox-scout}"
 : "${DEMO_SANDBOX_BUILDER_AGENT:=demo-sandbox-builder}"
 : "${DEMO_SANDBOX_TEMPLATE_REF:=orka-live-template}"
+: "${DEMO_SANDBOX_CLASS_REF:=sandbox-coding}"
 : "${DEMO_SANDBOX_TURN1_TASK:=demo-sandbox-turn-1-scout}"
 : "${DEMO_SANDBOX_TURN2_TASK:=demo-sandbox-turn-2-builder}"
 : "${DEMO_SANDBOX_TURN3_TASK:=demo-sandbox-turn-3-fixup}"
@@ -757,11 +758,9 @@ EOF
   cat <<EOF
   execution:
     workspace:
-      enabled: true
-      templateRef:
-        name: ${DEMO_SANDBOX_TEMPLATE_REF}
+      classRef:
+        name: ${DEMO_SANDBOX_CLASS_REF}
       reusePolicy: session
-      cleanupPolicy: retain
 EOF
 }
 
@@ -802,7 +801,7 @@ Beyond this demo, any scanner that emits structured findings (custom rules, LLM-
 # Demo 70 — Agent Substrate (real agentic run in a gVisor workspace).
 #
 # Substrate is a SECOND execution-workspace provider (distinct from Demo 60's
-# agent-sandbox). Orka Tasks request `execution.workspace.provider: substrate`;
+# agent-sandbox). Orka Tasks request `execution.workspace.classRef.name: ${DEMO_SUBSTRATE_CLASS_REF}`;
 # the controller claims a gVisor-isolated Actor from a Substrate WorkerPool via
 # the ActorTemplate and runs a REAL codex agent inside it. These renderers
 # assume install-substrate.sh already stood up: the Substrate control plane, a
@@ -827,6 +826,7 @@ Beyond this demo, any scanner that emits structured findings (custom rules, LLM-
 : "${DEMO_SUBSTRATE_NAMESPACE:=${DEMO_NAMESPACE:-default}}"
 : "${DEMO_SUBSTRATE_AGENT:=demo-substrate-codex}"
 : "${DEMO_SUBSTRATE_TEMPLATE_NAME:=orka-codex-ci}"
+: "${DEMO_SUBSTRATE_CLASS_REF:=substrate-coding}"
 : "${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE:=ate-demo}"
 : "${DEMO_SUBSTRATE_SESSION:=substrate-warm-70}"
 : "${DEMO_SUBSTRATE_COLD_TASK:=demo-substrate-cold}"
@@ -883,8 +883,6 @@ render_substrate_task() {
   local reuse="${2:-session}"
   local create="${3:-false}"
   local prompt="${4:-Make the requested change and stop.}"
-  local cleanup="retain"
-  [[ "${reuse}" == "session" ]] || cleanup="delete"
   local session_block=""
   if [[ "${reuse}" == "session" ]]; then
     session_block="  sessionRef:
@@ -927,13 +925,9 @@ ${session_block}
       name: ${DEMO_SUBSTRATE_GIT_SECRET}
   execution:
     workspace:
-      enabled: true
-      provider: substrate
-      cleanupPolicy: ${cleanup}
+      classRef:
+        name: ${DEMO_SUBSTRATE_CLASS_REF}
       reusePolicy: ${reuse}
-      templateRef:
-        name: ${DEMO_SUBSTRATE_TEMPLATE_NAME}
-        namespace: ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}
 EOF
 }
 
@@ -943,7 +937,7 @@ Demo 70 — Agent Substrate (a real agent in a gVisor-isolated workspace).
 
 THE FEATURE: Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks with agent-sandbox; this demo backs the SAME Task API with Agent Substrate — a second provider that runs each workspace as a gVisor-isolated Actor (a microVM-class sandbox) drawn from a pre-warmed WorkerPool, and keeps that Actor warm between turns.
 
-One Task field switches backends: execution.workspace.provider: substrate. Everything else — the Agent CR, the Task CR, the model call, the git push — is identical to every other Orka agent Task. Orka abstracts the execution substrate.
+One Task field switches backends: execution.workspace.classRef.name: ${DEMO_SUBSTRATE_CLASS_REF}. Everything else — the Agent CR, the Task CR, the model call, the git push — is identical to every other Orka agent Task. Orka abstracts the execution substrate.
 
 THIS DEMO (two beats, real ${DEMO_SUBSTRATE_RUNTIME_MODEL} agent):
 1. COLD — a fresh gVisor workspace. The agent clones ${DEMO_SUBSTRATE_PR_REPO}, makes a change, and stops. Orka pushes the branch; the demo opens a real pull request. status.executionWorkspace.provider == substrate.

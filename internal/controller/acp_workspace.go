@@ -14,13 +14,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+)
+
+const (
+	sourceRefField    = "sourceRef"
+	relativeRootField = "relativeRoot"
 )
 
 const defaultACPSourceBranch = "main"
@@ -358,19 +363,7 @@ func externalEffectSucceededAt(
 	if effects == nil {
 		return time.Time{}, fmt.Errorf("external-effect store is required")
 	}
-	var (
-		effect *store.ExternalEffect
-		err    error
-	)
-	if reader, ok := effects.(store.ExternalEffectIdentityReader); ok {
-		effect, err = reader.GetExternalEffectByIdentity(ctx, identity)
-	} else {
-		id, idErr := identity.CanonicalID()
-		if idErr != nil {
-			return time.Time{}, idErr
-		}
-		effect, err = effects.GetExternalEffect(ctx, id)
-	}
+	effect, err := effects.GetExternalEffectByIdentity(ctx, identity)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -383,11 +376,11 @@ func externalEffectSucceededAt(
 func acpRuntimeWorkspaceBindingDigest(sourceRef string, workspace harnessv2.WorkspaceSpec) (string, error) {
 	return acpDomainDigest("runtime-session-workspace-binding", map[string]any{
 		"repositoryIdentity": strings.TrimSpace(workspace.Baseline.RepositoryIdentity),
-		"sourceRef":          strings.TrimSpace(sourceRef),
+		sourceRefField:       strings.TrimSpace(sourceRef),
 		"revision":           strings.TrimSpace(workspace.Baseline.Revision),
 		"treeDigest":         strings.TrimSpace(workspace.Baseline.TreeDigest),
-		"intent":             workspace.Intent,
-		"relativeRoot":       strings.TrimSpace(workspace.RelativeRoot),
+		intentField:          workspace.Intent,
+		relativeRootField:    strings.TrimSpace(workspace.RelativeRoot),
 	})
 }
 

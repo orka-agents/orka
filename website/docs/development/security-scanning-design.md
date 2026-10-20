@@ -322,9 +322,10 @@ Optional:
 - `security-patch-<finding-id>.diff`
 - `security-patch-<finding-id>.json`
 
-Agent runtime tasks call `common.UploadArtifacts()` after result submission on both the
-success path and the failure path where partial artifacts still exist, so the threat model,
-findings payload, validation evidence, and patch diff persist reliably.
+Agent runtime tasks call `common.UploadArtifactsContext(ctx)` after result submission,
+passing the worker lifecycle context as `ctx`. This applies to the success path and
+the failure path where partial artifacts still exist, so the threat model, findings
+payload, validation evidence, and patch diff are uploaded.
 
 ### `security-slices.json`
 

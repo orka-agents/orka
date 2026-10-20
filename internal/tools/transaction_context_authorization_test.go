@@ -8,6 +8,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -846,10 +848,35 @@ func readyChildTransactionOutboundPolicy(name string, spec corev1alpha1.Outbound
 	}
 }
 
+func TestValidateChildTaskAgainstParentTransactionDoesNotRequireAIWorkerToolsForAgentChild(t *testing.T) {
+	agent := researcherAgent()
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		Type:                corev1alpha1.AgentRuntimeCodex,
+		DefaultAllowedTools: []string{"Read"},
+		DefaultAllowBash:    new(false),
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AI = &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}}
+	child.Labels = map[string]string{labels.LabelParentTask: "parent-task"}
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `["Read","send_message","check_messages"]`,
+	}
+
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v", err)
+	}
+}
+
 func TestChildTransactionEffectiveAIToolsSkipsDisabledCoordinationInjection(t *testing.T) {
 	agent := researcherAgent()
-	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true}
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}
 	child := childTaskForResearcherAgent()
+	child.Labels = map[string]string{labels.LabelParentTask: "parent-task"}
 	child.Annotations = map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"}
 	child.Spec.Type = corev1alpha1.TaskTypeAI
 	child.Spec.AI = &corev1alpha1.AISpec{
@@ -867,7 +894,7 @@ func TestChildTransactionEffectiveAIToolsSkipsDisabledCoordinationInjection(t *t
 			t.Fatalf("expected memory tool %q in %q", tool, got)
 		}
 	}
-	for _, tool := range []string{"delegate_task", "merge_pull_request", "auto_merge_pull_request"} {
+	for _, tool := range []string{"delegate_task", "send_message", "check_messages", "request_approval", "merge_pull_request", "auto_merge_pull_request"} {
 		if strings.Contains(got, tool) {
 			t.Fatalf("unexpected coordination tool %q in %q", tool, got)
 		}
@@ -888,6 +915,91 @@ func TestChildTransactionEffectiveAIToolsIncludesPRReviewCoordinationTools(t *te
 	}
 }
 
+func TestChildTransactionEffectiveAIToolsMatchesSharedResolver(t *testing.T) {
+	agent := researcherAgent()
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}
+	child := childTaskForResearcherAgent()
+	child.Labels = map[string]string{labels.LabelParentTask: "parent-task"}
+	child.Spec.AI = &corev1alpha1.AISpec{Tools: []string{"task_tool"}}
+
+	want := aitools.Resolve(child, agent)
+	got := childTransactionEffectiveAITools(child, agent)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("child authorization tools = %#v, shared resolver = %#v", got, want)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsOmittedAutonomousApprovalTool(t *testing.T) {
+	agent := researcherAgent()
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}
+	child := childTaskForResearcherAgent()
+	parent := parentTaskWithAllowedTools(t, childTransactionEffectiveAITools(child, agent), "request_approval")
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `tool "request_approval"`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want request_approval denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionAllowsAutonomousApprovalTool(t *testing.T) {
+	agent := researcherAgent()
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}
+	child := childTaskForResearcherAgent()
+	parent := parentTaskWithAllowedTools(t, childTransactionEffectiveAITools(child, agent))
+
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsOmittedChildMessagingTools(t *testing.T) {
+	agent := researcherAgent()
+	child := childTaskForResearcherAgent()
+	child.Labels = map[string]string{labels.LabelParentTask: "parent-task"}
+	parent := parentTaskWithAllowedTools(t, childTransactionEffectiveAITools(child, agent), "send_message", "check_messages")
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || (!strings.Contains(err.Error(), `tool "send_message"`) && !strings.Contains(err.Error(), `tool "check_messages"`)) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want child messaging denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionAllowsChildMessagingTools(t *testing.T) {
+	agent := researcherAgent()
+	child := childTaskForResearcherAgent()
+	child.Labels = map[string]string{labels.LabelParentTask: "parent-task"}
+	parent := parentTaskWithAllowedTools(t, childTransactionEffectiveAITools(child, agent))
+
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v", err)
+	}
+}
+
+func parentTaskWithAllowedTools(t *testing.T, tools []string, omitted ...string) *corev1alpha1.Task {
+	t.Helper()
+	omit := make(map[string]struct{}, len(omitted))
+	for _, tool := range omitted {
+		omit[tool] = struct{}{}
+	}
+	allowed := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if _, found := omit[tool]; !found {
+			allowed = append(allowed, tool)
+		}
+	}
+	encoded, err := json.Marshal(allowed)
+	if err != nil {
+		t.Fatalf("marshal allowed tools: %v", err)
+	}
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  string(encoded),
+	}
+	return parent
+}
+
 func TestChildTransactionEffectiveAIToolsSkipsRuntimeRefChildMessagingInjection(t *testing.T) {
 	agent := researcherAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
@@ -898,7 +1010,7 @@ func TestChildTransactionEffectiveAIToolsSkipsRuntimeRefChildMessagingInjection(
 	child.Labels = map[string]string{labels.LabelParentTask: "parent"}
 
 	got := childTransactionEffectiveAITools(child, agent)
-	for _, tool := range append(transactionCoordinationToolNames(), transactionMemoryToolNames()...) {
+	for _, tool := range append(aitools.CoordinationToolNames(), aitools.MemoryToolNames()...) {
 		if slices.Contains(got, tool) {
 			t.Fatalf("childTransactionEffectiveAITools() = %#v, unexpectedly injected coordination tool %q for runtimeRef Agent", got, tool)
 		}

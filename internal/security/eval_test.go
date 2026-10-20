@@ -36,7 +36,7 @@ func TestScannerEvalFilterCorpus(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertEvalFixtureExists(t, tc.keep, tc.name)
-			result := FilterFindings([]*store.Finding{tc.finding}, FindingFilterOptions{})
+			result := FilterFindings([]*store.Finding{tc.finding})
 			if tc.keep && (len(result.Kept) != 1 || len(result.Dropped) != 0) {
 				t.Fatalf("FilterFindings() kept=%d dropped=%d, want kept: %#v", len(result.Kept), len(result.Dropped), result.Dropped)
 			}

@@ -36,11 +36,18 @@ type sessionRuntimeCleanupTarget struct {
 }
 
 // sessionRuntimeCleanupFence separates the current cleanup owner from the
-// immutable terminal turn's resident runtime. Only Session teardown may use
-// this older runtime epoch; it grants no admission or publication authority.
+// immutable terminal execution's resident runtime. Cleanup may use this older
+// runtime epoch. It never grants admission. Session teardown fences permit
+// only exact deletion; a standalone terminal fence may additionally finalize
+// the evidence-bound publication that must precede that deletion.
 type sessionRuntimeCleanupFence struct {
 	controller   store.ControllerEpochFence
 	runtimeEpoch uint64
+	validateTask func(context.Context) error
+	// allowPublicationFinalization lets standalone terminal cleanup finish an
+	// evidence-bound publication before exact deletion. Session teardown
+	// never sets it; that authority remains delete-only.
+	allowPublicationFinalization bool
 }
 
 func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup *sessionRuntimeCleanupFence) (uint64, error) {
@@ -68,6 +75,11 @@ func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup
 	}
 	if authoritative != cleanup.controller {
 		return 0, fmt.Errorf("%w: Session runtime cleanup controller lost authority", store.ErrConflict)
+	}
+	if cleanup.validateTask != nil {
+		if err := cleanup.validateTask(ctx); err != nil {
+			return 0, err
+		}
 	}
 	return cleanup.runtimeEpoch, nil
 }
@@ -208,7 +220,7 @@ func (d *ACPDispatcher) sessionRuntimeCleanupTarget(
 		frozen.Status.Delivery = payload.Delivery.DeepCopy()
 		frozen.Status.Phase = payload.Phase
 	}
-	validated, err := taskterminal.ValidateFinalizedSessionProjection(projection.Payload, frozen, turn.Key.TaskUID, attempt, turn)
+	validated, err := taskterminal.ValidateSessionCleanupProjection(projection.Payload, frozen, turn.Key.TaskUID, attempt, turn)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +263,7 @@ func (d *ACPDispatcher) frozenSessionRuntimeCleanupTask(
 	task *corev1alpha1.Task,
 	intent store.SessionCleanupIntent,
 ) (*corev1alpha1.Task, error) {
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Task.UID != acpTaskControlUID(task) {
 		return nil, fmt.Errorf("%w: Session runtime cleanup requires the frozen Task binding", store.ErrConflict)
 	}

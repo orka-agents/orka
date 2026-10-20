@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { GitBranch } from 'lucide-react'
 import { DiffViewer } from './diff-viewer'
 import { TaskFilesChanged } from './task-files-changed'
+import { isNotFoundError } from '@/lib/api-client'
 
 interface StructuredResult {
   summary?: string
@@ -25,9 +26,24 @@ const verdictStyles: Record<string, string> = {
 
 function tryParseStructuredResult(result: string): StructuredResult | null {
   try {
-    const parsed = JSON.parse(result)
-    if (typeof parsed === 'object' && parsed !== null && (parsed.summary || parsed.diff || parsed.verdict || parsed.feedback || parsed.files)) {
-      return parsed as StructuredResult
+    const parsed: unknown = JSON.parse(result)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+
+    const candidate = parsed as Record<string, unknown>
+    const stringFields = ['summary', 'diff', 'verdict', 'feedback', 'pushBranch'] as const
+    for (const field of stringFields) {
+      if (field in candidate && typeof candidate[field] !== 'string') return null
+    }
+    if (
+      'files' in candidate &&
+      (!Array.isArray(candidate.files) || !candidate.files.every((file) => typeof file === 'string'))
+    ) {
+      return null
+    }
+
+    const structured = candidate as StructuredResult
+    if (stringFields.some((field) => structured[field]) || structured.files?.length) {
+      return structured
     }
     return null
   } catch {
@@ -48,13 +64,13 @@ function StructuredResultView({ result }: { result: StructuredResult }) {
       {result.summary && (
         <div>
           <h4 className="mb-1 text-sm font-semibold">Summary</h4>
-          <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-sm">{result.summary}</pre>
+          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted p-3 text-sm">{result.summary}</pre>
         </div>
       )}
       {result.feedback && (
         <div>
           <h4 className="mb-1 text-sm font-semibold">Feedback</h4>
-          <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-sm">{result.feedback}</pre>
+          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted p-3 text-sm">{result.feedback}</pre>
         </div>
       )}
       {result.files && result.files.length > 0 && (
@@ -79,14 +95,56 @@ function StructuredResultView({ result }: { result: StructuredResult }) {
   )
 }
 
-export function TaskResultViewer({ taskId }: { taskId: string }) {
-  const { data, isLoading, refetch, isFetched } = useTaskResult(taskId)
+interface TaskResultViewerProps {
+  taskId: string
+  /** A terminal task's result loads as soon as the tab opens. */
+  taskPhase?: string
+  taskUid?: string
+}
+
+export function TaskResultViewer({ taskId, taskPhase, taskUid }: TaskResultViewerProps) {
+  const terminal = ['Succeeded', 'Failed', 'Cancelled'].includes(taskPhase ?? '')
+  const { data, isLoading, isFetched, isFetching, error, refetch } = useTaskResult(taskId, terminal, taskUid)
 
   const resultText = data?.result
   const structured = useMemo(() => {
     if (!resultText) return null
     return tryParseStructuredResult(resultText)
   }, [resultText])
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Result</CardTitle></CardHeader>
+        <CardContent>
+          <div data-testid="result-loading" className="h-32 w-full">
+            <Skeleton className="h-32 w-full" />
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (error) {
+    const unavailable = isNotFoundError(error)
+    return (
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle>Result</CardTitle>
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+            {unavailable ? (terminal ? 'Refresh' : 'Load Result') : 'Retry'}
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground" data-testid="result-error">
+            {unavailable
+              ? terminal ? 'No result was recorded for this task.' : 'No result available for this task yet.'
+              : error.message}
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
 
   if (!isFetched) {
     return (
@@ -99,25 +157,22 @@ export function TaskResultViewer({ taskId }: { taskId: string }) {
     )
   }
 
-  if (isLoading) {
-    return (
-      <Card>
-        <CardHeader><CardTitle>Result</CardTitle></CardHeader>
-        <CardContent><Skeleton className="h-32 w-full" /></CardContent>
-      </Card>
-    )
-  }
-
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>Result</CardTitle>
+        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? 'Refreshing…' : 'Refresh'}
+        </Button>
       </CardHeader>
       <CardContent>
         {structured ? (
           <StructuredResultView result={structured} />
         ) : (
-          <pre className="max-h-96 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">
+          // No fixed-height cap: a long result grows with the page instead of
+          // hiding most of itself in a short inner scroller, and long tokens
+          // wrap rather than forcing horizontal scrolling.
+          <pre className="overflow-x-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap break-words">
             {data?.result ?? 'No result available'}
           </pre>
         )}

@@ -62,6 +62,10 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	}
 	blockedReason, actionError := repositoryMonitorWorkActionReasonFields(status, reason)
 	if existing, err := r.Store.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
+		if status == repositoryMonitorWorkActionStatusQueued {
+			// Queue recovery only fills missing actions; it must not rewind state.
+			return nil
+		}
 		verifiedUpdateBranchSuccess := desiredAction == repositoryMonitorCommandIntentUpdateBranch && status == repositoryMonitorWorkActionStatusSucceeded
 		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume && !verifiedUpdateBranchSuccess {
 			return nil
@@ -98,7 +102,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 			}
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{"actionKind": actionKind})
+	metadata, _ := json.Marshal(map[string]any{repositoryMonitorEventActionKindKey: actionKind})
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := r.Store.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,
@@ -165,7 +169,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorGitHubMutation(ctx 
 	record.MonitorName = monitor.Name
 	record.MonitorGeneration = monitor.Generation
 	if record.Actor == "" {
-		record.Actor = "orka-controller"
+		record.Actor = repositoryMonitorControllerActor
 	}
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now()
@@ -185,7 +189,7 @@ func (r *RepositoryMonitorReconciler) updateRepositoryMonitorGitHubMutation(ctx 
 	record.MonitorName = monitor.Name
 	record.MonitorGeneration = monitor.Generation
 	if record.Actor == "" {
-		record.Actor = "orka-controller"
+		record.Actor = repositoryMonitorControllerActor
 	}
 	if err := r.Store.UpdateGitHubMutationRecord(ctx, record); err != nil {
 		return err

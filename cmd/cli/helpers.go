@@ -25,6 +25,10 @@ import (
 )
 
 const (
+	cliProgramName = "orka"
+)
+
+const (
 	configDir  = ".orka"
 	configFile = "config.yaml"
 
@@ -96,7 +100,15 @@ func clearPortForwardCache() {
 
 // newClientFromCmd creates a client.Client using flag values resolved against config.
 func newClientFromCmd(cmd *cobra.Command) *client.Client {
-	server, _ := cmd.Flags().GetString("server")
+	return newClientFromCmdWithServer(cmd, "")
+}
+
+// newClientFromCmdWithServer preserves credential/config resolution while using
+// a transport already selected by the caller.
+func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Client {
+	if server == "" {
+		server, _ = cmd.Flags().GetString("server")
+	}
 	token, _ := cmd.Flags().GetString("token")
 	txnToken, _ := cmd.Flags().GetString("txn-token")
 	txnTokenFile, _ := cmd.Flags().GetString("txn-token-file")
@@ -210,7 +222,7 @@ func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 
 	// Try the user's namespace first, then well-known orka namespaces
 	namespacesToTry := []string{defaultNS}
-	for _, ns := range []string{"orka-system", "orka", defaultNamespace} {
+	for _, ns := range []string{"orka-system", cliProgramName, defaultNamespace} {
 		if ns != defaultNS {
 			namespacesToTry = append(namespacesToTry, ns)
 		}
@@ -289,7 +301,7 @@ func discoverOrkaService(restConfig *rest.Config, namespace string) string {
 	httpClient := &http.Client{Transport: rt, Timeout: 5 * time.Second}
 
 	// Strategy 1: check well-known service names
-	for _, candidate := range []string{"orka-api", "orka", "orka-controller-manager"} {
+	for _, candidate := range []string{"orka-api", cliProgramName, "orka-controller-manager"} {
 		if checkServiceExists(httpClient, restConfig.Host, namespace, candidate) {
 			return candidate
 		}

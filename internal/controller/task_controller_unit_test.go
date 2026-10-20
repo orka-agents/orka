@@ -37,15 +37,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
-	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -73,7 +72,6 @@ func newTestScheme() *runtime.Scheme {
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
-	_ = sandboxextv1beta1.AddToScheme(s)
 	return s
 }
 
@@ -149,6 +147,10 @@ func (s failingExecutionEventStore) ListSessionExecutionEvents(context.Context, 
 
 func (s failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
 	return 0, s.err
+}
+
+func (s failingExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, s.err
 }
 
 func (s failingExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
@@ -1026,7 +1028,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskAgentExecutionWorkspace(t *test
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 			},
 		},
 	}
@@ -1237,224 +1239,40 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestValidateExecutionWorkspace(t *testing.T) {
-	executionWorkspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
-		// ACP RuntimeSessions run in controller-rendered sandbox templates, so a
-		// valid request omits templateRef entirely.
-		ws := &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}
-		for _, mutate := range mutators {
-			mutate(ws)
-		}
-		return ws
-	}
-	substrateTemplateRef := func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-		ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "default"}
-	}
-	_ = substrateTemplateRef
-
-	tests := []struct {
-		name                        string
-		agentSandboxEnabled         bool
-		substrateEnabled            bool
-		acpWorkspaceDispatchEnabled bool
-		workspaceProviderAPIEnabled bool
-		task                        *corev1alpha1.Task
-		agentSandboxConfig          AgentSandboxConfig
-		substrateConfig             SubstrateConfig
-		wantErr                     string
+	for _, tc := range []struct {
+		name       string
+		workspace  *corev1alpha1.ExecutionWorkspaceSpec
+		taskType   corev1alpha1.TaskType
+		disabled   bool
+		sessionRef *corev1alpha1.SessionReference
+		wantErr    string
 	}{
-		{
-			name: "nil execution",
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-			}},
-		},
-		{
-			name: "workspace disabled",
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: false},
-				},
-			}},
-		},
-		{
-			name: "classRef workspace provider API disabled",
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
-				}},
-			}},
-			wantErr: "requires the workspace provider API",
-		},
-		{
-			name:                        "classRef admitted for agent tasks",
-			workspaceProviderAPIEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
-				}},
-			}},
-		},
-		{
-			name:                        "classRef rejected for non-agent tasks",
-			workspaceProviderAPIEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAI,
-				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
-				}},
-			}},
-			wantErr: "only supported for type: agent tasks",
-		},
-		{
-			name:                "non-agent task",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAI,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(),
-				},
-			}},
-			wantErr: "only supported for type: agent",
-		},
-		{
-			name:                "unsupported reusePolicy",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicy("forever")
-					}),
-				},
-			}},
-			wantErr: "unsupported execution workspace reusePolicy",
-		},
-		{
-			name:                "unsupported cleanupPolicy",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy("archive")
-					}),
-				},
-			}},
-			wantErr: "unsupported execution workspace cleanupPolicy",
-		},
-		{
-			name:             "substrate Task validation does not require legacy bootstrap secret before dispatch gate",
-			substrateEnabled: true,
-			substrateConfig: SubstrateConfig{
-				APIInsecureSkipVerify: true,
-			},
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(substrateTemplateRef, func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-					}),
-				},
-			}},
-		},
-		{
-			name:             "substrate poolRef accepted",
-			substrateEnabled: true,
-			substrateConfig: SubstrateConfig{
-				APIInsecureSkipVerify: true,
-				BootstrapSecretName:   testSubstrateBootstrapSecretName,
-				BootstrapSecretKey:    testSubstrateBootstrapSecretKey,
-			},
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(substrateTemplateRef, func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-						ws.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"}
-					}),
-				},
-			}},
-		},
-		{
-			name:                "session reuse without sessionRef",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
-					}),
-				},
-			}},
-			wantErr: acpWorkspaceTestSessionReferenceRequiredError,
-		},
-		{
-			name:                "session reuse with empty sessionRef name",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type:       corev1alpha1.TaskTypeAgent,
-				SessionRef: &corev1alpha1.SessionReference{Name: ""},
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
-					}),
-				},
-			}},
-			wantErr: acpWorkspaceTestSessionReferenceRequiredError,
-		},
-		{
-			name:                "valid defaults",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(),
-				},
-			}},
-		},
-		{
-			name:                "valid session reuse",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type:       corev1alpha1.TaskTypeAgent,
-				SessionRef: &corev1alpha1.SessionReference{Name: "session-1"},
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
-						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
-					}),
-				},
-			}},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := &TaskReconciler{
-				AgentSandboxEnabled:         tt.agentSandboxEnabled,
-				SubstrateEnabled:            tt.substrateEnabled,
-				ACPWorkspaceDispatchEnabled: tt.acpWorkspaceDispatchEnabled,
-				WorkspaceProviderAPIEnabled: tt.workspaceProviderAPIEnabled,
-				AgentSandboxConfig:          tt.agentSandboxConfig,
-				SubstrateConfig:             tt.substrateConfig,
+		{name: "omitted workspace"},
+		{name: "empty workspace", workspace: &corev1alpha1.ExecutionWorkspaceSpec{}, wantErr: "classRef.name is required"},
+		{name: "empty class", workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{}}, wantErr: "classRef.name is required"},
+		{name: "class selected", workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: acpTestClassName}}},
+		{name: "provider API disabled", workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: acpTestClassName}}, disabled: true, wantErr: "requires the workspace provider API"},
+		{name: "container task", workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: acpTestClassName}}, taskType: corev1alpha1.TaskTypeContainer, wantErr: "only supported for type: agent"},
+		{name: "invalid reuse", workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: acpTestClassName}, ReusePolicy: "forever"}, wantErr: "unsupported execution workspace reusePolicy"},
+		{name: "missing session", workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: acpTestClassName}, ReusePolicy: corev1alpha1.WorkspaceReusePolicySession}, wantErr: "requires spec.sessionRef.name"},
+		{name: "session reuse", workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: acpTestClassName}, ReusePolicy: corev1alpha1.WorkspaceReusePolicySession}, sessionRef: &corev1alpha1.SessionReference{Name: "session"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			typ := tc.taskType
+			if typ == "" {
+				typ = corev1alpha1.TaskTypeAgent
 			}
-
-			err := r.validateExecutionWorkspace(tt.task)
-			if tt.wantErr == "" {
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: typ, SessionRef: tc.sessionRef, Execution: &corev1alpha1.ExecutionSpec{Workspace: tc.workspace}}}
+			r := &TaskReconciler{WorkspaceProviderAPIEnabled: !tc.disabled}
+			err := r.validateExecutionWorkspace(task)
+			if tc.wantErr == "" {
 				if err != nil {
-					t.Fatalf("expected no error, got %v", err)
+					t.Fatal(err)
 				}
 				return
 			}
-
-			if err == nil {
-				t.Fatalf("expected error containing %q", tt.wantErr)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validation error = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -1462,15 +1280,10 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 
 func TestValidateExecutionWorkspaceDefersACPProviderChecksUntilContractRouting(t *testing.T) {
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-		Type: corev1alpha1.TaskTypeAgent,
-		Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled: true,
-			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
-				Name: "legacy-harness-template",
-			},
-		}},
+		Type:      corev1alpha1.TaskTypeAgent,
+		Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}},
 	}}
-	r := &TaskReconciler{AgentSandboxEnabled: true}
+	r := &TaskReconciler{WorkspaceProviderAPIEnabled: true}
 
 	if err := r.validateExecutionWorkspace(task); err != nil {
 		t.Fatalf("validateExecutionWorkspace() error = %v, want provider checks deferred to planAgentExecution", err)
@@ -3461,6 +3274,275 @@ func TestHandleRunning_JobFailed_WithRetry(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_RetryRecordsAttemptFailure(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-retry-event-job-0", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-retry-event", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeContainer,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 2},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  job.Name,
+			Attempts: 1,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-retry-event-pod", Namespace: "default",
+			Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name), batchv1.JobNameLabel: job.Name},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "worker",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3, Reason: "Error"}},
+			}},
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, pod)
+
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending for retry", task.Status.Phase)
+	}
+	recorded, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: task.Namespace, TaskName: task.Name,
+		EventTypes: []string{events.ExecutionEventTypeTaskPhaseChanged},
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents() error = %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("attempt failure events = %d, want 1", len(recorded))
+	}
+	const want = "Attempt 1 (Job run-retry-event-job-0) failed, retrying in 10s: job failed: container exited with code 3 (reason=Error)"
+	if recorded[0].Summary != want || recorded[0].Severity != events.ExecutionEventSeverityWarning {
+		t.Fatalf("event = %s %q, want warning %q", recorded[0].Severity, recorded[0].Summary, want)
+	}
+}
+
+func appendApprovalTestEvent(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task, eventType string, content map[string]any) {
+	t.Helper()
+	data, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, TaskName: task.Name,
+		Type: eventType, Severity: events.ExecutionEventSeverityInfo, Content: data, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(%s): %v", eventType, err)
+	}
+}
+
+func TestParkOnPendingApprovalSetsWaitingForApproval(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "autonomous-approval", Namespace: "default", UID: "autonomous-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 2},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalRequested, map[string]any{
+		"approvalID": "approval-1", "taskUID": string(task.UID), "targetTool": "merge_pull_request",
+	})
+
+	if _, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || !parked {
+		t.Fatalf("parkOnPendingApproval() parked = %v, err = %v", parked, err)
+	}
+	waiting := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval)
+	if waiting == nil || waiting.Status != metav1.ConditionTrue || waiting.Reason != waitingForApprovalReasonPending ||
+		waiting.Message != "waiting for approval approval-1 for merge_pull_request" {
+		t.Fatalf("WaitingForApproval = %+v, want True naming the pending approval", waiting)
+	}
+	if task.Status.Message != "waiting for approval approval-1 for merge_pull_request at iteration 2" {
+		t.Fatalf("message = %q", task.Status.Message)
+	}
+
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalApproved, map[string]any{"approvalID": "approval-1"})
+	if _, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+		t.Fatalf("parkOnPendingApproval() after decision parked = %v, err = %v", parked, err)
+	}
+	stored := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+		t.Fatal(err)
+	}
+	waiting = meta.FindStatusCondition(stored.Status.Conditions, ConditionTypeWaitingForApproval)
+	if waiting == nil || waiting.Status != metav1.ConditionFalse || waiting.Reason != waitingForApprovalReasonResolved {
+		t.Fatalf("WaitingForApproval after decision = %+v, want False/%s", waiting, waitingForApprovalReasonResolved)
+	}
+}
+
+func TestSyncACPWaitingForApproval(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "acp-approval", Namespace: "default", UID: "acp-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	requireWaiting := func(status metav1.ConditionStatus, reason string) {
+		t.Helper()
+		stored := &corev1alpha1.Task{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+			t.Fatal(err)
+		}
+		waiting := meta.FindStatusCondition(stored.Status.Conditions, ConditionTypeWaitingForApproval)
+		if status == "" {
+			if waiting != nil {
+				t.Fatalf("WaitingForApproval = %+v, want unset", waiting)
+			}
+			return
+		}
+		if waiting == nil || waiting.Status != status || waiting.Reason != reason {
+			t.Fatalf("WaitingForApproval = %+v, want %s/%s", waiting, status, reason)
+		}
+	}
+
+	// No approval has been requested: the condition is not invented.
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting("", "")
+
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalRequested, map[string]any{
+		"approvalID": "brokered-1", "taskUID": string(task.UID), "targetTool": "deploy",
+		"expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	})
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting(metav1.ConditionTrue, waitingForApprovalReasonPending)
+
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalDeclined, map[string]any{"approvalID": "brokered-1"})
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting(metav1.ConditionFalse, waitingForApprovalReasonResolved)
+
+	// An expired request no longer blocks the Task.
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalRequested, map[string]any{
+		"approvalID": "brokered-2", "taskUID": string(task.UID), "targetTool": "deploy",
+		"expiresAt": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting(metav1.ConditionFalse, waitingForApprovalReasonResolved)
+}
+
+func TestHandleRunning_SurfacesPodWaitingReason(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	startTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	timeout := metav1.Duration{Duration: time.Hour}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-bad-image", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "does-not-exist:latest", Timeout: &timeout},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-bad-image-job",
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-bad-image-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	const pullMessage = `Back-off pulling image "does-not-exist:latest"`
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-bad-image-pod", Namespace: "default",
+			Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name), batchv1.JobNameLabel: job.Name},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "worker",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: pullMessage}},
+			}},
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, pod)
+	const want = "pod waiting: ImagePullBackOff - " + pullMessage
+
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.Message != want {
+		t.Fatalf("status = %s %q, want Running %q", task.Status.Phase, task.Status.Message, want)
+	}
+
+	// Once the image pulls, the stale waiting message is cleared.
+	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning}
+	if err := r.Status().Update(ctx, pod); err != nil {
+		t.Fatalf("update pod status: %v", err)
+	}
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.Message != "" {
+		t.Fatalf("status = %s %q, want Running with no message", task.Status.Phase, task.Status.Message)
+	}
+
+	// A Task that times out while its image cannot be pulled reports why.
+	task.Status.Message = want
+	task.Status.StartTime = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
+	if err := r.Status().Update(ctx, task); err != nil {
+		t.Fatalf("update task status: %v", err)
+	}
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Message != "task timed out; "+want {
+		t.Fatalf("status = %s %q, want Failed with the pull failure", task.Status.Phase, task.Status.Message)
+	}
+}
+
+func TestPodWaitingMessage(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status corev1.PodStatus
+		want   string
+	}{
+		{
+			name: "invalid image name",
+			status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "InvalidImageName", Message: `couldn't parse image name "Bad:Image"`}},
+			}}},
+			want: `pod waiting: InvalidImageName - couldn't parse image name "Bad:Image"`,
+		},
+		{
+			name: "init container config error",
+			status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError"}},
+			}}},
+			want: "pod waiting: CreateContainerConfigError",
+		},
+		{
+			name: "creating containers is not surfaced",
+			status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+			}}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podWaitingMessage(&corev1.Pod{Status: tt.status}); got != tt.want {
+				t.Fatalf("podWaitingMessage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleRunning_PodFailedMountFailsTask(t *testing.T) {
 	scheme := newTestScheme()
 	now := time.Now()
@@ -4021,6 +4103,75 @@ func TestCompleteTask_WithSessionRef(t *testing.T) {
 	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "token-task", Namespace: "default", UID: "token-task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "token-session", Append: true},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	sessions := r.SessionManager.store
+	now := time.Now().UTC()
+	if err := sessions.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "token-session", SessionType: "task",
+		ActiveTask: task.Name, ActiveTaskUID: string(task.UID), CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	usageStore := r.ExecutionEventStore.(store.UsageStore)
+	count := func(v int64) *int64 { return &v }
+	for _, observation := range []store.UsageObservation{
+		// A running snapshot and the final summary of one call count once.
+		{ID: "call-1-running", CounterID: "call-1", Status: "running", InputTokens: count(40), OutputTokens: count(0)},
+		{ID: "call-1-done", CounterID: "call-1", Status: store.UsageStatusCompleted, InputTokens: count(100), OutputTokens: count(20), Complete: true},
+		{ID: "call-2-done", CounterID: "call-2", Status: store.UsageStatusCompleted, InputTokens: count(50), OutputTokens: count(5), Complete: true},
+	} {
+		observation.Namespace, observation.TaskUID, observation.TaskName = "default", string(task.UID), task.Name
+		observation.Scope, observation.Source, observation.ObservedAt = store.UsageScopeCall, store.UsageSourceProvider, now
+		if err := usageStore.RecordUsage(ctx, observation); err != nil {
+			t.Fatalf("RecordUsage(%s): %v", observation.ID, err)
+		}
+	}
+	requireTokens := func(input, output int) {
+		t.Helper()
+		session, err := sessions.GetSession(ctx, "default", "token-session")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if session.InputTokens != input || session.OutputTokens != output {
+			t.Fatalf("session tokens = %d/%d, want %d/%d", session.InputTokens, session.OutputTokens, input, output)
+		}
+	}
+
+	if _, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done"); err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+	requireTokens(150, 25)
+
+	// The usage is added in the same write that releases the Session lock, so
+	// a completion replayed after a crash finds no lock and counts nothing.
+	if _, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done"); err != nil {
+		t.Fatalf("replayed completeTask() error = %v", err)
+	}
+	if err := r.SessionManager.ReleaseLockWithTokenUsage(ctx, task, 150, 25); err != nil {
+		t.Fatalf("replayed ReleaseLockWithTokenUsage() error = %v", err)
+	}
+	requireTokens(150, 25)
+
+	// Agent Tasks are ACP Session turns, counted when the turn finalizes, so
+	// they report no usage to add here.
+	agentTask := task.DeepCopy()
+	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
+	if input, output, err := r.sessionTokenUsage(ctx, agentTask); err != nil || input != 0 || output != 0 {
+		t.Fatalf("sessionTokenUsage(agent) = %d/%d, %v; want 0/0", input, output, err)
 	}
 }
 
@@ -5400,7 +5551,7 @@ func TestHandlePending_AgentRuntimeUnsupportedPlannerFeaturesFailBeforeJobBacken
 	}
 }
 
-func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testing.T) {
+func TestHandlePending_ClasslessWorkspaceFailsBeforeJobBackend(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
@@ -5410,12 +5561,6 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
-	}
-	template := &sandboxextv1beta1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS},
-	}
-	warmPool := &sandboxextv1beta1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{Name: template.Name, Namespace: defaultNS},
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -5428,19 +5573,12 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
 			Prompt:   "do work",
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:  true,
-					Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
-						Name: template.Name,
-					},
-				},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{},
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
-	r := newUnitReconciler(scheme, task, agent, template, warmPool)
-	r.AgentSandboxEnabled = true
+	r := newUnitReconciler(scheme, task, agent)
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5457,16 +5595,10 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	if !strings.Contains(updated.Status.Message, acpWorkspaceTestTemplateRefForbiddenError) {
-		t.Fatalf("message = %q, want templateRef rejection", updated.Status.Message)
+	if !strings.Contains(updated.Status.Message, "classRef.name is required") {
+		t.Fatalf("message = %q, want classRef rejection", updated.Status.Message)
 	}
-	assertExecutionWorkspaceValidationFailedStatus(
-		t,
-		updated.Status.ExecutionWorkspace,
-		corev1alpha1.WorkspaceProviderAgentSandbox,
-		template.Name,
-		acpWorkspaceTestTemplateRefForbiddenError,
-	)
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, "classRef.name is required")
 	assertNoJobsForTask(t, r, task)
 }
 
@@ -5492,13 +5624,7 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
 			Prompt:   "do work",
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:  true,
-					Provider: corev1alpha1.WorkspaceProviderSubstrate,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
-						Name: "orka-codex",
-					},
-				},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
@@ -5520,16 +5646,16 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderSubstrate, "orka-codex", "provider substrate is disabled")
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, "requires the workspace provider API")
 	assertNoJobsForTask(t, r, task)
 }
 
-func TestHandlePending_ExecutionWorkspaceUnsupportedProviderStatusOmitsProviderDetails(t *testing.T) {
+func TestHandlePending_ExecutionWorkspaceMissingClassStatusOmitsProviderDetails(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2)},
 		},
 	}
 	task := &corev1alpha1.Task{
@@ -5539,15 +5665,13 @@ func TestHandlePending_ExecutionWorkspaceUnsupportedProviderStatusOmitsProviderD
 			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
 			Prompt:   "do work",
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:  true,
-					Provider: corev1alpha1.WorkspaceProvider("provider-native"),
-				},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
+	r.WorkspaceProviderAPIEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5571,8 +5695,8 @@ func TestHandlePending_ExecutionWorkspaceUnsupportedProviderStatusOmitsProviderD
 	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed || status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
 		t.Fatalf("workspace status phase/reason = %q/%q, want Failed/WorkspaceValidationFailed", status.Phase, status.Reason)
 	}
-	if !strings.Contains(status.Message, "unsupported execution workspace provider") {
-		t.Fatalf("workspace status message = %q, want unsupported provider", status.Message)
+	if !strings.Contains(status.Message, "does not exist") {
+		t.Fatalf("workspace status message = %q, want missing class", status.Message)
 	}
 	assertNoJobsForTask(t, r, task)
 }
@@ -5599,16 +5723,13 @@ func TestHandlePending_ExecutionWorkspaceDispatchDisabledFailsClosed(t *testing.
 			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
 			Prompt:   "do work",
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:  true,
-					Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-				},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
-	r.AgentSandboxEnabled = true
+	installTestACPWorkspaceClass(t, r)
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5641,13 +5762,13 @@ func TestHandlePending_ExecutionWorkspaceDispatchDisabledFailsClosed(t *testing.
 	assertNoJobsForTask(t, r, task)
 }
 
-func assertExecutionWorkspaceValidationFailedStatus(t *testing.T, status *corev1alpha1.ExecutionWorkspaceStatus, provider corev1alpha1.WorkspaceProvider, templateName, messageSubstring string) {
+func assertExecutionWorkspaceValidationFailedStatus(t *testing.T, status *corev1alpha1.ExecutionWorkspaceStatus, messageSubstring string) {
 	t.Helper()
 	if status == nil {
 		t.Fatal("ExecutionWorkspace status is nil")
 	}
-	if status.Provider != provider {
-		t.Fatalf("workspace provider = %q, want %q", status.Provider, provider)
+	if status.Provider != "" || status.TemplateRef != nil {
+		t.Fatal("validation failure must omit unresolved provider details")
 	}
 	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed {
 		t.Fatalf("workspace phase = %q, want %q", status.Phase, corev1alpha1.ExecutionWorkspacePhaseFailed)
@@ -5655,14 +5776,8 @@ func assertExecutionWorkspaceValidationFailedStatus(t *testing.T, status *corev1
 	if status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
 		t.Fatalf("workspace reason = %q, want %q", status.Reason, corev1alpha1.ExecutionWorkspaceReasonValidationFailed)
 	}
-	if status.TemplateRef == nil || status.TemplateRef.Name != templateName || status.TemplateRef.Namespace != defaultNS {
-		t.Fatalf("workspace templateRef = %#v, want default/%s", status.TemplateRef, templateName)
-	}
 	if status.ReusePolicy != corev1alpha1.WorkspaceReusePolicyNone {
 		t.Fatalf("workspace reusePolicy = %q, want %q", status.ReusePolicy, corev1alpha1.WorkspaceReusePolicyNone)
-	}
-	if status.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete {
-		t.Fatalf("workspace cleanupPolicy = %q, want %q", status.CleanupPolicy, corev1alpha1.WorkspaceCleanupPolicyDelete)
 	}
 	if !strings.Contains(status.Message, messageSubstring) {
 		t.Fatalf("workspace message = %q, want substring %q", status.Message, messageSubstring)
@@ -6394,6 +6509,75 @@ func TestCreateTaskJob_JobAlreadyExists(t *testing.T) {
 	_ = jobName
 }
 
+func TestCreateTaskJob_RecoveredJobKeepsItsOwnConnectionBindings(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "create-recover-bindings", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890ab"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "busybox:latest", Command: []string{"echo", "hello"}},
+	}
+	r := newUnitReconciler(scheme, task)
+	if _, err := r.createTaskJob(context.Background(), task, nil, nil); err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	// The Job that already exists was dispatched against a frozen
+	// Connection; a later reconcile must adopt those bindings rather than
+	// the ones it would freeze now.
+	job := &batchv1.Job{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		t.Fatal(err)
+	}
+	frozen := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
+	encoded, _ := json.Marshal(frozen)
+	// The fake API server assigns no UID; recovery adopts only a recorded one.
+	job.UID = "job-uid-1"
+	for i := range job.Spec.Template.Spec.Containers {
+		if job.Spec.Template.Spec.Containers[i].Name == workerContainerName {
+			job.Spec.Template.Spec.Containers[i].Env = setControllerEnvValue(job.Spec.Template.Spec.Containers[i].Env, workerenv.ConnectionBindings, string(encoded))
+		}
+	}
+	if err := r.Update(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	stored := &batchv1.Job{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if got, present, err := FrozenConnectionBindingsFromJob(stored); err != nil || !present || !ConnectionBindingsEqual(got, frozen) {
+		t.Fatalf("stored job bindings = %+v present = %v err = %v", got, present, err)
+	}
+	// A status write that landed before the crash recorded the Job's
+	// identity but not yet its bindings; the next reconcile dispatches again.
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	task.Status.Attempts = 0
+	task.Status.StartTime = nil
+	task.Status.Conditions = nil
+	task.Status.ConnectionBindings = nil
+	task.Status.JobUID = "job-uid-1"
+	if err := r.Status().Update(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	firstJob := job.Name
+	if _, err := r.createTaskJob(context.Background(), task, nil, nil); err != nil {
+		t.Fatalf("recovery dispatch: %v", err)
+	}
+	if task.Status.JobName != firstJob || task.Status.JobUID != "job-uid-1" {
+		t.Fatalf("recovery dispatched job %q uid %q, want the existing %q", task.Status.JobName, task.Status.JobUID, firstJob)
+	}
+	if !ConnectionBindingsEqual(task.Status.ConnectionBindings, frozen) {
+		t.Fatalf("recovered bindings = %+v, want the Job's own %+v (phase %s message %q)", task.Status.ConnectionBindings, frozen, task.Status.Phase, task.Status.Message)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if !ConnectionBindingsEqual(updated.Status.ConnectionBindings, frozen) {
+		t.Fatalf("persisted bindings = %+v, want the Job's own %+v", updated.Status.ConnectionBindings, frozen)
+	}
+}
+
 func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 	scheme := newTestScheme()
 	current := &corev1alpha1.Task{
@@ -7123,6 +7307,10 @@ func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context
 	return 0, errors.New("not implemented")
 }
 
+func (failingTaskExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (failingTaskExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
 	return errors.New("not implemented")
 }
@@ -7352,6 +7540,67 @@ func TestTaskLifecycleEventKeepsExistingSessionName(t *testing.T) {
 	}
 }
 
+func TestTaskLifecycleEventAttributesChatCreatedTasks(t *testing.T) {
+	// A chat-created Task has no sessionRef; its orka.ai/chat-session label
+	// attributes lifecycle events to that chat Session, but only when the
+	// label names an existing chat Session.
+	ctx := context.Background()
+	reconciler := newUnitReconciler(newTestScheme())
+	now := time.Now()
+	for _, session := range []*store.SessionRecord{
+		{Namespace: "default", Name: "chat-1", SessionType: store.SessionTypeChat},
+		{Namespace: "default", Name: "task-session", SessionType: "task"},
+	} {
+		session.CreatedAt, session.UpdatedAt = now, now
+		if err := reconciler.SessionManager.store.CreateSession(ctx, session); err != nil {
+			t.Fatalf("CreateSession(%s): %v", session.Name, err)
+		}
+	}
+	for i, tt := range []struct {
+		name        string
+		label       string
+		sessionRef  string
+		wantSession string
+	}{
+		{name: "chat session label", label: "chat-1", wantSession: "chat-1"},
+		{name: "sessionRef wins over the label", label: "chat-1", sessionRef: "task-session", wantSession: "task-session"},
+		{name: "label naming a non-chat session", label: "task-session"},
+		{name: "label naming a missing session", label: "deleted-chat"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: fmt.Sprintf("chat-task-%d", i), Namespace: "default",
+					Labels: map[string]string{labels.LabelChatSession: tt.label},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			if tt.sessionRef != "" {
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: tt.sessionRef}
+			}
+			eventStore := storetest.NewFakeExecutionEventStore()
+			reconciler.ExecutionEventStore = eventStore
+			if err := reconciler.recordTaskLifecycleEvent(ctx, task, events.ExecutionEventTypeTaskCreated,
+				events.ExecutionEventSeverityInfo, "Task status initialized to Pending"); err != nil {
+				t.Fatalf("recordTaskLifecycleEvent: %v", err)
+			}
+			listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+				Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, Limit: 10,
+			})
+			if err != nil {
+				t.Fatalf("ListExecutionEvents: %v", err)
+			}
+			if len(listed) != 1 || listed[0].SessionName != tt.wantSession {
+				t.Fatalf("listed events = %#v, want one event attributed to session %q", listed, tt.wantSession)
+			}
+			// Event attribution never changes Session continuity.
+			if got := taskSessionName(task); got != tt.sessionRef {
+				t.Fatalf("taskSessionName() = %q, want %q", got, tt.sessionRef)
+			}
+		})
+	}
+}
+
 func TestTaskDeletionDeletesExecutionEvents(t *testing.T) {
 	scheme := newTestScheme()
 	now := metav1.Now()
@@ -7425,7 +7674,7 @@ func TestCompleteExecutedTaskBeginsFinalizingUntilWorkspaceAuthorityIsRevoked(t 
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "finalize-after-execution", Namespace: "default"},
-		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhaseRunning,
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
@@ -7474,7 +7723,7 @@ func TestHandleFinalizingBeginsWorkspaceAttachmentRevocation(t *testing.T) {
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "finalize-revoke", Namespace: "default"},
-		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseFinalizing,
 			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1},
@@ -7533,7 +7782,7 @@ func TestHandleFinalizingRecoversRotatedACPAttachmentEpoch(t *testing.T) {
 			Name: "finalize-revoke-rotated", Namespace: "default", UID: taskUID,
 			Annotations: map[string]string{acpTaskAttachmentEpochAnnotation: strconv.FormatInt(projectedEpoch, 10)},
 		},
-		Spec: corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Spec: corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseFinalizing,
 			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1},
@@ -7588,7 +7837,7 @@ func TestHandleFinalizingCompletesAfterProjectedRevocationUsingHighWaterEpoch(t 
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "finalize-detached", Namespace: "default"},
-		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseFinalizing,
 			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, Message: "done"},
@@ -8403,7 +8652,7 @@ func TestHandleFinalizingUsesACPWorkspaceDetachTimeout(t *testing.T) {
 				Spec: corev1alpha1.TaskSpec{
 					Type: corev1alpha1.TaskTypeAgent,
 					Execution: &corev1alpha1.ExecutionSpec{
-						Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
+						Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 					},
 				},
 				Status: corev1alpha1.TaskStatus{
@@ -8462,7 +8711,7 @@ func TestHandleFinalizingQuarantinesWorkspaceAfterTimeout(t *testing.T) {
 	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: attachmentLeaseName(workspaceObject.Name), Namespace: "default"}}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "finalize-timeout", Namespace: "default", UID: types.UID("task-timeout-uid")},
-		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhaseFinalizing,
 			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{
@@ -8570,5 +8819,43 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRequestedTaskCancellation(t *testing.T) {
+	running := func(mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationCancelRequested: "stop"}},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+		}
+		mutate(task)
+		return task
+	}
+	for _, tc := range []struct {
+		name    string
+		task    *corev1alpha1.Task
+		message string
+		ok      bool
+	}{
+		{name: "running", task: running(func(*corev1alpha1.Task) {}), message: "stop", ok: true},
+		{name: "pending", task: running(func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhasePending }), message: "stop", ok: true},
+		{name: "empty message", task: running(func(t *corev1alpha1.Task) {
+			t.Annotations[labels.AnnotationCancelRequested] = " "
+		}), message: "cancelled by parent task", ok: true},
+		{name: "no request", task: running(func(t *corev1alpha1.Task) { t.Annotations = nil })},
+		{name: "finalizing", task: running(func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseFinalizing })},
+		{name: "succeeded", task: running(func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded })},
+		{name: "agent", task: running(func(t *corev1alpha1.Task) { t.Spec.Type = corev1alpha1.TaskTypeAgent })},
+		{name: "ACP execution", task: running(func(t *corev1alpha1.Task) {
+			t.Status.Execution = &corev1alpha1.TaskExecutionStatus{ControllerEpoch: 1}
+		})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message, ok := requestedTaskCancellation(tc.task)
+			if message != tc.message || ok != tc.ok {
+				t.Fatalf("requestedTaskCancellation() = %q, %v; want %q, %v", message, ok, tc.message, tc.ok)
+			}
+		})
 	}
 }

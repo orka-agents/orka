@@ -109,6 +109,16 @@ describe('sessionListItemSchema', () => {
 })
 
 describe('transcriptMessageSchema', () => {
+  it('preserves tool metadata from persisted chat turns', () => {
+    const messages = [
+      { role: 'assistant', content: '', toolCalls: [
+        { id: 'call-1', name: 'list_tasks', arguments: { namespace: 'default' } },
+      ] },
+      { role: 'tool', content: '{"success":true,"data":[]}', name: 'list_tasks', toolCallID: 'call-1' },
+    ]
+    expect(messages.map((message) => transcriptMessageSchema.parse(message))).toEqual(messages)
+  })
+
   it('parses valid data with all fields', () => {
     const data = {
       role: 'assistant',

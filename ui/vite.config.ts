@@ -5,7 +5,9 @@ import tailwindcss from '@tailwindcss/vite'
 import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
 import path from 'path'
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  // The demo build is a static site served from a subpath (GitHub Pages).
+  base: mode === 'demo' ? './' : '/',
   plugins: [
     TanStackRouterVite({
       routesDirectory: './src/routes',
@@ -44,6 +46,7 @@ export default defineConfig({
         'src/main.tsx',
         'src/components/ui/**',
         'src/test/**',
+        'src/demo/**',
         'src/**/*.test.{ts,tsx}',
         'src/vite-env.d.ts',
         // Thin wrappers only; route logic and future routes stay in coverage.
@@ -68,4 +71,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

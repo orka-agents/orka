@@ -11,31 +11,36 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+const (
+	metricLabelResult = "result"
+	metricLabelKind   = "kind"
+)
+
 var (
 	gatewayIngressTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "orka_gateway_ingress_total",
 		Help: "Normalized gateway ingress outcomes.",
-	}, []string{"result"})
+	}, []string{metricLabelResult})
 	gatewayDispatchTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "orka_gateway_dispatch_total",
 		Help: "Gateway event dispatch outcomes.",
-	}, []string{"result"})
+	}, []string{metricLabelResult})
 	gatewayDeliveryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "orka_gateway_delivery_total",
 		Help: "Gateway delivery attempt outcomes.",
-	}, []string{"result"})
+	}, []string{metricLabelResult})
 	gatewayDeadLettersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "orka_gateway_dead_letters_total",
 		Help: "Gateway event and delivery dead letters.",
-	}, []string{"kind"})
+	}, []string{metricLabelKind})
 	gatewayQueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "orka_gateway_queue_depth",
 		Help: "Current gateway event and delivery queue depth.",
-	}, []string{"kind"})
+	}, []string{metricLabelKind})
 	gatewayQueueOldestAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "orka_gateway_queue_oldest_age_seconds",
 		Help: "Age of the oldest pending gateway event or due delivery.",
-	}, []string{"kind"})
+	}, []string{metricLabelKind})
 	gatewayTaskDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "orka_gateway_task_duration_seconds",
 		Help:    "Duration of Tasks created from gateway events.",

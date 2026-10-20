@@ -175,7 +175,7 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 			}
 		}
 		if cfg.GitRef != "" {
-			fetchMode, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+			fetchMode, err := fetchGitRefWithArgs(ctx, workspaceDir, cfg.GitRef, nil)
 			if err != nil {
 				return err
 			}
@@ -223,7 +223,7 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		if cfg.ShallowGitRef {
 			fetchMode, err = fetchGitRefShallow(ctx, workspaceDir, cfg.GitRef)
 		} else {
-			fetchMode, err = fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+			fetchMode, err = fetchGitRefWithArgs(ctx, workspaceDir, cfg.GitRef, nil)
 		}
 		if err != nil {
 			return err
@@ -325,10 +325,6 @@ func gitRemoteForError(remote string) string {
 		remote = parsed.String()
 	}
 	return redact.SensitiveText(remote)
-}
-
-func fetchGitRef(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
-	return fetchGitRefWithArgs(ctx, workspaceDir, ref, nil)
 }
 
 func fetchGitRefShallow(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
@@ -486,17 +482,23 @@ func gitSafeDirectoryArgs(dir string, args ...string) []string {
 	return append([]string{"-c", "safe.directory=" + safeDir, "-c", "core.hooksPath=/dev/null"}, args...)
 }
 
+// execGitOutputContext runs git with stderr passed through and returns trimmed stdout.
 func execGitOutputContext(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", gitSafeDirectoryArgs(dir, args...)...)
-	cmd.Dir = dir
+	cmd, err := newGitCommand(ctx, dir, args...)
+	if err != nil {
+		return "", err
+	}
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
 
+// execGitContext runs git with stdout and stderr passed through.
 func execGitContext(ctx context.Context, dir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", gitSafeDirectoryArgs(dir, args...)...)
-	cmd.Dir = dir
+	cmd, err := newGitCommand(ctx, dir, args...)
+	if err != nil {
+		return err
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

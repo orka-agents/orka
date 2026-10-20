@@ -268,6 +268,12 @@ func (o *KubernetesACPUpgradeDrainBarrierObserver) ObserveACPUpgradeDrainBarrier
 		return snapshot, fmt.Errorf("list ExternalEffects for upgrade drain: %w", err)
 	}
 	for i := range effects.Items {
+		if emptyRuntimePoolBootEvidenceReservation(&effects.Items[i]) {
+			// Boot evidence only records a local observation. An interrupted
+			// controller can leave its reservation empty; the writer resumes it,
+			// and it never stands for in-flight external work.
+			continue
+		}
 		switch store.ExternalEffectState(effects.Items[i].Status.State) {
 		case store.ExternalEffectSucceeded, store.ExternalEffectFailed, store.ExternalEffectOutcomeUnknown:
 		default:
@@ -408,7 +414,6 @@ type ACPUpgradeDrainCoordinator struct {
 	Barriers            ACPUpgradeDrainBarrierObserver
 	SupervisorClient    RuntimePoolSupervisorClient
 	HTTPClient          *http.Client
-	SubstrateConfig     SubstrateConfig
 	ControllerNamespace string
 	Options             ACPUpgradeDrainOptions
 	Now                 func() time.Time
@@ -614,7 +619,7 @@ func (c *ACPUpgradeDrainCoordinator) runDrain(parent context.Context) error {
 		lastErr = observeErr
 		lastErrorText := ""
 		if observeErr != nil {
-			lastErrorText = sanitizeRuntimePoolMessage(observeErr.Error())
+			lastErrorText = sanitizeStatusMessage(observeErr.Error())
 		}
 		c.setDrainingStatus(fence, marker.StartedAt, deadline, snapshot, lastErrorText)
 		if observeErr == nil && snapshot.Quiescent() {
@@ -734,18 +739,17 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 			}
 			return nil
 		}
-		if runtimePoolIsSubstrateBacked(pool) && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded {
-			return c.observeFailedNativeSubstrateCleanup(ctx, pool)
-		}
+
 		return fmt.Errorf(
 			"has no authenticated active instance but workspace lifecycle %q does not prove the provider workspace is stopped",
 			pool.Status.Lifecycle,
 		)
 	}
-	if runtimePoolIsSubstrateBacked(pool) {
-		pod, err := upgradeDrainSubstrateInstancePod(pool, active)
+
+	if runtimePoolHasExternalWorkspace(pool) && active != nil {
+		pod, err := runtimePoolWorkspaceCleanupPod(ctx, c.APIReader, pool)
 		if err != nil {
-			return err
+			return fmt.Errorf("external RuntimePool admitted endpoint: %w", err)
 		}
 		return c.observeAndDrainRuntimeInstance(ctx, fence, pool, active, pod, snapshot)
 	}
@@ -777,13 +781,6 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 		return fmt.Errorf("found %d live owned runtime Pods during planned drain", len(pods))
 	}
 	return c.observeAndDrainRuntimeInstance(ctx, fence, pool, active, pod, snapshot)
-}
-
-func (c *ACPUpgradeDrainCoordinator) observeFailedNativeSubstrateCleanup(ctx context.Context, pool *corev1alpha1.RuntimePool) error {
-	reconciler := &RuntimePoolReconciler{
-		Client: c.Client, APIReader: c.APIReader, ControllerNamespace: c.ControllerNamespace,
-	}
-	return reconciler.verifyFailedNativeSubstrateCleanup(ctx, pool)
 }
 
 func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimeInstance(
@@ -842,35 +839,6 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimeInstance(
 		return fmt.Errorf("authenticated supervisor is still draining")
 	}
 	return nil
-}
-
-func upgradeDrainSubstrateInstancePod(
-	pool *corev1alpha1.RuntimePool,
-	active *corev1alpha1.RuntimePoolActiveInstanceStatus,
-) (*corev1.Pod, error) {
-	if pool == nil || active == nil {
-		return nil, fmt.Errorf("substrate RuntimePool active instance is required")
-	}
-	namespace := strings.TrimSpace(active.PodNamespace)
-	name := strings.TrimSpace(active.PodName)
-	uid := strings.TrimSpace(active.PodUID)
-	address := strings.TrimSpace(active.PodAddress)
-	providerGeneration := strings.TrimSpace(active.ProviderTokenGeneration)
-	if namespace == "" || name == "" || uid == "" || address == "" || !validRuntimePoolProviderTokenGeneration(providerGeneration) {
-		return nil, fmt.Errorf("substrate RuntimePool active instance identity is incomplete")
-	}
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-			UID:       types.UID(uid),
-			Annotations: map[string]string{
-				runtimePoolProfileAnnotation:                 pool.Spec.Runtime.Profile.Digest,
-				runtimePoolProviderTokenGenerationAnnotation: providerGeneration,
-			},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: address},
-	}, nil
 }
 
 func (c *ACPUpgradeDrainCoordinator) listRuntimePoolPodsForUpgradeDrain(
@@ -961,8 +929,8 @@ func (c *ACPUpgradeDrainCoordinator) supervisorClientForPool(pool *corev1alpha1.
 	reconciler := &RuntimePoolReconciler{
 		SupervisorClient: c.SupervisorClient,
 		HTTPClient:       c.HTTPClient,
-		SubstrateConfig:  c.SubstrateConfig,
-		Now:              c.Now,
+
+		Now: c.Now,
 	}
 	return reconciler.supervisorClientForPool(pool)
 }
@@ -1021,7 +989,7 @@ func (c *ACPUpgradeDrainCoordinator) finishTimedOut(
 ) error {
 	reason := "ACP planned-upgrade barriers did not settle before the configured deadline"
 	if lastErr != nil {
-		reason += ": " + sanitizeRuntimePoolMessage(lastErr.Error())
+		reason += ": " + sanitizeStatusMessage(lastErr.Error())
 	}
 	now := c.now()
 	markerErr := error(nil)
@@ -1031,7 +999,7 @@ func (c *ACPUpgradeDrainCoordinator) finishTimedOut(
 		markerErr = c.persistTerminalMarker(markerCtx, marker, ACPUpgradeDrainMarkerTimedOut, snapshot, now, reason)
 	}
 	if markerErr != nil {
-		reason += "; failed to persist timeout marker: " + sanitizeRuntimePoolMessage(markerErr.Error())
+		reason += "; failed to persist timeout marker: " + sanitizeStatusMessage(markerErr.Error())
 	}
 	c.setTerminalStatus(ACPUpgradeDrainTimedOut, fence, snapshot, nil, reason)
 	return fmt.Errorf("%w: %s", ErrACPUpgradeDrainTimedOut, reason)
@@ -1127,7 +1095,7 @@ func (c *ACPUpgradeDrainCoordinator) persistTerminalMarker(
 		}
 		existing.State = state
 		existing.Snapshot = snapshot
-		existing.LastError = sanitizeRuntimePoolMessage(reason)
+		existing.LastError = sanitizeStatusMessage(reason)
 		at = at.UTC()
 		if state == ACPUpgradeDrainMarkerCompleted {
 			existing.CompletedAt = &at
@@ -1341,10 +1309,7 @@ func (c *ACPUpgradeDrainCoordinator) currentLifecycleContext() context.Context {
 }
 
 func (c *ACPUpgradeDrainCoordinator) now() time.Time {
-	if c.Now != nil {
-		return c.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(c.Now)
 }
 
 func (c *ACPUpgradeDrainCoordinator) setDrainingStatus(
@@ -1397,7 +1362,7 @@ func (c *ACPUpgradeDrainCoordinator) setTerminalStatus(
 func (c *ACPUpgradeDrainCoordinator) failStatus(err error) {
 	message := ""
 	if err != nil {
-		message = sanitizeRuntimePoolMessage(err.Error())
+		message = sanitizeStatusMessage(err.Error())
 	}
 	c.statusMu.Lock()
 	defer c.statusMu.Unlock()

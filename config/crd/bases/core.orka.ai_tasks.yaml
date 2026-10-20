@@ -220,7 +220,9 @@ spec:
                           description: Selects a key of a ConfigMap.
                           properties:
                             key:
-                              description: The key to select.
+                              description: |-
+                                The key to select from the ConfigMap's Data field.
+                                Keys in the BinaryData field are not currently propagated to container env vars.
                               type: string
                             name:
                               default: ""
@@ -1322,24 +1324,13 @@ spec:
                     type: array
                   workspace:
                     description: |-
-                      Workspace requests an execution workspace. Worker-backed Task types use
-                      it directly. ACP agent Tasks may bind a workspace-provider-backed
-                      RuntimeSession through it (a provider/templateRef request, or a classRef
-                      with the workspace provider API enabled); these dispatch paths are
-                      flag-gated behind --acp-workspace-dispatch-enabled plus the matching
-                      provider flag and fail closed otherwise. Clean-room publication remains
-                      owned by RuntimeSession lifecycle.
+                      Workspace selects an ExecutionWorkspaceClass for an ACP agent Task.
+                      Omit workspace for ordinary execution. Workspace dispatch requires the
+                      workspace provider API, ACP workspace dispatch, and an installed provider.
                     properties:
-                      boot:
-                        description: |-
-                          Boot asks providers that support it to boot the workspace workload from scratch
-                          instead of resuming from the provider's default snapshot. Currently supported
-                          by the Substrate provider.
-                        type: boolean
                       classRef:
-                        description: |-
-                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
-                          classRef implicitly enables the controller-first workspace path.
+                        description: ClassRef selects an immutable ExecutionWorkspaceClass
+                          in the Task namespace.
                         properties:
                           name:
                             description: Name is the class name.
@@ -1348,67 +1339,12 @@ spec:
                         required:
                         - name
                         type: object
-                      cleanupPolicy:
-                        description: |-
-                          CleanupPolicy controls whether the workspace is deleted or retained after use.
-                          Defaults to delete when omitted.
-                        enum:
-                        - delete
-                        - retain
-                        type: string
-                      enabled:
-                        default: false
-                        description: Enabled requests use of a durable workspace for
-                          the task execution.
-                        type: boolean
-                      hibernation:
-                        description: |-
-                          Hibernation configures process lifetime inside the workspace. Resident
-                          mode is currently rejected until the worker protocol can report per-turn
-                          completion separately from resident process lifetime.
-                        properties:
-                          processMode:
-                            description: |-
-                              ProcessMode controls whether each turn starts fresh or reuses a resident
-                              process. Defaults to fresh.
-                            enum:
-                            - fresh
-                            - resident
-                            type: string
-                          residentKey:
-                            description: |-
-                              ResidentKey selects the process slot for resident mode. When omitted, the
-                              worker derives a stable key from namespace, template, and reuse key.
-                            type: string
-                        type: object
                       onDetach:
                         description: OnDetach requests an action allowed by the selected
                           class.
                         enum:
                         - Suspend
                         - Delete
-                        type: string
-                      poolRef:
-                        description: |-
-                          PoolRef references an operator-managed Substrate actor pool for placement,
-                          density tracking, and oversubscription policy.
-                        properties:
-                          name:
-                            description: Name is the pool name.
-                            type: string
-                          namespace:
-                            description: Namespace is the pool namespace. It defaults
-                              to the Task namespace.
-                            type: string
-                        type: object
-                      provider:
-                        description: |-
-                          Provider selects the workspace backend. When omitted, the controller
-                          resolves the configured default workspace provider; the built-in
-                          compatibility default is agent-sandbox.
-                        enum:
-                        - agent-sandbox
-                        - substrate
                         type: string
                       restoreFrom:
                         description: |-
@@ -1448,43 +1384,6 @@ spec:
                         - none
                         - session
                         type: string
-                      snapshot:
-                        description: |-
-                          Snapshot configures explicit provider snapshot restore/checkpoint behavior.
-                          Non-empty settings are currently rejected until provider checkpoint/restore
-                          support is available through Orka.
-                        properties:
-                          checkpointOnRelease:
-                            description: |-
-                              CheckpointOnRelease requests a checkpoint when cleanup releases or retains
-                              the workspace. CheckpointURI must be set when this is true.
-                            type: boolean
-                          checkpointURI:
-                            description: |-
-                              CheckpointURI is a provider-native snapshot URI prefix to write when the
-                              workspace is retained or released.
-                            type: string
-                          restoreURI:
-                            description: |-
-                              RestoreURI is a provider-native snapshot URI prefix to restore before the
-                              workspace command runs.
-                            type: string
-                        type: object
-                      templateRef:
-                        description: |-
-                          TemplateRef references the workspace template to instantiate or reuse.
-                          The template name is required when enabled is true unless the controller
-                          is configured with a provider-specific default template.
-                        properties:
-                          name:
-                            description: Name is the name of the workspace template.
-                            type: string
-                          namespace:
-                            description: |-
-                              Namespace is the namespace of the workspace template and claim.
-                              It defaults to the Task namespace, or the controller namespace when configured.
-                            type: string
-                        type: object
                       workspaceSlot:
                         default: default
                         description: WorkspaceSlot names one independently reusable
@@ -1493,16 +1392,9 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                    required:
+                    - classRef
                     type: object
-                    x-kubernetes-validations:
-                    - message: classRef cannot be combined with legacy enabled, provider,
-                        template, pool, cleanup, boot, snapshot, or hibernation settings
-                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
-                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
-                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
-                        && !has(self.snapshot) && !has(self.hibernation))'
-                    - message: restoreFrom requires classRef
-                      rule: '!has(self.restoreFrom) || has(self.classRef)'
                 type: object
               failedRunsHistoryLimit:
                 default: 1
@@ -1883,6 +1775,31 @@ spec:
                       CreatePR is true.
                     maxLength: 255
                     type: string
+                  prBody:
+                    description: |-
+                      PRBody is the pull request body supplied by the Task author. When empty,
+                      the publisher describes the publication and identifies the Task. Publication
+                      generation and reconciliation markers are appended to either body.
+                      Orka reconciliation comments are reserved and must not be included.
+                      Secret-like text is rejected at runtime before publication.
+                    maxLength: 32768
+                    type: string
+                    x-kubernetes-validations:
+                    - message: prBody must not contain reserved publisher reconciliation
+                        markers
+                      rule: '!self.contains(''<!-- orka.publisher.pr-'')'
+                  prTitle:
+                    description: |-
+                      PRTitle is the pull request title supplied by the Task author. When empty,
+                      the controller uses the prompt's first nonblank line, limited to 256 characters.
+                      An empty or whitespace-only prompt falls back to the publication generation title.
+                      Nonempty whitespace-only titles are rejected. Secret-like titles, including
+                      prompt-derived titles, are rejected at runtime before publication.
+                    maxLength: 256
+                    type: string
+                    x-kubernetes-validations:
+                    - message: prTitle must not be whitespace-only
+                      rule: self == '' || self.trim() != ''
                   publicationCredentialRef:
                     description: |-
                       PublicationCredentialRef references the target-repository write credential
@@ -2101,6 +2018,9 @@ spec:
               rule: self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch)
                 || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size()
                 == 0
+            - message: execution.workspace is only supported for agent Tasks
+              rule: '!has(self.execution) || !has(self.execution.workspace) || self.type
+                == ''agent'''
           status:
             description: |-
               TaskStatus defines the observed state of Task
@@ -2362,6 +2282,62 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              connectionBindings:
+                description: |-
+                  ConnectionBindings freezes, for native type: ai Tasks, the identity of
+                  the requester's Connection behind each connection-mode
+                  OutboundAccessPolicy at Job creation. Connector-backed tool calls from
+                  the worker are honored only while the live Connection still matches.
+                  No token material is ever recorded.
+                items:
+                  description: ConnectionBinding is one frozen person-to-provider
+                    link for a policy.
+                  properties:
+                    connectionName:
+                      description: ConnectionName is the requester's Connection for
+                        that provider.
+                      type: string
+                    generation:
+                      format: int64
+                      type: integer
+                    grantSequence:
+                      description: |-
+                        GrantSequence is the Connection's consent count when frozen; a
+                        re-link of the same object raises it and invalidates this binding.
+                      format: int64
+                      type: integer
+                    mode:
+                      description: Mode is the Connection mode at freeze time.
+                      type: string
+                    policyGeneration:
+                      format: int64
+                      type: integer
+                    policyName:
+                      description: PolicyName is the connection-mode OutboundAccessPolicy.
+                      type: string
+                    policyUID:
+                      description: |-
+                        PolicyUID and PolicyGeneration pin the policy object the binding was
+                        frozen under, so a policy deleted and recreated, or edited, after
+                        dispatch is refused rather than executed under the old binding.
+                      type: string
+                    provider:
+                      description: Provider is the ConnectorProvider the policy selects.
+                      type: string
+                    uid:
+                      description: UID and Generation pin the Connection as it was
+                        when frozen.
+                      type: string
+                  required:
+                  - connectionName
+                  - generation
+                  - grantSequence
+                  - mode
+                  - policyName
+                  - provider
+                  - uid
+                  type: object
+                type: array
               delivery:
                 description: Delivery reports trusted workspace validation and publication
                   reconciliation.
@@ -2941,9 +2917,8 @@ spec:
                     type: object
                   provider:
                     description: Provider is the resolved legacy workspace backend.
-                    enum:
-                    - agent-sandbox
-                    - substrate
+                    maxLength: 253
+                    minLength: 1
                     type: string
                   reason:
                     description: Reason is the provider-neutral lifecycle reason.
@@ -3061,6 +3036,55 @@ spec:
                 required:
                 - available
                 type: object
+              soulBinding:
+                description: |-
+                  SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+                  digests only, never prompt text. Retries reject configuration drift.
+                properties:
+                  agentGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  agentUID:
+                    description: AgentUID and AgentGeneration identify the exact Agent
+                      revision.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  inputsDigest:
+                    description: |-
+                      InputsDigest identifies the Task execution inputs, the spec without its
+                      control fields, that the binding froze. After the first binding it,
+                      rather than TaskGeneration, proves the inputs are unchanged, so a
+                      control-field edit such as spec.suspend keeps the binding valid.
+                      Bindings recorded before this field existed keep the generation check.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  promptDigest:
+                    description: PromptDigest identifies the composed role and persona
+                      prompt.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  soulDigest:
+                    description: SoulDigest identifies the exact persona source bytes.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  taskGeneration:
+                    description: TaskGeneration is the Task spec generation whose
+                      prompt was resolved.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                required:
+                - agentGeneration
+                - agentUID
+                - promptDigest
+                - soulDigest
+                - taskGeneration
+                type: object
               startTime:
                 description: StartTime is when the task started running
                 format: date-time
@@ -3077,11 +3101,62 @@ spec:
             - message: agentExecutionBinding is write-once and immutable
               rule: '!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding)
                 && self.agentExecutionBinding == oldSelf.agentExecutionBinding)'
+            - message: soulBinding is write-once and immutable
+              rule: '!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding
+                == oldSelf.soulBinding)'
         type: object
         x-kubernetes-validations:
         - message: Task spec is immutable after execution authority is recorded
-          rule: '!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding)
-            || self.spec == oldSelf.spec)'
+          rule: '!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding)
+            && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding)
+            && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type)
+            || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image)
+            && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) &&
+            has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command)
+            || self.spec.command == oldSelf.spec.command) && has(self.spec.args) ==
+            has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args)
+            && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env)
+            || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout)
+            && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout)
+            && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority)
+            || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy)
+            == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy
+            == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL)
+            && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL)
+            && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef)
+            || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef)
+            == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef
+            == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources)
+            && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources)
+            && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution)
+            || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule)
+            == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule
+            == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone)
+            && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone)
+            && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy)
+            && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy ==
+            oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds)
+            == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds)
+            || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds)
+            && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit)
+            && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit
+            == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit)
+            == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit)
+            || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit)
+            && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) ||
+            self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef)
+            && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef)
+            && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt)
+            || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime)
+            == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) ||
+            self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace)
+            == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace
+            == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef)
+            && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef)
+            && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy)
+            || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction)
+            == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction
+            == oldSelf.spec.transaction))))'
     selectableFields:
     - jsonPath: .spec.sessionRef.name
     served: true

@@ -60,7 +60,7 @@ func acpTaskUsesRestoredSourceIdentity(task *corev1alpha1.Task) bool {
 	default:
 		return false
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Task.UID == "" || binding.Task.UID == task.UID ||
 		task.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpRestoreIdentityChangedReason) {
 		return false
@@ -84,7 +84,7 @@ func acpTaskHasUnvalidatedSourceIdentity(task *corev1alpha1.Task) bool {
 }
 
 func acpTaskHasRestoredSourceIdentityBinding(task *corev1alpha1.Task) bool {
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	return binding != nil && binding.Task.UID != "" && binding.Task.UID != task.UID
 }
 
@@ -209,7 +209,7 @@ func (d *ACPDispatcher) recoverRestoredTaskIncarnation(
 	if task == nil {
 		return false, nil
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil {
 		return false, nil
 	}
@@ -415,8 +415,8 @@ func (d *ACPDispatcher) persistRestoredPreSubmissionFailure(
 		return err
 	}
 	digest, err := acpDomainDigest("attempt-transition", map[string]any{
-		"id": attempt.ID, "from": attempt.ExecutionState, "to": store.PromptExecutionFailed,
-		"operation": acpRestoreIdentityChangedOperation, "version": attempt.Version,
+		"id": attempt.ID, transitionFromField: attempt.ExecutionState, "to": store.PromptExecutionFailed,
+		operationField: acpRestoreIdentityChangedOperation, versionField: attempt.Version,
 	})
 	if err != nil {
 		return err
@@ -557,7 +557,7 @@ func (d *ACPDispatcher) settleRestoredTerminalDelivery(
 					}
 					op := publicationOperationID("restore-unknown", nil)
 					digest, digestErr := acpDomainDigest("publication-restore-unknown", map[string]any{
-						"id": publication.ID, "generation": publication.Generation, "version": publication.Version,
+						"id": publication.ID, generationField: publication.Generation, versionField: publication.Version,
 					})
 					if digestErr != nil {
 						return nil, digestErr
@@ -656,10 +656,7 @@ func (d *ACPDispatcher) readRecoverableTask(
 	if candidate == nil {
 		return nil, false, nil
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return nil, false, fmt.Errorf("ACP recovery requires a Kubernetes reader")
 	}
@@ -700,7 +697,11 @@ func (d *ACPDispatcher) readRecoverableTask(
 	return latest, true, nil
 }
 
+//nolint:gocyclo // Stale-task recovery handles each persisted lifecycle phase under one fence.
 func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
+	if task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
+		return errNativeSessionInstallUnresolved
+	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
 		return err
@@ -714,6 +715,29 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		return err
 	}
 	continuitySession := task.Spec.SessionRef != nil && sessionBound
+	// If the unknown-create marker could not be persisted, authenticated
+	// resident status still fences a native installation before stale-epoch
+	// pre-submission recovery can re-admit or rotate this exact Task.
+	if continuitySession && task.Status.Execution != nil && task.Status.Execution.RuntimeSessionRecreationPending &&
+		(attempt.ExecutionState == store.PromptExecutionSessionStarting || attempt.ExecutionState == store.PromptExecutionPlanned) {
+		control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+		if err != nil {
+			return err
+		}
+		native, err := d.loadTaskNativeSession(ctx, task, control)
+		if err != nil {
+			return err
+		}
+		if native != nil {
+			ready, err := d.reconcileRecoveredRuntimeSession(ctx, task, acpTaskControlUID(task), false, nil)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				return fmt.Errorf("%w: native RuntimeSession creation has not reconciled", store.ErrNotReady)
+			}
+		}
+	}
 	if store.IsTerminalPromptExecutionState(attempt.ExecutionState) && store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		if continuitySession {
 			if archived, err := d.recoverArchivedTerminalSession(ctx, task, attempt, fence); err != nil || archived {
@@ -743,7 +767,7 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		return d.patchRecoveredTaskReserved(ctx, task, fence.Epoch, attempt.ExecutionState == store.PromptExecutionQueued)
 	case store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
 		digest, err := acpDomainDigest("pre-submission-recovery", map[string]any{
-			"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
+			attemptIDField: attempt.ID, stateField: attempt.ExecutionState, versionField: attempt.Version, epochField: fence.Epoch,
 		})
 		if err != nil {
 			return err
@@ -822,10 +846,7 @@ func (d *ACPDispatcher) recoverArchivedTerminalSession(
 	key := client.ObjectKeyFromObject(task)
 	return true, retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
-		reader := d.APIReader
-		if reader == nil {
-			reader = d.Client
-		}
+		reader := uncachedReader(d.APIReader, d.Client)
 		if err := reader.Get(ctx, key, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
@@ -863,7 +884,7 @@ func validateArchivedSessionTask(task *corev1alpha1.Task, attempt *store.PromptA
 	if receipt.Key != key || receipt.PromptAttemptID != attempt.ID || receipt.ProjectionState != store.OutboxProjectionDelivered {
 		return fmt.Errorf("%w: archived Session proof is not the delivered terminal projection for this attempt", store.ErrConflict)
 	}
-	projection, err := taskterminal.ValidateFinalizedSessionProjection(receipt.Payload, task, string(task.UID), attempt, receipt.SessionTurn())
+	projection, err := taskterminal.ValidateSessionCleanupProjection(receipt.Payload, task, string(task.UID), attempt, receipt.SessionTurn())
 	if err != nil {
 		return err
 	}
@@ -1013,32 +1034,15 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 			return nil, err
 		}
 	default:
-		// Recover with the same durable classification the live path writes:
-		// the journaled (already redacted) failure code/message become the
-		// PromptAttempt's TerminalReason/OutcomeMarker instead of the generic
-		// "prompt failed" default.
-		failureMessage := acpPromptFailureMessage(harnessv2.Event{
-			Type:   harnessv2.EventFailed,
-			Failed: &harnessv2.FailedEvent{Code: evidence.FailureCode, Message: evidence.FailureMessage},
-		})
+		// Keep the same fixed status classification as the live path. Runtime
+		// diagnostics remain in their canonical journal event.
 		if err := d.transitionAttemptToFailed(
-			ctx, attempt.ID, fence, "recover-restored-journal-terminal-failed", acpPromptFailedReason, failureMessage,
+			ctx, attempt.ID, fence, "recover-restored-journal-terminal-failed", acpPromptFailedReason, acpPromptFailedMessage,
 		); err != nil {
 			return nil, err
 		}
 	}
 	return d.Store.GetPromptAttempt(ctx, attempt.ID)
-}
-
-// recoveredTerminalEvent rebuilds the terminal event from journaled evidence
-// so a recovered failure keeps the (already redacted) code/message the live
-// path would have projected instead of the generic "prompt failed".
-func recoveredTerminalEvent(evidence *v2eventjournal.PromptTerminalEvidence) harnessv2.Event {
-	event := harnessv2.Event{Type: evidence.TerminalEvent}
-	if evidence.TerminalEvent == harnessv2.EventFailed && (evidence.FailureCode != "" || evidence.FailureMessage != "") {
-		event.Failed = &harnessv2.FailedEvent{Code: evidence.FailureCode, Message: evidence.FailureMessage}
-	}
-	return event
 }
 
 func mappedPromptRecoveryContext(task *corev1alpha1.Task) v2eventjournal.MapContext {
@@ -1080,7 +1084,7 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 			return true, err
 		}
 		return true, d.finishNonSuccessWithCancellationReason(
-			ctx, task, attempt.ID, fence, session, recoveredTerminalEvent(evidence), evidence.CancellationReason,
+			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent}, evidence.CancellationReason,
 		)
 	}
 	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
@@ -1222,7 +1226,7 @@ func taskScopedRuntimeSessionCleanupDigest(
 		return "", fmt.Errorf("%w: task-scoped RuntimeSession cleanup identity is incomplete", store.ErrConflict)
 	}
 	return acpDomainDigest("task-runtime-session-cleanup", map[string]any{
-		"taskUID": string(taskUID), "attempt": attempt, "runtimeInstanceID": runtimeInstanceID,
+		taskUIDField: string(taskUID), attemptField: attempt, "runtimeInstanceID": runtimeInstanceID,
 		"runtimeSessionUID": runtimeSessionUID, "runtimeSessionGeneration": runtimeSessionGeneration,
 	})
 }
@@ -1236,7 +1240,9 @@ func taskScopedRuntimeSessionCleanupCompleteForUID(task *corev1alpha1.Task, task
 		return true
 	}
 	if task.DeletionTimestamp.IsZero() && task.Spec.SessionRef != nil &&
-		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) {
+		task.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown &&
+		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
+		task.Annotations[nativeCaptureIntentAnnotation] == "" && !task.Status.Execution.RuntimeSessionRecreationPending {
 		// A live read Session retains its conversation process between Tasks.
 		// Deleting Tasks must keep their frozen authority until Session cleanup
 		// has recorded an exact runtime cleanup receipt.
@@ -1275,7 +1281,7 @@ func agentRuntimeDrainCleanupProofDigest(
 		return "", fmt.Errorf("%w: AgentRuntime drain cleanup proof binding failed canonical integrity verification", store.ErrConflict)
 	}
 	return acpDomainDigest("agent-runtime-drain-cleanup", map[string]any{
-		"taskUID": string(taskUID), agentRuntimeDrainBindingDigestKey: binding.BindingDigest,
+		taskUIDField: string(taskUID), agentRuntimeDrainBindingDigestKey: binding.BindingDigest,
 		"agentRuntimeName": binding.RuntimeRef.Name, "agentRuntimeUID": string(binding.RuntimeRef.UID),
 		"agentRuntimeGeneration": binding.RuntimeRef.Generation,
 	})
@@ -1285,7 +1291,7 @@ func taskHasAgentRuntimeDrainCleanupProofForUID(task *corev1alpha1.Task, taskUID
 	if task == nil || task.Status.Execution == nil {
 		return false
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	execution := task.Status.Execution
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || execution.AgentRuntimeName != binding.RuntimeRef.Name ||
@@ -1345,7 +1351,7 @@ func persistTaskScopedRuntimeSessionCleanupReceipt(
 			return fmt.Errorf("%w: Task execution identity changed during RuntimeSession cleanup receipt", store.ErrConflict)
 		}
 		if taskUID != latest.UID {
-			binding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+			binding := executionBinding(latest)
 			if binding == nil || binding.Task.UID != taskUID {
 				return fmt.Errorf("%w: restored Task source identity changed during RuntimeSession cleanup receipt", store.ErrConflict)
 			}
@@ -1378,7 +1384,7 @@ func persistAgentRuntimeDrainCleanupProof(
 		if err := kubeClient.Get(ctx, key, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
-		binding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+		binding := executionBinding(latest)
 		if latest.Status.Execution == nil || binding == nil || binding.BindingDigest != expectedBindingDigest ||
 			acpTaskControlUID(latest) != taskUID ||
 			binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint || binding.RuntimeRef == nil ||
@@ -1432,7 +1438,7 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 	if d.Snapshots == nil {
 		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("immutable execution snapshot store is required for external RuntimeSession recovery")
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || binding.Task.UID != taskUID || task.Status.Execution == nil {
 		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("external RuntimeSession recovery binding is incomplete")
@@ -1602,10 +1608,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeRotatedEndpointCleanupMutation(
 	if authority == nil || authority.frozenRuntime == nil {
 		return errors.New("external AgentRuntime rotated-endpoint cleanup authority is incomplete")
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	current := &corev1alpha1.AgentRuntime{}
 	if err := reader.Get(ctx, authority.runtimeKey, current); err != nil {
 		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before rotated-endpoint cleanup mutation: %w", err))
@@ -1684,7 +1687,10 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	deleteAfterSettlement bool,
 ) (bool, error) {
 	if task != nil && task.Spec.SessionRef != nil &&
-		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) {
+		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
+		task.Annotations[nativeCaptureIntentAnnotation] == "" &&
+		(task.Status.Execution == nil || (task.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown &&
+			!task.Status.Execution.RuntimeSessionRecreationPending)) {
 		return true, nil
 	}
 	return d.reconcileRecoveredRuntimeSession(ctx, task, taskUID, deleteAfterSettlement, nil)
@@ -1699,10 +1705,14 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	sessionCleanup *sessionRuntimeCleanupFence,
 ) (bool, error) {
 	sessionDeletion := sessionCleanup != nil
+	runtimeCleanup := sessionCleanup
 	if runtimeSessionCleanupCompleteForUID(task, taskUID) {
 		return true, nil
 	}
 	retired, retirementErr := verifiedKubernetesRuntimeRetirement(ctx, d.Store, task, taskUID)
+	if retirementErr == nil && !retired {
+		retired, retirementErr = verifiedNativeRuntimePoolRetirement(ctx, d.Store, task, taskUID)
+	}
 	if retirementErr != nil {
 		return false, retirementErr
 	}
@@ -1765,8 +1775,20 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			}
 			return true, nil
 		}
-		if active.ControllerEpoch != currentFence.Epoch {
+		// Unknown terminal recovery on a native pool uses exact cleanup authority
+		// for every mutation (including deletion after validation), even before
+		// an epoch changes. Retained boots never get admission authority. That
+		// authority is native-only: a workspace pool keeps its current-epoch,
+		// backend-aware client and waits for a new epoch's owner otherwise.
+		retainedCleanup := pool.Spec.ExecutionWorkspace == nil && (sessionDeletion || abandonedValidationRecoveryTask(task))
+		if active.ControllerEpoch != currentFence.Epoch && !retainedCleanup {
 			return false, nil
+		}
+		if retainedCleanup && (active.ControllerEpoch != currentFence.Epoch || abandonedValidationRecoveryTask(task)) {
+			runtimeClient, runtimeFence, err = d.runtimePoolRetainedCleanupClient(ctx, task, taskUID, pool, currentFence, sessionDeletion)
+			if err != nil {
+				return false, err
+			}
 		}
 		if sessionDeletion && (string(pool.UID) != execution.RuntimePoolUID ||
 			active.BootID != execution.RuntimeSessionSupervisorBootID ||
@@ -1788,12 +1810,11 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 				return false, fmt.Errorf("%w: Session AgentRuntime cleanup identity changed", store.ErrConflict)
 			}
 			if !deleteAfterSettlement {
+				// Durable terminal settlement can proceed without contacting the
+				// replacement. Runtime retirement still requires its own proof.
 				return true, nil
 			}
-			if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration); markErr != nil {
-				return false, markErr
-			}
-			return true, nil
+			return false, fmt.Errorf("%w: external AgentRuntime cleanup identity changed", store.ErrConflict)
 		}
 		frozenRuntime, frozenProfile, frozenMCPConfiguration, err := d.verifiedExternalRuntimeRecoveryTarget(ctx, task, taskUID, runtime)
 		if err != nil {
@@ -1824,8 +1845,15 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			return false, err
 		}
 		expectedRuntimeEpoch := uint64(currentFence.Epoch)
-		if sessionCleanup != nil {
-			expectedRuntimeEpoch, err = d.externalRuntimeCleanupEpoch(ctx, sessionCleanup)
+		if runtimeCleanup == nil && deleteAfterSettlement &&
+			(endpointRotated || observed.ControllerEpoch != currentFence.Epoch) {
+			runtimeCleanup, err = d.standaloneRuntimeCleanupFence(ctx, task, taskUID, currentFence)
+			if err != nil {
+				return false, err
+			}
+		}
+		if runtimeCleanup != nil {
+			expectedRuntimeEpoch, err = d.externalRuntimeCleanupEpoch(ctx, runtimeCleanup)
 			if err != nil {
 				return false, err
 			}
@@ -1845,13 +1873,13 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			runtimeClient, runtimeFence, err = d.externalRuntimeRotatedEndpointCleanupClient(
 				ctx, runtime, frozenRuntime, profileDigest, frozenRuntime.Limits,
 				harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
-				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), sessionCleanup,
+				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), runtimeCleanup,
 			)
 		} else {
 			runtimeClient, runtimeFence, err = d.externalRuntimeCleanupClient(
 				ctx, runtime, frozenRuntime, profileDigest, frozenRuntime.Limits,
 				harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
-				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), sessionCleanup,
+				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), runtimeCleanup,
 			)
 		}
 		if err != nil {
@@ -1882,7 +1910,7 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	if statusErr != nil {
 		return false, statusErr
 	}
-	if sessionDeletion {
+	if runtimeCleanup != nil {
 		if err := validateSessionRuntimeCleanupStatus(runtimeFence, status); err != nil {
 			return false, err
 		}
@@ -1897,21 +1925,41 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		if !deleteAfterSettlement || sessionDeletion {
 			return true, nil
 		}
-		if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(
-			ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration,
-		); markErr != nil {
+		if markErr := d.markRecoveredRuntimeCleanupComplete(ctx, task, taskUID, runtimeCleanup); markErr != nil {
 			return false, markErr
 		}
 		return true, nil
 	}
+	if observed.NativeInstallUnresolved {
+		return false, errNativeSessionInstallUnresolved
+	}
 	switch observed.State {
+	case harnessv2.RuntimeSessionStateValidating:
+		// Session deletion itself is deliberately delete-only. Normal Task
+		// recovery must first finish its abandoned local validation barrier.
+		// That recovery uses native-only retained cleanup authority, so other
+		// backends keep waiting as they did before it existed.
+		if sessionDeletion || target.pool == nil || target.pool.Spec.ExecutionWorkspace != nil {
+			return false, nil
+		}
+		if err := d.recoverAbandonedWorkspaceValidation(ctx, task, taskUID, target.pool); err != nil {
+			return false, err
+		}
+		// Re-observe the exact runtime after validation/finalization. Never
+		// treat a validation response as a runtime retirement receipt.
+		return false, nil
 	case harnessv2.RuntimeSessionStatePublicationPrepared:
 		if task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
 			return false, fmt.Errorf("recover RuntimeSession publication finalization: prepared session is not bound to a write workspace")
 		}
 		deltaID := harnessv2.WorkspaceDeltaID("delta-" + execution.PromptID)
 		finalization, finalizationErr := d.runtimeSessionPublicationFinalization(ctx, publicationIDForTaskUID(task, taskUID), deltaID)
-		if errors.Is(finalizationErr, store.ErrNotFound) && task.Status.Delivery != nil &&
+		if errors.Is(finalizationErr, store.ErrNotFound) && abandonedValidationRecoveryTask(task) {
+			// A validation response can be lost after a delta was prepared.
+			// Resume the same canonical no-publication receipt, not a different
+			// abandonment identity derived from the Task's empty delivery.
+			finalization, finalizationErr = abandonedValidationFinalization(task, taskUID, deltaID)
+		} else if errors.Is(finalizationErr, store.ErrNotFound) && task.Status.Delivery != nil &&
 			task.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeNoChange {
 			finalization, finalizationErr = runtimeSessionDeltaAbandonmentFinalizationForTaskUID(task, taskUID, deltaID, *task.Status.Delivery)
 		}
@@ -1929,6 +1977,26 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		return false, nil
 	default:
 		return false, nil
+	}
+	if deleteAfterSettlement && !sessionDeletion && task.Annotations[nativeCaptureIntentAnnotation] != "" {
+		attemptID, err := promptAttemptIDFromTaskUID(task, taskUID)
+		if err != nil {
+			return false, err
+		}
+		attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+		if err != nil {
+			return false, err
+		}
+		turnID, err := (store.SessionTurnKey{SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration, TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID}).CanonicalID()
+		if err != nil {
+			return false, err
+		}
+		turn, err := d.Store.GetSessionTurn(ctx, turnID)
+		var nativeIntent nativeCaptureIntent
+		intentErr := json.Unmarshal([]byte(task.Annotations[nativeCaptureIntentAnnotation]), &nativeIntent)
+		if err != nil || turn.State != store.SessionTurnFinalized || intentErr != nil || (turn.NativeSessionDigest == "" && !nativeIntent.Unsupported) {
+			return false, fmt.Errorf("%w: native runtime deletion awaits atomic canonical checkpoint commit", store.ErrNotReady)
+		}
 	}
 	if !deleteAfterSettlement {
 		return true, nil
@@ -1960,9 +2028,7 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		}
 		return true, nil
 	}
-	if err := d.markTaskScopedRuntimeSessionCleanupComplete(
-		ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration,
-	); err != nil {
+	if err := d.markRecoveredRuntimeCleanupComplete(ctx, task, taskUID, runtimeCleanup); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -2274,6 +2340,11 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 		}
 		return err
 	}
+	if attempt.ExecutionState == store.PromptExecutionSucceeded {
+		if err := d.recoverTaskNativeCapture(ctx, task, session); err != nil {
+			return err
+		}
+	}
 	var finalizeErr error
 	switch attempt.ExecutionState {
 	case store.PromptExecutionOutcomeUnknown:
@@ -2299,9 +2370,13 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 		}
 		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", message, corev1alpha1.TaskPhaseFailed, execution)
 	case store.PromptExecutionSucceeded:
-		delivery := task.Status.Delivery
-		if delivery == nil {
-			delivery = deliveryStatusFromPromptState(attempt.DeliveryState)
+		delivery, deliveryErr := d.recoveredTerminalDeliveryStatus(ctx, task, attempt)
+		if deliveryErr != nil {
+			return deliveryErr
+		}
+		if delivery == nil || store.PromptDeliveryState(delivery.State) != attempt.DeliveryState ||
+			string(delivery.Outcome) != string(attempt.DeliveryState) {
+			return fmt.Errorf("%w: recovered Session delivery does not match the authoritative terminal attempt", store.ErrConflict)
 		}
 		phase := corev1alpha1.TaskPhaseFailed
 		switch attempt.DeliveryState {
@@ -2439,6 +2514,12 @@ func (d *ACPDispatcher) recoveredTerminalDeliveryStatus(
 
 func (d *ACPDispatcher) patchRecoveredTerminalExecution(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, epoch int64) error {
 	if attempt.ExecutionState == store.PromptExecutionSucceeded {
+		// The live settlement may have committed its projection before the
+		// terminal Task status reached this recovery pass. Preserve that record's
+		// message and delivery evidence instead of rebuilding a different payload.
+		if exists, err := d.validateExistingStandaloneTaskProjection(ctx, task, attempt); err != nil || exists {
+			return err
+		}
 		status, err := d.recoveredTerminalDeliveryStatus(ctx, task, attempt)
 		if err != nil {
 			return err

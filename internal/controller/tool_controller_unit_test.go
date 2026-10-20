@@ -284,10 +284,10 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -381,10 +381,10 @@ func TestToolReconcilerMCPSubstrateActorPollsEndpointReadiness(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -449,10 +449,10 @@ func TestToolReconcilerMCPSubstrateActorBootsRecreatedActor(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -509,10 +509,10 @@ func TestToolReconcilerMCPSubstrateActorRetriesBootAfterWaitReadyFailure(t *test
 		waitReadyErrs: []error{errors.New("timed out waiting for actor readiness")},
 	}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -639,10 +639,10 @@ func TestToolReconcilerMCPSubstrateActorSeedsBootedAnnotationWithoutReboot(t *te
 	}
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -690,10 +690,10 @@ func TestToolReconcilerMCPSubstrateActorRequiresEndpointReadiness(t *testing.T) 
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -761,10 +761,10 @@ func TestToolReconcilerMCPSubstrateActorReplacementIgnoresNonPooledAnnotationOwn
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -857,10 +857,10 @@ func TestToolReconcilerMCPSubstrateActorReplacementRetriesNonPooledCleanupAfterD
 		deleteErrs: []error{errors.New("temporary delete failure")},
 	}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -947,10 +947,10 @@ func TestToolReconcilerMCPSubstrateActorReplacementDeletesAnnotatedPooledActorBe
 	lease := newSubstrateMCPPoolActorLease(tool, defaultNS, oldActorID, oldActorID)
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1038,10 +1038,10 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1126,10 +1126,10 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1265,9 +1265,9 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 		Client: fake.NewClientBuilder().WithScheme(scheme).
 			WithStatusSubresource(&corev1alpha1.Tool{}, &corev1alpha1.Task{}).
 			WithObjects(tool, template, pool, legacyTask, legacyLease).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1370,10 +1370,10 @@ func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T)
 	}
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1478,9 +1478,9 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, template, pool, oldLease).
 			Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1593,9 +1593,9 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, template, pool, holder, busyLease).
 			Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -2203,7 +2203,7 @@ func TestToolReconcilerMCPSubstrateActorRejectsCrossNamespaceTemplateWhenIsolati
 	r := &ToolReconciler{
 		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool, template).Build(),
 		Scheme:                    scheme,
-		SubstrateEnabled:          true,
+		SubstrateMCPToolsEnabled:  true,
 		EnforceNamespaceIsolation: true,
 	}
 	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
@@ -2220,9 +2220,9 @@ func TestToolReconcilerMCPSubstrateActorRejectsCrossNamespaceTemplateWhenIsolati
 func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) {
 	scheme := newToolScheme()
 	template := approvedMCPActorTemplateForTest()
-	labels := template.GetLabels()
-	delete(labels, "orka.ai/execution-workspace")
-	template.SetLabels(labels)
+	templateLabels := template.GetLabels()
+	delete(templateLabels, "orka.ai/execution-workspace")
+	template.SetLabels(templateLabels)
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool", Namespace: "default"},
 		Spec: corev1alpha1.ToolSpec{
@@ -2237,9 +2237,9 @@ func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) 
 	}
 	var executorFactoryCalled bool
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      "http://atenet-router.ate-system.svc",
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -2270,176 +2270,6 @@ func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) 
 	}
 }
 
-func TestToolReconcilerMCPSubstrateActorAllowsMCPOnlyTemplate(t *testing.T) {
-	scheme := newToolScheme()
-	template := approvedMCPActorTemplateForTest()
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
-	request := &ExecutionWorkspaceRequest{
-		TemplateName:      "mcp-template",
-		TemplateNamespace: "ate-demo",
-	}
-
-	if err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request); err != nil {
-		t.Fatalf("validateSubstrateMCPActorTemplateResource() error = %v", err)
-	}
-	if err := validateSubstrateActorTemplateResource(context.Background(), k8sClient, request); err == nil {
-		t.Fatal("validateSubstrateActorTemplateResource() error = nil, want workspace template validation to reject MCP-only template")
-	}
-}
-
-func TestToolReconcilerMCPSubstrateActorRejectsRoutePortMismatch(t *testing.T) {
-	scheme := newToolScheme()
-	template := approvedMCPActorTemplateForTest()
-	annotations := template.GetAnnotations()
-	annotations["orka.ai/workspace-daemon-port"] = "80"
-	template.SetAnnotations(annotations)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
-	request := &ExecutionWorkspaceRequest{
-		TemplateName:      "mcp-template",
-		TemplateNamespace: "ate-demo",
-	}
-
-	err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request)
-	if err == nil {
-		t.Fatal("validateSubstrateMCPActorTemplateResource() error = nil, want route port mismatch")
-	}
-	if !contains(err.Error(), "requires a matching containerPort") {
-		t.Fatalf("error = %q, want matching containerPort context", err.Error())
-	}
-}
-
-func TestToolReconcilerMCPSubstrateActorAcceptsExplicitRoutePort(t *testing.T) {
-	scheme := newToolScheme()
-	template := readySubstrateActorTemplateWithContainersForTest([]any{
-		map[string]any{
-			"name":    "mcp",
-			"command": []any{"/mcp-server"},
-			"ports": []any{
-				map[string]any{"containerPort": int64(9090)},
-			},
-		},
-	})
-	template.SetName("mcp-template")
-	template.SetNamespace("ate-demo")
-	annotations := template.GetAnnotations()
-	annotations["orka.ai/workspace-daemon-port"] = "9090"
-	delete(annotations, "orka.ai/workspace-staging-root")
-	template.SetAnnotations(annotations)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
-	request := &ExecutionWorkspaceRequest{
-		TemplateName:      "mcp-template",
-		TemplateNamespace: "ate-demo",
-	}
-
-	if err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request); err != nil {
-		t.Fatalf("validateSubstrateMCPActorTemplateResource() error = %v", err)
-	}
-}
-
-func TestToolReconcilerMCPSubstrateActorRejectsListenEnvRoutePortMismatch(t *testing.T) {
-	scheme := newToolScheme()
-	template := readySubstrateActorTemplateWithContainersForTest([]any{
-		map[string]any{
-			"name":    "mcp",
-			"command": []any{"/mcp-server"},
-			"env": []any{
-				map[string]any{
-					"name":  substrateWorkspaceDaemonListenEnv,
-					"value": ":9090",
-				},
-			},
-		},
-	})
-	template.SetName("mcp-template")
-	template.SetNamespace("ate-demo")
-	annotations := template.GetAnnotations()
-	annotations["orka.ai/workspace-daemon-port"] = "8080"
-	delete(annotations, "orka.ai/workspace-staging-root")
-	template.SetAnnotations(annotations)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
-	request := &ExecutionWorkspaceRequest{
-		TemplateName:      "mcp-template",
-		TemplateNamespace: "ate-demo",
-	}
-
-	err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request)
-	if err == nil {
-		t.Fatal("validateSubstrateMCPActorTemplateResource() error = nil, want listen env route port mismatch")
-	}
-	if !contains(err.Error(), "no container listen env matches") {
-		t.Fatalf("error = %q, want listen env mismatch context", err.Error())
-	}
-}
-
-func TestToolReconcilerMCPSubstrateActorRejectsListenEnvMismatchDespiteMatchingContainerPort(t *testing.T) {
-	scheme := newToolScheme()
-	template := readySubstrateActorTemplateWithContainersForTest([]any{
-		map[string]any{
-			"name":    "mcp",
-			"command": []any{"/mcp-server"},
-			"env": []any{
-				map[string]any{
-					"name":  substrateWorkspaceDaemonListenEnv,
-					"value": ":9090",
-				},
-			},
-			"ports": []any{
-				map[string]any{"containerPort": int64(8080)},
-			},
-		},
-	})
-	template.SetName("mcp-template")
-	template.SetNamespace("ate-demo")
-	annotations := template.GetAnnotations()
-	annotations["orka.ai/workspace-daemon-port"] = "8080"
-	delete(annotations, "orka.ai/workspace-staging-root")
-	template.SetAnnotations(annotations)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
-	request := &ExecutionWorkspaceRequest{
-		TemplateName:      "mcp-template",
-		TemplateNamespace: "ate-demo",
-	}
-
-	err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request)
-	if err == nil {
-		t.Fatal("validateSubstrateMCPActorTemplateResource() error = nil, want listen env mismatch despite matching containerPort")
-	}
-	if !contains(err.Error(), "no container listen env matches") {
-		t.Fatalf("error = %q, want listen env mismatch context", err.Error())
-	}
-}
-
-func TestToolReconcilerMCPSubstrateActorAcceptsExplicitListenEnvRoutePort(t *testing.T) {
-	scheme := newToolScheme()
-	template := readySubstrateActorTemplateWithContainersForTest([]any{
-		map[string]any{
-			"name":    "mcp",
-			"command": []any{"/mcp-server"},
-			"env": []any{
-				map[string]any{
-					"name":  substrateWorkspaceDaemonListenEnv,
-					"value": ":9090",
-				},
-			},
-		},
-	})
-	template.SetName("mcp-template")
-	template.SetNamespace("ate-demo")
-	annotations := template.GetAnnotations()
-	annotations["orka.ai/workspace-daemon-port"] = "9090"
-	delete(annotations, "orka.ai/workspace-staging-root")
-	template.SetAnnotations(annotations)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
-	request := &ExecutionWorkspaceRequest{
-		TemplateName:      "mcp-template",
-		TemplateNamespace: "ate-demo",
-	}
-
-	if err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request); err != nil {
-		t.Fatalf("validateSubstrateMCPActorTemplateResource() error = %v", err)
-	}
-}
-
 func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 	scheme := newToolScheme()
 	template := approvedMCPActorTemplateForTest()
@@ -2460,9 +2290,9 @@ func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 	}
 	var executorFactoryCalled bool
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      "http://atenet-router.ate-system.svc",
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",

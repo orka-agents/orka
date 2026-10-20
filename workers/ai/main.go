@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,12 +33,14 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
@@ -50,6 +53,12 @@ import (
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
+)
+
+const (
+	logFieldProvider  = "provider"
+	logFieldModel     = "model"
+	logFieldIteration = "iteration"
 )
 
 const (
@@ -91,13 +100,14 @@ const (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := run("/session/transcript.jsonl"); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() (err error) {
+//nolint:gocyclo // Worker startup wires each optional subsystem in order.
+func run(transcriptPath string) (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
@@ -106,30 +116,17 @@ func run() (err error) {
 	taskName := workerEnv.TaskName
 	taskNamespace := workerEnv.TaskNamespace
 	eventRecorder := common.NewHTTPEventRecorderFromEnv()
-	defer func() {
-		if err != nil {
-			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,
-				common.WithEventSeverity(events.ExecutionEventSeverityError),
-				common.WithEventTaskName(taskName),
-				common.WithEventSummary(err.Error()),
-			)
-			return
-		}
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerCompleted, 0,
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker completed"),
-		)
-	}()
-	if err := workerEnv.ValidateRequired(); err != nil {
-		return err
-	}
-	settings, err := parseModelSettings(workerEnv)
+	ctx = withWorkerUsage(ctx, eventRecorder)
+	// Gateway Tasks carry their current user turn only in the canonical transcript.
+	// Never substitute a direct prompt when that required input is missing.
+	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")
+	sessionContext, settings, err := prepareAIWorkerInput(workerEnv, transcriptPath, promptIncluded)
 	if err != nil {
-		return err
+		return finishAIWorkerRun(ctx, eventRecorder, taskName, err)
 	}
 	tracingShutdown, err := tracing.Init("orka-ai-worker", workerEnv.EnableTelemetry)
 	if err != nil {
-		return fmt.Errorf("failed to initialize telemetry: %w", err)
+		return finishAIWorkerRun(ctx, eventRecorder, taskName, fmt.Errorf("failed to initialize telemetry: %w", err))
 	}
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -157,6 +154,11 @@ func run() (err error) {
 		taskSpan.End()
 	}()
 
+	// Settle before span completion and telemetry shutdown can observe cancellation.
+	defer func() {
+		err = finishAIWorkerRun(ctx, eventRecorder, taskName, err)
+	}()
+
 	transactionLogFields := workerenv.TransactionLogFields(
 		workerEnv.TransactionID, workerEnv.TransactionProfile,
 	)
@@ -165,8 +167,8 @@ func run() (err error) {
 		common.WithEventTaskName(taskName),
 		common.WithEventSummary("AI worker started"),
 		common.WithEventContent(eventContent(map[string]any{
-			"provider": workerEnv.Provider,
-			"model":    workerEnv.Model,
+			logFieldProvider: workerEnv.Provider,
+			logFieldModel:    workerEnv.Model,
 		})),
 	)
 	provider := workerEnv.Provider
@@ -184,17 +186,18 @@ func run() (err error) {
 
 	// Create LLM provider
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
-		APIKey:          apiKey,
-		BaseURL:         baseURL,
-		ProviderType:    provider,
-		AzureAPIVersion: azureAPIVersion,
+		APIKey:              apiKey,
+		BaseURL:             baseURL,
+		ProviderType:        provider,
+		AzureAPIVersion:     azureAPIVersion,
+		AzureDeploymentName: workerEnv.AzureDeploymentName,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
 	}
 
 	// Wrap with retry logic for transient errors
-	llmProvider = llm.NewRetryProvider(llmProvider, 0)
+	llmProvider = llm.NewRetryProvider(llmProvider)
 
 	// Set up fallback providers if configured
 	if len(workerEnv.Fallbacks) > 0 {
@@ -206,10 +209,11 @@ func run() (err error) {
 			}
 
 			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, llm.ProviderConfig{
-				APIKey:          fallbackEnv.APIKey,
-				BaseURL:         fallbackEnv.BaseURL,
-				ProviderType:    fallbackEnv.Provider,
-				AzureAPIVersion: fallbackEnv.AzureAPIVersion,
+				APIKey:              fallbackEnv.APIKey,
+				BaseURL:             fallbackEnv.BaseURL,
+				ProviderType:        fallbackEnv.Provider,
+				AzureAPIVersion:     fallbackEnv.AzureAPIVersion,
+				AzureDeploymentName: fallbackEnv.AzureDeploymentName,
 			})
 			if err != nil {
 				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
@@ -217,7 +221,7 @@ func run() (err error) {
 			}
 
 			fallbacks = append(fallbacks, llm.FallbackEntry{
-				Provider: llm.NewRetryProvider(fbProvider, 0),
+				Provider: llm.NewRetryProvider(fbProvider),
 				Model:    fallbackEnv.Model,
 			})
 		}
@@ -256,10 +260,23 @@ func run() (err error) {
 	enabledTools = autoEnableMemoryTools(enabledTools)
 
 	// Load custom Tool CRDs
-	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
-
-	// Load session context if available
-	sessionContext := loadSessionContext()
+	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	if err != nil {
+		return fmt.Errorf("load custom tools: %w", err)
+	}
+	// Tools behind a connection-mode policy never run in this Pod.
+	connectorBackedToolNames, err = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
+	if err != nil {
+		return fmt.Errorf("classify connector-backed tools: %w", err)
+	}
+	markConnectorBackedTools(customTools, connectorBackedToolNames)
+	connectorBindings = parseConnectionBindings(os.Getenv(workerenv.ConnectionBindings))
+	ctx, err = prepareNativeRemoteTools(
+		ctx, k8sClient, taskNamespace, taskName, enabledTools, customTools, worker.NewToolExecutor(),
+	)
+	if err != nil {
+		return fmt.Errorf("prepare remote MCP tools: %w", err)
+	}
 
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
@@ -285,12 +302,9 @@ func run() (err error) {
 		if err != nil {
 			return err
 		}
-		resolvedContext := strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
+		approvalPromptContext = strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
 		if planContext != "" {
 			planPromptContext = "## Previous Plan State\n\n" + planContext
-		}
-		if resolvedContext != "" {
-			approvalPromptContext = resolvedContext
 		}
 		promptSections := make([]string, 0, 2)
 		if planPromptContext != "" {
@@ -318,11 +332,7 @@ func run() (err error) {
 	}
 
 	// Build messages
-	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")
 	messages := buildInitialMessages(sessionContext, prompt, promptIncluded, planPromptContext, approvalPromptContext)
-
-	// Build tools for LLM (built-in + custom)
-	llmTools := buildLLMTools(enabledTools, customTools)
 
 	// Create tool executor for custom tools
 	toolExecutor := worker.NewToolExecutor()
@@ -332,6 +342,7 @@ func run() (err error) {
 		Namespace: taskNamespace,
 		Tenant:    taskNamespace,
 		TaskID:    taskName,
+		TaskUID:   workerEnv.TaskUID,
 		AuthorizeSecretRead: workerSecretReadAuthorizer(
 			k8sClient,
 			taskNamespace,
@@ -340,7 +351,21 @@ func run() (err error) {
 			workerEnv.TransactionCredentialReadScopes,
 		),
 		RequireSecretReadAuthorization: workerEnv.EnforceTransactionCredentialAuth,
+		// Children this worker creates inherit the requester's connector
+		// authority only when the controller seals them on this worker's
+		// authenticated request.
+		SealTaskCreate: sealChildTaskViaController,
 	}
+
+	baseToolCtx.GatewayReplySender, err = newNativeGatewayReplySender(
+		ctx, inClusterNativeGatewayReplyTaskReader, workerEnv,
+		workerenv.ServiceAccountTokenFile, nativeGatewayReplyBootstrapTimeout,
+	)
+	if err != nil {
+		return err
+	}
+	// Only a bound, controller-authorized sender permits gateway tool advertisement.
+	llmTools := buildLLMTools(enabledTools, customTools, baseToolCtx)
 
 	// Execute the agent loop
 	result, err := executeAgentLoopWithEvents(
@@ -351,36 +376,39 @@ func run() (err error) {
 		return fmt.Errorf("agent execution failed: %w", err)
 	}
 
-	// Write result to controller via HTTP
-	if err := writeResult(result); err != nil {
+	// Write result to controller via HTTP.
+	if err := writeResult(ctx, result); err != nil {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
 	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
 		common.WithEventTaskName(taskName),
 		common.WithEventSummary("AI worker submitted result"),
-		common.WithEventContent(eventContent(map[string]any{"resultLength": len(result)})),
+		common.WithEventContent(eventContent(map[string]any{logFieldResultLength: len(result)})),
 	)
 
-	// Upload any artifacts the agent wrote
-	if err := common.UploadArtifacts(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadFailed, 0,
-			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker artifact upload failed"),
-			common.WithEventContent(eventContent(map[string]any{"artifact": "all", "error": err.Error()})),
-		)
-		// Don't fail the task if artifact upload fails
-	} else {
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadCompleted, 0,
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker artifact upload completed"),
-			common.WithEventContent(eventContent(map[string]any{"artifact": "all"})),
-		)
+	// Upload any artifacts the agent wrote.
+	if err := uploadAIArtifacts(ctx, eventRecorder, taskName); err != nil {
+		return err
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
 	return nil
+}
+
+func prepareAIWorkerInput(
+	workerEnv workerenv.AIWorkerEnv,
+	transcriptPath string,
+	promptIncluded bool,
+) ([]llm.Message, modelSettings, error) {
+	sessionContext, err := loadSessionContext(transcriptPath, promptIncluded)
+	if err != nil {
+		return nil, modelSettings{}, err
+	}
+	if err := workerEnv.ValidateRequired(promptIncluded); err != nil {
+		return nil, modelSettings{}, err
+	}
+	settings, err := parseModelSettings(workerEnv)
+	return sessionContext, settings, err
 }
 
 func registerModeAwareCoordinationTools(k8sClient client.Client, rawMode string, enabled bool) error {
@@ -425,28 +453,52 @@ func createK8sClient() (client.Client, error) {
 }
 
 // loadCustomTools loads Tool CRDs from the cluster
+//
+// A Tool the controller dispatched as connector-backed (it is in the frozen
+// digest set) is never silently dropped: a read that keeps failing fails
+// startup so the Pod restarts with the tool set it was dispatched with,
+// instead of running with a permanently reduced one.
 func loadCustomTools(
 	ctx context.Context,
 	k8sClient client.Client,
 	namespace string,
 	toolNames []string,
-) map[string]*corev1alpha1.Tool {
+) (map[string]*corev1alpha1.Tool, error) {
 	customTools := make(map[string]*corev1alpha1.Tool)
+	frozenConnector := frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests))
 
 	for _, name := range toolNames {
 		// Skip built-in tools
 		if _, ok := tools.DefaultRegistry.Get(name); ok {
 			continue
 		}
+		_, frozen := frozenConnector[name]
 
 		// Try to load as custom Tool CRD
 		tool := &corev1alpha1.Tool{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
+		key := client.ObjectKey{Namespace: namespace, Name: name}
+		if err := readCustomTool(ctx, k8sClient, key, tool, frozen); err != nil {
+			// A dispatched connector-backed Tool that is gone fails startup
+			// too: the Job ends (it is never retried at the Job level) and
+			// the controller's retry re-dispatches with a fresh freeze,
+			// rather than this worker running a tool set nobody dispatched.
+			if frozen {
+				return nil, fmt.Errorf("load connector-backed tool %q: %w", name, err)
+			}
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
+			continue
+		}
+		if aitools.IsRemoteMCP(tool) {
+			// Remote binding/discovery is mandatory and Task-authorized, not a
+			// best-effort load that may silently omit a selected capability.
+			customTools[name] = tool
 			continue
 		}
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
+			if frozen {
+				return nil, fmt.Errorf("bind outbound access policy for connector-backed tool %q: %w", name, err)
+			}
 			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
 			continue
 		}
@@ -454,7 +506,31 @@ func loadCustomTools(
 		customTools[name] = tool
 	}
 
-	return customTools
+	return customTools, nil
+}
+
+// readCustomTool reads a Tool; a frozen connector-backed one is retried on
+// transient failures with the same bounds as its policy.
+func readCustomTool(
+	ctx context.Context, k8sClient client.Client, key client.ObjectKey, tool *corev1alpha1.Tool, frozen bool,
+) error {
+	if !frozen {
+		return k8sClient.Get(ctx, key, tool)
+	}
+	backoff := connectorPolicyReadBackoff
+	var err error
+	for range connectorPolicyReadAttempts {
+		if err = k8sClient.Get(ctx, key, tool); err == nil || apierrors.IsNotFound(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return err
 }
 
 func clearApprovalAuthRefVersion(tool *corev1alpha1.Tool) {
@@ -528,6 +604,19 @@ func bindApprovalOutboundAccessPolicyVersion(
 	if err := k8sClient.Get(ctx, key, policy); err != nil {
 		return fmt.Errorf("read outbound access policy %q for approval binding: %w", key.Name, err)
 	}
+	return bindApprovalResolvedOutboundPolicyVersion(ctx, k8sClient, namespace, tool, policy)
+}
+
+// bindApprovalResolvedOutboundPolicyVersion binds the exact policy snapshot the
+// caller validated, without a second policy read introducing different selectors.
+func bindApprovalResolvedOutboundPolicyVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+	policy *corev1alpha1.OutboundAccessPolicy,
+) error {
+	clearApprovalOutboundAccessPolicyVersion(tool)
 	secretRefs := approvalOutboundPolicySecretRefs(policy)
 	serviceAccountNames := approvalOutboundPolicyServiceAccountNames(policy)
 	serviceRefs := approvalOutboundPolicyServiceRefs(policy)
@@ -662,10 +751,17 @@ func approvalOutboundPolicySecretRefs(
 }
 
 // buildLLMTools builds the combined tool list for the LLM
-func buildLLMTools(enabledTools []string, customTools map[string]*corev1alpha1.Tool) []llm.Tool {
+func buildLLMTools(
+	enabledTools []string, customTools map[string]*corev1alpha1.Tool, toolContexts ...*tools.ToolContext,
+) []llm.Tool {
 	var llmTools []llm.Tool
+	toolCtx := optionalToolContext(toolContexts)
 
 	for _, name := range enabledTools {
+		if name == aitools.GatewayReplyToolName && (toolCtx == nil || toolCtx.GatewayReplySender == nil ||
+			toolCtx.TaskUID == "" || toolCtx.Namespace == "" || toolCtx.TaskID == "") {
+			continue
+		}
 		// Check if it's a built-in tool
 		if builtinTools := tools.DefaultRegistry.ToLLMTools([]string{name}); len(builtinTools) > 0 {
 			llmTools = append(llmTools, builtinTools...)
@@ -1094,28 +1190,42 @@ func initialMessageBytes(message llm.Message) int {
 	return len(message.Role) + len(message.Content) + len(message.Name) + len(message.ToolCallID) + 16
 }
 
-// loadSessionContext loads messages from the session transcript
-func loadSessionContext() []llm.Message {
-	transcriptPath := "/session/transcript.jsonl"
+// loadSessionContext loads required input or best-effort optional history.
+func loadSessionContext(transcriptPath string, required bool) ([]llm.Message, error) {
 	data, err := os.ReadFile(transcriptPath)
 	if err != nil {
-		return nil
+		if required {
+			return nil, fmt.Errorf("failed to read required session transcript: %w", err)
+		}
+		return nil, nil
 	}
-	return parseSessionContext(data)
+	return parseSessionContext(data, required)
 }
 
-func parseSessionContext(data []byte) []llm.Message {
+func parseSessionContext(data []byte, required bool) ([]llm.Message, error) {
 	var messages []llm.Message
-	lines := strings.SplitSeq(string(data), "\n")
-	for line := range lines {
+	// Allow the JSONL terminator without hiding an actual blank final row.
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	for i, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" && !required {
 			continue
 		}
 
 		var msg store.SessionMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			if required {
+				// Decoder errors can include transcript contents; report only the line.
+				return nil, fmt.Errorf("session transcript contains an invalid message at line %d", i+1)
+			}
 			continue
+		}
+		// Validate the actual final row before filtering roles or adding provenance.
+		if required && i == len(lines)-1 && (msg.Role != roleUser || strings.TrimSpace(msg.Content) == "") {
+			return nil, fmt.Errorf(
+				"session transcript must end with a non-empty user message when %s is true",
+				workerenv.SessionPromptIncluded,
+			)
 		}
 
 		if msg.Role == roleUser || msg.Role == "assistant" {
@@ -1126,7 +1236,7 @@ func parseSessionContext(data []byte) []llm.Message {
 		}
 	}
 
-	return messages
+	return messages, nil
 }
 
 // loadPlanContext fetches the current plan state from the controller API.
@@ -1202,6 +1312,7 @@ func loadPlanContext(ctx context.Context) (string, error) {
 		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument), nil
 }
 
+//nolint:gocyclo // The agent loop keeps tool, approval, and overflow handling in one ordered pass.
 func executeAgentLoopWithEvents(
 	ctx context.Context,
 	provider llm.Provider,
@@ -1216,6 +1327,9 @@ func executeAgentLoopWithEvents(
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
 	baseToolCtx := optionalToolContext(baseToolCtxOpt)
+	// A new execution/model turn is a new logical operation, not semantic dedupe.
+	// The identity remains fixed across transport retries of that tool execution.
+	replyExecutionID := rand.Text()
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
 	allowedToolCalls := advertisedToolNames(llmTools)
@@ -1249,11 +1363,11 @@ func executeAgentLoopWithEvents(
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"model":        model,
-				"provider":     llm.ProviderTelemetryName(provider),
-				"messageCount": len(messages),
-				"toolCount":    len(requestTools),
+				logFieldIteration: iteration + 1,
+				logFieldModel:     model,
+				logFieldProvider:  llm.ProviderTelemetryName(provider),
+				"messageCount":    len(messages),
+				"toolCount":       len(requestTools),
 			})),
 		)
 
@@ -1270,7 +1384,7 @@ func executeAgentLoopWithEvents(
 				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
 				common.WithEventSummary("model context truncated after provider context limit error"),
 				common.WithEventContent(eventContent(map[string]any{
-					"iteration":          iteration + 1,
+					logFieldIteration:    iteration + 1,
 					"messageCountBefore": beforeCount,
 					"messageCountAfter":  len(messages),
 				})),
@@ -1286,9 +1400,9 @@ func executeAgentLoopWithEvents(
 				common.WithEventSeverity(events.ExecutionEventSeverityError),
 				common.WithEventSummary(err.Error()),
 				common.WithEventContent(eventContent(map[string]any{
-					"iteration": iteration + 1,
-					"model":     model,
-					"provider":  llm.ProviderTelemetryName(provider),
+					logFieldIteration: iteration + 1,
+					logFieldModel:     model,
+					logFieldProvider:  llm.ProviderTelemetryName(provider),
 				})),
 			)
 			stepSpan.End()
@@ -1298,22 +1412,22 @@ func executeAgentLoopWithEvents(
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestCompleted, modelLoopEventTimeout,
 			common.WithEventSummary("model request completed"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"model":        firstNonBlankOriginal(resp.Model, model),
-				"provider":     firstNonBlankOriginal(resp.Provider, llm.ProviderTelemetryName(provider)),
-				"inputTokens":  resp.InputTokens,
-				"outputTokens": resp.OutputTokens,
-				"stopReason":   resp.StopReason,
-				"toolCalls":    len(resp.ToolCalls),
+				logFieldIteration: iteration + 1,
+				logFieldModel:     common.FirstNonBlank(resp.Model, model),
+				logFieldProvider:  common.FirstNonBlank(resp.Provider, llm.ProviderTelemetryName(provider)),
+				"inputTokens":     resp.InputTokens,
+				"outputTokens":    resp.OutputTokens,
+				"stopReason":      resp.StopReason,
+				"toolCalls":       len(resp.ToolCalls),
 			})),
 		)
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelMessage, modelLoopEventTimeout,
 			common.WithEventSummary("model returned message"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"contentChars": len([]rune(resp.Content)),
-				"toolCalls":    len(resp.ToolCalls),
-				"stopReason":   resp.StopReason,
+				logFieldIteration: iteration + 1,
+				"contentChars":    len([]rune(resp.Content)),
+				"toolCalls":       len(resp.ToolCalls),
+				"stopReason":      resp.StopReason,
 			})),
 			common.WithEventContentText(resp.Content),
 		)
@@ -1391,9 +1505,9 @@ func executeAgentLoopWithEvents(
 				common.WithEventToolCallID(tc.ID),
 				common.WithEventSummary("tool call started"),
 				common.WithEventContent(eventContent(map[string]any{
-					"toolName":      toolName,
-					"toolCallID":    tc.ID,
-					"argumentBytes": len(tc.Arguments),
+					logFieldToolName:   toolName,
+					logFieldToolCallID: tc.ID,
+					"argumentBytes":    len(tc.Arguments),
 				})),
 			)
 
@@ -1422,7 +1536,13 @@ func executeAgentLoopWithEvents(
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
-				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+				if connectorBackedToolNames[toolName] {
+					// The person's linked-account token lives only in the
+					// controller; the worker asks it to run the call.
+					result, execErr = executeConnectorToolViaController(execCtx, nil, customTool, execArgs, tc.ID, approvalKey)
+				} else {
+					result, execErr = executeNativeCustomTool(execCtx, baseToolCtx, toolExecutor, customTool, execArgs)
+				}
 				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 					approvalGate.markFired(approvalKey)
 				}
@@ -1435,10 +1555,27 @@ func executeAgentLoopWithEvents(
 				if baseToolCtx != nil {
 					toolCtxCopy := *baseToolCtx
 					toolCtxCopy.ToolCallID = tc.ID
+					if toolName == aitools.GatewayReplyToolName {
+						toolCtxCopy.OperationID = ""
+						if strings.TrimSpace(tc.ID) != "" {
+							toolCtxCopy.OperationID = fmt.Sprintf("native/%s/%d/%s", replyExecutionID, iteration, tc.ID)
+						}
+					}
 					if toolCtxCopy.Tenant == "" {
 						toolCtxCopy.Tenant = toolCtxCopy.Namespace
 					}
 					execCtx = tools.WithToolContext(stepCtx, &toolCtxCopy)
+				}
+				if execErr == nil && approvalKey != "" {
+					// Schema preflight cannot execute the tool, so it must not
+					// consume approval. Once execution starts, retain the fired
+					// key even if the tool returns an argument-shaped error.
+					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
+						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
+						if execErr != nil {
+							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments", execErr.Error())
+						}
+					}
 				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)
@@ -1460,16 +1597,16 @@ func executeAgentLoopWithEvents(
 					common.WithEventToolCallID(tc.ID),
 					common.WithEventSummary("tool call completed"),
 					common.WithEventContent(eventContent(map[string]any{
-						"toolName":     toolName,
-						"toolCallID":   tc.ID,
-						"resultLength": len(result),
+						logFieldToolName:     toolName,
+						logFieldToolCallID:   tc.ID,
+						logFieldResultLength: len(result),
 					})),
 				)
 			}
 
 			// Add tool result
 			messages = append(messages, llm.Message{
-				Role:       "tool",
+				Role:       logFieldTool,
 				Content:    result,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
@@ -1555,24 +1692,59 @@ func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {
 	return names
 }
 
+func finishAIWorkerRun(
+	ctx context.Context, eventRecorder common.EventRecorder, taskName string, runErr error,
+) error {
+	if runErr == nil {
+		runErr = ctx.Err()
+	}
+	// Settle the outcome before publishing; a lost response must not change it.
+	if runErr == nil {
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerCompleted, 0,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker completed"),
+		)
+	}
+	if runErr != nil {
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,
+			common.WithEventSeverity(events.ExecutionEventSeverityError),
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary(runErr.Error()),
+		)
+		return runErr
+	}
+	return nil
+}
+
+func uploadAIArtifacts(ctx context.Context, eventRecorder common.EventRecorder, taskName string) error {
+	err := common.UploadArtifactsContext(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("artifact upload canceled: %w", ctxErr)
+		}
+		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeArtifactUploadFailed,
+			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker artifact upload failed"),
+			common.WithEventContent(eventContent(map[string]any{"artifact": "all", "error": err.Error()})),
+		)
+		return ctx.Err()
+	}
+	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeArtifactUploadCompleted,
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("AI worker artifact upload completed"),
+		common.WithEventContent(eventContent(map[string]any{"artifact": "all"})),
+	)
+	return ctx.Err()
+}
+
 func eventContent(values map[string]any) json.RawMessage {
 	data, err := json.Marshal(values)
 	if err != nil {
 		return nil
 	}
 	return json.RawMessage(data)
-}
-
-// firstNonBlankOriginal returns the original value for the first non-blank string.
-// Event metadata should preserve provider-supplied model IDs exactly while
-// still treating whitespace-only values as empty.
-func firstNonBlankOriginal(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func evaluateCompletionResponse(
@@ -1626,8 +1798,8 @@ func completionOutcomeError(outcome llm.CompletionOutcome, stopReason string) er
 }
 
 // writeResult submits the result to the controller via HTTP POST.
-func writeResult(result string) error {
-	return common.SubmitResult([]byte(result))
+func writeResult(ctx context.Context, result string) error {
+	return common.SubmitResultContext(ctx, []byte(result))
 }
 
 func workerSecretReadAuthorizer(
@@ -1755,4 +1927,82 @@ func loadSkillsFromVolume() string {
 		fmt.Printf("Loaded %d skill file(s) from %s\n", loaded, skillsDir)
 	}
 	return sb.String()
+}
+
+// sealChildTaskViaController asks the controller to seal the requester stamp
+// onto a child Task this worker just created. The controller authenticates
+// this Pod as the parent Task's worker and checks the child's ownership and
+// requester before sealing; a failure leaves the child unverified for
+// connector use and is not an error for the creating tool.
+func sealChildTaskViaController(ctx context.Context, _ client.Client, task *corev1alpha1.Task) error {
+	controllerURL := strings.TrimRight(strings.TrimSpace(os.Getenv(workerenv.ControllerURL)), "/")
+	namespace := strings.TrimSpace(os.Getenv(workerenv.TaskNamespace))
+	parent := strings.TrimSpace(os.Getenv(workerenv.TaskName))
+	if task == nil || controllerURL == "" || namespace == "" || parent == "" || task.Spec.RequestedBy == nil {
+		return nil
+	}
+	endpoint := fmt.Sprintf("%s/internal/v1/tasks/%s/%s/children/%s/requester-stamp",
+		controllerURL, url.PathEscape(namespace), url.PathEscape(parent), url.PathEscape(task.Name))
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	token := workerServiceAccountToken()
+	// Nothing repairs a seal later, so a failure that may clear is retried
+	// briefly: a 409 (the child changed between the controller's read and
+	// its fenced seal), a 429 or 5xx, or a transport error. Any other
+	// response is final.
+	backoff := sealConflictBackoff
+	var last string
+	for attempt := range 4 {
+		if attempt > 0 {
+			select {
+			case <-callCtx.Done():
+				fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
+				return nil
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+		req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, nil)
+		if err != nil {
+			return nil
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := sealHTTPClient().Do(req)
+		if err != nil {
+			last = err.Error()
+			continue
+		}
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if status >= 200 && status < 300 {
+			return nil
+		}
+		last = fmt.Sprintf("controller returned %d", status)
+		if status != http.StatusConflict && status != http.StatusTooManyRequests && status < http.StatusInternalServerError {
+			break
+		}
+	}
+	fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
+	return nil
+}
+
+// sealConflictBackoff is the first wait before a seal is retried; each
+// retry doubles it.
+var sealConflictBackoff = 250 * time.Millisecond
+
+// sealHTTPClient is the client used to reach the controller for sealing;
+// tests replace it with a fixture client.
+// It carries the worker's ServiceAccount token, so it neither honors proxy
+// environment variables nor follows redirects: the token reaches the
+// controller and nothing else.
+var sealHTTPClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Timeout:       15 * time.Second,
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }

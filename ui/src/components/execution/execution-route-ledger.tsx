@@ -104,7 +104,7 @@ function bindingRouteTitle(task: Task) {
   const binding = task.status?.agentExecutionBinding
   if (!binding) return 'No execution route recorded'
   const backend = words(binding.backend)
-  return `ACP v2 · ${backend}`
+  return `Harness v2 · ${backend}`
 }
 
 export function TaskExecutionRouteLedger({ task }: { task: Task }) {
@@ -186,7 +186,7 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   const blocked = control.availability === 'ReconciliationBlocked'
   const available = control.availability === 'Available'
   const routeTitle = lineage
-    ? `ACP v2 · lineage ${lineage.generation}`
+    ? `Harness v2 · lineage ${lineage.generation}`
     : 'Lineage not yet established'
 
   return (

@@ -13,7 +13,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -63,17 +62,19 @@ const (
 	OutboundAccessTrustedTokenEndpointServices = "ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"
 
 	// AI worker env vars.
-	AIProvider        = "ORKA_AI_PROVIDER"
-	AIModel           = "ORKA_AI_MODEL"
-	AITemperature     = "ORKA_AI_TEMPERATURE"
-	AIMaxTokens       = "ORKA_AI_MAX_TOKENS"
-	AIPrompt          = "ORKA_AI_PROMPT"
-	AISystemPrompt    = "ORKA_AI_SYSTEM_PROMPT"
-	AIBaseURL         = "ORKA_AI_BASE_URL"
-	AIAzureAPIVersion = "ORKA_AI_AZURE_API_VERSION"
-	AITools           = "ORKA_AI_TOOLS"
-	AIFallbackCount   = "ORKA_AI_FALLBACK_COUNT"
-	ControllerMode    = "ORKA_CONTROLLER_MODE"
+	AIProvider            = "ORKA_AI_PROVIDER"
+	AIModel               = "ORKA_AI_MODEL"
+	AITemperature         = "ORKA_AI_TEMPERATURE"
+	AIMaxTokens           = "ORKA_AI_MAX_TOKENS"
+	AIPrompt              = "ORKA_AI_PROMPT"
+	AISystemPrompt        = "ORKA_AI_SYSTEM_PROMPT"
+	AIBaseURL             = "ORKA_AI_BASE_URL"
+	AIAzureAPIVersion     = "ORKA_AI_AZURE_API_VERSION"
+	AIAzureDeploymentName = "ORKA_AI_AZURE_DEPLOYMENT_NAME"
+	AITools               = "ORKA_AI_TOOLS"
+	GatewayReplyEnabled   = "ORKA_GATEWAY_REPLY_ENABLED"
+	AIFallbackCount       = "ORKA_AI_FALLBACK_COUNT"
+	ControllerMode        = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -92,7 +93,13 @@ const (
 	AutonomousMaxIterations   = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
 	TaskUID                   = "ORKA_TASK_UID"
 	ApprovalRequiredTools     = "ORKA_APPROVAL_REQUIRED_TOOLS"
-	ResolvedApprovals         = "ORKA_RESOLVED_APPROVALS"
+	// ConnectorToolDigests is a JSON object mapping each connector-backed
+	// tool dispatched with the Job to the digest of its Tool spec at dispatch.
+	ConnectorToolDigests = "ORKA_CONNECTOR_TOOL_DIGESTS"
+	// ConnectionBindings is the JSON list of Connection identities frozen
+	// for the Task at dispatch (no token material).
+	ConnectionBindings = "ORKA_CONNECTION_BINDINGS"
+	ResolvedApprovals  = "ORKA_RESOLVED_APPROVALS"
 
 	// Agent runtime env vars.
 	Prompt                      = "ORKA_PROMPT"
@@ -168,55 +175,8 @@ const (
 	WorkDir              = "ORKA_WORK_DIR"
 	SkillsDir            = "ORKA_SKILLS_DIR"
 
-	// Agent sandbox workspace env vars used by agent-runtime workers.
-	ExecutionWorkspaceEnabled               = "ORKA_EXECUTION_WORKSPACE_ENABLED"
-	ExecutionWorkspaceProvider              = "ORKA_EXECUTION_WORKSPACE_PROVIDER"
-	ExecutionWorkspaceTemplateName          = "ORKA_EXECUTION_WORKSPACE_TEMPLATE_NAME"
-	ExecutionWorkspaceTemplateNamespace     = "ORKA_EXECUTION_WORKSPACE_TEMPLATE_NAMESPACE"
-	ExecutionWorkspaceClaimNamespace        = "ORKA_EXECUTION_WORKSPACE_CLAIM_NAMESPACE"
-	ExecutionWorkspaceClaimName             = "ORKA_EXECUTION_WORKSPACE_CLAIM_NAME"
-	ExecutionWorkspaceReusePolicy           = "ORKA_EXECUTION_WORKSPACE_REUSE_POLICY"
-	ExecutionWorkspaceReuseKey              = "ORKA_EXECUTION_WORKSPACE_REUSE_KEY"
-	ExecutionWorkspaceCleanupPolicy         = "ORKA_EXECUTION_WORKSPACE_CLEANUP_POLICY"
-	ExecutionWorkspaceBoot                  = "ORKA_EXECUTION_WORKSPACE_BOOT"
-	ExecutionWorkspacePoolName              = "ORKA_EXECUTION_WORKSPACE_POOL_NAME"
-	ExecutionWorkspacePoolNamespace         = "ORKA_EXECUTION_WORKSPACE_POOL_NAMESPACE"
-	ExecutionWorkspaceSnapshotRestoreURI    = "ORKA_EXECUTION_WORKSPACE_SNAPSHOT_RESTORE_URI"
-	ExecutionWorkspaceSnapshotCheckpointURI = "ORKA_EXECUTION_WORKSPACE_SNAPSHOT_CHECKPOINT_URI"
-	ExecutionWorkspaceSnapshotOnRelease     = "ORKA_EXECUTION_WORKSPACE_SNAPSHOT_ON_RELEASE"
-	ExecutionWorkspaceProcessMode           = "ORKA_EXECUTION_WORKSPACE_PROCESS_MODE"
-	ExecutionWorkspaceResidentKey           = "ORKA_EXECUTION_WORKSPACE_RESIDENT_KEY"
-	ExecutionWorkspaceClaimTimeoutSeconds   = "ORKA_EXECUTION_WORKSPACE_CLAIM_TIMEOUT_SECONDS"
-	ExecutionWorkspaceCommandTimeoutSeconds = "ORKA_EXECUTION_WORKSPACE_COMMAND_TIMEOUT_SECONDS"
-	ExecutionWorkspaceStatusEndpoint        = "ORKA_EXECUTION_WORKSPACE_STATUS_ENDPOINT"
-	ExecutionWorkspaceDepth                 = "ORKA_EXECUTION_WORKSPACE_DEPTH"
-
-	SubstrateAPIEndpoint             = "ORKA_SUBSTRATE_API_ENDPOINT"
-	SubstrateAPICAFile               = "ORKA_SUBSTRATE_API_CA_FILE"
-	SubstrateAPIInsecureSkipVerify   = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
-	SubstrateRouterURL               = "ORKA_SUBSTRATE_ROUTER_URL"
-	SubstrateActorDNSSuffix          = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
-	SubstrateSessionIdentityToken    = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN"
-	SubstrateSessionIdentityRequired = "ORKA_SUBSTRATE_SESSION_IDENTITY_REQUIRED"
-	SubstrateSessionIdentityMintCert = "ORKA_SUBSTRATE_SESSION_IDENTITY_MINT_CERT"
-	SubstrateSessionIdentityAudience = "ORKA_SUBSTRATE_SESSION_IDENTITY_AUDIENCE"
-	SubstrateSessionIdentityAppID    = "ORKA_SUBSTRATE_SESSION_IDENTITY_APP_ID"
-	SubstrateSessionIdentityUserID   = "ORKA_SUBSTRATE_SESSION_IDENTITY_USER_ID"
-	WorkspaceBootstrapToken          = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
-
-	AgentSandboxEnabled               = "ORKA_AGENT_SANDBOX_ENABLED"
-	AgentSandboxRouterURL             = "ORKA_AGENT_SANDBOX_ROUTER_URL"
-	AgentSandboxTemplateName          = "ORKA_AGENT_SANDBOX_TEMPLATE_NAME"
-	AgentSandboxTemplateNamespace     = "ORKA_AGENT_SANDBOX_TEMPLATE_NAMESPACE"
-	AgentSandboxClaimNamespace        = "ORKA_AGENT_SANDBOX_CLAIM_NAMESPACE"
-	AgentSandboxReusePolicy           = "ORKA_AGENT_SANDBOX_REUSE_POLICY"
-	AgentSandboxReuseKey              = "ORKA_AGENT_SANDBOX_REUSE_KEY"
-	AgentSandboxCleanupPolicy         = "ORKA_AGENT_SANDBOX_CLEANUP_POLICY"
-	AgentSandboxWarmPoolPolicy        = "ORKA_AGENT_SANDBOX_WARM_POOL_POLICY"
-	AgentSandboxNamespaceStrategy     = "ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY"
-	AgentSandboxClaimTimeoutSeconds   = "ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT_SECONDS"
-	AgentSandboxCommandTimeoutSeconds = "ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS"
-	AgentSandboxDepth                 = "ORKA_AGENT_SANDBOX_DEPTH"
+	WorkspaceBootstrapToken = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
+	AgentSandboxDepth       = "ORKA_AGENT_SANDBOX_DEPTH"
 
 	// Git config env vars used to mark the prepared workspace as safe.
 	GitConfigCount  = "GIT_CONFIG_COUNT"
@@ -386,11 +346,12 @@ func TransactionLogFields(transactionID, profile string) string {
 
 // FallbackProviderEnv is one fallback provider entry from the AI worker env contract.
 type FallbackProviderEnv struct {
-	Provider        string
-	APIKey          string
-	Model           string
-	BaseURL         string
-	AzureAPIVersion string
+	Provider            string
+	APIKey              string
+	Model               string
+	BaseURL             string
+	AzureAPIVersion     string
+	AzureDeploymentName string
 }
 
 // FallbackPrefix returns the prefix for fallback provider i.
@@ -403,6 +364,9 @@ func FallbackAPIKeyKey(i int) string          { return FallbackPrefix(i) + "_API
 func FallbackModelKey(i int) string           { return FallbackPrefix(i) + "_MODEL" }
 func FallbackBaseURLKey(i int) string         { return FallbackPrefix(i) + "_BASE_URL" }
 func FallbackAzureAPIVersionKey(i int) string { return FallbackPrefix(i) + "_AZURE_API_VERSION" }
+func FallbackAzureDeploymentNameKey(i int) string {
+	return FallbackPrefix(i) + "_AZURE_DEPLOYMENT_NAME"
+}
 
 // EnvVars renders the non-secret fallback metadata env vars for fallback i.
 // API keys should normally be rendered from SecretKeyRef by the caller.
@@ -413,6 +377,7 @@ func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 	}
 	envVars = AppendIfSet(envVars, FallbackBaseURLKey(i), e.BaseURL)
 	envVars = AppendIfSet(envVars, FallbackAzureAPIVersionKey(i), e.AzureAPIVersion)
+	envVars = AppendIfSet(envVars, FallbackAzureDeploymentNameKey(i), e.AzureDeploymentName)
 	if e.APIKey != "" {
 		envVars = append(envVars, Env(FallbackAPIKeyKey(i), e.APIKey))
 	}
@@ -422,11 +387,12 @@ func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 // ParseFallbackProviderEnv reads fallback provider i.
 func ParseFallbackProviderEnv(getenv func(string) string, i int) FallbackProviderEnv {
 	return FallbackProviderEnv{
-		Provider:        getenv(FallbackProviderKey(i)),
-		APIKey:          getenv(FallbackAPIKeyKey(i)),
-		Model:           getenv(FallbackModelKey(i)),
-		BaseURL:         getenv(FallbackBaseURLKey(i)),
-		AzureAPIVersion: getenv(FallbackAzureAPIVersionKey(i)),
+		Provider:            getenv(FallbackProviderKey(i)),
+		APIKey:              getenv(FallbackAPIKeyKey(i)),
+		Model:               getenv(FallbackModelKey(i)),
+		BaseURL:             getenv(FallbackBaseURLKey(i)),
+		AzureAPIVersion:     getenv(FallbackAzureAPIVersionKey(i)),
+		AzureDeploymentName: getenv(FallbackAzureDeploymentNameKey(i)),
 	}
 }
 
@@ -460,7 +426,9 @@ type AIWorkerEnv struct {
 	SystemPrompt                     string
 	BaseURL                          string
 	AzureAPIVersion                  string
+	AzureDeploymentName              string
 	Tools                            []string
+	GatewayReplyEnabled              bool
 	Fallbacks                        []FallbackProviderEnv
 	EnforceTransactionCredentialAuth bool
 	TransactionCredentialReadScopes  []string
@@ -488,6 +456,10 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	)
 	envVars = AppendIfSet(envVars, AIBaseURL, e.BaseURL)
 	envVars = AppendIfSet(envVars, AIAzureAPIVersion, e.AzureAPIVersion)
+	envVars = AppendIfSet(envVars, AIAzureDeploymentName, e.AzureDeploymentName)
+	if e.GatewayReplyEnabled {
+		envVars = append(envVars, Env(GatewayReplyEnabled, "true"))
+	}
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
 	}
@@ -525,7 +497,9 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		SystemPrompt:                     getenv(AISystemPrompt),
 		BaseURL:                          getenv(AIBaseURL),
 		AzureAPIVersion:                  getenv(AIAzureAPIVersion),
+		AzureDeploymentName:              getenv(AIAzureDeploymentName),
 		Tools:                            SplitCSV(getenv(AITools)),
+		GatewayReplyEnabled:              IsTrue(getenv(GatewayReplyEnabled)),
 		Fallbacks:                        ParseFallbacks(getenv),
 		EnforceTransactionCredentialAuth: IsTrue(getenv(TransactionCredentialAuthorizationEnforced)),
 		TransactionCredentialReadScopes:  SplitCSV(getenv(TransactionCredentialReadScopes)),
@@ -538,152 +512,20 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 }
 
 // ValidateRequired returns an error when required AI worker fields are missing.
-func (e AIWorkerEnv) ValidateRequired() error {
+// hasSessionPrompt must only be true after the worker validates its transcript input.
+func (e AIWorkerEnv) ValidateRequired(hasSessionPrompt bool) error {
 	if e.Provider == "" {
 		return fmt.Errorf("%s is required", AIProvider)
 	}
 	if e.Model == "" {
 		return fmt.Errorf("%s is required", AIModel)
 	}
-	if e.Prompt == "" {
+	if e.Prompt == "" && !hasSessionPrompt {
 		return fmt.Errorf("%s is required", AIPrompt)
 	}
 	return nil
 }
 
-// ExecutionWorkspaceEnv is the provider-neutral execution workspace env
-// contract passed to agent-runtime workers.
-type ExecutionWorkspaceEnv struct {
-	Enabled               bool
-	Provider              string
-	TemplateName          string
-	TemplateNamespace     string
-	ClaimNamespace        string
-	ClaimName             string
-	ReusePolicy           string
-	ReuseKey              string
-	CleanupPolicy         string
-	Boot                  bool
-	PoolName              string
-	PoolNamespace         string
-	SnapshotRestoreURI    string
-	SnapshotCheckpointURI string
-	SnapshotOnRelease     bool
-	ProcessMode           string
-	ResidentKey           string
-	ClaimTimeout          time.Duration
-	CommandTimeout        time.Duration
-	StatusEndpoint        string
-	Depth                 int
-}
-
-// EnvVars renders the generic execution workspace environment.
-func (e ExecutionWorkspaceEnv) EnvVars() []corev1.EnvVar {
-	if !e.Enabled {
-		return nil
-	}
-
-	return []corev1.EnvVar{
-		Env(ExecutionWorkspaceEnabled, strconv.FormatBool(e.Enabled)),
-		Env(ExecutionWorkspaceProvider, e.Provider),
-		Env(ExecutionWorkspaceTemplateName, e.TemplateName),
-		Env(ExecutionWorkspaceTemplateNamespace, e.TemplateNamespace),
-		Env(ExecutionWorkspaceClaimNamespace, e.ClaimNamespace),
-		Env(ExecutionWorkspaceClaimName, e.ClaimName),
-		Env(ExecutionWorkspaceReusePolicy, e.ReusePolicy),
-		Env(ExecutionWorkspaceReuseKey, e.ReuseKey),
-		Env(ExecutionWorkspaceCleanupPolicy, e.CleanupPolicy),
-		Env(ExecutionWorkspaceBoot, strconv.FormatBool(e.Boot)),
-		Env(ExecutionWorkspacePoolName, e.PoolName),
-		Env(ExecutionWorkspacePoolNamespace, e.PoolNamespace),
-		Env(ExecutionWorkspaceSnapshotRestoreURI, e.SnapshotRestoreURI),
-		Env(ExecutionWorkspaceSnapshotCheckpointURI, e.SnapshotCheckpointURI),
-		Env(ExecutionWorkspaceSnapshotOnRelease, strconv.FormatBool(e.SnapshotOnRelease)),
-		Env(ExecutionWorkspaceProcessMode, e.ProcessMode),
-		Env(ExecutionWorkspaceResidentKey, e.ResidentKey),
-		Env(ExecutionWorkspaceClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
-		Env(ExecutionWorkspaceCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
-		Env(ExecutionWorkspaceStatusEndpoint, e.StatusEndpoint),
-		Env(ExecutionWorkspaceDepth, strconv.Itoa(e.Depth)),
-	}
-}
-
-// SubstrateEnv is the Substrate-specific worker env contract.
-type SubstrateEnv struct {
-	APIEndpoint             string
-	APICAFile               string
-	APIInsecureSkipVerify   bool
-	RouterURL               string
-	ActorDNSSuffix          string
-	SessionIdentityToken    string
-	SessionIdentityRequired bool
-	SessionIdentityMintCert bool
-	SessionIdentityAudience string
-	SessionIdentityAppID    string
-	SessionIdentityUserID   string
-}
-
-// EnvVars renders Substrate-specific worker env vars.
-func (e SubstrateEnv) EnvVars() []corev1.EnvVar {
-	envVars := []corev1.EnvVar{
-		Env(SubstrateAPIEndpoint, e.APIEndpoint),
-		Env(SubstrateAPICAFile, e.APICAFile),
-		Env(SubstrateAPIInsecureSkipVerify, strconv.FormatBool(e.APIInsecureSkipVerify)),
-		Env(SubstrateRouterURL, e.RouterURL),
-		Env(SubstrateActorDNSSuffix, e.ActorDNSSuffix),
-		Env(SubstrateSessionIdentityRequired, strconv.FormatBool(e.SessionIdentityRequired)),
-		Env(SubstrateSessionIdentityMintCert, strconv.FormatBool(e.SessionIdentityMintCert)),
-		Env(SubstrateSessionIdentityAudience, e.SessionIdentityAudience),
-		Env(SubstrateSessionIdentityAppID, e.SessionIdentityAppID),
-		Env(SubstrateSessionIdentityUserID, e.SessionIdentityUserID),
-	}
-	if strings.TrimSpace(e.SessionIdentityToken) != "" {
-		envVars = append(envVars, Env(SubstrateSessionIdentityToken, e.SessionIdentityToken))
-	}
-	return envVars
-}
-
-// AgentSandboxEnv is the resolved sandbox workspace env contract passed to
-// agent-runtime workers.
-type AgentSandboxEnv struct {
-	Enabled           bool
-	RouterURL         string
-	TemplateName      string
-	TemplateNamespace string
-	ClaimNamespace    string
-	ReusePolicy       string
-	ReuseKey          string
-	CleanupPolicy     string
-	WarmPoolPolicy    string
-	NamespaceStrategy string
-	ClaimTimeout      time.Duration
-	CommandTimeout    time.Duration
-}
-
-// EnvVars renders the agent sandbox workspace environment.
-func (e AgentSandboxEnv) EnvVars() []corev1.EnvVar {
-	if !e.Enabled {
-		return nil
-	}
-
-	return []corev1.EnvVar{
-		Env(AgentSandboxEnabled, strconv.FormatBool(e.Enabled)),
-		Env(AgentSandboxRouterURL, e.RouterURL),
-		Env(AgentSandboxTemplateName, e.TemplateName),
-		Env(AgentSandboxTemplateNamespace, e.TemplateNamespace),
-		Env(AgentSandboxClaimNamespace, e.ClaimNamespace),
-		Env(AgentSandboxReusePolicy, e.ReusePolicy),
-		Env(AgentSandboxReuseKey, e.ReuseKey),
-		Env(AgentSandboxCleanupPolicy, e.CleanupPolicy),
-		Env(AgentSandboxWarmPoolPolicy, e.WarmPoolPolicy),
-		Env(AgentSandboxNamespaceStrategy, e.NamespaceStrategy),
-		Env(AgentSandboxClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
-		Env(AgentSandboxCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
-		Env(AgentSandboxDepth, "0"),
-	}
-}
-
-// CoordinationEnv is the coordination/autonomous env contract used by AI tasks.
 type CoordinationEnv struct {
 	Enabled       bool
 	MaxDepth      int

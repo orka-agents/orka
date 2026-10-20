@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* dark: utilities follow the app theme (the .dark class), not the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /*
  * Orka design tokens — deep-ocean identity.
  *
@@ -35,9 +38,10 @@
   --color-input: #e2e8f0;
   --color-ring: #0b69c7;
 
-  /* ---- Phase status tokens (foreground-strength: dots / text / rails) ---- */
+  /* ---- Phase status tokens (foreground-strength: dots / text / rails) ----
+   * Text use: each clears WCAG AA 4.5:1 on card and page backgrounds. */
   --color-status-pending: #b45309;
-  --color-status-running: #0891b2;
+  --color-status-running: #0e7490;
   --color-status-finalizing: #7c3aed;
   --color-status-succeeded: #047857;
   --color-status-failed: #be123c;
@@ -50,7 +54,7 @@
   --color-status-failed-bg: rgb(244 63 94 / 0.12);
 
   /* ---- Reserved liveness (bioluminescent cyan; consumed only in active contexts) ---- */
-  --color-live: #0891b2;
+  --color-live: #0e7490;
   --color-live-bg: rgb(34 211 238 / 0.14);
 
   /* ---- Task type tokens (kept off the status hues) ---- */
@@ -73,11 +77,18 @@
   --shadow-xl: 0 20px 48px -12px rgb(15 23 42 / 0.2);
 }
 
+/* Native controls (checkboxes, date pickers, select popups) follow the app theme. */
+:root {
+  color-scheme: light;
+}
+
 /*
  * Dark = layered abyss (not flat black). The elevation ramp does the work that
  * shadows do on light, so cards stay legible without relying on invisible shadow.
  */
 .dark {
+  color-scheme: dark;
+
   --color-background: #0a0e14;
 
   --color-foreground: #e6edf3;

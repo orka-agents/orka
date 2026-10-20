@@ -19,7 +19,7 @@ orka_kind_registry_start() {
 
   if [[ -n "${owner}" ]]; then
     docker run -d --name "${ORKA_KIND_REGISTRY_NAME}" --network kind \
-      --label "io.orka.test.owner=${owner}" \
+      --label "ai.orka.test.owner=${owner}" \
       -p 127.0.0.1::5000 registry:2 >/dev/null || return 1
   elif [[ "$(docker inspect -f '{{.State.Running}}' "${ORKA_KIND_REGISTRY_NAME}" 2>/dev/null)" == "true" ]]; then
     # Reuse the running registry: recreating it would change the host port
@@ -116,7 +116,7 @@ orka_kind_registry_stop() {
   }
 
   if [[ -n "${owner}" ]]; then
-    actual_owner="$(docker container inspect --format '{{ index .Config.Labels "io.orka.test.owner" }}' "${name}")" || return 1
+    actual_owner="$(docker container inspect --format '{{ index .Config.Labels "ai.orka.test.owner" }}' "${name}")" || return 1
     [[ "${actual_owner}" == "${owner}" ]] || {
       echo "refusing to remove Kind registry ${name} without matching ownership" >&2
       return 1

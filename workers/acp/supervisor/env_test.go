@@ -3,12 +3,14 @@ package supervisor
 import (
 	"encoding/json"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -27,7 +29,7 @@ func TestProviderProfilesDisableUpdatesAndUsePrivateHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if codexEnv["NO_BROWSER"] != "1" || codexEnv["CODEX_HOME"] != "/sessions/private/home/.codex" || !strings.Contains(codexEnv["CODEX_CONFIG"], proxy.BaseURL) || codexEnv["CODEX_API_KEY"] != proxy.Credential {
+	if codexEnv["NO_BROWSER"] != "1" || codexEnv["CODEX_HOME"] != "/sessions/private/home/.codex" || !strings.Contains(codexEnv["CODEX_CONFIG"], proxy.BaseURL) || codexEnv["CODEX_API_KEY"] != proxy.Credential || codexEnv["MODEL_PROVIDER"] != codexProviderID {
 		t.Fatalf("unexpected Codex environment: %#v", codexEnv)
 	}
 	var codexConfig map[string]any
@@ -105,6 +107,7 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	maps.Copy(environment, projection.Environment)
+	assertCodexResumeModelProvider(t, environment)
 	if environment["NO_BROWSER"] != "1" || environment["CODEX_HOME"] != "/sessions/private/home/.codex" ||
 		!strings.Contains(environment["CODEX_CONFIG"], proxy.BaseURL) || environment["CODEX_API_KEY"] != proxy.Credential {
 		t.Fatalf("unexpected Codex environment: %#v", environment)
@@ -119,6 +122,21 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 	assertCodexWebSocketTransportsDisabled(t, config)
 	if strings.Contains(strings.Join(codex.Args, " "), "npx") {
 		t.Fatalf("Codex runtime uses a download-on-start command: %v", codex.Args)
+	}
+}
+
+func TestCodexProviderSessionProjectionNoReasoning(t *testing.T) {
+	request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "none", nil, nil, true)
+	projection, err := codexSessionProjection(request, acp.SessionPaths{Home: "/sessions/private/home"}, ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session"}, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["model_reasoning_effort"] != "none" {
+		t.Fatalf("Codex reasoning effort = %v, want none", config["model_reasoning_effort"])
 	}
 }
 
@@ -140,6 +158,7 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	maps.Copy(environment, projection.Environment)
+	assertCodexResumeModelProvider(t, environment)
 	// Read-only sessions keep the orka-external agent mode: Codex's own
 	// sandbox needs unprivileged user namespaces the runtime Pod forbids, so
 	// the RuntimeSession boundary enforces the read-only surface instead.
@@ -434,8 +453,12 @@ func TestProviderSessionProjectionFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "unsupported", "", nil, nil, true), paths, proxy); err == nil || !strings.Contains(err.Error(), "systemPrompt") {
-		t.Fatalf("Copilot system prompt error = %v", err)
+	projection, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "native instructions", "", nil, nil, true), paths, proxy)
+	if err != nil || projection.Instructions == nil || projection.Instructions.Content != "native instructions" {
+		t.Fatalf("Copilot native instruction projection failed: %v", err)
+	}
+	if _, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "@mutable.md", "", nil, nil, true), paths, proxy); err == nil {
+		t.Fatal("Copilot admitted native imports outside the frozen configuration")
 	}
 	if _, err := copilot.ProjectSession(testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", []string{providerToolWebSearch}, nil, true), paths, proxy); err == nil || !strings.Contains(err.Error(), providerToolWebSearch) {
 		t.Fatalf("Copilot WebSearch policy error = %v", err)
@@ -525,6 +548,7 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			assertCodexResumeModelProvider(t, environment)
 			if got := environment["INITIAL_AGENT_MODE"]; got != codexAgentModeOrkaExternal {
 				t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", got)
 			}
@@ -532,6 +556,78 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 	}
 }
 
+// Both adapter processes must receive the actual Codex provider environment,
+// including after the runtime reconnects the persisted session with session/resume.
+func TestCodexProviderResumeEnvironmentSurvivesIdleRestart(t *testing.T) {
+	server, cfg, profile := newTestServer(t, adapterResumeMode)
+	codex, err := providerProfile(providerKindCodex, profile.Model, profile.WorkspaceIntent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.cfg.Provider.EnvironmentForSession = codex.EnvironmentForSession
+	server.cfg.Provider.PrepareSession = codex.PrepareSession
+	server.cfg.Provider.Args = []string{"-test.run=^TestCodexProviderResumeHelper$"}
+	create := testCreateSessionRequest(t, cfg, profile)
+	created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d", created.Code)
+	}
+	first := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+	completed := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", first, cfg)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("first prompt status = %d", completed.Code)
+	}
+	server.mu.Lock()
+	state := server.sessions[create.RuntimeSessionID]
+	server.mu.Unlock()
+	if state == nil || state.runtime == nil {
+		t.Fatal("session state missing after first prompt")
+	}
+	select {
+	case <-state.runtime.Process().Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("helper adapter did not exit after the first prompt")
+	}
+	server.mu.Lock()
+	state.descriptor.State = harnessv2.RuntimeSessionStateIdle
+	server.mu.Unlock()
+	deactivatePromptCapabilities(state, first.Metadata.PromptID, harnessv2.RuntimeSessionStateIdle)
+	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
+	resumed := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
+	if resumed.Code != http.StatusOK {
+		t.Fatalf("resumed prompt status = %d", resumed.Code)
+	}
+	if got := state.runtime.AdapterRestarts(); got != 1 {
+		t.Fatalf("adapter restarts = %d, want 1", got)
+	}
+}
+
+func TestCodexProviderResumeHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_SUPERVISOR_ACP_HELPER") != "1" {
+		return
+	}
+	assertCodexResumeModelProvider(t, map[string]string{
+		"MODEL_PROVIDER": os.Getenv("MODEL_PROVIDER"),
+		"CODEX_CONFIG":   os.Getenv("CODEX_CONFIG"),
+	})
+	TestSupervisorACPHelper(t)
+}
+
+func assertCodexResumeModelProvider(t *testing.T, environment map[string]string) {
+	t.Helper()
+	var config map[string]any
+	if err := json.Unmarshal([]byte(environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	// The pinned adapter does not consult CODEX_CONFIG for thread/resume's
+	// modelProvider. Its explicit MODEL_PROVIDER must match the session config.
+	if got := environment["MODEL_PROVIDER"]; got != codexProviderID || got != config["model_provider"] {
+		t.Fatalf("MODEL_PROVIDER = %q, CODEX_CONFIG.model_provider = %v, want %q", got, config["model_provider"], codexProviderID)
+	}
+	assertCodexWebSocketTransportsDisabled(t, config)
+}
+
+//nolint:gocyclo // The environment fixture checks one complete derived supervisor configuration.
 func TestLoadConfigFromEnv(t *testing.T) {
 	dir := t.TempDir()
 	controllerToken := filepath.Join(dir, "controller-token")
@@ -553,7 +649,9 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		EnvControllerTokenFile: controllerToken, EnvCapabilitySecretFile: capabilitySecret, EnvProviderTokenFile: providerToken,
 		EnvMCPBrokerURL: "http://orka-controller.orka-system.svc:8080", EnvTrustNamespace: "default",
 		EnvSessionBaseDir: filepath.Join(dir, "sessions"), EnvFirstSessionUID: "20000", EnvLastSessionUID: "20010", EnvSessionGID: "20000",
-		EnvE2EPromptWriteAmbiguity: testE2EPromptWriteAmbiguityMarker,
+		EnvE2EPromptWriteAmbiguity:           testE2EPromptWriteAmbiguityMarker,
+		EnvBrokeredToolApprovalProfileDigest: "",
+		EnvFoundryRecoveryProfileDigest:      "",
 	}
 	for name, value := range values {
 		t.Setenv(name, value)
@@ -636,8 +734,154 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if agentKitCfg.Capabilities.SupportsAgentSessionConfiguration ||
 		agentKitCfg.Capabilities.Provider.SupportsImages || agentKitCfg.Capabilities.Provider.SupportsAudio ||
 		agentKitCfg.Capabilities.Provider.SupportsEmbeddedResources ||
-		agentKitCfg.Capabilities.Provider.SupportsPermissions || !agentKitCfg.Capabilities.Provider.SupportsTools {
+		agentKitCfg.Capabilities.Provider.SupportsPermissions || agentKitCfg.Capabilities.Provider.SupportsBrokeredToolApprovals ||
+		!agentKitCfg.Capabilities.Provider.SupportsTools {
 		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
+	}
+
+	t.Run("exact profile brokered approval qualification", testLoadConfigFromEnvBrokeredApprovalQualification)
+	t.Run("exact profile Foundry recovery qualification", testLoadConfigFromEnvFoundryRecoveryQualification)
+}
+
+func testLoadConfigFromEnvFoundryRecoveryQualification(t *testing.T) {
+	t.Setenv(EnvProvider, providerKindFoundry)
+	t.Setenv(EnvFoundryAdapterDigest, testDigest("foundry-adapter"))
+	baseline, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Capabilities.SupportsFoundryRecovery {
+		t.Fatal("Foundry recovery was advertised without qualification")
+	}
+	digest := string(baseline.Fence.RuntimeProfileDigest)
+	t.Run("approval qualification remains independent", func(t *testing.T) {
+		t.Setenv(EnvBrokeredToolApprovalProfileDigest, digest)
+		cfg, err := LoadConfigFromEnv()
+		if err != nil || !cfg.Capabilities.Provider.SupportsBrokeredToolApprovals || cfg.Capabilities.SupportsFoundryRecovery {
+			t.Fatalf("approval qualification enabled recovery: %v", err)
+		}
+	})
+	t.Run("matching recovery qualification", func(t *testing.T) {
+		t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+		cfg, err := LoadConfigFromEnv()
+		if err != nil || !cfg.Capabilities.SupportsFoundryRecovery || cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+			t.Fatalf("recovery qualification enabled approvals or was rejected: %v", err)
+		}
+	})
+	for _, test := range []struct{ name, value string }{
+		{"malformed", "not-a-digest"},
+		{"invalid hex", "sha256:" + strings.Repeat("g", 64)},
+		{"mismatched", testDigest("another-profile")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(EnvFoundryRecoveryProfileDigest, test.value)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvFoundryRecoveryProfileDigest) {
+				t.Fatalf("invalid recovery qualification startup error = %v", err)
+			}
+		})
+	}
+	for _, test := range []struct{ name, variable, value string }{
+		{"adapter drift", EnvFoundryAdapterDigest, testDigest("different-adapter")},
+		{"configuration drift", EnvAgentConfigurationDigest, testDigest("different-config")},
+		{"model drift", EnvModel, "different-model"},
+		{"policy drift", EnvApprovalPolicyDigest, testDigest("different-policy")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+			t.Setenv(test.variable, test.value)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "does not match runtime profile digest") {
+				t.Fatalf("changed profile retained recovery qualification: %v", err)
+			}
+		})
+	}
+	for _, provider := range []string{providerKindAgentKit, providerKindCodex, providerKindClaude, providerKindCopilot, providerKindOpencode} {
+		t.Run("unsupported "+provider, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider)
+			t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
+			if provider == providerKindOpencode {
+				t.Setenv(EnvModel, "openai/gpt-test")
+				t.Setenv(EnvModelContextLimit, "128000")
+				t.Setenv(EnvModelOutputLimit, "16000")
+			}
+			t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvFoundryRecoveryProfileDigest+" is unsupported for provider") {
+				t.Fatalf("unsupported provider recovery startup error = %v", err)
+			}
+		})
+	}
+}
+
+func testLoadConfigFromEnvBrokeredApprovalQualification(t *testing.T) {
+	for _, provider := range []struct{ kind, adapterEnv string }{
+		{providerKindAgentKit, EnvAgentKitAdapterDigest},
+		{providerKindFoundry, EnvFoundryAdapterDigest},
+	} {
+		t.Run(provider.kind, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider.kind)
+			t.Setenv(provider.adapterEnv, testDigest(provider.kind+"-adapter"))
+			unqualified, err := LoadConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if unqualified.Capabilities.Provider.SupportsBrokeredToolApprovals {
+				t.Fatal("approval support was advertised without qualification")
+			}
+			profileDigest := string(unqualified.Fence.RuntimeProfileDigest)
+			t.Run("matching", func(t *testing.T) {
+				t.Setenv(EnvBrokeredToolApprovalProfileDigest, profileDigest)
+				qualified, err := LoadConfigFromEnv()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !qualified.Capabilities.Provider.SupportsBrokeredToolApprovals || qualified.Capabilities.Provider.SupportsPermissions {
+					t.Fatal("qualified brokered capability did not remain separate from native permissions")
+				}
+			})
+			for _, test := range []struct{ name, value string }{
+				{"malformed", "not-a-profile-digest"},
+				{"invalid hex", "sha256:" + strings.Repeat("g", 64)},
+				{"mismatched", testDigest("another-qualified-profile")},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Setenv(EnvBrokeredToolApprovalProfileDigest, test.value)
+					if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvBrokeredToolApprovalProfileDigest) {
+						t.Fatalf("invalid qualification startup error = %v", err)
+					}
+				})
+			}
+			for _, test := range []struct{ name, variable, value string }{
+				{"adapter drift", provider.adapterEnv, testDigest("different-adapter")},
+				{"configuration drift", EnvAgentConfigurationDigest, testDigest("different-config")},
+				{"model drift", EnvModel, "different-model"},
+				{"policy drift", EnvApprovalPolicyDigest, testDigest("different-policy")},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Setenv(EnvBrokeredToolApprovalProfileDigest, profileDigest)
+					t.Setenv(test.variable, test.value)
+					if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "does not match runtime profile digest") {
+						t.Fatalf("changed profile retained approval qualification: %v", err)
+					}
+				})
+			}
+		})
+	}
+	for _, provider := range []string{providerKindCodex, providerKindClaude, providerKindCopilot, providerKindOpencode} {
+		t.Run("unsupported "+provider, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider)
+			if provider == providerKindOpencode {
+				t.Setenv(EnvModel, "openai/gpt-test")
+				t.Setenv(EnvModelContextLimit, "128000")
+				t.Setenv(EnvModelOutputLimit, "16000")
+			}
+			baseline, err := LoadConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(EnvBrokeredToolApprovalProfileDigest, string(baseline.Fence.RuntimeProfileDigest))
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "is unsupported for provider") {
+				t.Fatalf("unsupported provider qualification error = %v", err)
+			}
+		})
 	}
 }
 
@@ -704,23 +948,9 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 	}
 }
 
-func TestDefaultProtocolLimitsUseProviderSpecificUpdateRates(t *testing.T) {
-	tests := []struct {
-		provider string
-		want     int
-	}{
-		{provider: providerKindCodex, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindClaude, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindCopilot, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindOpencode, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindAgentKit, want: runtimeMaxUpdateEventsPerSecond},
-	}
-	for _, test := range tests {
-		t.Run(test.provider, func(t *testing.T) {
-			if got := defaultProtocolLimits(test.provider).MaxUpdateEventsPerSecond; got != test.want {
-				t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, test.want)
-			}
-		})
+func TestDefaultProtocolLimitsUpdateRate(t *testing.T) {
+	if got := defaultProtocolLimits().MaxUpdateEventsPerSecond; got != runtimeMaxUpdateEventsPerSecond {
+		t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, runtimeMaxUpdateEventsPerSecond)
 	}
 }
 

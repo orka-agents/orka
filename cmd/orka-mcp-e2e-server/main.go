@@ -18,6 +18,14 @@ import (
 )
 
 const (
+	jsonRPCField = "jsonrpc"
+)
+
+const (
+	jsonRPCVersion = "2.0"
+)
+
+const (
 	defaultListenAddr   = ":8080"
 	mcpProtocolVersion  = "2025-06-18"
 	mcpSessionIDHeader  = "Mcp-Session-Id"
@@ -85,8 +93,8 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 	case mcpInitializeMethod:
 		w.Header().Set(mcpSessionIDHeader, mcpE2ESessionID)
 		writeJSON(w, map[string]any{
-			"jsonrpc": "2.0",
-			"id":      rawID(req.ID),
+			jsonRPCField: jsonRPCVersion,
+			"id":         rawID(req.ID),
 			"result": map[string]any{
 				"protocolVersion": mcpProtocolVersion,
 				"capabilities":    map[string]any{},
@@ -114,8 +122,8 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 			result = fmt.Sprintf("mcp-e2e-state:%s:%d:%d", params.Name, processStartedAt, callCount)
 		}
 		writeJSON(w, map[string]any{
-			"jsonrpc": "2.0",
-			"id":      rawID(req.ID),
+			jsonRPCField: jsonRPCVersion,
+			"id":         rawID(req.ID),
 			"result": map[string]any{
 				"content": []map[string]string{
 					{
@@ -143,8 +151,8 @@ func rawID(id json.RawMessage) any {
 
 func writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
 	writeJSON(w, map[string]any{
-		"jsonrpc": "2.0",
-		"id":      rawID(id),
+		jsonRPCField: jsonRPCVersion,
+		"id":         rawID(id),
 		"error": map[string]any{
 			"code":    code,
 			"message": message,

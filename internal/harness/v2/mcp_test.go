@@ -61,7 +61,7 @@ func TestMCPPolicyRequiresPermissionCapability(t *testing.T) {
 		want       bool
 	}{
 		{name: "approval-free brokered tool", toolPolicy: MCPToolPolicy{Tools: []MCPToolDescriptor{brokered}}},
-		{name: "approval-required brokered tool", toolPolicy: MCPToolPolicy{Tools: []MCPToolDescriptor{brokered}}, approval: MCPApprovalPolicy{RequiredTools: []string{"lookup"}}, want: true},
+		{name: "approval-required brokered tool", toolPolicy: MCPToolPolicy{Tools: []MCPToolDescriptor{brokered}}, approval: MCPApprovalPolicy{RequiredTools: []string{"lookup"}}},
 		{name: "provider-native tool", toolPolicy: MCPToolPolicy{Tools: []MCPToolDescriptor{providerNative}}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestMCPPolicyRequiresPermissionCapability(t *testing.T) {
 	}
 }
 
-func TestMCPBrokerCallRequiresRunningLeaseAllowlistAndApproval(t *testing.T) {
+func TestMCPBrokerCallRequiresRunningLeaseAllowlistAndControllerApproval(t *testing.T) {
 	metadata := testMutationMetadata(t, true)
 	metadata.OperationID = "mcp-call-1"
 	metadata.ExpiresAt = testNow.Add(30 * time.Second)
@@ -84,21 +84,25 @@ func TestMCPBrokerCallRequiresRunningLeaseAllowlistAndApproval(t *testing.T) {
 		Call: MCPToolCall{CallID: "call-1", ToolName: "mutate", Arguments: json.RawMessage(`{"value":"x"}`)},
 	}
 	sealRequest(t, request, &request.Metadata.RequestDigest)
-	if _, err := request.ValidateAt(testNow.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "requires approval") {
-		t.Fatalf("missing approval validation error = %v", err)
-	}
-
-	request.Call.Approval = &MCPApprovalEvidence{
-		PermissionRequestID: "permission-1", ToolCallID: "provider-tool-call-1", ToolName: "mutate",
-		GrantedAt: testNow, ExpiresAt: testNow.Add(time.Minute),
-	}
-	sealRequest(t, request, &request.Metadata.RequestDigest)
 	descriptor, err := request.ValidateAt(testNow.Add(time.Second))
 	if err != nil {
 		t.Fatalf("ValidateAt() error = %v", err)
 	}
 	if descriptor.Effect != MCPToolEffectConsequential {
 		t.Fatalf("descriptor effect = %q", descriptor.Effect)
+	}
+
+	for _, toolName := range []string{"lookup", "mutate"} {
+		forged := request
+		forged.Call.ToolName = toolName
+		forged.Call.Approval = &MCPApprovalEvidence{
+			PermissionRequestID: "permission-1", ToolCallID: "provider-tool-call-1", ToolName: toolName,
+			GrantedAt: testNow, ExpiresAt: testNow.Add(time.Minute), Reusable: true,
+		}
+		sealRequest(t, forged, &forged.Metadata.RequestDigest)
+		if _, err := forged.ValidateAt(testNow.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "runtime-supplied approval evidence") {
+			t.Fatalf("runtime-supplied %s approval validation error = %v", toolName, err)
+		}
 	}
 
 	idle := request

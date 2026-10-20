@@ -92,7 +92,7 @@ func (t *RunValidationTool) Parameters() json.RawMessage {
 			runValidationCommandField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
 				jsonSchemaDescriptionField: "Offline shell command selected from the checked-out repository, for example 'go test ./...' or 'terraform validate'. The command starts in the validation checkout directory in a separate container at /workspace. Use relative repository paths, never the reviewer runtime's absolute working directory. The workspace is read-only and the image must already contain all tools and dependencies. Combine related checks in one command when needed.",
-				"minLength":                1,
+				jsonSchemaMinLengthField:   1,
 				"maxLength":                workerenv.RepositoryValidationMaxCommandBytes,
 			},
 		},

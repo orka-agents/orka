@@ -29,8 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -387,6 +387,7 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
+	epochs ...*ControllerEpochManager,
 ) *corev1alpha1.Task {
 	t.Helper()
 	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
@@ -403,6 +404,12 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 		DurableControlStore:     controlStore,
 		AgentExecutionSnapshots: persistence,
 		ACPRuntimeImages:        images,
+	}
+	if len(epochs) > 0 {
+		binder.ControllerEpochManager = epochs[0]
+	}
+	if taskRequestsExecutionWorkspace(task) {
+		installTestACPWorkspaceClass(t, binder)
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
 	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
@@ -1316,7 +1323,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	if err := dispatcher.handlePromptStreamError(
 		ctx, nil, runtimeClient, "runtime-session-1", task.DeepCopy(), attempt.ID, fence, runtimeFence,
 		nil, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(errors.New("event store unavailable"), nil),
+		acpUpdatePersistenceError(errors.New("event store unavailable"), nil), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1515,6 +1522,49 @@ func (f *promptStreamLifecycleFixture) assertTerminalLifecycle(
 	}
 }
 
+func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
+	for _, persistenceFailure := range []bool{false, true} {
+		name := "cancelled stream"
+		if persistenceFailure {
+			name = "plan persistence failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
+			})
+			cancellation := requestACPPromptCancellation(fixture.ctx, fixture.runtimeClient, "runtime-session-1",
+				fixture.task.DeepCopy(), fixture.runtimeFence, harnessv2.CancelReasonControllerShutdown)
+			if cancellation.err != nil {
+				t.Fatal(cancellation.err)
+			}
+			var streamErr = context.Canceled
+			wantState := corev1alpha1.TaskExecutionStateCancelled
+			if persistenceFailure {
+				streamErr = acpUpdatePersistenceError(nil, errors.New("plan store unavailable"))
+				wantState = corev1alpha1.TaskExecutionStateFailed
+			}
+			if err := fixture.dispatcher.handlePromptStreamError(
+				fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
+				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{},
+				context.Canceled, streamErr, cancellation,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if len(fixture.cancelRequests) != 1 {
+				t.Fatalf("cancellation requests = %d, want exactly one sealed operation", len(fixture.cancelRequests))
+			}
+			completed := &corev1alpha1.Task{}
+			if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
+				t.Fatal(err)
+			}
+			if completed.Status.Execution == nil || completed.Status.Execution.State != wantState {
+				t.Fatalf("cached cancellation execution = %v, want %s", completed.Status.Execution, wantState)
+			}
+		})
+	}
+}
+
 func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *testing.T) {
 	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
 		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
@@ -1523,7 +1573,7 @@ func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *tes
 	if err := fixture.dispatcher.handlePromptStreamError(
 		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")),
+		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1550,7 +1600,7 @@ func TestPromptStreamFailureClosesLifecycleBeforeOutcomeUnknown(t *testing.T) {
 	if err := fixture.dispatcher.handlePromptStreamError(
 		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		errors.New("stream disconnected"),
+		errors.New("stream disconnected"), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1604,7 +1654,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 			if err := fixture.dispatcher.handlePromptStreamError(
 				fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
 				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{},
-				context.DeadlineExceeded, context.DeadlineExceeded,
+				context.DeadlineExceeded, context.DeadlineExceeded, nil,
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -2401,19 +2451,27 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 }
 
 func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCleanupReceipt(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, false, false)
+	testACPDispatcherWriteSessionFinalization(t, false, false, false)
 }
 
 func TestACPDispatcherWriteSessionSurvivesCreateConflictRequeue(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, true, false)
+	testACPDispatcherWriteSessionFinalization(t, true, false, false)
 }
 
 func TestACPDispatcherWriteTaskSettlesPublicationOwnerConflict(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, false, true)
+	testACPDispatcherWriteSessionFinalization(t, false, true, false)
+}
+
+func TestACPDispatcherNativeWriteSessionCapturesAfterPublicationFinalization(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false, false, true)
+}
+
+func TestACPDispatcherNativeWriteSessionCapturesAfterTerminalPublicationFailure(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false, true, true)
 }
 
 //nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
-func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict, publicationOwnerConflict bool) {
+func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict, publicationOwnerConflict, nativeCapture bool) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -2447,7 +2505,9 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 		}},
 	}
 	if publicationOwnerConflict {
-		task.Spec.SessionRef = nil
+		if !nativeCapture {
+			task.Spec.SessionRef = nil
+		}
 		task.Spec.Workspace.PushBranch = "orka/claimed-branch"
 	}
 	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
@@ -2469,6 +2529,12 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
+	var persistence *sqlite.Store
+	var nativeSnapshot *harnessv2.NativeSessionSnapshot
+	if nativeCapture {
+		snapshot := storetest.NativeSessionSnapshot(t, "completed write-session native conversation")
+		nativeSnapshot = &snapshot
+	}
 	var creationPending atomic.Bool
 	creationPending.Store(requeueAfterCreateConflict)
 	runtimeServer := newDispatcherWriteRuntimeServer(
@@ -2479,11 +2545,25 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 			operations = append(operations, "finalize")
 			finalizationRequest = request
 		},
-		func(harnessv2.DeleteRuntimeSessionRequest) {
+		func(request harnessv2.DeleteRuntimeSessionRequest) {
+			if nativeCapture {
+				record, err := persistence.GetNativeSession(context.Background(), task.Namespace, task.Spec.SessionRef.Name, string(request.Metadata.Fence.RuntimeSessionUID))
+				if err != nil {
+					t.Errorf("read native checkpoint before runtime deletion: %v", err)
+				} else if record.MessageCount != 2 || record.Snapshot.DataDigest != nativeSnapshot.DataDigest {
+					t.Errorf("runtime deletion preceded the updated atomic native checkpoint: count=%d digest=%s", record.MessageCount, record.Snapshot.DataDigest)
+				}
+			}
 			operationMu.Lock()
 			defer operationMu.Unlock()
 			operations = append(operations, "delete")
 		},
+		dispatcherRuntimeServerOptions{nativeSnapshot: nativeSnapshot, onNativeCapture: func(harnessv2.CaptureNativeSessionRequest) error {
+			operationMu.Lock()
+			defer operationMu.Unlock()
+			operations = append(operations, "capture")
+			return nil
+		}},
 	)
 	defer runtimeServer.Close()
 	parsed, err := url.Parse(runtimeServer.URL)
@@ -2529,6 +2609,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	}
 	defer db.Close() //nolint:errcheck
 	controlStore := sqlite.NewStore(db, "test")
+	persistence = controlStore
 	epochs := NewControllerEpochManager(controlStore, "controller-write-session")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -2586,9 +2667,24 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 			operations = append(operations, "settle")
 		},
 	}
-	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+	continuityConfig := ACPSessionContinuityConfig{
 		SessionControls: recordingControls, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
-	})
+	}
+	if nativeCapture {
+		continuityConfig.NewSessionUID = func() (string, error) { return "native-write-owner", nil }
+		prior := storetest.NativeSessionSnapshot(t, "prior write-session native conversation")
+		prior.RuntimeSessionUID, prior.RuntimeProfileDigest, prior.WorkingDirectory = "", "", ""
+		if _, err := controlStore.StageNativeSessionImport(ctx, store.NativeSessionImport{
+			Namespace: task.Namespace, SessionName: task.Spec.SessionRef.Name, OperationID: "stage-write-native",
+			RequestDigest: store.NativeSessionImportDigest(task.Namespace, task.Spec.SessionRef.Name, prior.DataDigest), Snapshot: prior,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := controlStore.BindSessionCleanupIdentity(ctx, task.Namespace, task.Spec.SessionRef.Name, "native-write-owner"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	continuity, err := NewACPSessionContinuity(continuityConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2659,6 +2755,23 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 		if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.DeliveryState != store.PromptDeliveryConflict {
 			t.Fatalf("conflict attempt = %#v", attempt)
 		}
+		if nativeCapture {
+			operationMu.Lock()
+			gotOperations := append([]string(nil), operations...)
+			operationMu.Unlock()
+			if fmt.Sprint(gotOperations) != "[finalize capture settle delete]" {
+				t.Fatalf("terminal publication failure native ordering = %v", gotOperations)
+			}
+			control, err := controlStore.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+			if err != nil || control.Lease != nil {
+				t.Fatalf("native publication failure did not settle its Session lease: control=%v err=%v", control, err)
+			}
+			cancelEpoch()
+			if err := <-epochDone; err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
 		if exists, err := dispatcher.validateExistingStandaloneTaskProjection(ctx, completed, attempt); err != nil || !exists {
 			t.Fatalf("conflict terminal projection: exists=%v err=%v", exists, err)
 		}
@@ -2716,7 +2829,11 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	gotOperations := append([]string(nil), operations...)
 	gotFinalization := finalizationRequest
 	operationMu.Unlock()
-	if fmt.Sprint(gotOperations) != "[finalize settle delete]" {
+	wantOperations := "[finalize settle delete]"
+	if nativeCapture {
+		wantOperations = "[finalize capture settle delete]"
+	}
+	if fmt.Sprint(gotOperations) != wantOperations {
 		t.Fatalf("runtime cleanup operations = %v, want publication finalization, Session settlement, then deletion", gotOperations)
 	}
 	if gotFinalization.WorkspaceDeltaID != harnessv2.WorkspaceDeltaID("delta-"+promptID) ||
@@ -2784,9 +2901,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}},
 	}
 	if workspaceLifetime {
-		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled: true, Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-		}}
+		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
@@ -2800,7 +2915,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
 	if workspaceLifetime {
-		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		binding, err := resolveTestACPWorkspaceBinding(t, task, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2813,12 +2928,20 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	profileDigest := plan.Digest
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
 	task.Status.Execution.RuntimePoolName = plan.PoolName
+	runtimeUID := types.UID("pod-uid")
+	if workspaceLifetime {
+		runtimeUID = externalNativeRuntimeUID(&workspacev1alpha1.WorkloadRequest{
+			Sequence: 1, Key: workspacev1alpha1.AllocationKey{WorkspaceUID: "expiring-workspace-uid"},
+			Runtime: &workspacev1alpha1.RuntimeWorkload{PoolBinding: workspacev1alpha1.ImmutableObjectBinding{UID: "pool-uid"}},
+		})
+	}
+	runtimeInstanceID := harnessv2.RuntimeInstanceID(runtimePoolRuntimeInstanceID(runtimeUID, "boot-id"))
 	var deleteCalls atomic.Int32
 	deadlineCancels := make(chan context.CancelCauseFunc, 1)
 	accepted := make(chan struct{})
 	server := newDispatcherTimeoutRuntimeServer(t, profile, profileDigest, &deleteCalls, func() {
 		close(accepted)
-	})
+	}, runtimeInstanceID)
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -2835,15 +2958,13 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 			Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
 			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
 				PodNamespace: "orka-runtimes", PodName: "runtime-pod", PodAddress: parsed.Host,
-				PodUID: "pod-uid", BootID: "boot-id", RuntimeInstanceID: "pod-uid.boot-id", ControllerEpoch: 1,
+				PodUID: string(runtimeUID), BootID: "boot-id", RuntimeInstanceID: string(runtimeInstanceID), ControllerEpoch: 1,
 				ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, ProfileDigest: string(profileDigest), ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
 			},
 		},
 	}
 	if workspaceLifetime {
-		pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-			Provider: plan.Workspace.Provider, BindingDigest: plan.Workspace.BindingDigest,
-		}
+		pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(plan.Workspace, "expiring-workspace", "expiring-workspace-uid")
 		pool.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: "expiring-workspace"}
 		pool.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: "expiring-workspace-uid"}
 	}
@@ -2865,7 +2986,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}
 		pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(1)] = secret.Name + "/" + string(secret.UID)
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}).WithObjects(task, pool, secret, agent).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "timeout-store.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -2882,7 +3003,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
+	task = prepareBoundACPDispatcherTaskWithStoresForTest(t, ctx, kubeClient, scheme, controlStore, controlStore, task, agent, images, epochs)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
@@ -2910,17 +3031,31 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		// authenticated cancellation. The Task's own 30-second timeout must
 		// not be the cause of settlement within this test's 10-second bound.
 		dispatcher.runtimeContextFactory = nil
-		workspace := &workspacev1alpha1.ExecutionWorkspace{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: task.Namespace, Name: "expiring-workspace", UID: types.UID("expiring-workspace-uid"),
-				CreationTimestamp: metav1.NewTime(time.Now().UTC().Truncate(time.Second)),
-				Annotations:       map[string]string{acpExecutionWorkspacePoolAnnotation: pool.Name},
-			},
-			Spec: workspacev1alpha1.ExecutionWorkspaceSpec{Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
-				MaxLifetime: &metav1.Duration{Duration: 5 * time.Second},
-			}},
+		bootstrapPort, err := strconv.ParseInt(parsed.Port(), 10, 32)
+		if err != nil {
+			t.Fatal(err)
 		}
+		workspace := testAdmittedNativeDispatchWorkspace(t, plan.Workspace, pool, server.URL, int32(bootstrapPort))
+		workspace.CreationTimestamp = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+		workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 5 * time.Second}
 		if err := kubeClient.Create(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+		worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "deadline-worker", UID: "deadline-worker-uid"}}
+		if err := kubeClient.Create(ctx, worker); err != nil {
+			t.Fatal(err)
+		}
+		// Model the core fence persisted after the one-time native challenge. This
+		// test exercises deadline settlement; the endpoint test verifies admission.
+		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), pool); err != nil {
+			t.Fatal(err)
+		}
+		pool.Status.ActiveInstance.PodAddress = parsed.Hostname()
+		if err := kubeClient.Status().Update(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		observer := &RuntimePoolReconciler{Client: kubeClient, APIReader: kubeClient}
+		if err := observer.bindExternalRuntimeInstanceEvidence(ctx, pool, workspace); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -3013,6 +3148,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -3040,6 +3176,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -3070,8 +3207,17 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 	}
 }
 
-//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, true)
+}
+
+func TestACPDispatcherPublishesPreparedWorkspaceDeltaWithLegacyPublisher(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, false)
+}
+
+//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
+func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPresentation bool) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -3092,12 +3238,17 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 				PublicationCredentialRef:     &corev1alpha1.WorkspaceCredentialReference{Name: "github-publish"},
 				ForgeCredentialRef:           &corev1alpha1.WorkspaceCredentialReference{Name: "github-forge"},
 				CreatePR:                     true, PRBaseBranch: "main",
+				PRTitle: "fix: publish the authored title", PRBody: "Publish the reviewed change.",
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
 			State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 			Attempt: 1, PromptID: promptID, RequestDigest: testControlDigestForDispatcher("write-task"), ControllerEpoch: 1,
 		}},
+	}
+
+	if !supportsPresentation {
+		task.Spec.Workspace.PRTitle, task.Spec.Workspace.PRBody = "", ""
 	}
 
 	scheme := runtime.NewScheme()
@@ -3165,8 +3316,9 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	prepareRoots := make(chan string, 1)
 	publishRoots := make(chan string, 1)
 	publisherServer := newDispatcherPublisherServer(t, treeOID, commitOID, bundleDigest, dispatcherPublisherServerOptions{
-		inspectPullRequest: func(intent publisher.PullRequestIntent) { prIntents <- intent },
-		inspectPrepare:     func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
+		disablePRPresentation: !supportsPresentation,
+		inspectPullRequest:    func(intent publisher.PullRequestIntent) { prIntents <- intent },
+		inspectPrepare:        func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
 		inspectPublish: func(request publisherservice.PublicationPublishRequest) {
 			publishRoots <- request.Prepared.RelativeRoot
 		},
@@ -3222,6 +3374,14 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	}
 	select {
 	case intent := <-prIntents:
+		if supportsPresentation {
+			if intent.Title != task.Spec.Workspace.PRTitle || intent.Body != task.Spec.Workspace.PRBody ||
+				intent.TaskName != task.Name || intent.TaskNamespace != task.Namespace {
+				t.Fatal("publisher did not receive the Task-authored PR presentation")
+			}
+		} else if intent != withoutTaskPullRequestMetadata(intent) {
+			t.Fatal("legacy publisher received Task presentation")
+		}
 		if intent.BaseRepository.ID != "github.com/orka-agents/orka" || intent.HeadRepository.ID != "github.com/sozercan/orka-fork" {
 			t.Fatalf("continuation PR repositories = base %#v head %#v", intent.BaseRepository, intent.HeadRepository)
 		}
@@ -3282,11 +3442,13 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 }
 
 type dispatcherPublisherServerOptions struct {
-	inspectPrepare     func(publisherservice.PublicationPrepareRequest)
-	inspectPublish     func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest func(publisher.PullRequestIntent)
+	disablePRPresentation bool
+	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
+	inspectPublish        func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest    func(publisher.PullRequestIntent)
 }
 
+//nolint:gocyclo // Publisher test fixture exposes protocol operations and their fault-injection controls.
 func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest string, options ...dispatcherPublisherServerOptions) *httptest.Server {
 	t.Helper()
 	bundleArtifactID, err := artifactcap.ArtifactIDForDigest(bundleDigest)
@@ -3301,6 +3463,12 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case publisherservice.CapabilitiesPath:
+			supportsPresentation := len(options) == 0 || !options[0].disablePRPresentation
+			writeDispatcherJSON(w, publisherservice.CapabilitiesResponse{
+				Protocol: publisherservice.ProtocolVersion, PullRequestReconciliation: true,
+				PullRequestPresentation: supportsPresentation && r.URL.Query().Get("features") == publisherservice.PullRequestPresentationFeature,
+			})
 		case publisherservice.WorkspaceResolvePath:
 			var request publisherservice.WorkspaceResolveRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3417,6 +3585,11 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			if len(options) > 0 && options[0].disablePRPresentation && request.Intent != withoutTaskPullRequestMetadata(request.Intent) {
+				t.Error("legacy publisher received unsupported presentation fields")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			intentKey, err := request.Intent.Key()
 			if err != nil {
 				t.Errorf("PR intent key: %v", err)
@@ -3442,6 +3615,7 @@ func newDispatcherTimeoutRuntimeServer(
 	digest harnessv2.ProfileDigest,
 	deleteCalls *atomic.Int32,
 	onAccepted func(),
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
 ) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -3453,7 +3627,9 @@ func newDispatcherTimeoutRuntimeServer(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+		response := dispatcherRuntimeStatusResponse(digest, current)
+		response.Fence.RuntimeInstanceID = runtimeInstanceID
+		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
@@ -3570,8 +3746,13 @@ func newDispatcherWriteRuntimeServer(
 	creationPending *atomic.Bool,
 	onFinalize func(harnessv2.FinalizeRuntimeSessionPublicationRequest),
 	onDelete func(harnessv2.DeleteRuntimeSessionRequest),
+	options ...dispatcherRuntimeServerOptions,
 ) *httptest.Server {
 	t.Helper()
+	var nativeOptions dispatcherRuntimeServerOptions
+	if len(options) > 0 {
+		nativeOptions = options[0]
+	}
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	deltaDigest := "sha256:" + strings.Repeat("5", 64)
@@ -3604,6 +3785,7 @@ func newDispatcherWriteRuntimeServer(
 			SupportsDrain:                     true,
 			SupportsPublicationFinalization:   true,
 			SupportsAgentSessionConfiguration: true,
+			SupportsNativeSessions:            nativeOptions.nativeSnapshot != nil,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
@@ -3621,6 +3803,10 @@ func newDispatcherWriteRuntimeServer(
 			SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
 			State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
+		}
+		if request.NativeRestore != nil {
+			descriptor.ProviderSessionID = request.NativeRestore.Snapshot.ProviderSessionID
+			descriptor.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: descriptor.ProviderSessionID, Loaded: true}
 		}
 		responseDescriptor := descriptor
 		descriptorMu.Unlock()
@@ -3725,6 +3911,29 @@ func newDispatcherWriteRuntimeServer(
 			},
 		})
 	})
+	mux.HandleFunc("POST /v2/runtime-sessions/{sessionID}/native-session", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.CaptureNativeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || nativeOptions.nativeSnapshot == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if nativeOptions.onNativeCapture != nil {
+			if err := nativeOptions.onNativeCapture(request); err != nil {
+				t.Errorf("native write capture: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+		snapshot := *nativeOptions.nativeSnapshot
+		snapshot.RuntimeSessionUID = request.Metadata.Fence.RuntimeSessionUID
+		snapshot.RuntimeProfileDigest = request.Metadata.Fence.RuntimeProfileDigest
+		descriptorMu.Lock()
+		descriptor.ProviderSessionID = snapshot.ProviderSessionID
+		descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		captured := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, harnessv2.CaptureNativeSessionResponse{Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Session: captured, Snapshot: snapshot})
+	})
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.DeleteRuntimeSessionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3775,6 +3984,8 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 }
 
 type dispatcherRuntimeServerOptions struct {
+	beforeTerminal                   func(harnessv2.StartPromptRequest, harnessv2.Event)
+	onCancel                         func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
 	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
@@ -3783,8 +3994,15 @@ type dispatcherRuntimeServerOptions struct {
 	// resident makes the runtime keep reporting the exact requested session as
 	// Idle, as a supervisor does after an earlier send of the same create
 	// already created it.
-	rejectCreate func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
-	onDelete     func(harnessv2.DeleteRuntimeSessionRequest)
+	rejectCreate            func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
+	onDelete                func(harnessv2.DeleteRuntimeSessionRequest)
+	deleteFailure           func() *harnessv2.ErrorResponse
+	nativeSnapshot          *harnessv2.NativeSessionSnapshot
+	nativeInstallUnresolved bool
+	onNativeCapture         func(harnessv2.CaptureNativeSessionRequest) error
+	onPrompt                func(harnessv2.StartPromptRequest)
+	workspaceDeltaState     harnessv2.WorkspaceDeltaState
+	workspaceDeltaFailure   *harnessv2.ErrorResponse
 }
 
 func newDispatcherRuntimeServerWithOptions(
@@ -3800,6 +4018,7 @@ func newDispatcherRuntimeServerWithOptions(
 	)
 }
 
+//nolint:gocyclo // Fake runtime server routes every v2 endpoint the dispatcher tests exercise.
 func newDispatcherRuntimeServerForPoolWithOptions(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
@@ -3818,7 +4037,11 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponseForPool(digest, poolUID, current))
+		response := dispatcherRuntimeStatusResponseForPool(digest, poolUID, current)
+		if options.nativeInstallUnresolved && len(response.Sessions) > 0 {
+			response.Sessions[0].NativeInstallUnresolved = true
+		}
+		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
@@ -3828,6 +4051,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: !options.disablePermissions, SupportsTools: true},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
+			SupportsNativeSessions:            options.nativeSnapshot != nil,
 			SupportsAgentSessionConfiguration: !options.disableAgentSessionConfiguration,
 		})
 	})
@@ -3850,6 +4074,14 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
 			State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
+		}
+		if request.NativeRestore != nil {
+			created.ProviderSessionID = request.NativeRestore.Snapshot.ProviderSessionID
+			created.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: created.ProviderSessionID, Loaded: true}
+		}
+		if options.nativeInstallUnresolved {
+			created.State = harnessv2.RuntimeSessionStatePoisoned
+			created.NativeRestoration = nil
 		}
 		if options.rejectCreate != nil {
 			if status, response, resident := options.rejectCreate(request); response != nil {
@@ -3876,6 +4108,9 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			t.Errorf("decode prompt: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		if options.onPrompt != nil {
+			options.onPrompt(request)
 		}
 		w.Header().Set("Content-Type", harnessv2.NDJSONMediaType)
 		encoder, err := harnessv2.NewEventEncoder(w, harnessv2.EventStreamLimits{
@@ -3918,7 +4153,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				Result: harnessv2.PromptResult{
 					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "from runtime"}},
 					Model:   "served-model",
-					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
+					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: new(uint64(40))},
 				},
 			}
 		case harnessv2.EventCancelled:
@@ -3942,6 +4177,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			t.Errorf("unsupported deterministic terminal event %q", terminalType)
 			return
 		}
+		if options.beforeTerminal != nil {
+			w.(http.Flusher).Flush()
+			options.beforeTerminal(request, terminal)
+		}
 		if err := encoder.Encode(terminal); err != nil {
 			t.Errorf("encode terminal event: %v", err)
 			return
@@ -3950,6 +4189,19 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			t.Errorf("close encoder: %v", err)
 		}
 	})
+	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if options.onCancel == nil {
+			http.NotFound(w, r)
+			return
+		}
+		var request harnessv2.CancelPromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode cancellation: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writeDispatcherJSON(w, options.onCancel(request))
+	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.CreateWorkspaceDeltaRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3957,20 +4209,70 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if options.workspaceDeltaFailure != nil {
+			writeDispatcherJSONStatus(w, http.StatusConflict, *options.workspaceDeltaFailure)
+			return
+		}
+		deltaState := harnessv2.WorkspaceDeltaNoChange
+		var entryCount uint32
+		if options.workspaceDeltaState != "" {
+			deltaState = options.workspaceDeltaState
+		}
+		if deltaState == harnessv2.WorkspaceDeltaReadOnlyModified {
+			entryCount = 1
+		}
 		writeDispatcherJSON(w, harnessv2.CreateWorkspaceDeltaResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
 			Delta: harnessv2.WorkspaceDeltaDescriptor{
 				DeltaID: request.DeltaID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
-				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration, State: harnessv2.WorkspaceDeltaNoChange,
-				Intent: request.Intent, VerifiedBaseline: request.VerifiedBaseline, NoFollowVerified: true, PublicationSafe: true, FrozenAt: time.Now().UTC(),
+				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration, State: deltaState,
+				EntryCount: entryCount, ChangedFileCount: entryCount,
+				Intent: request.Intent, VerifiedBaseline: request.VerifiedBaseline, NoFollowVerified: true, PublicationSafe: deltaState != harnessv2.WorkspaceDeltaReadOnlyModified, FrozenAt: time.Now().UTC(),
 			},
 		})
+	})
+	mux.HandleFunc("POST /v2/runtime-sessions/{sessionID}/native-session", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.CaptureNativeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode native capture: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if options.onNativeCapture != nil {
+			if err := options.onNativeCapture(request); err != nil {
+				status, code, retryable := http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, true
+				if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
+					status, code, retryable = clientErr.StatusCode, clientErr.Code, clientErr.Retryable
+				}
+				writeDispatcherJSONStatus(w, status, harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion, Code: code, Message: "native capture rejected by test runtime", Retryable: retryable})
+				return
+			}
+		}
+		if options.nativeSnapshot == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		snapshot := *options.nativeSnapshot
+		snapshot.RuntimeSessionUID = request.Metadata.Fence.RuntimeSessionUID
+		snapshot.RuntimeProfileDigest = request.Metadata.Fence.RuntimeProfileDigest
+		descriptorMu.Lock()
+		descriptor.ProviderSessionID = snapshot.ProviderSessionID
+		descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		captured := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, harnessv2.CaptureNativeSessionResponse{Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Session: captured, Snapshot: snapshot})
 	})
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.DeleteRuntimeSessionRequest
 		_ = json.NewDecoder(r.Body).Decode(&request)
 		if options.onDelete != nil {
 			options.onDelete(request)
+		}
+		if options.deleteFailure != nil {
+			if failure := options.deleteFailure(); failure != nil {
+				writeDispatcherJSONStatus(w, http.StatusConflict, *failure)
+				return
+			}
 		}
 		descriptorMu.Lock()
 		descriptor = harnessv2.RuntimeSessionDescriptor{}
@@ -4009,7 +4311,7 @@ func dispatcherRuntimeStatusResponseForPool(
 	if descriptor.RuntimeSessionUID != "" {
 		response.Sessions = append(response.Sessions, harnessv2.RuntimeSessionStatus{
 			RuntimeSessionID: descriptor.RuntimeSessionID, RuntimeSessionUID: descriptor.RuntimeSessionUID,
-			Generation: descriptor.Generation, State: descriptor.State, LastTransitionAt: descriptor.LastTransitionAt,
+			Generation: descriptor.Generation, State: descriptor.State, LastTransitionAt: descriptor.LastTransitionAt, NativeRestoration: descriptor.NativeRestoration,
 		})
 		response.Pressure.ResidentSessions = 1
 	}
@@ -4906,6 +5208,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 					testControlDigestForDispatcher("mcp-"+name),
 					harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 					acpSessionLineageIdentity{},
+					false,
 				)
 				if err != nil {
 					t.Fatal(err)
@@ -5015,6 +5318,7 @@ func TestACPDispatcherAbortsLeaseWhenSessionTurnOpenFails(t *testing.T) {
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-open-failure")),
 		testControlDigestForDispatcher("mcp-open-failure"), "runtime", "boot",
 		acpSessionLineageIdentity{},
+		false,
 	); err == nil {
 		t.Fatal("prepareTaskSession unexpectedly succeeded")
 	}
@@ -5138,6 +5442,7 @@ func TestACPDispatcherGatewaySessionUsesTranscriptBackedPrompt(t *testing.T) {
 		testControlDigestForDispatcher("mcp-gateway-transcript"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -5352,6 +5657,7 @@ func TestACPDispatcherPromptIncludedSessionAppendsAssistantOnly(t *testing.T) {
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-prompt-included-append")),
 		testControlDigestForDispatcher("mcp-prompt-included-append"), "runtime", "boot",
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -5541,6 +5847,15 @@ func TestFrozenMCPPermissionDecisionAllowsGrantedToolsOnce(t *testing.T) {
 			permission: &harnessv2.PermissionRequestedEvent{
 				ToolName: "lookup", Options: options,
 			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:     "provider-native tool cannot borrow brokered approval",
+			policy:   providerNativePolicy,
+			approval: harnessv2.MCPApprovalPolicy{RequiredTools: []string{providerNativeToolRead}},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead, Options: options,
+			},
 			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
 		},
 		{
@@ -5720,7 +6035,7 @@ func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization,
-			harnessv2.DefaultProtocolLimits(),
+			harnessv2.DefaultProtocolLimits(), nil,
 		)
 	}()
 	select {
@@ -5821,7 +6136,7 @@ func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization,
-			harnessv2.DefaultProtocolLimits(),
+			harnessv2.DefaultProtocolLimits(), nil,
 		)
 	}()
 	select {
@@ -5848,7 +6163,7 @@ func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, func() { cancelled <- struct{}{} }, nil, "", &corev1alpha1.Task{}, harnessv2.Fence{},
-			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{},
+			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{}, nil,
 		)
 	}()
 	cancel()

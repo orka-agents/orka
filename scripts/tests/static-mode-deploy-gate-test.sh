@@ -142,6 +142,8 @@ for crd in \
   agentruntimes.core.orka.ai \
   agents.core.orka.ai \
   branchclaims.core.orka.ai \
+  connections.core.orka.ai \
+  connectorproviders.core.orka.ai \
   controllerepochs.core.orka.ai \
   executionworkspaceclasses.workspace.orka.ai \
   executionworkspacepools.workspace.orka.ai \
@@ -270,4 +272,4 @@ if grep -Fq 'claimName: controller-manager-store' <<<"${rendered_default}"; then
   exit 1
 fi
 
-printf '%s\n' 'ok - deployment requires Established CRDs, v2 AgentRuntime/Agent/Task contracts, and no retired CRDs'
+printf '%s\n' 'ok - deployment requires the Established 26-CRD shared bundle, v2 AgentRuntime/Agent/Task contracts, and no retired CRDs'

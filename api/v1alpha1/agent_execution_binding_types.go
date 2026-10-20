@@ -16,7 +16,7 @@ import (
 type AgentExecutionBackend string
 
 const (
-	// AgentExecutionBackendRuntimePool is the managed ACP v2 RuntimePool path.
+	// AgentExecutionBackendRuntimePool is the managed Orka harness v2 RuntimePool path.
 	AgentExecutionBackendRuntimePool AgentExecutionBackend = "runtime-pool"
 	// AgentExecutionBackendExternalEndpoint is an external AgentRuntime endpoint.
 	AgentExecutionBackendExternalEndpoint AgentExecutionBackend = "external-endpoint"

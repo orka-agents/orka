@@ -191,7 +191,8 @@ type VerificationReceipt struct {
 	DescendantProofDigest string              `json:"descendantProofDigest,omitempty"`
 }
 
-// PullRequestIntent is the complete immutable identity of one desired PR.
+// PullRequestIntent contains the immutable identity and controller-authored
+// presentation of one desired PR. Presentation is not part of the ownership key.
 type PullRequestIntent struct {
 	BaseRepository        Repository `json:"baseRepository"`
 	BaseRef               string     `json:"baseRef"`
@@ -203,6 +204,13 @@ type PullRequestIntent struct {
 	// successive publications reuse their Session's PR without adopting a PR
 	// created by another Session that happens to use the same branch.
 	SessionUID string `json:"sessionUid,omitempty"`
+
+	// Title and Body come only from trusted Task input, never workspace output.
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
+	// TaskName and TaskNamespace identify the creating Task in the default body.
+	TaskName      string `json:"taskName,omitempty"`
+	TaskNamespace string `json:"taskNamespace,omitempty"`
 }
 
 // PullRequestState is the reconciled forge state.

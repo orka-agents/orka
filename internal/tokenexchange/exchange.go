@@ -1224,3 +1224,30 @@ func metricGrantClass(grant string) string {
 		return "unknown"
 	}
 }
+
+// UnverifiedJWTExpiry returns the exp claim of a compact JWT without verifying
+// its signature. It is a best-effort hint for cache and expiry bookkeeping and
+// must never be used as an authorization decision.
+func UnverifiedJWTExpiry(token string) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}
+	}
+	var claims struct {
+		Expiration json.Number `json:"exp"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.UseNumber()
+	if decoder.Decode(&claims) != nil || claims.Expiration == "" {
+		return time.Time{}
+	}
+	seconds, err := claims.Expiration.Int64()
+	if err != nil || seconds <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(seconds, 0)
+}

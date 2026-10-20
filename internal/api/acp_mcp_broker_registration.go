@@ -2,9 +2,11 @@ package api
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/adaptor"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/orka-agents/orka/internal/controller"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -21,7 +23,14 @@ func RegisterACPMCPBroker(app *fiber.App, broker *controller.ACPMCPBroker) error
 	if err := broker.Validate(); err != nil {
 		return err
 	}
-	app.Post(harnessv2.MCPBrokerCallPath, adaptor.HTTPHandler(broker))
+	app.Post(harnessv2.MCPBrokerCallPath, adaptor.HTTPHandlerWithContext(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The adaptor stores Fiber's context separately. Copy only its server
+		// span, preserving the HTTP request's cancellation and other values.
+		if ctx, ok := adaptor.LocalContextFromHTTPRequest(r); ok {
+			r = r.WithContext(trace.ContextWithSpanContext(r.Context(), trace.SpanContextFromContext(ctx)))
+		}
+		broker.ServeHTTP(w, r)
+	})))
 	return nil
 }
 

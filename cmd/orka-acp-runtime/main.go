@@ -11,10 +11,17 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/acp/toolbox"
 	"github.com/orka-agents/orka/workers/acp/supervisor"
 )
 
 func main() {
+	// Toolbox subcommands run in init containers (and as an unprivileged
+	// supervisor child) with no supervisor configuration. They must run before
+	// process hardening and before any environment is read.
+	if len(os.Args) > 1 && toolbox.IsSubcommand(os.Args[1]) {
+		os.Exit(toolbox.Run(os.Args[1], os.Args[2:], os.Stdout, os.Stderr))
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -50,9 +57,23 @@ func main() {
 		logger.Error("invalid ACP supervisor configuration", "error", err)
 		os.Exit(1)
 	}
+	if err := supervisor.VerifyToolboxes(cfg); err != nil {
+		// The stable FAIL line reaches the container termination message so
+		// the controller fails waiting Tasks with ToolboxUnavailable instead
+		// of letting them wait for a Pod that never becomes Ready.
+		supervisor.ReportToolboxFailure(err)
+		logger.Error("toolbox verification failed", "error", err)
+		os.Exit(1)
+	}
+	tracer, shutdownTelemetry, telemetryErr := supervisor.NewTelemetryFromEnv()
+	if telemetryErr != nil {
+		logger.Warn("supervisor telemetry unavailable")
+	}
+	cfg.Tracer = tracer
 	runtimeServer, err := supervisor.New(cfg)
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	if err != nil {
+		_ = shutdownTelemetry(context.Background())
 		logger.Error("create ACP supervisor", "error", err)
 		os.Exit(1)
 	}
@@ -100,6 +121,9 @@ func main() {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cleanupErr := runtimeServer.Close(cleanupCtx)
+	if err := shutdownTelemetry(context.Background()); err != nil {
+		logger.Warn("supervisor telemetry shutdown incomplete")
+	}
 	if err := errors.Join(serveErr, shutdownErr, cleanupErr); err != nil {
 		logger.Error("ACP supervisor stopped with incomplete cleanup", "error", err)
 		os.Exit(1)

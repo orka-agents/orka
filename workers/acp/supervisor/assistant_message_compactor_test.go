@@ -110,7 +110,7 @@ func TestAssistantMessageCompactorPreservesUTF8AndPermissionBoundary(t *testing.
 	t.Cleanup(compactor.close)
 	now := time.Now().UTC()
 	inputs := []string{"a", " \n", "é", "🙂"}
-	var ready []acp.PromptEvent
+	ready := make([]acp.PromptEvent, 0, len(inputs))
 	for index, input := range inputs {
 		at := now.Add(time.Duration(index) * time.Millisecond)
 		ready = append(ready, compactor.push(testAssistantMessagePromptEvent(t, int64(index+1), at, input), at)...)

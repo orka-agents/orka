@@ -13,11 +13,23 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a resource cannot be updated because it changed concurrently.
 var ErrConflict = errors.New("conflict")
 
+// ErrSessionConfigurationMismatch marks an immutable conflict, not lease contention.
+var ErrSessionConfigurationMismatch = errors.New("session configuration mismatch")
+
+// ErrControllerEpochMutationContention marks an exhausted mutation-lock
+// acquisition retry window. Errors carrying it also wrap ErrConflict;
+// definitive epoch authority failures do not carry this marker.
+var ErrControllerEpochMutationContention = errors.New("controller epoch mutation contention")
+
 // ErrNotReady is returned when a durable prerequisite is expected to become ready shortly.
 var ErrNotReady = errors.New("not ready")
 
 // ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
 var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
+
+// ErrGatewayMessageReplayOnly is returned when receipt-only admission finds no
+// existing message. The caller must return its original live admission gate error.
+var ErrGatewayMessageReplayOnly = errors.New("gateway message receipt not found for replay-only admission")
 
 // ErrCapacity is returned when a bounded durable store quota is full.
 var ErrCapacity = errors.New("capacity exceeded")
@@ -84,10 +96,11 @@ type SessionStore interface {
 	CreateSession(ctx context.Context, session *SessionRecord) error
 	GetSession(ctx context.Context, namespace, name string) (*SessionRecord, error)
 	ListSessions(ctx context.Context, namespace string) ([]SessionMetadata, error)
-	// ListSessionsPage returns up to limit sessions of the namespace in name
-	// order, starting strictly after afterName and skipping excludeType
-	// (empty = no exclusion). more reports whether further rows exist.
-	ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) (items []SessionMetadata, more bool, err error)
+	// ListSessionsPage returns up to limit sessions of the namespace newest
+	// first (creation time descending, then name), starting strictly after
+	// the after cursor (nil = first page) and skipping excludeType (empty =
+	// no exclusion). more reports whether further rows exist.
+	ListSessionsPage(ctx context.Context, namespace string, after *SessionPageCursor, limit int, excludeType string) (items []SessionMetadata, more bool, err error)
 	DeleteSession(ctx context.Context, namespace, name string) error
 
 	// Locking
@@ -107,17 +120,31 @@ type SessionStore interface {
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }
 
-// ExpiringSessionLockStore supports crash-recoverable transient locks. Durable
-// Task locks continue to use SessionStore.AcquireLock without an expiry.
-type ExpiringSessionLockStore interface {
-	AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, expiresAt time.Time) error
+// SessionTurnCommitter reserves chat turns and atomically commits their
+// transcript messages with token usage. The expected message count fences the
+// session revision observed after acquiring the turn lease.
+type SessionTurnCommitter interface {
+	AcquireChatTurn(ctx context.Context, session *SessionRecord, turnID string, expiresAt time.Time) (created bool, err error)
+	ReleaseChatTurn(ctx context.Context, namespace, name, turnID string, deleteEmptyCreatedSession bool) error
+	CommitSessionTurn(
+		ctx context.Context,
+		session *SessionRecord,
+		turnID string,
+		expectedMessageCount int,
+		messages []SessionMessage,
+		inputTokens, outputTokens int,
+	) error
 }
 
 // FencedSessionWriteStore binds transcript and token writes to the exact active
-// transient lock owner so an expired request cannot write after takeover.
+// Task or transient lock owner so a stale owner cannot write after takeover.
 type FencedSessionWriteStore interface {
 	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
 	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
+	// ReleaseLockWithTokenUsage adds a finished owner's token usage and
+	// releases its lock in one write, so a replayed completion cannot count the
+	// usage twice: either nothing was written or the lock is already gone.
+	ReleaseLockWithTokenUsage(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
 }
 
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.
@@ -143,6 +170,8 @@ type GatewayEventStore interface {
 
 // GatewayDeliveryStore handles durable adapter outbox records.
 type GatewayDeliveryStore interface {
+	GetGatewayMessageBudget(ctx context.Context, query GatewayMessageBudgetQuery) (*GatewayMessageBudget, error)
+	EnqueueGatewayMessage(ctx context.Context, request GatewayMessageEnqueue) (*GatewayDelivery, bool, error)
 	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
 	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
 	ListGatewayDeliveries(ctx context.Context, filter GatewayDeliveryFilter) ([]GatewayDelivery, error)
@@ -217,6 +246,9 @@ type SecurityStore interface {
 
 	GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
+	// SaveThreatModelIfVersion saves model only while the latest stored
+	// version equals expectedVersion, and returns ErrConflict otherwise.
+	SaveThreatModelIfVersion(ctx context.Context, model *ThreatModel, expectedVersion int64) error
 
 	UpsertFinding(ctx context.Context, finding *Finding) error
 	UpsertObservedFinding(ctx context.Context, finding *Finding) error
@@ -255,7 +287,7 @@ type RepositoryMonitorStore interface {
 	UpdateWorkAction(ctx context.Context, action *WorkAction) error
 	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
 	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
-	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
+	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error)
 
 	CreateActionRecord(ctx context.Context, record *ActionRecord) error
 	UpdateActionRecord(ctx context.Context, record *ActionRecord) error

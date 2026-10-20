@@ -18,13 +18,6 @@ var (
 	testOnlyNegationPattern = regexp.MustCompile(`\bnot(?:\s+\w+){0,3}\s+(?:test-only|test only|only test|test fixture only)\b`)
 )
 
-type FindingFilterOptions struct {
-	RepositoryScan string
-	ScanRunID      string
-	TaskName       string
-	SliceID        string
-}
-
 type FindingFilterResult struct {
 	Kept    []*store.Finding
 	Dropped []DroppedFindingDiagnostic
@@ -32,7 +25,7 @@ type FindingFilterResult struct {
 
 // FilterFindings applies deterministic hard false-positive exclusions after
 // schema/evidence validation and before durable finding persistence.
-func FilterFindings(findings []*store.Finding, _ FindingFilterOptions) FindingFilterResult {
+func FilterFindings(findings []*store.Finding) FindingFilterResult {
 	result := FindingFilterResult{Kept: make([]*store.Finding, 0, len(findings))}
 	for index, finding := range findings {
 		if finding == nil {
@@ -188,7 +181,8 @@ func likelyNonCredentialSensitiveDisclosure(text string) bool {
 }
 
 func normalizedFindingText(finding *store.Finding) string {
-	parts := []string{
+	parts := make([]string, 0, 11+3*len(finding.Evidence))
+	parts = append(parts,
 		finding.Title,
 		finding.Category,
 		finding.Summary,
@@ -200,7 +194,7 @@ func normalizedFindingText(finding *store.Finding) string {
 		finding.WhyTestsDoNotAlreadyCoverThis,
 		finding.SuggestedRegressionTest,
 		finding.MinimumFixScope,
-	}
+	)
 	for _, evidence := range finding.Evidence {
 		parts = append(parts, evidence.Label, evidence.Path, evidence.Symbol)
 	}

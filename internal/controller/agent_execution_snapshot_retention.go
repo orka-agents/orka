@@ -89,10 +89,7 @@ func (m *AgentExecutionSnapshotRetentionManager) retention() time.Duration {
 }
 
 func (m *AgentExecutionSnapshotRetentionManager) now() time.Time {
-	if m.Now != nil {
-		return m.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(m.Now)
 }
 
 func (m *AgentExecutionSnapshotRetentionManager) collectOnce(ctx context.Context) error {

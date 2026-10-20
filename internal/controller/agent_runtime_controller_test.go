@@ -36,8 +36,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-const agentRuntimeV1TestBearer = "0123456789abcdef0123456789abcdef"
-
 func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
 	config := conformancetest.Config{
@@ -2661,13 +2659,6 @@ func allowAgentRuntimeLoopback(t *testing.T) {
 	t.Cleanup(func() { agentRuntimeAllowInsecureLoopbackForTests = false })
 }
 
-type agentRuntimeMutateSecondSecretReadClient struct {
-	client.Client
-	SecretKey client.ObjectKey
-	Mutate    func(*corev1.Secret)
-	reads     int
-}
-
 type agentRuntimeFailCleanupSecretCreateClient struct {
 	client.Client
 	failed bool
@@ -2684,24 +2675,4 @@ func (c *agentRuntimeFailCleanupSecretCreateClient) Create(
 		return fmt.Errorf("injected cleanup Secret create failure")
 	}
 	return c.Client.Create(ctx, object, options...)
-}
-
-func (c *agentRuntimeMutateSecondSecretReadClient) Get(
-	ctx context.Context,
-	key client.ObjectKey,
-	object client.Object,
-	options ...client.GetOption,
-) error {
-	if err := c.Client.Get(ctx, key, object, options...); err != nil {
-		return err
-	}
-	secret, ok := object.(*corev1.Secret)
-	if !ok || key != c.SecretKey {
-		return nil
-	}
-	c.reads++
-	if c.reads == 2 && c.Mutate != nil {
-		c.Mutate(secret)
-	}
-	return nil
 }

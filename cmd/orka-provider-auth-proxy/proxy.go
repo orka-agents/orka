@@ -90,8 +90,13 @@ func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStor
 
 func normalizeProxyConfig(cfg proxyConfig) (proxyConfig, *url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(cfg.UpstreamBaseURL))
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
+	}
+	if strings.HasPrefix(parsed.Host, "[") && net.ParseIP(parsed.Hostname()) == nil {
+		// url.Parse accepts any bracketed authority; only a real IPv6 literal
+		// can be dialed, so anything else must fail here rather than at runtime.
 		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
 	}
 	if parsed.Path == "" {
@@ -235,9 +240,15 @@ func serveHealth(w http.ResponseWriter, r *http.Request) {
 type boundedReadCloser struct {
 	io.ReadCloser
 	remaining int64
+	sawEOF    bool
 }
 
 func (r *boundedReadCloser) Read(buffer []byte) (int, error) {
+	// Flushing an HTTP/1 response can close the incoming body before the
+	// upstream transport makes its final EOF check after sending the body.
+	if r.sawEOF {
+		return 0, io.EOF
+	}
 	if r.remaining < 0 {
 		return 0, errRequestBodyTooLarge
 	}
@@ -249,6 +260,7 @@ func (r *boundedReadCloser) Read(buffer []byte) (int, error) {
 		return allowed, errRequestBodyTooLarge
 	}
 	r.remaining -= int64(n)
+	r.sawEOF = err == io.EOF
 	return n, err
 }
 

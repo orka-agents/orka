@@ -14,8 +14,7 @@ import (
 )
 
 // AgentSpec defines the desired state of Agent
-// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
-// +kubebuilder:validation:XValidation:rule="!(has(self.runtime) && has(self.runtime.type) && self.runtime.type == 'opencode' && has(self.runtime.contractVersion) && self.runtime.contractVersion == 'orka.harness.v2' && has(self.systemPrompt) && ((has(self.systemPrompt.inline) && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))",message="opencode orka.harness.v2 runtime does not support spec.systemPrompt"
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace)",message="execution.workspace is only supported on Task specs"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)
@@ -30,6 +29,11 @@ type AgentSpec struct {
 	// SystemPrompt defines the system prompt configuration
 	// +optional
 	SystemPrompt *PromptSource `json:"systemPrompt,omitempty"`
+
+	// Soul supplies persistent persona and communication defaults, separate from the role prompt.
+	// Supported by AI workers and built-in harness v2 runtimes, not runtimeRef runtimes.
+	// +optional
+	Soul *SoulSource `json:"soul,omitempty"`
 
 	// Tools lists the default tools available to this agent
 	// +optional
@@ -71,20 +75,35 @@ type AgentSpec struct {
 	TTLAfterLastTask *metav1.Duration `json:"ttlAfterLastTask,omitempty"`
 }
 
+// MarshalJSON preserves an explicitly empty native tool policy instead of
+// omitting it. Nil and nonempty lists retain their existing wire representation.
+func (in AgentSpec) MarshalJSON() ([]byte, error) {
+	type agentSpecJSON AgentSpec
+	if in.Tools == nil || len(in.Tools) > 0 {
+		return json.Marshal(agentSpecJSON(in))
+	}
+	return json.Marshal(struct {
+		agentSpecJSON
+		Tools []ToolReference `json:"tools"`
+	}{agentSpecJSON: agentSpecJSON(in), Tools: in.Tools})
+}
+
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
 // Unknown fields reach admission so removed fields are rejected.
 // +kubebuilder:pruning:PreserveUnknownFields
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
-// +kubebuilder:validation:XValidation:rule="!has(self.type) || has(self.contractVersion)",message="built-in runtimes require an explicit orka.harness.v2 contractVersion"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
+// +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)",message="runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
 	Type AgentRuntimeType `json:"type,omitempty"`
 
-	// ContractVersion pins the harness identity for built-in runtime types.
-	// Built-in Agents require an explicit orka.harness.v2 value.
+	// ContractVersion is the harness protocol selector for built-in runtime
+	// types. Only orka.harness.v2 is supported, so an omitted selector means
+	// orka.harness.v2. Once written, the value never changes. runtime.type
+	// alone is never protocol evidence.
 	// +optional
 	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 
@@ -108,10 +127,50 @@ type AgentCLIRuntime struct {
 	DefaultAllowBash *bool `json:"defaultAllowBash,omitempty"`
 
 	// DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
-	// Runtime adapters reject values they do not support (for example, Codex does not support max).
-	// +kubebuilder:validation:Enum=low;medium;high;xhigh;max
+	// Runtime adapters reject values they do not support (none is Codex-only; max is Claude-only).
+	// +kubebuilder:validation:Enum=none;low;medium;high;xhigh;max
 	// +optional
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
+
+	// Toolboxes lists extra command-line tool images for built-in runtimes.
+	// Each toolbox folder is bound read-only into the runtime Pod at the same
+	// path and its pathEntries are appended, in order, to the agent's PATH.
+	// Nothing from a toolbox runs with elevated permissions. The feature is
+	// off by default and the controller restricts images to allowed registries.
+	// +kubebuilder:validation:MaxItems=4
+	// +optional
+	Toolboxes []AgentToolbox `json:"toolboxes,omitempty"`
+}
+
+// AgentToolbox is a container image whose files are added, read-only, to the
+// runtime Pod so the agent can run the tools inside it.
+type AgentToolbox struct {
+	// Image must be a fully qualified reference pinned by digest:
+	// <registry>/<repository>@sha256:<64 hex>.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// MountPath is the absolute folder inside the toolbox image that holds the
+	// tools. Orka makes it appear at the same path in the runtime container.
+	// It must be exactly /home/linuxbrew/.linuxbrew or /opt/<name>, where
+	// <name> is not one the runtime images already use.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=5
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^(/opt/[A-Za-z0-9][A-Za-z0-9._-]{0,127}|/home/linuxbrew/\.linuxbrew)$`
+	MountPath string `json:"mountPath"`
+
+	// PathEntries are folders relative to MountPath that are appended, in
+	// order, to the agent's PATH. Example: ["bin"].
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9._-][A-Za-z0-9._/-]*$`
+	// +optional
+	PathEntries []string `json:"pathEntries,omitempty"`
 }
 
 // MarshalJSON preserves the distinction between an omitted tool allowlist and
@@ -126,6 +185,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools    *[]string                    `json:"defaultAllowedTools,omitempty"`
 		DefaultAllowBash       *bool                        `json:"defaultAllowBash,omitempty"`
 		DefaultReasoningEffort string                       `json:"defaultReasoningEffort,omitempty"`
+		Toolboxes              []AgentToolbox               `json:"toolboxes,omitempty"`
 	}
 	var defaultAllowedTools *[]string
 	if in.DefaultAllowedTools != nil {
@@ -140,6 +200,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools:    defaultAllowedTools,
 		DefaultAllowBash:       in.DefaultAllowBash,
 		DefaultReasoningEffort: in.DefaultReasoningEffort,
+		Toolboxes:              in.Toolboxes,
 	})
 }
 
@@ -190,7 +251,8 @@ type ModelConfig struct {
 
 	// MaxTokens limits the response length. OpenCode validates positive reviewed
 	// limits at its runtime-specific admission boundary; existing Agent objects
-	// may retain the legacy zero value.
+	// may retain the legacy zero value, which selects the worker default.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxTokens *int32 `json:"maxTokens,omitempty"`
 
@@ -210,6 +272,28 @@ type PromptSource struct {
 	// ConfigMapRef references a ConfigMap containing the prompt
 	// +optional
 	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
+}
+
+// SoulSource is non-secret, versioned persona text. ConfigMap sources require an
+// expected content digest so replacing a named ConfigMap cannot publish a new soul.
+// +kubebuilder:validation:XValidation:rule="(has(self.inline) && self.inline.size() > 0) != has(self.configMapRef)",message="soul must use exactly one of inline or configMapRef"
+// +kubebuilder:validation:XValidation:rule="!has(self.configMapRef) || (has(self.digest) && self.digest.size() > 0)",message="ConfigMap-backed souls require an expected digest"
+type SoulSource struct {
+	// Inline is UTF-8 Markdown, limited to 8192 bytes by the controller.
+	// +kubebuilder:validation:MaxLength=8192
+	// +optional
+	Inline string `json:"inline,omitempty"`
+
+	// ConfigMapRef selects non-secret text in the Agent's namespace.
+	// +optional
+	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// Digest is the expected SHA-256 digest of the exact UTF-8 source bytes.
+	// Required for ConfigMap sources; optional for inline text.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	Digest string `json:"digest,omitempty"`
 }
 
 // ConfigMapKeySelector selects a key from a ConfigMap

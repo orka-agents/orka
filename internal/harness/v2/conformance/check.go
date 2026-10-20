@@ -352,7 +352,14 @@ func validateExactCapabilities(target Target, observed *CapabilitiesResponse) er
 	if !maps.Equal(base.AdapterDigests, target.Profile.AdapterDigests) {
 		return fmt.Errorf("adapter digest set does not exactly match the registered runtime profile")
 	}
-	if base.Limits != target.Limits {
+	registeredLimits := base.Limits
+	// The AgentRuntime registration predates the optional native-session cap.
+	// When absent from registration, it is separately negotiated and bounded
+	// by the v2 client; every registered ordinary limit remains exact.
+	if target.Limits.MaxNativeSessionBytes == 0 {
+		registeredLimits.MaxNativeSessionBytes = 0
+	}
+	if registeredLimits != target.Limits {
 		return fmt.Errorf("protocol limits do not exactly match the AgentRuntime registration")
 	}
 	if base.SupportsDrain != target.SupportsDrain {
@@ -383,6 +390,9 @@ func validateExactCapabilities(target Target, observed *CapabilitiesResponse) er
 		harnessv2.MCPPolicyRequiresPermissionCapability(target.ToolPolicy, target.ApprovalPolicy) &&
 		!base.Provider.SupportsPermissions {
 		return fmt.Errorf("strict-governed runtime policy requires permission support")
+	}
+	if len(target.ApprovalPolicy.RequiredTools) > 0 && !base.Provider.SupportsBrokeredToolApprovals {
+		return fmt.Errorf("runtime approval policy requires brokered tool approval support")
 	}
 	return nil
 }
@@ -453,6 +463,7 @@ func getCapabilities(ctx context.Context, client *http.Client, baseURL string) (
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set(harnessv2.NativeSessionLimitsHeader, "1")
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)
 	if err != nil {

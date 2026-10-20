@@ -61,4 +61,18 @@ bun install
 bun run dev
 ```
 
+Using the devcontainer: the container setup installs Bun and Node.js, which the UI test runner requires. After changing files in `.devcontainer/`, rebuild with **Dev Containers: Rebuild Container**; the dashboard checks are the same commands used by CI:
+
+```bash
+cd ui
+bun install --frozen-lockfile
+bun run lint
+bun run test
+bun run build
+```
+
 Additional development guidance is available in [website/docs/development/development.md](website/docs/development/development.md).
+
+## Website (documentation site)
+
+The documentation site in `website/` uses its own Node/Yarn toolchain (the dashboard in `ui/` uses Bun). See [website/README.md](website/README.md) for prerequisites, the local preview, and the production build.

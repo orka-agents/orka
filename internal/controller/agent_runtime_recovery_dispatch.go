@@ -66,7 +66,7 @@ func (d *ACPDispatcher) recordKubernetesRuntimeExposure(ctx context.Context, tas
 	if err := d.revalidateKubernetesRuntimeAdmission(ctx, runtime); err != nil {
 		return err
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint || binding.RuntimeRef == nil ||
 		binding.Task.UID != task.UID || binding.RuntimeRef.UID != runtime.UID || binding.RuntimeRef.Generation != runtime.Generation {
 		return errors.New("runtime exposure lacks the immutable Task execution binding")
@@ -142,8 +142,16 @@ func (r *AgentRuntimeReconciler) validateRecoveryAdmissionWitness(ctx context.Co
 	}
 	observed := backend.witness
 	observed.Fence = witness.Fence
+	observed.FoundryBroker = witness.FoundryBroker
 	observed.ControllerAuthUID, observed.ControllerAuthVersion = witness.ControllerAuthUID, witness.ControllerAuthVersion
 	observed.CapabilityAuthUID, observed.CapabilityAuthVersion = witness.CapabilityAuthUID, witness.CapabilityAuthVersion
+	if recoveryProviderKind(runtime.Spec) == agentRuntimeFoundryProvider {
+		authenticated, err := r.authenticateRecoveryBoot(ctx, runtime, backend)
+		if err != nil {
+			return err
+		}
+		observed = authenticated.witness
+	}
 	if !reflect.DeepEqual(observed, witness) || !controllerutil.ContainsFinalizer(backend.pod, agentRuntimeRecoveryPodFinalizer) {
 		return errors.New("runtime admission Kubernetes container witness changed")
 	}
@@ -226,7 +234,7 @@ func verifiedKubernetesRuntimeRetirement(ctx context.Context, effects store.Exte
 	if err != nil {
 		return false, err
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	e := task.Status.Execution
 	if binding == nil || binding.RuntimeRef == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.Task.UID != taskUID || binding.RuntimeRef.UID != types.UID(e.AgentRuntimeUID) || binding.RuntimeRef.Name != e.AgentRuntimeName ||
@@ -340,7 +348,7 @@ func (r *AgentRuntimeReconciler) recordRetiredKubernetesRuntimeTasks(ctx context
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+		binding := executionBinding(task)
 		if binding == nil || binding.RuntimeRef == nil || binding.RuntimeRef.UID != runtime.UID {
 			continue
 		}

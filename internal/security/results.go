@@ -347,7 +347,7 @@ func validateBoundedFinding(index int, finding FindingsV2Finding) error {
 		{"severity", finding.Severity, 32},
 		{"confidence", finding.Confidence, 32},
 		{"triage", finding.Triage, maxFindingSummaryBytes},
-		{"summary", finding.Summary, maxFindingTextBytes},
+		{summaryField, finding.Summary, maxFindingTextBytes},
 		{"rootCause", finding.RootCause, maxFindingTextBytes},
 		{"reproduction", finding.Reproduction, maxFindingTextBytes},
 		{"remediation", finding.Remediation, maxFindingTextBytes},
@@ -398,7 +398,7 @@ func validateValidationArtifact(artifact ValidationArtifact, finding *store.Find
 		name  string
 		value string
 	}{
-		{"summary", artifact.Summary},
+		{summaryField, artifact.Summary},
 		{"reproduction", artifact.Reproduction},
 		{"attack_path_analysis", artifact.AttackPathAnalysis},
 		{"likelihood", artifact.Likelihood},
@@ -439,7 +439,7 @@ func validateValidationEvidenceRef(index int, ref store.FindingEvidenceRef, acce
 		return fmt.Errorf("validation.evidence[%d] may not reference task artifacts", index)
 	}
 	switch strings.TrimSpace(ref.Kind) {
-	case "file":
+	case fileLocationKind:
 		if !SafeRepoPath(ref.Path) || ref.StartLine <= 0 || ref.EndLine < ref.StartLine {
 			return fmt.Errorf("validation.evidence[%d] has invalid file range", index)
 		}
@@ -468,7 +468,7 @@ func validateValidationEvidenceRef(index int, ref store.FindingEvidenceRef, acce
 
 func validationEvidenceWithinAcceptedFinding(ref store.FindingEvidenceRef, accepted []store.FindingEvidenceRef) bool {
 	for _, candidate := range accepted {
-		if candidate.Kind != "file" || candidate.Path != ref.Path {
+		if candidate.Kind != fileLocationKind || candidate.Path != ref.Path {
 			continue
 		}
 		if ref.StartLine >= candidate.StartLine && ref.EndLine <= candidate.EndLine {

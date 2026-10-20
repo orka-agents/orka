@@ -23,6 +23,12 @@ import (
 
 const testWorkspaceRelativeRoot = "services/app"
 
+type ArtifactAuthorizationProviderFunc func(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error)
+
+func (f ArtifactAuthorizationProviderFunc) AuthorizeArtifact(ctx context.Context, request ArtifactAuthorizationRequest) (artifactcap.Authorization, error) {
+	return f(ctx, request)
+}
+
 func TestArtifactClientUploadAndDownload(t *testing.T) {
 	t.Parallel()
 	token := "opaque-operation-capability-never-log"
@@ -390,7 +396,7 @@ func materializerForArchive(t *testing.T, archive []byte) (WorkspaceMaterializer
 	if err != nil {
 		t.Fatal(err)
 	}
-	materializer, err := NewRemoteWorkspaceMaterializer(client, WorkspaceMaterializerLimits{MaxEntries: 100, MaxExpandedBytes: 1 << 20})
+	materializer, err := newRemoteWorkspaceMaterializerWithLimits(client, workspaceMaterializerLimits{MaxEntries: 100, MaxExpandedBytes: 1 << 20, MaxPathBytes: workspaceMaterializerMaxPathBytes})
 	if err != nil {
 		t.Fatal(err)
 	}

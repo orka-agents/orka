@@ -15,6 +15,7 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
 
 const conditionTypeACPArtifactsRetired = "ACPArtifactsRetired"
@@ -187,7 +188,8 @@ func acpTaskTerminalBeforeDurableAttempt(task *corev1alpha1.Task) bool {
 	delivery := task.Status.Delivery
 	terminalBeforeAttempt := execution.State == corev1alpha1.TaskExecutionStateFailed &&
 		execution.Outcome == corev1alpha1.TaskExecutionOutcomeFailed &&
-		(execution.Reason == corev1alpha1.TaskExecutionReason("InvalidWorkspace") || execution.Reason == corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"))
+		(execution.Reason == corev1alpha1.TaskExecutionReason("InvalidWorkspace") || execution.Reason == corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile") ||
+			execution.Reason == corev1alpha1.TaskExecutionReason("WorkspaceFailed"))
 	if !terminalBeforeAttempt {
 		return false
 	}
@@ -232,7 +234,7 @@ func (r *TaskReconciler) acpTaskHasUnsettledExternalEffects(
 	}
 	for i := range effects.Items {
 		effect := &effects.Items[i]
-		if _, ok := related[effect.Spec.AggregateID]; !ok {
+		if !storekube.ExternalEffectReferencesTask(effect, string(acpTaskControlUID(task)), related) {
 			continue
 		}
 		switch store.ExternalEffectState(effect.Status.State) {
@@ -357,8 +359,8 @@ func (r *TaskReconciler) reclaimACPTaskPublicationBundles(ctx context.Context, t
 	}
 	for _, target := range targets {
 		operationDigest, digestErr := acpDomainDigest("publication-reclaim-operation", map[string]any{
-			"namespace": task.Namespace, "taskUID": string(acpTaskControlUID(task)),
-			"publicationID": target.id, "publicationGeneration": target.generation,
+			acpCancelLogKeyNamespace: task.Namespace, taskUIDField: string(acpTaskControlUID(task)),
+			publicationIDField: target.id, "publicationGeneration": target.generation,
 		})
 		if digestErr != nil {
 			return false, digestErr
@@ -632,7 +634,7 @@ func (r *TaskReconciler) acpArtifactRetirementIdentities(
 	}
 	for i := range effects.Items {
 		effect := &effects.Items[i]
-		if _, related := relatedEffects[effect.Spec.AggregateID]; !related {
+		if !storekube.ExternalEffectReferencesTask(effect, string(acpTaskControlUID(task)), relatedEffects) {
 			continue
 		}
 		switch store.ExternalEffectState(effect.Status.State) {

@@ -9,6 +9,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -90,7 +91,8 @@ func NewTracingMiddleware() fiber.Handler {
 		c.SetContext(ctx)
 
 		if reqID := requestid.FromContext(c); reqID != "" {
-			span.SetAttributes(attribute.String("http.request_id", reqID))
+			// Incoming request IDs borrow Fiber's buffer, but export can be delayed.
+			span.SetAttributes(attribute.String("http.request_id", strings.Clone(reqID)))
 		}
 
 		err := c.Next()
@@ -112,9 +114,10 @@ func NewTracingMiddleware() fiber.Handler {
 
 // effectiveStatusCode resolves the status a client will actually receive.
 // Handler errors are mapped by the app error handler only after middleware
-// unwinds, so the response still carries the default 200 here. A 404 on a
-// non-API path is served as the SPA index page with 200 by that same error
-// handler, so it is reported as a success rather than a failure, and a 404 for
+// unwinds, so the response still carries the default 200 here. When the app
+// serves the dashboard, a 404 on a non-API path is served as the SPA index
+// page with 200 by that same error handler, so it is reported as a success
+// rather than a failure, and a 404 for
 // a deliberately unsupported compatibility route is rewritten there to 501.
 func effectiveStatusCode(c fiber.Ctx, err error) int {
 	status := c.Response().StatusCode()
@@ -125,8 +128,8 @@ func effectiveStatusCode(c fiber.Ctx, err error) int {
 			status = fiber.StatusInternalServerError
 		}
 	}
-	if status == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
-		if _, ok := spaIndexHTML(); ok {
+	if status == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
+		if _, ok := embeddedSPAIndexPage(); ok {
 			status = fiber.StatusOK
 		}
 	}
@@ -146,7 +149,8 @@ func (c fiberHeaderCarrier) Get(key string) string {
 	if c.c == nil {
 		return ""
 	}
-	return c.c.Get(key)
+	// Propagators may retain substrings after Fiber reuses the request buffer.
+	return strings.Clone(c.c.Get(key))
 }
 
 func (c fiberHeaderCarrier) Set(string, string) {}
@@ -158,7 +162,7 @@ func (c fiberHeaderCarrier) Keys() []string {
 	headers := c.c.GetReqHeaders()
 	keys := make([]string, 0, len(headers))
 	for key := range headers {
-		keys = append(keys, key)
+		keys = append(keys, strings.Clone(key))
 	}
 	return keys
 }

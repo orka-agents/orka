@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"path"
 	"strconv"
 	"strings"
@@ -583,6 +584,7 @@ type SessionTurn struct {
 	TerminalKind          SessionTurnTerminalKind `json:"terminalKind,omitempty"`
 	TerminalContent       string                  `json:"terminalContent,omitempty"`
 	FinalizationDigest    string                  `json:"finalizationDigest,omitempty"`
+	NativeSessionDigest   string                  `json:"nativeSessionDigest,omitempty"`
 	PublicationID         string                  `json:"publicationId,omitempty"`
 	PublicationReceipt    *PublicationReceipt     `json:"publicationReceipt,omitempty"`
 	ProjectionID          string                  `json:"projectionId,omitempty"`
@@ -622,6 +624,10 @@ type FinalizeSessionTurnRequest struct {
 	BlockReason            string                  `json:"blockReason,omitempty"`
 	Projection             OutboxProjection        `json:"projection"`
 	FinalizedAt            time.Time               `json:"finalizedAt"`
+	NativeSession          *NativeSessionRecord    `json:"-"`
+	// NativeSessionCarried marks NativeSession as the Session's existing checkpoint
+	// carried across a non-success outcome marker, not a fresh capture.
+	NativeSessionCarried bool `json:"-"`
 }
 
 // ResumeSessionTurnFinalizationRequest resumes only the Kubernetes and outbox
@@ -1046,6 +1052,12 @@ type ReserveExternalEffectRequest struct {
 	RequestDigest string                 `json:"requestDigest"`
 	Fence         ControllerEpochFence   `json:"fence"`
 	CreatedAt     time.Time              `json:"createdAt"`
+	// ApprovalTaskUID is an immutable Kubernetes Task binding, with a discovery
+	// label for approval recovery, when Tasks share a RuntimeSession aggregate.
+	// Legacy records receive only the discovery label, preserving their spec.
+	// Other backends may ignore it. It does not change the canonical identity,
+	// grant execution authority, or make the record subject to Task garbage collection.
+	ApprovalTaskUID string `json:"approvalTaskUid,omitempty"`
 }
 
 // ExternalEffectTransition performs a version/state CAS.
@@ -1152,10 +1164,10 @@ func SessionMutationLeaseRequestDigest(
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.New()
-	_, _ = hash.Write([]byte("orka.acp.session-mutation-lease\x00"))
-	_, _ = hash.Write(canonical)
-	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+	h := sha256.New()
+	_, _ = h.Write([]byte("orka.acp.session-mutation-lease\x00"))
+	_, _ = h.Write(canonical)
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func SessionLeaseReleaseOperationDigest(turnID, leaseRequestDigest string) (string, error) {
@@ -1173,10 +1185,10 @@ func SessionLeaseReleaseOperationDigest(turnID, leaseRequestDigest string) (stri
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.New()
-	_, _ = hash.Write([]byte("orka.acp.session-lease-release\x00"))
-	_, _ = hash.Write(canonical)
-	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+	h := sha256.New()
+	_, _ = h.Write([]byte("orka.acp.session-lease-release\x00"))
+	_, _ = h.Write(canonical)
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func CanonicalControlID(kind string, components ...string) string {
@@ -1188,11 +1200,7 @@ func CanonicalControlID(kind string, components ...string) string {
 	return kind + ":sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-type canonicalWriter interface {
-	Write([]byte) (int, error)
-}
-
-func writeCanonicalComponent(w canonicalWriter, value string) {
+func writeCanonicalComponent(w hash.Hash, value string) {
 	_, _ = fmt.Fprintf(w, "%d:", len(value))
 	_, _ = w.Write([]byte(value))
 }

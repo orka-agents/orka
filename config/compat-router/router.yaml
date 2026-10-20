@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-router-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orka-compat-router
+  namespace: orka-router-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orka-compat-router
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orka-compat-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-compat-router
+subjects:
+  - kind: ServiceAccount
+    name: orka-compat-router
+    namespace: orka-router-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orka-compat-router
+  namespace: orka-router-system
+data:
+  routes.yaml: |
+    namespaces:
+      team-a: http://orka-api.team-a.svc:8080
+      team-b: http://orka-api.team-b.svc:8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orka-compat-router
+  namespace: orka-router-system
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 2100
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: compat-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka
+        app.kubernetes.io/component: compat-router
+    spec:
+      # Allow the default 30-minute chat drain plus process shutdown overhead.
+      terminationGracePeriodSeconds: 1810
+      serviceAccountName: orka-compat-router
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: router
+          image: controller:latest
+          command: [/compat-router]
+          args: [--routes-file=/etc/orka-router/routes.yaml]
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: routes
+              mountPath: /etc/orka-router
+              readOnly: true
+      volumes:
+        - name: routes
+          configMap:
+            name: orka-compat-router
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orka-compat-router
+  namespace: orka-router-system
+spec:
+  selector:
+    app.kubernetes.io/component: compat-router
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

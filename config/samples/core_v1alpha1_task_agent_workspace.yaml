@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # type: agent uses the ACP v2 RuntimePool selected from the referenced Agent.
+  # type: agent uses the Orka harness v2 RuntimePool selected from the referenced Agent.
   type: agent
   agentRef:
     name: claude-agent

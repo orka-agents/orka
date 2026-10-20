@@ -22,10 +22,7 @@ func (r *RepositoryScanReconciler) validateScanRunIngestionIdentity(ctx context.
 	if !security.ScanRunMatchesRepositoryScan(run, scan) || run.CancellationVersion != 0 {
 		return store.ErrConflict
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if reader == nil {
 		return fmt.Errorf("live reader is required to validate scan ingestion")
 	}
@@ -88,6 +85,7 @@ func (r *RepositoryScanReconciler) applyScanTaskIngestion(
 				completed := task.Status.CompletionTime.Time
 				current.CompletedAt = &completed
 			}
+			stampFailedScanRunCompletion(current)
 		}
 		return nil
 	})

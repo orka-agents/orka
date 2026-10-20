@@ -5,8 +5,12 @@ import (
 	"time"
 )
 
-// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
-const SessionTypeGateway = "gateway"
+const (
+	// SessionTypeChat identifies Sessions owned by the interactive chat API.
+	SessionTypeChat = "chat"
+	// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
+	SessionTypeGateway = "gateway"
+)
 
 // SessionRecord represents a full session.
 type SessionRecord struct {
@@ -35,6 +39,13 @@ type SessionMetadata struct {
 	UpdatedAt     time.Time
 	ActiveTask    string
 	ActiveTaskUID string
+}
+
+// SessionPageCursor is the position a ListSessionsPage page ended at: the
+// creation time and name of its last session.
+type SessionPageCursor struct {
+	CreatedAt time.Time
+	Name      string
 }
 
 // SessionMessage is a single transcript entry.

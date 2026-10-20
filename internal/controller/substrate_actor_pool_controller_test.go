@@ -82,9 +82,9 @@ func TestSubstrateActorPoolReconcilerPrecreatesActorsAndUpdatesDensity(t *testin
 		},
 	}
 	reconciler := &SubstrateActorPoolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
 			return executor, nil
 		},
@@ -154,9 +154,9 @@ func TestSubstrateActorPoolReconcilerAcceptsMCPOnlyTemplate(t *testing.T) {
 		},
 	}
 	reconciler := &SubstrateActorPoolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
 			return executor, nil
 		},
@@ -202,9 +202,9 @@ func TestSubstrateActorPoolReconcilerPrecreatesZeroTarget(t *testing.T) {
 	template.SetNamespace("ate-demo")
 	executor := &recordingSubstratePoolExecutor{}
 	reconciler := &SubstrateActorPoolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
 			return executor, nil
 		},
@@ -238,9 +238,9 @@ func TestSubstrateActorPoolReconcilerRejectsOversizedTargetBeforeConverge(t *tes
 	}
 	executor := &recordingSubstratePoolExecutor{}
 	reconciler := &SubstrateActorPoolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
 			return executor, nil
 		},
@@ -288,9 +288,9 @@ func TestSubstrateActorPoolReconcilerPrunesActorsWithoutPrecreate(t *testing.T) 
 	template.SetNamespace("ate-demo")
 	executor := &recordingSubstratePoolExecutor{}
 	reconciler := &SubstrateActorPoolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
 			return executor, nil
 		},
@@ -395,9 +395,9 @@ func TestSubstrateActorPoolReconcilerDefersScaleDownWithActiveLease(t *testing.T
 	lease := newSubstrateMCPPoolActorLease(holder, pool.Namespace, deterministicSubstratePoolActorID(prefix, 2), deterministicSubstratePoolActorID(prefix, 2))
 	executor := &recordingSubstratePoolExecutor{}
 	reconciler := &SubstrateActorPoolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template, holder, lease).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template, holder, lease).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
 			return executor, nil
 		},

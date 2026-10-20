@@ -52,6 +52,9 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
+      colorMode: {
+        respectPrefersColorScheme: true,
+      },
       navbar: {
         title: 'Orka',
         items: [
@@ -60,6 +63,16 @@ const config = {
             sidebarId: 'tutorialSidebar',
             position: 'left',
             label: 'Docs',
+          },
+          {
+            to: '/docs/demos',
+            label: 'Demos',
+            position: 'left',
+          },
+          {
+            to: 'pathname:///demo/',
+            label: 'Dashboard demo',
+            position: 'left',
           },
           {
             href: 'https://github.com/orka-agents/orka',
@@ -75,12 +88,37 @@ const config = {
             title: 'Docs',
             items: [
               {
-                label: 'Getting Started',
+                label: 'What is Orka?',
+                to: '/docs',
+              },
+              {
+                label: 'Getting started',
                 to: '/docs/getting-started',
               },
               {
-                label: 'API Reference',
+                label: 'Resource reference',
+                to: '/docs/resources',
+              },
+              {
+                label: 'API reference',
                 to: '/docs/api-reference',
+              },
+            ],
+          },
+          {
+            title: 'Try it',
+            items: [
+              {
+                label: 'Interactive dashboard demo',
+                to: 'pathname:///demo/',
+              },
+              {
+                label: 'Demo videos',
+                to: '/docs/demos',
+              },
+              {
+                label: 'Examples',
+                href: 'https://github.com/orka-agents/orka/tree/main/examples',
               },
             ],
           },
@@ -90,6 +128,14 @@ const config = {
               {
                 label: 'GitHub',
                 href: 'https://github.com/orka-agents/orka',
+              },
+              {
+                label: 'Issues',
+                href: 'https://github.com/orka-agents/orka/issues',
+              },
+              {
+                label: 'Contributing',
+                href: 'https://github.com/orka-agents/orka/blob/main/CONTRIBUTING.md',
               },
             ],
           },

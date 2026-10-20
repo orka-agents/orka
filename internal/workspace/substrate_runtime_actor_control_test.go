@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package workspace
 
 import (
-	"context"
 	"strings"
 	"testing"
 )
@@ -87,17 +86,9 @@ func TestSubstrateRuntimeActorVerifiedDataSnapshotFence(t *testing.T) {
 }
 
 func TestSubstrateRuntimeActorControlDoesNotAdvertiseCreateRecoverySettlement(t *testing.T) {
-	provider := &recordingSubstrateControlClient{}
-	control := &substrateRuntimeActorControl{control: provider}
-	if control.ActorCreateRecoveryAttestationSupported() {
+	var control SubstrateRuntimeActorControl = &substrateRuntimeActorControl{control: &recordingSubstrateControlClient{}}
+	if _, ok := control.(SubstrateRuntimeActorCreateRecoveryControl); ok {
 		t.Fatal("production actor control advertised unsupported create recovery attestation")
-	}
-	settled, err := control.ConfirmActorCreationSettled(context.Background(), "actor-1")
-	if settled || err == nil || !strings.Contains(err.Error(), "operation-level") {
-		t.Fatalf("ConfirmActorCreationSettled() = (%v, %v), want fail-closed unsupported error", settled, err)
-	}
-	if provider.listActorsCalls != 0 || provider.getCalls != 0 {
-		t.Fatalf("unsupported settlement performed provider reads: list=%d get=%d", provider.listActorsCalls, provider.getCalls)
 	}
 }
 

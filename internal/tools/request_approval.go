@@ -94,6 +94,11 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 	if err := json.Unmarshal(req.TargetArguments, &targetArgsObject); err != nil || targetArgsObject == nil {
 		return "", requestApprovalValidationError("targetArguments must be a JSON object")
 	}
+	switch req.Severity {
+	case "", "warning", "critical":
+	default:
+		return "", requestApprovalValidationError("invalid severity %q: must be warning or critical", req.Severity)
+	}
 	if _, ok := DefaultRegistry.Get(targetTool); ok {
 		return "", requestApprovalValidationError("targetTool %q is a built-in tool and cannot be approved with request_approval", targetTool)
 	}

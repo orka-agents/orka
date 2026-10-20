@@ -188,7 +188,7 @@ func TestAgentKitDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
 		"chmod 0444 /agent/agent.yaml",
 		"ORKA_ACP_PROVIDER=agentkit",
 		"ORKA_ACP_AGENTKIT_ADAPTER_DIGEST=${AGENTKIT_ADAPTER_DIGEST}",
-		"io.orka.acp.adapter.name=\"agentkit-serve-acp\"",
+		"ai.orka.acp.adapter.name=\"agentkit-serve-acp\"",
 		"CMD []",
 		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
 	} {
@@ -254,7 +254,7 @@ func TestFoundryDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
 	for _, required := range []string{
 		"ORKA_ACP_PROVIDER=foundry",
 		"ORKA_ACP_FOUNDRY_ADAPTER_DIGEST=${FOUNDRY_ADAPTER_DIGEST}",
-		"io.orka.acp.adapter.name=\"foundry-serve-acp\"",
+		"ai.orka.acp.adapter.name=\"foundry-serve-acp\"",
 		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime",
 		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-exec-helper /usr/local/bin/orka-acp-exec-helper",
 		"COPY --from=supervisor-builder --chown=0:0 /out/agent-runtime-foundry /agent-runtime-foundry",

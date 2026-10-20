@@ -1,9 +1,12 @@
+import { Link } from '@tanstack/react-router'
+import { ArrowLeft } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
 import {
   useCreatePullRequest,
   useDismissFinding,
@@ -13,7 +16,10 @@ import {
   useReopenFinding,
   useValidateFinding,
 } from '@/hooks/use-security'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
+import { downloadTaskArtifact } from '@/hooks/use-task-artifacts'
 import { useUIStore } from '@/stores/ui'
+import type { SecurityFinding } from '@/schemas/security'
 import { PatchProposalCard } from './patch-proposal-card'
 
 function severityVariant(severity?: string): 'destructive' | 'secondary' | 'outline' {
@@ -24,21 +30,48 @@ function severityVariant(severity?: string): 'destructive' | 'secondary' | 'outl
 
 export function FindingDetail({ findingId }: { findingId: string }) {
   const namespace = useUIStore((s) => s.namespace)
-  const { data: finding, isLoading } = useFinding(findingId)
+  const { data: finding, isLoading, error } = useFinding(findingId)
+
+  if (isLoading) {
+    return <Skeleton className="h-96 w-full" />
+  }
+
+  const backToSecurity = (
+    <Button asChild variant="outline">
+      <Link to="/security"><ArrowLeft className="mr-1 h-4 w-4" />Back to Security</Link>
+    </Button>
+  )
+
+  // A 403 replaces cached data (the token lost access); any other failure
+  // keeps what already loaded and only blocks a page that never loaded.
+  if (isForbiddenError(error) || (error && !isNotFoundError(error) && !finding)) {
+    return <AccessErrorView title="Could not load finding" resource={`finding ${findingId}`} error={error} action={backToSecurity} />
+  }
+
+  // A 404 wins over cached data. The patch proposals query lives in
+  // FindingDetailContent, so a missing finding sends no further requests.
+  if (isNotFoundError(error) || !finding) {
+    return (
+      <NotFoundView
+        title="Finding not found"
+        headline={`No finding with ID "${findingId}" in ${namespace}`}
+        hint="It may belong to another namespace, or its repository may have been removed."
+        action={backToSecurity}
+      />
+    )
+  }
+
+  return <FindingDetailContent findingId={findingId} finding={finding} />
+}
+
+function FindingDetailContent({ findingId, finding }: { findingId: string; finding: SecurityFinding }) {
+  const namespace = useUIStore((s) => s.namespace)
   const patches = usePatchProposals(findingId)
   const generatePatch = useGeneratePatch(findingId)
   const validateFinding = useValidateFinding(findingId)
   const createPullRequest = useCreatePullRequest(findingId)
   const dismissFinding = useDismissFinding(findingId)
   const reopenFinding = useReopenFinding(findingId)
-
-  if (isLoading) {
-    return <Skeleton className="h-96 w-full" />
-  }
-
-  if (!finding) {
-    return <div className="text-muted-foreground">Finding not found.</div>
-  }
 
   const latestSuccessfulPatch = (patches.data?.items ?? []).find((proposal) => proposal.status === 'succeeded' || proposal.status === 'pr_opened')
   let parsedValidation: Record<string, unknown> | null = null
@@ -49,9 +82,10 @@ export function FindingDetail({ findingId }: { findingId: string }) {
       parsedValidation = null
     }
   }
-  const validationArtifactRefs = (finding.evidence ?? []).filter((evidence) =>
+  type Evidence = NonNullable<SecurityFinding['evidence']>[number]
+  const validationArtifactRefs = (finding.evidence ?? []).filter((evidence): evidence is Evidence & { taskName: string; name: string } =>
     evidence.kind === 'artifact' &&
-    evidence.taskName &&
+    !!evidence.taskName &&
     (evidence.name === 'security-validation.json' || evidence.name === 'security-validation.txt'),
   )
 
@@ -220,14 +254,14 @@ export function FindingDetail({ findingId }: { findingId: string }) {
               {(finding.evidence ?? []).map((evidence, index) => (
                 <div key={`${evidence.name || evidence.label || 'evidence'}-${index}`} className="rounded-md border border-border p-3 text-sm">
                   {evidence.kind === 'artifact' && evidence.taskName && evidence.name ? (
-                    <a
-                      href={`/api/v1/tasks/${evidence.taskName}/artifacts/${evidence.name}?namespace=${encodeURIComponent(namespace)}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="font-medium text-primary hover:underline"
+                    <ArtifactDownloadLink
+                      taskName={evidence.taskName}
+                      filename={evidence.name}
+                      namespace={namespace}
+                      className="font-medium"
                     >
                       {evidence.label || evidence.name || 'Evidence'}
-                    </a>
+                    </ArtifactDownloadLink>
                   ) : (
                     <div className="font-medium">
                       {evidence.path
@@ -238,7 +272,7 @@ export function FindingDetail({ findingId }: { findingId: string }) {
                   <div className="text-muted-foreground">{evidence.kind}</div>
                   {evidence.symbol && <div className="text-xs text-muted-foreground">Symbol: {evidence.symbol}</div>}
                   {evidence.taskName && <div className="text-xs text-muted-foreground">Task: {evidence.taskName}</div>}
-                  {evidence.quote && <div className="mt-2 rounded bg-muted p-2 font-mono text-xs">{evidence.quote}</div>}
+                  {evidence.quote && <div className="mt-2 whitespace-pre-wrap break-words rounded bg-muted p-2 font-mono text-xs">{evidence.quote}</div>}
                 </div>
               ))}
             </div>
@@ -315,15 +349,15 @@ export function FindingDetail({ findingId }: { findingId: string }) {
                 <div className="font-medium">Validation Artifacts</div>
                 <div className="mt-2 space-y-2 text-sm">
                   {validationArtifactRefs.map((evidence, index) => (
-                    <a
+                    <ArtifactDownloadLink
                       key={`${evidence.taskName || 'task'}-${evidence.name || index}`}
-                      href={`/api/v1/tasks/${evidence.taskName}/artifacts/${evidence.name}?namespace=${encodeURIComponent(namespace)}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="block text-primary hover:underline"
+                      taskName={evidence.taskName}
+                      filename={evidence.name}
+                      namespace={namespace}
+                      className="block"
                     >
                       {evidence.label || evidence.name}
-                    </a>
+                    </ArtifactDownloadLink>
                   ))}
                 </div>
               </div>
@@ -353,5 +387,27 @@ export function FindingDetail({ findingId }: { findingId: string }) {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+// Evidence artifacts download through the authenticated fetch path: a plain
+// link to the API cannot carry the bearer token, so the server would answer 401.
+function ArtifactDownloadLink({ taskName, filename, namespace, className, children }: {
+  taskName: string
+  filename: string
+  namespace: string
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      className={`text-left text-primary hover:underline ${className ?? ''}`}
+      onClick={() => {
+        downloadTaskArtifact(taskName, filename, namespace).catch(() => toast.error(`Failed to download ${filename}`))
+      }}
+    >
+      {children}
+    </button>
   )
 }

@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -93,8 +92,8 @@ func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinu
 
 // ACPEnsureSessionRequest identifies one canonical transcript Session. An
 // optional ExpectedSessionUID turns loading into an exact immutable-identity
-// assertion; when omitted, a UID is generated only if the control record does
-// not already exist.
+// assertion; when omitted, creation reuses any already-bound durable identity
+// before generating a new UID.
 type ACPEnsureSessionRequest struct {
 	Namespace                 string
 	SessionName               string
@@ -161,19 +160,12 @@ func (c *ACPSessionContinuity) EnsureSession(ctx context.Context, request ACPEns
 		return nil, err
 	}
 
-	sessionUID := request.ExpectedSessionUID
-	if sessionUID == "" {
-		generated, err := c.newSessionUID()
-		if err != nil {
-			return nil, fmt.Errorf("generate ACP session UID: %w", err)
-		}
-		sessionUID = strings.TrimSpace(generated)
-		if err := store.ValidateControlIdentifier("generated session UID", sessionUID); err != nil {
-			return nil, err
-		}
+	sessionUID, err := c.sessionUIDForCreate(ctx, request)
+	if err != nil {
+		return nil, err
 	}
 	requestDigest, err := acpDomainDigest("session-control", map[string]any{
-		"namespace": request.Namespace, "sessionName": request.SessionName, "sessionType": request.SessionType,
+		acpCancelLogKeyNamespace: request.Namespace, "sessionName": request.SessionName, "sessionType": request.SessionType,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("digest ACP session control: %w", err)
@@ -204,6 +196,40 @@ func (c *ACPSessionContinuity) EnsureSession(ctx context.Context, request ACPEns
 		return nil, validateErr
 	}
 	return winner, nil
+}
+
+// sessionUIDForCreate preserves the durable bind-before-control identity if a
+// prior Kubernetes create failed or its outcome was lost. Never unbind it: the
+// original create may have succeeded even when the caller received an error.
+func (c *ACPSessionContinuity) sessionUIDForCreate(ctx context.Context, request ACPEnsureSessionRequest) (string, error) {
+	if cleanup, ok := c.transcripts.(store.SessionCleanupPersistenceStore); ok {
+		boundUID, err := cleanup.GetSessionCleanupIdentity(ctx, request.Namespace, request.SessionName)
+		if err != nil {
+			return "", fmt.Errorf("load ACP session cleanup identity: %w", err)
+		}
+		if boundUID != "" {
+			if err := store.ValidateControlIdentifier("bound session UID", boundUID); err != nil {
+				return "", err
+			}
+			if request.ExpectedSessionUID != "" && request.ExpectedSessionUID != boundUID {
+				return "", store.ConflictErrorf("session %s/%s has immutable UID %q, expected %q",
+					request.Namespace, request.SessionName, boundUID, request.ExpectedSessionUID)
+			}
+			return boundUID, nil
+		}
+	}
+	if request.ExpectedSessionUID != "" {
+		return request.ExpectedSessionUID, nil
+	}
+	generated, err := c.newSessionUID()
+	if err != nil {
+		return "", fmt.Errorf("generate ACP session UID: %w", err)
+	}
+	generated = strings.TrimSpace(generated)
+	if err := store.ValidateControlIdentifier("generated session UID", generated); err != nil {
+		return "", err
+	}
+	return generated, nil
 }
 
 func (c *ACPSessionContinuity) ensureTranscriptSession(ctx context.Context, request ACPEnsureSessionRequest, now time.Time) error {
@@ -607,6 +633,7 @@ type ACPFinalizeAssistantRequest struct {
 	SessionTurn     ACPSessionTurn
 	Fence           store.ControllerEpochFence
 	AssistantResult string
+	NativeSession   *store.NativeSessionRecord
 	PublicationID   string
 	Projection      ACPFinalizationProjection
 	FinalizedAt     time.Time
@@ -622,6 +649,8 @@ type ACPFinalizeOutcomeUnknownRequest struct {
 	PublicationID string
 	Projection    ACPFinalizationProjection
 	FinalizedAt   time.Time
+	// NativeSession carries the Session's existing checkpoint across this marker.
+	NativeSession *store.NativeSessionRecord
 }
 
 // ACPFinalizeOutcomeMarkerRequest records a proven non-success terminal marker
@@ -633,6 +662,8 @@ type ACPFinalizeOutcomeMarkerRequest struct {
 	Reason      string
 	Projection  ACPFinalizationProjection
 	FinalizedAt time.Time
+	// NativeSession carries the Session's existing checkpoint across this marker.
+	NativeSession *store.NativeSessionRecord
 }
 
 // ACPSessionFinalization is the committed turn plus its latest Session state.
@@ -685,7 +716,7 @@ func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, requ
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnAssistantResult,
-		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt)
+		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 // FinalizeOutcomeUnknown atomically appends the user prompt and an explicit
@@ -703,7 +734,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeUnknown(ctx context.Context, reque
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		marker, request.PublicationID, request.Projection, request.FinalizedAt)
+		marker, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, request ACPFinalizeOutcomeMarkerRequest) (*ACPSessionFinalization, error) {
@@ -716,13 +747,13 @@ func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, reques
 		return nil, err
 	}
 	markerBytes, err := json.Marshal(map[string]any{
-		"kind": kind, "reason": reason, "assistantResultRecorded": false,
+		"kind": kind, eventReasonField: reason, "assistantResultRecorded": false,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		string(markerBytes), "", request.Projection, request.FinalizedAt)
+		string(markerBytes), "", request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 func (c *ACPSessionContinuity) finalizeTurn(
@@ -734,6 +765,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	publicationID string,
 	projectionInput ACPFinalizationProjection,
 	finalizedAt time.Time,
+	native *store.NativeSessionRecord,
 ) (*ACPSessionFinalization, error) {
 	if err := validateACPSessionLease(&sessionTurn.Lease.Session, sessionTurn.Lease.Key); err != nil {
 		return nil, err
@@ -752,7 +784,14 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	}
 	finalizationIdentity := map[string]any{
 		"turnID": sessionTurn.Turn.ID, "terminalKind": terminalKind, "terminalContent": terminalContent,
-		"publicationID": publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
+		publicationIDField: publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
+	}
+	carried := native != nil && terminalKind == store.SessionTurnOutcomeMarker
+	if native != nil {
+		finalizationIdentity["nativeSessionDigest"] = store.NativeSessionCaptureDigest(native)
+	}
+	if carried {
+		finalizationIdentity["nativeSessionCarried"] = true
 	}
 	if blockReason != "" {
 		finalizationIdentity["blockReason"] = blockReason
@@ -775,6 +814,8 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		Key: sessionTurn.Turn.Key, Fence: fence,
 		ExpectedSessionVersion: sessionTurn.Lease.Session.Version, ExpectedTurnVersion: sessionTurn.Turn.Version,
 		FinalizationDigest: finalizationDigest, TerminalKind: terminalKind, TerminalContent: terminalContent,
+		NativeSession:        native,
+		NativeSessionCarried: carried,
 		SkipTranscriptAppend: sessionTurn.SkipTranscriptAppend,
 		SkipUserPromptAppend: sessionTurn.SkipUserPromptAppend,
 		PublicationID:        publicationID,
@@ -849,8 +890,7 @@ func buildACPSessionTurnProjection(turnID string, input ACPFinalizationProjectio
 }
 
 func canonicalACPPayloadDigest(payload []byte) string {
-	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return store.CanonicalBytesDigest(payload)
 }
 
 type acpOutcomeUnknownMarker struct {

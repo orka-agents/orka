@@ -14,6 +14,10 @@ import (
 )
 
 const (
+	apiFieldError = "error"
+)
+
+const (
 	defaultAPIRequestBodyLimit = 15 << 20
 	defaultACPArtifactMaxBytes = 512 << 20
 	defaultACPArtifactRoot     = "/data/acp-artifacts"
@@ -132,7 +136,7 @@ func writeACPArtifactError(c fiber.Ctx, err error) error {
 	case errors.Is(err, artifactcap.ErrUnsafePath), errors.Is(err, artifactcap.ErrCorrupt):
 		status, code = fiber.StatusInternalServerError, "artifact_storage_unavailable"
 	}
-	return c.Status(status).JSON(fiber.Map{"error": code})
+	return c.Status(status).JSON(fiber.Map{apiFieldError: code})
 }
 
 func (s *Server) installACPArtifactTransport() {
@@ -141,7 +145,7 @@ func (s *Server) installACPArtifactTransport() {
 	group := s.app.Group(acpArtifactRoutePrefix)
 	if err != nil {
 		unavailable := func(c fiber.Ctx) error {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactTransportUnavailable})
 		}
 		group.Put("/sha256/:digest", unavailable)
 		group.Get("/sha256/:digest", unavailable)
@@ -186,8 +190,9 @@ func acpArtifactStreamingGuard(c fiber.Ctx) error {
 	// Gateway adapter ingress legitimately arrives chunked (or as HTTP/2
 	// without a declared length); it carries its own per-route body-size
 	// configuration and reads a bounded body stream, so the Content-Length
-	// requirement must not reject it.
-	if isGatewayIngressPath(c.Path()) {
+	// requirement must not reject it. Native imports have their own bounded
+	// stream reader as well, but only the POST migration route is exempt.
+	if isGatewayIngressPath(c.Path()) || (c.Method() == fiber.MethodPost && isNativeSessionImportPath(c.Path())) {
 		return c.Next()
 	}
 	method := c.Method()
@@ -196,10 +201,10 @@ func acpArtifactStreamingGuard(c fiber.Ctx) error {
 	}
 	contentLength := c.Request().Header.ContentLength()
 	if contentLength == -1 {
-		return c.Status(fiber.StatusLengthRequired).JSON(fiber.Map{"error": "content_length_required"})
+		return c.Status(fiber.StatusLengthRequired).JSON(fiber.Map{apiFieldError: "content_length_required"})
 	}
 	if contentLength > defaultAPIRequestBodyLimit {
-		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": "request_body_too_large"})
+		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{apiFieldError: "request_body_too_large"})
 	}
 	return c.Next()
 }

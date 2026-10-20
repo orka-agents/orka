@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -148,6 +149,32 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 	})
 }
 
+func TestContextTokenTaskToolFailuresKeepsExplicitChildCoordinationFailClosed(t *testing.T) {
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue},
+		AI:          &corev1alpha1.AISpec{Tools: []string{"send_message"}},
+	}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{
+		Request:          req,
+		EffectiveAITools: contextTokenTaskCreateEffectiveAITools(req, nil),
+	}
+	allowedWithoutExplicit := make([]any, 0, len(aitools.MemoryToolNames()))
+	for _, name := range aitools.MemoryToolNames() {
+		allowedWithoutExplicit = append(allowedWithoutExplicit, name)
+	}
+	token := &ContextToken{TransactionContext: map[string]any{"allowedTools": allowedWithoutExplicit}}
+
+	failures := contextTokenTaskToolFailures(token, authzCtx)
+	require.Equal(t, []string{`tool "send_message" is not allowed by token context`}, failures)
+
+	token.TransactionContext["allowedTools"] = append(allowedWithoutExplicit, "send_message")
+	require.Empty(t, contextTokenTaskToolFailures(token, authzCtx))
+}
+
 func TestContextTokenWorkspaceFailuresRejectRefOverridingBranchConstraint(t *testing.T) {
 	token := &ContextToken{TransactionContext: map[string]any{"branch": "main"}}
 	failures := contextTokenWorkspaceFailures(token, &corev1alpha1.WorkspaceConfig{
@@ -244,6 +271,50 @@ func TestAuthorizeContextTokenToolAgentCreateRejectsSpecOutsideTokenConstraints(
 	require.NotContains(t, joined, `agent tool "Bash" is not allowed by token context`)
 }
 
+func TestAuthorizeContextTokenToolAgentMutationsWithRuntimeCoordination(t *testing.T) {
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.AgentWriteScopes = []string{ContextTokenScopeAgentsWrite}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime-agent", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:                corev1alpha1.AgentRuntimeClaude,
+				ContractVersion:     new(corev1alpha1.AgentRuntimeContractHarnessV2),
+				DefaultAllowedTools: []string{"Read"},
+				DefaultAllowBash:    new(false),
+			},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+
+	for _, tt := range []struct {
+		name      string
+		authorize func(context.Context, client.Reader, *ContextToken, ContextTokenAuthorizationConfig, string, *corev1alpha1.Agent) error
+	}{
+		{name: "create", authorize: authorizeContextTokenToolAgentCreate},
+		{name: "update", authorize: authorizeContextTokenToolAgentUpdate},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			token := &ContextToken{
+				Scopes:             []string{ContextTokenScopeAgentsWrite},
+				TransactionContext: map[string]any{"allowedTools": []any{"Read"}},
+			}
+			err := tt.authorize(context.Background(), nil, token, cfg, tt.name+"Agent", agent)
+			require.NoError(t, err)
+
+			token.TransactionContext["allowedTools"] = []any{}
+			err = tt.authorize(context.Background(), nil, token, cfg, tt.name+"Agent", agent)
+			var forbidden *fiber.Error
+			require.ErrorAs(t, err, &forbidden)
+			require.Equal(t, fiber.StatusForbidden, forbidden.Code)
+			failures, failureErr := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
+			require.NoError(t, failureErr)
+			require.Equal(t, []string{`agent tool "Read" is not allowed by token context`}, failures)
+		})
+	}
+}
+
 func TestContextTokenAgentSpecFailuresRejectsCrossNamespaceProviderRef(t *testing.T) {
 	token := &ContextToken{
 		TransactionContext: map[string]any{
@@ -300,8 +371,8 @@ func TestContextTokenTaskCreateAuthorizationDerivesOpenCodeProviderFromModelName
 	}
 	agent.Spec.Model.Provider = string(corev1alpha1.ProviderTypeAnthropic)
 	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: overrideProvider.Name}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, overrideProvider).Build()
-	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), client, CreateTaskRequest{
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, overrideProvider).Build()
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), k8sClient, CreateTaskRequest{
 		Type:     corev1alpha1.TaskTypeAgent,
 		AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
 		AI: &corev1alpha1.AISpec{
@@ -417,6 +488,7 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 		Type:         corev1alpha1.TaskTypeAgent,
 		AgentRef:     &corev1alpha1.AgentReference{Name: agent.Name},
 		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Bash", "read_tool", "write_tool"}},
+		AI:           &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}},
 	}, "team-a")
 	require.NoError(t, err)
 	require.Equal(t, ProviderResolutionInfo{Type: "operator-managed"}, authzCtx.EffectiveProvider)
@@ -942,11 +1014,12 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjection(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
 		},
 	}
 	req := CreateTaskRequest{
 		Type:        corev1alpha1.TaskTypeAI,
+		Metadata:    MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}},
 		Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
 		AI: &corev1alpha1.AISpec{
 			Tools: []string{"list_pull_requests", "check_pr_review_marker"},
@@ -961,6 +1034,9 @@ func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjectio
 	require.Contains(t, got, "propose_memory")
 	require.Contains(t, got, "search_transcript")
 	require.NotContains(t, got, "delegate_task")
+	require.NotContains(t, got, "send_message")
+	require.NotContains(t, got, "check_messages")
+	require.NotContains(t, got, "request_approval")
 	require.NotContains(t, got, "merge_pull_request")
 	require.NotContains(t, got, "auto_merge_pull_request")
 }
@@ -1205,24 +1281,24 @@ func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testin
 			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
 		}},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
 	cfg := enforceContextTokenAuthorizationConfig()
 	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
 	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
 
 	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
-	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
 	require.NoError(t, err)
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
 
 	token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
-	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
 	require.NoError(t, err)
 	require.Empty(t, failures)
 
 	token.TransactionContext = map[string]any{"secret": "different-secret"}
-	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
 	require.NoError(t, err)
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0], "resource-assertion")
@@ -1400,12 +1476,12 @@ func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedOutboundAccessPo
 			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
 		}},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool).Build()
 	cfg := enforceContextTokenAuthorizationConfig()
 	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
 	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
 
-	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
 	require.NoError(t, err)
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0], "search")
@@ -1590,10 +1666,10 @@ func readyContextTokenOutboundPolicy(
 func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedCustomTool(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"custom-search"}}
 	failures, err := contextTokenTaskToolCredentialFailures(
-		context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
+		context.Background(), k8sClient, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
 	)
 	require.NoError(t, err)
 	require.Equal(t, []string{`Tool "custom-search" is unresolved`}, failures)
@@ -1602,12 +1678,12 @@ func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedCustomTool(t *te
 func TestContextTokenTaskToolCredentialFailuresAllowsUnresolvedBuiltinAndRuntimeTools(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	authzCtx := contextTokenTaskCreateAuthorizationContext{
 		Namespace: "team-a", EffectiveAITools: []string{"web_search"}, RuntimeAllowedTools: []string{"Bash"},
 	}
 	failures, err := contextTokenTaskToolCredentialFailures(
-		context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
+		context.Background(), k8sClient, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
 	)
 	require.NoError(t, err)
 	require.Empty(t, failures)
@@ -1616,9 +1692,9 @@ func TestContextTokenTaskToolCredentialFailuresAllowsUnresolvedBuiltinAndRuntime
 func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedBrokeredRuntimeTool(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", RuntimeAllowedTools: []string{"read_incident"}}
-	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
 	require.NoError(t, err)
 	require.Equal(t, []string{`Tool "read_incident" is unresolved`}, failures)
 }
@@ -1683,7 +1759,7 @@ func TestContextTokenTaskToolCredentialFailuresUsesResolvedExternalRuntimeProfil
 func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	builtinAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}}}
 	remoteAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "remote"}}}}
 	tests := []struct {
@@ -1694,6 +1770,10 @@ func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) 
 		{name: "AI name matching native tool still resolves", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"Read"}}, wantFailure: "Read"},
 		{name: "AI coordination tool is builtin when coordination is enabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, EffectiveAITools: []string{"list_issues"}}},
 		{name: "AI coordination name resolves as custom without coordination", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"list_issues"}}, wantFailure: "list_issues"},
+		{name: "implicit child messaging is builtin without agent coordination", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}}}, EffectiveAITools: []string{"send_message", "check_messages"}}},
+		{name: "explicit child coordination is builtin when injection is disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}}, Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"send_message", "list_pull_requests"}}},
+		{name: "explicit child custom tool still resolves when injection is disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}}, Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"custom-search"}}, wantFailure: "custom-search"},
+		{name: "explicit child messaging name resolves as custom without child identity", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI}, EffectiveAITools: []string{"send_message"}}, wantFailure: "send_message"},
 		{name: "AI explicit coordination tool remains builtin when injection disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, Request: CreateTaskRequest{Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"list_pull_requests"}}},
 		{name: "controller proxy coordination name resolves as custom when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"create_pull_request"}}, wantFailure: "create_pull_request"},
 		{name: "dual-registered coordination name remains builtin when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"cancel_task"}}},
@@ -1708,7 +1788,7 @@ func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), tt.ctx)
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, &ContextToken{}, enforceContextTokenAuthorizationConfig(), tt.ctx)
 			require.NoError(t, err)
 			if tt.wantFailure == "" {
 				require.Empty(t, failures)
@@ -1724,16 +1804,72 @@ func TestContextTokenTaskToolCredentialFailuresAllowsLowercaseBrokeredBashWithSy
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	bashTool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "team-a"}}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bashTool).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bashTool).Build()
 	remoteAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "remote"}}}}
 	authzCtx := contextTokenTaskCreateAuthorizationContext{
 		Namespace: "team-a", Agent: remoteAgent,
 		Request:             CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"bash"}}},
 		RuntimeAllowedTools: []string{"bash"}, RuntimeAllowBash: true,
 	}
-	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
 	require.NoError(t, err)
 	require.Empty(t, failures)
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesAutonomousApproval(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+
+	got := contextTokenTaskCreateEffectiveAITools(CreateTaskRequest{Type: corev1alpha1.TaskTypeAI}, agent)
+	require.Contains(t, got, "request_approval")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesChildMessaging(t *testing.T) {
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(req, nil)
+	require.Contains(t, got, "send_message")
+	require.Contains(t, got, "check_messages")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsExcludesAIWorkerToolsFromAgentTasks(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Tools:        []corev1alpha1.ToolReference{{Name: "agent_tool"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	req := CreateTaskRequest{
+		Type:     corev1alpha1.TaskTypeAgent,
+		Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}},
+		AI:       &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}},
+	}
+
+	require.Equal(t, []string{"agent_tool", "send_message", "check_messages"}, contextTokenTaskCreateEffectiveAITools(req, agent))
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsMatchesSharedResolver(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Tools:        []corev1alpha1.ToolReference{{Name: "agent_tool"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		AI: &corev1alpha1.AISpec{Tools: []string{"task_tool"}},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Labels: req.Metadata.Labels},
+		Spec:       corev1alpha1.TaskSpec{Type: req.Type, AI: req.AI},
+	}
+
+	require.Equal(t, aitools.Resolve(task, agent), contextTokenTaskCreateEffectiveAITools(req, agent))
 }
 
 func TestContextTokenAgentSpecToolFailuresAcceptsNormalizedOpenCodeBash(t *testing.T) {

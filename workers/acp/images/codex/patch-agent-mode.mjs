@@ -6,27 +6,31 @@ let source = readFileSync(path, "utf8");
 
 const modeAnchor = `    static readonly AgentFullAccess = new AgentMode(
         "agent-full-access",
-        "Agent (full access)",
-        "Codex can edit files outside this workspace and run commands with network access. Exercise caution when using.",
+        "Full access",
+        "Unrestricted access to the internet and any file on your computer",
+        "full_access",
         "never",
+        "user",
         {"type": "dangerFullAccess"},
-        "danger-full-access"
+        "danger-full-access",
     );
 `;
 const externalMode = `${modeAnchor}    static readonly OrkaExternal = new AgentMode(
         "orka-external",
         "Orka external sandbox",
         "Execution is confined by the Orka RuntimeSession boundary.",
+        "standard",
         "on-request",
+        "user",
         {"type": "externalSandbox", networkAccess: "restricted"},
-        "read-only"
+        "read-only",
     );
 `;
 if (!source.includes(modeAnchor)) throw new Error("AgentFullAccess anchor not found");
 source = source.replace(modeAnchor, externalMode);
 
-const allAnchor = `        return [AgentMode.ReadOnly, AgentMode.Agent, AgentMode.AgentFullAccess];`;
-const allReplacement = `        return [AgentMode.ReadOnly, AgentMode.Agent, AgentMode.AgentFullAccess, AgentMode.OrkaExternal];`;
+const allAnchor = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess];`;
+const allReplacement = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess, AgentMode.OrkaExternal];`;
 if (!source.includes(allAnchor)) throw new Error("AgentMode.all anchor not found");
 source = source.replace(allAnchor, allReplacement);
 

@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	workspaceagent "github.com/orka-agents/orka/pkg/workspaceagent"
+	workspaceagent "github.com/orka-agents/orka-workspace/sdk/workspaceagent"
 )
 
 func FuzzWorkspaceAgentRequestDecoding(f *testing.F) {

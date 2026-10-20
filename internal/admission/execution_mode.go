@@ -29,7 +29,6 @@ import (
 const (
 	statusSubresource = "status"
 
-	NamespaceExecutionModeWebhookPath = "/validate-v1-namespace-execution-mode"
 	AgentContractWebhookPath          = "/validate-core-orka-ai-v1alpha1-agent-contract"
 	AgentRuntimeContractWebhookPath   = "/validate-core-orka-ai-v1alpha1-agentruntime-contract"
 	TaskExecutionAuthorityWebhookPath = "/validate-core-orka-ai-v1alpha1-task-execution-authority"
@@ -58,7 +57,9 @@ func (c ExecutionModeConfig) controller(username string) bool {
 	return slices.Contains(c.ControllerUsernames, strings.TrimSpace(username))
 }
 
-// RegisterExecutionModeWebhooks registers the static namespace-mode boundary.
+// RegisterExecutionModeWebhooks registers the static execution-mode boundary
+// for Orka resources. Namespace claim immutability and ACP workspace
+// coordination Lease ownership are ValidatingAdmissionPolicies.
 func RegisterExecutionModeWebhooks(
 	server webhook.Server,
 	scheme *runtime.Scheme,
@@ -67,9 +68,6 @@ func RegisterExecutionModeWebhooks(
 ) {
 	config = config.normalized()
 	decoder := ctrladmission.NewDecoder(scheme)
-	server.Register(NamespaceExecutionModeWebhookPath, &ctrladmission.Webhook{Handler: &NamespaceExecutionModeValidator{
-		decoder: decoder,
-	}})
 	server.Register(AgentContractWebhookPath, &ctrladmission.Webhook{Handler: &AgentContractValidator{
 		decoder: decoder, reader: reader,
 	}})
@@ -82,54 +80,6 @@ func RegisterExecutionModeWebhooks(
 	server.Register(WorkspaceAttachmentSecretWebhookPath, &ctrladmission.Webhook{Handler: &WorkspaceAttachmentSecretValidator{
 		decoder: decoder, config: config,
 	}})
-	server.Register(ACPSuspendQuotaLeaseWebhookPath, &ctrladmission.Webhook{Handler: &ACPSuspendQuotaLeaseValidator{
-		config: config,
-	}})
-}
-
-// NamespaceExecutionModeValidator permits a namespace to be created with one
-// valid execution-mode label and then makes that claim immutable.
-type NamespaceExecutionModeValidator struct {
-	decoder ctrladmission.Decoder
-}
-
-func (v *NamespaceExecutionModeValidator) Handle(_ context.Context, req ctrladmission.Request) ctrladmission.Response {
-	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
-		return ctrladmission.Allowed("not a namespace execution-mode write")
-	}
-	object := &corev1.Namespace{}
-	if err := v.decoder.Decode(req, object); err != nil {
-		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode namespace: %w", err))
-	}
-	newValue := strings.TrimSpace(object.Labels[executionmode.NamespaceLabel])
-	if req.Operation == admissionv1.Create {
-		if newValue == "" {
-			return ctrladmission.Allowed("namespace has no Orka execution-mode claim")
-		}
-		if _, err := executionmode.Parse(newValue); err != nil {
-			return ctrladmission.Denied(err.Error())
-		}
-		return ctrladmission.Allowed("namespace acquired an immutable execution-mode claim")
-	}
-
-	oldObject := &corev1.Namespace{}
-	if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
-		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old namespace: %w", err))
-	}
-	oldValue := strings.TrimSpace(oldObject.Labels[executionmode.NamespaceLabel])
-	if oldValue == "" {
-		if newValue == "" {
-			return ctrladmission.Allowed("namespace has no Orka execution-mode claim")
-		}
-		return ctrladmission.Denied("an existing namespace cannot acquire an execution-mode claim; create a new namespace for the installation")
-	}
-	if newValue != oldValue {
-		return ctrladmission.Denied("namespace execution-mode claim is immutable; recreate the installation in a different namespace")
-	}
-	if _, err := executionmode.Parse(newValue); err != nil {
-		return ctrladmission.Denied(err.Error())
-	}
-	return ctrladmission.Allowed("namespace execution-mode claim is unchanged")
 }
 
 type AgentContractValidator struct {
@@ -166,10 +116,9 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 	if !agentUsesBuiltInRuntime(object) {
 		return ctrladmission.Allowed("Agent derives its contract from AgentRuntime")
 	}
-	if object.Spec.Runtime.ContractVersion == nil {
-		return ctrladmission.Denied("built-in Agent runtime requires an explicit contractVersion")
-	}
-	if *object.Spec.Runtime.ContractVersion != mode.ContractVersion() {
+	// The namespace is immutably bound to one mode, so an omitted contract
+	// can only mean that mode. An explicit value must still agree with it.
+	if object.Spec.Runtime.ContractVersion != nil && *object.Spec.Runtime.ContractVersion != mode.ContractVersion() {
 		return ctrladmission.Denied(fmt.Sprintf("Agent contractVersion must match namespace execution mode %q", mode))
 	}
 	if object.Spec.Model == nil || strings.TrimSpace(object.Spec.Model.Name) == "" {
@@ -177,11 +126,11 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 		// turns a run-time Task failure into an immediate, actionable error.
 		return ctrladmission.Denied("built-in Agent runtime requires spec.model.name (the ACP runtime session has no default model)")
 	}
-	if oldObject != nil {
-		if oldObject.Spec.Runtime == nil || oldObject.Spec.Runtime.ContractVersion == nil {
-			return ctrladmission.Denied("stored Agent has no contractVersion; recreate it with orka.harness.v2")
-		}
-		if *oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
+	if oldObject != nil && oldObject.Spec.Runtime != nil && oldObject.Spec.Runtime.ContractVersion != nil {
+		// Once written, the selector never changes or disappears. Adding a
+		// matching value to an Agent that omitted it is allowed above.
+		if object.Spec.Runtime.ContractVersion == nil ||
+			*oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
 			return ctrladmission.Denied("Agent contractVersion is immutable")
 		}
 	}
@@ -235,6 +184,7 @@ type TaskExecutionAuthorityValidator struct {
 	config  ExecutionModeConfig
 }
 
+//nolint:gocyclo // Admission checks every execution-authority invariant in one fail-closed pass.
 func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
 	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
 		return ctrladmission.Allowed("not a Task execution-authority write")
@@ -253,7 +203,7 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 	if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task execution authority: %w", err))
 	}
-	if taskHasExecutionAuthority(oldObject) && !reflect.DeepEqual(oldObject.Spec, object.Spec) {
+	if taskHasExecutionAuthority(oldObject) && !taskSpecUnchangedForAuthority(oldObject, object) {
 		return ctrladmission.Denied("Task spec is immutable after execution authority is recorded")
 	}
 	if taskHasExecutionAuthority(oldObject) && slices.Contains(oldObject.Finalizers, labels.TaskFinalizer) &&
@@ -263,6 +213,16 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 		}
 	}
 
+	if oldObject.Status.SoulBinding != nil && !reflect.DeepEqual(oldObject.Status.SoulBinding, object.Status.SoulBinding) {
+		return ctrladmission.Denied("AI soul binding is write-once and immutable")
+	}
+	// Match the live generation when first binding, not when preserving a
+	// binding: deletion can advance metadata.generation without changing spec.
+	// The immutable spec/binding and finalizer ownership checks above still apply.
+	if binding := object.Status.SoulBinding; binding != nil && (object.Spec.Type != corev1alpha1.TaskTypeAI ||
+		oldObject.Status.SoulBinding == nil && (binding.TaskGeneration != object.Generation || !object.DeletionTimestamp.IsZero())) {
+		return ctrladmission.Denied("AI soul binding does not match the Task identity")
+	}
 	oldBinding, newBinding := oldObject.Status.AgentExecutionBinding, object.Status.AgentExecutionBinding
 	if response, handled := taskStatusWriteResponse(v.config, req.UserInfo.Username, oldObject, object); handled {
 		return response
@@ -345,7 +305,7 @@ func agentUsesBuiltInRuntime(agent *corev1alpha1.Agent) bool {
 }
 
 func taskHasExecutionAuthority(task *corev1alpha1.Task) bool {
-	return task != nil && task.Status.AgentExecutionBinding != nil
+	return task != nil && (task.Status.AgentExecutionBinding != nil || task.Status.SoulBinding != nil)
 }
 
 func admissionReadError(operation string, err error) ctrladmission.Response {
@@ -353,4 +313,14 @@ func admissionReadError(operation string, err error) ctrladmission.Response {
 		return ctrladmission.Denied(operation + ": referenced object does not exist")
 	}
 	return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("%s: %w", operation, err))
+}
+
+// taskSpecUnchangedForAuthority applies the same freeze as the Task CRD rule:
+// an ACP execution binding freezes the whole spec, while a soul-only binding
+// freezes the execution inputs and leaves control fields such as suspend mutable.
+func taskSpecUnchangedForAuthority(oldObject, object *corev1alpha1.Task) bool {
+	if oldObject.Status.AgentExecutionBinding != nil {
+		return reflect.DeepEqual(oldObject.Spec, object.Spec)
+	}
+	return reflect.DeepEqual(oldObject.Spec.ExecutionInputs(), object.Spec.ExecutionInputs())
 }

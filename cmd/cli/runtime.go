@@ -15,6 +15,7 @@ func newRuntimePoolCmd() *cobra.Command {
 		Name:         "runtime pool",
 		ReadOnly:     true,
 		TablePrinter: printRuntimePoolTable,
+		DescribeRows: runtimePoolDescribeRows,
 	})
 }
 
@@ -25,7 +26,31 @@ func newAgentRuntimeCmd() *cobra.Command {
 		BasePath:     "/api/v1/agent-runtimes",
 		Name:         "agent runtime",
 		TablePrinter: printAgentRuntimeTable,
+		DescribeRows: agentRuntimeDescribeRows,
 	})
+}
+
+func runtimePoolDescribeRows(pool map[string]any) []describeRow {
+	status := nestedMap(pool, "status")
+	capacity := nestedMap(status, "capacity")
+	ratio := func(current, maximum string) string {
+		if current == "" && maximum == "" {
+			return ""
+		}
+		return dash(current) + "/" + dash(maximum)
+	}
+	return []describeRow{
+		{Label: labelName, Value: nestedString(pool, "metadata", "name")},
+		{Label: labelNamespace, Value: nestedString(pool, "metadata", "namespace")},
+		{Label: "Lifecycle", Value: firstString(status, "lifecycle")},
+		{Label: "Admission", Value: firstString(status, "admissionState")},
+		{Label: "Pods", Value: ratio(anyString(status["currentReplicas"]), anyString(status["desiredReplicas"]))},
+		{Label: "Sessions", Value: ratio(anyString(capacity["residentSessions"]), anyString(capacity["maxResidentSessions"]))},
+		{Label: "Prompts", Value: ratio(anyString(capacity["runningPrompts"]), anyString(capacity["maxRunningPrompts"]))},
+		{Label: "Queued tasks", Value: anyString(capacity["queuedTasks"])},
+		{Label: labelMessage, Value: firstString(status, "message")},
+		{Label: labelCreated, Value: formatTimestamp(nestedString(pool, "metadata", "creationTimestamp"))},
+	}
 }
 
 func printRuntimePoolTable(cmd *cobra.Command, value any) error {

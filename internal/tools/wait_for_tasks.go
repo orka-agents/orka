@@ -101,6 +101,10 @@ func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
 	}
 }
 
+// waitForTasksDeadlineGrace leaves time to assemble and return the result
+// before a caller's context deadline expires.
+const waitForTasksDeadlineGrace = 2 * time.Second
+
 // Name returns the tool name
 func (t *WaitForTasksTool) Name() string {
 	return waitForTasksToolName
@@ -143,6 +147,8 @@ func (t *WaitForTasksTool) Parameters() json.RawMessage {
 }
 
 // Execute waits for the specified tasks to complete and returns their results
+//
+//nolint:gocyclo // Task observation, timeout, cancellation, and result assembly share one wait loop.
 func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var waitArgs WaitForTasksArgs
 	if err := json.Unmarshal(args, &waitArgs); err != nil {
@@ -167,6 +173,14 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 	if t.maxWait > 0 {
 		timeout = min(timeout, t.maxWait)
+	}
+	// A caller's context deadline bounds the wait so a shorter enclosing
+	// execution budget, such as an approved brokered call, yields the normal
+	// in-progress result instead of a cancellation with no result.
+	if ctxDeadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(ctxDeadline) - waitForTasksDeadlineGrace; remaining < timeout {
+			timeout = max(remaining, 0)
+		}
 	}
 
 	ns := ""
@@ -267,7 +281,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 						// boundary cannot leak as an unmatched prefix.
 						summaryText = redact.SensitiveText(summaryText)
 					}
-					summary := truncateWaitTaskSummary(summaryText)
+					summary := common.TruncateSummary(summaryText, maxWaitTaskSummaryChars)
 					results[taskName].Summary = summary
 					results[taskName].Verdict = sr.Verdict
 					results[taskName].Feedback = sr.Feedback
@@ -576,16 +590,6 @@ func brokeredWaitTaskValueIsSensitive(key string, value any) bool {
 
 // Ensure WaitForTasksTool implements Tool
 var _ Tool = (*WaitForTasksTool)(nil)
-
-func truncateWaitTaskSummary(summary string) string {
-	if len(summary) <= maxWaitTaskSummaryChars {
-		return summary
-	}
-	return summary[:maxWaitTaskSummaryChars] + fmt.Sprintf(
-		"\n[summary truncated, full summary: %d chars]",
-		len(summary),
-	)
-}
 
 // getRetryInfo extracts retry count and max retries from task annotations.
 func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {

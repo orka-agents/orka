@@ -1,4 +1,4 @@
-# ACP v2 CRD hard cutover
+# Orka harness v2 CRD hard cutover
 
 Historical procedure, retired by [#568](https://github.com/orka-agents/orka/issues/568).
 The referenced v1 retirement helper and its tests have been removed. Current

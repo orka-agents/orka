@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -169,9 +171,59 @@ func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 }
 
+func TestCreateRepositoryMonitorRun_RejectsMonitorInConfigurationError(t *testing.T) {
+	for _, tt := range []struct {
+		name               string
+		phase              string
+		reason             string
+		observedGeneration int64
+		want               string
+	}{
+		{name: "reviewer agent not found", phase: "Error", reason: "ReviewerAgentNotFound", observedGeneration: 2, want: `repository monitor is not ready (ReviewerAgentNotFound): spec.agents.reviewer "gone" not found`},
+		{name: "store unavailable", phase: "Error", reason: "StoreUnavailable", observedGeneration: 2, want: "repository monitor is not ready (StoreUnavailable)"},
+		{name: "failed run can be retried", phase: "Error", reason: "RunFailed", observedGeneration: 2},
+		{name: "invalid schedule still runs manually", phase: "Error", reason: "InvalidSchedule", observedGeneration: 2},
+		{name: "error from an older generation", phase: "Error", reason: "ReviewerAgentNotFound", observedGeneration: 1},
+		{name: "ready monitor", phase: "Ready", reason: "RunSucceeded", observedGeneration: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status := metav1.ConditionFalse
+			if tt.phase == "Ready" {
+				status = metav1.ConditionTrue
+			}
+			monitor := &corev1alpha1.RepositoryMonitor{
+				ObjectMeta: metav1.ObjectMeta{Name: "repo-monitor", Namespace: "demo", Generation: 2},
+				Spec:       corev1alpha1.RepositoryMonitorSpec{RepoURL: monitorTestRepoURL, Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "gone"}}},
+				Status: corev1alpha1.RepositoryMonitorStatus{
+					Phase: tt.phase,
+					Conditions: []metav1.Condition{{
+						Type: "Ready", Status: status, Reason: tt.reason, ObservedGeneration: tt.observedGeneration,
+						Message: `spec.agents.reviewer "gone" not found in namespace "demo"`, LastTransitionTime: metav1.Now(),
+					}},
+				},
+			}
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, monitor)
+			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/runs?namespace=demo", nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			body := readRespBody(t, resp)
+			runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", Limit: 10})
+			require.NoError(t, err)
+			if tt.want == "" {
+				require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+				require.Len(t, runs, 1)
+				return
+			}
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
+			require.Contains(t, body, tt.want)
+			require.Empty(t, runs, "a run the controller will not process must not be queued")
+		})
+	}
+}
+
 func TestRepositoryMonitorHandlers_ListSubresourcesAcceptContinueToken(t *testing.T) {
 	app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
-	createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+	createRepositoryMonitorForHandlerTest(t, app)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	for _, run := range []store.MonitorRun{
@@ -253,7 +305,7 @@ func TestRepositoryMonitorHandlersRejectMutableValidationImage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
 			if tt.setup {
-				createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+				createRepositoryMonitorForHandlerTest(t, app)
 			}
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
@@ -301,7 +353,7 @@ func TestRepositoryMonitorHandlersRejectLegacyValidationCommands(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
 			if tt.setup {
-				createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+				createRepositoryMonitorForHandlerTest(t, app)
 			}
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
@@ -399,13 +451,69 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedPublishConfig(t *testing.T) {
 	}
 }
 
-func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
+func TestRepositoryMonitorMutationsRejectInvalidValues(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		field string
+		want  string
+	}{
+		{name: "negative stale review TTL", field: `"review":{"staleReviewTTL":"-1h"}`, want: "spec.review.staleReviewTTL must not be negative"},
+		{name: "not a cron expression", field: `"schedule":"every day"`, want: "spec.schedule is invalid"},
+		{name: "minute out of range", field: `"schedule":"61 * * * *"`, want: "spec.schedule is invalid"},
+		{name: "unknown time zone", field: `"schedule":"0 * * * *","timeZone":"Mars/Olympus"`, want: "spec.schedule is invalid"},
+		{name: "zero every interval", field: `"schedule":"@every 0s"`, want: "@every interval must be at least 1 minute"},
+		{name: "negative every interval", field: `"schedule":"@every -5m"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval", field: `"schedule":"@every 30s"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval in a time zone", field: `"schedule":"@every 1s","timeZone":"America/Los_Angeles"`, want: "@every interval must be at least 1 minute"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			existing := &corev1alpha1.RepositoryMonitor{
+				ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "demo"},
+				Spec:       corev1alpha1.RepositoryMonitorSpec{RepoURL: monitorTestRepoURL},
+			}
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, existing)
+			spec := fmt.Sprintf(`{"repoURL":%q,"agents":{"reviewer":{"name":"reviewer"}},%s}`, monitorTestRepoURL, tt.field)
+			for _, req := range []struct{ method, path, body string }{
+				{http.MethodPost, "/monitors/repositories", `{"name":"repo-monitor","namespace":"demo","spec":` + spec + `}`},
+				{http.MethodPut, "/monitors/repositories/existing?namespace=demo", `{"spec":` + spec + `}`},
+			} {
+				httpReq := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(httpReq)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, req.method)
+				require.Contains(t, readRespBody(t, resp), tt.want)
+			}
+			err := handlers.client.Get(context.Background(), crclient.ObjectKey{Namespace: "demo", Name: "repo-monitor"}, &corev1alpha1.RepositoryMonitor{})
+			require.True(t, apierrors.IsNotFound(err), "an invalid spec must not create a RepositoryMonitor")
+		})
+	}
+}
+
+func TestCreateRepositoryMonitor_AcceptsStandardSchedules(t *testing.T) {
 	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	for i, schedule := range []string{"*/15 * * * *", "@hourly", "@every 5m"} {
+		body := fmt.Sprintf(`{"name":"monitor-%d","namespace":"demo","spec":{"repoURL":%q,"schedule":%q,"timeZone":"America/Los_Angeles","agents":{"reviewer":{"name":"reviewer"}}}}`, i, monitorTestRepoURL, schedule)
+		req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, readRespBody(t, resp))
+	}
+}
+
+func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
+	forgeSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "forge", Namespace: "demo"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, forgeSecret)
 	body := fmt.Sprintf(`{
 		"name":"repo-monitor",
 		"namespace":"demo",
 		"spec":{
 			"repoURL":%q,
+			"forgeCredentialRef":{"name":"forge"},
 			"review":{"publish":{
 				"enabled":true,
 				"mode":"summary_with_inline_findings",
@@ -429,6 +537,70 @@ func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
 	require.Equal(t, "COMMENT", created.Spec.Review.Publish.Event)
 	require.NotNil(t, created.Spec.Review.Publish.PostPassed)
 	require.True(t, *created.Spec.Review.Publish.PostPassed)
+}
+
+func TestRepositoryMonitorHandlers_ControllerMutationsRequireForgeCredential(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		repair  bool
+		forge   *corev1.LocalObjectReference
+		want    int
+	}{
+		{name: "missing reference", enabled: true, want: http.StatusBadRequest},
+		{name: "blank reference", enabled: true, forge: &corev1.LocalObjectReference{Name: " "}, want: http.StatusBadRequest},
+		{name: "valid reference", enabled: true, forge: &corev1.LocalObjectReference{Name: "forge"}, want: http.StatusOK},
+		{name: "agentless repair missing reference", repair: true, want: http.StatusBadRequest},
+		{name: "agentless repair blank reference", repair: true, forge: &corev1.LocalObjectReference{Name: " "}, want: http.StatusBadRequest},
+		{name: "agentless repair valid reference", repair: true, forge: &corev1.LocalObjectReference{Name: "forge"}, want: http.StatusOK},
+		{name: "read-only publication disabled", want: http.StatusOK},
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		for _, tt := range tests {
+			t.Run(method+"/"+tt.name, func(t *testing.T) {
+				forgeSecret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "forge", Namespace: "demo"},
+					Data:       map[string][]byte{"token": []byte("test-token")},
+				}
+				app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, forgeSecret)
+				path := "/monitors/repositories"
+				want := tt.want
+				if method == http.MethodPut {
+					createRepositoryMonitorForHandlerTest(t, app)
+					path += "/repo-monitor?namespace=demo"
+				} else if want == http.StatusOK {
+					want = http.StatusCreated
+				}
+				spec := corev1alpha1.RepositoryMonitorSpec{
+					RepoURL:            monitorTestRepoURL,
+					ForgeCredentialRef: tt.forge,
+					Agents: corev1alpha1.RepositoryMonitorAgents{
+						Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+					},
+					Review: corev1alpha1.RepositoryMonitorReviewSpec{
+						Publish: corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: tt.enabled},
+					},
+				}
+				spec.Repair.Enabled = tt.repair
+				body, err := json.Marshal(CreateRepositoryMonitorRequest{Name: "repo-monitor", Namespace: "demo", Spec: spec})
+				require.NoError(t, err)
+				req := httptest.NewRequest(method, path, strings.NewReader(string(body)))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				require.Equal(t, want, resp.StatusCode)
+				if want == http.StatusBadRequest {
+					require.Contains(t, readRespBody(t, resp), "spec.forgeCredentialRef is required")
+				} else {
+					var monitor corev1alpha1.RepositoryMonitor
+					require.NoError(t, json.NewDecoder(resp.Body).Decode(&monitor))
+					require.Equal(t, tt.enabled, monitor.Spec.Review.Publish.Enabled)
+					require.Equal(t, tt.repair, monitor.Spec.Repair.Enabled)
+					require.Equal(t, tt.forge, monitor.Spec.ForgeCredentialRef)
+				}
+			})
+		}
+	}
 }
 
 func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
@@ -598,16 +770,16 @@ func TestCreateRepositoryMonitor_RejectsBuiltInReviewerSecretRef(t *testing.T) {
 	require.Contains(t, readRespBody(t, resp), "must omit spec.secretRef")
 }
 
-func createRepositoryMonitorForHandlerTest(t *testing.T, app *fiber.App, name, namespace string) {
+func createRepositoryMonitorForHandlerTest(t *testing.T, app *fiber.App) {
 	t.Helper()
 	body := fmt.Sprintf(`{
-		"name":%q,
-		"namespace":%q,
+		"name":"repo-monitor",
+		"namespace":"demo",
 		"spec":{
 			"repoURL":%q,
 			"agents":{"reviewer":{"name":"reviewer"}}
 		}
-	}`, name, namespace, monitorTestRepoURL)
+	}`, monitorTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
@@ -926,6 +1098,105 @@ func TestCreateRepositoryMonitorCommandEventQueuesRun(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(listResp.Body).Decode(&listed))
 	require.Len(t, listed.Items, 1)
+}
+
+func TestCreateRepositoryMonitorCommandEventAcceptsSameHeadFixCIRequests(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		nextNumber        int64
+		priorRunPhase     string
+		priorActionStatus string
+	}{
+		{name: "retry after failed run", nextNumber: 12, priorRunPhase: "failed", priorActionStatus: "failed"},
+		{name: "retry after succeeded run", nextNumber: 12, priorRunPhase: "succeeded", priorActionStatus: "completed"},
+		{name: "different target while first is active", nextNumber: 13},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+			createRepositoryMonitorForHandlerTest(t, app)
+			for _, number := range []int64{12, 13} {
+				require.NoError(t, handlers.repositoryMonitorStore.UpsertMonitorItem(t.Context(), &store.MonitorItem{
+					MonitorNamespace: "demo",
+					MonitorName:      "repo-monitor",
+					Kind:             "pull_request",
+					ItemKey:          fmt.Sprint(number),
+					Number:           number,
+					State:            "open",
+					HeadSHA:          "same-head",
+				}))
+			}
+			createCommand := func(number int64) store.CommandEvent {
+				t.Helper()
+				body := fmt.Sprintf(`{"kind":"pull_request","number":%d,"intent":"fix_ci","targetSHA":"same-head"}`, number)
+				req := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/commands?namespace=demo", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				responseBody := readRespBody(t, resp)
+				require.Equal(t, http.StatusCreated, resp.StatusCode, responseBody)
+				var command store.CommandEvent
+				require.NoError(t, json.Unmarshal([]byte(responseBody), &command))
+				require.Equal(t, "accepted", command.Status)
+				require.Equal(t, "api", command.Source)
+				require.Equal(t, "orka-api", command.Author)
+				require.Equal(t, "fix_ci", command.Intent)
+				require.Equal(t, number, command.Number)
+				require.Equal(t, "same-head", command.HeadSHA)
+				return command
+			}
+
+			first := createCommand(12)
+			runFilter := store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", Limit: 10}
+			runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), runFilter)
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
+			require.Equal(t, first.ID, runs[0].CommandEventID)
+			require.Equal(t, "queued", runs[0].Phase)
+			actionFilter := store.WorkActionFilter{Namespace: "demo", MonitorName: "repo-monitor", DesiredAction: "fix_ci", Limit: 10}
+			actions, _, err := handlers.repositoryMonitorStore.ListWorkActions(t.Context(), actionFilter)
+			require.NoError(t, err)
+			require.Len(t, actions, 1)
+			require.Equal(t, first.ID, actions[0].CommandEventID)
+			require.Equal(t, "queued", actions[0].Status)
+			if tt.priorRunPhase != "" {
+				// Model controller completion so an intentional retry is not active-work coalescing.
+				completedAt := time.Now()
+				first.Status = "processed"
+				require.NoError(t, handlers.repositoryMonitorStore.UpdateCommandEvent(t.Context(), &first))
+				runs[0].Phase = tt.priorRunPhase
+				runs[0].CompletedAt = &completedAt
+				require.NoError(t, handlers.repositoryMonitorStore.UpdateMonitorRun(t.Context(), &runs[0]))
+				actions[0].Status = tt.priorActionStatus
+				actions[0].Phase = tt.priorActionStatus
+				actions[0].CompletedAt = &completedAt
+				require.NoError(t, handlers.repositoryMonitorStore.UpdateWorkAction(t.Context(), &actions[0]))
+			}
+
+			second := createCommand(tt.nextNumber)
+			require.NotEqual(t, first.ID, second.ID)
+			require.NotEqual(t, first.DedupeKey, second.DedupeKey)
+			require.NotEqual(t, first.IdempotencyKey, second.IdempotencyKey)
+			commands, _, err := handlers.repositoryMonitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "demo", MonitorName: "repo-monitor", Intent: "fix_ci", Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, commands, 2)
+			runs, _, err = handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), runFilter)
+			require.NoError(t, err)
+			require.Len(t, runs, 2)
+			actionFilter.CommandEventID = second.ID
+			actions, _, err = handlers.repositoryMonitorStore.ListWorkActions(t.Context(), actionFilter)
+			require.NoError(t, err)
+			require.Len(t, actions, 1)
+			require.Equal(t, "queued", actions[0].Status)
+			require.NotEmpty(t, actions[0].RunID)
+			require.Empty(t, actions[0].DependsOnActionID)
+			queuedRun, err := handlers.repositoryMonitorStore.GetMonitorRun(t.Context(), "demo", actions[0].RunID)
+			require.NoError(t, err)
+			require.Equal(t, second.ID, queuedRun.CommandEventID)
+			require.Equal(t, "queued", queuedRun.Phase)
+			require.Equal(t, tt.nextNumber, queuedRun.TargetNumber)
+			require.Equal(t, "same-head", queuedRun.TargetSHA)
+		})
+	}
 }
 
 func TestCreateRepositoryMonitorCommandEventRequiresInventoryForIssuePlan(t *testing.T) {

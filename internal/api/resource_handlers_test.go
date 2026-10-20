@@ -626,7 +626,7 @@ func TestHandlers_CreateTask_KubernetesStyleManifest(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)
 	body := map[string]any{
-		"apiVersion": "core.orka.io/v1alpha1",
+		"apiVersion": "core.orka.ai/v1alpha1",
 		"kind":       "Task",
 		"metadata": map[string]any{
 			"name":        "manifest-task",

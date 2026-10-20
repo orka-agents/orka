@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -286,11 +287,42 @@ func TestMergeNewSessionMetaRejectsProtectedNamespace(t *testing.T) {
 	}
 }
 
+// Adapters send advisories as notices only to a client that advertises them;
+// otherwise the pinned codex-acp prefixes them to the agent's reply.
+func TestRuntimeSessionAdvertisesSessionNotices(t *testing.T) {
+	_, stateDir := newTestRuntimeSessionWithOptions(t, "immediate", nil, nil)
+	data, err := os.ReadFile(filepath.Join(stateDir, helperClientCapabilities))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capabilities struct {
+		Session struct {
+			Notices json.RawMessage `json:"notices"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(data, &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if string(capabilities.Session.Notices) != "{}" {
+		t.Fatalf("client capabilities = %s, want session.notices {}", data)
+	}
+}
+
 func newTestRuntimeSession(t *testing.T, mode string) *RuntimeSession {
 	return newTestRuntimeSessionWithMeta(t, mode, nil)
 }
 
 func newTestRuntimeSessionWithMeta(t *testing.T, mode string, newSessionMeta Meta) *RuntimeSession {
+	t.Helper()
+	session, _ := newTestRuntimeSessionWithOptions(t, mode, newSessionMeta, nil)
+	return session
+}
+
+// newTestRuntimeSessionWithOptions starts a helper-backed RuntimeSession and
+// returns it with the helper's writable state directory, which the helper uses
+// to persist its provider session across adapter restarts and to record
+// lifecycle markers such as a received session/close.
+func newTestRuntimeSessionWithOptions(t *testing.T, mode string, newSessionMeta Meta, extraEnv map[string]string) (*RuntimeSession, string) {
 	t.Helper()
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid == 0 {
@@ -304,14 +336,24 @@ func newTestRuntimeSessionWithMeta(t *testing.T, mode string, newSessionMeta Met
 	if err := os.Chmod(testRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	stateDir := filepath.Join(testRoot, "state")
+	if err := os.Mkdir(stateDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	paths, err := PrepareSessionPaths(filepath.Join(testRoot, "sessions"), "test-session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, err := BuildChildEnvironment(paths, EnvironmentConfig{Values: map[string]string{
-		"GO_WANT_ACP_HELPER": "1",
-		"ACP_HELPER_MODE":    mode,
-	}})
+	values := map[string]string{
+		"GO_WANT_ACP_HELPER":   "1",
+		"ACP_HELPER_MODE":      mode,
+		"ACP_HELPER_STATE_DIR": stateDir,
+	}
+	maps.Copy(values, extraEnv)
+	env, err := BuildChildEnvironment(paths, EnvironmentConfig{Values: values})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,9 +385,96 @@ func newTestRuntimeSessionWithMeta(t *testing.T, mode string, newSessionMeta Met
 		defer cancel()
 		_, _ = session.Delete(ctx)
 	})
-	return session
+	return session, stateDir
 }
 
+// Helper modes exercising the ACP v1 session lifecycle methods beyond
+// session/new and session/prompt.
+const (
+	// helperModeResume advertises session/resume and session/close, persists
+	// its provider session ID in the state directory, and honors a resume of
+	// exactly that session from a fresh process.
+	helperModeResume = "resume"
+	// helperModeResumeReject advertises session/resume but refuses every
+	// resume request, as an agent whose persisted thread is gone would.
+	helperModeResumeReject = "resume-reject"
+	// helperModeClose advertises only session/close and records receiving it.
+	helperModeClose = "close"
+	// helperExitAfterPromptEnv makes the helper exit right after answering a
+	// prompt, simulating an adapter crash while the session is idle.
+	helperExitAfterPromptEnv = "ACP_HELPER_EXIT_AFTER_PROMPT"
+	// helperHangFirstResumeEnv makes the first session/resume never answer,
+	// so the caller's context ends mid-restart; later resumes succeed.
+	helperHangFirstResumeEnv = "ACP_HELPER_HANG_FIRST_RESUME"
+	// helperBlockFirstResumeEnv parks the first resume until the test releases it.
+	helperBlockFirstResumeEnv   = "ACP_HELPER_BLOCK_FIRST_RESUME"
+	helperSkipResumeUpdateEnv   = "ACP_HELPER_SKIP_RESUME_UPDATE"
+	helperStateDirEnv           = "ACP_HELPER_STATE_DIR"
+	helperSessionStateFile      = "provider-session"
+	helperResumedStateFile      = "resumed"
+	helperResumeHungFile        = "resume-hung"
+	helperResumeBlockedFile     = "resume-blocked"
+	helperResumeReleaseFile     = "resume-release"
+	helperPromptAfterResumeFile = "prompt-after-resume"
+	helperClosedStateFile       = "closed"
+	helperClientCapabilities    = "client-capabilities"
+)
+
+// helperCreationResumeMode reports the modes that resume a provider session
+// while the runtime session is created, instead of after an idle adapter exit.
+func helperCreationResumeMode(mode string) bool {
+	switch mode {
+	case "resume-success", "resume-error", "resume-wrong-id", "resume-unsupported":
+		return true
+	default:
+		return false
+	}
+}
+
+func helperSessionCapabilities(mode string) map[string]any {
+	switch mode {
+	case "resume-success", "resume-error", "resume-wrong-id":
+		return map[string]any{SessionCapabilityResume: true}
+	case "resume-unsupported":
+		return map[string]any{SessionCapabilityResume: false}
+	case helperModeResume:
+		return map[string]any{SessionCapabilityResume: map[string]any{}, SessionCapabilityClose: map[string]any{}}
+	case helperModeResumeReject:
+		return map[string]any{SessionCapabilityResume: map[string]any{}}
+	case helperModeClose:
+		return map[string]any{SessionCapabilityClose: map[string]any{}}
+	default:
+		return nil
+	}
+}
+
+func helperStatePath(name string) string {
+	dir := os.Getenv(helperStateDirEnv)
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, name)
+}
+
+func writeHelperState(name, value string) {
+	if path := helperStatePath(name); path != "" {
+		_ = os.WriteFile(path, []byte(value), 0o644)
+	}
+}
+
+func readHelperState(name string) string {
+	path := helperStatePath(name)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+//nolint:gocyclo // Helper process dispatches every scripted ACP scenario in one switch.
 func TestACPHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_ACP_HELPER") != "1" {
 		return
@@ -354,6 +483,7 @@ func TestACPHelperProcess(t *testing.T) {
 	writer := bufio.NewWriter(os.Stdout)
 	defer func() { _ = writer.Flush() }()
 	mode := os.Getenv("ACP_HELPER_MODE")
+	exitAfterPrompt := os.Getenv(helperExitAfterPromptEnv) == "1"
 	var promptID json.RawMessage
 	var providerSession = "provider-test-session"
 	for {
@@ -368,11 +498,28 @@ func TestACPHelperProcess(t *testing.T) {
 		}
 		switch message.Method {
 		case MethodInitialize:
+			var initialize struct {
+				ClientCapabilities json.RawMessage `json:"clientCapabilities"`
+			}
+			if err := json.Unmarshal(message.Params, &initialize); err == nil {
+				writeHelperState(helperClientCapabilities, string(initialize.ClientCapabilities))
+			}
+			capabilities := map[string]any{"loadSession": true, "mcpCapabilities": map[string]bool{"http": true}}
+			if sessionCapabilities := helperSessionCapabilities(mode); sessionCapabilities != nil {
+				capabilities["sessionCapabilities"] = sessionCapabilities
+			}
 			writeACPHelper(writer, map[string]any{
 				"jsonrpc": "2.0", "id": rawIDValue(message.ID),
-				"result": map[string]any{"protocolVersion": ProtocolVersion, "agentInfo": map[string]any{"name": "fake", "version": "1"}},
+				"result": map[string]any{
+					"protocolVersion": ProtocolVersion, "agentInfo": map[string]any{"name": "fake", "version": "1"},
+					"agentCapabilities": capabilities,
+				},
 			})
 		case MethodSessionNew:
+			if helperCreationResumeMode(mode) {
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "session/new fallback forbidden"}})
+				continue
+			}
 			if mode == "metadata" {
 				var request NewSessionRequest
 				if err := json.Unmarshal(message.Params, &request); err != nil || !validTestNewSessionMetadata(request.Meta) {
@@ -383,20 +530,83 @@ func TestACPHelperProcess(t *testing.T) {
 					continue
 				}
 			}
+			writeHelperState(helperSessionStateFile, providerSession)
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{"sessionId": providerSession}})
+		case MethodSessionResume:
+			var request ResumeSessionRequest
+			if helperCreationResumeMode(mode) {
+				cwd, _ := os.Getwd()
+				if mode == "resume-error" || json.Unmarshal(message.Params, &request) != nil ||
+					request.CWD != cwd || len(request.MCPServers) != 1 || request.MCPServers[0].Name != "current-mcp" {
+					writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "resume rejected"}})
+					continue
+				}
+				providerSession = request.SessionID
+				response := map[string]any{}
+				if mode == "resume-wrong-id" {
+					response["sessionId"] = "another-thread"
+				}
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": response})
+				continue
+			}
+			if err := json.Unmarshal(message.Params, &request); err != nil || mode == helperModeResumeReject ||
+				request.SessionID == "" || request.SessionID != readHelperState(helperSessionStateFile) ||
+				request.CWD == "" || request.Meta[sessionMetaRuntimeSessionID] != "test-session" {
+				writeACPHelper(writer, map[string]any{
+					"jsonrpc": "2.0", "id": rawIDValue(message.ID),
+					"error": map[string]any{"code": -32602, "message": "cannot resume session"},
+				})
+				continue
+			}
+			if os.Getenv(helperHangFirstResumeEnv) == "1" && readHelperState(helperResumeHungFile) == "" {
+				writeHelperState(helperResumeHungFile, "1")
+				continue
+			}
+			if os.Getenv(helperBlockFirstResumeEnv) == "1" && readHelperState(helperResumeBlockedFile) == "" {
+				writeHelperState(helperResumeBlockedFile, strconv.Itoa(os.Getpid()))
+				for readHelperState(helperResumeReleaseFile) == "" {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+			writeHelperState(helperResumedStateFile, "1")
+			// Real agents (Codex, Claude, OpenCode) send an
+			// available_commands_update after a resume; it must not reach any
+			// prompt stream.
+			if os.Getenv(helperSkipResumeUpdateEnv) != "1" {
+				writeACPHelper(writer, map[string]any{
+					"jsonrpc": "2.0", "method": MethodSessionUpdate,
+					"params": map[string]any{"sessionId": providerSession, "update": map[string]any{"sessionUpdate": "available_commands_update", "availableCommands": []any{}}},
+				})
+			}
+			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
+		case MethodSessionClose:
+			writeHelperState(helperClosedStateFile, "1")
+			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
 		case MethodSessionPrompt:
+			if readHelperState(helperResumedStateFile) != "" {
+				writeHelperState(helperPromptAfterResumeFile, "1")
+			}
 			promptID = append(promptID[:0], message.ID...)
 			writeACPHelper(writer, map[string]any{
 				"jsonrpc": "2.0", "method": MethodSessionUpdate,
 				"params": map[string]any{"sessionId": providerSession, "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "working"}}},
 			})
+			if exitAfterPrompt {
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonEndTurn}})
+				os.Exit(0)
+			}
 			switch mode {
+			case helperModeResume, helperModeResumeReject, helperModeClose:
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonEndTurn}})
 			case "permission":
 				writeACPHelper(writer, map[string]any{
 					"jsonrpc": "2.0", "id": 50, "method": MethodRequestPermission,
 					"params": map[string]any{"sessionId": providerSession, "toolCall": map[string]any{"toolCallId": "tool-1", "title": "test"}, "options": []map[string]any{{"optionId": "allow", "name": "Allow", "kind": "allow_once"}}},
 				})
-			case "immediate":
+			case "immediate", "delayed-complete", "resume-success":
+				if mode == "delayed-complete" {
+					time.Sleep(100 * time.Millisecond)
+				}
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonEndTurn}})
 			case "rpc-error":
 				writeACPHelper(writer, map[string]any{
@@ -407,6 +617,9 @@ func TestACPHelperProcess(t *testing.T) {
 				os.Exit(0)
 			}
 		case MethodSessionCancel:
+			if mode == "ignore-cancel" {
+				continue
+			}
 			if len(promptID) > 0 {
 				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(promptID), "result": map[string]any{"stopReason": StopReasonCancelled}})
 				promptID = nil

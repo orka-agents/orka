@@ -1,95 +1,80 @@
 ---
 slug: /release-status
-description: "Historical release differences and the current source installation."
+description: "Where to get Orka releases and what each release includes."
 ---
 
 # Release status
 
-**These docs describe `main`.** The historical **v0.1.3** release predates the
-current harness v2 execution model. The comparison below records that difference;
-its older execution protocol is no longer supported by current source.
+Get published versions from [GitHub Releases](https://github.com/orka-agents/orka/releases).
+For a new installation, follow [Install Orka](../operations/installation.md).
 
-That gap is deliberate — `main` is where the current work lands — but it means you can
-follow a page here exactly and get "unknown field" or "no matches for kind" from a v0.1.3
-cluster. This page tells you which one you are on and what the difference is.
+## Release files
 
-## Which one am I running?
+The release workflow publishes these files. Replace `<version>` with a version
+number such as `0.3.0`:
+
+| File | What it contains |
+| --- | --- |
+| `orka-<version>.tgz` | The Helm chart used to install Orka |
+| `orka_v<version>_linux_amd64.tar.gz` | The CLI for Linux on x86-64 |
+| `orka_v<version>_linux_arm64.tar.gz` | The CLI for Linux on ARM64 |
+| `orka_v<version>_darwin_amd64.tar.gz` | The CLI for macOS on Intel |
+| `orka_v<version>_darwin_arm64.tar.gz` | The CLI for macOS on Apple silicon |
+| `orka_v<version>_windows_amd64.zip` | The CLI for Windows on x86-64 |
+| `orka_v<version>_checksums.txt` | SHA-256 checksums for the five CLI archives |
+| `orka_v<version>_checksums.txt.bundle` | The keyless Cosign signature and verification material for the checksum file |
+| `candidate.json` | The version, source commit, image digests, and SHA-256 hashes for the chart and CLI assets |
+| `qualification.json` | The release test run and checksums for its reports |
+| `acceptance.json` | Results for installation, restart, agent, publication, and cleanup tests |
+
+The chart uses release version tags by default. `candidate.json` records the
+exact image digests and SHA-256 hashes for the chart, CLI archives, checksum file,
+and signature bundle. Use these to inspect a release or pin images. See
+[CLI installation](./cli.md#installation) to choose a download and verify it.
+The chart is also available from Orka's Helm repository
+at `https://orka-agents.github.io/orka/charts`.
+
+## Check your installation {#which-one-am-i-running}
+
+For a Helm release named `orka` in `orka-system`, check the chart version,
+controller image, and CRDs. Use the same cluster connection name as your installation:
 
 ```bash
-# Neither install creates a Deployment named plain `orka`: a Helm release named `orka`
-# creates `orka-controller`, and the release manifest creates `orka-controller-manager`.
-kubectl -n orka-system get deploy -l app.kubernetes.io/name=orka \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[0].image}{"\n"}{end}'
-
-# Orka CRDs carry no common label, so count them by group instead.
-kubectl get crd -o name | grep -c '\.orka\.ai$'
+export ORKA_CONTEXT='<your-kubeconfig-context>'
+helm list --kube-context "${ORKA_CONTEXT}" --namespace orka-system
+kubectl --context "${ORKA_CONTEXT}" -n orka-system get deploy orka-controller \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+kubectl --context "${ORKA_CONTEXT}" get crd -o name | grep -c '\.orka\.ai$'
 ```
 
-| CRDs | You have |
-| --- | --- |
-| 17 | v0.1.3 |
-| 27 | a build from `main` |
-| 12 | a stale `charts/orka/` snapshot from the repo root — see the warning below |
+Compare the CRDs with those in your release's chart. Development CRDs are
+packaged separately. A CRD count alone does not identify the running version
+because Kubernetes keeps CRDs after an uninstall. Check the chart version and
+image too.
 
-## What v0.1.3 does not have
+## Build from source {#installing-main}
 
-The ACP execution path and runtime pools landed after v0.1.3. That release already
-included the `AgentRuntime` CRD and the `orka.harness.v1` contract for external runtimes.
+Follow [Build from source](../development/build-from-source.md)
+for development. This builds your own images; ordinary pushes to `main` do not
+publish release images.
 
-| | v0.1.3 | `main` |
-| --- | --- | --- |
-| Container tasks (`type: container`) | Yes | Yes |
-| Native AI tasks (`type: ai`) | Yes | Yes |
-| Chat and compatibility APIs | Yes | Yes |
-| Repository monitors, scans, gateways | Yes | Yes |
-| Coding-agent tasks (`type: agent`) | Yes, on a per-Task Job with a harness wrapper | Yes |
-| Coding agents over [ACP](glossary.md#running-coding-agents) | **No** | Yes |
-| `RuntimePool` / `RuntimeSession` | **No** | Yes |
-| `PromptAttempt`, `ControllerEpoch`, `Publication`, `BranchClaim`, `ExternalEffect` | **No** | Yes |
-| `RuntimeProviderConfig`, `RuntimeWorkspaceProfile`, `RuntimeSessionControl` | **No** | Yes |
-| [Installation identity](../operations/harness-modes.md) (`orka.ai/controller-mode`) | **No** | Yes |
-| `--watch-namespace` | Optional; empty watches the whole cluster | **Required** |
+Use `manifest_staging/charts/orka`, which `make manifests` generates from current
+source. The root `charts/orka` and `deploy` directories are release snapshots
+and may lag behind the source code.
 
-Ten CRDs are new on `main`. If a page here mentions a `RuntimePool`, a supervisor, a
-prompt attempt, or clean-room publication, it does not apply to v0.1.3. v0.1.3 does run
-`type: agent` Tasks — what it lacks is the ACP execution path that replaced the older
-per-Task Job.
+## How a release is published {#release-publication}
 
-## Historical installation packages
+1. A maintainer starts **Prepare Release** from `main` and enters the version.
+2. The workflow prepares a release branch, builds the images, chart, and CLI
+   archives, and waits for approval to run the release tests.
+3. After the tests pass, a maintainer approves publication. The workflow tags
+   the tested commit and publishes the images, chart, and GitHub Release files.
 
-The v0.1.3 packages contain the older execution model. They are historical
-artifacts, not the installation described by this documentation. Current source
-has no protocol migration or conversion of their Tasks and Sessions.
+See [Release automation](../development/release-qualification.md) for the
+maintainer instructions and test details.
 
-## Installing `main`
+## Support
 
-There is no published image for `main` — the release workflow is the only thing that
-builds and pushes images, and it is tag-triggered. To run current features you build the
-images yourself. [Getting started](../getting-started.md) has the full path.
-
-:::warning[Do not install from `charts/orka/` or `deploy/orka.yaml` at the repo root]
-Those are *promoted release snapshots*, refreshed only during release preparation. On
-`main` today they still hold v0.1.1 — `charts/orka/Chart.yaml` says `0.1.1`, its values
-deploy `ghcr.io/orka-agents/orka:0.1.1`, and it ships 12 CRDs. It is internally consistent,
-so it installs and runs; it just gives you a release that is two versions old, without
-saying so.
-
-Build from `manifest_staging/charts/orka/` instead — that is the chart regenerated from
-current source by `make manifests`.
-:::
-
-## Version support
-
-Orka is pre-1.0.
-
-- CRD schemas may change between minor releases. Diff the CRDs before upgrading, and follow
-  [Upgrading](../operations/upgrading.md) — Helm will not update CRDs for you.
-- Only the latest release gets fixes. There are no patch backports to older tags.
-- No release is supported for production use yet.
-
-There are currently no GitHub Release entries and no written release notes: `release.yml`
-publishes images and the Helm repository on a `v*` tag, and nothing else. To see what
-changed between two versions, compare the tags directly —
-[github.com/orka-agents/orka/tags](https://github.com/orka-agents/orka/tags) lists them,
-and `git diff v0.1.2..v0.1.3 -- config/crd/bases` shows the schema changes that matter
-most for an upgrade.
+Orka is pre-1.0 and is not yet supported for production use.
+See [Upgrading](../operations/upgrading.md) before updating an installation
+or planning a backup restore.

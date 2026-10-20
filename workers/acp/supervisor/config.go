@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspacedelta"
@@ -33,6 +35,7 @@ type ProviderProfile struct {
 }
 
 type ProviderSessionProjection struct {
+	Instructions   *acp.InstructionProjection
 	AdditionalArgs []string
 	Environment    map[string]string
 	NewSessionMeta acp.Meta
@@ -62,10 +65,6 @@ type AgentDiagnosticFilter struct {
 	Startup func(text string) (summary string, ok bool)
 }
 
-type ArtifactUploader interface {
-	UploadWorkspaceDelta(context.Context, harnessv2.CreateWorkspaceDeltaRequest, []byte, string) (harnessv2.ArtifactReference, error)
-}
-
 type WorkspaceMaterializer interface {
 	Materialize(context.Context, harnessv2.CreateRuntimeSessionRequest, string) error
 }
@@ -77,6 +76,9 @@ func (f WorkspaceMaterializerFunc) Materialize(ctx context.Context, request harn
 }
 
 type Config struct {
+	// Tracer belongs to this supervisor. Nil disables instrumentation. It never
+	// enters the provider process configuration or environment.
+	Tracer        trace.Tracer
 	ListenAddress string
 	Fence         harnessv2.Fence
 	Capabilities  harnessv2.CapabilitiesResponse
@@ -104,7 +106,7 @@ type Config struct {
 	ProviderProxy         ProviderProxyConfig
 	MCPBroker             MCPBroker
 	WorkspaceMaterializer WorkspaceMaterializer
-	ArtifactUploader      ArtifactUploader
+	ArtifactUploader      *RemoteArtifactUploader
 	DeltaOptions          workspacedelta.Options
 	// E2EPromptWriteFaultRecorder persists direct-pool fault consumption
 	// outside the runtime Pod so replacement cannot re-arm the test fault.
@@ -120,6 +122,15 @@ type Config struct {
 	// recording the operation. The one-shot record survives runtime and
 	// supervisor recreation so live conformance exposes an accidental retry.
 	E2EPromptWriteAmbiguityMarker string
+
+	// Toolboxes are the frozen profile toolboxes bound into this Pod, in
+	// declared order. Their PATH folders are appended after the default child
+	// PATH. The supervisor never opens or runs anything inside them.
+	Toolboxes []harnessv2.RuntimeToolbox
+	// ToolboxMountMethod is how the controller bound the toolboxes. With
+	// imageVolume the files were never sanitized, so startup runs the
+	// unprivileged architecture check.
+	ToolboxMountMethod string
 }
 
 func (c Config) Validate() error {
@@ -141,6 +152,47 @@ func (c Config) Validate() error {
 	if c.Capabilities.ProfileDigestSchemaVersion != c.Fence.ProfileDigestSchemaVersion {
 		return fmt.Errorf("capabilities and fence profile digest schema versions differ")
 	}
+	if err := c.validateProvider(); err != nil {
+		return err
+	}
+	if c.Capabilities.SupportsFoundryRecovery && (c.Provider.Kind != providerKindFoundry || !c.RequireCapabilities) {
+		return fmt.Errorf("foundry recovery requires a Foundry provider and operation capabilities")
+	}
+	if len(c.ControllerBearerToken) < 32 {
+		return fmt.Errorf("controller bearer token must be at least 32 bytes")
+	}
+	if c.RequireCapabilities && len(c.CapabilitySecret) < harnessv2.MinCapabilitySecretBytes {
+		return fmt.Errorf("operation capability secret must be at least %d bytes", harnessv2.MinCapabilitySecretBytes)
+	}
+	if err := c.validateWorkspaceDirectories(); err != nil {
+		return err
+	}
+	if c.UIDAllocator == nil {
+		return fmt.Errorf("UID allocator is required")
+	}
+	requiredIdentityCapacity := uint64(c.Capabilities.Limits.MaxResidentSessions) + sessionIdentityExhaustionReserve
+	if uint64(c.UIDAllocator.Capacity()) < requiredIdentityCapacity {
+		return fmt.Errorf("UID allocator capacity must provide at least %d resident identities plus the exhaustion reserve", c.Capabilities.Limits.MaxResidentSessions)
+	}
+	if c.WorkspaceMaterializer == nil {
+		return fmt.Errorf("workspace materializer is required")
+	}
+	if _, _, err := c.ProviderProxy.normalized(); err != nil {
+		return err
+	}
+	if c.MCPBroker == nil {
+		return fmt.Errorf("controller MCP broker is required")
+	}
+	if c.InitializeTimeout < 0 || c.PermissionTimeout < 0 || c.CancelGrace < 0 {
+		return fmt.Errorf("runtime timeouts must be non-negative")
+	}
+	if err := c.validatePromptWriteFault(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c Config) validateProvider() error {
 	if strings.TrimSpace(c.Provider.Kind) == "" || strings.TrimSpace(c.Provider.Model) == "" {
 		return fmt.Errorf("provider kind and model are required")
 	}
@@ -156,12 +208,10 @@ func (c Config) Validate() error {
 	if got := c.Capabilities.AdapterDigests[c.Provider.AdapterName]; got == "" || got != c.Provider.AdapterDigest {
 		return fmt.Errorf("provider adapter digest does not match advertised capability")
 	}
-	if len(c.ControllerBearerToken) < 32 {
-		return fmt.Errorf("controller bearer token must be at least 32 bytes")
-	}
-	if c.RequireCapabilities && len(c.CapabilitySecret) < harnessv2.MinCapabilitySecretBytes {
-		return fmt.Errorf("operation capability secret must be at least %d bytes", harnessv2.MinCapabilitySecretBytes)
-	}
+	return nil
+}
+
+func (c Config) validateWorkspaceDirectories() error {
 	if c.SessionBaseDir == "" || !filepath.IsAbs(c.SessionBaseDir) {
 		return fmt.Errorf("session base directory must be absolute")
 	}
@@ -186,25 +236,10 @@ func (c Config) Validate() error {
 			return fmt.Errorf("session base directory must not equal or be beneath the durable workspace directory")
 		}
 	}
-	if c.UIDAllocator == nil {
-		return fmt.Errorf("UID allocator is required")
-	}
-	requiredIdentityCapacity := uint64(c.Capabilities.Limits.MaxResidentSessions) + sessionIdentityExhaustionReserve
-	if uint64(c.UIDAllocator.Capacity()) < requiredIdentityCapacity {
-		return fmt.Errorf("UID allocator capacity must provide at least %d resident identities plus the exhaustion reserve", c.Capabilities.Limits.MaxResidentSessions)
-	}
-	if c.WorkspaceMaterializer == nil {
-		return fmt.Errorf("workspace materializer is required")
-	}
-	if _, _, err := c.ProviderProxy.normalized(); err != nil {
-		return err
-	}
-	if c.MCPBroker == nil {
-		return fmt.Errorf("controller MCP broker is required")
-	}
-	if c.InitializeTimeout < 0 || c.PermissionTimeout < 0 || c.CancelGrace < 0 {
-		return fmt.Errorf("runtime timeouts must be non-negative")
-	}
+	return nil
+}
+
+func (c Config) validatePromptWriteFault() error {
 	if marker := c.E2EPromptWriteAmbiguityMarker; marker != "" {
 		if strings.TrimSpace(marker) != marker || len(marker) > 128 ||
 			!strings.HasPrefix(marker, "ORKA_E2E_") || !strings.HasSuffix(marker, "_OK") {

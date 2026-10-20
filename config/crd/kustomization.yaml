@@ -19,6 +19,8 @@ resources:
 - bases/core.orka.ai_repositorymonitors.yaml
 - bases/core.orka.ai_substrateactorpools.yaml
 - bases/core.orka.ai_outboundaccesspolicies.yaml
+- bases/core.orka.ai_connectorproviders.yaml
+- bases/core.orka.ai_connections.yaml
 - bases/gateway.orka.ai_gatewayclasses.yaml
 - bases/gateway.orka.ai_gateways.yaml
 - bases/gateway.orka.ai_gatewaybindings.yaml
@@ -27,10 +29,6 @@ resources:
 - bases/workspace.orka.ai_executionworkspaceclasses.yaml
 - bases/workspace.orka.ai_executionworkspaces.yaml
 - bases/workspace.orka.ai_executionworkspacecheckpoints.yaml
-- bases/acp.workspace.orka.ai_runtimeproviderconfigs.yaml
-- bases/acp.workspace.orka.ai_runtimeworkspaceprofiles.yaml
-# Development-only fake.workspace.orka.ai CRDs are composed separately by
-# config/development/fake-workspace-provider.
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

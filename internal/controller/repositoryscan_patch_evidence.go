@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/publisher"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -633,23 +634,19 @@ func repositoryScanDiffFromPublishedCommit(files []repositoryScanCommitFileRespo
 }
 
 const (
-	// repositoryScanGenericPublicationTitlePrefix is the publisher's default
-	// pull request title; a remediation PR still carrying it has not been
-	// decorated with the finding yet.
-	repositoryScanGenericPublicationTitlePrefix = "Orka publication generation "
-	repositoryScanIntentMarkerPrefix            = "<!-- orka.publisher.pr-intent.v1 key="
-	repositoryScanPullRequestBodyField          = "body"
-	repositoryScanPullRequestTitleField         = "title"
+	repositoryScanIntentMarkerPrefix    = publisher.PullRequestMarkerPrefix + "intent.v1 key="
+	repositoryScanPullRequestBodyField  = "body"
+	repositoryScanPullRequestTitleField = "title"
 )
 
 // decorateSecurityPatchPullRequest gives the publisher-created remediation
 // pull request a reviewer-facing title and body derived from the finding and
 // the verified patch summary. It is best-effort and idempotent: only a PR
-// that still carries the publisher's generic title is updated, the
-// publisher's intent marker is preserved as the final body line so the PR
+// that still carries its exact publisher-created title and body is updated.
+// The publisher's reconciliation markers remain at the end so the PR
 // remains recognizable to the clean-room publisher, and any failure is
 // logged without affecting the proposal.
-func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, findingID string, prNumber int, summaryArtifact string) {
+func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, findingID string, prNumber int, generation int64, summaryArtifact string) {
 	logger := log.FromContext(ctx).WithValues("namespace", task.Namespace, "task", task.Name, "finding", findingID, "pullRequest", prNumber)
 	if prNumber <= 0 || r.SecurityStore == nil || r.ArtifactStore == nil {
 		return
@@ -685,32 +682,34 @@ func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, url.PathEscape(owner), url.PathEscape(repository), prNumber)
 	client := r.repositoryScanHTTPClient()
 	current, ok := r.readRemediationPullRequest(ctx, client, endpoint, token, logger)
-	if !ok || !strings.HasPrefix(strings.TrimSpace(current.Title), repositoryScanGenericPublicationTitlePrefix) {
+	if !ok {
 		return
 	}
-	marker := ""
-	for line := range strings.SplitSeq(current.Body, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), repositoryScanIntentMarkerPrefix) {
-			marker = strings.TrimSpace(line)
-		}
-	}
-	if marker == "" {
-		logger.Info("skipping remediation pull request decoration", "reason", "publisher intent marker missing")
+	title, markers, ok := repositoryScanPublisherPresentation(task, generation, current)
+	if !ok {
+		logger.Info("skipping remediation pull request decoration", "reason", "publisher title or body is not the default")
 		return
 	}
-	generation := strings.TrimPrefix(strings.TrimSpace(current.Title), repositoryScanGenericPublicationTitlePrefix)
-	publisherBody := "Created by the Orka clean-room workspace publisher.\n\nPublication generation: " + generation + "\n\n" + marker
-	if strings.TrimSpace(current.Body) != publisherBody {
-		logger.Info("skipping remediation pull request decoration", "reason", "publisher body has been edited")
+	if finding != nil && strings.TrimSpace(finding.Title) != "" {
+		title = security.RemediationPullRequestTitle(finding)
+	}
+	body := current.Body
+	if task.Spec.Workspace == nil || task.Spec.Workspace.PRBody == "" {
+		body = security.RemediationPullRequestBody(finding, summary) + "\n\nTask: `" + task.Namespace + "/" + task.Name + "`"
+		body = (publisher.PullRequestIntent{Body: body, PublicationGeneration: generation}).Description() + "\n\n" + markers
+	}
+	if title == current.Title && body == current.Body {
 		return
 	}
-	title := security.RemediationPullRequestTitle(finding)
-	body := security.RemediationPullRequestBody(finding, summary) + "\n\n" + marker
-	if security.LooksLikeSecret(title) || security.LooksLikeSecret(body) {
+	if security.LooksLikeSecret(title) || (body != current.Body && security.LooksLikeSecret(body)) {
 		logger.Info("skipping remediation pull request decoration", "reason", "rendered text looks like a secret")
 		return
 	}
-	payload, err := json.Marshal(map[string]string{repositoryScanPullRequestTitleField: title, repositoryScanPullRequestBodyField: body})
+	update := map[string]string{repositoryScanPullRequestTitleField: title}
+	if body != current.Body {
+		update[repositoryScanPullRequestBodyField] = body
+	}
+	payload, err := json.Marshal(update)
 	if err != nil {
 		return
 	}
@@ -734,6 +733,52 @@ func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.
 		return
 	}
 	logger.Info("remediation pull request decorated with the finding")
+}
+
+// repositoryScanPublisherPresentation recognizes only unedited publisher text,
+// including publications made before Task-authored presentation was supported.
+func repositoryScanPublisherPresentation(task *corev1alpha1.Task, generation int64, current repositoryScanPullRequestResponse) (string, string, bool) {
+	// An explicit Task title belongs to its author. A body-only override still
+	// gets the finding title, but decoration must leave that body untouched.
+	if task.Spec.Workspace != nil && task.Spec.Workspace.PRTitle != "" {
+		return "", "", false
+	}
+	intent := withTaskPullRequestMetadata(publisher.PullRequestIntent{PublicationGeneration: generation}, task)
+	legacy := publisher.PullRequestIntent{PublicationGeneration: generation}
+	legacy.Title = publisher.DefaultPullRequestTitle("", generation)
+	_, markers, ok := strings.Cut(current.Body, "\n\n"+repositoryScanIntentMarkerPrefix)
+	if !ok {
+		return "", "", false
+	}
+	markers = repositoryScanIntentMarkerPrefix + markers
+	if !repositoryScanPublisherMarkersValid(markers) {
+		return "", "", false
+	}
+	if (current.Title != intent.Title || current.Body != intent.Description()+"\n\n"+markers) &&
+		(current.Title != legacy.Title || current.Body != legacy.Description()+"\n\n"+markers) {
+		return "", "", false
+	}
+	return intent.Title, markers, true
+}
+
+// Accept only the publisher's footer, with its optional Session ownership
+// marker last. Additional text is a human edit, not disposable metadata.
+func repositoryScanPublisherMarkersValid(markers string) bool {
+	lines := strings.Split(markers, "\n\n")
+	prefixes := []string{repositoryScanIntentMarkerPrefix, publisher.PullRequestMarkerPrefix + "session.v1 key="}
+	if len(lines) > len(prefixes) {
+		return false
+	}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, prefixes[i]) || !strings.HasSuffix(line, " -->") {
+			return false
+		}
+		key := strings.TrimSuffix(strings.TrimPrefix(line, prefixes[i]), " -->")
+		if store.ValidateCanonicalDigest("publisher marker", key) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 type repositoryScanPullRequestResponse struct {

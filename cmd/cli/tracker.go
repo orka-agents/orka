@@ -187,12 +187,12 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 
 	// Parse agent name from args
 	var args map[string]any
-	agentName := "agent"
+	agentName := cliTaskTypeAgent
 	taskName := ""
 	prompt := ""
 	if err := json.Unmarshal(data.Args, &args); err == nil {
 		// delegate_task uses "agent", create_agent_task uses "agentRef"
-		if name, ok := args["agent"].(string); ok {
+		if name, ok := args[cliTaskTypeAgent].(string); ok {
 			agentName = name
 		} else if name, ok := args["agentRef"].(string); ok {
 			agentName = name

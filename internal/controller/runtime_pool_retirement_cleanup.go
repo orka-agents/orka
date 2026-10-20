@@ -23,10 +23,7 @@ func (r *RuntimePoolReconciler) recordDrainedRuntimePoolTaskCleanup(
 	if !runtimePoolRetirementFenceMatches(pool, active, status) {
 		return fmt.Errorf("%w: RuntimePool retirement requires exact authenticated quiescence", store.ErrConflict)
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	var tasks corev1alpha1.TaskList
 	if err := reader.List(ctx, &tasks, client.InNamespace(pool.Namespace)); err != nil {
 		return fmt.Errorf("list Tasks before RuntimePool retirement: %w", err)
@@ -42,7 +39,7 @@ func (r *RuntimePoolReconciler) recordDrainedRuntimePoolTaskCleanup(
 		if runtimeSessionCleanupCompleteForUID(task, taskUID) {
 			continue
 		}
-		binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+		binding := executionBinding(task)
 		// Standalone Tasks freeze the profile in AgentExecutionBinding. The
 		// additional session profile digest is populated for Session reuse.
 		sessionProfileMatches := execution.RuntimeSessionProfileDigest == active.ProfileDigest ||

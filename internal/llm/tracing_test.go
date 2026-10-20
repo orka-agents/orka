@@ -596,7 +596,9 @@ func TestTracingProviderCompleteErrorPreservesWrappedProviderTelemetryName(t *te
 		telemetryName: "azure-openai",
 		err:           &ProviderError{Provider: "azure-openai", Message: "rate limited", StatusCode: 401},
 	}
-	tp := NewTracingProvider(NewRetryProvider(inner, 1))
+	rp := NewRetryProvider(inner)
+	rp.maxRetries = 1
+	tp := NewTracingProvider(rp)
 
 	_, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"})
 	if err == nil {

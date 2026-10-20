@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
@@ -8,11 +9,32 @@ import { PageHeader } from '@/components/layout/page-header'
 import { Trash2 } from 'lucide-react'
 import { useSessionListPages, useDeleteSession } from '@/hooks/use-sessions'
 import { timeAgo } from '@/lib/time'
+import { toast } from 'sonner'
 
 export function SessionList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useSessionListPages()
   const deleteSession = useDeleteSession()
   const sessions = error ? [] : (data?.pages ?? []).flatMap((page) => page.items)
+
+  // The shared mutation only remembers its latest variables, so track every
+  // in-flight delete by name to block a repeat while an earlier one runs.
+  const [pendingDeletes, setPendingDeletes] = useState<ReadonlySet<string>>(() => new Set())
+  const pendingRef = useRef(new Set<string>())
+  const deletePending = (name: string) => pendingDeletes.has(name)
+  const handleDelete = async (name: string) => {
+    if (pendingRef.current.has(name) || !confirm(`Delete session "${name}"?`)) return
+    pendingRef.current.add(name)
+    setPendingDeletes(new Set(pendingRef.current))
+    try {
+      await deleteSession.mutateAsync(name)
+      toast.success('Session deleted')
+    } catch (err) {
+      toast.error(`Failed to delete session: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    } finally {
+      pendingRef.current.delete(name)
+      setPendingDeletes(new Set(pendingRef.current))
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -27,7 +49,7 @@ export function SessionList() {
               <TableHead>Tokens (in/out)</TableHead>
               <TableHead>Active Task</TableHead>
               <TableHead>Age</TableHead>
-              <TableHead className="w-12"></TableHead>
+              <TableHead className="w-12"><span className="sr-only">Actions</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -69,7 +91,17 @@ export function SessionList() {
                   </TableCell>
                   <TableCell>{timeAgo(session.createdAt, { compact: true })}</TableCell>
                   <TableCell>
-                    <Button variant="ghost" size="icon" onClick={() => deleteSession.mutate(session.name)}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Delete session ${session.name}`}
+                      title="Delete session"
+                      onClick={() => handleDelete(session.name)}
+                      // aria-disabled, not disabled: disabling the focused button would drop
+                      // keyboard focus to <body>, and a failed delete leaves the row in place.
+                      aria-disabled={deletePending(session.name) || undefined}
+                      className="aria-disabled:opacity-50"
+                    >
                       <Trash2 className="h-4 w-4 text-muted-foreground" />
                     </Button>
                   </TableCell>

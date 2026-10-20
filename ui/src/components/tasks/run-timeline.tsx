@@ -1,7 +1,6 @@
 import { cn } from '@/lib/utils'
-import { latestModelContextEvent, latestModelUsageEvents } from '@/lib/execution-events'
 import { CheckCircle2, Circle, XCircle, MinusCircle, Flag } from 'lucide-react'
-import type { Task, PlanState, TaskPhase, ExecutionEvent } from '@/schemas/task'
+import type { Task, PlanState, TaskPhase } from '@/schemas/task'
 
 interface TimelineEvent {
   key: string
@@ -169,7 +168,6 @@ function EventIcon({ status }: { status: TimelineEvent['status'] }) {
 interface RunTimelineProps {
   task: Task
   plan?: PlanState
-  events?: ExecutionEvent[]
   className?: string
 }
 
@@ -187,24 +185,9 @@ interface RunTimelineProps {
 export function RunTimeline({
   task,
   plan,
-  events: taskEvents = [],
   className,
 }: RunTimelineProps) {
   const events = buildEvents(task, plan)
-  const modelEvents = latestModelUsageEvents(taskEvents)
-  const contextEvent = latestModelContextEvent(taskEvents)
-  const totalIn = modelEvents.reduce(
-    (sum, event) => sum + (event.inputTokens ?? 0),
-    0,
-  )
-  const totalOut = modelEvents.reduce(
-    (sum, event) => sum + (event.outputTokens ?? 0),
-    0,
-  )
-  const totalCachedIn = modelEvents.reduce(
-    (sum, event) => sum + (event.cachedInputTokens ?? 0),
-    0,
-  )
   const iteration = task.status?.iteration ?? 0
   const progressPct = plan?.progressPct
   const goalComplete = plan?.goalComplete ?? false
@@ -252,55 +235,6 @@ export function RunTimeline({
                   aria-hidden="true"
                 />
               ))}
-          </div>
-        </div>
-      )}
-
-      {modelEvents.length > 0 && (
-        <div
-          className="rounded-md border bg-card p-3 text-xs"
-          aria-label="GenAI telemetry"
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium">GenAI</span>
-            <span className="rounded-full bg-muted px-2 py-0.5">
-              {totalIn + totalOut} tokens
-            </span>
-            <span className="text-muted-foreground">
-              {totalIn} input / {totalOut} output
-              {totalCachedIn > 0 ? ` / ${totalCachedIn} cached input` : ''}
-            </span>
-          </div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {modelEvents.map((event) => (
-              <span
-                key={event.id || event.seq}
-                className="rounded-full border px-2 py-0.5 text-muted-foreground"
-              >
-                {event.model ?? 'unknown model'}
-                {event.provider ? ` · ${event.provider}` : ''}
-                {event.stopReason ? ` · ${event.stopReason}` : ''}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {contextEvent?.contextWindowSize !== undefined && (
-        <div
-          className="rounded-md border bg-card p-3 text-xs"
-          aria-label="GenAI context window"
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium">Context</span>
-            <span className="rounded-full bg-muted px-2 py-0.5">
-              {contextEvent.contextWindowUsed ?? 0} / {contextEvent.contextWindowSize} tokens
-            </span>
-            {contextEvent.contextWindowSize > 0 && (
-              <span className="text-muted-foreground">
-                {Math.round(((contextEvent.contextWindowUsed ?? 0) / contextEvent.contextWindowSize) * 100)}% used
-              </span>
-            )}
           </div>
         </div>
       )}

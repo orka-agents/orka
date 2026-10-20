@@ -291,14 +291,12 @@ describe('use-execution-events hooks', () => {
     await waitFor(() => expect(calls).toBeGreaterThan(1), { timeout: 1000 })
   })
 
-  it('useTaskApprovals stops polling once the task is terminal even with a pending approval', async () => {
+  it('useTaskApprovals stops polling a terminal task with a legacy pending approval', async () => {
     let calls = 0
     server.use(
       http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
         calls += 1
-        // A pending approval on a terminal task (e.g. no expiry/cancel event was
-        // ever written). It renders read-only and the backend rejects decisions,
-        // so polling it would refetch the same row forever — it must stop.
+        // Legacy approvals have no execution outcome for v2 recovery to settle.
         return HttpResponse.json({
           namespace: 'default',
           taskName: params.id,
@@ -313,10 +311,94 @@ describe('use-execution-events hooks', () => {
     )
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     const afterFirst = calls
-    // Wait well beyond several poll intervals; a terminal task must not keep
-    // refetching its stuck-pending approval.
+    // A terminal task must not keep refetching a legacy pending approval.
     await new Promise((r) => setTimeout(r, 250))
     expect(calls).toBe(afterFirst)
+  })
+
+  it.each([
+    { name: 'pending approval cancellation', status: 'pending', outcome: 'not_started', settledStatus: 'cancelled', settledOutcome: 'not_started', reason: 'approval_cancelled' },
+    { name: 'pending approval expiry', status: 'pending', outcome: 'not_started', settledStatus: 'expired', settledOutcome: 'not_started', reason: 'approval_expired' },
+    { name: 'approved execution success', status: 'approved', outcome: 'not_started', settledStatus: 'approved', settledOutcome: 'succeeded', reason: 'Recorded tool result' },
+    { name: 'approved execution denied before starting', status: 'approved', outcome: 'not_started', settledStatus: 'approved', settledOutcome: 'not_started', reason: 'approval_stale' },
+    { name: 'running execution recovered as unknown', status: 'approved', outcome: 'running', settledStatus: 'approved', settledOutcome: 'unknown', reason: 'The action may have run. Do not repeat it automatically.' },
+    { name: 'running execution failure', status: 'approved', outcome: 'running', settledStatus: 'approved', settledOutcome: 'failed', reason: 'Recorded tool result' },
+    { name: 'decline receipt settlement', status: 'declined', outcome: 'not_started', settledStatus: 'declined', settledOutcome: 'not_started', reason: 'approval_declined' },
+  ])('useTaskApprovals polls a terminal task until $name settles', async ({ status, outcome, settledStatus, settledOutcome, reason }) => {
+    let calls = 0
+    let approval = {
+      id: 'ap-v2', action: 'create_work_order', status,
+      executionOutcome: outcome, executionReason: '', createdAt: '2026-06-13T00:00:00Z',
+    }
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+        calls += 1
+        return HttpResponse.json({ namespace: 'default', taskName: params.id, approvals: [approval] })
+      }),
+    )
+    const { result } = renderHook(
+      () => useTaskApprovals('tk', true, 20, false, true, 'uid-v2'),
+      { wrapper: createWrapper() },
+    )
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    // An already-terminal task still needs updates from execution recovery.
+    await waitFor(() => expect(calls).toBeGreaterThan(1))
+
+    approval = { ...approval, status: settledStatus, executionOutcome: settledOutcome, executionReason: reason }
+    await waitFor(() => expect(result.current.data?.approvals[0]).toEqual(approval))
+    const afterSettlement = calls
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(calls).toBe(afterSettlement)
+  })
+
+  it('useTaskApprovals keeps refreshing a running execution when the task becomes terminal', async () => {
+    let calls = 0
+    let outcome = 'running'
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+        calls += 1
+        return HttpResponse.json({
+          namespace: 'default', taskName: params.id,
+          approvals: [{ id: 'ap-v2', action: 'create_work_order', status: 'approved', executionOutcome: outcome, createdAt: '2026-06-13T00:00:00Z' }],
+        })
+      }),
+    )
+    const { result, rerender } = renderHook(
+      ({ terminal }) => useTaskApprovals('tk', true, 20, !terminal, terminal, 'uid-v2'),
+      { wrapper: createWrapper(), initialProps: { terminal: false } },
+    )
+    await waitFor(() => expect(result.current.data?.approvals[0].executionOutcome).toBe('running'))
+    rerender({ terminal: true })
+    const beforeRecovery = calls
+    await waitFor(() => expect(calls).toBeGreaterThan(beforeRecovery))
+
+    outcome = 'unknown'
+    await waitFor(() => expect(result.current.data?.approvals[0].executionOutcome).toBe('unknown'))
+    const afterRecovery = calls
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(calls).toBe(afterRecovery)
+  })
+
+  it('useTaskApprovals stops polling unsupported storage even with cached unresolved execution', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+        calls += 1
+        if (calls > 1) return HttpResponse.json({ error: 'not enabled' }, { status: 501 })
+        return HttpResponse.json({
+          namespace: 'default', taskName: params.id,
+          approvals: [{ id: 'ap-v2', action: 'create_work_order', status: 'approved', executionOutcome: 'running', createdAt: '2026-06-13T00:00:00Z' }],
+        })
+      }),
+    )
+    const { result } = renderHook(
+      () => useTaskApprovals('tk', true, 20, false, true, 'uid-unsupported'),
+      { wrapper: createWrapper() },
+    )
+    await waitFor(() => expect(result.current.error).toBeTruthy())
+    expect(result.current.data?.approvals[0].executionOutcome).toBe('running')
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(calls).toBe(2)
   })
 
   it('useDecideApproval posts the decision body', async () => {

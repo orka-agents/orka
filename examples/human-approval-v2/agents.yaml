@@ -1,0 +1,17 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: human-approval-agentkit
+spec:
+  runtime:
+    runtimeRef:
+      name: human-approval-agentkit-runtime
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: human-approval-foundry
+spec:
+  runtime:
+    runtimeRef:
+      name: human-approval-foundry-runtime

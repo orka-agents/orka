@@ -9,6 +9,11 @@ Orka speaks the Anthropic Messages API at `/anthropic/v1/messages`, so Claude Co
 Anthropic-native clients can point at Orka instead of at a model vendor. Your cluster holds
 the API keys; the client holds a ServiceAccount token.
 
+The optional [shared compatibility router](../operations/shared-compatibility-api.md)
+selects the team's installation from its validated ServiceAccount token. It
+accepts `x-api-key` or Bearer authentication, with Bearer taking precedence when
+both are present. Clients can omit the namespace parameter.
+
 :::warning[Coordinator mode is enabled by default]
 Orka rewrites your request before sending it upstream: it **discards the tools your client
 sent**, injects its own, and prepends its own system prompt. See
@@ -17,6 +22,11 @@ turn it off — the behavior is identical on both compatibility endpoints.
 :::
 
 See also [OpenAI compatibility](openai-compat.md) for the OpenAI-shaped equivalent.
+
+:::tip[Video demos]
+- [From chat to a GitHub pull request](https://www.youtube.com/watch?v=FlLgdh2lKMk)
+- [Two teams, one AI endpoint](https://www.youtube.com/watch?v=-x0tKk9epWU)
+:::
 
 ## Endpoints
 
@@ -45,8 +55,8 @@ See [Authentication](./api-reference.md#authentication).
 
 The `model` field supports two formats:
 
-- **`provider/model`** — e.g., `anthropic/claude-sonnet-4-20250514`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
-- **`model`** — e.g., `claude-sonnet-4-20250514`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
+- **`provider/model`** — e.g., `anthropic/claude-opus-5`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
+- **`model`** — e.g., `claude-opus-5`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
 
 ## Prerequisites
 
@@ -63,7 +73,7 @@ spec:
   secretRef:
     name: anthropic-secret
     key: api-key
-  defaultModel: claude-sonnet-4-20250514
+  defaultModel: claude-opus-5
 ```
 
 2. **Secret** with the API key:
@@ -81,7 +91,7 @@ stringData:
 
 3. **ServiceAccount token and RBAC** for authentication and coordinator tools:
 
-Follow the [API-client setup](../getting-started.md#give-yourself-an-api-client) to
+Follow the [API-client setup](../getting-started.md#connect-to-the-api) to
 configure `orka-client` and its Task permissions. Coordinator Task creation requires
 `tasks/create`. Agent creation currently does not check a ServiceAccount caller's
 `agents/create` permission; see the [API authorization limitation](../operations/troubleshooting.md#i-get-403-from-the-api).
@@ -111,7 +121,7 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
@@ -125,7 +135,7 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
@@ -239,7 +249,7 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "max_tokens": 4096,
     "messages": [{"role": "user", "content": "Search the web for Kubernetes 1.32 release highlights and summarize them."}],
     "stream": true

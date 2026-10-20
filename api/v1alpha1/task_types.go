@@ -141,6 +141,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.createPR) || !self.workspace.createPR)",message="container Tasks do not support workspace.createPR"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -414,6 +415,19 @@ type AISpec struct {
 	Tools []string `json:"tools,omitempty"`
 }
 
+// MarshalJSON preserves an explicitly empty native tool policy instead of
+// omitting it. Nil and nonempty lists retain their existing wire representation.
+func (in AISpec) MarshalJSON() ([]byte, error) {
+	type aiSpecJSON AISpec
+	if in.Tools == nil || len(in.Tools) > 0 {
+		return json.Marshal(aiSpecJSON(in))
+	}
+	return json.Marshal(struct {
+		aiSpecJSON
+		Tools []string `json:"tools"`
+	}{aiSpecJSON: aiSpecJSON(in), Tools: in.Tools})
+}
+
 // SkillReference references a Skill CRD by name or inline skill content from a ConfigMap key.
 type SkillReference struct {
 	// Name references a Skill CR by name
@@ -428,6 +442,7 @@ type SkillReference struct {
 // TaskStatus defines the observed state of Task
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome",message="executionOutcome is immutable once recorded"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding) && self.agentExecutionBinding == oldSelf.agentExecutionBinding)",message="agentExecutionBinding is write-once and immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding == oldSelf.soulBinding)",message="soulBinding is write-once and immutable"
 // Unknown fields reach admission so removed fields are rejected.
 // +kubebuilder:pruning:PreserveUnknownFields
 type TaskStatus struct {
@@ -479,6 +494,19 @@ type TaskStatus struct {
 	// +optional
 	AgentExecutionBinding *AgentExecutionBinding `json:"agentExecutionBinding,omitempty"`
 
+	// SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+	// digests only, never prompt text. Retries reject configuration drift.
+	// +optional
+	SoulBinding *TaskSoulBinding `json:"soulBinding,omitempty"`
+
+	// ConnectionBindings freezes, for native type: ai Tasks, the identity of
+	// the requester's Connection behind each connection-mode
+	// OutboundAccessPolicy at Job creation. Connector-backed tool calls from
+	// the worker are honored only while the live Connection still matches.
+	// No token material is ever recorded.
+	// +optional
+	ConnectionBindings []ConnectionBinding `json:"connectionBindings,omitempty"`
+
 	// ExecutionOutcome records the immutable outcome of a non-ACP workload before
 	// provider-neutral execution-workspace finalization completes.
 	// +optional
@@ -519,6 +547,36 @@ type TaskStatus struct {
 	// NextScheduleTime is the next time a child task will be created.
 	// +optional
 	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
+}
+
+// TaskSoulBinding is the non-secret, write-once identity of AI prompt configuration.
+type TaskSoulBinding struct {
+	// TaskGeneration is the Task spec generation whose prompt was resolved.
+	// +kubebuilder:validation:Minimum=1
+	TaskGeneration int64 `json:"taskGeneration"`
+	// AgentUID and AgentGeneration identify the exact Agent revision.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	AgentUID string `json:"agentUID"`
+	// +kubebuilder:validation:Minimum=1
+	AgentGeneration int64 `json:"agentGeneration"`
+	// SoulDigest identifies the exact persona source bytes.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	SoulDigest string `json:"soulDigest"`
+	// PromptDigest identifies the composed role and persona prompt.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	PromptDigest string `json:"promptDigest"`
+	// InputsDigest identifies the Task execution inputs, the spec without its
+	// control fields, that the binding froze. After the first binding it,
+	// rather than TaskGeneration, proves the inputs are unchanged, so a
+	// control-field edit such as spec.suspend keeps the binding valid.
+	// Bindings recorded before this field existed keep the generation check.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	InputsDigest string `json:"inputsDigest,omitempty"`
 }
 
 // TaskWorkloadExecutionOutcome records the immutable result of non-ACP workload
@@ -689,6 +747,31 @@ type ChildTaskStatus struct {
 	Result string `json:"result,omitempty"`
 }
 
+// ConnectionBinding is one frozen person-to-provider link for a policy.
+type ConnectionBinding struct {
+	// PolicyName is the connection-mode OutboundAccessPolicy.
+	PolicyName string `json:"policyName"`
+	// Provider is the ConnectorProvider the policy selects.
+	Provider string `json:"provider"`
+	// ConnectionName is the requester's Connection for that provider.
+	ConnectionName string `json:"connectionName"`
+	// UID and Generation pin the Connection as it was when frozen.
+	UID        string `json:"uid"`
+	Generation int64  `json:"generation"`
+	// GrantSequence is the Connection's consent count when frozen; a
+	// re-link of the same object raises it and invalidates this binding.
+	GrantSequence int64 `json:"grantSequence"`
+	// Mode is the Connection mode at freeze time.
+	Mode string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the policy object the binding was
+	// frozen under, so a policy deleted and recreated, or edited, after
+	// dispatch is refused rather than executed under the old binding.
+	// +optional
+	PolicyUID string `json:"policyUID,omitempty"`
+	// +optional
+	PolicyGeneration int64 `json:"policyGeneration,omitempty"`
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:metadata:annotations=gateway.orka.ai/session-cutoff-schema=v1
 // +kubebuilder:subresource:status
@@ -697,7 +780,10 @@ type ChildTaskStatus struct {
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:selectablefield:JSONPath=.spec.sessionRef.name
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority is recorded"
+// The execution-authority rule freezes the whole spec for ACP-bound Tasks. For a
+// soul-only binding it compares every field except TaskControlFields; a test
+// regenerates that field list from TaskSpec.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type) || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image) && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) && has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command) || self.spec.command == oldSelf.spec.command) && has(self.spec.args) == has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args) && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env) || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout) && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout) && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority) || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy) == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL) && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL) && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef) || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources) && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution) || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule) == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone) && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone) && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy) && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy == oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds) == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds) || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds) && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit) && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit) == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit) || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit) && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) || self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef) && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef) && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt) || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime) == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) || self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace) == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef) && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef) && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy) || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction) == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction == oldSelf.spec.transaction))))",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {
@@ -853,6 +939,26 @@ type WorkspaceConfig struct {
 	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	PRBaseBranch string `json:"prBaseBranch,omitempty"`
+
+	// PRTitle is the pull request title supplied by the Task author. When empty,
+	// the controller uses the prompt's first nonblank line, limited to 256 characters.
+	// An empty or whitespace-only prompt falls back to the publication generation title.
+	// Nonempty whitespace-only titles are rejected. Secret-like titles, including
+	// prompt-derived titles, are rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="prTitle must not be whitespace-only"
+	// +optional
+	PRTitle string `json:"prTitle,omitempty"`
+
+	// PRBody is the pull request body supplied by the Task author. When empty,
+	// the publisher describes the publication and identifies the Task. Publication
+	// generation and reconciliation markers are appended to either body.
+	// Orka reconciliation comments are reserved and must not be included.
+	// Secret-like text is rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:XValidation:rule="!self.contains('<!-- orka.publisher.pr-')",message="prBody must not contain reserved publisher reconciliation markers"
+	// +optional
+	PRBody string `json:"prBody,omitempty"`
 
 	// PushBranch is the publication branch. For write Tasks the controller derives
 	// a full-entropy Task- or Session-owned branch when this is omitted.

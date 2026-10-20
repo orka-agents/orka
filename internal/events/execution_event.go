@@ -20,6 +20,7 @@ const (
 	ExecutionEventTypeModelContextUpdated           = "ModelContextUpdated"
 	ExecutionEventTypeModelMessage                  = "ModelMessage"
 	ExecutionEventTypeContextTruncated              = "ContextTruncated"
+	ExecutionEventTypeNativeSessionCaptureSkipped   = "NativeSessionCaptureSkipped"
 	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
 	ExecutionEventTypeToolCallCompleted             = "ToolCallCompleted"
 	ExecutionEventTypeToolCallFailed                = "ToolCallFailed"
@@ -42,6 +43,7 @@ const (
 	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
 	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
 	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
+	ExecutionEventTypeApprovalExecutionUpdated      = "ApprovalExecutionUpdated"
 	ExecutionEventTypePlanUpdated                   = "PlanUpdated"
 )
 
@@ -77,6 +79,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeModelContextUpdated,
 	ExecutionEventTypeModelMessage,
 	ExecutionEventTypeContextTruncated,
+	ExecutionEventTypeNativeSessionCaptureSkipped,
 	ExecutionEventTypeToolCallStarted,
 	ExecutionEventTypeToolCallCompleted,
 	ExecutionEventTypeToolCallFailed,
@@ -99,6 +102,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeApprovalDeclined,
 	ExecutionEventTypeApprovalExpired,
 	ExecutionEventTypeApprovalCancelled,
+	ExecutionEventTypeApprovalExecutionUpdated,
 	ExecutionEventTypePlanUpdated,
 }
 
@@ -145,6 +149,27 @@ func IsTerminalTaskEventType(value string) bool {
 func IsTerminalApprovalEventType(value string) bool {
 	_, ok := terminalApprovalEventTypeSet[strings.TrimSpace(value)]
 	return ok
+}
+
+// ExecutionEventTypes returns every known execution event type in
+// declaration order, for help text and completion.
+func ExecutionEventTypes() []string {
+	return append([]string(nil), executionEventTypes...)
+}
+
+// CanonicalExecutionEventType maps a case-insensitive spelling of a known
+// event type to its canonical name. Unknown values return "".
+func CanonicalExecutionEventType(value string) string {
+	value = strings.TrimSpace(value)
+	if IsValidExecutionEventType(value) {
+		return value
+	}
+	for _, known := range executionEventTypes {
+		if strings.EqualFold(known, value) {
+			return known
+		}
+	}
+	return ""
 }
 
 // IsValidExecutionEventType reports whether value is a known execution event type.

@@ -28,6 +28,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -38,8 +41,6 @@ import (
 	"github.com/orka-agents/orka/internal/transactiontoken"
 	txtest "github.com/orka-agents/orka/internal/transactiontoken/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
-	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const (
@@ -1797,6 +1798,59 @@ func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_HTTPErrorCarriesStatus(t *testing.T) {
+	for status, delivered := range map[int]bool{http.StatusForbidden: false, http.StatusNotFound: true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+		tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}}}
+
+		_, err := executor.Execute(context.Background(), tool, nil)
+		server.Close()
+		statusErr, ok := errors.AsType[ToolHTTPStatusError](err)
+		_, isDelivered := errors.AsType[ToolExecutionError](err)
+		if !ok || statusErr.StatusCode != status || statusErr.Redirected || !ToolRequestWasAttempted(err) || isDelivered != delivered {
+			t.Fatalf("Execute() for HTTP %d error = %#v, want an attempted status error (delivered=%t)", status, err, delivered)
+		}
+	}
+}
+
+func TestToolExecutor_Execute_HTTPErrorAfterRedirectIsMarked(t *testing.T) {
+	// The POST may have taken effect before redirecting to a result the
+	// caller may not read.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /action", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/result", http.StatusSeeOther)
+	})
+	mux.HandleFunc("GET /result", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL + "/action"}}}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	statusErr, ok := errors.AsType[ToolHTTPStatusError](err)
+	if !ok || statusErr.StatusCode != http.StatusForbidden || !statusErr.Redirected {
+		t.Fatalf("Execute() error = %#v, want a redirected HTTP 403", err)
+	}
+}
+
+func TestToolErrorDiagnosticKeepsGatewayMCPCause(t *testing.T) {
+	err := ToolRequestAttemptedError{Err: gatewayMCPError{Err: errors.New("tool returned HTTP 403: denied")}}
+	if err.Error() != "gateway MCP request failed" {
+		t.Fatalf("Error() = %q, want the cause kept out of the message", err.Error())
+	}
+	if got := ToolErrorDiagnostic(err); got != "gateway MCP request failed: tool returned HTTP 403: denied" {
+		t.Fatalf("ToolErrorDiagnostic() = %q, want the gateway cause", got)
+	}
+	if got := ToolErrorDiagnostic(errors.New("plain")); got != "plain" {
+		t.Fatalf("ToolErrorDiagnostic() = %q, want the plain message", got)
+	}
+}
+
 func TestToolExecutor_Execute_HTTPErrorRedactsPropagatedTransactionToken(t *testing.T) {
 	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
 	if err := os.WriteFile(txnTokenPath, []byte("tx-token-sensitive"), 0600); err != nil {
@@ -2780,7 +2834,7 @@ func TestToolHTTPClientStripsSensitiveHeadersOnRedirect(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	client, err := toolHTTPClient(server.Client(), nil, tokenexchange.TLSConfig{}, false)
+	client, err := toolHTTPClient(server.Client(), nil, tokenexchange.TLSConfig{}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2825,7 +2879,7 @@ func TestToolHTTPClientGatewayBypassesConfiguredProxy(t *testing.T) {
 	transport := base.Transport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxyURL)
 	base.Transport = transport
-	client, err := toolHTTPClient(base, nil, tokenexchange.TLSConfig{}, true)
+	client, err := toolHTTPClient(base, nil, tokenexchange.TLSConfig{}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2854,7 +2908,7 @@ func TestToolHTTPClientDoesNotFollowGatewayRedirect(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}))
 	defer gateway.Close()
-	client, err := toolHTTPClient(gateway.Client(), nil, tokenexchange.TLSConfig{}, true)
+	client, err := toolHTTPClient(gateway.Client(), nil, tokenexchange.TLSConfig{}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2961,7 +3015,7 @@ func TestToolHTTPClientRejectsCrossOriginRedirectWithoutCredentials(t *testing.T
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}))
 	defer source.Close()
-	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false)
+	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3232,5 +3286,35 @@ func TestGatewayMCPErrorHidesMessageAndPreservesClassification(t *testing.T) {
 	}
 	if !ToolRequestWasAttempted(err) {
 		t.Fatal("gateway error lost attempted-request classification")
+	}
+}
+
+// A request carrying a person's linked-account credential never follows a
+// redirect: Go forwards custom headers across redirects, and the credential
+// is bound to the origin the provider declared.
+func TestToolHTTPClientDoesNotFollowRedirectsForConnectionCredentials(t *testing.T) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(source.Close)
+	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, source.URL+"/search", nil)
+	req.Header.Set("X-Linked-Token", "secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || hits.Load() != 0 {
+		t.Fatalf("status = %d target hits = %d, want the redirect returned unfollowed", resp.StatusCode, hits.Load())
 	}
 }

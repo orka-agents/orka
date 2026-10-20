@@ -69,7 +69,6 @@ type SubstrateConfig struct {
 	SessionIdentityAppID    string
 	SessionIdentityUserID   string
 	SessionIdentityRequired bool
-	SessionIdentityMintCert bool
 	SessionIdentityClient   substrateSessionIdentityClient
 }
 
@@ -93,15 +92,6 @@ func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, err
 	}
 	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
 		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "actor DNS suffix is required", false, nil)
-	}
-	if cfg.SessionIdentityMintCert {
-		return nil, NewError(
-			"configure substrate",
-			ErrorKindFailedPrecondition,
-			"Substrate SessionIdentity certificate minting is not supported yet",
-			false,
-			nil,
-		)
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{}
@@ -1069,7 +1059,7 @@ func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, ac
 	return e.workspaceDaemonError(err)
 }
 
-func (e *SubstrateWorkspaceExecutor) workspaceDaemonClient() daemonprotocol.Client {
+func (e *SubstrateWorkspaceExecutor) workspaceDaemonClient() daemonprotocol.HTTPClient {
 	return daemonprotocol.HTTPClient{
 		RouterURL:      e.routerURL,
 		ActorDNSSuffix: e.actorDNSSuffix,

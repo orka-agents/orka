@@ -62,7 +62,9 @@ describe('runtime-validation', () => {
       task: { ...base, status: { phase: 'Failed' } },
       trace: trace(), // no errors recorded, but phase is authoritative
     })
-    expect(checks.find((c) => c.id === 'terminal')?.status).toBe('fail')
+    // The task did reach a terminal state; the failure is its own check.
+    expect(checks.find((c) => c.id === 'terminal')?.status).toBe('pass')
+    expect(checks.find((c) => c.id === 'outcome')?.status).toBe('fail')
     expect(rollupStatus(checks)).toBe('fail')
   })
 
@@ -76,5 +78,46 @@ describe('runtime-validation', () => {
   it('cancelled task warns, not pass', () => {
     const checks = deriveRuntimeChecks({ task: { ...base, status: { phase: 'Cancelled' } }, trace: trace() })
     expect(rollupStatus(checks)).not.toBe('pass')
+  })
+
+  it('reports a failed task as terminal with a separate failed outcome carrying the message', () => {
+    const checks = deriveRuntimeChecks({
+      task: { ...base, status: { phase: 'Failed', message: 'container exited 1' } },
+      trace: trace(),
+    })
+    expect(checks.find((c) => c.id === 'terminal')).toMatchObject({ status: 'pass', reason: 'Phase Failed' })
+    expect(checks.find((c) => c.id === 'outcome')).toMatchObject({ status: 'fail', reason: 'container exited 1' })
+  })
+
+  it('a running task with clean data does not need attention', () => {
+    const checks = deriveRuntimeChecks({ task: base, trace: trace(), approvals: [], artifacts: [] })
+    expect(checks.find((c) => c.id === 'terminal')?.status).toBe('info')
+    expect(checks.find((c) => c.id === 'outcome')).toBeUndefined()
+    expect(rollupStatus(checks)).toBe('pass')
+  })
+
+  it('a running task whose Pod is stuck waiting needs attention instead of passing', () => {
+    const message = 'pod waiting: ImagePullBackOff - Back-off pulling image "ghcr.io/example/missing:v1"'
+    const checks = deriveRuntimeChecks({
+      task: { ...base, status: { phase: 'Running', message } },
+      trace: trace(), approvals: [], artifacts: [],
+    })
+    expect(checks.find((c) => c.id === 'terminal')).toMatchObject({ status: 'warn', reason: `Phase Running; ${message}` })
+    expect(rollupStatus(checks)).toBe('warn')
+  })
+
+  it('a succeeded task without artifacts still rolls up to pass', () => {
+    const checks = deriveRuntimeChecks({
+      task: { ...base, status: { phase: 'Succeeded', resultRef: { available: true } } },
+      trace: trace(),
+      approvals: [],
+      artifacts: [],
+    })
+    expect(checks.find((c) => c.id === 'artifacts')).toMatchObject({ status: 'info', reason: 'None published' })
+    expect(rollupStatus(checks)).toBe('pass')
+  })
+
+  it('a rollup of only informational checks is unknown, not pass', () => {
+    expect(rollupStatus([{ id: 'a', label: 'a', status: 'info', reason: '' }])).toBe('unknown')
   })
 })

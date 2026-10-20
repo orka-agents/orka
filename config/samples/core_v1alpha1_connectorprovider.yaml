@@ -1,0 +1,44 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: ConnectorProvider
+metadata:
+  name: github
+  namespace: default
+spec:
+  displayName: GitHub
+  oauth:
+    authorizeURL: https://github.com/login/oauth/authorize
+    tokenURL: https://github.com/login/oauth/access_token
+    clientID: Iv1.example-client-id
+    clientSecretRef:
+      name: github-connector-oauth
+      key: clientSecret
+    scopes:
+      read:
+        - read:user
+      write:
+        - repo
+  tools:
+    - name: list_pull_requests
+      class: read
+      source: Builtin
+    - name: get_issue
+      class: read
+      source: Builtin
+    - name: list_issues
+      class: read
+      source: Builtin
+    - name: review_pull_request
+      class: read
+      source: Builtin
+    - name: check_pull_request_ci
+      class: read
+      source: Builtin
+    - name: create_pull_request
+      class: write
+      source: Builtin
+    - name: comment_on_issue
+      class: write
+      source: Builtin
+    - name: post_review_comment
+      class: write
+      source: Builtin

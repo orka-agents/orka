@@ -5,7 +5,38 @@ description: "The chat endpoint: describe what you want in plain language and le
 
 # Interactive chat
 
-The chat endpoint provides an agentic conversational interface where an LLM orchestrator can create and manage Kubernetes resources on the user's behalf. It accepts natural language, reasons about what tasks to create, and autonomously executes them using the platform.
+Chat lets you describe what you want in plain language. An orchestrator model decides which
+Tasks to create, runs them, checks on them, and reports back, streaming its progress as it
+goes. You can chat from the [dashboard](ui.md), from the CLI with `orka run`, or over the API.
+
+:::tip[Video demo]
+Watch [From chat to a GitHub pull request](https://www.youtube.com/watch?v=FlLgdh2lKMk).
+:::
+
+## Try it
+
+With the API [port-forwarded and a client token in `ORKA_TOKEN`](../getting-started.md#connect-to-the-api)
+and at least one [Provider](../getting-started.md#your-first-task) created, send one
+message. The orchestrator decides what to do, creates the Tasks it needs, and streams
+its progress back:
+
+```bash
+curl -N -H "Authorization: Bearer ${ORKA_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message": "Run a container task that prints the date, then tell me what it printed.", "namespace": "orka-system"}' \
+  http://localhost:8080/api/v1/chat
+```
+
+Swap `Accept: text/event-stream` for `Accept: application/json` to get one JSON
+reply instead of a stream. From the CLI, the same conversation is:
+
+Without `--session`, each `orka run` starts a new conversation.
+
+```bash
+orka run --session incident-123 "Run a container task that prints the date, then tell me what it printed."
+orka run --session incident-123 "What did that task print?"
+```
 
 ## Endpoint
 
@@ -49,7 +80,7 @@ User ──POST /api/v1/chat──▶ API Server ──▶ Concurrency Semaphore
     "message": "Create an AI task that summarizes Kubernetes best practices",
     "sessionId": "my-session",
     "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-opus-5",
     "namespace": "default",
     "temperature": 0.7,
     "maxTokens": 4096,
@@ -100,15 +131,6 @@ Send `Accept: application/json` for a blocking JSON response:
     "usage": {"inputTokens": 4200, "outputTokens": 1800, "llmCalls": 3}
 }
 ```
-
-## Live coverage
-
-PR-blocking live CI covers the chat endpoint against a real backend in both:
-
-- SSE mode via `Accept: text/event-stream`
-- JSON mode via `Accept: application/json`
-
-The live suite verifies transport behavior, session creation/persistence, and usage reporting. Exact model wording is still covered primarily by deterministic chat tests in `test/e2e/` and unit tests.
 
 ## Available Tools
 
@@ -202,29 +224,21 @@ Structured error responses help the LLM self-correct:
 ## Namespace scoping
 
 - Default to namespace from `ChatRequest` or authenticated user's namespace
-- `kube-system`, `kube-public`, and the operator's namespace are blocked
+- `kube-system` and `kube-public` are blocked
 - All orchestrator-created resources get labels: `orka.ai/created-by: orchestrator`, `orka.ai/chat-session: <sessionId>`
 
-## Configuration flags
+## Configuration
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--chat-enabled` | `true` | Enable/disable chat endpoint |
-| `--chat-provider` | `""` | Default Provider CRD name |
-| `--chat-model` | `""` | Default model |
-| `--chat-max-iterations` | `50` | Max tool execution loops |
-| `--chat-max-duration` | `30m` | Max wall-clock time per request |
-| `--chat-tool-timeout` | `60s` | Max time per tool execution |
-| `--chat-max-concurrent` | `10` | Max concurrent chat sessions |
-| `--chat-max-tasks-per-turn` | `5` | Max tasks per chat turn |
-| `--chat-max-session-size` | `512000` | Session size soft limit (bytes) |
+Chat is on by default (`--chat-enabled`). `--chat-provider` and `--chat-model` set the default
+Provider and model, and the limits above have their own flags. All of them are listed under
+[Controller flags](../reference/configuration.md#controller-flags).
 
 ## Example usage
 
 ```bash
 # Chat with SSE streaming
 curl -N http://localhost:8080/api/v1/chat \
-  -H "Authorization: Bearer $(kubectl create token orka-client)" \
+  -H "Authorization: Bearer ${ORKA_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Create an AI task that summarizes Kubernetes best practices",
@@ -233,16 +247,16 @@ curl -N http://localhost:8080/api/v1/chat \
 
 # Chat with JSON response
 curl http://localhost:8080/api/v1/chat \
-  -H "Authorization: Bearer $(kubectl create token orka-client)" \
+  -H "Authorization: Bearer ${ORKA_TOKEN}" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"message": "List all available agents"}'
 
 # Get chat configuration
 curl http://localhost:8080/api/v1/chat/config \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer ${ORKA_TOKEN}"
 
 # Cancel a chat session
 curl -X DELETE http://localhost:8080/api/v1/chat/my-session \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer ${ORKA_TOKEN}"
 ```

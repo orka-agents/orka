@@ -88,7 +88,7 @@ assert_secret_mounts() {
   --set-string controller.mode=harness-v2 \
   --set-string controller.watchNamespace=orka-system \
   --set publisher.enabled=true \
-  --set providerProxy.enabled=true \
+  --values "${root}/cmd/build/helmify/testdata/provider-proxy-values.yaml" \
   --set scmEgressProxy.enabled=true \
   --set controller.image.repository=docker.io/sozercan/orka \
   --set controller.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -98,6 +98,8 @@ assert_secret_mounts() {
   --set-string webhooks.caBundle=Y2E= \
   --set publisher.image.repository=docker.io/sozercan/orka-workspace-publisher \
   --set publisher.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --set workers.ai.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --set workers.general.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   | yaml_to_json \
   | assert_secret_mounts "Helm chart"
 

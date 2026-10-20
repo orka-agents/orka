@@ -30,6 +30,12 @@ func (*standaloneCheckpointAuthorizer) Authorize(context.Context, string, string
 	return errors.New("checkpoint admission must authorize its source workspace")
 }
 
+func (*standaloneCheckpointAuthorizer) AuthorizeCheckpoint(
+	context.Context, string, string, authenticationv1.UserInfo,
+) error {
+	return errors.New("checkpoint admission must authorize its source workspace")
+}
+
 func (a *standaloneCheckpointAuthorizer) AuthorizeCheckpointSource(
 	_ context.Context, namespace, workspace string, caller authenticationv1.UserInfo,
 ) error {

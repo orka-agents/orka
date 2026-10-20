@@ -17,7 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
-	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
@@ -30,6 +30,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const (
+	credentialRoleSourceRead = "source-read"
 )
 
 const (
@@ -50,6 +54,10 @@ const (
 	ContextTokenScopeTaskList = "orka:tasks:list"
 	// ContextTokenScopeTaskDelete authorizes context-token callers to delete Tasks.
 	ContextTokenScopeTaskDelete = "orka:tasks:delete"
+	// ContextTokenScopeConnectorsRead lists and reads a person's Connections.
+	ContextTokenScopeConnectorsRead = "orka:connectors:read"
+	// ContextTokenScopeConnectorsManage links, changes, and disconnects them.
+	ContextTokenScopeConnectorsManage = "orka:connectors:manage"
 	// ContextTokenScopeToolsRead authorizes context-token callers to read Tool definitions.
 	ContextTokenScopeToolsRead = "orka:tools:read"
 	// ContextTokenScopeToolsUse authorizes context-token callers to execute Orka-managed tools.
@@ -118,6 +126,10 @@ type ContextTokenAuthorizationConfig struct {
 	GatewayReadScopes             []string
 	GatewayOperateScopes          []string
 	ConfigMapReadScopeList        []string
+	// ConnectorReadScopes and ConnectorManageScopes gate a delegated
+	// context token's access to a person's linked accounts.
+	ConnectorReadScopes   []string
+	ConnectorManageScopes []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
@@ -150,6 +162,8 @@ type ContextTokenAuthorizationConfigOptions struct {
 	GatewayReadScopes          string
 	GatewayOperateScopes       string
 	ConfigMapReadScopes        string
+	ConnectorReadScopes        string
+	ConnectorManageScopes      string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -184,6 +198,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	securityWrite := defaultScopes(opts.SecurityWriteScopes, ContextTokenScopeSecurityWrite)
 	monitorRead := defaultScopes(opts.MonitorReadScopes, ContextTokenScopeMonitorsRead)
 	monitorWrite := defaultScopes(opts.MonitorWriteScopes, ContextTokenScopeMonitorsWrite)
+	connectorRead := defaultScopes(opts.ConnectorReadScopes, ContextTokenScopeConnectorsRead)
+	connectorManage := defaultScopes(opts.ConnectorManageScopes, ContextTokenScopeConnectorsManage)
 	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
@@ -212,6 +228,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		SecurityWriteScopes:           securityWrite,
 		MonitorReadScopes:             monitorRead,
 		MonitorWriteScopes:            monitorWrite,
+		ConnectorReadScopes:           connectorRead,
+		ConnectorManageScopes:         connectorManage,
 		MonitorOperateScopes:          monitorOperate,
 		SkillReadScopes:               skillRead,
 		SkillWriteScopes:              skillWrite,
@@ -291,7 +309,7 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 		return nil
 	}
 
-	reader := h.contextTokenAuthorizationReader()
+	reader := h.uncachedReader()
 	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(c.Context(), reader, req, namespace)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -629,7 +647,7 @@ func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action 
 }
 
 func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
-	return contextTokenLoadedTaskContextFailures(ctx, h.contextTokenAuthorizationReader(), token, task, includeTaskIdentity)
+	return contextTokenLoadedTaskContextFailures(ctx, h.uncachedReader(), token, task, includeTaskIdentity)
 }
 
 func contextTokenLoadedTaskContextFailures(ctx context.Context, reader client.Reader, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
@@ -657,8 +675,14 @@ func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
 	}
 
 	req := CreateTaskRequest{
-		Name:              task.Name,
-		Namespace:         task.Namespace,
+		Name:      task.Name,
+		Namespace: task.Namespace,
+		Metadata: MetadataRequest{
+			Name:        task.Name,
+			Namespace:   task.Namespace,
+			Labels:      task.Labels,
+			Annotations: task.Annotations,
+		},
 		Annotations:       task.Annotations,
 		Type:              task.Spec.Type,
 		Image:             task.Spec.Image,
@@ -1154,11 +1178,18 @@ func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextToke
 	return failures
 }
 
-func (h *Handlers) contextTokenAuthorizationReader() client.Reader {
-	if h.apiReader != nil {
-		return h.apiReader
+// uncachedReaderOr returns apiReader when configured, otherwise the cached
+// client, so authorization decisions can bypass the informer cache when a
+// direct API reader is available.
+func uncachedReaderOr(apiReader client.Reader, fallback client.Client) client.Reader {
+	if apiReader != nil {
+		return apiReader
 	}
-	return h.client
+	return fallback
+}
+
+func (h *Handlers) uncachedReader() client.Reader {
+	return uncachedReaderOr(h.apiReader, h.client)
 }
 
 func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, reader client.Reader, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
@@ -1404,61 +1435,28 @@ func contextTokenOpenCodeModelProvider(agent *corev1alpha1.Agent) string {
 }
 
 func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1alpha1.Agent) []string {
-	tools := []string{}
-	if agent != nil {
-		for _, tool := range agent.Spec.Tools {
-			if tool.Enabled != nil && !*tool.Enabled {
-				continue
-			}
-			if strings.TrimSpace(tool.Name) != "" {
-				tools = append(tools, tool.Name)
-			}
-		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled &&
-			(agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil) &&
-			req.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
-			for _, tool := range coordinationToolNames() {
-				if !slices.Contains(tools, tool) {
-					tools = append(tools, tool)
-				}
-			}
-		}
-	}
-	if req.AI != nil {
-		for _, tool := range req.AI.Tools {
-			if strings.TrimSpace(tool) != "" {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	if req.Type == corev1alpha1.TaskTypeAI {
-		for _, tool := range memoryToolNames() {
-			if !slices.Contains(tools, tool) {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	return tools
+	return aitools.Resolve(contextTokenTaskCreateAIToolTask(req), agent)
 }
 
-func memoryToolNames() []string {
-	return []string{
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
+func contextTokenTaskCreateAIToolTask(req CreateTaskRequest) *corev1alpha1.Task {
+	taskType := req.Type
+	taskAI := req.AI
+	if req.Spec != nil {
+		if taskType == "" {
+			taskType = req.Spec.Type
+		}
+		if taskAI == nil {
+			taskAI = req.Spec.AI
+		}
 	}
-}
-
-func coordinationToolNames() []string {
-	return []string{
-		"delegate_task", "wait_for_tasks", "create_container_task", "cancel_task",
-		"send_message", "check_messages", "recall_memory", "remember",
-		"propose_memory", "search_transcript", "create_pull_request",
-		"list_pull_requests", "check_pr_review_marker", "check_pull_request_ci",
-		"merge_pull_request", "auto_merge_pull_request", "review_pull_request",
-		"post_review_comment", "create_agent", "delete_agent", "update_plan",
+	annotations := req.Annotations
+	if annotations == nil {
+		annotations = req.Metadata.Annotations
 	}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: taskType, AI: taskAI}}
+	task.Labels = req.Metadata.Labels
+	task.Annotations = annotations
+	return task
 }
 
 func contextTokenAgentRuntimeAllowedTools(agent *corev1alpha1.Agent) []string {
@@ -1727,6 +1725,20 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 	return failures
 }
 
+// authorizeContextTokenAgentTaskReference checks only request-supplied identity
+// and creation scope. Runtime policy validation belongs to the completed Task.
+func authorizeContextTokenAgentTaskReference(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, name string) error {
+	if !cfg.Enabled() || token == nil {
+		return nil
+	}
+	failures := contextTokenTaskCreateScopeFailures(token, cfg)
+	failures = append(failures, contextTokenAgentContextFailures(token, namespace, name)...)
+	if len(failures) == 0 {
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, "chatToolAgentReference", failures)
+}
+
 func contextTokenTaskCreateScopeFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig) []string {
 	if hasAnyScope(token.Scopes, cfg.TaskCreateScopes) {
 		return nil
@@ -1742,7 +1754,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 		role string
 		ref  *corev1alpha1.WorkspaceCredentialReference
 	}{
-		{role: "source-read", ref: workspace.ReadCredentialRef},
+		{role: credentialRoleSourceRead, ref: workspace.ReadCredentialRef},
 		{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 		{role: "target-write", ref: workspace.PublicationCredentialRef},
 		{role: "forge", ref: workspace.ForgeCredentialRef},
@@ -1890,12 +1902,15 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 }
 
 func contextTokenPlatformAIToolName(authzCtx contextTokenTaskCreateAuthorizationContext, name string) bool {
-	if slices.Contains(memoryToolNames(), name) {
+	task := contextTokenTaskCreateAIToolTask(authzCtx.Request)
+	if slices.Contains(aitools.MemoryToolNames(), name) {
+		return true
+	}
+	if aitools.IsImplicitTool(task, authzCtx.Agent, name) {
 		return true
 	}
 	if slices.Contains(toolspkg.CoordinationToolNames(), name) {
-		coordinationEnabled := authzCtx.Agent != nil && authzCtx.Agent.Spec.Coordination != nil && authzCtx.Agent.Spec.Coordination.Enabled
-		return coordinationEnabled || slices.Contains(toolspkg.ChatToolNames(), name)
+		return aitools.RegistersCoordinationTools(task, authzCtx.Agent) || slices.Contains(toolspkg.ChatToolNames(), name)
 	}
 	_, builtin := toolspkg.DefaultRegistry.Get(name)
 	return builtin
@@ -2010,11 +2025,68 @@ func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthoriza
 		return tools
 	}
 
+	// list_connections shows the person's linked accounts, which the
+	// connector routes guard with the connector-read scope; a delegated
+	// token narrowed away from that boundary does not see the tool at all.
+	if !hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes) {
+		tools = filterCompletionToolsExcluding(tools, toolspkg.ListConnectionsToolName)
+	}
 	allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools")
 	if !ok {
 		return tools
 	}
 	return filterCompletionToolsByName(tools, allowed)
+}
+
+// contextTokenAllowsConnectorRead reports whether a context-token caller
+// may read the person's linked accounts; every other caller may.
+func contextTokenAllowsConnectorRead(ui *UserInfo, cfg ContextTokenAuthorizationConfig) bool {
+	if !cfg.Enabled() || !cfg.enforcing() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true
+	}
+	return hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes)
+}
+
+// connectorReadToolAuthorizer is the execution-time twin of the exposure
+// filter for list_connections: connectors disabled on the controller, or a
+// delegated token without the connector-read scope, refuse the call.
+func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConfig, connectorsEnabled bool) func() *toolspkg.ChatToolError {
+	if !connectorsEnabled {
+		return func() *toolspkg.ChatToolError {
+			return &toolspkg.ChatToolError{
+				Type: "unauthorized_tool", Message: "connectors are disabled on this controller", Suggestion: "Ask the operator to enable --connectors-enabled",
+			}
+		}
+	}
+	if !cfg.Enabled() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil ||
+		hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes) {
+		return nil
+	}
+	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ConnectorReadScopes, ","))}
+	return func() *toolspkg.ChatToolError {
+		// Audit mode allows the call but records the failure, as the
+		// connector routes do for the same scope.
+		if err := handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, string(connectorActionRead), failures); err == nil {
+			return nil
+		}
+		return &toolspkg.ChatToolError{
+			Type:       "unauthorized_tool",
+			Message:    fmt.Sprintf("this token lacks one of the scopes %q needed to read linked accounts", strings.Join(cfg.ConnectorReadScopes, ",")),
+			Suggestion: "Use a token that carries the connector-read scope",
+		}
+	}
+}
+
+//nolint:unparam // Callers name the excluded tool so each filter site reads on its own.
+func filterCompletionToolsExcluding(tools []llm.Tool, name string) []llm.Tool {
+	filtered := make([]llm.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.Name) == name {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
 }
 
 func filterCompletionToolsByName(tools []llm.Tool, allowed []string) []llm.Tool {

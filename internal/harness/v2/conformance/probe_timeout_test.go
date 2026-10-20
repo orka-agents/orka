@@ -92,7 +92,16 @@ func TestCheckProbeTimeoutSeparatesOriginalStreamFromControls(t *testing.T) {
 				response.Header.Del("Content-Length")
 				return nil
 			}
-			server := httptest.NewServer(proxy)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The upstream can flush acceptance before the transport's final
+				// request-body EOF check. Keep the server from closing that shared
+				// body when it flushes the downstream response.
+				if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+					t.Errorf("enable full-duplex proxy: %v", err)
+					return
+				}
+				proxy.ServeHTTP(w, r)
+			}))
 			defer server.Close()
 			target.BaseURL = server.URL
 			started := time.Now()

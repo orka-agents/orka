@@ -36,6 +36,7 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 	const (
 		providerName = "e2e-api-ext-provider"
 		taskName     = "e2e-api-ext-task"
+		resultMarker = "[e2e:api-ext-result]"
 	)
 
 	BeforeAll(func() {
@@ -82,14 +83,14 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "What is 7+7? Reply with just the number.",
+					"prompt": "What is 7+7? Reply with just the number. %s",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
 				}
 			}
-		}`, taskName, namespace, model, providerName)
+		}`, taskName, namespace, resultMarker, model, providerName)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
@@ -117,6 +118,10 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 		bodyStr := string(body)
 		Expect(bodyStr).NotTo(BeEmpty(), "Result should not be empty")
 		Expect(bodyStr).To(ContainSubstring("result"), "Response should contain result field")
+		if e2eMockOpenAI {
+			Expect(bodyStr).To(ContainSubstring("E2E_API_EXT_RESULT: 14"),
+				"the stored result should be the scripted model answer")
+		}
 	})
 
 	It("should list tools via GET /api/v1/tools", func() {

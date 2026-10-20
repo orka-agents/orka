@@ -1,0 +1,34 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:coord-factorial]"},
+      "response": {"content": "E2E-FACTORIAL-120: the factorial of 5 is 120."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-delegate]", "toolResultContains": "E2E-FACTORIAL-120"},
+      "response": {"content": "The delegated agent reported that the factorial of 5 is 120."}
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-delegate]", "toolResultContains": "\"status\":\"created\""},
+      "response": {
+        "toolCalls": [
+          {"name": "wait_for_tasks", "arguments": {"tasks": ["e2e-coord-task-hold"], "timeout": "30s"}}
+        ]
+      }
+    },
+    {
+      "match": {"userMessage": "[e2e:coord-delegate]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "e2e-coord-worker",
+              "prompt": "[e2e:coord-factorial] Compute the factorial of 5 and return just the number."
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

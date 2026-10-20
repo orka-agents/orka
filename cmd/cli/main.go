@@ -32,7 +32,7 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "orka",
+		Use:           cliProgramName,
 		Short:         "Orka CLI — Kubernetes-native task execution platform",
 		Version:       version,
 		SilenceUsage:  true,
@@ -56,7 +56,10 @@ func newRootCmd() *cobra.Command {
 	cmd.PersistentFlags().String("kubeconfig", "", "Path to kubeconfig file")
 
 	// Register subcommands
-	cmd.AddCommand(newLoginCmd())
+	cmd.AddCommand(newVersionCmd())
+	cmd.AddCommand(newDashboardCmd())
+	cmd.AddCommand(newConnectCmd())
+	cmd.AddCommand(newConnectionCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newConfigCmd())
 	cmd.AddCommand(newAgentCmd())
@@ -70,6 +73,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newSecretCmd())
 	cmd.AddCommand(newSecurityCmd())
 	cmd.AddCommand(newMonitorCmd())
+	cmd.AddCommand(newUsageCmd())
 	cmd.AddCommand(newMemoryCmd())
 	cmd.AddCommand(newAuthCmd())
 	cmd.AddCommand(newModelsCmd())
@@ -82,9 +86,9 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
-// serviceAccountLoginFunc is used by login to request ServiceAccount login credentials.
+// serviceAccountTokenFunc creates the ServiceAccount token orka dashboard signs the browser in with.
 // Tests can replace this to avoid calling kubectl.
-var serviceAccountLoginFunc = createServiceAccountToken
+var serviceAccountTokenFunc = createServiceAccountToken
 
 // createServiceAccountToken generates a token for the given ServiceAccount using kubectl.
 func createServiceAccountToken(serviceAccount, namespace string) (string, error) {

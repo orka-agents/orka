@@ -330,3 +330,10 @@ func SamePublicationCreation(a, b Publication) bool {
 		a.CommitMessage == b.CommitMessage && a.CommitTimestamp.Equal(b.CommitTimestamp) &&
 		prIntentMatches && a.RequestDigest == b.RequestDigest
 }
+
+// SameSessionTurnCreation reports whether two SessionTurns share the immutable
+// creation identity, so a repeated create is idempotent rather than a conflict.
+func SameSessionTurnCreation(a, b SessionTurn) bool {
+	return a.ID == b.ID && a.Key == b.Key && a.PromptAttemptID == b.PromptAttemptID &&
+		a.RequestDigest == b.RequestDigest && a.UserPrompt == b.UserPrompt
+}

@@ -17,7 +17,7 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	if s.sessionTurns == nil {
 		return nil, ErrSessionTurnStoreNotConfigured
 	}
-	normalized, fence, err := normalizeSessionTurnForCreateKube(request.Turn, request.Fence)
+	normalized, fence, err := store.NormalizeSessionTurnForCreate(request.Turn, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +30,7 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	}
 	defer s.releaseControllerEpochMutation(snapshot)
 	if existing, getErr := s.sessionTurns.GetSessionTurn(ctx, normalized.ID); getErr == nil {
-		if sameSessionTurnCreationKube(*existing, normalized) {
+		if store.SameSessionTurnCreation(*existing, normalized) {
 			return existing, nil
 		}
 		return nil, store.ConflictErrorf("session turn %q was reused with different prompt input or request digest", normalized.ID)
@@ -139,6 +139,8 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		PublicationReceipt:   plan.receipt,
 		Projection:           normalized.Projection,
 		FinalizedAt:          normalized.FinalizedAt,
+		NativeSession:        normalized.NativeSession,
+		NativeSessionCarried: normalized.NativeSessionCarried,
 	})
 	if err != nil {
 		return nil, err
@@ -524,63 +526,6 @@ func (s *Store) findSessionControlByUID(ctx context.Context, sessionUID string) 
 	return match, nil
 }
 
-func normalizeSessionTurnForCreateKube(turn store.SessionTurn, fence store.ControllerEpochFence) (store.SessionTurn, store.ControllerEpochFence, error) {
-	turn.Key.SessionUID = strings.TrimSpace(turn.Key.SessionUID)
-	turn.Key.TaskUID = strings.TrimSpace(turn.Key.TaskUID)
-	turn.Key.PromptID = strings.TrimSpace(turn.Key.PromptID)
-	if err := turn.Key.Validate(); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	canonicalID, err := turn.Key.CanonicalID()
-	if err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	turn.ID = strings.TrimSpace(turn.ID)
-	if turn.ID == "" {
-		turn.ID = canonicalID
-	}
-	if turn.ID != canonicalID {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("session turn ID must equal canonical ID %q", canonicalID)
-	}
-	turn.PromptAttemptID = strings.TrimSpace(turn.PromptAttemptID)
-	if err := store.ValidateControlIdentifier("prompt attempt ID", turn.PromptAttemptID); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if err := store.ValidateCanonicalDigest("session turn request digest", turn.RequestDigest); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if strings.TrimSpace(turn.UserPrompt) == "" {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("session turn user prompt is required")
-	}
-	if err := store.ValidateControlText("session turn user prompt", turn.UserPrompt); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if turn.State == "" {
-		turn.State = store.SessionTurnOpen
-	}
-	if turn.State != store.SessionTurnOpen || turn.TerminalKind != "" || turn.TerminalContent != "" || turn.FinalizationDigest != "" || turn.PublicationID != "" || turn.PublicationReceipt != nil || turn.FinalizedAt != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session turn must be open and must not contain finalization data")
-	}
-	normalizedFence, err := store.NormalizeEpochFence(fence)
-	if err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if turn.Version != 0 && turn.Version != 1 {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session turn version must be zero or one")
-	}
-	now := store.NormalizeControlTime(turn.CreatedAt)
-	turn.CreatedAt = now
-	if turn.UpdatedAt.IsZero() {
-		turn.UpdatedAt = now
-	} else {
-		turn.UpdatedAt = turn.UpdatedAt.UTC()
-	}
-	turn.ControllerEpochName = normalizedFence.Name
-	turn.ControllerEpoch = normalizedFence.Epoch
-	turn.Version = 1
-	return turn, normalizedFence, nil
-}
-
 func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnRequest) (store.FinalizeSessionTurnRequest, string, error) {
 	if err := request.Key.Validate(); err != nil {
 		return store.FinalizeSessionTurnRequest{}, "", err
@@ -608,6 +553,12 @@ func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnReq
 	}
 	if request.SkipTranscriptAppend && request.SkipUserPromptAppend {
 		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("session turn cannot combine full transcript suppression with user-prompt-only suppression")
+	}
+	if request.NativeSessionCarried && (request.NativeSession == nil || request.TerminalKind != store.SessionTurnOutcomeMarker) {
+		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("carried native checkpoint requires the existing record and an outcome-marker finalization")
+	}
+	if request.NativeSession != nil && (request.SkipTranscriptAppend || !request.NativeSessionCarried && request.TerminalKind != store.SessionTurnAssistantResult) {
+		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("native capture requires canonical assistant-result finalization; native state cannot skip transcript append")
 	}
 	if err := store.ValidateControlText("session turn terminal content", request.TerminalContent); err != nil {
 		return store.FinalizeSessionTurnRequest{}, "", err
@@ -721,6 +672,7 @@ func sessionTurnRequestMatchesFinalized(turn store.SessionTurn, request store.Fi
 		availableAt = request.FinalizedAt
 	}
 	return turn.FinalizationDigest == request.FinalizationDigest && turn.TerminalKind == request.TerminalKind && turn.TerminalContent == request.TerminalContent && turn.PublicationID == request.PublicationID &&
+		turn.NativeSessionDigest == store.NativeSessionCaptureDigest(request.NativeSession) &&
 		turn.ProjectionID == request.Projection.ID && turn.ProjectionKind == request.Projection.ProjectionKind && turn.ProjectionDigest == request.Projection.PayloadDigest && turn.ProjectionAvailableAt.Equal(availableAt)
 }
 
@@ -730,8 +682,4 @@ func sessionControlAlreadyFinalized(control store.SessionControl, turnID, digest
 
 func sessionLeaseMatchesKey(lease *store.SessionMutationLease, key store.SessionTurnKey) bool {
 	return lease != nil && lease.Generation == key.LeaseGeneration && lease.TaskUID == key.TaskUID && lease.Attempt == key.Attempt && lease.PromptID == key.PromptID
-}
-
-func sameSessionTurnCreationKube(a, b store.SessionTurn) bool {
-	return a.ID == b.ID && a.Key == b.Key && a.PromptAttemptID == b.PromptAttemptID && a.RequestDigest == b.RequestDigest && a.UserPrompt == b.UserPrompt
 }

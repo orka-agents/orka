@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -105,10 +106,21 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 
 // ReleaseLock releases the session lock for a task.
 func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Task) error {
-	if event, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
+	return m.ReleaseLockWithTokenUsage(ctx, task, 0, 0)
+}
+
+// ReleaseLockWithTokenUsage releases the session lock for a finished task
+// and adds its token usage to the Session in the same write, so a completion
+// replayed after a crash cannot count the usage twice.
+func (m *SessionManager) ReleaseLockWithTokenUsage(ctx context.Context, task *corev1alpha1.Task, inputTokens, outputTokens int64) error {
+	if _, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
 		return err
 	} else if ok {
-		return m.store.ReleaseLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
+		// Gateway terminal projection owns lock release atomically with its
+		// canonical assistant message and delivery outbox row. Generic Task
+		// finalization must remain a no-op even when a malformed session policy
+		// caused the admitted Gateway Task to fail.
+		return nil
 	}
 	if task.Spec.SessionRef == nil {
 		return nil
@@ -124,7 +136,13 @@ func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Tas
 			return getErr
 		}
 	}
-	err := m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	var err error
+	if fenced, ok := m.store.(store.FencedSessionWriteStore); ok && (inputTokens != 0 || outputTokens != 0) {
+		err = fenced.ReleaseLockWithTokenUsage(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID),
+			int(inputTokens), int(outputTokens))
+	} else {
+		err = m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	}
 	if err != nil {
 		// Ignore not-found errors (session may have been deleted)
 		if errors.Is(err, store.ErrNotFound) {
@@ -170,7 +188,7 @@ func (m *SessionManager) createSession(ctx context.Context, task *corev1alpha1.T
 	session := &store.SessionRecord{
 		Namespace:     task.Namespace,
 		Name:          task.Spec.SessionRef.Name,
-		SessionType:   "task",
+		SessionType:   acpCancelLogKeyTask,
 		ActiveTask:    task.Name,
 		ActiveTaskUID: string(task.UID),
 		CreatedAt:     now,
@@ -183,15 +201,29 @@ func (m *SessionManager) createSession(ctx context.Context, task *corev1alpha1.T
 // AppendMessages appends messages from a completed task to the session.
 // The resultStore is used to fetch the task result for the assistant message.
 func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.Task, resultStore store.ResultStore) error {
+	if _, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
+		return err
+	} else if ok {
+		// Gateway terminal projection is the only writer for the canonical
+		// assistant message. Do not inspect a potentially modified SessionRef or
+		// read the Task result from generic finalization.
+		return nil
+	}
 	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Append {
 		return nil
 	}
 
-	if _, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name); err != nil {
+	session, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
 		}
 		return err
+	}
+	// Rejected Tasks and scheduled parents can finish without ever acquiring
+	// this Session. Only its current Task incarnation may append a transcript.
+	if task.Name == "" || session.ActiveTask != task.Name || session.ActiveTaskUID != string(task.UID) {
+		return nil
 	}
 
 	var prompt, response string
@@ -231,11 +263,21 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 		})
 	}
 
+	if digest := agentcontext.SessionDigest(task.Status.SoulBinding); digest != "" {
+		for i := range messages {
+			messages[i].Metadata = map[string]string{store.SessionSoulDigestMetadata: digest}
+		}
+	}
+
 	if len(messages) == 0 {
 		return nil
 	}
 
-	return m.store.AppendMessages(ctx, task.Namespace, task.Spec.SessionRef.Name, messages)
+	fenced, ok := m.store.(store.FencedSessionWriteStore)
+	if !ok {
+		return fmt.Errorf("session store does not support fenced transcript writes")
+	}
+	return fenced.AppendMessagesWithLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), messages)
 }
 
 // LoadTranscript loads the session transcript for a task.
@@ -306,7 +348,7 @@ func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name stri
 	}
 	operationID := store.CanonicalControlID("session-cleanup", namespace, name)
 	operationDigest, err := acpDomainDigest("session-cleanup", map[string]string{
-		"namespace": namespace, "sessionName": name, "operationID": operationID,
+		acpCancelLogKeyNamespace: namespace, "sessionName": name, "operationID": operationID,
 	})
 	if err != nil {
 		return err
@@ -322,7 +364,7 @@ func (m *SessionManager) ListSessions(ctx context.Context, namespace string) ([]
 	return m.store.ListSessions(ctx, namespace)
 }
 
-// ListSessionsPage lists one name-ordered page of sessions in a namespace.
-func (m *SessionManager) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
-	return m.store.ListSessionsPage(ctx, namespace, afterName, limit, excludeType)
+// ListSessionsPage lists one newest-first page of sessions in a namespace.
+func (m *SessionManager) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	return m.store.ListSessionsPage(ctx, namespace, after, limit, excludeType)
 }

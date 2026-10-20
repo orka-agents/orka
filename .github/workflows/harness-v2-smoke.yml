@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - ".github/workflows/harness-v2-smoke.yml"
+      - ".agents/skills/orka-kind-deploy/**"
       - "Makefile"
       - "api/**"
       - "cmd/main.go"
       - "cmd/build/helmify/**"
+      - "cmd/build/release/**"
       - "cmd/orka-admission/**"
       - "config/acp-production/**"
       - "config/acp-workload/**"
@@ -23,16 +25,19 @@ on:
       - "internal/harness/v2/**"
       - "workers/acp/**"
       - "internal/store/**"
+      - "examples/fibey-custom-agent-demo/**"
       # The script jobs syntax-check every script and execute every
       # scripts/tests/*-test.sh suite, so any script change is relevant.
       - "scripts/**"
   pull_request:
     paths:
       - ".github/workflows/harness-v2-smoke.yml"
+      - ".agents/skills/orka-kind-deploy/**"
       - "Makefile"
       - "api/**"
       - "cmd/main.go"
       - "cmd/build/helmify/**"
+      - "cmd/build/release/**"
       - "cmd/orka-admission/**"
       - "config/acp-production/**"
       - "config/acp-workload/**"
@@ -48,6 +53,7 @@ on:
       - "internal/harness/v2/**"
       - "workers/acp/**"
       - "internal/store/**"
+      - "examples/fibey-custom-agent-demo/**"
       # The script jobs syntax-check every script and execute every
       # scripts/tests/*-test.sh suite, so any script change is relevant.
       - "scripts/**"
@@ -110,6 +116,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
 
       - name: Validate scripts
         run: |

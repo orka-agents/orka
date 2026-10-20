@@ -489,14 +489,11 @@ type substrateRuntimeActorControl struct {
 // NewSubstrateRuntimeActorControl builds the control-only Substrate client for
 // ACP RuntimePool hosting.
 func NewSubstrateRuntimeActorControl(cfg SubstrateConfig) (SubstrateRuntimeActorControl, error) {
-	if cfg.ControlClient == nil {
-		client, err := newGRPCSubstrateControlClient(cfg)
-		if err != nil {
-			return nil, err
-		}
-		cfg.ControlClient = client
+	control, err := resolveSubstrateControlClient(cfg)
+	if err != nil {
+		return nil, err
 	}
-	return &substrateRuntimeActorControl{control: cfg.ControlClient}, nil
+	return &substrateRuntimeActorControl{control: control}, nil
 }
 
 func (c *substrateRuntimeActorControl) GetActor(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error) {
@@ -547,19 +544,8 @@ func (c *substrateRuntimeActorControl) DeleteActor(ctx context.Context, actorID 
 	return nil
 }
 
-func (c *substrateRuntimeActorControl) ActorCreateRecoveryAttestationSupported() bool {
-	return false
-}
-
-func (c *substrateRuntimeActorControl) ConfirmActorCreationSettled(context.Context, string) (bool, error) {
-	return false, fmt.Errorf("substrate provider does not expose operation-level actor creation settlement")
-}
-
 func (c *substrateRuntimeActorControl) Close() error {
-	if closer, ok := c.control.(interface{ Close() error }); ok {
-		return closer.Close()
-	}
-	return nil
+	return closeSubstrateControlClient(c.control)
 }
 
 func substrateRuntimeActorView(actor *substrateActor) *SubstrateRuntimeActor {

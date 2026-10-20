@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 129 authenticated external route registrations, including 50
+The table covers all 133 authenticated external route registrations, including 50
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -91,6 +91,11 @@ RepositoryScan namespace. Configuration create/update, scan start, and finding
 validation check these grants before loading the policies. The policy opt-in
 label or annotation remains required.
 
+Reading an Agent's system prompt from its `systemPrompt.configMapRef` also
+requires named `get` on that core `configmaps` object in the Agent namespace.
+Transaction tokens need a ConfigMap read scope as well. The response holds only
+the referenced key.
+
 Workspace-class `use` remains a separate check for every authenticated identity,
 including OIDC and transaction-token callers. When a Task or workspace-backed Tool
 references a class, grant `use` on `executionworkspaceclasses` in
@@ -150,6 +155,9 @@ otherwise. In the additional-checks column:
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use |
+| `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
+| `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
+| `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
 | `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |
@@ -169,6 +177,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/events` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/stream` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | Private native bundle export; excludes Gateway Sessions |
+| `POST` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `create` | empty | `Q` | `get` on the named Session; creates a fresh non-Gateway Session only |
 | `DELETE` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `delete` | `:id` | `Q` | none |
 | `GET` | `/api/v1/gatewayclasses` | `gateway.orka.ai` | `gatewayclasses` | `list` | empty | `cluster` | none |
 | `GET` | `/api/v1/gatewayclasses/:name` | `gateway.orka.ai` | `gatewayclasses` | `get` | `:name` | `cluster` | none |
@@ -214,6 +224,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/agents` | `core.orka.ai` | `agents` | `create` | empty | `C` | none |
 | `GET` | `/api/v1/agents` | `core.orka.ai` | `agents` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/agents/:name/system-prompt` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | Named `get` on core `configmaps` for the Agent's `systemPrompt.configMapRef` |
 | `PUT` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `patch` | `:name` | `Q` | none |
 | `DELETE` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `delete` | `:name` | `Q` | none |
 | `POST` | `/api/v1/skills` | `core.orka.ai` | `skills` | `create` | empty | `C` | none |
@@ -270,11 +281,20 @@ otherwise. In the additional-checks column:
 | `DELETE` | `/api/v1/substrate-actor-pools/:name` | `core.orka.ai` | `substrateactorpools` | `delete` | `:name` | `Q` | none |
 | `GET` | `/api/v1/auth/validate` | none | none | identity only | empty | not applicable | Authenticated identity only |
 | `GET` | `/api/v1/auth/whoami` | none | none | identity only | empty | not applicable | Authenticated identity only |
+| `GET` | `/api/v1/connectors` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `GET` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `POST` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `GET` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `PUT` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `DELETE` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `POST` | `/api/v1/connections/:name/authorize` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `POST` | `/api/v1/connections/:name/complete` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject; additionally requires the one-time completion token handed to the browser that finished consent |
 | `GET` | `/api/v1/secrets` | `""` | `secrets` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/chat` | `core.orka.ai` | `chats` | `create` | empty | `B` | Supplied JSON `sessionId`: `get` and `update` on `core.orka.ai/sessions` with that name; supplied JSON `agentRef`: `get core.orka.ai/agents` with that name; each nested tool requires its own resource permissions |
 | `GET` | `/api/v1/chat/config` | `core.orka.ai` | `chats/config` | `get` | empty | `Q` | none |
 | `DELETE` | `/api/v1/chat/:sessionId` | `core.orka.ai` | `sessions` | `delete` | `:sessionId` | `Q` | none |
 | `POST` | `/openai/v1/chat/completions` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Each nested tool requires its own resource permissions; custom Tool metadata requires unnamed `list core.orka.ai/tools` and is omitted on denial |
+| `POST` | `/openai/v1/responses` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Stateless only; each nested coordinator tool requires its own resource permissions |
 | `GET` | `/openai/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
 | `POST` | `/anthropic/v1/messages` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Each nested tool requires its own resource permissions; custom Tool metadata requires unnamed `list core.orka.ai/tools` and is omitted on denial |
 | `GET` | `/anthropic/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |

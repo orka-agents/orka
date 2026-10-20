@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -60,6 +60,7 @@ function ApprovalCard({
   const decide = useDecideApproval(taskId)
   const [reason, setReason] = useState('')
   const [conflict, setConflict] = useState<string | null>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
   const isPending = approval.status === 'pending'
   // A pending approval on a completed task can't be decided — show it read-only.
   const actionable = isPending && !taskTerminal
@@ -74,7 +75,10 @@ function ApprovalCard({
         decision,
         reason: reason.trim() || undefined,
       })
-      toast.success(`Approval ${updated.status}`)
+      toast.success(`Decision recorded: ${statusStyle(updated.status).label}`)
+      // The decided card drops its buttons; keep keyboard focus on the card
+      // instead of letting it fall back to the page.
+      headingRef.current?.focus()
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         // The approval changed underneath us (decided elsewhere, expired, or
@@ -84,6 +88,8 @@ function ApprovalCard({
         setConflict(err.message || 'This approval was already decided.')
         toast.error('Approval already decided')
         onConflict?.()
+        // The refetch settles the card, which can remove its buttons.
+        headingRef.current?.focus()
       } else {
         const message = err instanceof Error ? err.message : 'Unknown error'
         setConflict(message)
@@ -94,20 +100,47 @@ function ApprovalCard({
 
   return (
     <Card data-testid="approval-card">
-      <CardContent className="space-y-3 pt-6">
+      <CardContent className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <ApprovalStatusBadge status={approval.status} />
-          <span className="font-medium">{approval.action || 'Action'}</span>
+          <h3
+            ref={headingRef}
+            tabIndex={-1}
+            className="rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          >
+            {approval.action || 'Action'}
+          </h3>
           {approval.toolCallID && (
             <Badge variant="outline" className="font-mono text-[10px]" title={approval.toolCallID}>
               call: {approval.toolCallID.length > 12 ? approval.toolCallID.slice(0, 12) + '…' : approval.toolCallID}
             </Badge>
           )}
-          <span className="ml-auto font-mono text-xs text-muted-foreground">{approval.id}</span>
+          {/* IDs can be 64 characters; break them rather than overflow the card. */}
+          <span className="ml-auto break-all font-mono text-xs text-muted-foreground">{approval.id}</span>
         </div>
 
-        {approval.riskSummary && (
+        {/* Request guidance can describe an unexecuted tool; after a decision,
+            the execution outcome below describes its current state. */}
+        {isPending && approval.riskSummary && (
           <p className="break-words text-sm text-muted-foreground">{approval.riskSummary}</p>
+        )}
+
+        {approval.targetArgsPreview !== undefined && (
+          <div className="space-y-1 text-xs">
+            <p className="font-medium">Proposed inputs{approval.targetTool ? ` for ${approval.targetTool}` : ''}</p>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 font-mono">
+              {JSON.stringify(approval.targetArgsPreview, null, 2)}
+            </pre>
+            <p className="text-muted-foreground">Sensitive values are hidden. Approval applies to this exact call.</p>
+          </div>
+        )}
+
+        {approval.executionOutcome && (
+          <div className={`rounded-md px-3 py-2 text-xs ${approval.executionOutcome === 'unknown' ? 'bg-status-pending-bg text-status-pending' : 'bg-muted'}`}>
+            <p>Execution: {approval.executionOutcome.replace(/_/g, ' ')}</p>
+            {approval.executionReason && <p className="mt-1 break-words">{approval.executionReason}</p>}
+            {approval.executionOutcome === 'unknown' && <p className="mt-1">The action may have run. Check its outcome before trying again.</p>}
+          </div>
         )}
 
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -132,7 +165,9 @@ function ApprovalCard({
           </div>
         )}
 
-        {conflict && (
+        {/* The note explains why a decision on a still-pending card failed;
+            once the refetched card settles, its decision details replace it. */}
+        {conflict && isPending && (
           <p className="rounded-md border border-status-pending/40 bg-status-pending-bg px-3 py-2 text-xs text-status-pending">
             {conflict}
           </p>
@@ -155,11 +190,15 @@ function ApprovalCard({
               aria-label="Decision reason"
               disabled={submitting}
             />
+            {/* aria-disabled, not disabled, while a decision is in flight:
+                disabling the focused button would drop keyboard focus, and
+                submit() already ignores repeat presses. */}
             <div className="flex gap-2">
               <Button
                 size="sm"
                 onClick={() => submit('approve')}
-                disabled={submitting}
+                aria-disabled={submitting || undefined}
+                className="aria-disabled:opacity-50"
                 aria-label="Approve"
               >
                 <Check className="mr-1 h-4 w-4" /> Approve
@@ -168,7 +207,8 @@ function ApprovalCard({
                 size="sm"
                 variant="destructive"
                 onClick={() => submit('decline')}
-                disabled={submitting}
+                aria-disabled={submitting || undefined}
+                className="aria-disabled:opacity-50"
                 aria-label="Decline"
               >
                 <X className="mr-1 h-4 w-4" /> Decline
@@ -182,12 +222,9 @@ function ApprovalCard({
 }
 
 export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: string; taskPhase?: TaskPhase; taskUid?: string }) {
-  // Poll while approvals are pending or the task is still running, so a live
-  // ApprovalRequested surfaces even if the panel opened before any existed.
+  // Poll for new approvals while active and unresolved execution after termination.
   const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
-  // The backend rejects decisions on terminal tasks, so their pending approvals
-  // render read-only — and polling them is pointless since no event will flip
-  // their status. Gate both on taskTerminal.
+  // Terminal tasks reject decisions, but recovery can still update their approvals.
   const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
   const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning, taskTerminal, taskUid)
   const approvals = data?.approvals ?? []
@@ -196,7 +233,7 @@ export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: stri
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="space-y-3 pt-6">
+        <CardContent className="space-y-3">
           <Skeleton className="h-6 w-40" />
           <Skeleton className="h-24 w-full" />
         </CardContent>
@@ -208,7 +245,7 @@ export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: stri
     const notImplemented = error instanceof ApiError && error.status === 501
     return (
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <EmptyState
             icon={ShieldCheck}
             headline={
@@ -232,7 +269,7 @@ export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: stri
   if (approvals.length === 0) {
     return (
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <EmptyState
             icon={ShieldCheck}
             headline="No approvals requested."
