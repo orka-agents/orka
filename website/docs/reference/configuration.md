@@ -117,11 +117,11 @@ to disable that provider.
 The controller encrypts agent execution snapshots at rest with an AES-256 key
 mounted from a Secret. By default the chart renders an empty Secret named
 `<release>-agent-execution-snapshot` and the controller mints 32 random bytes
-into it on its first start, then reuses them on every later start. The chart
-never renders key material, so Helm release history and dry-run output contain
-no secrets, and Helm leaves the controller-written data alone on upgrade. The
-Secret is kept on `helm uninstall` so a restored data volume can still be
-decrypted. Back it up with the data volume.
+into it when it creates a new SQLite dataset, then reuses them on every later
+start. The chart never renders key material, so Helm release history and
+dry-run output contain no secrets, and Helm leaves the controller-written data
+alone on upgrade. The Secret is kept on `helm uninstall` so a restored data
+volume can still be decrypted. Back it up with the data volume.
 
 The controller decides whether it may mint a key from the dataset history recorded
 inside the SQLite database, not from whether the database file exists. It mints a
