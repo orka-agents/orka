@@ -154,6 +154,26 @@ func TestNewRejectsMissingOrSplitEmbeddedStores(t *testing.T) {
 	}
 }
 
+func TestNewRejectsTypedNilProviders(t *testing.T) {
+	var typedNil *sqlite.Store
+	if _, err := storageclient.NewEmbedded(typedNil); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("typed-nil embedded backend error = %v, want validation", err)
+	}
+	if _, err := storageclient.New(storageclient.Options{State: typedNil, Artifacts: typedNil, Embedded: typedNil}); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("typed-nil providers error = %v, want validation", err)
+	}
+	valid := openSQLite(t)
+	for name, options := range map[string]storageclient.Options{
+		"state":     {State: typedNil, Artifacts: valid, Embedded: valid},
+		"artifacts": {State: valid, Artifacts: typedNil, Embedded: valid},
+		"embedded":  {State: valid, Artifacts: valid, Embedded: typedNil},
+	} {
+		if _, err := storageclient.New(options); !errors.Is(err, store.ErrValidation) {
+			t.Fatalf("typed-nil %s provider error = %v, want validation", name, err)
+		}
+	}
+}
+
 // uncomparableStore is a value-typed provider whose dynamic type cannot be
 // compared with ==.
 type uncomparableStore struct {

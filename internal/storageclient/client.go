@@ -77,7 +77,7 @@ var ErrSplitEmbeddedStore = errors.New("embedded storage families require state 
 // New composes a storage client. State, Artifacts and Embedded are required,
 // and while embedded families exist they must all be one store.
 func New(options Options) (*Client, error) {
-	if options.State == nil || options.Artifacts == nil || options.Embedded == nil {
+	if isNilProvider(options.State) || isNilProvider(options.Artifacts) || isNilProvider(options.Embedded) {
 		return nil, store.ValidationErrorf("storage client requires state, artifact and embedded stores")
 	}
 	if !sameStore(options.State, options.Embedded) || !sameStore(options.Artifacts, options.Embedded) {
@@ -100,7 +100,7 @@ type EmbeddedStore interface {
 
 // NewEmbedded composes a client over one in-process store.
 func NewEmbedded(backend EmbeddedStore) (*Client, error) {
-	if backend == nil {
+	if isNilProvider(backend) {
 		return nil, store.ValidationErrorf("embedded storage backend is required")
 	}
 	return New(Options{State: backend, Artifacts: backend, Embedded: backend})
@@ -110,6 +110,21 @@ func NewEmbedded(backend EmbeddedStore) (*Client, error) {
 // embedded families share one store, so one check covers every binding.
 func (c *Client) HealthCheck(ctx context.Context) error {
 	return c.StateProvider.HealthCheck(ctx)
+}
+
+// isNilProvider reports whether provider is nil, including a typed nil such as
+// (*sqlite.Store)(nil) whose methods would panic on first use.
+func isNilProvider(provider any) bool {
+	if provider == nil {
+		return true
+	}
+	value := reflect.ValueOf(provider)
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // sameStore reports whether two provider values are provably the same store.
