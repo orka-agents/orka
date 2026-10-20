@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -243,9 +245,27 @@ func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Millisecond)
 			request := clientTestStartPromptRequest(t, now, "idle-resume-rejected-op")
+			// net/http reports WroteRequest only after the body reaches the
+			// socket, so an immediate rejection can arrive first. Answer only
+			// after that report (httptrace runs the client's own hook before
+			// this outer one) to observe the evidence of a completed write.
+			requestWritten := make(chan struct{})
+			var reportWritten sync.Once
+			ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+				WroteRequest: func(info httptrace.WroteRequestInfo) {
+					if info.Err == nil {
+						reportWritten.Do(func() { close(requestWritten) })
+					}
+				},
+			})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var decoded StartPromptRequest
 				clientTestDecodeMutation(t, r, &decoded, true)
+				select {
+				case <-requestWritten:
+				case <-time.After(10 * time.Second):
+					t.Error("client never reported the request as written")
+				}
 				writeClientTestJSON(w, test.status, ErrorResponse{
 					Protocol: ProtocolVersion, Code: ErrorCodePromptNotAccepted,
 					Message:   "idle adapter recovery failed before prompt submission",
@@ -254,7 +274,7 @@ func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
 			}))
 			defer server.Close()
 			emitted := false
-			summary, err := clientTestClient(t, server.URL).StreamPrompt(t.Context(), "runtime-session-1", request, func(Event) error {
+			summary, err := clientTestClient(t, server.URL).StreamPrompt(ctx, "runtime-session-1", request, func(Event) error {
 				emitted = true
 				return nil
 			})
@@ -270,5 +290,22 @@ func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
 				t.Fatalf("rejection must preserve a written request without stream acceptance: summary=%#v error=%#v", summary, clientErr)
 			}
 		})
+	}
+}
+
+// A response can be read before net/http reports WroteRequest. Until that
+// report arrives, the evidence must stay ambiguous and never resend-safe.
+func TestRequestTraceResponseBeforeWriteReportStaysAmbiguous(t *testing.T) {
+	tracker := newRequestTrace(true)
+	trace := tracker.clientTrace()
+	trace.WroteHeaders()
+	tracker.bodyBytesRead.Add(64)
+	trace.GotFirstResponseByte()
+	if evidence := tracker.evidence(); evidence.State != RequestWriteAmbiguous || evidence.SafeToResendSameIdentity() {
+		t.Fatalf("response before the write report = %#v, want ambiguous and not resendable", evidence)
+	}
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
+	if evidence := tracker.evidence(); evidence.State != RequestWriteComplete || evidence.SafeToResendSameIdentity() {
+		t.Fatalf("reported write = %#v, want complete and not resendable", evidence)
 	}
 }
