@@ -756,18 +756,38 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
-      # The tap verifies the signed CLI checksums itself, so this token only
-      # needs permission to dispatch to orka-agents/homebrew-tap. Without it, the
-      # tap's scheduled sync picks the release up within six hours.
-      - name: Dispatch the formula update
+      # The tap verifies the signed CLI checksums itself, so the Orka Homebrew
+      # Tap app is installed only on orka-agents/homebrew-tap with Contents:
+      # write, enough to dispatch. Without its key, the tap's scheduled sync
+      # picks the release up within six hours.
+      - name: Check for the tap app key
+        id: app
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HAS_KEY: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY != '' }}
           RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
-          set -euo pipefail
-          if [[ -z "${GH_TOKEN}" ]]; then
-            echo "::notice::HOMEBREW_TAP_TOKEN is not set; the tap's scheduled sync will publish ${RELEASE_VERSION}."
+          if [[ "${HAS_KEY}" != true ]]; then
+            echo "::notice::HOMEBREW_TAP_APP_PRIVATE_KEY is not set; the tap's scheduled sync will publish ${RELEASE_VERSION}."
             exit 0
           fi
+          echo "enabled=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Mint a tap token
+        id: token
+        if: steps.app.outputs.enabled
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.HOMEBREW_TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: orka-agents
+          repositories: homebrew-tap
+          permission-contents: write
+
+      - name: Dispatch the formula update
+        if: steps.app.outputs.enabled
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
           gh api repos/orka-agents/homebrew-tap/dispatches \
             -f event_type=orka-release -f "client_payload[version]=${RELEASE_VERSION}"
