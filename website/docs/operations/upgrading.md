@@ -36,10 +36,16 @@ Object counts alone do not establish compatibility.
 
 | Source layout | Representative revision | Transition |
 | --- | --- | --- |
-| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes. |
-| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes. |
-| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables. |
-| 166 objects (current) | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Validate only; no migration or automatic backup. |
+| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes, then remove the empty harness v1 tables. |
+| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes, then remove the empty harness v1 tables. |
+| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables. |
+| 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes. |
+| 158 objects (current) | #574 | Validate only; no migration or automatic backup. |
+
+A harness v2 store never writes the harness v1 tables. If either table holds
+records, the upgrade stops before changing the schema and reports
+`harness v1 ... records`; that store belongs to an unsupported harness v1
+installation.
 
 ### Unsupported intermediate connector layout
 
@@ -342,4 +348,5 @@ Keep CRDs until their data is no longer needed or has been backed up.
 
 The current controller only supports harness v2. Older execution protocols have
 no in-place upgrade, automatic Task or Session conversion, or database backfill.
-Use a fresh installation with the current schema and images.
+A database holding harness v1 records is refused at startup. Use a fresh
+installation with the current schema and images.

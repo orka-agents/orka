@@ -36,13 +36,22 @@ func newAgentExecutionTestStore(t *testing.T) *Store {
 	return NewStore(db, dbPath)
 }
 
-func TestAgentExecutionFreshDatabaseHasNoSnapshotReferences(t *testing.T) {
+func TestAgentExecutionFreshDatabaseHasNoHarnessV1Tables(t *testing.T) {
 	s := newAgentExecutionTestStore(t)
+	for _, table := range []string{"harness_v1_attempts", "runtime_sessions"} {
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("fresh database created unsupported table %q", table)
+		}
+	}
 	counts, err := s.CountAgentExecutionSnapshotReferences(context.Background(), store.AgentExecutionSnapshotKey{
 		TaskUID: "task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest([]byte("snapshot")),
 	})
 	if err != nil {
-		t.Fatalf("count snapshot references: %v", err)
+		t.Fatalf("count snapshot references without v1 tables: %v", err)
 	}
 	if counts.Total() != 0 {
 		t.Fatalf("fresh database reference counts = %#v", counts)
