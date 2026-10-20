@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	sqliteDriver "modernc.org/sqlite"
 )
@@ -278,42 +279,114 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 	return path, db
 }
 
-// schemaVersion1StoreDB returns a store written by this release's production
-// open path: user_version = 1 and one completed store_dataset identity row with
-// the given origin, plus seeded migration records. Upgrade tests for the next
-// layout must start from this, not from a historicalSchemaDB fixture extended
-// with 166-to-167.sql (see upgradeSchema).
-func schemaVersion1StoreDB(t *testing.T, origin string) (string, *sql.DB) {
-	t.Helper()
-	var path string
-	switch origin {
-	case datasetOriginNew:
-		path = filepath.Join(t.TempDir(), "store.db")
-	case datasetOriginAdopted:
-		var old *sql.DB
-		path, old = historicalSchemaDB(t, "abd2c040")
-		require.NoError(t, old.Close())
-	default:
-		t.Fatalf("unknown dataset origin %q", origin)
-	}
-	s, err := OpenLockedStore(path)
-	require.NoError(t, err)
-	require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
-	seedMigrationRecords(t, s.db, path)
-	require.NoError(t, s.close())
+// version1StoreStates lists every schema version 1 dataset state that
+// production can leave on disk, with whether DatasetInfo lets it mint a
+// snapshot key. An incomplete store is one whose key loading or authentication
+// failed after OpenLockedStore committed its identity row. A later upgrade of
+// these stores must preserve canBootstrap.
+var version1StoreStates = []struct {
+	name         string
+	origin       string
+	complete     bool
+	canBootstrap bool
+}{
+	{"new incomplete", datasetOriginNew, false, true},
+	{"new complete", datasetOriginNew, true, false},
+	{"adopted incomplete", datasetOriginAdopted, false, false},
+	{"adopted complete", datasetOriginAdopted, true, false},
+}
 
-	db := rawMigrationDB(t, path)
+// schemaVersion1StoreDB returns a schema version 1 store built only from frozen
+// inputs: the 166-object layout, the immutable 166-to-167.sql step, one
+// store_dataset identity row and user_version = 1. An incomplete new store is
+// empty, because production writes no records before key bootstrap completes;
+// the others hold seeded migration records. It never uses the current schema
+// constructor, so it keeps producing version-1 stores after the layout moves
+// on. Upgrade tests for the next layout must start from this, not from
+// historicalSchemaDB plus 166-to-167.sql alone (see upgradeSchema).
+func schemaVersion1StoreDB(t *testing.T, origin string, complete bool) (string, *sql.DB) {
+	t.Helper()
+	require.Contains(t, []string{datasetOriginNew, datasetOriginAdopted}, origin)
+	path, db := historicalSchemaDB(t, "abd2c040")
+	if origin == datasetOriginAdopted || complete {
+		seedMigrationRecords(t, db, path)
+	}
+	_, err := db.Exec(migration166To167)
+	require.NoError(t, err)
+	bootstrapComplete := 0
+	if complete {
+		bootstrapComplete = 1
+	}
+	_, err = db.Exec(`INSERT INTO store_dataset(singleton, dataset_id, origin, bootstrap_complete) VALUES(1, ?, ?, ?)`,
+		uuid.NewString(), origin, bootstrapComplete)
+	require.NoError(t, err)
+	_, err = db.Exec(`PRAGMA user_version = 1`)
+	require.NoError(t, err)
+
 	schema, err := readSchema(db)
 	require.NoError(t, err)
-	require.Equal(t, schema167, schemaFingerprint(schema))
-	version, err := readSchemaVersion(db)
-	require.NoError(t, err)
-	require.Equal(t, SchemaVersion, version)
+	// A literal digest, independent of schema167, as in historicalSchemaDB.
+	require.Equal(t, "10d05a3ab1d90d4837476740a4b8dc6e9b5ee3d2c9699e3a4252b9f6d944168b", schemaFingerprint(schema))
 	record, err := readDataset(db)
 	require.NoError(t, err)
 	require.Equal(t, origin, record.origin)
-	require.True(t, record.complete)
+	require.Equal(t, complete, record.complete)
 	return path, db
+}
+
+type version1StoreState struct {
+	fingerprint  string
+	version      int
+	origin       string
+	complete     bool
+	canBootstrap bool
+}
+
+func readVersion1StoreState(t *testing.T, db *sql.DB, path string) version1StoreState {
+	t.Helper()
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	version, err := readSchemaVersion(db)
+	require.NoError(t, err)
+	record, err := readDataset(db)
+	require.NoError(t, err)
+	info, err := NewStore(db, path).DatasetInfo()
+	require.NoError(t, err)
+	return version1StoreState{
+		fingerprint:  schemaFingerprint(schema),
+		version:      version,
+		origin:       record.origin,
+		complete:     record.complete,
+		canBootstrap: info.CanBootstrapSnapshotKey,
+	}
+}
+
+// Pins schemaVersion1StoreDB to what this release's production open path
+// writes, including whether the store may still mint a key. Once SchemaVersion
+// moves past 1 this release is historical: keep schemaVersion1StoreDB
+// unchanged and retire this comparison.
+func TestSchemaVersion1StoreMatchesProductionStore(t *testing.T) {
+	for _, state := range version1StoreStates {
+		t.Run(state.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "store.db")
+			if state.origin == datasetOriginAdopted {
+				var old *sql.DB
+				path, old = historicalSchemaDB(t, "abd2c040")
+				require.NoError(t, old.Close())
+			}
+			s, err := OpenLockedStore(path)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, s.close()) }()
+			if state.complete {
+				require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+			}
+			production := readVersion1StoreState(t, s.db, path)
+			require.Equal(t, state.canBootstrap, production.canBootstrap)
+
+			frozenPath, db := schemaVersion1StoreDB(t, state.origin, state.complete)
+			require.Equal(t, production, readVersion1StoreState(t, db, frozenPath))
+		})
+	}
 }
 
 // A 167-object fixture rebuilt from historical DDL plus 166-to-167.sql has the
@@ -338,11 +411,12 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema167, nil))
 	require.NoError(t, conn.Close())
 
-	for _, origin := range []string{datasetOriginNew, datasetOriginAdopted} {
-		t.Run(origin, func(t *testing.T) {
-			path, db := schemaVersion1StoreDB(t, origin)
+	for _, state := range version1StoreStates {
+		t.Run(state.name, func(t *testing.T) {
+			path, db := schemaVersion1StoreDB(t, state.origin, state.complete)
 			before, err := readDataset(db)
 			require.NoError(t, err)
+			beforeRows := applicationRows(t, db)
 			backups := migrationBackups(t, path)
 
 			conn, err := db.Conn(t.Context())
@@ -357,7 +431,7 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 			after, err := readDataset(db)
 			require.NoError(t, err)
 			require.Equal(t, before, after)
-			assertMigrationRecords(t, db, path)
+			require.Equal(t, beforeRows, applicationRows(t, db))
 		})
 	}
 }
