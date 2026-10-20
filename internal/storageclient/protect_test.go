@@ -215,9 +215,10 @@ func protectedSecrets() map[string]string {
 	}
 }
 
-// TestProviderReceivesOnlyRedactedContent drives every write whose content
-// Orka redacts, sanitizes or derives through the client and proves that the
-// provider receives none of the secrets the caller supplied.
+// TestProviderReceivesOnlyRedactedContent drives every write outside the
+// gateway family whose content Orka redacts, sanitizes or derives through the
+// client and proves that the provider receives none of the secrets the caller
+// supplied. TestProviderReceivesOnlySanitizedGatewayText covers gateway writes.
 func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	secrets := protectedSecrets()
 	openAI, github, bearer := secrets["OpenAI key"], secrets["GitHub token"], secrets["bearer value"]
@@ -361,6 +362,45 @@ func TestClientDerivesWorkerUsageOnlyForTheAttributedTask(t *testing.T) {
 			TaskName: "invalid", Type: events.ExecutionEventTypeModelMessage, Content: invalid})
 	require.ErrorIs(t, err, store.ErrValidation)
 	require.InDelta(t, before+1, failures(), 0)
+}
+
+// TestClientCountsSanitizationOncePerNewEvent checks that the client records
+// the redaction and truncation metrics once for each newly appended event and
+// not for a deduplicated replay.
+func TestClientCountsSanitizationOncePerNewEvent(t *testing.T) {
+	client := newEmbeddedClient(t)
+	ctx := t.Context()
+	streamType, eventType := store.ExecutionEventStreamTypeTask, events.ExecutionEventTypeToolCallCompleted
+	redactions := func() float64 {
+		return metrics.CounterVecValue(metrics.ExecutionEventRedactionsTotal, streamType, eventType)
+	}
+	truncations := func() float64 {
+		return metrics.CounterVecValue(metrics.ExecutionEventTruncationsTotal, streamType, eventType)
+	}
+	redactedBefore, truncatedBefore := redactions(), truncations()
+	event := func(streamID string) *store.ExecutionEvent {
+		return &store.ExecutionEvent{Namespace: "tenant", StreamType: streamType, StreamID: streamID, TaskName: streamID,
+			Type: eventType, Summary: "api_key=" + protectedSecrets()["OpenAI key"],
+			ContentText: strings.Repeat("x", events.MaxExecutionEventContentTextChars+1)}
+	}
+	_, err := client.AppendExecutionEvent(ctx, event("plain"))
+	require.NoError(t, err)
+	_, appended, err := client.AppendExecutionEventIfAbsent(ctx, event("deduplicated"), "key")
+	require.NoError(t, err)
+	require.True(t, appended)
+	_, appended, err = client.AppendExecutionEventIfAbsent(ctx, event("deduplicated"), "key")
+	require.NoError(t, err)
+	require.False(t, appended)
+	_, appended, err = client.AppendExecutionEventWithPlanIfAbsent(ctx, event("planned"), "key",
+		&store.PlanState{Namespace: "tenant", TaskName: "planned"})
+	require.NoError(t, err)
+	require.True(t, appended)
+	_, appended, err = client.AppendExecutionEventWithPlanIfAbsent(ctx, event("planned"), "key",
+		&store.PlanState{Namespace: "tenant", TaskName: "planned"})
+	require.NoError(t, err)
+	require.False(t, appended)
+	require.InDelta(t, redactedBefore+3, redactions(), 0, "one redaction per new event")
+	require.InDelta(t, truncatedBefore+3, truncations(), 0, "one truncation per new event")
 }
 
 func TestClientTaskTokenUsageAttributesOnlyTheTaskShare(t *testing.T) {

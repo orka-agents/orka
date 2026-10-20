@@ -351,9 +351,10 @@ persist:
   re-applies the redaction rule when it copies a stored proposal into a
   memory, because it runs inside the embedded transaction.
 
-`TestProviderReceivesOnlyRedactedContent` in `internal/storageclient` sends
-secrets through each of these paths over a recording SQLite provider and
-fails if the provider receives any of them. Encryption of snapshots, native
+Two tests in `internal/storageclient` send secrets through these paths over a
+recording SQLite provider and fail if the provider receives any of them:
+`TestProviderReceivesOnlySanitizedGatewayText` covers the gateway writes and
+`TestProviderReceivesOnlyRedactedContent` covers the others. Encryption of snapshots, native
 sessions and connector custody still happens inside SQLite.
 
 ## Kubernetes control authority and retained SQL compatibility
