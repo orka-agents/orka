@@ -867,18 +867,31 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, p.RecordUsage(ctx, observation("task-c", "c-call", "call-c", "call", 9, 9,
 			workflowAt(0).Add(time.Second))))
 
+		// Same-time observations on one counter keep the order they were
+		// recorded in.
+		require.NoError(t, p.RecordUsage(ctx, observation("task-c", "c-call-tie-z", "call-c", "call", 10, 9,
+			workflowAt(0).Add(4*time.Second))))
+		require.NoError(t, p.RecordUsage(ctx, observation("task-c", "c-call-tie-a", "call-c", "call", 11, 9,
+			workflowAt(0).Add(4*time.Second))))
+
 		for _, tc := range []struct {
 			namespace, task string
-			input, output   int64
+			want            []string
 		}{
-			{workflowNamespace, "task-c", 9, 9},
-			{workflowNamespace, "task-b", 67, 8},
-			{workflowNamespace, "unreported", 0, 0},
-			{workflowOtherNamespace, "task-b", 0, 0},
+			{workflowNamespace, "task-a", []string{"a-session", "b-session"}},
+			{workflowNamespace, "task-b", []string{"a-session", "b-call-running", "b-session", "b-call-final"}},
+			{workflowNamespace, "task-c", []string{"c-call", "c-call-tie-z", "c-call-tie-a"}},
+			{workflowNamespace, "unreported", nil},
+			{workflowOtherNamespace, "task-b", nil},
 		} {
-			input, output, err := p.TaskTokenUsage(ctx, tc.namespace, tc.task)
+			observations, err := p.ListTaskCounterObservations(ctx, tc.namespace, tc.task)
 			require.NoError(t, err)
-			require.Equal(t, [2]int64{tc.input, tc.output}, [2]int64{input, output}, "%s/%s", tc.namespace, tc.task)
+			var got []string
+			for _, item := range observations {
+				require.Equal(t, tc.namespace, item.Namespace)
+				got = append(got, item.ID)
+			}
+			require.Equal(t, tc.want, got, "%s/%s counter observations in accounting order", tc.namespace, tc.task)
 		}
 	})
 

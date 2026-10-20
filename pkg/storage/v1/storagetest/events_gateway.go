@@ -103,6 +103,8 @@ func runExecutionEvents(t *testing.T, newProvider StateFactory) {
 			"no namespace":   taskEvent("", "task", storagev1.ExecutionEventTypeTaskCreated),
 			"no stream":      taskEvent(eventsTenant, "", storagev1.ExecutionEventTypeTaskCreated),
 			"unknown stream": {Namespace: eventsTenant, StreamType: "pod", StreamID: "x", Type: storagev1.ExecutionEventTypeTaskCreated},
+			"content that is not JSON": {Namespace: eventsTenant, StreamType: storagev1.ExecutionEventStreamTypeTask, StreamID: "x",
+				Type: storagev1.ExecutionEventTypeTaskCreated, Content: json.RawMessage(`{"open":`)},
 		} {
 			_, err := p.AppendExecutionEvent(t.Context(), event)
 			require.ErrorIs(t, err, storagev1.ErrValidation, name)
@@ -113,6 +115,60 @@ func runExecutionEvents(t *testing.T, newProvider StateFactory) {
 		require.ErrorIs(t, err, storagev1.ErrValidation)
 		_, _, err = p.AppendExecutionEventIfAbsent(t.Context(), taskEvent(eventsTenant, "task", storagev1.ExecutionEventTypeTaskCreated), " ")
 		require.ErrorIs(t, err, storagev1.ErrValidation)
+	})
+
+	t.Run("carried usage commits with a new event only", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		at := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+		usage := func(id string, input int64, observedAt time.Time) *storagev1.ExecutionEventUsage {
+			return &storagev1.ExecutionEventUsage{Observation: storagev1.UsageObservation{
+				ID: id, Namespace: eventsTenant, TaskUID: "task-uid", TaskName: "task-usage", CounterID: "counter",
+				Scope: storagev1.UsageScopeCall, Source: storagev1.UsageSourceProvider, InputTokens: &input,
+				Status: storagev1.UsageStatusCompleted, ObservedAt: observedAt,
+			}}
+		}
+		withUsage := func(carried *storagev1.ExecutionEventUsage) *storagev1.ExecutionEvent {
+			event := taskEvent(eventsTenant, "task-usage", storagev1.ExecutionEventTypeModelMessage)
+			event.Usage = carried
+			return event
+		}
+		observations := func() []storagev1.UsageObservation {
+			t.Helper()
+			data, err := p.LoadUsage(ctx, storagev1.UsageFilter{Namespaces: []string{eventsTenant}, AsOf: at.Add(time.Hour)})
+			require.NoError(t, err)
+			return data.Observations
+		}
+
+		_, appended, err := p.AppendExecutionEventIfAbsent(ctx, withUsage(usage("call", 5, at)), "first")
+		require.NoError(t, err)
+		require.True(t, appended)
+		require.Len(t, observations(), 1)
+		listed := listEvents(t, p, storagev1.ExecutionEventFilter{Namespace: eventsTenant, StreamID: "task-usage"})
+		require.Len(t, listed, 1)
+		require.Nil(t, listed[0].Usage, "reads never return carried usage")
+
+		_, appended, err = p.AppendExecutionEventIfAbsent(ctx, withUsage(usage("replayed", 9, at)), "first")
+		require.NoError(t, err)
+		require.False(t, appended)
+		require.Len(t, observations(), 1, "a deduplicated replay records no usage")
+
+		invalid := usage("invalid", 1, at)
+		invalid.Observation.Scope = "lifetime"
+		_, err = p.AppendExecutionEvent(ctx, withUsage(invalid))
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		_, err = p.AppendExecutionEvent(ctx, withUsage(usage("call", 6, at)))
+		require.ErrorIs(t, err, storagev1.ErrConflict, "a reused observation ID with other counts")
+		_, err = p.AppendExecutionEvent(ctx, withUsage(usage("call", 5, at.Add(time.Minute))))
+		require.ErrorIs(t, err, storagev1.ErrConflict, "a reused observation ID at another time")
+		require.Len(t, listEvents(t, p, storagev1.ExecutionEventFilter{Namespace: eventsTenant, StreamID: "task-usage"}), 1,
+			"an event whose usage was refused is not appended")
+
+		retried := usage("call", 5, at.Add(time.Minute))
+		retried.KeepFirstObservedAt = true
+		appendEvent(t, p, withUsage(retried))
+		recorded := observations()
+		require.Len(t, recorded, 1)
+		require.True(t, at.Equal(recorded[0].ObservedAt), "a retried report keeps its first receipt time")
 	})
 
 	t.Run("deduplication keys are scoped to one stream", func(t *testing.T) {

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -581,8 +580,6 @@ func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryS
 // SaveThreatModel stores the current threat model, replacing any older copies for the repository.
 // When Version is zero, the revision number is incremented from the latest stored model.
 func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
-	model.Content = security.SanitizeThreatModel(model.Content)
-
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, nil)
 	})
@@ -592,8 +589,6 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 // the latest stored version equals expectedVersion. Otherwise it returns
 // store.ErrConflict and leaves the stored model unchanged.
 func (s *Store) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
-	model.Content = security.SanitizeThreatModel(model.Content)
-
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, &expectedVersion)
 	})

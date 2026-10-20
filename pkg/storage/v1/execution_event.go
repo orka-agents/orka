@@ -34,11 +34,21 @@ type ExecutionEvent struct {
 	Truncation  *ExecutionEventTruncation `json:"truncation,omitempty"`
 	CreatedAt   time.Time                 `json:"createdAt"`
 
-	// Internal is not part of the contract. It carries metadata from Orka's
-	// controller to the embedded SQLite store, which derives usage from it.
-	// Other providers must ignore it; it is removed when that derivation moves
-	// above the storage client.
-	Internal map[string]any `json:"-"`
+	// Usage is a usage observation Orka derived from this event. When the
+	// event is newly appended, the provider records it in the same
+	// transaction, as RecordUsage would, and the append fails if recording
+	// fails. An append that returns an existing event by its deduplication
+	// key records nothing. Reads never return it.
+	Usage *ExecutionEventUsage `json:"-"`
+}
+
+// ExecutionEventUsage is a usage observation carried by an execution event.
+type ExecutionEventUsage struct {
+	Observation UsageObservation
+	// KeepFirstObservedAt makes the provider keep the ObservedAt of an
+	// observation already recorded under the same namespace and ID before
+	// comparing them, so a report retried under a new event stays idempotent.
+	KeepFirstObservedAt bool
 }
 
 // ExecutionEventFilter constrains execution event list queries.

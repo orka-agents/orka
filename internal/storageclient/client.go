@@ -5,6 +5,10 @@
 // public storage contract (pkg/storage/v1). Families that still carry
 // plaintext protected data or Go callbacks into a database transaction are
 // served through Embedded, which only the in-process SQLite store implements.
+//
+// The client applies Orka's redaction, payload sanitization and usage
+// attribution before any provider call, so providers store only content Orka
+// has already made safe to persist.
 package storageclient
 
 import (

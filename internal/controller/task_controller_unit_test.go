@@ -49,6 +49,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -96,7 +97,12 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 	if err != nil {
 		panic(err)
 	}
-	ss := sqlite.NewStore(db, ":memory:")
+	// Production consumers reach SQLite through the storage client, which
+	// applies Orka's redaction and usage attribution.
+	ss, err := storageclient.NewEmbedded(sqlite.NewStore(db, ":memory:"))
+	if err != nil {
+		panic(err)
+	}
 	sessionManager := NewSessionManager(ss)
 	sessionManager.SetGatewayEventStore(ss)
 	return &TaskReconciler{

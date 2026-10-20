@@ -50,7 +50,6 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	if strings.TrimSpace(memory.Namespace) == "" {
 		return store.ValidationErrorf("namespace is required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
 		return store.ValidationErrorf("content is required")
 	}
@@ -135,7 +134,6 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory.Namespace == "" || memory.ID == "" {
 		return store.ValidationErrorf("namespace and id are required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
 		return store.ValidationErrorf("content is required")
 	}
@@ -309,13 +307,6 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	if proposal.Type == "" {
 		proposal.Type = "skill"
 	}
-	proposal.Title = redact.SensitiveText(proposal.Title)
-	proposal.Description = redact.SensitiveText(proposal.Description)
-	proposal.Content = redact.SensitiveText(proposal.Content)
-	proposal.Patch = redact.SensitiveText(proposal.Patch)
-	proposal.Reviewer = redact.SensitiveText(proposal.Reviewer)
-	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
-	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
 	if strings.TrimSpace(proposal.Title) == "" {
 		return store.ValidationErrorf("title is required")
 	}
@@ -437,8 +428,6 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 		return store.ValidationErrorf("applied proposal cannot be reviewed")
 	}
 
-	review.Reviewer = redact.SensitiveText(review.Reviewer)
-	review.ReviewNote = redact.SensitiveText(review.ReviewNote)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE memory_proposals
 		 SET status = ?, reviewer = ?, review_note = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -497,7 +486,7 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	if apply.Namespace == "" || apply.ID == "" {
 		return nil, store.ValidationErrorf("namespace and id are required")
 	}
-	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
+	apply.AppliedBy = strings.TrimSpace(apply.AppliedBy)
 
 	const maxAttempts = 5
 	retryBackoffs := [...]time.Duration{
@@ -616,6 +605,10 @@ func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryP
 	}
 
 	now := time.Now()
+	// The storage client redacted the proposal when it was created. The copy
+	// re-applies the current rule to that stored text so a proposal written
+	// under an older rule cannot become a memory unredacted. This stays here
+	// while proposal application runs inside the embedded transaction.
 	memory := &store.Memory{
 		ID:               "mem-" + uuid.NewString(),
 		Namespace:        proposal.Namespace,

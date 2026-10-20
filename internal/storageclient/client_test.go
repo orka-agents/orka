@@ -56,7 +56,14 @@ var (
 	_ store.ControllerEpochMirror                     = (*storageclient.Client)(nil)
 	_ kube.SQLitePersistence                          = (*storageclient.Client)(nil)
 	_ store.HealthChecker                             = (*storageclient.Client)(nil)
+	_ taskTokenUsageReader                            = (*storageclient.Client)(nil)
 )
+
+// taskTokenUsageReader is the controller's local view of Task token
+// attribution, which it type-asserts on the client.
+type taskTokenUsageReader interface {
+	TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error)
+}
 
 // sqliteOnlyMethods are SQLite store methods that production code does not
 // reach through the application storage client: process lifecycle and key

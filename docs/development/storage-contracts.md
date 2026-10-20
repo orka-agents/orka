@@ -206,8 +206,9 @@ the observable parts.
   finding decision times are tagged `json:"-"`, so a provider that sends these
   structs as JSON loses them. The
   network protocol (step 6) defines its own wire records with a round-trip
-  test over every record type. `ExecutionEvent.Internal` is not part of the
-  contract and other providers must ignore it.
+  test over every record type. `ExecutionEvent.Usage` is also tagged
+  `json:"-"`: it carries the usage observation Orka derived from the event
+  (see "Orka policy above the client").
 - **Artifacts.** Requests carry an `ArtifactOwner` (namespace, Task name and
   Task UID) so the identity can grow with a Job and cleanup generation without
   another signature change. The Task UID is reserved: Orka passes it where it
@@ -279,7 +280,7 @@ store implements:
 | `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Snapshot bodies arrive in plaintext; SQLite encrypts them. |
 | `NativeSessionImportStore`, `SessionTurnPersistenceStore` | Native session bytes arrive in plaintext, including the native capture in turn finalization. |
 | `ConnectorCredentialStore`, `ConnectorConsentStore` | Tokens arrive in plaintext; SQLite performs row-bound sealing. |
-| `MemoryStore`, `MemoryProposalStore` | Redaction runs inside SQLite, and proposal application calls `AuthorizeExistingMemory`. |
+| `MemoryStore`, `MemoryProposalStore` | Proposal application calls `AuthorizeExistingMemory` inside the database transaction. |
 | `TaskDataTransactionStore` transaction methods | Go callbacks run inside a database transaction. |
 | `SecurityStore.ApplyScanTaskIngestion` | Go callbacks run inside a database transaction. |
 | `harness.RuntimeSessionStore` | Its records are defined in `internal/harness`. |
@@ -289,13 +290,6 @@ task-data transaction context also covers `SaveArtifact`, for example), so the
 client refuses a configuration that would place them on different stores. That
 sharing is an embedded-store behavior, not a provider obligation; see "No
 cross-contract transactions" above.
-The SQLite provider also still applies Orka's execution event payload
-sanitization on append, and derives token usage observations from appended
-model usage events using the controller-only `ExecutionEvent.Internal` keys
-`usageTaskUID` and `harnessV2UsageModel`. That field is not serialized, and the
-provider suite does not cover the derivation, so a provider that implements
-only the documented contract would record no usage from execution events. Both
-behaviors move above the client in follow-up work.
 
 `pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
 `RunArtifacts` exercise each provider family through the public interfaces.
@@ -306,6 +300,53 @@ SQLite also implements the duplicate SQL control-record methods described in
 the next section. They are not part of the provider contract or the client. A
 client test fails if any other SQLite method is missing from the client, so a
 consumer's type assertion cannot silently lose a capability.
+
+### Orka policy above the client
+
+The storage client applies Orka's redaction, sanitization and usage
+attribution before a provider sees the data, so a provider, including the
+embedded SQLite store, stores only content Orka has already made safe to
+persist:
+
+- **Execution events.** The client redacts and bounds each event's summary,
+  text and JSON content, records the redaction and truncation metrics once
+  for each newly appended event, and stamps the creation time when the caller
+  left it unset. A provider only requires structured content to be valid
+  JSON.
+- **Usage from execution events.** The client derives the usage observation
+  that a worker usage report or the controller's ACP journal carries and
+  sends it as `ExecutionEvent.Usage`, unless Orka code attached an
+  observation itself. The provider records it in the event's
+  transaction, as `RecordUsage` would, and records nothing when a
+  deduplication key returns an existing event. A worker report keeps the
+  time it was first received (`KeepFirstObservedAt`). Attribution travels in
+  the context (`store.WithUsageAttribution`): the authenticated Task for a
+  worker report and the frozen profile model for the journal. It never
+  reaches a provider. Invalid journal accounting is dropped without failing
+  the append; an invalid worker report fails it, as before.
+- **Usage names.** The client redacts and bounds provider and model names in
+  `RecordUsage` and in derived observations.
+- **Token attribution.** A provider returns the observations of every counter
+  a Task observed (`ListTaskCounterObservations`), in accounting order. The
+  client applies the usage report's attribution rules for `TaskTokenUsage`
+  and for the prompt attempt a Session turn finalizes, and passes that
+  attempt's totals in `CommitSessionTurnFinalizationRequest`. The client reads
+  the observations just before the finalization commits rather than inside
+  its transaction, so usage recorded for the attempt in that interval is not
+  added to the Session's counters, as usage recorded after finalization never
+  was.
+- **Threat models.** The client sanitizes threat model content before
+  `SaveThreatModel` and `SaveThreatModelIfVersion`, including writes that a
+  scan ingestion callback makes through its transaction-scoped store.
+- **Memory.** The client redacts memory content, every free-text proposal
+  field, review fields and the applier. Proposal application still
+  re-applies the redaction rule when it copies a stored proposal into a
+  memory, because it runs inside the embedded transaction.
+
+`TestProviderReceivesOnlyRedactedContent` in `internal/storageclient` sends
+secrets through each of these paths over a recording SQLite provider and
+fails if the provider receives any of them. Encryption of snapshots, native
+sessions and connector custody still happens inside SQLite.
 
 ## Kubernetes control authority and retained SQL compatibility
 

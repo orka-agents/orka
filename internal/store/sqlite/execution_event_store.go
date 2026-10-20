@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -128,10 +129,6 @@ func (s *Store) appendExecutionEvent(
 			ctx, copy, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt,
 		)
 		if err == nil {
-			if isNew {
-				redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
-				metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
-			}
 			success = true
 			return appended, isNew, nil
 		}
@@ -253,9 +250,10 @@ func appendSQLiteExecutionEvent(
 			return nil, false, err
 		}
 	}
-	if err := projectUsageEvent(ctx, conn, event); err != nil {
+	if err := recordEventUsage(ctx, conn, event); err != nil {
 		return nil, false, err
 	}
+	event.Usage = nil
 	return &event, true, nil
 }
 
@@ -746,8 +744,10 @@ func normalizeSQLiteExecutionEvent(event *store.ExecutionEvent) error {
 	if !events.IsValidExecutionEventType(event.Type) {
 		return store.ValidationErrorf("unsupported execution event type %q", event.Type)
 	}
-	if err := store.SanitizeExecutionEventPayloadFields(event); err != nil {
-		return store.ValidationErrorf("invalid execution event payload: %v", err)
+	// Orka redacts and bounds the payload above the storage client; the
+	// store only requires that structured content is valid JSON.
+	if len(bytes.TrimSpace(event.Content)) > 0 && !json.Valid(event.Content) {
+		return store.ValidationErrorf("invalid execution event payload: content is not valid JSON")
 	}
 	return nil
 }

@@ -1244,10 +1244,7 @@ func (s *State) appendMappedEventWithPlan(
 	// Usage attribution comes from the controller's frozen profile, not the
 	// runtime's free-text model field or the cross-turn redacted public event.
 	// Set it at the append boundary so mapped content cannot override it.
-	if mapped.Internal == nil {
-		mapped.Internal = make(map[string]any)
-	}
-	mapped.Internal["harnessV2UsageModel"] = s.journal.MapContext.normalized().Model
+	ctx = store.WithUsageAttribution(ctx, store.UsageAttribution{Model: s.journal.MapContext.normalized().Model})
 	key := identity.Key()
 	if isMappedToolTerminalEvent(*mapped) {
 		// Real runtime terminal updates and synthesized recovery closures race
