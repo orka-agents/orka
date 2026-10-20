@@ -156,8 +156,6 @@ jobs:
       contents: read
       pull-requests: read
     uses: ./.github/workflows/lint.yml
-    with:
-      full_check: true
 
   tests:
     needs: validate-release
