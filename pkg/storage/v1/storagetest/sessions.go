@@ -127,6 +127,8 @@ func runMessages(t *testing.T, newProvider StateFactory) {
 			require.Equal(t, "tenant-a", message.Namespace)
 			require.Equal(t, "worker-a", message.FromTask)
 			require.Equal(t, "parent", message.ParentTask)
+			require.False(t, message.CreatedAt.IsZero(), "the provider assigns a creation time")
+			require.Equal(t, time.UTC, message.CreatedAt.Location(), "creation times are UTC")
 		}
 
 		own, err := provider.GetMessages(ctx, "tenant-a", "worker-a", "parent", false)
@@ -189,10 +191,10 @@ func runSessions(t *testing.T, newProvider StateFactory) {
 
 		createSessionFixture(t, provider, "tenant-a", "alpha", sessionsTypeTask, time.Now().UTC())
 		createSessionFixture(t, provider, "tenant-b", "alpha", sessionsTypeChat, time.Now().UTC())
-		require.Error(t, provider.CreateSession(ctx, &storagev1.SessionRecord{
+		require.ErrorIs(t, provider.CreateSession(ctx, &storagev1.SessionRecord{
 			Namespace: "tenant-a", Name: "alpha", SessionType: sessionsTypeTask,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		}), "a session name is unique within its namespace")
+		}), storagev1.ErrConflict, "a session name is unique within its namespace")
 
 		got, err := provider.GetSession(ctx, "tenant-a", "alpha")
 		require.NoError(t, err)
@@ -362,11 +364,10 @@ func runSessionLocks(t *testing.T, newProvider StateFactory) {
 
 		require.NoError(t, provider.AppendMessagesWithLock(ctx, "tenant-a", "fenced", "task-a", "uid-a",
 			[]storagev1.SessionMessage{{ID: "owned", Role: "user", Content: "from owner"}}))
-		require.ErrorIs(t, provider.AppendMessagesWithLock(ctx, "tenant-a", "fenced", "task-a", "uid-stale",
-			[]storagev1.SessionMessage{{ID: "stale", Role: "user", Content: "from stale owner"}}), storagev1.ErrConflict)
+		requireFenced(t, provider.AppendMessagesWithLock(ctx, "tenant-a", "fenced", "task-a", "uid-stale",
+			[]storagev1.SessionMessage{{ID: "stale", Role: "user", Content: "from stale owner"}}))
 		require.NoError(t, provider.UpdateTokenCountsWithLock(ctx, "tenant-a", "fenced", "task-a", "uid-a", 2, 3))
-		require.ErrorIs(t, provider.UpdateTokenCountsWithLock(ctx, "tenant-a", "fenced", "task-b", "uid-b", 50, 50),
-			storagev1.ErrConflict)
+		requireFenced(t, provider.UpdateTokenCountsWithLock(ctx, "tenant-a", "fenced", "task-b", "uid-b", 50, 50))
 
 		require.NoError(t, provider.ReleaseLockWithTokenUsage(ctx, "tenant-a", "fenced", "task-a", "uid-a", 5, 7))
 		require.NoError(t, provider.ReleaseLockWithTokenUsage(ctx, "tenant-a", "fenced", "task-a", "uid-a", 5, 7),

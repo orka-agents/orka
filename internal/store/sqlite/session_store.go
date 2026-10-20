@@ -56,7 +56,7 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 		session.Namespace, session.Name, session.Namespace, session.Name,
 	)
 	if err != nil {
-		return err
+		return uniqueConflict(err)
 	}
 	inserted, err := result.RowsAffected()
 	if err != nil {
@@ -987,7 +987,7 @@ func verifySessionWriteLockTx(ctx context.Context, tx *sql.Tx, namespace, name, 
 		return err
 	}
 	if rows != 1 {
-		return fmt.Errorf("%w: session %s/%s lock owner changed or expired", store.ErrConflict, namespace, name)
+		return store.FencedErrorf("session %s/%s lock owner changed or expired", namespace, name)
 	}
 	return nil
 }
@@ -1210,7 +1210,7 @@ func (s *Store) UpdateTokenCountsWithLock(
 		return err
 	}
 	if rows != 1 {
-		return fmt.Errorf("%w: session %s/%s lock owner changed or expired", store.ErrConflict, namespace, name)
+		return store.FencedErrorf("session %s/%s lock owner changed or expired", namespace, name)
 	}
 	return nil
 }

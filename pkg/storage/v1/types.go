@@ -56,12 +56,46 @@ type SessionMessage struct {
 	Timestamp  time.Time         `json:"ts"`
 }
 
+// MaxArtifactBytes is the largest artifact Orka stores. Every artifacts.v1
+// provider accepts artifacts up to this size and rejects larger ones with
+// [ErrTooLarge].
+const MaxArtifactBytes = 10 << 20
+
+// ArtifactOwner identifies the Task whose artifacts an operation addresses.
+// Requests are structs so the identity can grow, for example with the Job and
+// cleanup generation that let a provider refuse an old retry, without another
+// change to every method.
+type ArtifactOwner struct {
+	Namespace string
+	TaskName  string
+	// TaskUID is the owning Task's UID when the caller knows it. It is
+	// reserved: providers accept it and may ignore it until artifact identity
+	// is enforced, after which a write for an older Task with the same name
+	// must not overwrite or delete a newer Task's artifacts.
+	TaskUID string
+}
+
+// ArtifactKey identifies one artifact file.
+type ArtifactKey struct {
+	Owner    ArtifactOwner
+	Filename string
+}
+
+// SaveArtifactRequest stores one artifact file.
+type SaveArtifactRequest struct {
+	Owner       ArtifactOwner
+	Filename    string
+	ContentType string
+	Data        []byte
+}
+
 // ArtifactMetadata describes a stored artifact file.
 type ArtifactMetadata struct {
 	Filename    string `json:"filename"`
 	ContentType string `json:"contentType"`
 	Size        int64  `json:"size"`
-	CreatedAt   string `json:"createdAt"`
+	// CreatedAt is when the provider stored this version of the file, in UTC.
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // PlanState represents the autonomous plan state for a coordinator task.

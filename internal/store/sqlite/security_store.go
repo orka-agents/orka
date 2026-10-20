@@ -30,7 +30,7 @@ func parseOffsetCursor(cursor string) (int, error) {
 	}
 	offset, err := strconv.Atoi(cursor)
 	if err != nil || offset < 0 {
-		return 0, fmt.Errorf("invalid cursor")
+		return 0, store.ValidationErrorf("invalid cursor")
 	}
 	return offset, nil
 }
@@ -1179,7 +1179,7 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 		proposal.ID, proposal.Namespace, proposal.RepositoryScan, proposal.FindingID, proposal.TaskName, proposal.Branch,
 		proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber, proposal.PRURL, proposal.CreatedAt, proposal.UpdatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // BindPatchProposalPublicationEvidence atomically finalizes a proposal with one
@@ -1500,7 +1500,7 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 		dropped.ID, dropped.Namespace, dropped.RepositoryScan, dropped.ScanRunID, dropped.TaskName,
 		dropped.SliceID, dropped.Reason, dropped.Layer, dropped.SampleJSON, dropped.CreatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // ListDroppedFindings lists rejected finding diagnostics.

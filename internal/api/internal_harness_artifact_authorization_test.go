@@ -271,12 +271,12 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 			t.Cleanup(func() { _ = response.Body.Close() })
 			if tc.allowed {
 				require.Equal(t, http.StatusCreated, response.StatusCode)
-				stored, _, err := f.data.GetArtifact(context.Background(), "tenant", "task-a", f.upload.Filename)
+				stored, _, err := f.data.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task-a"}, Filename: f.upload.Filename})
 				require.NoError(t, err)
 				require.Equal(t, f.upload.Data, stored)
 			} else {
 				require.Equal(t, http.StatusForbidden, response.StatusCode)
-				_, _, err := f.data.GetArtifact(context.Background(), "tenant", "task-a", f.upload.Filename)
+				_, _, err := f.data.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task-a"}, Filename: f.upload.Filename})
 				require.ErrorIs(t, err, store.ErrNotFound)
 			}
 		})

@@ -17,13 +17,13 @@ const (
 	workflowMonitor        = "monitor"
 )
 
-var workflowBase = time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+var workflowBase = time.Date(2026, time.January, 2, 3, 4, 5, 987654321, time.UTC)
 
 func workflowAt(minutes int) time.Time { return workflowBase.Add(time.Duration(minutes) * time.Minute) }
 
 func requireWorkflowTime(t *testing.T, want, got time.Time) {
 	t.Helper()
-	require.WithinDuration(t, want, got, time.Millisecond)
+	requireSameInstant(t, want, got, "workflow time")
 }
 
 func workflowScanRun(id, phase string) *storagev1.ScanRun {
@@ -47,6 +47,14 @@ func workflowFindingIDs(findings []storagev1.Finding) []string {
 }
 
 func runSecurity(t *testing.T, newProvider StateFactory) {
+	t.Run("an invalid cursor is a validation error", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		_, _, err := p.ListScanRuns(ctx, workflowNamespace, workflowScan, 2, "not-a-cursor")
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		_, _, err = p.ListFindings(ctx, storagev1.FindingFilter{Namespace: workflowNamespace, Limit: 2, Cursor: "not-a-cursor"})
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+	})
+
 	t.Run("scan run cancellation handshake", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		run := workflowScanRun("run-1", "pending")
@@ -415,6 +423,49 @@ func runSecurity(t *testing.T, newProvider StateFactory) {
 }
 
 func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
+	t.Run("an invalid cursor is a validation error", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		_, _, err := p.ListMonitorRuns(ctx, storagev1.MonitorRunFilter{Namespace: workflowNamespace, Cursor: "not-a-cursor"})
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		_, _, err = p.ListMonitorEvents(ctx, storagev1.MonitorEventFilter{Namespace: workflowNamespace, Cursor: "-1"})
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+	})
+
+	t.Run("a reused record ID conflicts", func(t *testing.T) {
+		p := newProvider(t)
+		ctx := t.Context()
+		creates := map[string]func() error{
+			"action record": func() error {
+				return p.CreateActionRecord(ctx, &storagev1.ActionRecord{ID: "reused", MonitorNamespace: workflowNamespace,
+					MonitorName: workflowMonitor, Kind: "pull_request", ActionKind: "comment"})
+			},
+			"review record": func() error {
+				return p.CreateReviewRecord(ctx, &storagev1.ReviewRecord{ID: "reused", MonitorNamespace: workflowNamespace,
+					MonitorName: workflowMonitor, Kind: "pull_request", Number: 1})
+			},
+			"repair job": func() error {
+				return p.CreateRepairJob(ctx, &storagev1.RepairJob{ID: "reused", MonitorNamespace: workflowNamespace,
+					MonitorName: workflowMonitor})
+			},
+			"monitor event": func() error {
+				return p.CreateMonitorEvent(ctx, &storagev1.MonitorEvent{ID: "reused", MonitorNamespace: workflowNamespace,
+					MonitorName: workflowMonitor, EventType: "observed"})
+			},
+			"implementation job": func() error {
+				return p.CreateImplementationJob(ctx, &storagev1.ImplementationJob{ID: "reused", MonitorNamespace: workflowNamespace,
+					MonitorName: workflowMonitor})
+			},
+			"GitHub mutation record": func() error {
+				return p.CreateGitHubMutationRecord(ctx, &storagev1.GitHubMutationRecord{ID: "reused",
+					MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor, Operation: "comment"})
+			},
+		}
+		for name, create := range creates {
+			require.NoError(t, create(), name)
+			require.ErrorIs(t, create(), storagev1.ErrConflict, name)
+		}
+	})
+
 	monitorRecord := func(uid string, generation int64) *storagev1.RepositoryMonitorRecord {
 		return &storagev1.RepositoryMonitorRecord{Namespace: workflowNamespace, Name: workflowMonitor, UID: uid,
 			RepoURL: "https://github.com/org/repo", Owner: "org", Repository: "repo", Branch: "main", Generation: generation}
@@ -531,8 +582,8 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		} {
 			require.NoError(t, p.CreateWorkAction(ctx, created))
 		}
-		require.Error(t, p.CreateWorkAction(ctx, action("duplicate", "queued", "review-12", 12)),
-			"an active dedupe key admits one action")
+		require.ErrorIs(t, p.CreateWorkAction(ctx, action("duplicate", "queued", "review-12", 12)),
+			storagev1.ErrConflict, "an active dedupe key admits one action")
 		cancelled, err := p.CancelWorkActions(ctx, workflowNamespace, workflowMonitor, "pull_request", 12, "superseded", "control")
 		require.NoError(t, err)
 		require.Equal(t, 1, cancelled, "terminal actions and the excepted action are kept")
@@ -624,9 +675,9 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		publish := &storagev1.ReviewPublishRecord{ID: "publish-1", MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor,
 			ItemKind: "pull_request", ItemNumber: 12, HeadSHA: "head-1", ReviewRecordID: "review-1", Phase: "started"}
 		require.NoError(t, p.CreateReviewPublishRecord(ctx, publish))
-		require.Error(t, p.CreateReviewPublishRecord(ctx, &storagev1.ReviewPublishRecord{ID: "publish-2",
+		require.ErrorIs(t, p.CreateReviewPublishRecord(ctx, &storagev1.ReviewPublishRecord{ID: "publish-2",
 			MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor, ItemKind: "pull_request", ItemNumber: 12,
-			HeadSHA: "head-1", Phase: "started"}), "one head has at most one active publication")
+			HeadSHA: "head-1", Phase: "started"}), storagev1.ErrConflict, "one head has at most one active publication")
 		publish.Phase, publish.GitHubReviewID, publish.UpdatedAt = "succeeded", "gh-review-1", workflowAt(1)
 		require.NoError(t, p.UpdateReviewPublishRecord(ctx, publish))
 		published, _, err := p.ListReviewPublishRecords(ctx, storagev1.ReviewPublishRecordFilter{Namespace: workflowNamespace,
@@ -640,8 +691,8 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		event := &storagev1.CommandEvent{ID: "command-1", MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor,
 			Kind: "pull_request", Number: 12, DedupeKey: "comment-1", Command: "/orka review", Intent: "review", Status: "received"}
 		require.NoError(t, p.CreateCommandEvent(ctx, event))
-		require.Error(t, p.CreateCommandEvent(ctx, &storagev1.CommandEvent{ID: "command-2", MonitorNamespace: workflowNamespace,
-			MonitorName: workflowMonitor, DedupeKey: "comment-1"}), "a dedupe key admits one command")
+		require.ErrorIs(t, p.CreateCommandEvent(ctx, &storagev1.CommandEvent{ID: "command-2", MonitorNamespace: workflowNamespace,
+			MonitorName: workflowMonitor, DedupeKey: "comment-1"}), storagev1.ErrConflict, "a dedupe key admits one command")
 		processed := workflowAt(2)
 		event.Status, event.ProcessedAt = "processed", &processed
 		require.NoError(t, p.UpdateCommandEvent(ctx, event))
@@ -767,8 +818,8 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		require.ErrorIs(t, p.RegisterUsageTask(ctx, renamed), storagev1.ErrConflict, "a Task UID keeps its identity")
 		require.NoError(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, TaskUID: "child",
 			TaskName: "child", ParentTaskUID: "task-1", Phase: "Running", StartedAt: workflowAt(2)}))
-		require.Error(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowOtherNamespace, TaskUID: "foreign",
-			TaskName: "foreign", WorkID: work}), "work belongs to one namespace")
+		require.ErrorIs(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowOtherNamespace, TaskUID: "foreign",
+			TaskName: "foreign", WorkID: work}), storagev1.ErrNotFound, "work belongs to one namespace")
 
 		data, err := p.LoadUsage(ctx, storagev1.UsageFilter{Namespaces: []string{workflowNamespace}, AsOf: time.Now().UTC()})
 		require.NoError(t, err)

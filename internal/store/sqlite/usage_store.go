@@ -84,6 +84,9 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 		if task.WorkID != "" {
 			var work store.UsageWorkRequest
 			if err := readUsageJSON(ctx, db, &work, `SELECT data FROM usage_work_requests WHERE namespace = ? AND id = ?`, task.Namespace, task.WorkID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("%w: usage work %q in namespace %q", store.ErrNotFound, task.WorkID, task.Namespace)
+				}
 				return fmt.Errorf("load usage task work: %w", err)
 			}
 			if task.Repository != "" && !strings.EqualFold(task.Repository, work.Repository) {

@@ -18,6 +18,43 @@
 // data or callbacks into the embedded SQLite store. Those families remain
 // internal to Orka until their provider shape is defined.
 //
+// # Execution semantics
+//
+// Each provider method commits atomically and is linearizable with respect to
+// every other call on the same dataset: the outcome is as if the calls ran one
+// at a time, in an order consistent with when they were made. A method that
+// reads and then writes, such as claiming a gateway event, reserving a chat
+// turn or recording a terminal approval, keeps that guarantee across its read
+// and its write. A nil error means the change is durable: it survives a
+// provider restart and any failover the provider declares automatic (see
+// [DurabilityClass]). No operation or transaction spans state.v1 and
+// artifacts.v1.
+//
+// # Errors
+//
+// A provider reports each refusal with the sentinel error that names it, so
+// callers can branch with errors.Is: [ErrNotFound], [ErrConflict] (including a
+// reused identifier), [ErrFenced], [ErrValidation] (including an invalid
+// cursor), [ErrTooLarge], [ErrCapacity], [ErrNotReady], or a family error such
+// as [ErrDuplicateMismatch]. A provider that could not run an operation
+// returns [ErrUnavailable] only when nothing was committed. When a write may
+// have committed, it returns [ErrOutcomeUnknown], never success.
+//
+// # Times
+//
+// A provider preserves every caller-supplied time exactly, to the nanosecond,
+// and returns stored times in UTC. Some records bind exact times into
+// encryption associated data or keys, so rounding to a database's native
+// precision corrupts them.
+//
+// # Records and wire format
+//
+// The records in this package carry JSON tags for Orka's API, not a storage
+// encoding: several persisted fields, such as gateway claim ownership and
+// usage phase history, are tagged json:"-". A provider that crosses a process
+// boundary defines its own wire records and must not encode these structs
+// with encoding/json.
+//
 // The contract is unstable until a release advertises storage extension
 // support; names and semantics may change before then.
 package v1
@@ -54,6 +91,7 @@ type TaskTokenUsageReader interface {
 // StateProvider is the provider side of state.v1.
 type StateProvider interface {
 	HealthChecker
+	ProviderDescriber
 
 	ResultStore
 	PromptResultReceiptStore
@@ -93,5 +131,6 @@ type StateProvider interface {
 // their metadata stay together under this contract.
 type ArtifactProvider interface {
 	HealthChecker
+	ProviderDescriber
 	ArtifactStore
 }

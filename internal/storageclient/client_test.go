@@ -221,10 +221,10 @@ func TestClientRoutesCallsToTheEmbeddedStore(t *testing.T) {
 	if err != nil || string(got) != "result" {
 		t.Fatalf("backend result = %q, %v", got, err)
 	}
-	if err := client.SaveArtifact(ctx, "tenant", "task", "a.txt", "text/plain", []byte("artifact")); err != nil {
+	if err := client.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task"}, Filename: "a.txt", ContentType: "text/plain", Data: []byte("artifact")}); err != nil {
 		t.Fatalf("SaveArtifact: %v", err)
 	}
-	data, contentType, err := backend.GetArtifact(ctx, "tenant", "task", "a.txt")
+	data, contentType, err := backend.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task"}, Filename: "a.txt"})
 	if err != nil || string(data) != "artifact" || contentType != "text/plain" {
 		t.Fatalf("backend artifact = %q, %q, %v", data, contentType, err)
 	}

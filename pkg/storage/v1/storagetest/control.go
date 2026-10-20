@@ -39,6 +39,14 @@ func syncEpoch(t *testing.T, provider storagev1.StateProvider, epoch int64, hold
 	return controlFence(epoch, holder)
 }
 
+// requireFenced checks a stale-fence rejection. It also checks the
+// compatibility match on ErrConflict that existing Orka callers rely on.
+func requireFenced(t *testing.T, err error) {
+	t.Helper()
+	require.ErrorIs(t, err, storagev1.ErrFenced)
+	require.ErrorIs(t, err, storagev1.ErrConflict, "a fence rejection still matches ErrConflict")
+}
+
 func harnessAttempt(taskUID string, attempt int32) *storagev1.HarnessV1Attempt {
 	return &storagev1.HarnessV1Attempt{
 		Namespace: "tenant", TaskName: "task-" + taskUID, TaskUID: taskUID, Attempt: attempt,
@@ -76,15 +84,14 @@ func runControllerEpochMirror(t *testing.T, newProvider StateFactory) {
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, conflicting), storagev1.ErrConflict)
 
 	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-current", 1), ownerA))
-	require.ErrorIs(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-wrong-holder", 1),
-		controlFence(1, "owner-b")), storagev1.ErrConflict)
-	require.ErrorIs(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-future", 1),
-		controlFence(2, "owner-a")), storagev1.ErrConflict)
+	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-wrong-holder", 1),
+		controlFence(1, "owner-b")))
+	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-future", 1),
+		controlFence(2, "owner-a")))
 
 	// A mirror may move forward past epochs it never saw, but never rewinds.
 	ownerC := syncEpoch(t, provider, 3, "owner-c")
-	require.ErrorIs(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-stale", 1), ownerA),
-		storagev1.ErrConflict)
+	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-stale", 1), ownerA))
 	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-advanced", 1), ownerC))
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, mirroredEpoch(2, "owner-b")), storagev1.ErrConflict)
 	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-after-rewind", 1), ownerC))
@@ -441,7 +448,7 @@ func runHarnessV1Attempts(t *testing.T, newProvider StateFactory) {
 	invalid := harnessAttempt("task-uid", 1)
 	invalid.State = storagev1.HarnessV1AttemptRunning
 	require.ErrorIs(t, provider.CreateHarnessV1Attempt(ctx, invalid, fence), storagev1.ErrValidation)
-	require.ErrorIs(t, provider.CreateHarnessV1Attempt(ctx, first, controlFence(1, "owner-b")), storagev1.ErrConflict)
+	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, first, controlFence(1, "owner-b")))
 	_, err := provider.GetHarnessV1Attempt(ctx, harnessKey(first))
 	require.ErrorIs(t, err, storagev1.ErrNotFound)
 

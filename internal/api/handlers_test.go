@@ -1416,7 +1416,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 			path: "/tasks/" + taskName + "/artifacts/report.txt",
 			prepare: func(t *testing.T, ss *sqlite.Store) {
 				t.Helper()
-				require.NoError(t, ss.SaveArtifact(context.Background(), "default", taskName, "report.txt", "text/plain", []byte("artifact")))
+				require.NoError(t, ss.SaveArtifact(context.Background(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: taskName}, Filename: "report.txt", ContentType: "text/plain", Data: []byte("artifact")}))
 			},
 		},
 	}

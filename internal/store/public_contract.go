@@ -144,6 +144,11 @@ type (
 	SessionPageCursor                         = storagev1.SessionPageCursor
 	SessionMessage                            = storagev1.SessionMessage
 	ArtifactMetadata                          = storagev1.ArtifactMetadata
+	ArtifactOwner                             = storagev1.ArtifactOwner
+	ArtifactKey                               = storagev1.ArtifactKey
+	SaveArtifactRequest                       = storagev1.SaveArtifactRequest
+	FencedError                               = storagev1.FencedError
+	TooLargeError                             = storagev1.TooLargeError
 	PlanState                                 = storagev1.PlanState
 	TranscriptSearchFilter                    = storagev1.TranscriptSearchFilter
 	TranscriptSearchHistoryBound              = storagev1.TranscriptSearchHistoryBound
@@ -236,6 +241,7 @@ const (
 	UsagePRCreated                    = storagev1.UsagePRCreated
 	UsagePRAssisted                   = storagev1.UsagePRAssisted
 	UsagePRReview                     = storagev1.UsagePRReview
+	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
 )
 
 var (
@@ -250,7 +256,15 @@ var (
 	ErrTaskJobRevoked               = storagev1.ErrTaskJobRevoked
 	ErrSessionConfigurationMismatch = storagev1.ErrSessionConfigurationMismatch
 	ErrUsageSelectionTooLarge       = storagev1.ErrUsageSelectionTooLarge
+	ErrUnavailable                  = storagev1.ErrUnavailable
+	ErrOutcomeUnknown               = storagev1.ErrOutcomeUnknown
+	ErrFenced                       = storagev1.ErrFenced
+	ErrTooLarge                     = storagev1.ErrTooLarge
 )
+
+func FencedErrorf(format string, args ...any) error {
+	return storagev1.FencedErrorf(format, args...)
+}
 
 func ConflictErrorf(format string, args ...any) error {
 	return storagev1.ConflictErrorf(format, args...)

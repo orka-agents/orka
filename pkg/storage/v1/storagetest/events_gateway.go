@@ -552,7 +552,7 @@ func runGatewayDeliveries(t *testing.T, newProvider StateFactory) {
 		wrongTask := query
 		wrongTask.TaskUID = "other-uid"
 		_, err = p.GetGatewayMessageBudget(t.Context(), wrongTask)
-		require.Error(t, err)
+		require.ErrorIs(t, err, storagev1.ErrNotFound, "a budget belongs to one Task")
 	})
 }
 

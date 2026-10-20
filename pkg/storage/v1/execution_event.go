@@ -34,7 +34,10 @@ type ExecutionEvent struct {
 	Truncation  *ExecutionEventTruncation `json:"truncation,omitempty"`
 	CreatedAt   time.Time                 `json:"createdAt"`
 
-	// Internal carries store/backend-only metadata and is intentionally omitted from API DTOs.
+	// Internal is not part of the contract. It carries metadata from Orka's
+	// controller to the embedded SQLite store, which derives usage from it.
+	// Other providers must ignore it; it is removed when that derivation moves
+	// above the storage client.
 	Internal map[string]any `json:"-"`
 }
 

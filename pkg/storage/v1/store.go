@@ -35,6 +35,68 @@ var ErrValidation = errors.New("validation error")
 // ErrGatewayOwnedSession is returned when a generic deletion targets canonical gateway history.
 var ErrGatewayOwnedSession = errors.New("gateway-owned session")
 
+// ErrUnavailable is returned when the provider could not run an operation and
+// nothing was committed. Retrying the same operation is safe.
+var ErrUnavailable = errors.New("storage unavailable")
+
+// ErrOutcomeUnknown is returned when a write may or may not have committed,
+// for example because the connection failed after the commit was sent. The
+// caller must not report success or repeat the action as a new operation. It
+// may retry only with the same operation ID and request digest (see
+// [WriteEnvelope]).
+var ErrOutcomeUnknown = errors.New("storage outcome unknown")
+
+// ErrFenced is returned when a write is rejected because the caller's
+// controller epoch fence or owner fence is stale. The caller has lost the
+// authority the write required and must stop rather than retry. Providers
+// report it with [FencedErrorf].
+var ErrFenced = errors.New("fenced")
+
+// ErrTooLarge is returned when a value exceeds a size limit of the contract or
+// of the provider. Providers report it with [TooLargeError].
+var ErrTooLarge = errors.New("too large")
+
+// FencedError reports a write rejected by a stale fence. It matches
+// [ErrFenced]. Orka callers written before ErrFenced existed branch on
+// [ErrConflict], so a FencedError also matches ErrConflict until those callers
+// move to ErrFenced. Providers must not rely on that compatibility match.
+type FencedError struct {
+	Message string
+}
+
+func (e FencedError) Error() string {
+	return e.Message
+}
+
+// Is reports whether target is ErrFenced or, for compatibility, ErrConflict.
+func (e FencedError) Is(target error) bool {
+	return target == ErrFenced || target == ErrConflict
+}
+
+// FencedErrorf formats a fence rejection.
+func FencedErrorf(format string, args ...any) error {
+	return FencedError{Message: fmt.Sprintf(format, args...)}
+}
+
+// TooLargeError reports a value that exceeds a size limit. It matches
+// [ErrTooLarge].
+type TooLargeError struct {
+	// What names the rejected value, such as "artifact \"report.txt\"".
+	What string
+	// Size is the rejected value's size in bytes.
+	Size int64
+	// Limit is the largest accepted size in bytes.
+	Limit int64
+}
+
+func (e TooLargeError) Error() string {
+	return fmt.Sprintf("%s is %d bytes, which exceeds the %d byte limit", e.What, e.Size, e.Limit)
+}
+
+func (e TooLargeError) Unwrap() error {
+	return ErrTooLarge
+}
+
 // ValidationError carries a client-safe validation message while remaining
 // comparable with ErrValidation via errors.Is.
 type ValidationError struct {
@@ -185,12 +247,21 @@ type PlanStore interface {
 	DeletePlan(ctx context.Context, namespace, taskName string) error
 }
 
-// ArtifactStore handles task artifact persistence.
+// ArtifactStore handles task artifact persistence. Artifact operations never
+// share a transaction with state.v1 records.
 type ArtifactStore interface {
-	SaveArtifact(ctx context.Context, namespace, taskName, filename, contentType string, data []byte) error
-	GetArtifact(ctx context.Context, namespace, taskName, filename string) ([]byte, string, error)
-	ListArtifacts(ctx context.Context, namespace, taskName string) ([]ArtifactMetadata, error)
-	DeleteArtifacts(ctx context.Context, namespace, taskName string) error
+	// SaveArtifact stores an artifact, replacing an earlier file with the same
+	// filename for the same Task. Data larger than MaxArtifactBytes is rejected
+	// with ErrTooLarge.
+	SaveArtifact(ctx context.Context, request SaveArtifactRequest) error
+	// GetArtifact returns an artifact's data and content type, or ErrNotFound.
+	GetArtifact(ctx context.Context, key ArtifactKey) ([]byte, string, error)
+	// ListArtifacts returns metadata for a Task's artifacts, ordered by
+	// filename in byte order.
+	ListArtifacts(ctx context.Context, owner ArtifactOwner) ([]ArtifactMetadata, error)
+	// DeleteArtifacts removes a Task's artifacts. Deleting a Task with no
+	// artifacts succeeds.
+	DeleteArtifacts(ctx context.Context, owner ArtifactOwner) error
 }
 
 // RepositoryMonitorStore handles durable repository monitor state.
@@ -262,7 +333,8 @@ type Message struct {
 	ParentTask string `json:"parentTask"`
 	Content    string `json:"content"`
 	Read       bool   `json:"read"`
-	CreatedAt  string `json:"createdAt"`
+	// CreatedAt is when the provider stored the message, in UTC.
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // MessageStore handles inter-agent message persistence.

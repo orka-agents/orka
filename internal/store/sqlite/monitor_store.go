@@ -94,7 +94,7 @@ func (s *Store) UpsertRepositoryMonitor(ctx context.Context, monitor *store.Repo
 	if monitor.Namespace == "" || monitor.Name == "" {
 		return store.ValidationErrorf("repository monitor namespace and name are required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if monitor.CreatedAt.IsZero() {
 		monitor.CreatedAt = now
 	}
@@ -253,7 +253,7 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 		run.Phase = "queued"
 	}
 	if run.StartedAt.IsZero() {
-		run.StartedAt = time.Now()
+		run.StartedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO monitor_runs
@@ -353,7 +353,7 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 	if item.MonitorNamespace == "" || item.MonitorName == "" || item.Kind == "" || item.ItemKey == "" {
 		return store.ValidationErrorf("monitor item namespace, monitor name, kind, and item key are required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if item.LastSeenAt.IsZero() {
 		item.LastSeenAt = now
 	}
@@ -476,7 +476,7 @@ func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionReco
 		return store.ValidationErrorf("action record id, monitor namespace, monitor name, kind, and action kind are required")
 	}
 	if record.CreatedAt.IsZero() {
-		record.CreatedAt = time.Now()
+		record.CreatedAt = time.Now().UTC()
 	}
 	if record.PayloadJSON == "" {
 		record.PayloadJSON = "{}"
@@ -492,7 +492,7 @@ func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionReco
 		record.MonitorGeneration, record.Verdict, record.Confidence, record.Summary, record.PayloadJSON,
 		record.PayloadDigest, record.CreatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // UpdateActionRecord replaces result fields when sensitive content must be redacted.
@@ -558,7 +558,7 @@ func (s *Store) ListActionRecords(ctx context.Context, filter store.ActionRecord
 // CreateReviewRecord inserts an immutable review record.
 func (s *Store) CreateReviewRecord(ctx context.Context, record *store.ReviewRecord) error {
 	if record.CreatedAt.IsZero() {
-		record.CreatedAt = time.Now()
+		record.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO review_records
@@ -575,7 +575,7 @@ func (s *Store) CreateReviewRecord(ctx context.Context, record *store.ReviewReco
 		record.RenderedComment, record.Marker, record.GitHubReviewID, record.GitHubCommentID,
 		record.GitHubCommentURL, record.CreatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // GetReviewRecord fetches a review record by ID.
@@ -624,7 +624,7 @@ func (s *Store) CreateReviewPublishRecord(ctx context.Context, record *store.Rev
 	if record.ID == "" || record.MonitorNamespace == "" || record.MonitorName == "" {
 		return store.ValidationErrorf("review publish record id, namespace, and monitor name are required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = now
 	}
@@ -642,7 +642,7 @@ func (s *Store) CreateReviewPublishRecord(ctx context.Context, record *store.Rev
 		record.Event, record.GitHubReviewID, record.GitHubReviewURL, record.BodyDigest,
 		record.InlineCommentCount, record.SkipReason, record.Error, record.CreatedAt, record.UpdatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // UpdateReviewPublishRecord updates a review publish attempt/outcome record.
@@ -654,7 +654,7 @@ func (s *Store) UpdateReviewPublishRecord(ctx context.Context, record *store.Rev
 		return store.ValidationErrorf("review publish record id and namespace are required")
 	}
 	if record.UpdatedAt.IsZero() {
-		record.UpdatedAt = time.Now()
+		record.UpdatedAt = time.Now().UTC()
 	}
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE review_publish_records
@@ -666,7 +666,7 @@ func (s *Store) UpdateReviewPublishRecord(ctx context.Context, record *store.Rev
 		record.MonitorNamespace, record.ID,
 	)
 	if err != nil {
-		return err
+		return uniqueConflict(err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
@@ -716,7 +716,7 @@ func (s *Store) ListReviewPublishRecords(ctx context.Context, filter store.Revie
 // CreateCommandEvent inserts a maintainer command event.
 func (s *Store) CreateCommandEvent(ctx context.Context, event *store.CommandEvent) error {
 	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now()
+		event.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO command_events
@@ -731,7 +731,7 @@ func (s *Store) CreateCommandEvent(ctx context.Context, event *store.CommandEven
 		event.Command, event.Intent, event.HeadSHA, event.IssueSnapshotDigest, event.Status, event.StatusCommentID,
 		event.CreatedRepairJobID, event.CreatedAt, event.ProcessedAt, event.Error,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // UpdateCommandEvent updates command processing state.
@@ -795,7 +795,7 @@ func (s *Store) ListCommandEvents(ctx context.Context, filter store.CommandEvent
 
 // CreateRepairJob inserts a repair job.
 func (s *Store) CreateRepairJob(ctx context.Context, job *store.RepairJob) error {
-	now := time.Now()
+	now := time.Now().UTC()
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now
 	}
@@ -811,12 +811,12 @@ func (s *Store) CreateRepairJob(ctx context.Context, job *store.RepairJob) error
 		job.ValidationAttempts, job.ReviewFixAttempts, job.TaskName, job.Branch, job.PushedSHA,
 		job.LastError, job.CreatedAt, job.UpdatedAt, job.CompletedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // UpdateRepairJob updates repair job state.
 func (s *Store) UpdateRepairJob(ctx context.Context, job *store.RepairJob) error {
-	job.UpdatedAt = time.Now()
+	job.UpdatedAt = time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE repair_jobs
 		 SET repo = ?, pr_number = ?, intent = ?, source = ?, head_sha = ?, base_sha = ?, base_branch = ?, phase = ?,
@@ -873,7 +873,7 @@ func (s *Store) ListRepairJobs(ctx context.Context, filter store.RepairJobFilter
 // CreateMonitorEvent inserts an audit event.
 func (s *Store) CreateMonitorEvent(ctx context.Context, event *store.MonitorEvent) error {
 	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now()
+		event.CreatedAt = time.Now().UTC()
 	}
 	if event.MetadataJSON == "" {
 		event.MetadataJSON = "{}"
@@ -887,7 +887,7 @@ func (s *Store) CreateMonitorEvent(ctx context.Context, event *store.MonitorEven
 		event.ItemNumber, event.ItemSHA, event.EventType, event.Actor, event.Summary,
 		event.MetadataJSON, event.CreatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // ListMonitorEvents lists audit events ordered newest first.
@@ -925,7 +925,7 @@ func (s *Store) CreateWorkAction(ctx context.Context, action *store.WorkAction) 
 	if action.ID == "" || action.MonitorNamespace == "" || action.MonitorName == "" || action.Status == "" {
 		return store.ValidationErrorf("work action id, monitor namespace, monitor name, and status are required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if action.CreatedAt.IsZero() {
 		action.CreatedAt = now
 	}
@@ -949,7 +949,7 @@ func (s *Store) CreateWorkAction(ctx context.Context, action *store.WorkAction) 
 		action.ArtifactIDs, action.PayloadDigest, action.MetadataJSON, action.CreatedAt, action.UpdatedAt,
 		action.CompletedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // UpdateWorkAction updates durable workflow action state.
@@ -957,7 +957,7 @@ func (s *Store) UpdateWorkAction(ctx context.Context, action *store.WorkAction) 
 	if action == nil {
 		return store.ValidationErrorf("work action is required")
 	}
-	action.UpdatedAt = time.Now()
+	action.UpdatedAt = time.Now().UTC()
 	if action.MetadataJSON == "" {
 		action.MetadataJSON = "{}"
 	}
@@ -1039,7 +1039,7 @@ func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilt
 
 // CancelWorkActions cancels non-terminal target actions except the executing control action.
 func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error) {
-	now := time.Now()
+	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE work_actions SET status = 'cancelled', blocked_reason = ?, error = '', completed_at = ?, updated_at = ?
 		 WHERE monitor_namespace = ? AND monitor_name = ? AND target_kind = ? AND target_number = ?
@@ -1059,7 +1059,7 @@ func (s *Store) CreateImplementationJob(ctx context.Context, job *store.Implemen
 	if job.ID == "" || job.MonitorNamespace == "" || job.MonitorName == "" {
 		return store.ValidationErrorf("implementation job id, monitor namespace, and monitor name are required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now
 	}
@@ -1075,7 +1075,7 @@ func (s *Store) CreateImplementationJob(ctx context.Context, job *store.Implemen
 		job.ValidationState, job.TaskName, job.MutationTaskName, job.CommandEventID, job.WorkActionID,
 		job.MonitorGeneration, job.Error, job.CreatedAt, job.UpdatedAt, job.CompletedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // UpdateImplementationJob updates implementation job state.
@@ -1083,7 +1083,7 @@ func (s *Store) UpdateImplementationJob(ctx context.Context, job *store.Implemen
 	if job == nil {
 		return store.ValidationErrorf("implementation job is required")
 	}
-	job.UpdatedAt = time.Now()
+	job.UpdatedAt = time.Now().UTC()
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE implementation_jobs SET repo = ?, issue_number = ?, plan_id = ?, snapshot_digest = ?, phase = ?,
 		 attempt = ?, branch = ?, patch_artifact_id = ?, pr_number = ?, validation_state = ?, task_name = ?,
@@ -1206,7 +1206,7 @@ func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.Gi
 		return store.ValidationErrorf("github mutation record id, monitor namespace, monitor name, and operation are required")
 	}
 	if record.CreatedAt.IsZero() {
-		record.CreatedAt = time.Now()
+		record.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO github_mutation_records
@@ -1220,7 +1220,7 @@ func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.Gi
 		record.GitHubURL, record.GitHubRequestID, record.ExternalID, record.Status, record.Error,
 		record.PendingAt, record.CreatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // UpdateGitHubMutationRecord updates the durable outcome of one mutation attempt.

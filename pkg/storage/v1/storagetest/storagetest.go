@@ -2,12 +2,14 @@
 // providers.
 //
 // A provider runs RunState and RunArtifacts from its own tests with a factory
-// that returns a fresh, empty provider for each case. The suite uses only the
-// public contract in pkg/storage/v1, so a separately built provider can run it
+// that returns an empty dataset for each case. The suite uses only the public
+// contract in pkg/storage/v1, so a separately built provider can run it
 // without Orka's internal packages. Cases assert contract behavior: identity
-// and namespace isolation, not-found and conflict errors, idempotent replays,
-// atomic grouped writes and bounded queries. They do not inspect a provider's
-// schema or rely on its clock beyond the times passed in requests.
+// and namespace isolation, the typed errors providers return, idempotent
+// replays, atomic grouped writes, bounded queries, one winner among
+// concurrent callers, exact nanosecond times and the provider description.
+// They do not inspect a provider's schema or rely on its clock beyond the
+// times passed in requests.
 package storagetest
 
 import (
@@ -16,12 +18,15 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// StateFactory returns a fresh, empty state.v1 provider. The factory owns the
-// provider's lifecycle and must release it with t.Cleanup.
+// StateFactory returns a state.v1 provider over a fresh, empty dataset: a new
+// provider, or an isolated dataset (such as a schema or key prefix) on a
+// shared one. The factory owns that lifecycle and must release it with
+// t.Cleanup.
 type StateFactory func(t *testing.T) storagev1.StateProvider
 
-// ArtifactFactory returns a fresh, empty artifacts.v1 provider. The factory
-// owns the provider's lifecycle and must release it with t.Cleanup.
+// ArtifactFactory returns an artifacts.v1 provider over a fresh, empty
+// dataset, in the same way as StateFactory. The factory owns that lifecycle
+// and must release it with t.Cleanup.
 type ArtifactFactory func(t *testing.T) storagev1.ArtifactProvider
 
 type stateFamily struct {
@@ -50,6 +55,9 @@ var stateFamilies = []stateFamily{
 	{"security", runSecurity},
 	{"repository-monitors", runRepositoryMonitors},
 	{"usage", runUsage},
+	{"timestamps", runTimestamps},
+	{"concurrency", runConcurrency},
+	{"describe", runDescribe},
 }
 
 // RunState runs every state.v1 case against providers from newProvider.
