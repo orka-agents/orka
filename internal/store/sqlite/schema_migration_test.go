@@ -118,6 +118,9 @@ func TestOpenLockedStoreRefusesHarnessV1Records(t *testing.T) {
 			VALUES('a','ns','uid',1,'b','s','r','t','Prepared','none',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
 		"runtime_sessions": `INSERT INTO runtime_sessions(id,namespace,session_name,provider,state,cleanup_policy)
 			VALUES('rs','ns','session','kubernetes-service','Ready','Delete')`,
+		"session_lineages": `INSERT INTO session_lineages(namespace,session_name,namespace_uid,session_uid,contract_version,
+			lineage_generation,runtime_identity,version,created_at,updated_at)
+			VALUES('ns','session','ns-uid','session-uid','orka.harness.v1',1,'runtime',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
 	} {
 		t.Run(table, func(t *testing.T) {
 			path, db := historicalSchemaDB(t, "abd2c040")
@@ -136,6 +139,21 @@ func TestOpenLockedStoreRefusesHarnessV1Records(t *testing.T) {
 			require.NoError(t, raw.Close())
 		})
 	}
+}
+
+func TestOpenLockedStoreKeepsHarnessV2LineagesAcrossV1TableRemoval(t *testing.T) {
+	path, db := historicalSchemaDB(t, "abd2c040")
+	_, err := db.Exec(`INSERT INTO session_lineages(namespace,session_name,namespace_uid,session_uid,contract_version,
+		lineage_generation,runtime_identity,version,created_at,updated_at)
+		VALUES('ns','session','ns-uid','session-uid','orka.harness.v2',1,'runtime',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	s, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	var rows int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM session_lineages WHERE contract_version = 'orka.harness.v2'`).Scan(&rows))
+	require.Equal(t, 1, rows)
+	require.NoError(t, s.close())
 }
 
 func TestOpenLockedStoreCurrentDoesNotBackUp(t *testing.T) {

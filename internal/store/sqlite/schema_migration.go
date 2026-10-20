@@ -52,21 +52,26 @@ func schemaMigrations() []schemaMigration {
 		{schema149, schema150, migration149To150, nil},
 		{schema150, schema162, migration150To162, nil},
 		{schema162, schema166, migration162To166, nil},
-		{schema166, schema167, migration166To167, requireRetiredHarnessV1TablesEmpty},
+		{schema166, schema167, migration166To167, requireNoHarnessV1Records},
 	}
 }
 
-// requireRetiredHarnessV1TablesEmpty refuses to drop harness v1 tables that
-// hold records. A harness v2 store never writes them, so rows mean the store
-// belonged to an unsupported harness v1 installation.
-func requireRetiredHarnessV1TablesEmpty(ctx context.Context, conn *sql.Conn) error {
-	for _, table := range []string{"harness_v1_attempts", "runtime_sessions"} {
+// requireNoHarnessV1Records refuses to upgrade a store that holds harness v1
+// state: rows in the retired tables, or v1 Session lineages that a harness v2
+// controller could never continue. A harness v2 store never writes either, so
+// such rows mean the store belonged to an unsupported harness v1 installation.
+func requireNoHarnessV1Records(ctx context.Context, conn *sql.Conn) error {
+	for _, check := range []struct{ records, query string }{
+		{"harness_v1_attempts", `SELECT COUNT(*) FROM harness_v1_attempts`},
+		{"runtime_sessions", `SELECT COUNT(*) FROM runtime_sessions`},
+		{"session_lineages", `SELECT COUNT(*) FROM session_lineages WHERE contract_version <> 'orka.harness.v2'`},
+	} {
 		var rows int
-		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&rows); err != nil {
+		if err := conn.QueryRowContext(ctx, check.query).Scan(&rows); err != nil {
 			return err
 		}
 		if rows != 0 {
-			return fmt.Errorf("SQLite store holds %d harness v1 %s records; harness v1 is no longer supported, so install a new harness v2 store", rows, table)
+			return fmt.Errorf("SQLite store holds %d harness v1 %s records; harness v1 is no longer supported, so install a new harness v2 store", rows, check.records)
 		}
 	}
 	return nil

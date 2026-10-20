@@ -42,8 +42,9 @@ Object counts alone do not establish compatibility.
 | 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes. |
 | 158 objects (current) | #574 | Validate only; no migration or automatic backup. |
 
-A harness v2 store never writes the harness v1 tables. If either table holds
-records, the upgrade stops before changing the schema and reports
+A harness v2 store never writes the harness v1 tables or harness v1 Session
+lineages. If either table holds records, or a Session lineage uses
+`orka.harness.v1`, the upgrade stops before changing the schema and reports
 `harness v1 ... records`; that store belongs to an unsupported harness v1
 installation.
 
