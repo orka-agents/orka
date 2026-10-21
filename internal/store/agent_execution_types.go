@@ -110,14 +110,13 @@ func (m AgentExecutionSnapshotMetadata) Validate() error {
 // scoped to their immutable Task UID because they do not store a snapshot
 // digest themselves.
 type AgentExecutionSnapshotReferenceCounts struct {
-	HarnessV1Attempts int64
-	PromptAttempts    int64
-	SessionTurns      int64
+	PromptAttempts int64
+	SessionTurns   int64
 }
 
 // Total returns the number of durable references across all known sources.
 func (c AgentExecutionSnapshotReferenceCounts) Total() int64 {
-	return c.HarnessV1Attempts + c.PromptAttempts + c.SessionTurns
+	return c.PromptAttempts + c.SessionTurns
 }
 
 // AgentExecutionSnapshotLifecycleStore is an optional retention/GC extension
@@ -130,9 +129,9 @@ type AgentExecutionSnapshotLifecycleStore interface {
 	ListAgentExecutionSnapshotMetadataBefore(ctx context.Context, cutoff time.Time) ([]AgentExecutionSnapshotMetadata, error)
 
 	// CountAgentExecutionSnapshotReferences returns a consistent count across
-	// v1 attempts, v2 prompt attempts, and SessionTurns. Attempt sources match
-	// Task UID and digest; SessionTurns match the immutable Task UID because they
-	// do not carry a snapshot digest.
+	// prompt attempts and SessionTurns. Prompt attempts match Task UID and
+	// digest; SessionTurns match the immutable Task UID because they do not carry
+	// a snapshot digest.
 	CountAgentExecutionSnapshotReferences(ctx context.Context, key AgentExecutionSnapshotKey) (AgentExecutionSnapshotReferenceCounts, error)
 
 	// DeleteAgentExecutionSnapshot idempotently deletes one exact Task

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"reflect"
 
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
@@ -34,7 +33,6 @@ type Embedded interface {
 	store.MemoryStore
 	store.MemoryProposalStore
 	store.SessionTurnPersistenceStore
-	harness.RuntimeSessionStore
 
 	WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error
 	WithAuthorizedTaskDataTransaction(

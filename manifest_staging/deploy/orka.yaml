@@ -3449,8 +3449,8 @@ spec:
       resources:
       - namespaces
   validations:
-  - expression: variables.newClaim == '' || variables.newClaim in ['harness-v1', 'harness-v2']
-    message: orka.ai/controller-mode must be harness-v1 or harness-v2
+  - expression: variables.newClaim == '' || variables.newClaim == 'harness-v2'
+    message: orka.ai/controller-mode must be harness-v2
   - expression: variables.oldClaim == '' || variables.newClaim == variables.oldClaim
     message: namespace execution-mode claim is immutable; recreate the installation
       in a different namespace

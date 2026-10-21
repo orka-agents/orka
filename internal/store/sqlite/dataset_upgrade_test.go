@@ -12,7 +12,7 @@ import (
 )
 
 func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
-	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040"} {
+	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
 		t.Run(revision, func(t *testing.T) {
 			path, db := historicalSchemaDB(t, revision)
 			seedMigrationRecords(t, db, path)
@@ -26,10 +26,10 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.NoError(t, old.SendMessage(t.Context(), &store.Message{Namespace: "ns", FromTask: "sender", ToTask: "receiver", ParentTask: "parent", Content: "retained message"}))
-			if revision == "57583975" || revision == "abd2c040" {
+			if revision != "0e567418" && revision != "1f18614c" {
 				require.NoError(t, old.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "synthetic-migration-value"}))
 			}
-			if revision == "abd2c040" {
+			if revision == "abd2c040" || revision == "fdb64ecd" {
 				_, err := old.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "native", "retained native history"))
 				require.NoError(t, err)
 			}
@@ -58,12 +58,12 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			messages, err := s.GetMessages(t.Context(), "ns", "receiver", "parent", false)
 			require.NoError(t, err)
 			require.Len(t, messages, 1)
-			if revision == "57583975" || revision == "abd2c040" {
+			if revision != "0e567418" && revision != "1f18614c" {
 				got, err := s.GetConnectorCredential(t.Context(), testCredentialRef())
 				require.NoError(t, err)
 				require.True(t, got.AccessToken == "synthetic-migration-value", "retained credential changed")
 			}
-			if revision == "abd2c040" {
+			if revision == "abd2c040" || revision == "fdb64ecd" {
 				got, err := s.GetNativeSession(t.Context(), "tenant", "native", "")
 				require.NoError(t, err)
 				require.NotEmpty(t, got.Snapshot.Data)
@@ -91,7 +91,7 @@ func TestDatasetMetadataInsertionFailureRollsBackUpgrade(t *testing.T) {
 	_, err = backupSchemaDatabase(t.Context(), conn, path)
 	require.NoError(t, err)
 	steps := schemaMigrations()[3:]
-	steps[0].sql += `; CREATE TEMP TRIGGER fail_dataset BEFORE INSERT ON store_dataset BEGIN SELECT RAISE(ABORT,'injected dataset insert failure'); END;`
+	steps[len(steps)-1].sql += `; CREATE TEMP TRIGGER fail_dataset BEFORE INSERT ON store_dataset BEGIN SELECT RAISE(ABORT,'injected dataset insert failure'); END;`
 	require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema166, steps), "injected dataset insert failure")
 	require.NoError(t, conn.Close())
 	require.Equal(t, beforeSchema, storedSchemaSQL(t, db))
@@ -134,7 +134,7 @@ func TestDatasetFreshCreationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
-	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040"} {
+	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
 		t.Run(revision, func(t *testing.T) {
 			path, db := historicalSchemaDB(t, revision)
 			seedMigrationRecords(t, db, path)

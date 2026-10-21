@@ -1,5 +1,4 @@
 {{- if .Values.rbac.create -}}
-{{- $harnessV2 := eq .Values.controller.mode "harness-v2" -}}
 # Controller tenant Role. The release namespace is also the immutable watch namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -26,7 +25,6 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "runtimepools/finalizers", "promptattempts/finalizers", "runtimesessioncontrols/finalizers", "publications/finalizers", "controllerepochs/finalizers", "externaleffects/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers", "connectorproviders/finalizers", "connections/finalizers"]
     verbs: ["update"]
-  {{- if $harnessV2 }}
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gateways", "gatewaybindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -57,7 +55,6 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces/finalizers", "executionworkspaceclasses/finalizers", "executionworkspacecheckpoints/finalizers"]
     verbs: ["update"]
-  {{- end }}
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -118,7 +115,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- if and $harnessV2 .Values.controller.executionWorkspace.dispatchEnabled }}
+{{- if .Values.controller.executionWorkspace.dispatchEnabled }}
 ---
 # Providers opt namespaced profile reads into this release's watch namespace.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -177,7 +174,6 @@ subjects:
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
-{{- if $harnessV2 }}
 ---
 # Runtime child resources are confined to the v2 installation's runtime namespace.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -219,7 +215,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- end }}
 ---
 # Minimal cluster-scoped controller authority. Namespaced workload access is never bound here.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -235,12 +230,10 @@ rules:
     resources: ["namespaces"]
     resourceNames: [{{ .Release.Namespace | quote }}]
     verbs: ["get", "update"]
-  {{- if $harnessV2 }}
   - apiGroups: [""]
     resources: ["namespaces"]
     resourceNames: [{{ .Values.controller.acpRuntime.namespace | quote }}]
     verbs: ["get"]
-  {{- end }}
   {{- if include "orka.webhookTLSGenerated" . }}
   # The certificate rotator watches webhook configurations cluster-wide and
   # rewrites only this release's caBundle. list/watch cannot be name-scoped.
@@ -272,7 +265,6 @@ rules:
       - {{ include "orka.vendorWorkerClusterRoleName" . }}
       - {{ include "orka.containerWorkerClusterRoleName" . }}
     verbs: ["bind"]
-  {{- if $harnessV2 }}
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     resourceNames: ["tasks.core.orka.ai", "gatewayclasses.gateway.orka.ai", "gateways.gateway.orka.ai", "gatewaybindings.gateway.orka.ai"]
@@ -318,7 +310,6 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["list"]
-  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -422,7 +413,6 @@ rules:
     resources: ["monitorcommands", "monitoractions", "monitorworkactions", "monitorimplementationjobs", "monitormutations"]
     verbs: ["get", "list"]
 
-  {{- if $harnessV2 }}
   # Generic gateway resources and virtual durable ledgers remain read-only.
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gateways", "gatewaybindings"]
@@ -437,7 +427,6 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["runtimepools", "agentruntimes"]
     verbs: ["get", "list", "watch"]
-  {{- end }}
 
   # ConfigMap permissions (for results and sessions)
   - apiGroups: [""]
@@ -459,7 +448,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Values.client.name }}
     namespace: {{ include "orka.clientNamespace" . }}
-{{- if $harnessV2 }}
 ---
 # GatewayClass is cluster-scoped, so isolated clients need a separate ClusterRoleBinding for read access.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -487,7 +475,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Values.client.name }}
     namespace: {{ include "orka.clientNamespace" . }}
-{{- end }}
 {{- end }}
 ---
 # AI Worker Role (trusted worker with Kubernetes tool and code_exec permissions)

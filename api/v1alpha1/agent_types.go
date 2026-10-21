@@ -89,22 +89,21 @@ func (in AgentSpec) MarshalJSON() ([]byte, error) {
 }
 
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
 // +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)",message="runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
-// +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || !has(self.contractVersion) || self.contractVersion == 'orka.harness.v2'",message="runtime.toolboxes require the orka.harness.v2 contract; harness v1 runtimes cannot mount toolboxes"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
 	Type AgentRuntimeType `json:"type,omitempty"`
 
 	// ContractVersion is the harness protocol selector for built-in runtime
-	// types. It may be omitted: the namespace is bound to exactly one
-	// execution mode, so an omitted selector means that mode. An explicit
-	// value must match the namespace mode and, once written, never changes.
-	// runtime.type alone (including opencode, which exists in both protocols)
-	// is never protocol evidence.
+	// types. Only orka.harness.v2 is supported, so an omitted selector means
+	// orka.harness.v2. Once written, the value never changes. runtime.type
+	// alone is never protocol evidence.
 	// +optional
 	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 
@@ -206,9 +205,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 }
 
 // BuiltInContractVersion returns the Agent's explicit built-in harness
-// protocol selector, or empty when unclassified. Callers must treat empty as
-// neither protocol and fail closed; runtime.type alone is never protocol
-// evidence.
+// protocol, or empty when absent. Callers must reject an absent contract.
 func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
 		return ""

@@ -8,7 +8,6 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/kube"
@@ -30,8 +29,6 @@ var (
 	_ store.SessionSoulReader                         = (*storageclient.Client)(nil)
 	_ store.SessionSoulWriter                         = (*storageclient.Client)(nil)
 	_ store.SessionLineageStore                       = (*storageclient.Client)(nil)
-	_ store.HarnessV1AttemptStore                     = (*storageclient.Client)(nil)
-	_ harness.RuntimeSessionStore                     = (*storageclient.Client)(nil)
 	_ store.AgentExecutionSnapshotStore               = (*storageclient.Client)(nil)
 	_ store.AgentExecutionSnapshotLifecycleStore      = (*storageclient.Client)(nil)
 	_ store.NativeSessionImportStore                  = (*storageclient.Client)(nil)

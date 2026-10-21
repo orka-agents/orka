@@ -16,7 +16,7 @@ definition: a version marker alone cannot establish compatibility.
 
 Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
-process lock and one `BEGIN IMMEDIATE` transaction. The final 166-to-167 transition
+process lock and one `BEGIN IMMEDIATE` transaction. The final 167-to-168 transition
 adds the metadata table and records an adopted identity. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
@@ -63,7 +63,7 @@ Kubernetes authority remains separate from either boundary.
 | `ResultStore`, `PromptResultReceiptStore` | Results and immutable attempt-bound result receipts; state. | Task reconciler, ACP dispatch/recovery, worker API and result API. A result receipt precedes prompt settling. |
 | `SessionStore`, `SessionTurnCommitter`, `FencedSessionWriteStore` | Sessions, transcript messages, token counters and Task/chat ownership locks; state. | Session manager, chat, compatibility APIs and transcript tools. Turn commit groups messages with usage; fenced writes require the exact owner. `GetSessionType` is also consumed through a narrow local reader. |
 | `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Encrypted immutable snapshots keyed by Task UID/digest, metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
-| `SessionLineageStore`, `HarnessV1AttemptStore`, `harness.RuntimeSessionStore` | Lineage claims, harness-v1 attempt receipts and runtime-session history; state. | Session continuity, harness-v1 dispatch/recovery and session APIs. These remain necessary while current upstream supports harness v1. |
+| `SessionLineageStore` | Payload projection of Kubernetes-authoritative Session lineage; state. | Session continuity and dispatch. Projection failure may block dispatch but never changes Kubernetes lineage authority. |
 | `NativeSessionStore`, `NativeSessionImportStore` | Encrypted private native session bytes, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
 | `ConnectorCredentialStore`, `ConnectorConsentStore` | Sealed credentials/consents, grants, retired custody, completion receipts, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. |
 | `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable native capture) atomically; projection activates after Kubernetes finalization. |
@@ -108,10 +108,9 @@ event vocabulary and two provider interfaces:
 
 - `StateProvider` serves `state.v1`: results and prompt result receipts, plans,
   messages, Sessions and transcripts (including turn commits, owner-fenced
-  writes, soul pinning and lineage), harness-v1 attempts, Session cleanup
-  persistence, the controller epoch mirror, outbox persistence, Task Job
-  revocations, execution events, gateway records, security records, repository
-  monitors and usage.
+  writes, soul pinning and lineage), Session cleanup persistence, the
+  controller epoch mirror, outbox persistence, Task Job revocations, execution
+  events, gateway records, security records, repository monitors and usage.
 - `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
 
 `internal/store` keeps aliases for the moved names, so Orka callers keep their
@@ -175,12 +174,11 @@ the observable parts.
   (`WithWriteEnvelope`, `WriteEnvelopeFrom`). Orka does not attach it yet and
   providers must accept writes without one. Operation receipts (step 3) will
   check the dataset, the controller epoch fence and the operation identity at
-  commit time. Only the harness-v1 attempt family and the outbox family take a
-  `ControllerEpochFence` today, as an explicit parameter that stays
-  authoritative for them; the envelope reaches every other write family
-  without another change to each of the contract's roughly 190
-  context-taking methods. Operation-specific preconditions, such as an
-  expected version or message count, stay explicit parameters.
+  commit time. Only the outbox family takes a `ControllerEpochFence` today, as
+  an explicit parameter that stays authoritative for it; the envelope reaches
+  every other write family without another change to each of the contract's
+  roughly 190 context-taking methods. Operation-specific preconditions, such
+  as an expected version or message count, stay explicit parameters.
 - **Provider description.** `Describe(ctx)` on both providers returns
   `ProviderInfo`: the contract version and parts served, the dataset ID and
   its origin (`new`, `adopted` or `migrated`), the provider's schema version,
@@ -246,7 +244,7 @@ the named step.
   once the store is a separate service; operation receipts (step 3) decide
   which side owns each time.
 - **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents`,
-  `ListActiveScanRuns`, `ListHarnessV1AttemptsByTask` and `GetMessages` return
+  `ListActiveScanRuns` and `GetMessages` return
   every match. They gain limits and cursors in the same signature sweep as the
   write envelope.
 - **`state.v1` is a relational contract.** Several methods push joins and
@@ -282,7 +280,6 @@ store implements:
 | `MemoryStore`, `MemoryProposalStore` | Redaction runs inside SQLite, and proposal application calls `AuthorizeExistingMemory`. |
 | `TaskDataTransactionStore` transaction methods | Go callbacks run inside a database transaction. |
 | `SecurityStore.ApplyScanTaskIngestion` | Go callbacks run inside a database transaction. |
-| `harness.RuntimeSessionStore` | Its records are defined in `internal/harness`. |
 
 Embedded families share transactions with state and artifact records (a
 task-data transaction context also covers `SaveArtifact`, for example), so the
@@ -311,7 +308,7 @@ consumer's type assertion cannot silently lose a capability.
 
 `store/kube.NewComposite` receives precisely `SessionTurnPersistenceStore`,
 `OutboxPersistenceStore` and `SessionCleanupPersistenceStore` through
-`kube.SQLitePersistence`, plus optional harness-v1 receipt reads. It implements
+`kube.SQLitePersistence`. It implements
 the production `DurableControlStore` using Kubernetes resources and Leases.
 
 | Interface | Production owner |
@@ -336,9 +333,8 @@ must not be discarded with the duplicate control implementation.
 the test-only control implementation. [#620](https://github.com/orka-agents/orka/issues/620)
 owns misleading snapshot reference counts: the current SQL count includes both
 duplicate prompt attempts and real persisted SessionTurns. This inventory does
-not redefine those counts. [#568](https://github.com/orka-agents/orka/issues/568)
-and [PR #574](https://github.com/orka-agents/orka/pull/574) own harness-v1 retirement.
-Retain currently supported persistence until that work lands.
+not redefine those counts. [PR #574](https://github.com/orka-agents/orka/pull/574)
+removed harness v1 and its `harness_v1_attempts` and `runtime_sessions` tables.
 
 ## Callback and transaction inventory
 
