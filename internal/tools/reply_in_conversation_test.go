@@ -37,7 +37,7 @@ func TestReplyInConversationStrictContent(t *testing.T) {
 	require.Equal(t, false, schema["additionalProperties"])
 	require.Equal(t, []any{"content"}, schema["required"])
 	properties := schema["properties"].(map[string]any)
-	require.Len(t, properties, 1)
+	require.Len(t, properties, 2)
 	require.Equal(t, float64(1), properties["content"].(map[string]any)["minLength"])
 	require.Equal(t, float64(16384), properties["content"].(map[string]any)["maxLength"])
 	for _, raw := range []string{`{}`, `null`, `[]`, `{"content":null}`, `{"content":7}`, `{"Content":"x"}`, `{"content":"x","target":"room"}`, `{"content":"x","requestID":"x"}`, `{"content":"x"}{}`, `{"content":"x","content":"y"}`, `{"content":""}`, `{"content":" \n\t"}`, `{"content":"\u0000"}`, `{"content":"\ud800"}`, `{"content":"\udc00"}`, "{\"content\":\"\xff\"}", `{"content":"` + strings.Repeat("x", 16385) + `"}`, `{"content":"` + strings.Repeat("é", 8193) + `"}`} {

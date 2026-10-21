@@ -87,6 +87,56 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 	}
 }
 
+func TestGatewayExtensionProjectionAndRequirement(t *testing.T) {
+	var response protocol.CapabilitiesResponse
+	if err := json.Unmarshal([]byte(`{"capabilities":{"extensions":["meetingDraft.v1","future.v2"]}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	observed := observedGatewayCapabilities(&response)
+	encoded, err := json.Marshal(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"extensions":["meetingDraft.v1","future.v2"]`) {
+		t.Fatalf("lost extensions %s", encoded)
+	}
+	var required gatewayv1alpha1.GatewayCapabilities
+	if err := json.Unmarshal([]byte(`{"extensions":["meetingDraft.v1","future.v2"]}`), &required); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequiredGatewayCapabilities(required, gatewayv1alpha1.GatewayCapabilities{}); err == nil || err.Error() != "adapter does not advertise required extension" {
+		t.Fatalf("missing extensions: %v", err)
+	}
+	// Class requirements are generic; the meeting action enforces interim delivery.
+	if err := validateRequiredGatewayCapabilities(required, observed.Capabilities); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err = json.Marshal(gatewayv1alpha1.GatewayCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "extensions") || strings.Contains(string(encoded), "meetingDrafts") {
+		t.Fatalf("empty capabilities not omitted %s", encoded)
+	}
+}
+
+func TestGatewayExtensionProjectionBoundsAndCopies(t *testing.T) {
+	response := &protocol.CapabilitiesResponse{Capabilities: protocol.Capabilities{Extensions: []string{
+		"meetingDraft.v1", " meetingDraft.v1", "unsafe\x01.v1", "token=example-placeholder", "future.v2", "meetingDraft.v1",
+	}}}
+	for i := range 20 {
+		response.Capabilities.Extensions = append(response.Capabilities.Extensions, fmt.Sprintf("future%d.v1", i))
+	}
+	observed := observedGatewayCapabilities(response)
+	if len(observed.Capabilities.Extensions) != 16 || observed.Capabilities.Extensions[0] != "meetingDraft.v1" || observed.Capabilities.Extensions[1] != "future.v2" {
+		t.Fatalf("unsafe or unbounded projection: %#v", observed.Capabilities.Extensions)
+	}
+	observed.Capabilities.Extensions[0] = "changed.v1"
+	if response.Capabilities.Extensions[0] != "meetingDraft.v1" {
+		t.Fatal("projection aliases adapter response")
+	}
+}
+
 func TestGatewayInterimCapabilityProjectionAndRequirement(t *testing.T) {
 	var response protocol.CapabilitiesResponse
 	if err := json.Unmarshal([]byte(`{"capabilities":{"interimDelivery":true}}`), &response); err != nil {

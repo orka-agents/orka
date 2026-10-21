@@ -102,6 +102,11 @@ func TestInterimDeliveryCapabilitiesAreOptionalAndStrict(t *testing.T) {
 		{"absent", "", false},
 		{"enabled", `,"interimDelivery":true`, false},
 		{"disabled", `,"interimDelivery":false`, false},
+		{"extensions", `,"extensions":["meetingDraft.v1","future.v2"]`, false},
+		{"empty extensions", `,"extensions":[]`, false},
+		{"legacy drafts", `,"meetingDrafts":true`, true},
+		{"invalid extensions", `,"extensions":true`, true},
+		{"invalid extension item", `,"extensions":[true]`, true},
 		{"unknown", `,"futureDelivery":true`, true},
 		{"wrong type", `,"interimDelivery":"true"`, true},
 	} {
@@ -116,11 +121,61 @@ func TestInterimDeliveryCapabilitiesAreOptionalAndStrict(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if strings.Contains(string(encoded), `"extensions":["meetingDraft.v1","future.v2"]`) != (tc.name == "extensions") || (tc.name != "extensions" && strings.Contains(string(encoded), `"extensions"`)) {
+					t.Fatalf("extension round trip = %s", encoded)
+				}
 				if strings.Contains(string(encoded), `"interimDelivery":true`) != (tc.name == "enabled") {
 					t.Fatalf("capability round trip = %s", encoded)
 				}
 			}
 		})
+	}
+}
+
+func TestTerminalDeliveryRetainsLegacyMetadataValidation(t *testing.T) {
+	for _, kind := range []string{DeliveryKindFinal, DeliveryKindError} {
+		request := DeliveryRequest{ProtocolVersion: Version, DeliveryID: "delivery", IdempotencyID: "delivery", OriginatingEvent: "event", AccountID: "account", ContextID: "room", ReplyTarget: "room", Kind: kind, Text: "Done", ThreadID: "legacy\x00thread", Metadata: map[string]string{"legacy key": "line one\nline two", "long": strings.Repeat("x", MaxMetadataValueBytes+1)}}
+		if err := ValidateDeliveryRequest(&request); err != nil {
+			t.Fatalf("%s legacy metadata validation changed: %v", kind, err)
+		}
+	}
+}
+
+func TestDeliveryThreadAndMetadataBounds(t *testing.T) {
+	base := DeliveryRequest{ProtocolVersion: Version, DeliveryID: "delivery", IdempotencyID: "delivery", OriginatingEvent: "event", AccountID: "account", ContextID: "room", ReplyTarget: "room", Kind: DeliveryKindMessage, Text: "Draft above"}
+	cases := []struct {
+		name     string
+		thread   string
+		metadata map[string]string
+	}{
+		{"thread control", "bad\x00thread", nil},
+		{"thread oversize", strings.Repeat("x", MaxIdentityBytes+1), nil},
+		{"metadata value control", "thread", map[string]string{"meeting.subject": "bad\nsubject"}},
+		{"metadata value oversize", "thread", map[string]string{"meeting.subject": strings.Repeat("x", MaxMetadataValueBytes+1)}},
+		{"metadata key invalid", "thread", map[string]string{"bad key": "value"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := base
+			request.ThreadID = tc.thread
+			request.Metadata = tc.metadata
+			if err := ValidateDeliveryRequest(&request); err == nil {
+				t.Fatal("invalid thread/metadata accepted")
+			}
+		})
+	}
+	request := base
+	request.Metadata = make(map[string]string)
+	for i := range MaxMetadataEntries + 1 {
+		request.Metadata[fmt.Sprintf("key.%d", i)] = "value"
+	}
+	if err := ValidateDeliveryRequest(&request); err == nil {
+		t.Fatal("too many metadata entries accepted")
+	}
+	base.ThreadID = "thread"
+	base.Metadata = map[string]string{"meeting.subject": "Planning"}
+	if err := ValidateDeliveryRequest(&base); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -401,7 +402,7 @@ func TestDeliveryFixtureMaskCopiesCapabilities(t *testing.T) {
 		masked.ProtocolVersion != caps.ProtocolVersion || masked.AdapterVersion != caps.AdapterVersion {
 		t.Error("masking changed safe fields or retained a fixture-bearing field")
 	}
-	if caps != original || masked == &caps {
+	if !reflect.DeepEqual(caps, original) || masked == &caps {
 		t.Error("masking did not preserve caller-owned capabilities")
 	}
 }
@@ -532,7 +533,7 @@ func TestDeliveryFixtureMaskEscapingBoundsAndSafeFields(t *testing.T) {
 	caps.AdapterName = `safe%2Fadapter\u0026\uD83D\uDE00\U0001f680`
 	safe := "safe%20route is 100% ready, a+b"
 	message, masked := fixture.maskResultFields(safe, &caps)
-	if message != safe || *masked != caps {
+	if message != safe || !reflect.DeepEqual(*masked, caps) {
 		t.Error("safe escaped fields changed")
 	}
 }

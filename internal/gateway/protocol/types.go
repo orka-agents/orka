@@ -87,6 +87,8 @@ type Capabilities struct {
 	ExplicitSessions   bool `json:"explicitSessions,omitempty"`
 	IdempotentDelivery bool `json:"idempotentDelivery"`
 	InterimDelivery    bool `json:"interimDelivery,omitempty"`
+	// Extensions lists versioned structured-message schemas the adapter renders.
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // HealthResponse is returned by GET /v1/health.

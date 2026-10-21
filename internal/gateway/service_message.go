@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +23,11 @@ import (
 // conflating it with Task lifecycle or idempotency conflicts.
 var ErrInterimDeliveryUnsupported = &HTTPError{
 	Code: http.StatusConflict, Message: "gateway adapter does not advertise interimDelivery capability",
+}
+
+// ErrMeetingDraftsUnsupported is a definitive structured-action rejection.
+var ErrMeetingDraftsUnsupported = &HTTPError{
+	Code: http.StatusConflict, Message: "gateway adapter does not advertise meetingDraft.v1 extension",
 }
 
 // TaskMessageReceipt acknowledges durable admission, not provider delivery. A
@@ -54,6 +60,20 @@ func (s *Service) EnqueueTaskMessage(ctx context.Context, namespace, taskName, t
 // PrepareTaskMessage performs live Kubernetes checks outside the SQLite writer.
 // No routing or controller policy is accepted from the caller.
 func (s *Service) PrepareTaskMessage(ctx context.Context, namespace, taskName, taskUID, requestID, content string) (*PreparedTaskMessage, error) {
+	return s.prepareTaskMessage(ctx, namespace, taskName, taskUID, requestID, content, nil)
+}
+
+// PrepareTaskMeetingDraft derives bounded metadata at the controller boundary.
+// Workers cannot select routing or override controller-owned metadata.
+func (s *Service) PrepareTaskMeetingDraft(ctx context.Context, namespace, taskName, taskUID, requestID, content string, draft protocol.MeetingDraft) (*PreparedTaskMessage, error) {
+	metadata, err := draft.Metadata()
+	if err != nil {
+		return nil, &HTTPError{Code: http.StatusBadRequest, Message: "invalid meeting draft"}
+	}
+	return s.prepareTaskMessage(ctx, namespace, taskName, taskUID, requestID, content, metadata)
+}
+
+func (s *Service) prepareTaskMessage(ctx context.Context, namespace, taskName, taskUID, requestID, content string, metadata map[string]string) (*PreparedTaskMessage, error) {
 	if s == nil || !s.Config.Enabled || s.EventStore == nil || s.DeliveryStore == nil || s.freshReader() == nil {
 		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway message processing is unavailable"}
 	}
@@ -73,10 +93,14 @@ func (s *Service) PrepareTaskMessage(ctx context.Context, namespace, taskName, t
 		return nil, err
 	}
 	gateErr := messageGatewayAdmissionError(object)
+	if version, draft := metadata["meeting.version"]; gateErr == nil && draft &&
+		(version != "1" || !slices.Contains(object.Status.ObservedCapabilities.Capabilities.Extensions, protocol.MeetingDraftExtension)) {
+		gateErr = ErrMeetingDraftsUnsupported
+	}
 	now := time.Now().UTC()
 	return &PreparedTaskMessage{service: s, admissionGateError: gateErr, request: store.GatewayMessageEnqueue{
 		Namespace: event.Namespace, NamespaceUID: event.NamespaceUID, EventID: event.ID,
-		TaskName: event.TaskName, TaskUID: event.TaskUID, RequestID: requestID, Text: text,
+		TaskName: event.TaskName, TaskUID: event.TaskUID, RequestID: requestID, Text: text, Metadata: metadata,
 		MaxMessages: s.Config.InterimMessagesPerTask, MaxAttempts: s.Config.DeliveryMaxAttempts,
 		Now: now, ExpiresAt: now.Add(s.Config.EventExpiry), ReplayOnly: gateErr != nil,
 	}}, nil
@@ -216,5 +240,12 @@ func (s *Service) validateMessageDelivery(ctx context.Context, delivery *store.G
 	if err != nil {
 		return err
 	}
-	return messageGatewayAdmissionError(object)
+	if err := messageGatewayAdmissionError(object); err != nil {
+		return err
+	}
+	if version, draft := delivery.Metadata["meeting.version"]; draft &&
+		(version != "1" || !slices.Contains(object.Status.ObservedCapabilities.Capabilities.Extensions, protocol.MeetingDraftExtension)) {
+		return ErrMeetingDraftsUnsupported
+	}
+	return nil
 }

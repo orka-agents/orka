@@ -492,6 +492,15 @@ func sanitizeCapabilities(
 	result.ProtocolVersion = sanitizeOutputText(result.ProtocolVersion, authorizationValue, protocol.MaxIdentityBytes)
 	result.AdapterName = sanitizeOutputText(result.AdapterName, authorizationValue, protocol.MaxIdentityBytes)
 	result.AdapterVersion = sanitizeOutputText(result.AdapterVersion, authorizationValue, protocol.MaxIdentityBytes)
+	credential := strings.TrimSpace(authorizationValue)
+	var extensions []string
+	for _, value := range capabilities.Capabilities.Extensions {
+		if credential != "" && strings.Contains(value, credential) {
+			continue
+		}
+		extensions = append(extensions, value)
+	}
+	result.Capabilities.Extensions = protocol.SanitizeExtensions(extensions)
 	return &result
 }
 
@@ -503,9 +512,17 @@ func capabilitiesContainCredential(capabilities *protocol.CapabilitiesResponse, 
 	if credential == "" {
 		return false
 	}
-	return strings.Contains(capabilities.ProtocolVersion, credential) ||
+	if strings.Contains(capabilities.ProtocolVersion, credential) ||
 		strings.Contains(capabilities.AdapterName, credential) ||
-		strings.Contains(capabilities.AdapterVersion, credential)
+		strings.Contains(capabilities.AdapterVersion, credential) {
+		return true
+	}
+	for _, value := range capabilities.Capabilities.Extensions {
+		if strings.Contains(value, credential) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsCredential(body []byte, authorizationValue string) bool {

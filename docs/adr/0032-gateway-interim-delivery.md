@@ -35,7 +35,7 @@ receipts, not a second delivery channel.
 
 The controller derives all routing from the exact Task UID's admitted durable
 event. Execution hosts supply content and a stable internal request ID; the model
-supplies only content through the tool described below. The native
+supplies content (and optionally a bounded meeting draft) through the tool described below. The native
 worker endpoint uses the existing TokenReview and current Pod/Job/Task UID
 fences, with no controller-ServiceAccount or runtime impersonation exception.
 Live Task/Gateway/capability checks happen before the authorized SQLite writer.
@@ -55,14 +55,28 @@ delivery ID and its current status without a second enqueue or quota charge.
 sanitized text is retained, with no raw-content digest or additional persisted
 identity. The HTTP receipt acknowledges durable admission, not provider send.
 
-### Expose a content-only tool, not a general send API
+### Expose a conversation-bound tool, not a general send API
 
 The production native worker and ACP broker register `reply_in_conversation`.
-Its only argument is `content`: a required string with schema `minLength: 1`,
+Its required argument is `content`: a string with schema `minLength: 1`,
 `maxLength: 16384`, and `additionalProperties: false`. Execute also enforces the
 strict object shape, valid Unicode, nonempty sanitized text, and the stronger
-16 KiB UTF-8 **byte** bound. There is no target, recipient, request ID, quota
-configuration, or approval argument.
+16 KiB UTF-8 **byte** bound. There is no target, resolved recipient address, request ID, quota
+configuration, or approval argument. The optional structured `meetingDraft`
+extension keeps these routing/authority constraints: it carries bounded display
+names and unscheduled proposal fields, never addresses, a URL or arbitrary
+metadata. Generic `capabilities.extensions` lists versioned structured-message
+schemas, with at most 16 bounded, sanitized identifiers. The meeting schema is
+`meetingDraft.v1`; its delivery metadata retains `meeting.version: "1"`, preserving
+immutable delivery/replay identity. Admission and dispatch require exact extension
+membership as well as interim support. GatewayClass requirements use the same list
+as a generic subset check: this keeps the shared capability contract consistent
+without embedding meeting semantics in class readiness. Unsafe identifiers are
+dropped, never repaired into supported schemas; credential detection and safe
+probe/fixture output cover extensions alongside adapter identity fields. The [protocol contract](../development/gateway-protocol-v1.md#optional-structured-meeting-draft)
+defines bounds, immutable metadata replay, controller/worker-first rollout and
+settle/abandon-before-rollback requirements. Existing sealed ACP profiles do not
+automatically adopt the additive schema.
 
 The controller proves durable origin by exact admitted event/Task UID linkage,
 not prompt inspection or provenance metadata alone. Pending linkage defers
