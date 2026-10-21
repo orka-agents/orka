@@ -266,6 +266,8 @@ Workers redact before submitting events, and the store sanitizes again before pe
 
 Execution event metrics intentionally avoid task names, session names, event ids, tool call ids, and other high-cardinality labels.
 
+Orka's storage client records the append, redaction and truncation metrics and the list metrics with `scope` `task_store` or `session_store`, so they are the same for every storage provider. The API records the list metrics with `scope` `task_api` or `session_api` and the stream metrics.
+
 Available metrics include:
 
 - `orka_execution_events_appended_total{stream_type,event_type}`

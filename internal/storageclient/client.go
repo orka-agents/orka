@@ -8,7 +8,8 @@
 //
 // The client applies Orka's redaction, payload sanitization and usage
 // attribution before any provider call, so providers store only content Orka
-// has already made safe to persist.
+// has already made safe to persist. It also records the execution-event store
+// metrics, so every provider reports them.
 package storageclient
 
 import (

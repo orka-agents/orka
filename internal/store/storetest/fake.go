@@ -10,11 +10,8 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 )
-
-const unknownMetricLabel = "unknown"
 
 type executionEventStreamKey struct {
 	namespace  string
@@ -91,12 +88,6 @@ func (s *FakeExecutionEventStore) appendExecutionEvent(
 	event *store.ExecutionEvent,
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
-	started := time.Now()
-	metricStreamType, metricEventType := metricLabelsForExecutionEvent(event)
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventAppend(metricStreamType, metricEventType, success, time.Since(started).Seconds())
-	}()
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
@@ -144,7 +135,6 @@ func (s *FakeExecutionEventStore) appendExecutionEvent(
 	indexKey := executionEventDedupeIndexKey{executionEventStreamKey: key, dedupeKey: dedupeKey}
 	if dedupeKey != "" {
 		if existing, ok := s.dedupe[indexKey]; ok {
-			success = true
 			clone := cloneExecutionEvent(existing)
 			return &clone, false, nil
 		}
@@ -174,19 +164,11 @@ func (s *FakeExecutionEventStore) appendExecutionEvent(
 	if dedupeKey != "" {
 		s.dedupe[indexKey] = cloneExecutionEvent(copy)
 	}
-	redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(&copy)
-	metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
-	success = true
 	return &copy, true, nil
 }
 
 // ListExecutionEvents returns events matching filter in ascending sequence order per stream.
 func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("task_store", success, time.Since(started).Seconds())
-	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -244,17 +226,11 @@ func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filte
 	if len(matches) > filter.Limit {
 		matches = matches[:filter.Limit]
 	}
-	success = true
 	return matches, nil
 }
 
 // ListSessionExecutionEvents returns task-derived events for one session with an aggregated cursor.
 func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context, filter store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("session_store", success, time.Since(started).Seconds())
-	}()
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -296,7 +272,6 @@ func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context
 			break
 		}
 	}
-	success = true
 	return matches, latestSeq, nil
 }
 
@@ -387,24 +362,6 @@ func (s *FakeExecutionEventStore) existingTerminalApprovalEvent(event store.Exec
 		}
 	}
 	return "", approvalID, false
-}
-
-func metricLabelsForExecutionEvent(event *store.ExecutionEvent) (string, string) {
-	if event == nil {
-		return unknownMetricLabel, unknownMetricLabel
-	}
-	streamType := strings.TrimSpace(event.StreamType)
-	if streamType == "" {
-		streamType = store.ExecutionEventStreamTypeTask
-	}
-	if !events.IsValidExecutionEventStreamType(streamType) {
-		streamType = unknownMetricLabel
-	}
-	eventType := strings.TrimSpace(event.Type)
-	if !events.IsValidExecutionEventType(eventType) {
-		eventType = unknownMetricLabel
-	}
-	return streamType, eventType
 }
 
 func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {

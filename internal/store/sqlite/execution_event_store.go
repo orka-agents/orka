@@ -10,14 +10,10 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const (
-	sqliteUnknownMetricLabel         = "unknown"
-	sqliteExecutionEventSeqBatchSize = 256
-)
+const sqliteExecutionEventSeqBatchSize = 256
 
 var _ store.ExecutionEventStore = (*Store)(nil)
 var _ store.DeduplicatingExecutionEventStore = (*Store)(nil)
@@ -71,12 +67,6 @@ func (s *Store) appendExecutionEvent(
 	dedupeKey string,
 	plan *store.PlanState,
 ) (*store.ExecutionEvent, bool, error) {
-	started := time.Now()
-	metricStreamType, metricEventType := sqliteMetricLabelsForExecutionEvent(event)
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventAppend(metricStreamType, metricEventType, success, time.Since(started).Seconds())
-	}()
 	if event == nil {
 		return nil, false, store.ValidationErrorf("execution event is required")
 	}
@@ -129,7 +119,6 @@ func (s *Store) appendExecutionEvent(
 			ctx, copy, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt,
 		)
 		if err == nil {
-			success = true
 			return appended, isNew, nil
 		}
 		if ctx.Err() != nil {
@@ -404,11 +393,6 @@ func sqliteSessionCursorSeq(ctx context.Context, querier sqliteSessionCursorQuer
 
 // ListExecutionEvents returns execution events matching filter in stream sequence order.
 func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("task_store", success, time.Since(started).Seconds())
-	}()
 	filter = filter.Normalized()
 	if err := filter.Validate(); err != nil {
 		return nil, err
@@ -469,17 +453,11 @@ func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionE
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	success = true
 	return out, nil
 }
 
 // ListSessionExecutionEvents returns task-derived events for one session with a deterministic session cursor.
 func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("session_store", success, time.Since(started).Seconds())
-	}()
 	filter = filter.Normalized()
 	if err := filter.Validate(); err != nil {
 		return nil, 0, err
@@ -535,7 +513,6 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	success = true
 	return out, latestSeq, nil
 }
 
@@ -765,24 +742,6 @@ func cloneSQLiteExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent 
 		event.Truncation = &truncation
 	}
 	return event
-}
-
-func sqliteMetricLabelsForExecutionEvent(event *store.ExecutionEvent) (string, string) {
-	if event == nil {
-		return sqliteUnknownMetricLabel, sqliteUnknownMetricLabel
-	}
-	streamType := strings.TrimSpace(event.StreamType)
-	if streamType == "" {
-		streamType = store.ExecutionEventStreamTypeTask
-	}
-	if !events.IsValidExecutionEventStreamType(streamType) {
-		streamType = sqliteUnknownMetricLabel
-	}
-	eventType := strings.TrimSpace(event.Type)
-	if !events.IsValidExecutionEventType(eventType) {
-		eventType = sqliteUnknownMetricLabel
-	}
-	return streamType, eventType
 }
 
 func nullableStringFromRaw(raw json.RawMessage) any {

@@ -308,11 +308,27 @@ embedded SQLite store, stores only content Orka has already made safe to
 persist:
 
 - **Execution events.** The client redacts and bounds each event's summary,
-  text and JSON content, records the redaction and truncation metrics once
-  for each newly appended event, counts an event it refuses before calling
-  the provider as an append failure, and stamps the creation time when the
-  caller left it unset. A provider only requires structured content to be valid
-  JSON, and stores content that is only whitespace as no content.
+  text and JSON content and stamps the creation time when the caller left it
+  unset. A provider only requires structured content to be valid JSON, and
+  stores content that is only whitespace as no content.
+- **Execution-event metrics.** The client records the execution-event store
+  metrics for every provider, with the names and labels the SQLite store
+  used: appends (`orka_execution_events_appended_total`,
+  `orka_execution_event_append_failures_total` and
+  `orka_execution_event_append_duration_seconds`), store reads
+  (`orka_execution_event_list_requests_total` and
+  `orka_execution_event_list_duration_seconds` with `scope` `task_store` or
+  `session_store`), and redaction and truncation once for each newly
+  appended event. An event the client refuses before calling the provider
+  counts as an append failure, as does a provider error, and a deduplicated
+  replay counts as an appended event. An invalid deduplication key or a
+  missing plan is rejected before the provider is called and is not counted,
+  as SQLite never counted it. A provider records none of these
+  metrics, so a provider in another process still reports them in Orka's
+  registry and nothing is counted twice. The append duration runs from the
+  start of the client call, so it includes Orka's sanitization and, for a
+  remote provider, network time. The embedded SQLite store still records
+  `orka_store_db_size_bytes` from its database file.
 - **Usage from execution events.** The client derives the usage observation
   that a worker usage report or the controller's ACP journal carries and
   sends it as `ExecutionEvent.Usage`, unless Orka code attached an
@@ -355,6 +371,9 @@ recording SQLite provider and fail if the provider receives any of them:
 `TestProviderReceivesOnlySanitizedGatewayText` covers the gateway writes and
 `TestProviderReceivesOnlyRedactedContent` covers the others. Encryption of snapshots, native
 sessions and connector custody still happens inside SQLite.
+`TestClientRecordsTheStoreMetricsSQLiteRecorded` runs a fixed append and
+list workload through the client and requires the series and counts that
+the SQLite store recorded for it before the client took over.
 
 ## Kubernetes control authority and retained SQL compatibility
 

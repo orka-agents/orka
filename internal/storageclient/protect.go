@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
@@ -17,17 +16,16 @@ import (
 // before a provider sees the data, so a provider only ever stores content
 // that Orka has already made safe to persist.
 
-const unknownMetricLabel = "unknown"
-
 // AppendExecutionEvent sanitizes the event payload before appending it.
 func (c *Client) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	started := time.Now()
 	prepared, err := c.prepareExecutionEvent(ctx, event)
 	if err != nil {
-		recordExecutionEventRejection(event, started)
+		recordExecutionEventAppend(event, false, started)
 		return nil, err
 	}
 	appended, err := c.StateProvider.AppendExecutionEvent(providerContext(ctx), prepared)
+	recordExecutionEventAppend(event, err == nil, started)
 	if err != nil {
 		return nil, err
 	}
@@ -45,10 +43,14 @@ func (c *Client) AppendExecutionEventIfAbsent(
 	started := time.Now()
 	prepared, err := c.prepareExecutionEvent(ctx, event)
 	if err != nil {
-		recordExecutionEventRejection(event, started)
+		recordExecutionEventAppend(event, false, started)
+		return nil, false, err
+	}
+	if _, err := store.NormalizeExecutionEventDedupeKey(dedupeKey); err != nil {
 		return nil, false, err
 	}
 	appended, isNew, err := c.StateProvider.AppendExecutionEventIfAbsent(providerContext(ctx), prepared, dedupeKey)
+	recordExecutionEventAppend(event, err == nil, started)
 	if err != nil {
 		return nil, false, err
 	}
@@ -69,10 +71,17 @@ func (c *Client) AppendExecutionEventWithPlanIfAbsent(
 	started := time.Now()
 	prepared, err := c.prepareExecutionEvent(ctx, event)
 	if err != nil {
-		recordExecutionEventRejection(event, started)
+		recordExecutionEventAppend(event, false, started)
 		return nil, false, err
 	}
+	if _, err := store.NormalizeExecutionEventDedupeKey(dedupeKey); err != nil {
+		return nil, false, err
+	}
+	if plan == nil {
+		return nil, false, store.ValidationErrorf("plan state is required")
+	}
 	appended, isNew, err := c.StateProvider.AppendExecutionEventWithPlanIfAbsent(providerContext(ctx), prepared, dedupeKey, plan)
+	recordExecutionEventAppend(event, err == nil, started)
 	if err != nil {
 		return nil, false, err
 	}
@@ -138,41 +147,6 @@ func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {
 		event.Truncation = &truncation
 	}
 	return event
-}
-
-// recordExecutionEventRejection counts an append the client refused before
-// calling the provider, such as a payload that cannot be sanitized or an
-// invalid worker usage report, in the same append failure and duration
-// metrics the provider records for its own failures.
-func recordExecutionEventRejection(event *store.ExecutionEvent, started time.Time) {
-	streamType, eventType := executionEventMetricLabels(event)
-	metrics.RecordExecutionEventAppend(streamType, eventType, false, time.Since(started).Seconds())
-}
-
-// recordExecutionEventSanitization counts redaction and truncation once per
-// newly persisted event, from its final stored state.
-func recordExecutionEventSanitization(submitted, appended *store.ExecutionEvent) {
-	streamType, eventType := executionEventMetricLabels(submitted)
-	redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
-	metrics.RecordExecutionEventPayloadSanitization(streamType, eventType, redacted, truncated)
-}
-
-func executionEventMetricLabels(event *store.ExecutionEvent) (string, string) {
-	if event == nil {
-		return unknownMetricLabel, unknownMetricLabel
-	}
-	streamType := strings.TrimSpace(event.StreamType)
-	if streamType == "" {
-		streamType = store.ExecutionEventStreamTypeTask
-	}
-	if !events.IsValidExecutionEventStreamType(streamType) {
-		streamType = unknownMetricLabel
-	}
-	eventType := strings.TrimSpace(event.Type)
-	if !events.IsValidExecutionEventType(eventType) {
-		eventType = unknownMetricLabel
-	}
-	return streamType, eventType
 }
 
 // CreateMemory redacts the memory content before storing it. The caller's
