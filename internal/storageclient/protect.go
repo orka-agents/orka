@@ -95,7 +95,7 @@ func (c *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends []st
 		}
 		prepared[i] = store.ExecutionEventAppend{Event: event, DedupeKey: entry.DedupeKey}
 	}
-	results, err := c.StateProvider.AppendExecutionEventsIfAbsent(ctx, prepared)
+	results, err := c.StateProvider.AppendExecutionEventsIfAbsent(providerContext(ctx), prepared)
 	if err != nil {
 		return nil, err
 	}

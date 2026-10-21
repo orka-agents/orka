@@ -101,6 +101,12 @@ func (r *recordingStore) AppendExecutionEventIfAbsent(ctx context.Context, event
 	return r.Store.AppendExecutionEventIfAbsent(ctx, event, key)
 }
 
+func (r *recordingStore) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	r.recordAttribution(ctx)
+	r.record("AppendExecutionEventsIfAbsent", appends, store.UsageAttributionFrom(ctx))
+	return r.Store.AppendExecutionEventsIfAbsent(ctx, appends)
+}
+
 func (r *recordingStore) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, event *store.ExecutionEvent, key string, plan *store.PlanState) (*store.ExecutionEvent, bool, error) {
 	r.recordAttribution(ctx)
 	r.record("AppendExecutionEventWithPlanIfAbsent", event, key, plan, store.UsageAttributionFrom(ctx))
@@ -247,6 +253,9 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	_, _, err = client.AppendExecutionEventWithPlanIfAbsent(ctx, event("planned"), "key",
 		&store.PlanState{Namespace: "tenant", TaskName: "planned"})
 	require.NoError(t, err)
+	_, err = client.AppendExecutionEventsIfAbsent(store.WithUsageAttribution(ctx, store.UsageAttribution{TaskUID: "task-uid"}),
+		[]store.ExecutionEventAppend{{Event: event("grouped"), DedupeKey: "key"}})
+	require.NoError(t, err)
 
 	// Usage derived from a worker report and from the controller journal
 	// carries provider and model names; both reach the provider redacted.
@@ -311,7 +320,7 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	require.True(t, applied)
 
 	recorder.requireCalled(t,
-		"AppendExecutionEvent", "AppendExecutionEventIfAbsent", "AppendExecutionEventWithPlanIfAbsent", "RecordUsage",
+		"AppendExecutionEvent", "AppendExecutionEventIfAbsent", "AppendExecutionEventWithPlanIfAbsent", "AppendExecutionEventsIfAbsent", "RecordUsage",
 		"CreateMemory", "UpdateMemory", "CreateMemoryProposal", "ReviewMemoryProposal", "CommitMemoryProposalApplication",
 		"SaveThreatModel", "SaveThreatModelIfVersion", "PreviewScanTaskIngestion", "CommitScanTaskIngestion",
 	)
@@ -321,6 +330,7 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	recorder.requireReceived(t, "AppendExecutionEvent", "kept")
 	recorder.requireReceived(t, "AppendExecutionEvent", "task-uid/call-1")
 	recorder.requireReceived(t, "AppendExecutionEventIfAbsent", "acp/task-uid/prompt/1/")
+	recorder.requireReceived(t, "AppendExecutionEventsIfAbsent", "kept")
 	// The controller's attribution stays with the client: the recorder also
 	// records the attribution in each append's context, and it is empty.
 	recorder.requireNoAttribution(t)
