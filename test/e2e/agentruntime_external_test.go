@@ -51,7 +51,7 @@ var _ = Describe("AgentRuntime external dispatch", func() {
 		}
 	})
 
-	It("rejects orka.harness.v1 registrations in a harness-v2 namespace", func() {
+	It("rejects orka.harness.v1 registrations", func() {
 		manifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "AgentRuntime",
@@ -68,9 +68,8 @@ var _ = Describe("AgentRuntime external dispatch", func() {
 		cmd.Stdin = stringReader(manifest)
 		output, err := utils.Run(cmd)
 		Expect(err).To(HaveOccurred())
-		Expect(output).To(ContainSubstring(
-			`AgentRuntime contractVersion must match namespace execution mode "harness-v2"`,
-		))
+		Expect(output).To(ContainSubstring("contractVersion"))
+		Expect(output).To(ContainSubstring("orka.harness.v1"))
 	})
 
 	It("dispatches a Task through a conformant external v2 runtime", func() {

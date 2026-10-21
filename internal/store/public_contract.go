@@ -11,14 +11,6 @@ type (
 	SessionLineage                            = storagev1.SessionLineage
 	ClaimSessionLineageRequest                = storagev1.ClaimSessionLineageRequest
 	SessionLineageStore                       = storagev1.SessionLineageStore
-	HarnessV1AttemptState                     = storagev1.HarnessV1AttemptState
-	HarnessV1AttemptKey                       = storagev1.HarnessV1AttemptKey
-	HarnessV1AttemptRetryClass                = storagev1.HarnessV1AttemptRetryClass
-	HarnessV1Attempt                          = storagev1.HarnessV1Attempt
-	HarnessV1AttemptUpdates                   = storagev1.HarnessV1AttemptUpdates
-	HarnessV1AttemptTransition                = storagev1.HarnessV1AttemptTransition
-	ReclaimHarnessV1AttemptsRequest           = storagev1.ReclaimHarnessV1AttemptsRequest
-	HarnessV1AttemptStore                     = storagev1.HarnessV1AttemptStore
 	ControllerEpochMirror                     = storagev1.ControllerEpochMirror
 	ControllerEpochFence                      = storagev1.ControllerEpochFence
 	ControllerEpoch                           = storagev1.ControllerEpoch
@@ -174,20 +166,6 @@ type (
 )
 
 const (
-	HarnessV1AttemptPrepared          = storagev1.HarnessV1AttemptPrepared
-	HarnessV1AttemptSubmitting        = storagev1.HarnessV1AttemptSubmitting
-	HarnessV1AttemptRejected          = storagev1.HarnessV1AttemptRejected
-	HarnessV1AttemptSubmittedUnknown  = storagev1.HarnessV1AttemptSubmittedUnknown
-	HarnessV1AttemptAccepted          = storagev1.HarnessV1AttemptAccepted
-	HarnessV1AttemptRunning           = storagev1.HarnessV1AttemptRunning
-	HarnessV1AttemptCancelRequested   = storagev1.HarnessV1AttemptCancelRequested
-	HarnessV1AttemptSettling          = storagev1.HarnessV1AttemptSettling
-	HarnessV1AttemptSucceeded         = storagev1.HarnessV1AttemptSucceeded
-	HarnessV1AttemptFailed            = storagev1.HarnessV1AttemptFailed
-	HarnessV1AttemptCancelled         = storagev1.HarnessV1AttemptCancelled
-	HarnessV1AttemptOutcomeUnknown    = storagev1.HarnessV1AttemptOutcomeUnknown
-	HarnessV1RetryClassNone           = storagev1.HarnessV1RetryClassNone
-	HarnessV1RetryClassDuplicateSafe  = storagev1.HarnessV1RetryClassDuplicateSafe
 	SessionTurnOpen                   = storagev1.SessionTurnOpen
 	SessionTurnFinalized              = storagev1.SessionTurnFinalized
 	SessionTurnAssistantResult        = storagev1.SessionTurnAssistantResult
@@ -357,14 +335,6 @@ func IsValidGatewayEventState(state GatewayEventState) bool {
 
 func IsValidGatewayDeliveryState(state GatewayDeliveryState) bool {
 	return storagev1.IsValidGatewayDeliveryState(state)
-}
-
-func IsTerminalHarnessV1AttemptState(state HarnessV1AttemptState) bool {
-	return storagev1.IsTerminalHarnessV1AttemptState(state)
-}
-
-func ValidateHarnessV1AttemptTransition(from, to HarnessV1AttemptState) error {
-	return storagev1.ValidateHarnessV1AttemptTransition(from, to)
 }
 
 func NormalizeControllerEpochName(name string) (string, error) {

@@ -21,7 +21,8 @@ const (
 	schema150 = "66de67c84e6cf135ea10f5aa98ebb0a65eb920f2742be8c0bd27c5d651167df8" // #731, 1f18614c
 	schema162 = "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7" // #701, 57583975
 	schema166 = "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36" // #732, abd2c040
-	schema167 = "10d05a3ab1d90d4837476740a4b8dc6e9b5ee3d2c9699e3a4252b9f6d944168b" // dataset identity
+	schema167 = "01af383a41304d65579d5221976bf479c7e8561a4ec363ba41dcb5f4d571af6c" // #574, harness v1 tables removed
+	schema168 = "b7af032523fa2f524c19ceb897fc1807e6850a8c43fa6e0779d059f11fe2c133" // dataset identity
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -40,18 +41,45 @@ var migration162To166 string
 //go:embed migrations/166-to-167.sql
 var migration166To167 string
 
+//go:embed migrations/167-to-168.sql
+var migration167To168 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
+	// precheck runs inside the migration transaction before sql.
+	precheck func(context.Context, *sql.Conn) error
 }
 
 func schemaMigrations() []schemaMigration {
 	return []schemaMigration{
-		{schema149, schema150, migration149To150},
-		{schema150, schema162, migration150To162},
-		{schema162, schema166, migration162To166},
-		{schema166, schema167, migration166To167},
+		{schema149, schema150, migration149To150, nil},
+		{schema150, schema162, migration150To162, nil},
+		{schema162, schema166, migration162To166, nil},
+		{schema166, schema167, migration166To167, requireNoHarnessV1Records},
+		{schema167, schema168, migration167To168, nil},
 	}
+}
+
+// requireNoHarnessV1Records refuses to upgrade a store that holds harness v1
+// state: rows in the retired tables, or v1 Session lineages that a harness v2
+// controller could never continue. A harness v2 store never writes either, so
+// such rows mean the store belonged to an unsupported harness v1 installation.
+func requireNoHarnessV1Records(ctx context.Context, conn *sql.Conn) error {
+	for _, check := range []struct{ records, query string }{
+		{"harness_v1_attempts", `SELECT COUNT(*) FROM harness_v1_attempts`},
+		{"runtime_sessions", `SELECT COUNT(*) FROM runtime_sessions`},
+		{"session_lineages", `SELECT COUNT(*) FROM session_lineages WHERE contract_version <> 'orka.harness.v2'`},
+	} {
+		var rows int
+		if err := conn.QueryRowContext(ctx, check.query).Scan(&rows); err != nil {
+			return err
+		}
+		if rows != 0 {
+			return fmt.Errorf("SQLite store holds %d harness v1 %s records; harness v1 is no longer supported, so install a new harness v2 store", rows, check.records)
+		}
+	}
+	return nil
 }
 
 func schemaFingerprint(schema map[string]string) string {
@@ -101,7 +129,7 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	// add no rows, even implicitly as FTS5 does, to an empty incomplete new
 	// store, or that store could never mint its key. Test that path from
 	// schemaVersion1StoreDB for every state in version1StoreStates, not from
-	// historicalSchemaDB plus 166-to-167.sql alone: that fixture has
+	// historicalSchemaDB plus 167-to-168.sql alone: that fixture has
 	// user_version = 0 and no identity row, so it takes the adoption path that
 	// real version-1 stores never take.
 	if version != 0 {
@@ -156,6 +184,11 @@ func runSchemaMigrations(ctx context.Context, conn *sql.Conn, source string, ste
 	for _, step := range steps {
 		if step.from != source {
 			return fmt.Errorf("SQLite migration chain does not match source layout")
+		}
+		if step.precheck != nil {
+			if err := step.precheck(ctx, conn); err != nil {
+				return err
+			}
 		}
 		if _, err := conn.ExecContext(ctx, step.sql); err != nil {
 			return fmt.Errorf("apply SQLite transition %s: %w", step.from, err)

@@ -113,12 +113,6 @@ func TestStaticChartAggregatesWorkspaceParameterReadsOnlyForDispatch(t *testing.
 			"--set", "controller.executionWorkspace.dispatchEnabled=true",
 			"--set", "rbac.create=false",
 		}},
-		{name: "harness v1", args: []string{
-			"--set-string", "controller.mode=harness-v1",
-			"--set-string", "harnessV1.image.digest=sha256:" + strings.Repeat("1", 64),
-			"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-			"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
-		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			rendered := requireHelmRender(t, test.args...)
@@ -127,7 +121,7 @@ func TestStaticChartAggregatesWorkspaceParameterReadsOnlyForDispatch(t *testing.
 				"workspace.orka.ai/aggregate-to-parameter-reader", "workspace.orka.ai/aggregate-to-provider-config-reader",
 			} {
 				if strings.Contains(rendered, marker) {
-					t.Fatalf("%s rendered without managed RBAC, harness-v2 and workspace dispatch", marker)
+					t.Fatalf("%s rendered without managed RBAC and workspace dispatch", marker)
 				}
 			}
 		})

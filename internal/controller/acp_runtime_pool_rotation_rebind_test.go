@@ -100,7 +100,7 @@ func TestQueueACPRuntimeTaskRebindsPreSubmissionAttemptAfterRuntimeImageRotation
 
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: oldImage},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)

@@ -72,14 +72,14 @@ type PromptAttemptSpec struct {
 	RequestDigest string `json:"requestDigest"`
 
 	// BindingDigest identifies the immutable Task-lifetime v2 execution
-	// binding. It is optional only so pre-coexistence records remain readable;
+	// binding. It is optional only so existing v2 records remain readable;
 	// all PromptAttempts newly created through DurableControlStore require it.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	BindingDigest string `json:"bindingDigest,omitempty"`
 
 	// SnapshotDigest identifies the immutable encrypted execution snapshot.
-	// It is optional only so pre-coexistence records remain readable; all
+	// It is optional only so existing v2 records remain readable; all
 	// PromptAttempts newly created through DurableControlStore require it.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`

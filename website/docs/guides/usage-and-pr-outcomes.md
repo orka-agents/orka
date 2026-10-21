@@ -131,7 +131,7 @@ remains evidence of a missing measurement.
 | Native chat and compatibility endpoints | The same provider counts, including streamed responses. They appear as unassociated usage unless a controller-owned Task relationship exists. |
 | ACP harness v2 agents | Agent-reported consumed input, output, and cache counts when supplied. Reports describe prompt attempts, not a verified number of model calls. |
 | Agents reporting only context-window usage | Consumed-token usage is unavailable. Conversation size is not total tokens consumed. |
-| Legacy harness v1 or agents with no usage report | An unavailable attempt measurement. |
+| Agents with no usage report | An unavailable attempt measurement. |
 | Container Tasks | No model calls are inferred. |
 
 The managed Codex, Claude, Copilot, and OpenCode adapters may expose only context

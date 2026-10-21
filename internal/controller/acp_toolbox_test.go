@@ -154,13 +154,13 @@ func TestToolboxPolicyValidateAgentToolboxes(t *testing.T) {
 			}(),
 			want: "external runtimeRef",
 		},
-		"harness v1": {
+		"unsupported contract": {
 			policy: policy, agent: func() *corev1alpha1.Agent {
 				agent := acpTestToolboxAgent(acpTestToolbox("/opt/yq", "bin"))
-				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
+				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"))
 				return agent
 			}(),
-			want: "harness v1",
+			want: "orka.harness.v2 contract",
 		},
 	}
 	for name, tc := range cases {
@@ -184,10 +184,6 @@ func TestAgentReconcilerValidateAgentRejectsToolboxesUnderPolicy(t *testing.T) {
 	if err := reconciler.validateAgent(t.Context(), agent); err != nil {
 		t.Fatalf("admission with toolboxes enabled: %v", err)
 	}
-	v1 := &AgentReconciler{Mode: executionmode.HarnessV1, ToolboxPolicy: acpTestToolboxPolicy()}
-	if err := v1.validateAgent(t.Context(), agent); err == nil || !strings.Contains(err.Error(), "harness v1") {
-		t.Fatalf("harness v1 installation must reject toolboxes: %v", err)
-	}
 }
 
 func TestPlanAgentExecutionRejectsToolboxCombinations(t *testing.T) {
@@ -195,7 +191,7 @@ func TestPlanAgentExecutionRejectsToolboxCombinations(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: types.UID("task-uid"), Generation: 1},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 	}
-	reconciler := &TaskReconciler{Mode: executionmode.HarnessV2, ACPRuntimeEnabled: true, ACPToolboxPolicy: acpTestToolboxPolicy()}
+	reconciler := &TaskReconciler{Mode: executionmode.HarnessV2, ACPToolboxPolicy: acpTestToolboxPolicy()}
 
 	plan := reconciler.planAgentExecution(t.Context(), task, acpTestToolboxAgent(acpTestToolbox("/opt/yq", "bin")))
 	if plan.path != agentExecutionPathACP {
@@ -210,11 +206,10 @@ func TestPlanAgentExecutionRejectsToolboxCombinations(t *testing.T) {
 	}
 
 	v1Agent := acpTestToolboxAgent(acpTestToolbox("/opt/yq", "bin"))
-	v1Agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
-	v1Reconciler := &TaskReconciler{Mode: executionmode.HarnessV1, HarnessV1Enabled: true, ACPToolboxPolicy: acpTestToolboxPolicy()}
-	plan = v1Reconciler.planAgentExecution(t.Context(), task, v1Agent)
-	if plan.path != agentExecutionPathRejected || !strings.Contains(plan.rejectionReason, "harness v1") {
-		t.Fatalf("harness v1 with toolboxes must be rejected, got %#v", plan)
+	v1Agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"))
+	plan = reconciler.planAgentExecution(t.Context(), task, v1Agent)
+	if plan.path != agentExecutionPathRejected || !strings.Contains(plan.rejectionReason, "orka.harness.v2") {
+		t.Fatalf("an unsupported contract with toolboxes must be rejected, got %#v", plan)
 	}
 
 	externalAgent := acpTestToolboxAgent(acpTestToolbox("/opt/yq", "bin"))
@@ -226,7 +221,7 @@ func TestPlanAgentExecutionRejectsToolboxCombinations(t *testing.T) {
 		t.Fatalf("runtimeRef with toolboxes must be rejected before the AgentRuntime lookup, got %#v", plan)
 	}
 
-	disabled := &TaskReconciler{Mode: executionmode.HarnessV2, ACPRuntimeEnabled: true}
+	disabled := &TaskReconciler{Mode: executionmode.HarnessV2}
 	plan = disabled.planAgentExecution(t.Context(), task, acpTestToolboxAgent(acpTestToolbox("/opt/yq", "bin")))
 	if plan.path != agentExecutionPathRejected || !strings.Contains(plan.rejectionReason, "disabled on this controller") {
 		t.Fatalf("toolboxes disabled must be rejected at planning, got %#v", plan)

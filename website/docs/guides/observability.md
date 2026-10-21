@@ -148,6 +148,41 @@ do not enable telemetry. Standard SDK sampling is
 available through `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` (for
 example `always_off`, `always_on`, or `parentbased_traceidratio`).
 
+## Approval decision duration
+
+The Prometheus endpoint on `--metrics-bind-address` exports
+`orka_approval_decision_duration_seconds`, independently of OpenTelemetry enablement.
+It measures seconds between the stored approval request timestamp and the first
+committed terminal decision timestamp. Buckets cover one second through one day,
+with longer waits included in the `+Inf` bucket.
+
+The only labels are:
+
+| Label | Values |
+|---|---|
+| `outcome` | `approved`, `denied`, `cancelled`, `expired` |
+| `path` | `acp` for broker-owned approvals with a call binding; `worker` for built-in AI worker approvals |
+
+Human approvals and declines record `approved` and `denied`. ACP wait/deadline
+expiry records `expired`; Task cancellation or loss of the original tool/prompt
+authority records `cancelled`. Recovery records a sample when it commits a missing
+terminal decision from a verified execution receipt. Revocation after a human
+decision preserves that original decision and adds no second sample. Polling,
+receipt replay, rejected decisions and rolled-back writes add no samples.
+
+Worker approvals currently have human decisions only: passive timeout metadata,
+Task termination and cancellation do not create worker terminal approval events.
+This metric does not introduce worker expiry or agent parking. A pending approval
+whose expiry is derived for display is counted only when a terminal event commits.
+Missing or backwards timestamps are omitted. Labels contain no Task names,
+approval IDs, users or request text.
+
+Histograms are in memory and reset on process restart. Existing terminal events
+are not replayed into the histogram. A crash between committing a decision and
+observing it, or between scrapes, can lose a sample; use durable approval events
+for audits. Pending requests retained across a restart still use their original
+request timestamps when a new decision commits.
+
 ## Trace topology
 
 A delegated Task should appear as one distributed trace:

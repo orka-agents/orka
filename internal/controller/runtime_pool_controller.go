@@ -60,6 +60,7 @@ import (
 
 const (
 	baselineField = "baseline"
+	runtimeField  = "runtime"
 )
 
 var (
