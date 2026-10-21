@@ -27,6 +27,8 @@ type recordingStore struct {
 	mu    sync.Mutex
 	calls map[string]int
 	texts []recordedText
+	// attributions holds the usage attribution each append's context carried.
+	attributions []store.UsageAttribution
 }
 
 type recordedText struct {
@@ -88,17 +90,20 @@ func collectTexts(value reflect.Value, seen map[uintptr]bool, visit func(string)
 }
 
 func (r *recordingStore) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
-	r.record("AppendExecutionEvent", event)
+	r.recordAttribution(ctx)
+	r.record("AppendExecutionEvent", event, store.UsageAttributionFrom(ctx))
 	return r.Store.AppendExecutionEvent(ctx, event)
 }
 
 func (r *recordingStore) AppendExecutionEventIfAbsent(ctx context.Context, event *store.ExecutionEvent, key string) (*store.ExecutionEvent, bool, error) {
-	r.record("AppendExecutionEventIfAbsent", event, key)
+	r.recordAttribution(ctx)
+	r.record("AppendExecutionEventIfAbsent", event, key, store.UsageAttributionFrom(ctx))
 	return r.Store.AppendExecutionEventIfAbsent(ctx, event, key)
 }
 
 func (r *recordingStore) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, event *store.ExecutionEvent, key string, plan *store.PlanState) (*store.ExecutionEvent, bool, error) {
-	r.record("AppendExecutionEventWithPlanIfAbsent", event, key, plan)
+	r.recordAttribution(ctx)
+	r.record("AppendExecutionEventWithPlanIfAbsent", event, key, plan, store.UsageAttributionFrom(ctx))
 	return r.Store.AppendExecutionEventWithPlanIfAbsent(ctx, event, key, plan)
 }
 
@@ -175,6 +180,22 @@ func (r *recordingStore) requireNoSecret(t *testing.T, secrets map[string]string
 		for name, secret := range secrets {
 			require.NotContains(t, text.value, secret, "%s received the %s secret", text.method, name)
 		}
+	}
+}
+
+func (r *recordingStore) recordAttribution(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.attributions = append(r.attributions, store.UsageAttributionFrom(ctx))
+}
+
+func (r *recordingStore) requireNoAttribution(t *testing.T) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	require.NotEmpty(t, r.attributions)
+	for _, attribution := range r.attributions {
+		require.Zero(t, attribution, "a provider received the controller's usage attribution in its context")
 	}
 }
 
@@ -300,6 +321,9 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	recorder.requireReceived(t, "AppendExecutionEvent", "kept")
 	recorder.requireReceived(t, "AppendExecutionEvent", "task-uid/call-1")
 	recorder.requireReceived(t, "AppendExecutionEventIfAbsent", "acp/task-uid/prompt/1/")
+	// The controller's attribution stays with the client: the recorder also
+	// records the attribution in each append's context, and it is empty.
+	recorder.requireNoAttribution(t)
 	recorder.requireReceived(t, "CreateMemory", "the deploy token is")
 	recorder.requireReceived(t, "CommitScanTaskIngestion", "Authorization:")
 	recorder.requireReceived(t, "CommitMemoryProposalApplication", "Authorization:")

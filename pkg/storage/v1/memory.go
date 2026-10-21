@@ -139,15 +139,19 @@ const (
 //
 //   - CreateMemory requires a namespace and non-blank content. It assigns an
 //     ID when the record has none and records MemorySourceManual when it
-//     names no source, writing both back to the caller's record.
+//     names no source, writing both back to the caller's record. Memory IDs
+//     are unique across namespaces: an ID already in use returns ErrConflict,
+//     as does a SourceProposalID already used by a memory in the namespace.
 //   - A memory is read, updated, disabled and deleted only in its namespace.
 //     A missing memory returns ErrNotFound.
 //   - ListMemories requires a namespace and returns memories most recently
 //     updated first. It leaves out disabled and deleted memories unless the
 //     filter includes them, matches Tags and Query case-insensitively, and
 //     bounds the result: a zero Limit selects the provider's default.
-//   - UpdateMemory replaces the mutable fields, including Disabled and
-//     Deleted, and refreshes UpdatedAt with the provider's time.
+//   - UpdateMemory replaces the mutable fields, including Disabled, Deleted
+//     and SourceProposalID, and refreshes UpdatedAt with the provider's time.
+//     A SourceProposalID another memory in the namespace uses returns
+//     ErrConflict.
 //   - DeleteMemory keeps the record, marking it deleted and disabled.
 //     SetMemoryDisabled on a deleted memory returns ErrNotFound.
 type MemoryStore interface {
@@ -164,15 +168,16 @@ type MemoryStore interface {
 // receives it.
 //
 //   - CreateMemoryProposal requires a namespace and a title and creates a
-//     pending proposal. It assigns an ID when the record has none, trims and
-//     lower-cases Type (default MemoryProposalTypeSkill) and Status, and
-//     writes them back to the caller's record. A new proposal carries no
-//     review or apply outcome: a status other than
-//     MemoryProposalStatusPending, or a reviewer, review note, review time,
-//     applied memory ID, applier or application time, returns ErrValidation.
-//     A blank reviewer, review note or applier counts as absent; any nonempty
-//     AppliedMemoryID, even whitespace, is an apply outcome, as it is for
-//     review and archive.
+//     pending proposal. Proposal IDs are unique across namespaces: an ID
+//     already in use returns ErrConflict. It assigns an ID when the record
+//     has none, trims and lower-cases Type (default
+//     MemoryProposalTypeSkill) and Status, and writes them back to the
+//     caller's record. A new proposal carries no review or apply outcome:
+//     a status other than MemoryProposalStatusPending, or a reviewer, review
+//     note, review time, applied memory ID, applier or application time,
+//     returns ErrValidation. A blank reviewer, review note or applier counts
+//     as absent; any nonempty AppliedMemoryID, even whitespace, is an apply
+//     outcome, as it is for review and archive.
 //   - A proposal is read, reviewed and archived only in its namespace. A
 //     missing proposal returns ErrNotFound.
 //   - ListMemoryProposals requires a namespace and returns proposals newest

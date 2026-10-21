@@ -80,7 +80,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
 		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // GetMemory fetches a memory by ID within a namespace.
@@ -150,7 +150,7 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.Namespace, memory.ID,
 	)
 	if err != nil {
-		return err
+		return uniqueConflict(err)
 	}
 	return ensureRowsAffected(res)
 }
@@ -350,7 +350,7 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 		proposal.ReviewNote, proposal.AppliedMemoryID, proposal.AppliedBy, proposal.CreatedAt, proposal.UpdatedAt,
 		proposal.ReviewedAt, proposal.AppliedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // GetMemoryProposal fetches a proposal by ID within a namespace.

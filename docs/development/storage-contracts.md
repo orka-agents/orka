@@ -322,7 +322,7 @@ persist:
   for each newly appended event, counts an event it refuses before calling
   the provider as an append failure, and stamps the creation time when the
   caller left it unset. A provider only requires structured content to be valid
-  JSON.
+  JSON, and stores content that is only whitespace as no content.
 - **Usage from execution events.** The client derives the usage observation
   that a worker usage report or the controller's ACP journal carries and
   sends it as `ExecutionEvent.Usage`, unless Orka code attached an

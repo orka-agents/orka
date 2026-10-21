@@ -3,8 +3,9 @@ package store
 import "context"
 
 // UsageAttribution is controller-owned accounting context for execution
-// events appended through the storage client. It never reaches a provider:
-// the client derives a usage observation from the event and this context.
+// events appended through the storage client. Callers attach it only to the
+// append call. The client derives a usage observation from the event and this
+// context and masks the attribution before calling the provider.
 type UsageAttribution struct {
 	// TaskUID is the authenticated Task that reported worker model usage.
 	// The client counts a worker "usage" report only when it is set.

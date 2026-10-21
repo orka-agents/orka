@@ -60,6 +60,15 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 		}
 		require.NoError(t, p.CreateMemory(ctx, &storagev1.Memory{ID: "mem-foreign", Namespace: memoryOtherTenant,
 			Content: "foreign", CreatedAt: at, UpdatedAt: at}))
+		require.ErrorIs(t, p.CreateMemory(ctx, &storagev1.Memory{ID: "mem-old", Namespace: memoryTenant,
+			Content: "reused", CreatedAt: at, UpdatedAt: at}), storagev1.ErrConflict, "a reused memory ID")
+		require.ErrorIs(t, p.CreateMemory(ctx, &storagev1.Memory{ID: "mem-foreign", Namespace: memoryTenant,
+			Content: "reused", CreatedAt: at, UpdatedAt: at}), storagev1.ErrConflict, "memory IDs are unique across namespaces")
+		require.NoError(t, p.CreateMemory(ctx, &storagev1.Memory{ID: "mem-from-proposal", Namespace: memoryOtherTenant,
+			Content: "from a proposal", SourceProposalID: "mprop-source", CreatedAt: at, UpdatedAt: at}))
+		require.ErrorIs(t, p.CreateMemory(ctx, &storagev1.Memory{ID: "mem-from-proposal-again", Namespace: memoryOtherTenant,
+			Content: "again", SourceProposalID: "mprop-source", CreatedAt: at, UpdatedAt: at}), storagev1.ErrConflict,
+			"one memory per source proposal in a namespace")
 
 		listed, err := p.ListMemories(ctx, storagev1.MemoryFilter{Namespace: memoryTenant})
 		require.NoError(t, err)
@@ -74,6 +83,9 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 		foreign, err := p.GetMemory(ctx, memoryOtherTenant, "mem-foreign")
 		require.NoError(t, err)
 		require.Equal(t, "foreign", foreign.Content)
+		reused := *foreign
+		reused.SourceProposalID = "mprop-source"
+		require.ErrorIs(t, p.UpdateMemory(ctx, &reused), storagev1.ErrConflict, "an update cannot reuse a source proposal")
 		_, err = p.GetMemory(ctx, memoryOtherTenant, "mem-old")
 		require.ErrorIs(t, err, storagev1.ErrNotFound, "a memory is read only in its namespace")
 		_, err = p.ListMemories(ctx, storagev1.MemoryFilter{})
@@ -180,6 +192,10 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 			Content: "The cache is warm", CreatedAt: at.Add(time.Minute), UpdatedAt: at.Add(time.Minute)}
 		require.NoError(t, p.CreateMemoryProposal(ctx, memory))
 		require.Equal(t, storagev1.MemoryProposalTypeMemory, memory.Type)
+		require.ErrorIs(t, p.CreateMemoryProposal(ctx, &storagev1.MemoryProposal{ID: "mprop-memory", Namespace: memoryTenant,
+			Title: "Reused"}), storagev1.ErrConflict, "a reused proposal ID")
+		require.ErrorIs(t, p.CreateMemoryProposal(ctx, &storagev1.MemoryProposal{ID: "mprop-memory", Namespace: memoryOtherTenant,
+			Title: "Reused"}), storagev1.ErrConflict, "proposal IDs are unique across namespaces")
 
 		listed, err = p.ListMemoryProposals(ctx, storagev1.MemoryProposalFilter{Namespace: memoryTenant})
 		require.NoError(t, err)
