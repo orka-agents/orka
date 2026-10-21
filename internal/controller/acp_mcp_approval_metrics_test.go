@@ -110,10 +110,11 @@ func TestMCPApprovalDecisionMetricsRecoveryCommitsAtomically(t *testing.T) {
 			outage.unavailable.Store(true)
 			f.dispatcher.EventStore = outage
 			err = f.dispatcher.projectMCPApprovalExecution(f.ctx, f.task, expected, effect.Identity)
-			require.Error(t, err)
+			require.ErrorContains(t, err, "injected terminal approval projection outage")
+			require.EqualValues(t, 1, outage.attempts.Load(), "the decision and outcome were refused as one group")
 			actual, _ := f.approval(t)
 			require.Equal(t, approvals.StatusPending, actual.Status, "the decision/outcome append was refused together")
-			require.Empty(t, gatherMCPApprovalDecisionMetrics(t), "rolled-back decisions must not count")
+			require.Empty(t, gatherMCPApprovalDecisionMetrics(t), "refused decisions must not count")
 			outage.unavailable.Store(false)
 			require.NoError(t, f.dispatcher.projectMCPApprovalExecution(f.ctx, f.task, expected, effect.Identity))
 			outcome := "cancelled"
