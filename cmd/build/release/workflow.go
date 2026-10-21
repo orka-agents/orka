@@ -30,7 +30,6 @@ const (
 	publisherImage           = "workspace-publisher"
 	aiWorkerImage            = "ai-worker"
 	generalWorkerImage       = "general-worker"
-	harnessWrapperImage      = "agent-harness-wrapper"
 	codexRuntimeImage        = "acp-codex-runtime"
 	claudeRuntimeImage       = "acp-claude-runtime"
 	copilotRuntimeImage      = "acp-copilot-runtime"
@@ -58,7 +57,7 @@ var (
 	numberRE   = regexp.MustCompile(`^[0-9]+$`)
 	branchRE   = regexp.MustCompile(`^release-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	imageNames = []string{
-		controllerImage, aiWorkerImage, generalWorkerImage, harnessWrapperImage,
+		controllerImage, aiWorkerImage, generalWorkerImage,
 		codexRuntimeImage, claudeRuntimeImage, copilotRuntimeImage,
 		opencodeRuntimeImage, publisherImage,
 	}

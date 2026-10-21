@@ -25,9 +25,6 @@ type soulCreateInstructionCase struct {
 }
 
 func (tc soulCreateInstructionCase) expectedError(mode executionmode.Mode, kind corev1alpha1.AgentRuntimeType) string {
-	if tc.soul != nil && kind != "" && mode == executionmode.HarnessV1 {
-		return "built-in harness v2"
-	}
 	if kind == corev1alpha1.AgentRuntimeCopilot && mode == executionmode.HarnessV2 {
 		return tc.invalidFor
 	}
@@ -51,7 +48,7 @@ func TestSoulAgentCreationInlineCopilotValidation(t *testing.T) {
 		{name: "unresolved soul", role: "Review the change.", soul: referencedSoul},
 		{name: "invalid role with referenced soul", role: "Follow @role.md", soul: referencedSoul, invalidFor: "systemPrompt.inline"},
 	}
-	for _, mode := range []executionmode.Mode{executionmode.HarnessV1, executionmode.HarnessV2} {
+	for _, mode := range []executionmode.Mode{executionmode.HarnessV2} {
 		for _, kind := range []corev1alpha1.AgentRuntimeType{
 			"", corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude,
 			corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode,
@@ -206,10 +203,8 @@ func TestSoulAgentUpdateCopilotValidationPreservesOtherRoutes(t *testing.T) {
 		{name: "codex v2", runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2)}, supportSoul: true},
 		{name: "claude v2", runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2)}, supportSoul: true},
 		{name: "opencode v2", runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2)}, supportSoul: true},
-		{name: "copilot v1", runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1)}},
 		{name: "copilot missing contract", runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot}},
 		{name: "external copilot v2", runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot, RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external"}, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2)}},
-		{name: "external copilot v1", runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot, RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external"}, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1)}},
 	} {
 		for _, withSoul := range []bool{false, true} {
 			if withSoul && !route.supportSoul {

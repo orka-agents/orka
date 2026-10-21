@@ -210,13 +210,9 @@ spec:
                     pattern: ^sha256:[a-f0-9]{64}$
                     type: string
                   contractVersion:
-                    description: |-
-                      AgentRuntimeContractVersion identifies the Orka-facing runtime contract.
-                      During harness coexistence both protocol values are schema-valid; omission is
-                      never protocol evidence and is tolerated only for stored objects awaiting the
-                      one-time bridge classification.
+                    description: AgentRuntimeContractVersion identifies the Orka-facing
+                      runtime contract.
                     enum:
-                    - orka.harness.v1
                     - orka.harness.v2
                     type: string
                   establishedAt:

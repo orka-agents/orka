@@ -25,11 +25,6 @@ var ErrSessionTurnStoreNotConfigured = errors.New("session turn persistence is n
 // persistence adapter was not configured.
 var ErrOutboxStoreNotConfigured = errors.New("outbox persistence is not configured")
 
-// ErrBranchClaimAccessDisabled is returned when a static harness v1
-// installation reaches a publication-only BranchClaim path. Harness v1 must
-// never observe or mutate the cluster-scoped claims owned by harness v2.
-var ErrBranchClaimAccessDisabled = errors.New("cluster-scoped branch claim access is disabled")
-
 // SQLitePersistence is the complete database-owned half of the hard-cutover
 // control store. The storage client satisfies this interface, sealing native
 // session state before its provider sees it, without treating any database
@@ -70,16 +65,6 @@ func WithWatchNamespace(namespace string) Option {
 	}
 }
 
-// WithoutClusterScopedBranchClaims configures the publication-free harness v1
-// control-store path. Session continuity remains Kubernetes-authoritative, but
-// Session cleanup cannot list or mutate the cluster-scoped BranchClaim kind.
-func WithoutClusterScopedBranchClaims() Option {
-	return func(s *Store) error {
-		s.branchClaimsEnabled = false
-		return nil
-	}
-}
-
 // WithSessionRuntimeCleanup closes resident runtimes before the Session's
 // durable authority and transcript are deleted.
 func WithSessionRuntimeCleanup(cleanup store.SessionRuntimeCleanupFunc) Option {
@@ -99,12 +84,10 @@ type Store struct {
 	controlNamespace      string
 	watchNamespace        string
 	sessionTurns          store.SessionTurnPersistenceStore
-	harnessV1Attempts     store.HarnessV1AttemptStore
 	outbox                store.OutboxPersistenceStore
 	sessionCleanup        store.SessionCleanupPersistenceStore
 	sessionRuntimeCleanup store.SessionRuntimeCleanupFunc
 	sessionCleanupLocks   sessionCleanupLockSet
-	branchClaimsEnabled   bool
 	epochMutations        *semaphore.Weighted
 }
 
@@ -122,12 +105,6 @@ func NewComposite(kubeClient client.Client, controlNamespace string, persistence
 	result.sessionTurns = persistence
 	result.outbox = persistence
 	result.sessionCleanup = persistence
-	// Harness v1 attempt receipts are consulted only for immutable attempt
-	// identity and terminal-receipt validation; Kubernetes SessionControl and
-	// Lease state remain the mutation authority.
-	if attempts, ok := persistence.(store.HarnessV1AttemptStore); ok {
-		result.harnessV1Attempts = attempts
-	}
 	return result, nil
 }
 
@@ -143,7 +120,7 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 		return nil, err
 	}
 	result := &Store{
-		client: kubeClient, controlNamespace: controlNamespace, branchClaimsEnabled: true,
+		client: kubeClient, controlNamespace: controlNamespace,
 		epochMutations: semaphore.NewWeighted(1),
 	}
 	for _, option := range options {
@@ -155,13 +132,6 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 		}
 	}
 	return result, nil
-}
-
-func (s *Store) requireBranchClaimAccess() error {
-	if s == nil || !s.branchClaimsEnabled {
-		return ErrBranchClaimAccessDisabled
-	}
-	return nil
 }
 
 // GetSessionTurn delegates SQLite-only SessionTurn reads.

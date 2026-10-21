@@ -161,7 +161,7 @@ func RunACPTraceBoundary(t *testing.T, tasks []*corev1alpha1.Task, agent *corev1
 		t.Fatal(err)
 	}
 	for i, task := range tasks {
-		binder := &TaskReconciler{Client: kc, APIReader: kc, Scheme: scheme, ACPRuntimeEnabled: true, ACPRuntimeImages: images, AgentExecutionSnapshots: persistence}
+		binder := &TaskReconciler{Client: kc, APIReader: kc, Scheme: scheme, ACPRuntimeImages: images, AgentExecutionSnapshots: persistence}
 		if _, err := binder.resolveAgentExecutionCandidate(ctx, task, agent); err != nil {
 			t.Fatalf("trace fixture candidate for %s: %v", task.Name, err)
 		}

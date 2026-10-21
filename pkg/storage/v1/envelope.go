@@ -14,9 +14,8 @@ import "context"
 // outcome for a retry instead of applying it twice. A network transport
 // carries the envelope as request metadata rather than in each record.
 //
-// The harness-v1 attempt and outbox families already take an explicit
-// [ControllerEpochFence] parameter, and that parameter stays authoritative for
-// them. Every other write family has no fence today; the envelope is how they
+// The outbox family already takes an explicit [ControllerEpochFence]
+// parameter, and that parameter stays authoritative for it. Every other write family has no fence today; the envelope is how they
 // will receive one without a second change to each method signature.
 // Operation-specific preconditions, such as an expected version or message
 // count, stay explicit parameters.

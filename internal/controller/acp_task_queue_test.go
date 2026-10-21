@@ -62,7 +62,7 @@ func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -186,7 +186,7 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 			}
 			reconciler := &TaskReconciler{
 				Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-				ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+				ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 				ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 			}
 			bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -265,7 +265,7 @@ func TestQueueACPRuntimeTaskReportsInvalidWorkspaceWhenReadCredentialDoesNotExis
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -337,7 +337,7 @@ func TestQueueACPRuntimeTaskReportsInvalidRuntimeProfile(t *testing.T) {
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)

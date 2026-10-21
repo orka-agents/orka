@@ -16,18 +16,23 @@ import (
 // finish before entry. Cleanup either removes this projection after commit, or
 // wins first and leaves no request on which a late writer can project evidence.
 // Absence does not prove cleanup or execution outcome; receipts remain intact.
+// The callback returns a newly appended event (nil for replay/no-op). Observe
+// terminal decisions only after the transaction commits, including recovery's
+// atomic decision/outcome pair.
 func withRetainedMCPApproval(
 	ctx context.Context,
 	eventStore store.ExecutionEventStore,
 	namespace, taskName string,
 	expected approvals.Approval,
-	project func(context.Context, approvals.Approval, []store.ExecutionEvent) error,
+	project func(context.Context, approvals.Approval, []store.ExecutionEvent) (*store.ExecutionEvent, error),
 ) (bool, error) {
 	transactions, ok := eventStore.(store.TaskDataTransactionStore)
 	if !ok {
 		return false, errors.New("approval projection requires task data transactions")
 	}
 	retained := false
+	var request approvals.Approval
+	var decision *store.ExecutionEvent
 	err := transactions.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		listed, err := approvals.ListEvents(txCtx, eventStore, namespace, taskName)
 		if err != nil {
@@ -61,12 +66,18 @@ func withRetainedMCPApproval(
 		// writer, rather than authorizing appends with a cached projection.
 		for _, approval := range approvals.Derive(listed, time.Time{}) {
 			if mcpApprovalProjectionBindingMatches(approval, expected) {
-				return project(txCtx, approval, listed)
+				request = approval
+				var err error
+				decision, err = project(txCtx, approval, listed)
+				return err
 			}
 		}
 		retained = false
 		return nil
 	})
+	if err == nil {
+		approvals.RecordDecision(request, decision)
+	}
 	return retained, err
 }
 

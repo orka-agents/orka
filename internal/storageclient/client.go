@@ -21,7 +21,6 @@ import (
 	"reflect"
 	"sync/atomic"
 
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
@@ -39,7 +38,6 @@ import (
 type Embedded interface {
 	store.ConnectorCredentialStore
 	store.ConnectorConsentStore
-	harness.RuntimeSessionStore
 
 	ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error)
 	WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error

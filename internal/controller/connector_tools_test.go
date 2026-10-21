@@ -244,7 +244,10 @@ func TestFreezeAndBindNativeConnections(t *testing.T) {
 func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	task := f.task.DeepCopy()
-	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"}}
+	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"},
+	}
 	body, err := json.Marshal(agentExecutionSnapshotBody{Connections: []agentExecutionSnapshotConnection{
 		{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-x", UID: "conn-uid", Generation: 3, GrantSequence: 1, Mode: "readWrite"},
 	}})

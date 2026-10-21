@@ -418,7 +418,7 @@ func newExternalACPDispatchFixtureWithOptions(
 		Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(32),
 		DurableControlStore: controlStore, ControllerEpochManager: epochs, AgentExecutionSnapshots: persistence,
 		ResultStore: persistence, MessageStore: persistence, PlanStore: persistence, ExecutionEventStore: persistence,
-		SessionManager: sessionManager, ACPRuntimeEnabled: true, MCPRegistry: options.registry,
+		SessionManager: sessionManager, MCPRegistry: options.registry,
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
