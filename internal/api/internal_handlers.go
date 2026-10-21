@@ -252,7 +252,7 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		contentType = "application/octet-stream"
 	}
 
-	var verifyHarnessAttempt func(context.Context) error
+	var verifyHarnessAttempt func(context.Context) (context.Context, error)
 	var capabilityTaskUID string
 	if err := withInternalTaskData(c, h.artifactStore, taskName, func(ctx context.Context) error {
 		if authorizedWorker != nil {
@@ -265,7 +265,8 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		return err
 	}, func(ctx context.Context) error {
 		if verifyHarnessAttempt != nil {
-			if err := verifyHarnessAttempt(ctx); err != nil {
+			var err error
+			if ctx, err = verifyHarnessAttempt(ctx); err != nil {
 				return err
 			}
 		}

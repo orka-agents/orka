@@ -109,7 +109,12 @@ func runMemoryProposalApplication(t *testing.T, newProvider StateFactory) {
 		target, err := p.ResolveMemoryProposalApplication(ctx, conditionalNamespace, proposal.ID)
 		require.NoError(t, err)
 		require.Equal(t, "mem-linked", target.MemoryID)
-		memory, err := p.CommitMemoryProposalApplication(ctx, storagev1.MemoryProposalApplication{Target: target, AppliedBy: "applier", AppliedAt: at})
+		forged := target
+		forged.MemoryID = "mem-other"
+		memory, err := p.CommitMemoryProposalApplication(ctx, storagev1.MemoryProposalApplication{Target: forged, AppliedBy: "applier", AppliedAt: at})
+		require.ErrorIs(t, err, storagev1.ErrPreconditionFailed, "a target naming another memory is refused even with the current proposal state")
+		require.Nil(t, memory)
+		memory, err = p.CommitMemoryProposalApplication(ctx, storagev1.MemoryProposalApplication{Target: target, AppliedBy: "applier", AppliedAt: at})
 		require.NoError(t, err)
 		require.Equal(t, "mem-linked", memory.ID)
 		applied, err := p.GetMemoryProposal(ctx, conditionalNamespace, proposal.ID)
@@ -433,6 +438,52 @@ func runTaskDataFences(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, "first", string(result), "a revoked Job's write has no effect")
 	})
 
+	t.Run("a fence bound to a harness-v1 attempt refuses once it ends or is superseded", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		epoch := syncEpoch(t, p, 1, "owner-a")
+		first := harnessAttempt("task-uid", 1)
+		require.NoError(t, p.CreateHarnessV1Attempt(ctx, first, epoch))
+		advance := func(attempt *storagev1.HarnessV1Attempt, version int64, from, to storagev1.HarnessV1AttemptState) {
+			t.Helper()
+			transition := storagev1.HarnessV1AttemptTransition{
+				Key: harnessKey(attempt), ExpectedVersion: version, ExpectedState: from, TargetState: to,
+				OperationID: fmt.Sprintf("%d-%s", attempt.Attempt, to), OperationDigest: controlDigest(string(to)), Fence: epoch,
+			}
+			if storagev1.IsTerminalHarnessV1AttemptState(to) {
+				receipt := controlDigest("terminal")
+				transition.Updates.TerminalReceiptDigest = &receipt
+			}
+			_, err := p.TransitionHarnessV1Attempt(ctx, transition)
+			require.NoError(t, err)
+		}
+		fence, _, err := p.ResolveTaskDataFence(ctx, "tenant", "")
+		require.NoError(t, err)
+		key := harnessKey(first)
+		fence.HarnessV1Attempt = &key
+		fenced := storagev1.WithTaskDataFence(ctx, fence)
+		require.ErrorIs(t, p.SaveResult(fenced, "tenant", "task-a", []byte("prepared")), storagev1.ErrTaskJobRevoked,
+			"a prepared attempt is not active yet")
+		advance(first, 1, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSubmitting)
+		require.NoError(t, p.SaveResult(fenced, "tenant", "task-a", []byte("active")))
+
+		second := harnessAttempt("task-uid", 2)
+		require.NoError(t, p.CreateHarnessV1Attempt(ctx, second, epoch))
+		require.ErrorIs(t, p.SaveResult(fenced, "tenant", "task-a", []byte("superseded")), storagev1.ErrTaskJobRevoked,
+			"a newer attempt supersedes the fenced one")
+
+		secondKey := harnessKey(second)
+		fence.HarnessV1Attempt = &secondKey
+		fencedSecond := storagev1.WithTaskDataFence(ctx, fence)
+		advance(second, 1, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSubmitting)
+		require.NoError(t, p.SaveResult(fencedSecond, "tenant", "task-a", []byte("second")))
+		advance(second, 2, storagev1.HarnessV1AttemptSubmitting, storagev1.HarnessV1AttemptRejected)
+		require.ErrorIs(t, p.SaveResult(fencedSecond, "tenant", "task-a", []byte("ended")), storagev1.ErrTaskJobRevoked,
+			"an attempt that ended no longer authorizes writes")
+		result, err := p.GetResult(ctx, "tenant", "task-a")
+		require.NoError(t, err)
+		require.Equal(t, "second", string(result))
+	})
+
 	t.Run("fenced writes racing cleanup leave nothing behind", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		fence, _, err := p.RegisterTaskDataFence(ctx, conditionalNamespace, "task-fenced")
@@ -701,7 +752,7 @@ func runScanIngestion(t *testing.T, newProvider StateFactory) {
 		other := commit
 		other.Ingestion.RepositoryScan = "another-scan"
 		_, err = p.CommitScanTaskIngestion(ctx, other)
-		require.Error(t, err, "a Task of another RepositoryScan is refused")
+		require.ErrorIs(t, err, storagev1.ErrValidation, "a commit whose run is not the ingestion's is refused")
 	})
 
 	t.Run("steps stay inside the ingestion's scope", func(t *testing.T) {

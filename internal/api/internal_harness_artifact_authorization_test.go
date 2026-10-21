@@ -125,13 +125,19 @@ func newHarnessArtifactFixture(t *testing.T) *harnessArtifactFixture {
 	return f
 }
 
-// artifactOwnerRecorder records the owner of each saved artifact.
+// artifactOwnerRecorder records the owner of each saved artifact. beforeSave
+// runs once just before the write reaches the store.
 type artifactOwnerRecorder struct {
 	*storageclient.Client
-	owners []store.ArtifactOwner
+	owners     []store.ArtifactOwner
+	beforeSave func()
 }
 
 func (r *artifactOwnerRecorder) SaveArtifact(ctx context.Context, request store.SaveArtifactRequest) error {
+	if hook := r.beforeSave; hook != nil {
+		r.beforeSave = nil
+		hook()
+	}
 	r.owners = append(r.owners, request.Owner)
 	return r.Client.SaveArtifact(ctx, request)
 }
@@ -158,6 +164,7 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 		name                string
 		change              func(*testing.T, *harnessArtifactFixture)
 		duringAuthorization func(*testing.T, *harnessArtifactFixture)
+		beforeWrite         func(*testing.T, *harnessArtifactFixture)
 		allowed             bool
 	}{
 		{name: "active Deployment Pod with capability", allowed: true},
@@ -246,6 +253,16 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 			f.attempt = next
 			f.advanceAttempt(t, store.HarnessV1AttemptSubmitting)
 		}},
+		// The attempt is checked again in the artifact write's own
+		// transaction, so a change after the check still refuses the write.
+		{name: "attempt ends before the write", beforeWrite: func(t *testing.T, f *harnessArtifactFixture) {
+			f.advanceAttempt(t, store.HarnessV1AttemptRejected)
+		}},
+		{name: "newer turn starts before the write", beforeWrite: func(t *testing.T, f *harnessArtifactFixture) {
+			next := f.attempt
+			next.Attempt, next.TurnID = 2, "turn-2"
+			require.NoError(t, f.data.CreateHarnessV1Attempt(context.Background(), &next, f.fence))
+		}},
 		{name: "rotated auth Secret", change: func(t *testing.T, f *harnessArtifactFixture) {
 			current := &corev1.Secret{}
 			require.NoError(t, f.kube.Get(context.Background(), client.ObjectKeyFromObject(f.secret), current))
@@ -263,6 +280,9 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHarnessArtifactFixture(t)
 			recorder := &artifactOwnerRecorder{Client: f.data}
+			if tc.beforeWrite != nil {
+				recorder.beforeSave = func() { tc.beforeWrite(t, f) }
+			}
 			f.handlers.artifactStore = recorder
 			if tc.change != nil {
 				tc.change(t, f)

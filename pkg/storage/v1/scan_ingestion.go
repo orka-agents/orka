@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"reflect"
 	"time"
 )
 
@@ -129,6 +130,74 @@ type ScanTaskIngestionCommit struct {
 	Steps []ScanIngestionStep
 }
 
+// ScanIngestionReadsEqual reports whether two read results are equal in the
+// sense a commit compares a read with its Expect: field by field, with an
+// empty list equal to an absent one and times equal when they are the same
+// instant. Every persisted field counts, including fields the JSON form
+// omits, such as Finding.TargetKey and Finding.DecisionAt, so a wire format
+// must carry them (see "Records and wire format" in the package
+// documentation). A provider that crosses a process boundary compares decoded
+// results with the same rule.
+func ScanIngestionReadsEqual(a, b ScanIngestionReadResult) bool {
+	return comparableRecordsEqual(a, b)
+}
+
+// ScanRunsEqual reports whether two scan runs are equal in the sense a commit
+// compares the stored run with ExpectedRun, including the cancellation fields
+// that are not part of the JSON form.
+func ScanRunsEqual(a, b ScanRun) bool {
+	return comparableRecordsEqual(a, b)
+}
+
+func comparableRecordsEqual(a, b any) bool {
+	left, right := reflect.ValueOf(&a).Elem(), reflect.ValueOf(&b).Elem()
+	return reflect.DeepEqual(normalizedRecord(left).Interface(), normalizedRecord(right).Interface())
+}
+
+var timeType = reflect.TypeFor[time.Time]()
+
+// normalizedRecord returns a deep copy of value with empty slices made nil and
+// times reduced to their UTC instant.
+func normalizedRecord(value reflect.Value) reflect.Value {
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return value
+		}
+		return normalizedRecord(value.Elem())
+	case reflect.Pointer:
+		if value.IsNil() {
+			return value
+		}
+		copied := reflect.New(value.Type().Elem())
+		copied.Elem().Set(normalizedRecord(value.Elem()))
+		return copied
+	case reflect.Slice:
+		if value.Len() == 0 {
+			return reflect.Zero(value.Type())
+		}
+		copied := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := range value.Len() {
+			copied.Index(i).Set(normalizedRecord(value.Index(i)))
+		}
+		return copied
+	case reflect.Struct:
+		if value.Type() == timeType {
+			instant := value.Interface().(time.Time)
+			return reflect.ValueOf(instant.UTC().Round(0))
+		}
+		copied := reflect.New(value.Type()).Elem()
+		for i := range value.NumField() {
+			if copied.Field(i).CanSet() {
+				copied.Field(i).Set(normalizedRecord(value.Field(i)))
+			}
+		}
+		return copied
+	default:
+		return value
+	}
+}
+
 // ScanIngestionStore commits scan Task ingestions.
 //
 //   - PreviewScanTaskIngestion runs the steps in order, as one transaction
@@ -136,10 +205,12 @@ type ScanTaskIngestionCommit struct {
 //     returns its error.
 //   - CommitScanTaskIngestion returns false and changes nothing when the
 //     Task's receipt already exists, or when the run is terminal (succeeded
-//     or failed) or has a cancellation requested. A run of another
-//     RepositoryScan returns ErrConflict. Otherwise it returns
-//     ErrPreconditionFailed, with nothing changed, unless the stored run
-//     equals ExpectedRun and each read step returns its Expect. It then
+//     or failed) or has a cancellation requested. ExpectedRun and Run must
+//     be the ingestion's run, with the same identity, or the commit returns
+//     ErrValidation; a stored run of another RepositoryScan returns
+//     ErrConflict. Otherwise it returns ErrPreconditionFailed, with nothing
+//     changed, unless the stored run equals ExpectedRun (ScanRunsEqual) and
+//     each read step returns its Expect (ScanIngestionReadsEqual). It then
 //     applies the write steps, updates the run to Run and records the
 //     receipt, all in one transaction, and returns true. A failing write
 //     returns its error and changes nothing. Two commits computed against the

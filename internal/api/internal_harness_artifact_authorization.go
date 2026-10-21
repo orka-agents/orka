@@ -20,7 +20,7 @@ import (
 // and capability before committing the artifact.
 // prepareHarnessV1ArtifactUpload authorizes a capability upload. It returns the
 // commit-time verification and the validated Task UID.
-func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c fiber.Ctx, upload harness.ArtifactUpload) (func(context.Context) error, string, error) {
+func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c fiber.Ctx, upload harness.ArtifactUpload) (func(context.Context) (context.Context, error), string, error) {
 	denied := fiber.NewError(fiber.StatusForbidden, "harness artifact authorization failed")
 	authorizer := h.internalCallerAuthorizer()
 	if authorizer.k8sReader == nil {
@@ -52,8 +52,8 @@ func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c
 		return nil, "", denied
 	}
 	// Cancellation and deletion can start while workload and Secret checks run.
-	// Recheck the live Task before reserving the writer; durable attempt state
-	// and the cleanup generation still fence the database access itself.
+	// Recheck the live Task before the data access; durable attempt state and
+	// the cleanup generation still fence the artifact write itself.
 	currentTask := &corev1alpha1.Task{}
 	if err := authorizer.k8sReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, currentTask); err != nil {
 		return nil, "", denied
@@ -67,15 +67,23 @@ func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c
 	capability := artifactcap.Authorization{
 		Capability: c.Get(artifactcap.CapabilityHeader), RequestDigest: c.Get(artifactcap.RequestDigestHeader),
 	}
-	return func(txCtx context.Context) error {
-		current, err := h.latestHarnessV1ArtifactAttempt(txCtx, task.Namespace, string(task.UID))
+	return func(fencedCtx context.Context) (context.Context, error) {
+		current, err := h.latestHarnessV1ArtifactAttempt(fencedCtx, task.Namespace, string(task.UID))
 		if err != nil || current.Attempt != latest.Attempt || !activeHarnessV1ArtifactAttempt(task, current) {
-			return denied
+			return nil, denied
 		}
 		if err := harness.VerifyArtifactUpload(strings.TrimSpace(string(secret.Data[latest.AuthSecretKey])), capability, upload, time.Now().UTC()); err != nil {
-			return denied
+			return nil, denied
 		}
-		return nil
+		// Bind the write to this attempt: the artifact store refuses it once
+		// another attempt starts or this one ends, in the write's own
+		// transaction.
+		fence, ok := store.TaskDataFenceFrom(fencedCtx)
+		if !ok {
+			return nil, denied
+		}
+		fence.HarnessV1Attempt = &store.HarnessV1AttemptKey{Namespace: current.Namespace, TaskUID: current.TaskUID, Attempt: current.Attempt}
+		return store.WithTaskDataFence(fencedCtx, fence), nil
 	}, string(task.UID), nil
 }
 

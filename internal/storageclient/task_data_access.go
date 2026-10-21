@@ -28,6 +28,31 @@ func (c *Client) WithAuthorizedTaskDataAccess(
 	namespace, taskName string,
 	authorize func(context.Context) ([]store.TaskJobIdentity, error),
 	access func(context.Context) error,
+) error {
+	return c.withTaskDataAccess(ctx, namespace, taskName, true, authorize, access)
+}
+
+// WithTaskDataAccess implements store.TaskDataAccessStore for trusted
+// controller code that needs no caller authorization. A Task it registers is
+// registered only for the duration of the access, so cleanup of other Tasks
+// does not refuse the access, yet no registration is left behind for a Task
+// that may already be finalized.
+func (c *Client) WithTaskDataAccess(ctx context.Context, namespace, taskName string, access func(context.Context) error) error {
+	return c.withTaskDataAccess(ctx, namespace, taskName, false, func(context.Context) ([]store.TaskJobIdentity, error) {
+		return nil, nil
+	}, access)
+}
+
+// withTaskDataAccess runs access under a fence. A Task without a registration
+// is registered first; keep decides whether a registration this call created
+// outlives a successful access (authorized callers) or is always released
+// (trusted controller access).
+func (c *Client) withTaskDataAccess(
+	ctx context.Context,
+	namespace, taskName string,
+	keep bool,
+	authorize func(context.Context) ([]store.TaskJobIdentity, error),
+	access func(context.Context) error,
 ) (accessErr error) {
 	if authorize == nil || access == nil {
 		return store.ValidationErrorf("task data access requires authorization and access functions")
@@ -51,14 +76,18 @@ func (c *Client) WithAuthorizedTaskDataAccess(
 		if created {
 			registration := fence
 			defer func() {
-				if accessErr == nil {
+				if accessErr == nil && keep {
 					return
 				}
-				// Failed or cancelled requests must not leave registrations
-				// behind; a later cleanup generation is preserved.
+				// Failed or cancelled requests, and trusted access, must not
+				// leave registrations behind; a later cleanup generation is
+				// preserved. Releasing after a successful access is best
+				// effort and does not turn that success into a failure.
 				releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTaskDataFenceTimeout)
 				defer cancel()
-				accessErr = errors.Join(accessErr, c.ReleaseTaskDataFence(releaseCtx, registration))
+				if releaseErr := c.ReleaseTaskDataFence(releaseCtx, registration); accessErr != nil {
+					accessErr = errors.Join(accessErr, releaseErr)
+				}
 			}()
 		}
 	}
@@ -83,12 +112,4 @@ func (c *Client) WithAuthorizedTaskDataAccess(
 		return err
 	}
 	return nil
-}
-
-// WithTaskDataAccess implements store.TaskDataAccessStore for trusted
-// controller code that needs no caller authorization.
-func (c *Client) WithTaskDataAccess(ctx context.Context, namespace, taskName string, access func(context.Context) error) error {
-	return c.WithAuthorizedTaskDataAccess(ctx, namespace, taskName, func(context.Context) ([]store.TaskJobIdentity, error) {
-		return nil, nil
-	}, access)
 }

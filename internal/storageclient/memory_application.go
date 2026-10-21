@@ -3,6 +3,7 @@ package storageclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -56,10 +57,18 @@ func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProp
 			application.Memory = memoryFromProposal(proposal, application.AppliedAt)
 		}
 		memory, err := c.CommitMemoryProposalApplication(ctx, application)
-		if !errors.Is(err, store.ErrPreconditionFailed) {
-			return memory, err
+		if errors.Is(err, store.ErrPreconditionFailed) {
+			lastErr = err
+			continue
 		}
-		lastErr = err
+		if err != nil {
+			return nil, err
+		}
+		if target.MemoryID != "" && (memory == nil || memory.ID != target.MemoryID) {
+			// Never pass on a memory other than the one just authorized.
+			return nil, fmt.Errorf("storage provider returned a memory other than the resolved target %q", target.MemoryID)
+		}
+		return memory, nil
 	}
 	return nil, lastErr
 }

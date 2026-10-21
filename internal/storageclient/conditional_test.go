@@ -128,6 +128,24 @@ func TestWithAuthorizedTaskDataAccessReportsAMovedFence(t *testing.T) {
 	require.ErrorIs(t, err, handlerErr, "an access error with a current fence is returned unchanged")
 }
 
+func TestWithTaskDataAccessRegistersOnlyForTheAccess(t *testing.T) {
+	client := newEmbeddedClient(t)
+	ctx := t.Context()
+	require.NoError(t, client.WithTaskDataAccess(ctx, "tenant", "task", func(fenced context.Context) error {
+		_, registered, err := client.ResolveTaskDataFence(ctx, "tenant", "task")
+		require.NoError(t, err)
+		require.True(t, registered, "the access is registered while it runs")
+		require.NoError(t, client.DeleteResult(ctx, "tenant", "other-task"))
+		return client.SavePlan(fenced, "tenant", "task", &store.PlanState{Summary: "kept"})
+	}), "cleanup of another Task does not refuse a registered access")
+	_, registered, err := client.ResolveTaskDataFence(ctx, "tenant", "task")
+	require.NoError(t, err)
+	require.False(t, registered, "trusted controller access leaves no registration behind")
+	plan, err := client.GetPlan(ctx, "tenant", "task")
+	require.NoError(t, err)
+	require.Equal(t, "kept", plan.Summary)
+}
+
 func TestScanIngestionRecordsReadsAndPreviewsOnlyAfterWrites(t *testing.T) {
 	client, backend := newProtocolClient(t)
 	ctx := t.Context()

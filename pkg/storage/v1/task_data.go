@@ -45,6 +45,11 @@ type TaskDataFence struct {
 	// Jobs are the Job authorities the access was authorized with. A fenced
 	// operation is refused once any of them is revoked.
 	Jobs []TaskJobIdentity
+	// HarnessV1Attempt, when set, is the harness-v1 attempt the access was
+	// authorized for. A fenced operation is refused once that attempt is no
+	// longer the Task's latest attempt or has left the active states
+	// (Submitting, SubmittedUnknown, Accepted and Running).
+	HarnessV1Attempt *HarnessV1AttemptKey
 }
 
 // TaskDataFenceStore orders task data access against cleanup without a
@@ -70,8 +75,11 @@ type TaskDataFence struct {
 //   - CheckTaskDataFence returns nil while the fence is current and no fence
 //     Job is revoked.
 //
-// A stale fence is refused with ErrTaskDataCleanupChanged and a revoked fence
-// Job with ErrTaskJobRevoked. These methods check a fence carried in their
+// A stale fence is refused with ErrTaskDataCleanupChanged, and a revoked fence
+// Job or an ended or superseded fence attempt with ErrTaskJobRevoked. The
+// fence is checked before the operation's own outcome, so a refused operation
+// changes nothing and reports the fence error even when it would have found
+// nothing. These methods check a fence carried in their
 // context in the same transaction as their reads and writes, so an operation
 // either completes before the cleanup that would invalidate it, and the
 // cleanup then removes its effect, or is refused: SaveResult, SaveArtifact,
@@ -99,15 +107,23 @@ type taskDataFenceKey struct{}
 // WithTaskDataFence returns a context that carries fence. A network transport
 // carries the fence as request metadata.
 func WithTaskDataFence(ctx context.Context, fence TaskDataFence) context.Context {
-	fence.Jobs = slices.Clone(fence.Jobs)
-	return context.WithValue(ctx, taskDataFenceKey{}, fence)
+	return context.WithValue(ctx, taskDataFenceKey{}, cloneTaskDataFence(fence))
 }
 
 // TaskDataFenceFrom returns the fence carried by ctx, if any.
 func TaskDataFenceFrom(ctx context.Context) (TaskDataFence, bool) {
 	fence, ok := ctx.Value(taskDataFenceKey{}).(TaskDataFence)
-	if ok {
-		fence.Jobs = slices.Clone(fence.Jobs)
+	if !ok {
+		return TaskDataFence{}, false
 	}
-	return fence, ok
+	return cloneTaskDataFence(fence), true
+}
+
+func cloneTaskDataFence(fence TaskDataFence) TaskDataFence {
+	fence.Jobs = slices.Clone(fence.Jobs)
+	if fence.HarnessV1Attempt != nil {
+		attempt := *fence.HarnessV1Attempt
+		fence.HarnessV1Attempt = &attempt
+	}
+	return fence
 }

@@ -46,8 +46,13 @@ func TaskDataFenceFrom(ctx context.Context) (TaskDataFence, bool) {
 // ErrTaskDataCleanupChanged with fresh authorization; when access can write
 // more than once, its writes must be safe to repeat.
 //
+// A Kubernetes write made inside access is checked against the fence before
+// access runs, not serialized with a later cleanup or revocation, so it must
+// keep its own Kubernetes preconditions.
+//
 // WithTaskDataAccess does the same for trusted controller code, which needs
-// no caller authorization.
+// no caller authorization. A Task it registers stays registered only for the
+// duration of the access.
 type TaskDataAccessStore interface {
 	TaskJobAuthorityStore
 	WithAuthorizedTaskDataAccess(

@@ -302,6 +302,12 @@ func FencedErrorf(format string, args ...any) error {
 	return storagev1.FencedErrorf(format, args...)
 }
 
+func ScanIngestionReadsEqual(a, b ScanIngestionReadResult) bool {
+	return storagev1.ScanIngestionReadsEqual(a, b)
+}
+
+func ScanRunsEqual(a, b ScanRun) bool { return storagev1.ScanRunsEqual(a, b) }
+
 func PreconditionFailedErrorf(format string, args ...any) error {
 	return storagev1.PreconditionFailedErrorf(format, args...)
 }

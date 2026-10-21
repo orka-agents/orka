@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 
@@ -133,7 +132,7 @@ func (s *Store) CommitScanTaskIngestion(ctx context.Context, commit store.ScanTa
 		if run.CancellationVersion != 0 || run.Phase == "succeeded" || run.Phase == "failed" {
 			return nil
 		}
-		if !reflect.DeepEqual(*run, commit.ExpectedRun) {
+		if !store.ScanRunsEqual(*run, commit.ExpectedRun) {
 			return store.PreconditionFailedErrorf("scan run %q changed after the ingestion read it", run.ID)
 		}
 		if _, err := tx.runScanIngestionSteps(ctx, commit.At, commit.Steps, true); err != nil {
@@ -248,7 +247,7 @@ func (s *Store) runScanIngestionSteps(ctx context.Context, at time.Time, steps [
 		if err != nil {
 			return nil, fmt.Errorf("scan ingestion step %d: %w", i, err)
 		}
-		if compare && step.IsRead() && !reflect.DeepEqual(result, *step.Expect) {
+		if compare && step.IsRead() && !store.ScanIngestionReadsEqual(result, *step.Expect) {
 			return nil, store.PreconditionFailedErrorf("scan ingestion step %d read a record that changed after the ingestion read it", i)
 		}
 		results[i] = result

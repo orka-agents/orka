@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
@@ -44,6 +45,30 @@ func TestTaskDataFenceTravelsInContext(t *testing.T) {
 	got.Jobs[0].JobUID = "changed after reading"
 	again, _ := storagev1.TaskDataFenceFrom(ctx)
 	require.Equal(t, "job-uid", again.Jobs[0].JobUID, "a reader cannot change the carried fence")
+}
+
+func TestScanIngestionReadsCompareByValue(t *testing.T) {
+	at := time.Date(2026, 1, 2, 3, 4, 5, 6, time.FixedZone("AEST", 10*60*60))
+	stored := storagev1.ScanIngestionReadResult{ReviewSlice: &storagev1.ReviewSlice{
+		ID: "slice", Tags: []string{}, OwnedFiles: []storagev1.ReviewSliceFile{}, CreatedAt: at.UTC(),
+	}}
+	decoded := storagev1.ScanIngestionReadResult{ReviewSlice: &storagev1.ReviewSlice{ID: "slice", CreatedAt: at}}
+	require.True(t, storagev1.ScanIngestionReadsEqual(stored, decoded),
+		"an empty list equals an absent one and a time equals the same instant in another zone")
+	decoded.ReviewSlice.Status = "reviewed"
+	require.False(t, storagev1.ScanIngestionReadsEqual(stored, decoded))
+	require.True(t, storagev1.ScanIngestionReadsEqual(
+		storagev1.ScanIngestionReadResult{Findings: []storagev1.Finding{}}, storagev1.ScanIngestionReadResult{}))
+	require.False(t, storagev1.ScanIngestionReadsEqual(
+		storagev1.ScanIngestionReadResult{NotFound: true}, storagev1.ScanIngestionReadResult{}))
+
+	run := storagev1.ScanRun{ID: "run", StartedAt: at}
+	cancelled := run
+	cancelled.CancellationVersion = 1
+	require.False(t, storagev1.ScanRunsEqual(run, cancelled), "fields outside the JSON form still count")
+	utc := run
+	utc.StartedAt = at.UTC()
+	require.True(t, storagev1.ScanRunsEqual(run, utc))
 }
 
 func TestTooLargeErrorReportsTheLimit(t *testing.T) {
