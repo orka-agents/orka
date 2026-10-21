@@ -428,10 +428,10 @@ func (d *ACPDispatcher) projectMCPApprovalExecution(
 		return store.ErrConflict
 	}
 	_, err = withRetainedMCPApproval(ctx, d.EventStore, task.Namespace, task.Name, expected,
-		func(txCtx context.Context, approval approvals.Approval, listed []store.ExecutionEvent) error {
+		func(txCtx context.Context, approval approvals.Approval, listed []store.ExecutionEvent) (*store.ExecutionEvent, error) {
 			outcome, reason, result := mcpApprovalRecoveredOutcome(effect, approval.ID)
 			if mcpApprovalProjectionCurrent(approval, outcome, reason) {
-				return nil
+				return nil, nil
 			}
 			return d.appendMCPApprovalRecoveryOutcome(txCtx, task, approval, effect.Version, listed, outcome, reason, result)
 		})
@@ -474,7 +474,7 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	listed []store.ExecutionEvent,
 	outcome, reason string,
 	result json.RawMessage,
-) error {
+) (*store.ExecutionEvent, error) {
 	var source store.ExecutionEvent
 	var lastSeq int64
 	for _, event := range listed {
@@ -488,7 +488,7 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	}
 	content, err := acpMCPApprovalOutcomeContent(approval.ID, string(task.UID), outcome, reason, result)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Include the observed history position so a late stale writer cannot make
 	// an earlier dedupe key prevent the next scan from repairing its projection.
@@ -503,14 +503,14 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	if decisionType == "" {
 		eventStore, ok := d.EventStore.(store.DeduplicatingExecutionEventStore)
 		if !ok {
-			return errors.New("approval recovery requires deduplicating execution events")
+			return nil, errors.New("approval recovery requires deduplicating execution events")
 		}
 		_, _, err = eventStore.AppendExecutionEventIfAbsent(ctx, outcomeEvent, key)
-		return err
+		return nil, err
 	}
 	grouped, ok := d.EventStore.(store.GroupedExecutionEventStore)
 	if !ok {
-		return errors.New("approval recovery requires grouped execution events")
+		return nil, errors.New("approval recovery requires grouped execution events")
 	}
 	// Close an undecided review once its verified receipt proves that the
 	// action cannot start.
@@ -520,12 +520,18 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 		Type: decisionType, Severity: events.ExecutionEventSeverityInfo,
 		ToolName: approval.TargetTool, ToolCallID: approval.ID, Summary: reason, Content: content,
 	}
-	_, err = grouped.AppendExecutionEventsIfAbsent(ctx, []store.ExecutionEventAppend{
+	results, err := grouped.AppendExecutionEventsIfAbsent(ctx, []store.ExecutionEventAppend{
 		{Event: decision, DedupeKey: "acp-approval:" + approval.ID + ":" + decisionType},
 		{Event: outcomeEvent, DedupeKey: key},
 	})
 	if errors.Is(err, store.ErrConflict) {
-		return errMCPApprovalHistoryChanged
+		return nil, errMCPApprovalHistoryChanged
 	}
-	return err
+	if err != nil {
+		return nil, err
+	}
+	if results[0].Appended {
+		return results[0].Event, nil
+	}
+	return nil, nil
 }

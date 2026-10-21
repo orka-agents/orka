@@ -107,7 +107,6 @@ type StateProvider interface {
 	SessionSoulWriter
 	SessionLineageStore
 	SessionCleanupPersistenceStore
-	HarnessV1AttemptStore
 
 	ControllerEpochMirror
 	OutboxPersistenceStore

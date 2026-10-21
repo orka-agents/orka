@@ -307,10 +307,6 @@ func fencedOperations(at time.Time) []fencedOperation {
 			_, err := p.ListExecutionEvents(ctx, storagev1.ExecutionEventFilter{Namespace: ns, StreamID: "task-fenced"})
 			return err
 		}},
-		{"ListHarnessV1AttemptsByTask", func(ctx context.Context, p storagev1.StateProvider) error {
-			_, err := p.ListHarnessV1AttemptsByTask(ctx, ns, "task-uid")
-			return err
-		}},
 		{"CheckTaskJobAuthority", func(ctx context.Context, p storagev1.StateProvider) error {
 			return p.CheckTaskJobAuthority(ctx, storagev1.TaskJobIdentity{Namespace: ns, TaskUID: "task-uid", JobUID: "job"})
 		}},
@@ -436,52 +432,6 @@ func runTaskDataFences(t *testing.T, newProvider StateFactory) {
 		result, err := p.GetResult(ctx, conditionalNamespace, "task-fenced")
 		require.NoError(t, err)
 		require.Equal(t, "first", string(result), "a revoked Job's write has no effect")
-	})
-
-	t.Run("a fence bound to a harness-v1 attempt refuses once it ends or is superseded", func(t *testing.T) {
-		p, ctx := newProvider(t), t.Context()
-		epoch := syncEpoch(t, p, 1, "owner-a")
-		first := harnessAttempt("task-uid", 1)
-		require.NoError(t, p.CreateHarnessV1Attempt(ctx, first, epoch))
-		advance := func(attempt *storagev1.HarnessV1Attempt, version int64, from, to storagev1.HarnessV1AttemptState) {
-			t.Helper()
-			transition := storagev1.HarnessV1AttemptTransition{
-				Key: harnessKey(attempt), ExpectedVersion: version, ExpectedState: from, TargetState: to,
-				OperationID: fmt.Sprintf("%d-%s", attempt.Attempt, to), OperationDigest: controlDigest(string(to)), Fence: epoch,
-			}
-			if storagev1.IsTerminalHarnessV1AttemptState(to) {
-				receipt := controlDigest("terminal")
-				transition.Updates.TerminalReceiptDigest = &receipt
-			}
-			_, err := p.TransitionHarnessV1Attempt(ctx, transition)
-			require.NoError(t, err)
-		}
-		fence, _, err := p.ResolveTaskDataFence(ctx, "tenant", "")
-		require.NoError(t, err)
-		key := harnessKey(first)
-		fence.HarnessV1Attempt = &key
-		fenced := storagev1.WithTaskDataFence(ctx, fence)
-		require.ErrorIs(t, p.SaveResult(fenced, "tenant", "task-a", []byte("prepared")), storagev1.ErrTaskJobRevoked,
-			"a prepared attempt is not active yet")
-		advance(first, 1, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSubmitting)
-		require.NoError(t, p.SaveResult(fenced, "tenant", "task-a", []byte("active")))
-
-		second := harnessAttempt("task-uid", 2)
-		require.NoError(t, p.CreateHarnessV1Attempt(ctx, second, epoch))
-		require.ErrorIs(t, p.SaveResult(fenced, "tenant", "task-a", []byte("superseded")), storagev1.ErrTaskJobRevoked,
-			"a newer attempt supersedes the fenced one")
-
-		secondKey := harnessKey(second)
-		fence.HarnessV1Attempt = &secondKey
-		fencedSecond := storagev1.WithTaskDataFence(ctx, fence)
-		advance(second, 1, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSubmitting)
-		require.NoError(t, p.SaveResult(fencedSecond, "tenant", "task-a", []byte("second")))
-		advance(second, 2, storagev1.HarnessV1AttemptSubmitting, storagev1.HarnessV1AttemptRejected)
-		require.ErrorIs(t, p.SaveResult(fencedSecond, "tenant", "task-a", []byte("ended")), storagev1.ErrTaskJobRevoked,
-			"an attempt that ended no longer authorizes writes")
-		result, err := p.GetResult(ctx, "tenant", "task-a")
-		require.NoError(t, err)
-		require.Equal(t, "second", string(result))
 	})
 
 	t.Run("fenced writes racing cleanup leave nothing behind", func(t *testing.T) {

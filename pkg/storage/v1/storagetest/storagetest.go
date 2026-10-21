@@ -45,7 +45,6 @@ var stateFamilies = []stateFamily{
 	{"session-soul", runSessionSoul},
 	{"session-lineage", runSessionLineage},
 	{"session-cleanup-persistence", runSessionCleanupPersistence},
-	{"harness-v1-attempts", runHarnessV1Attempts},
 	{"controller-epoch-mirror", runControllerEpochMirror},
 	{"outbox-persistence", runOutboxPersistence},
 	{"task-job-authority", runTaskJobAuthority},

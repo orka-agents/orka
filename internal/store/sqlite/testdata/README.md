@@ -1,11 +1,11 @@
 # SQLite bootstrap fixtures
 
 `schema/0e567418.sql` and `schema/b5265055.sql` are the frozen upstream fixtures
-introduced by the exact-schema migration tests. Historical 150-, 162- and
-166-object layouts are reconstructed using that frozen 149-object fixture and
-the immutable `migrations/149-to-150.sql`, `150-to-162.sql` and `162-to-166.sql`
-transitions, never the current schema constructor. Their pinned fingerprints
-are asserted before exercising upgrades.
+introduced by the exact-schema migration tests. Historical 150-, 162-, 166- and
+158-object layouts are reconstructed using that frozen 149-object fixture and
+the immutable `migrations/149-to-150.sql`, `150-to-162.sql`, `162-to-166.sql`
+and `166-to-167.sql` transitions, never the current schema constructor. Their
+pinned fingerprints are asserted before exercising upgrades.
 
 `bootstrap-snapshot.sql` contains one synthetic execution-snapshot row. It
 uses the unchanged pre-metadata snapshot format and a test-only 32-byte key

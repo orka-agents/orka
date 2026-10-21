@@ -98,11 +98,7 @@ if [[ "$1" == "create" ]]; then
       exit 1
       ;;
     race-opposite)
-      if [[ "${FAKE_EXPECTED_MODE}" == "harness-v1" ]]; then
-        namespace_json harness-v2 >"${FAKE_NAMESPACE_STATE}"
-      else
-        namespace_json harness-v1 >"${FAKE_NAMESPACE_STATE}"
-      fi
+      namespace_json harness-v1 >"${FAKE_NAMESPACE_STATE}"
       exit 1
       ;;
     failure)
@@ -186,9 +182,9 @@ jq -e '.metadata.labels["orka.ai/controller-mode"] == "harness-v2"' "${namespace
 run_helper orka-v2-system harness-v2 >/dev/null
 [[ "$(wc -l <"${write_log}" | tr -d '[:space:]')" == "1" ]] || fail "same-mode retry rewrote the namespace"
 
-reset_scenario absent-v1
-run_helper orka-v1-system harness-v1 >/dev/null
-jq -e '.metadata.labels["orka.ai/controller-mode"] == "harness-v1"' "${namespace_state}" >/dev/null
+reset_scenario unsupported-v1
+expect_failure "controller mode must be harness-v2" run_helper orka-v1-system harness-v1
+[[ ! -s "${call_log}" ]] || fail "unsupported protocol reached kubectl"
 
 reset_scenario exact-existing
 write_namespace orka-v2-system harness-v2
@@ -246,7 +242,7 @@ expect_failure "unable to create namespace orka-v2-system" \
 [[ ! -s "${write_log}" ]] || fail "failed namespace create recorded a write"
 
 reset_scenario invalid-mode
-expect_failure "controller mode must be harness-v1 or harness-v2" \
+expect_failure "controller mode must be harness-v2" \
   run_helper orka-v2-system dual
 [[ ! -s "${call_log}" ]] || fail "invalid controller mode reached kubectl"
 

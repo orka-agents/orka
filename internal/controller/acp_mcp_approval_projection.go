@@ -28,12 +28,15 @@ var errMCPApprovalHistoryChanged = errors.New("approval history changed during p
 // is projected onto a request cleanup removed. The appends are deduplicated,
 // so a projection repeated after a fence change does not duplicate evidence.
 // Absence does not prove cleanup or execution outcome; receipts remain intact.
+// The callback returns a newly appended event (nil for replay/no-op). Observe
+// terminal decisions only after the projection commits, including recovery's
+// grouped decision/outcome pair.
 func withRetainedMCPApproval(
 	ctx context.Context,
 	eventStore store.ExecutionEventStore,
 	namespace, taskName string,
 	expected approvals.Approval,
-	project func(context.Context, approvals.Approval, []store.ExecutionEvent) error,
+	project func(context.Context, approvals.Approval, []store.ExecutionEvent) (*store.ExecutionEvent, error),
 ) (bool, error) {
 	dataAccess, ok := eventStore.(store.TaskDataAccessStore)
 	if !ok {
@@ -56,9 +59,11 @@ func projectRetainedMCPApproval(
 	eventStore store.ExecutionEventStore,
 	namespace, taskName string,
 	expected approvals.Approval,
-	project func(context.Context, approvals.Approval, []store.ExecutionEvent) error,
+	project func(context.Context, approvals.Approval, []store.ExecutionEvent) (*store.ExecutionEvent, error),
 ) (bool, error) {
 	retained := false
+	var request approvals.Approval
+	var decision *store.ExecutionEvent
 	err := dataAccess.WithTaskDataAccess(ctx, namespace, taskName, func(txCtx context.Context) error {
 		listed, err := approvals.ListEvents(txCtx, eventStore, namespace, taskName)
 		if err != nil {
@@ -92,12 +97,18 @@ func projectRetainedMCPApproval(
 		// read, rather than authorizing appends with a cached projection.
 		for _, approval := range approvals.Derive(listed, time.Time{}) {
 			if mcpApprovalProjectionBindingMatches(approval, expected) {
-				return project(txCtx, approval, listed)
+				request = approval
+				var err error
+				decision, err = project(txCtx, approval, listed)
+				return err
 			}
 		}
 		retained = false
 		return nil
 	})
+	if err == nil {
+		approvals.RecordDecision(request, decision)
+	}
 	return retained, err
 }
 

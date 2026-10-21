@@ -22,7 +22,6 @@ import (
 	"errors"
 	"reflect"
 
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
@@ -30,8 +29,7 @@ import (
 // Embedded is the part of the application store that is not yet expressed in
 // the public provider contract. These families receive plaintext protected
 // data (execution snapshots, native sessions, connector custody, turn
-// finalization with native capture) or are defined in internal/harness. Only
-// the in-process SQLite store implements Embedded, and it must be the same
+// finalization with native capture). Only the in-process SQLite store implements Embedded, and it must be the same
 // store that serves both contracts, which also keeps fenced artifact writes on
 // the store whose cleanup generations fence them.
 type Embedded interface {
@@ -41,7 +39,6 @@ type Embedded interface {
 	store.ConnectorCredentialStore
 	store.ConnectorConsentStore
 	store.SessionTurnPersistenceStore
-	harness.RuntimeSessionStore
 }
 
 // Options selects the providers behind a Client.

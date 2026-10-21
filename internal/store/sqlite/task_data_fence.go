@@ -160,34 +160,7 @@ func (s *Store) checkTaskDataFence(ctx context.Context, fence store.TaskDataFenc
 			return err
 		}
 	}
-	if fence.HarnessV1Attempt != nil {
-		return s.checkHarnessV1AttemptFence(ctx, *fence.HarnessV1Attempt)
-	}
 	return nil
-}
-
-// checkHarnessV1AttemptFence requires the fenced attempt to be the Task's
-// latest attempt and still active.
-func (s *Store) checkHarnessV1AttemptFence(ctx context.Context, key store.HarnessV1AttemptKey) error {
-	attempts, err := s.listHarnessV1AttemptsByTaskUnfenced(ctx, key.Namespace, key.TaskUID)
-	if err != nil {
-		return err
-	}
-	var latest *store.HarnessV1Attempt
-	for i := range attempts {
-		if latest == nil || attempts[i].Attempt > latest.Attempt {
-			latest = &attempts[i]
-		}
-	}
-	if latest == nil || latest.Attempt != key.Attempt {
-		return fmt.Errorf("%w: harness-v1 attempt %d is no longer the latest attempt", store.ErrTaskJobRevoked, key.Attempt)
-	}
-	switch latest.State {
-	case store.HarnessV1AttemptSubmitting, store.HarnessV1AttemptSubmittedUnknown, store.HarnessV1AttemptAccepted, store.HarnessV1AttemptRunning:
-		return nil
-	default:
-		return fmt.Errorf("%w: harness-v1 attempt %d is %s", store.ErrTaskJobRevoked, key.Attempt, latest.State)
-	}
 }
 
 func validateTaskDataScope(namespace, taskName string, requireTask bool) error {

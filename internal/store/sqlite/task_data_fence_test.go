@@ -117,7 +117,7 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 }
 
 func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
-	s := newCoexistenceTestStore(t)
+	s := newAgentExecutionTestStore(t)
 	err := orkaClient(t, s).WithAuthorizedTaskDataAccess(t.Context(), "ns", "", func(ctx context.Context) ([]store.TaskJobIdentity, error) {
 		if err := s.SaveResult(ctx, "ns", "other-task", []byte("unrelated write")); err != nil {
 			return nil, err
@@ -133,7 +133,7 @@ func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
 }
 
 func TestTaskGenerationRegistrationRequiresAuthorization(t *testing.T) {
-	s := newCoexistenceTestStore(t)
+	s := newAgentExecutionTestStore(t)
 	client := orkaClient(t, s)
 	denied := errors.New("task identity unavailable")
 	err := client.WithAuthorizedTaskDataAccess(t.Context(), "ns", "missing", func(context.Context) ([]store.TaskJobIdentity, error) {
@@ -153,7 +153,7 @@ func TestTaskGenerationRegistrationRequiresAuthorization(t *testing.T) {
 func TestTaskGenerationRegistrationIsRemovedAfterRejectedAccess(t *testing.T) {
 	for _, failure := range []string{"authorization", "cancellation", "data access"} {
 		t.Run(failure, func(t *testing.T) {
-			s := newCoexistenceTestStore(t)
+			s := newAgentExecutionTestStore(t)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			denied := errors.New("access denied")
@@ -178,7 +178,7 @@ func TestTaskGenerationRegistrationIsRemovedAfterRejectedAccess(t *testing.T) {
 }
 
 func TestTaskDataTransactionRollsBackRejectedMutation(t *testing.T) {
-	s := newCoexistenceTestStore(t)
+	s := newAgentExecutionTestStore(t)
 	ctx := context.Background()
 	denied := errors.New("task identity changed")
 	err := s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
@@ -199,7 +199,7 @@ func TestTaskDataTransactionEventAndInboxCommitRollback(t *testing.T) {
 			name = "commit"
 		}
 		t.Run(name, func(t *testing.T) {
-			s := newCoexistenceTestStore(t)
+			s := newAgentExecutionTestStore(t)
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			require.NoError(t, s.SendMessage(ctx, &store.Message{

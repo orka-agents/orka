@@ -309,27 +309,32 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 	target.ApprovalID = call.ID
 	// Runtime call IDs can contain private text that generic redaction misses.
 	binding := approvalCallBinding(call)
-	return b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalRequested, "requested", target.Action, struct {
+	_, err = b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalRequested, "requested", target.Action, struct {
 		approvals.ApprovalTarget
 		ToolCallID string                 `json:"toolCallID"`
 		Binding    *approvals.CallBinding `json:"binding"`
 		Timeout    string                 `json:"timeout"`
 		ExpiresAt  time.Time              `json:"expiresAt"`
 	}{target, binding.CallIDDigest, binding, call.ExpiresAt.Sub(call.CreatedAt).String(), call.ExpiresAt})
+	return err
 }
 
-func (b *ACPMCPBroker) appendApprovalEvent(ctx context.Context, call *acpMCPApprovalCall, eventType, key, summary string, payload any) error {
+// A nil event means the append was a replay, rather than a new observation.
+func (b *ACPMCPBroker) appendApprovalEvent(ctx context.Context, call *acpMCPApprovalCall, eventType, key, summary string, payload any) (*store.ExecutionEvent, error) {
 	content, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, _, err = b.ApprovalEvents.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+	appended, isNew, err := b.ApprovalEvents.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
 		Namespace: call.Task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: call.Task.Name,
 		TaskName: call.Task.Name, SessionName: call.Task.SessionName, AgentName: call.Task.AgentName,
 		Type: eventType, Severity: events.ExecutionEventSeverityInfo, ToolName: call.Request.Call.ToolName,
 		ToolCallID: call.ID, Summary: summary, Content: content,
 	}, "acp-approval:"+call.ID+":"+key)
-	return err
+	if err != nil || !isNew {
+		return nil, err
+	}
+	return appended, nil
 }
 
 func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApprovalCall, outcome, reason string, result json.RawMessage) error {
@@ -339,7 +344,7 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 	}
 	retained, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
 		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
-		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) error {
+		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) (*store.ExecutionEvent, error) {
 			return b.appendApprovalEvent(txCtx, call, events.ExecutionEventTypeApprovalExecutionUpdated, "execution:"+outcome,
 				"Tool execution "+outcome, json.RawMessage(content))
 		})
@@ -354,17 +359,17 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 func (b *ACPMCPBroker) approvalDecision(ctx context.Context, call *acpMCPApprovalCall, eventType, reason string) error {
 	_, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
 		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
-		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) error {
-			err := b.appendApprovalEvent(txCtx, call, eventType, eventType, reason,
+		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) (*store.ExecutionEvent, error) {
+			appended, err := b.appendApprovalEvent(txCtx, call, eventType, eventType, reason,
 				struct {
 					ApprovalID string `json:"approvalID"`
 					TaskUID    string `json:"taskUID"`
 					Reason     string `json:"reason"`
 				}{ApprovalID: call.ID, TaskUID: call.Task.UID, Reason: reason})
 			if errors.Is(err, store.ErrConflict) {
-				return nil // A reviewer decision may have won; execution still rechecks authority and expiry.
+				return nil, nil // A reviewer decision may have won; execution still rechecks authority and expiry.
 			}
-			return err
+			return appended, err
 		})
 	return err
 }

@@ -24,15 +24,37 @@ type approvalTerminalProjectionOutageStore struct {
 }
 
 func (s *approvalTerminalProjectionOutageStore) AppendExecutionEventIfAbsent(ctx context.Context, event *store.ExecutionEvent, key string) (*store.ExecutionEvent, bool, error) {
+	if s.refuses(event) {
+		return nil, false, errors.New("injected terminal approval projection outage")
+	}
+	return s.DeduplicatingExecutionEventStore.AppendExecutionEventIfAbsent(ctx, event, key)
+}
+
+// AppendExecutionEventsIfAbsent refuses a whole group that carries a terminal
+// projection, so a recovery decision and its outcome stay unwritten together.
+func (s *approvalTerminalProjectionOutageStore) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	for _, entry := range appends {
+		if s.refuses(entry.Event) {
+			return nil, errors.New("injected terminal approval projection outage")
+		}
+	}
+	grouped, ok := s.DeduplicatingExecutionEventStore.(store.GroupedExecutionEventStore)
+	if !ok {
+		return nil, errors.New("grouped execution events are unavailable")
+	}
+	return grouped.AppendExecutionEventsIfAbsent(ctx, appends)
+}
+
+func (s *approvalTerminalProjectionOutageStore) refuses(event *store.ExecutionEvent) bool {
 	var payload struct {
 		ExecutionOutcome string `json:"executionOutcome"`
 	}
 	if event.Type == events.ExecutionEventTypeApprovalExecutionUpdated && json.Unmarshal(event.Content, &payload) == nil &&
 		payload.ExecutionOutcome != "" && payload.ExecutionOutcome != "running" && s.unavailable.Load() {
 		s.attempts.Add(1)
-		return nil, false, errors.New("injected terminal approval projection outage")
+		return true
 	}
-	return s.DeduplicatingExecutionEventStore.AppendExecutionEventIfAbsent(ctx, event, key)
+	return false
 }
 
 func TestMCPApprovalTerminalReceiptSurvivesProjectionOutage(t *testing.T) {

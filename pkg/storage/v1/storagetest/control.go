@@ -47,23 +47,8 @@ func requireFenced(t *testing.T, err error) {
 	require.ErrorIs(t, err, storagev1.ErrConflict, "a fence rejection still matches ErrConflict")
 }
 
-func harnessAttempt(taskUID string, attempt int32) *storagev1.HarnessV1Attempt {
-	return &storagev1.HarnessV1Attempt{
-		Namespace: "tenant", TaskName: "task-" + taskUID, TaskUID: taskUID, Attempt: attempt,
-		BindingDigest:  controlDigest("binding-" + taskUID),
-		SnapshotDigest: controlDigest("snapshot-" + taskUID),
-		RequestDigest:  controlDigest("request-" + taskUID),
-		TurnID:         "turn-" + taskUID, Backend: "builtin",
-		State: storagev1.HarnessV1AttemptPrepared, RetryClass: storagev1.HarnessV1RetryClassNone,
-	}
-}
-
-func harnessKey(attempt *storagev1.HarnessV1Attempt) storagev1.HarnessV1AttemptKey {
-	return storagev1.HarnessV1AttemptKey{Namespace: attempt.Namespace, TaskUID: attempt.TaskUID, Attempt: attempt.Attempt}
-}
-
-// runControllerEpochMirror observes the mirror through the fences that
-// harness v1 attempt writes check at commit.
+// runControllerEpochMirror checks that the mirror accepts exact replays and
+// only moves forward.
 func runControllerEpochMirror(t *testing.T, newProvider StateFactory) {
 	provider := newProvider(t)
 	ctx := t.Context()
@@ -74,7 +59,7 @@ func runControllerEpochMirror(t *testing.T, newProvider StateFactory) {
 	invalid.RequestDigest = "not-a-digest"
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, invalid), storagev1.ErrValidation)
 
-	ownerA := syncEpoch(t, provider, 1, "owner-a")
+	syncEpoch(t, provider, 1, "owner-a")
 	require.NoError(t, provider.SyncControllerEpochMirror(ctx, mirroredEpoch(1, "owner-a")), "identical replay")
 
 	conflicting := mirroredEpoch(1, "owner-b")
@@ -83,18 +68,11 @@ func runControllerEpochMirror(t *testing.T, newProvider StateFactory) {
 	conflicting.RequestDigest = controlDigest("other request")
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, conflicting), storagev1.ErrConflict)
 
-	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-current", 1), ownerA))
-	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-wrong-holder", 1),
-		controlFence(1, "owner-b")))
-	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-future", 1),
-		controlFence(2, "owner-a")))
-
 	// A mirror may move forward past epochs it never saw, but never rewinds.
-	ownerC := syncEpoch(t, provider, 3, "owner-c")
-	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-stale", 1), ownerA))
-	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-advanced", 1), ownerC))
+	syncEpoch(t, provider, 3, "owner-c")
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, mirroredEpoch(2, "owner-b")), storagev1.ErrConflict)
-	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("uid-after-rewind", 1), ownerC))
+	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, mirroredEpoch(1, "owner-a")), storagev1.ErrConflict)
+	require.NoError(t, provider.SyncControllerEpochMirror(ctx, mirroredEpoch(3, "owner-c")), "the mirror kept epoch 3")
 }
 
 func outboxProjection(id string, payload string, availableAt time.Time) *storagev1.OutboxProjection {
@@ -398,7 +376,7 @@ func runSessionLineage(t *testing.T, newProvider StateFactory) {
 	_, err = provider.GetSessionLineage(ctx, "", "session")
 	require.ErrorIs(t, err, storagev1.ErrValidation)
 	invalid := sessionLineage("tenant", "session", "uid-1")
-	invalid.ContractVersion = "orka.harness.v9"
+	invalid.ContractVersion = "orka.harness.v1"
 	_, err = provider.ProjectSessionLineage(ctx, invalid)
 	require.ErrorIs(t, err, storagev1.ErrValidation)
 
@@ -420,7 +398,6 @@ func runSessionLineage(t *testing.T, newProvider StateFactory) {
 	for name, mutate := range map[string]func(*storagev1.SessionLineage){
 		"session UID":   func(l *storagev1.SessionLineage) { l.SessionUID = "uid-2" },
 		"namespace UID": func(l *storagev1.SessionLineage) { l.NamespaceUID = "ns-uid-other" },
-		"contract":      func(l *storagev1.SessionLineage) { l.ContractVersion = "orka.harness.v1" },
 		"runtime":       func(l *storagev1.SessionLineage) { l.RuntimeIdentity = "claude" },
 		"config":        func(l *storagev1.SessionLineage) { l.ConfigDigest = controlDigest("other config") },
 		"generation":    func(l *storagev1.SessionLineage) { l.LineageGeneration = 2 },
@@ -437,112 +414,6 @@ func runSessionLineage(t *testing.T, newProvider StateFactory) {
 	stored, err = provider.GetSessionLineage(ctx, "tenant", "session")
 	require.NoError(t, err)
 	require.Equal(t, "uid-1", stored.SessionUID)
-}
-
-func runHarnessV1Attempts(t *testing.T, newProvider StateFactory) {
-	provider := newProvider(t)
-	ctx := t.Context()
-	fence := syncEpoch(t, provider, 1, "owner-a")
-	first := harnessAttempt("task-uid", 1)
-
-	invalid := harnessAttempt("task-uid", 1)
-	invalid.State = storagev1.HarnessV1AttemptRunning
-	require.ErrorIs(t, provider.CreateHarnessV1Attempt(ctx, invalid, fence), storagev1.ErrValidation)
-	requireFenced(t, provider.CreateHarnessV1Attempt(ctx, first, controlFence(1, "owner-b")))
-	_, err := provider.GetHarnessV1Attempt(ctx, harnessKey(first))
-	require.ErrorIs(t, err, storagev1.ErrNotFound)
-
-	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, first, fence))
-	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, harnessAttempt("task-uid", 1), fence),
-		"identical create is idempotent")
-	changed := harnessAttempt("task-uid", 1)
-	changed.RequestDigest = controlDigest("different request")
-	require.ErrorIs(t, provider.CreateHarnessV1Attempt(ctx, changed, fence), storagev1.ErrDuplicateMismatch)
-
-	stored, err := provider.GetHarnessV1Attempt(ctx, harnessKey(first))
-	require.NoError(t, err)
-	require.Equal(t, storagev1.HarnessV1AttemptPrepared, stored.State)
-	require.EqualValues(t, 1, stored.Version)
-	require.Equal(t, first.BindingDigest, stored.BindingDigest)
-	require.Equal(t, first.TurnID, stored.TurnID)
-	require.Equal(t, fence.Epoch, stored.ControllerEpoch)
-	_, err = provider.GetHarnessV1Attempt(ctx, storagev1.HarnessV1AttemptKey{Namespace: "other", TaskUID: "task-uid", Attempt: 1})
-	require.ErrorIs(t, err, storagev1.ErrNotFound, "attempts are namespace scoped")
-
-	transition := func(operation string, version int64, from, to storagev1.HarnessV1AttemptState) storagev1.HarnessV1AttemptTransition {
-		return storagev1.HarnessV1AttemptTransition{
-			Key: harnessKey(first), ExpectedVersion: version, ExpectedState: from, TargetState: to,
-			OperationID: operation, OperationDigest: controlDigest(operation), Fence: fence,
-		}
-	}
-	_, err = provider.TransitionHarnessV1Attempt(ctx, transition("skip", 1, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSucceeded))
-	require.ErrorIs(t, err, storagev1.ErrValidation, "illegal transitions are rejected")
-	_, err = provider.TransitionHarnessV1Attempt(ctx, transition("stale-version", 7, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSubmitting))
-	require.ErrorIs(t, err, storagev1.ErrConflict)
-	_, err = provider.TransitionHarnessV1Attempt(ctx, transition("stale-state", 1, storagev1.HarnessV1AttemptRunning, storagev1.HarnessV1AttemptSettling))
-	require.ErrorIs(t, err, storagev1.ErrConflict)
-	staleFence := transition("stale-fence", 1, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSubmitting)
-	staleFence.Fence = controlFence(1, "owner-b")
-	_, err = provider.TransitionHarnessV1Attempt(ctx, staleFence)
-	require.ErrorIs(t, err, storagev1.ErrConflict)
-
-	runtimeSession := "runtime-1"
-	submit := transition("submit", 1, storagev1.HarnessV1AttemptPrepared, storagev1.HarnessV1AttemptSubmitting)
-	submit.Updates.RuntimeSessionID = &runtimeSession
-	submitted, err := provider.TransitionHarnessV1Attempt(ctx, submit)
-	require.NoError(t, err)
-	require.Equal(t, storagev1.HarnessV1AttemptSubmitting, submitted.State)
-	require.EqualValues(t, 2, submitted.Version)
-	require.Equal(t, runtimeSession, submitted.RuntimeSessionID)
-	replayed, err := provider.TransitionHarnessV1Attempt(ctx, submit)
-	require.NoError(t, err, "operation replay is idempotent")
-	require.EqualValues(t, 2, replayed.Version)
-	reused := submit
-	reused.OperationDigest = controlDigest("different submit")
-	_, err = provider.TransitionHarnessV1Attempt(ctx, reused)
-	require.ErrorIs(t, err, storagev1.ErrConflict)
-
-	second := harnessAttempt("task-uid", 2)
-	require.NoError(t, provider.CreateHarnessV1Attempt(ctx, second, fence))
-	listed, err := provider.ListHarnessV1AttemptsByTask(ctx, "tenant", "task-uid")
-	require.NoError(t, err)
-	require.Len(t, listed, 2)
-	require.EqualValues(t, 1, listed[0].Attempt)
-	require.EqualValues(t, 2, listed[1].Attempt)
-	_, err = provider.ListHarnessV1AttemptsByTask(ctx, "", "task-uid")
-	require.ErrorIs(t, err, storagev1.ErrValidation)
-
-	reclaim := storagev1.ReclaimHarnessV1AttemptsRequest{
-		Namespace: "tenant", TaskUID: "task-uid", BindingDigest: first.BindingDigest, Fence: fence,
-	}
-	_, err = provider.ReclaimHarnessV1Attempts(ctx, reclaim)
-	require.ErrorIs(t, err, storagev1.ErrNotReady, "active attempts block reclamation")
-
-	_, err = provider.TransitionHarnessV1Attempt(ctx, transition("accept", 2, storagev1.HarnessV1AttemptSubmitting, storagev1.HarnessV1AttemptAccepted))
-	require.NoError(t, err)
-	_, err = provider.TransitionHarnessV1Attempt(ctx, transition("succeed", 3, storagev1.HarnessV1AttemptAccepted, storagev1.HarnessV1AttemptSucceeded))
-	require.NoError(t, err)
-	_, err = provider.TransitionHarnessV1Attempt(ctx, storagev1.HarnessV1AttemptTransition{
-		Key: harnessKey(second), ExpectedVersion: 1, ExpectedState: storagev1.HarnessV1AttemptPrepared,
-		TargetState: storagev1.HarnessV1AttemptCancelled, OperationID: "cancel-second",
-		OperationDigest: controlDigest("cancel-second"), Fence: fence,
-	})
-	require.NoError(t, err)
-
-	wrongBinding := reclaim
-	wrongBinding.BindingDigest = controlDigest("other binding")
-	_, err = provider.ReclaimHarnessV1Attempts(ctx, wrongBinding)
-	require.ErrorIs(t, err, storagev1.ErrConflict)
-	staleReclaim := reclaim
-	staleReclaim.Fence = controlFence(1, "owner-b")
-	_, err = provider.ReclaimHarnessV1Attempts(ctx, staleReclaim)
-	require.ErrorIs(t, err, storagev1.ErrConflict)
-	deleted, err := provider.ReclaimHarnessV1Attempts(ctx, reclaim)
-	require.NoError(t, err)
-	require.Equal(t, 2, deleted)
-	listed, err = provider.ListHarnessV1AttemptsByTask(ctx, "tenant", "task-uid")
-	require.NoError(t, err)
-	require.Empty(t, listed)
 }
 
 func runTaskJobAuthority(t *testing.T, newProvider StateFactory) {

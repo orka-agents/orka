@@ -576,8 +576,8 @@ func (s *Store) completeSessionLeaseStatus(ctx context.Context, object *corev1al
 }
 
 // completeExistingSessionLineage handles an idempotent retry whose exact
-// coordination Lease is already mirrored. Pre-coexistence controls may have a
-// mirrored Lease but no lineage; appending the lineage remains fenced by that
+// coordination Lease is already mirrored. A control may have a mirrored Lease
+// but no lineage; appending the lineage remains fenced by that
 // exact Lease and one RuntimeSessionControl status CAS.
 func (s *Store) completeExistingSessionLineage(ctx context.Context, object *corev1alpha1.RuntimeSessionControl, control store.SessionControl, request store.AcquireSessionMutationLeaseRequest, fence store.ControllerEpochFence, snapshot epochSnapshot) (*store.SessionControl, error) {
 	lineage, err := resolveSessionLineage(control.Lineage, *request.Lineage, request.AcquiredAt)

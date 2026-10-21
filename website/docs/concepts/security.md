@@ -240,13 +240,13 @@ for every route's permissions, namespace precedence, and grant examples.
 
 ## Namespace scoping
 
-- Every controller requires one non-empty `--watch-namespace` and one static
-  `--controller-mode` (`harness-v1` or `harness-v2`)
+- Every controller requires one non-empty `--watch-namespace` and the fixed
+  `harness-v2` installation identity
 - The watched namespace carries the matching `orka.ai/controller-mode`
   label. The controller claims an unlabeled namespace on first start; a
   mismatched claim fails startup, and a per-release ValidatingAdmissionPolicy
   keeps the claim immutable and lets only that controller add it
-- Same-cluster v1/v2 installations use distinct namespaces, ServiceAccounts,
+- Separate installations use distinct namespaces, ServiceAccounts,
   RBAC, Leases, stores, Services, Secrets, and execution data planes
 - Chat endpoint blocks operations in `kube-system` and `kube-public` namespaces
 - The web dashboard is off by default. When enabled with `--dashboard-enabled`, it is served on the API port, with no separate listener

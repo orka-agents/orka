@@ -16,7 +16,7 @@ definition: a version marker alone cannot establish compatibility.
 
 Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
-process lock and one `BEGIN IMMEDIATE` transaction. The final 166-to-167 transition
+process lock and one `BEGIN IMMEDIATE` transaction. The final 167-to-168 transition
 adds the metadata table and records an adopted identity. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
@@ -63,7 +63,7 @@ Kubernetes authority remains separate from either boundary.
 | `ResultStore`, `PromptResultReceiptStore` | Results and immutable attempt-bound result receipts; state. | Task reconciler, ACP dispatch/recovery, worker API and result API. A result receipt precedes prompt settling. |
 | `SessionStore`, `SessionTurnCommitter`, `FencedSessionWriteStore` | Sessions, transcript messages, token counters and Task/chat ownership locks; state. | Session manager, chat, compatibility APIs and transcript tools. Turn commit groups messages with usage; fenced writes require the exact owner. `GetSessionType` is also consumed through a narrow local reader. |
 | `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Encrypted immutable snapshots keyed by Task UID/digest, metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
-| `SessionLineageStore`, `HarnessV1AttemptStore`, `harness.RuntimeSessionStore` | Lineage claims, harness-v1 attempt receipts and runtime-session history; state. | Session continuity, harness-v1 dispatch/recovery and session APIs. These remain necessary while current upstream supports harness v1. |
+| `SessionLineageStore` | Payload projection of Kubernetes-authoritative Session lineage; state. | Session continuity and dispatch. Projection failure may block dispatch but never changes Kubernetes lineage authority. |
 | `NativeSessionStore`, `NativeSessionImportStore` | Encrypted private native session bytes, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
 | `ConnectorCredentialStore`, `ConnectorConsentStore` | Sealed credentials/consents, grants, retired custody, completion receipts, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. |
 | `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable native capture) atomically; projection activates after Kubernetes finalization. |
@@ -108,12 +108,12 @@ event vocabulary and two provider interfaces:
 
 - `StateProvider` serves `state.v1`: results and prompt result receipts, plans,
   messages, Sessions and transcripts (including turn commits, owner-fenced
-  writes, soul pinning and lineage), harness-v1 attempts, Session cleanup
-  persistence, the controller epoch mirror, outbox persistence, Task Job
-  revocations and task data fences, execution events (including grouped
-  appends), gateway records, security records (including scan Task
-  ingestion), repository monitors, usage, and memories with their proposals
-  (creation, review, archiving and application).
+  writes, soul pinning and lineage), Session cleanup persistence, the
+  controller epoch mirror, outbox persistence, Task Job revocations and task
+  data fences, execution events (including grouped appends), gateway records,
+  security records (including scan Task ingestion), repository monitors,
+  usage, and memories with their proposals (creation, review, archiving and
+  application).
 - `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
 
 `internal/store` keeps aliases for the moved names, so Orka callers keep their
@@ -187,12 +187,11 @@ the observable parts.
   (`WithWriteEnvelope`, `WriteEnvelopeFrom`). Orka does not attach it yet and
   providers must accept writes without one. Operation receipts (step 3) will
   check the dataset, the controller epoch fence and the operation identity at
-  commit time. Only the harness-v1 attempt family and the outbox family take a
-  `ControllerEpochFence` today, as an explicit parameter that stays
-  authoritative for them; the envelope reaches every other write family
-  without another change to each of the contract's roughly 190
-  context-taking methods. Operation-specific preconditions, such as an
-  expected version or message count, stay explicit parameters.
+  commit time. Only the outbox family takes a `ControllerEpochFence` today, as
+  an explicit parameter that stays authoritative for it; the envelope reaches
+  every other write family without another change to each of the contract's
+  roughly 190 context-taking methods. Operation-specific preconditions, such
+  as an expected version or message count, stay explicit parameters.
 - **Provider description.** `Describe(ctx)` on both providers returns
   `ProviderInfo`: the contract version and parts served, the dataset ID and
   its origin (`new`, `adopted` or `migrated`), the provider's schema version,
@@ -259,7 +258,7 @@ the named step.
   once the store is a separate service; operation receipts (step 3) decide
   which side owns each time.
 - **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents`,
-  `ListActiveScanRuns`, `ListHarnessV1AttemptsByTask` and `GetMessages` return
+  `ListActiveScanRuns` and `GetMessages` return
   every match. They gain limits and cursors in the same signature sweep as the
   write envelope.
 - **`state.v1` is a relational contract.** Several methods push joins and
@@ -292,7 +291,6 @@ store implements:
 | `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Snapshot bodies arrive in plaintext; SQLite encrypts them. |
 | `NativeSessionImportStore`, `SessionTurnPersistenceStore` | Native session bytes arrive in plaintext, including the native capture in turn finalization. |
 | `ConnectorCredentialStore`, `ConnectorConsentStore` | Tokens arrive in plaintext; SQLite performs row-bound sealing. |
-| `harness.RuntimeSessionStore` | Its records are defined in `internal/harness`. |
 
 The embedded families live in the same SQLite database as state and artifact
 records, and fenced artifact writes rely on the cleanup generations held with
@@ -371,7 +369,7 @@ sessions and connector custody still happens inside SQLite.
 
 `store/kube.NewComposite` receives precisely `SessionTurnPersistenceStore`,
 `OutboxPersistenceStore` and `SessionCleanupPersistenceStore` through
-`kube.SQLitePersistence`, plus optional harness-v1 receipt reads. It implements
+`kube.SQLitePersistence`. It implements
 the production `DurableControlStore` using Kubernetes resources and Leases.
 
 | Interface | Production owner |
@@ -396,9 +394,8 @@ must not be discarded with the duplicate control implementation.
 the test-only control implementation. [#620](https://github.com/orka-agents/orka/issues/620)
 owns misleading snapshot reference counts: the current SQL count includes both
 duplicate prompt attempts and real persisted SessionTurns. This inventory does
-not redefine those counts. [#568](https://github.com/orka-agents/orka/issues/568)
-and [PR #574](https://github.com/orka-agents/orka/pull/574) own harness-v1 retirement.
-Retain currently supported persistence until that work lands.
+not redefine those counts. [PR #574](https://github.com/orka-agents/orka/pull/574)
+removed harness v1 and its `harness_v1_attempts` and `runtime_sessions` tables.
 
 ## Conditional commands
 
@@ -415,7 +412,7 @@ protocol, including competing callers.
 | Operation | Protocol |
 | --- | --- |
 | Memory proposal application (`ApplyMemoryProposal`, `AuthorizeExistingMemory`) | `ResolveMemoryProposalApplication` returns the memory ID the application would return (the applied memory, or one already created from the proposal) and the proposal status and applied ID it read, but no memory content. Orka authorizes that exact memory for an external caller; a new memory is covered by the caller's create permission, and Orka builds and redacts it from the stored proposal. `CommitMemoryProposalApplication` applies only if the proposal still resolves to the same target. Competing applications create one memory: the losers' retries resolve, authorize and return the winner's memory. |
-| Task data access (`WithAuthorizedTaskDataAccess`, `WithTaskDataAccess`, which replace the task-data transaction methods) | `ResolveTaskDataFence` returns the namespace or Task cleanup generation. A Task is registered (`RegisterTaskDataFence`) only after a first successful authorization, and the registration is released when the access it was created for fails. Orka authorizes against live Kubernetes state, then sends the fence, with the authorized Job identities, in the context of each data call. A harness-v1 artifact upload also binds the attempt it verified, so its write is refused once that attempt ends or a newer one starts. Trusted controller access (`WithTaskDataAccess`) registers a Task only for the duration of the access, so it leaves nothing behind for a Task that may already be finalized. Every fence-checking method listed on `TaskDataFenceStore` refuses a moved generation with `ErrTaskDataCleanupChanged` or a revoked Job with `ErrTaskJobRevoked` in the same transaction as its own reads and writes. The calls of one access are separate operations: each either completes before an invalidating cleanup, which then removes its effect, or is refused, and callers retry with fresh authorization. A refused call that a caller turned into its own error is still reported as the fence error. A Kubernetes write made inside an access, such as a parent's request to cancel a child, is checked against the fence before the access runs but is not serialized with a later cleanup or revocation; it keeps its own UID and resourceVersion preconditions. Evidence that must not be recorded in part, such as a recovered approval decision and its execution outcome, uses one grouped append (`AppendExecutionEventsIfAbsent`). |
+| Task data access (`WithAuthorizedTaskDataAccess`, `WithTaskDataAccess`, which replace the task-data transaction methods) | `ResolveTaskDataFence` returns the namespace or Task cleanup generation. A Task is registered (`RegisterTaskDataFence`) only after a first successful authorization, and the registration is released when the access it was created for fails. Orka authorizes against live Kubernetes state, then sends the fence, with the authorized Job identities, in the context of each data call. Trusted controller access (`WithTaskDataAccess`) registers a Task only for the duration of the access, so it leaves nothing behind for a Task that may already be finalized. Every fence-checking method listed on `TaskDataFenceStore` refuses a moved generation with `ErrTaskDataCleanupChanged` or a revoked Job with `ErrTaskJobRevoked` in the same transaction as its own reads and writes. The calls of one access are separate operations: each either completes before an invalidating cleanup, which then removes its effect, or is refused, and callers retry with fresh authorization. A refused call that a caller turned into its own error is still reported as the fence error. A Kubernetes write made inside an access, such as a parent's request to cancel a child, is checked against the fence before the access runs but is not serialized with a later cleanup or revocation; it keeps its own UID and resourceVersion preconditions. Evidence that must not be recorded in part, such as a recovered approval decision and its execution outcome, uses one grouped append (`AppendExecutionEventsIfAbsent`). |
 | Scan Task ingestion (`SecurityStore.ApplyScanTaskIngestion`) | Orka reads the receipt and the run, validates the live RepositoryScan identity before applying and again before committing, and runs the application logic against a store that records its reads, with the results it saw, and its writes. A read of records an earlier recorded write may have changed is answered by `PreviewScanTaskIngestion`, which runs the steps so far with the provider's own write semantics and keeps nothing. `CommitScanTaskIngestion` applies the writes, the run update and the receipt in one transaction only while the stored run equals the run Orka read and every recorded read still returns what Orka saw, compared field by field with an empty list equal to an absent one and times compared as instants (`ScanRunsEqual`, `ScanIngestionReadsEqual`); a step's provider-assigned times come from the commit's time, so a preview and its commit agree. A changed run or read returns `ErrPreconditionFailed` with nothing changed, and the reconciler repeats the ingestion from fresh state. |
 
 Two callback-shaped interfaces stay in Orka because they are not storage
