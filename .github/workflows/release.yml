@@ -265,8 +265,7 @@ jobs:
       contents: read
       packages: write
     strategy:
-      # Application releases publish the default harness-v2 stack and
-      # the digest-pinned harness-v1 compatibility wrapper.
+      # Application releases publish the harness-v2 stack and native workers.
       fail-fast: false
       matrix:
         include:
@@ -281,10 +280,6 @@ jobs:
           - image: general-worker
             image_suffix: "/general-worker"
             dockerfile: workers/general/Dockerfile
-            context: .
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            dockerfile: workers/harness/Dockerfile
             context: .
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
@@ -406,14 +401,6 @@ jobs:
             image_suffix: "/general-worker"
             platform: linux/arm64
             platform_slug: linux-arm64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            platform: linux/amd64
-            platform_slug: linux-amd64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            platform: linux/arm64
-            platform_slug: linux-arm64
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
             platform: linux/amd64
@@ -511,8 +498,6 @@ jobs:
             image_suffix: "/ai-worker"
           - image: general-worker
             image_suffix: "/general-worker"
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
           - image: acp-claude-runtime

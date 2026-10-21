@@ -212,7 +212,7 @@ func newACPQueuePlanningFailureFixture(t *testing.T) *acpQueuePlanningFailureFix
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: runtimeImage},
 	}
 	return &acpQueuePlanningFailureFixture{

@@ -7,14 +7,14 @@ description: "Back up Orka, update its Kubernetes resource definitions, and chec
 
 Orka supports in-place SQLite upgrades from the exact layouts listed below.
 This is a narrow database compatibility guarantee, not support for every older
-release, controller mode, or deployment topology. Follow
-[Install Orka](installation.md) for new installations.
+release or deployment topology. This procedure covers harness v2 installations
+only. Follow [Install Orka](installation.md) for new installations.
 
 ## What release checks cover {#release-checks}
 
 The release checks install the chart after creating CRDs and internal Secrets
 separately. They restart the controller using the same data and encryption key,
-confirm that tasks still work, and check that Helm blocks a change to
+confirm that tasks still work, and check that Helm rejects an unsupported
 `controller.mode`. Results are in the release's `acceptance.json`.
 
 These checks do not test Helm's automatic CRD and Secret creation.
@@ -36,10 +36,48 @@ Object counts alone do not establish compatibility.
 
 | Source layout | Representative revision | Transition |
 | --- | --- | --- |
-| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes. |
-| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes. |
-| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables. |
-| 166 objects (current) | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Validate only; no migration or automatic backup. |
+| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
+| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
+| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables and add dataset metadata. |
+| 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata. |
+| 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata. |
+| 159 objects (current), schema version 1 | Dataset identity layout | Validate schema, version and identity; no migration or automatic backup. |
+
+A harness v2 store never writes the harness v1 tables or harness v1 Session
+lineages. If either table holds records, or a Session lineage uses
+`orka.harness.v1`, the upgrade stops before changing the schema and reports
+`harness v1 ... records`; that store belongs to an unsupported harness v1
+installation.
+
+The five historical source layouts have SQLite `user_version = 0`. A nonzero
+marker on an otherwise historical layout is refused rather than adopted.
+
+### Dataset identity and key bootstrap
+
+The current database records a stable dataset UUID, whether it was freshly
+created or adopted during upgrade, and whether key bootstrap completed.
+`PRAGMA user_version = 1` records this metadata layout; the controller also checks
+every actual schema definition. Unknown versions and missing or malformed
+established identity are refused without regenerating metadata or replacing data.
+
+The controller acquires the SQLite process lock before inspecting this history
+or loading the key. It may populate an empty managed snapshot-key Secret only
+for a new, unfinished dataset containing no application records. It never mints
+a key for an adopted dataset, even an empty one, or after bootstrap completed.
+Restore a missing key for such a dataset from backup. Key-file mode always
+requires an operator-supplied key.
+
+An interrupted first start can resume with the same dataset identity. A key
+already committed to the Secret is reused; bootstrap completes only after the
+key authenticates retained execution snapshots, native sessions and connector
+custody under the existing retention and consent-expiry rules. Key-load/authentication failure releases the database lock and
+stops startup before consumers run. Deleting ordinary records does not reset the
+bootstrap history.
+
+Dataset identity is stored inside the database. It does not detect replacement
+of the entire database, restoration of older history, or establish an independent
+installation binding. Preserve the volume, Kubernetes state and key together;
+this metadata is not a backup/restore protocol.
 
 ### Unsupported intermediate connector layout
 
@@ -291,11 +329,14 @@ existing tasks and data depend on them:
 
 | Value | Why it is fixed |
 | --- | --- |
-| `controller.mode` | Determines how this installation runs coding agents. |
+| `controller.mode` | The `harness-v2` execution contract is the installation's identity. |
 | `controller.watchNamespace` | Existing Tasks live there. |
 | `controller.agentExecutionSnapshot.existingSecret` and `.key` | Saved agent configuration needs the original encryption key. A generated key cannot be swapped for your own later, or the reverse. |
 | `controller.acpRuntime.namespace` | Running pools live there. |
 | The release fullname | Every owned resource is named from it. |
+
+To change one, install a new release alongside the old one and migrate producers across.
+See [installation ownership](harness-modes.md).
 
 The snapshot key also seals linked accounts (connectors). When the controller
 starts, it checks that its key opens every retained execution snapshot and
@@ -334,3 +375,10 @@ readable. Keeping them does not preserve the data stored in volumes.
 Deleting a CRD also deletes every resource of that type across the cluster.
 Keep CRDs until their data is no longer needed or has been backed up.
 :::
+
+## Unsupported installations
+
+The current controller only supports harness v2. Older execution protocols have
+no in-place upgrade, automatic Task or Session conversion, or database backfill.
+A database holding harness v1 records is refused at startup. Use a fresh
+installation with the current schema and images.

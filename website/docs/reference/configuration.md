@@ -21,7 +21,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
 | `controller.image.tag` | release version | Controller image tag. |
 | `controller.image.digest` | `""` | Optional SHA256 digest; takes precedence over `tag`. |
-| `controller.mode` | `harness-v2` | Static agent execution mode: `harness-v1` or `harness-v2`. Select v1 explicitly for a compatibility release; a release never serves both or changes mode in place. |
+| `controller.mode` | `harness-v2` | Fixed agent execution protocol identity. Only `harness-v2` is supported. |
 | `controller.watchNamespace` | Helm release namespace | Must match the release namespace, labeled `orka.ai/controller-mode` with the matching mode. |
 | `controller.agentExecutionSnapshot.existingSecret` | `""` | Your own snapshot encryption Secret. Empty renders an empty `<release>-agent-execution-snapshot` that the controller fills on first start. Immutable after install. See [Snapshot encryption key](#snapshot-encryption-key). |
 | `controller.agentExecutionSnapshot.key` | `key` | Item inside that Secret holding 32 raw bytes or their base64 encoding. Immutable after install. |
@@ -46,10 +46,6 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.acpRuntime.toolboxes.imagePullSecrets` | `[]` | Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound. Never mounted into containers. |
 | `controller.acpRuntime.toolboxes.nodeSelector` | `{}` | Node selector merged into runtime Pods that bind toolboxes. |
 | `controller.acpRuntime.toolboxes.mountMethod` | `copy` | `copy` (init-container copier, every Kubernetes version) or `imageVolume` (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+). |
-| `harnessV1.image.digest` | `""` | Required immutable wrapper image digest for a `harness-v1` release. |
-| `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer Secret, separate from its TLS Secret. Never share it with v2. |
-| `harnessV1.tls.existingSecret` | `""` | Dedicated v1 wrapper Secret containing `tls.crt`, `tls.key`, and `ca.crt`. |
-| `harnessV1.tls.rolloutNonce` | `""` | Non-secret revision marker for certificate renewal without changing the TLS Secret name. |
 | `providerProxy.enabled` | `false` | Enable the authenticated proxy when connecting built-in coding agents to your model gateway. Installation and AI-worker tasks do not require it. |
 | `providerProxy.upstreamBaseURL` | `""` | Your gateway's HTTP(S) endpoint. Required when the proxy is enabled. Credentials, queries, and fragments are forbidden in the URL. |
 | `providerProxy.egress` | `[]` | NetworkPolicy egress rules allowing the proxy to reach your gateway. Leave empty when `upstreamBaseURL` names an in-cluster Service; the chart then derives the rule from that Service at install time. Required for external gateways, named target ports, or offline renders. DNS access is always added. |
@@ -117,16 +113,22 @@ to disable that provider.
 The controller encrypts agent execution snapshots at rest with an AES-256 key
 mounted from a Secret. By default the chart renders an empty Secret named
 `<release>-agent-execution-snapshot` and the controller mints 32 random bytes
-into it on its first start, then reuses them on every later start. The chart
-never renders key material, so Helm release history and dry-run output contain
-no secrets, and Helm leaves the controller-written data alone on upgrade. The
-Secret is kept on `helm uninstall` so a restored data volume can still be
-decrypted. Back it up with the data volume.
+into it when it creates a new SQLite dataset, then reuses them on every later
+start. The chart never renders key material, so Helm release history and
+dry-run output contain no secrets, and Helm leaves the controller-written data
+alone on upgrade. The Secret is kept on `helm uninstall` so a restored data
+volume can still be decrypted. Back it up with the data volume.
 
-If the controller finds its SQLite store already present but the Secret empty,
-the key was lost. It refuses to start rather than mint a new key that could not
-read the existing records. Restore the Secret from backup, or delete the data
-volume to start over.
+The controller decides whether it may mint a key from the dataset history recorded
+inside the SQLite database, not from whether the database file exists. It mints a
+key only for a new dataset that has never completed key bootstrap and holds no
+records. A dataset that completed bootstrap, or was adopted from an older layout
+during an upgrade, needs its existing key even if every record has since been
+deleted. If the Secret is empty for such a dataset, the key was lost, and the
+controller refuses to start rather than mint a new key that could not read the
+existing records. Restore the Secret from backup, or delete the data volume to
+start over. See
+[Dataset identity and key bootstrap](../operations/upgrading.md#dataset-identity-and-key-bootstrap).
 
 To bring your own key, create the Secret before installing and set
 `controller.agentExecutionSnapshot.existingSecret`. The item must hold exactly
@@ -223,21 +225,6 @@ time.
 
 The Publisher, SCM proxy, and controller clients load these credentials at process startup. Update the Secret and bump its corresponding nonce in the same Helm upgrade: use `publisher.auth.rolloutNonce` for the publisher-auth Secret, and `scmEgressProxy.auth.rolloutNonce` for the SCM proxy-auth Secret. The publisher nonce is applied only to controller and Publisher Pod templates; the SCM nonce is applied only to Publisher and SCM proxy Pod templates. Nonces are safe revision strings, not Secret values. Coordinated rotation can briefly fail closed while Pods roll but prevents stale or split credential generations from persisting.
 
-### Harness v1 certificate rotation
-
-The harness-v1 wrapper keeps bearer and TLS credentials in separate Secrets.
-`harnessV1.auth.existingSecret` contains only the bearer token and is immutable
-while the wrapper Deployment exists. `harnessV1.tls.existingSecret` contains
-`tls.crt`, `tls.key`, and `ca.crt`.
-
-Changing the TLS Secret name triggers a drained wrapper restart. For certificate
-renewal under the same name, update the TLS Secret and bump
-`harnessV1.tls.rolloutNonce` in the same Helm upgrade. The hook drains the live
-wrapper before restarting the wrapper and controller.
-
-Keep the updated `ca.crt` able to verify the certificate served during the drain.
-Alternatively, use a new TLS Secret name so the hook can mount the prior CA.
-
 ### Canonical Kustomize overlay
 
 Direct Kustomize deployments must use:
@@ -294,9 +281,9 @@ When `ORKA_PUBLISHER_PUBLISH_TIMEOUT` is raised above the default on the Publish
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
 
-Harness v1 and v2 use separate releases, endpoints, watched namespaces, RBAC,
-Leases, stores, and data planes. They do not migrate Tasks or continue Sessions
-across modes. See [Operating harness v1 and v2 on one cluster](../operations/harness-modes.md).
+Each installation owns a separate watched namespace, runtime namespace, endpoint,
+RBAC, Lease, database, and credentials. See
+[installation ownership](../operations/harness-modes.md).
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:
@@ -373,7 +360,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--gateway-claim-lease` | `1m` | Event and delivery claim lease |
 | `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
 | `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
-| `--controller-mode` / `ORKA_CONTROLLER_MODE` | required | Static controller mode: `harness-v1` or `harness-v2`. `dual`, `auto`, and drain modes are rejected. |
+| `--controller-mode` / `ORKA_CONTROLLER_MODE` | `harness-v2` | Fixed `harness-v2` protocol identity. Other values are rejected. |
 | `--watch-namespace` | required | One non-empty watched namespace. Its `orka.ai/controller-mode` label must match; the controller adds it when absent. |
 | `--claim-namespace-mode` | `true` | Label an unlabeled watched namespace with the controller's mode on first start. Set `false` to require an operator-applied label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
@@ -714,7 +701,6 @@ Before upgrading from a controller that does not record `Task.status.jobUID`, pa
 
 The new authorization checks require the controller-recorded Job UID. They reject workers whose Tasks have only `status.jobName`, including otherwise valid Pods from the previous controller. Orka does not backfill UIDs by looking up Job names: namespace Job creators can replace those Jobs. Do not patch missing UIDs from a name lookup; finish the attempt before upgrading or explicitly submit a new Task after the upgrade.
 
-Built-in harness v1 artifact uploads also require the wrapper's Kubernetes workload identity. Configure the bound wrapper endpoint as a Kubernetes Service in the auth Secret's namespace. The uploading Pod must belong to a live ReplicaSet and Deployment selected by that Service. A worker Pod with a copy of the wrapper bearer does not receive artifact access.
 
 ## Prometheus metrics
 
@@ -746,6 +732,7 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_acp_runtime_pool_queued_tasks` | Gauge | `namespace`, `runtime_pool` | Durable unsatisfied Task demand assigned to the pool |
 | `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
 | `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
+| `orka_approval_decision_duration_seconds` | Histogram | `outcome`, `path` | Seconds from approval request to committed decision; see [Observability](../guides/observability.md#approval-decision-duration) |
 
 All context-token metric labels use low-cardinality values only. See [Transaction tokens](../concepts/transaction-tokens.md) for the authentication they measure.
 

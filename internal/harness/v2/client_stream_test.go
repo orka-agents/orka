@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -16,18 +15,19 @@ import (
 func TestClientPromptNDJSONStreamCompletesWithoutReconnect(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	request := clientTestStartPromptRequest(t, now, "stream-success-op")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ctx, handler := clientTestAfterRequestWritten(t, func(w http.ResponseWriter, r *http.Request) {
 		var decoded StartPromptRequest
 		clientTestDecodeMutation(t, r, &decoded, true)
 		writeClientTestNDJSON(w,
 			clientTestAcceptedEvent(request, now.Add(time.Millisecond)),
 			clientTestCompletedEvent(request, now.Add(2*time.Millisecond)),
 		)
-	}))
+	})
+	server := httptest.NewServer(handler)
 	defer server.Close()
 
 	var eventTypes []EventType
-	summary, err := clientTestClient(t, server.URL).StreamPrompt(context.Background(), "runtime-session-1", request, func(event Event) error {
+	summary, err := clientTestClient(t, server.URL).StreamPrompt(ctx, "runtime-session-1", request, func(event Event) error {
 		eventTypes = append(eventTypes, event.Type)
 		return nil
 	})
@@ -222,6 +222,26 @@ func TestClientPromptStreamContextCancellation(t *testing.T) {
 	}
 }
 
+// clientTestAfterRequestWritten holds next until the client has recorded its
+// WroteRequest trace hook. net/http can return a response before that deferred
+// hook runs, leaving the evidence request_write_ambiguous. httptrace calls the
+// client's hook before the one this context adds, so releasing on ours is enough.
+func clientTestAfterRequestWritten(t *testing.T, next http.HandlerFunc) (context.Context, http.Handler) {
+	t.Helper()
+	written := make(chan struct{})
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { close(written) },
+	})
+	return ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-written:
+		case <-time.After(5 * time.Second):
+			t.Error("client did not report the request written")
+		}
+		next(w, r)
+	})
+}
+
 func clientTestSmallStreamLimits() ProtocolLimits {
 	limits := DefaultProtocolLimits()
 	limits.MaxEventLineBytes = 128
@@ -245,33 +265,16 @@ func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Millisecond)
 			request := clientTestStartPromptRequest(t, now, "idle-resume-rejected-op")
-			// net/http reports WroteRequest only after the body reaches the
-			// socket, so an immediate rejection can arrive first. Answer only
-			// after that report (httptrace runs the client's own hook before
-			// this outer one) to observe the evidence of a completed write.
-			requestWritten := make(chan struct{})
-			var reportWritten sync.Once
-			ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
-				WroteRequest: func(info httptrace.WroteRequestInfo) {
-					if info.Err == nil {
-						reportWritten.Do(func() { close(requestWritten) })
-					}
-				},
-			})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, handler := clientTestAfterRequestWritten(t, func(w http.ResponseWriter, r *http.Request) {
 				var decoded StartPromptRequest
 				clientTestDecodeMutation(t, r, &decoded, true)
-				select {
-				case <-requestWritten:
-				case <-time.After(10 * time.Second):
-					t.Error("client never reported the request as written")
-				}
 				writeClientTestJSON(w, test.status, ErrorResponse{
 					Protocol: ProtocolVersion, Code: ErrorCodePromptNotAccepted,
 					Message:   "idle adapter recovery failed before prompt submission",
 					Retryable: test.retryable, Classification: test.class,
 				})
-			}))
+			})
+			server := httptest.NewServer(handler)
 			defer server.Close()
 			emitted := false
 			summary, err := clientTestClient(t, server.URL).StreamPrompt(ctx, "runtime-session-1", request, func(Event) error {
