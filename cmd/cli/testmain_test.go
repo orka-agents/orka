@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -38,7 +39,12 @@ func runWithoutAmbientCluster(m *testing.M) int {
 	// client-go skips a missing KUBECONFIG file instead of falling back to
 	// ~/.kube/config, and without the service variables it cannot fall back to
 	// in-cluster configuration either, so discovery finds no cluster.
-	for key, value := range map[string]string{"HOME": dir, "KUBECONFIG": filepath.Join(dir, "missing-kubeconfig")} {
+	isolated := map[string]string{"HOME": dir, "KUBECONFIG": filepath.Join(dir, "missing-kubeconfig")}
+	if runtime.GOOS == "windows" {
+		// os.UserHomeDir reads USERPROFILE rather than HOME on Windows.
+		isolated["USERPROFILE"] = dir
+	}
+	for key, value := range isolated {
 		if err := os.Setenv(key, value); err != nil {
 			fmt.Fprintln(os.Stderr, "isolate CLI test environment:", err)
 			return 1
