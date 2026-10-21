@@ -140,8 +140,7 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 	return &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
 		AgentExecutionSnapshots: snapshotStore,
-		ACPRuntimeEnabled:       true, ACPRuntimeNamespace: "orka-runtimes",
-		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
+		ACPRuntimeImages:        ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}, snapshotStore
 }
 

@@ -141,7 +141,7 @@ func (p ACPToolboxPolicy) ValidateAgentToolboxes(agent *corev1alpha1.Agent) erro
 		return fmt.Errorf("runtime.toolboxes require a built-in runtime.type")
 	}
 	if contract := agent.BuiltInContractVersion(); contract != "" && contract != corev1alpha1.AgentRuntimeContractHarnessV2 {
-		return fmt.Errorf("runtime.toolboxes require the orka.harness.v2 contract; harness v1 runtimes cannot mount toolboxes")
+		return fmt.Errorf("runtime.toolboxes require the orka.harness.v2 contract")
 	}
 	converted := RuntimeToolboxesFromAgent(toolboxes)
 	if err := harnessv2.ValidateRuntimeToolboxes(converted); err != nil {
@@ -195,15 +195,13 @@ func ToolboxImageAllowed(image string, allowed []string) bool {
 // toolboxes on execution paths that cannot host them. It repeats the
 // admission checks so a Task never reaches a RuntimePool with toolboxes it
 // cannot bind, even if the Agent was admitted under a different policy.
-func (p ACPToolboxPolicy) agentToolboxPlanRejection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool, harnessV1 bool) string {
+func (p ACPToolboxPolicy) agentToolboxPlanRejection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool) string {
 	if len(agentToolboxes(agent)) == 0 {
 		return ""
 	}
 	switch {
 	case external:
 		return "runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
-	case harnessV1:
-		return "runtime.toolboxes require the orka.harness.v2 contract; harness v1 runtimes cannot mount toolboxes"
 	case taskRequestsExecutionWorkspace(task):
 		return "runtime.toolboxes are not supported with Task.spec.execution.workspace; execution workspaces (including Agent Sandbox and Substrate) cannot mount toolboxes yet" //nolint:staticcheck // Field path begins the user-facing validation message.
 	}

@@ -106,6 +106,7 @@ func main() {
 	}
 }
 
+//nolint:gocyclo // Worker startup wires each optional subsystem in order.
 func run(transcriptPath string) (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -1311,6 +1312,7 @@ func loadPlanContext(ctx context.Context) (string, error) {
 		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument), nil
 }
 
+//nolint:gocyclo // The agent loop keeps tool, approval, and overflow handling in one ordered pass.
 func executeAgentLoopWithEvents(
 	ctx context.Context,
 	provider llm.Provider,

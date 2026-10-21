@@ -14,7 +14,7 @@ definition: a version marker alone cannot establish compatibility.
 
 Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
-process lock and one `BEGIN IMMEDIATE` transaction. The final 166-to-167 transition
+process lock and one `BEGIN IMMEDIATE` transaction. The final 167-to-168 transition
 adds the metadata table and records an adopted identity. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
@@ -59,7 +59,7 @@ authority remains separate from either boundary.
 | `ResultStore`, `PromptResultReceiptStore` | Results and immutable attempt-bound result receipts; state. | Task reconciler, ACP dispatch/recovery, worker API and result API. A result receipt precedes prompt settling. |
 | `SessionStore`, `SessionTurnCommitter`, `FencedSessionWriteStore` | Sessions, transcript messages, token counters and Task/chat ownership locks; state. | Session manager, chat, compatibility APIs and transcript tools. Turn commit groups messages with usage; fenced writes require the exact owner. `GetSessionType` is also consumed through a narrow local reader. |
 | `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Encrypted immutable snapshots keyed by Task UID/digest, metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
-| `SessionLineageStore`, `HarnessV1AttemptStore`, `harness.RuntimeSessionStore` | Lineage claims, harness-v1 attempt receipts and runtime-session history; state. | Session continuity, harness-v1 dispatch/recovery and session APIs. These remain necessary while current upstream supports harness v1. |
+| `SessionLineageStore` | Payload projection of Kubernetes-authoritative Session lineage; state. | Session continuity and dispatch. Projection failure may block dispatch but never changes Kubernetes lineage authority. |
 | `NativeSessionStore`, `NativeSessionImportStore` | Encrypted private native session bytes, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
 | `ConnectorCredentialStore`, `ConnectorConsentStore` | Sealed credentials/consents, grants, retired custody, completion receipts, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. |
 | `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable native capture) atomically; projection activates after Kubernetes finalization. |
@@ -100,7 +100,7 @@ those resources a database transaction.
 
 `store/kube.NewComposite` receives precisely `SessionTurnPersistenceStore`,
 `OutboxPersistenceStore` and `SessionCleanupPersistenceStore` through
-`kube.SQLitePersistence`, plus optional harness-v1 receipt reads. It implements
+`kube.SQLitePersistence`. It implements
 the production `DurableControlStore` using Kubernetes resources and Leases.
 
 | Interface | Production owner |
@@ -125,9 +125,8 @@ must not be discarded with the duplicate control implementation.
 the test-only control implementation. [#620](https://github.com/orka-agents/orka/issues/620)
 owns misleading snapshot reference counts: the current SQL count includes both
 duplicate prompt attempts and real persisted SessionTurns. This inventory does
-not redefine those counts. [#568](https://github.com/orka-agents/orka/issues/568)
-and [PR #574](https://github.com/orka-agents/orka/pull/574) own harness-v1 retirement.
-Retain currently supported persistence until that work lands.
+not redefine those counts. [PR #574](https://github.com/orka-agents/orka/pull/574)
+removed harness v1 and its `harness_v1_attempts` and `runtime_sessions` tables.
 
 ## Callback and transaction inventory
 

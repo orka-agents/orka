@@ -82,7 +82,7 @@ func TestTaskJobRevocationCleanupFencesAccess(t *testing.T) {
 }
 
 func TestTaskFinalizationReclaimsGenerationRows(t *testing.T) {
-	s := newCoexistenceTestStore(t)
+	s := newAgentExecutionTestStore(t)
 	allow := func(context.Context) error { return nil }
 	require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "active", allow, allow))
 	for index := range 25 {
@@ -102,7 +102,7 @@ func TestTaskGenerationReclamationDoesNotReuseAnAuthorization(t *testing.T) {
 	for _, registered := range []bool{false, true} {
 		for _, reused := range []bool{false, true} {
 			t.Run("registered="+strconv.FormatBool(registered)+"/reused="+strconv.FormatBool(reused), func(t *testing.T) {
-				s := newCoexistenceTestStore(t)
+				s := newAgentExecutionTestStore(t)
 				allow := func(context.Context) error { return nil }
 				if registered {
 					require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "task", allow, allow))

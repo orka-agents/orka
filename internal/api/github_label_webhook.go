@@ -595,24 +595,10 @@ func dnsNamePart(value string) string {
 	return value
 }
 
-func githubSameRepository(a, b githubWebhookRepository) bool {
-	return a.FullName != "" && b.FullName != "" && strings.EqualFold(a.FullName, b.FullName)
-}
-
 func githubReplayKeySuffix(replayKey string) string {
 	replayKey = strings.TrimSpace(replayKey)
 	if len(replayKey) >= 12 {
 		return replayKey[:12]
 	}
 	return hex.EncodeToString(githubHash([]byte(replayKey)))[:12]
-}
-
-func repoURL(repo githubWebhookRepository) string {
-	if repo.CloneURL != "" {
-		return repo.CloneURL
-	}
-	if repo.HTMLURL != "" {
-		return strings.TrimSuffix(repo.HTMLURL, ".git") + ".git"
-	}
-	return ""
 }

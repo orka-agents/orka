@@ -60,7 +60,7 @@ func acpTaskUsesRestoredSourceIdentity(task *corev1alpha1.Task) bool {
 	default:
 		return false
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Task.UID == "" || binding.Task.UID == task.UID ||
 		task.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpRestoreIdentityChangedReason) {
 		return false
@@ -84,7 +84,7 @@ func acpTaskHasUnvalidatedSourceIdentity(task *corev1alpha1.Task) bool {
 }
 
 func acpTaskHasRestoredSourceIdentityBinding(task *corev1alpha1.Task) bool {
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	return binding != nil && binding.Task.UID != "" && binding.Task.UID != task.UID
 }
 
@@ -209,7 +209,7 @@ func (d *ACPDispatcher) recoverRestoredTaskIncarnation(
 	if task == nil {
 		return false, nil
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil {
 		return false, nil
 	}
@@ -697,6 +697,7 @@ func (d *ACPDispatcher) readRecoverableTask(
 	return latest, true, nil
 }
 
+//nolint:gocyclo // Stale-task recovery handles each persisted lifecycle phase under one fence.
 func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
 	if task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
 		return errNativeSessionInstallUnresolved
@@ -1290,7 +1291,7 @@ func taskHasAgentRuntimeDrainCleanupProofForUID(task *corev1alpha1.Task, taskUID
 	if task == nil || task.Status.Execution == nil {
 		return false
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	execution := task.Status.Execution
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || execution.AgentRuntimeName != binding.RuntimeRef.Name ||
@@ -1350,7 +1351,7 @@ func persistTaskScopedRuntimeSessionCleanupReceipt(
 			return fmt.Errorf("%w: Task execution identity changed during RuntimeSession cleanup receipt", store.ErrConflict)
 		}
 		if taskUID != latest.UID {
-			binding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+			binding := executionBinding(latest)
 			if binding == nil || binding.Task.UID != taskUID {
 				return fmt.Errorf("%w: restored Task source identity changed during RuntimeSession cleanup receipt", store.ErrConflict)
 			}
@@ -1383,7 +1384,7 @@ func persistAgentRuntimeDrainCleanupProof(
 		if err := kubeClient.Get(ctx, key, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
-		binding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+		binding := executionBinding(latest)
 		if latest.Status.Execution == nil || binding == nil || binding.BindingDigest != expectedBindingDigest ||
 			acpTaskControlUID(latest) != taskUID ||
 			binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint || binding.RuntimeRef == nil ||
@@ -1437,7 +1438,7 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 	if d.Snapshots == nil {
 		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("immutable execution snapshot store is required for external RuntimeSession recovery")
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || binding.Task.UID != taskUID || task.Status.Execution == nil {
 		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("external RuntimeSession recovery binding is incomplete")

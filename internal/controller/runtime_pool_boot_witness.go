@@ -607,7 +607,7 @@ func runtimePoolPreparedContainerChanged(w runtimePoolBootWitness, pod *corev1.P
 // eager Task receipts. It never compares old proof with the replacement pool.
 func runtimePoolTaskWitnessMatches(task *corev1alpha1.Task, taskUID types.UID, w runtimePoolBootWitness) error {
 	e := task.Status.Execution
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if e == nil || binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool || binding.Task.UID != taskUID ||
 		task.Namespace != w.PoolNamespace || e.RuntimePoolName != w.PoolName || e.RuntimePoolUID != string(w.PoolUID) ||
 		e.AgentRuntimeName != "" || e.AgentRuntimeUID != "" || e.RuntimeInstanceID != string(w.Fence.RuntimeInstanceID) ||

@@ -352,6 +352,28 @@ func TestPromptLeaseRenewalRejectsStaleAndUnboundedExtension(t *testing.T) {
 	}
 }
 
+func TestPromptLeaseRenewalIsBoundedByTheLeaseItRenews(t *testing.T) {
+	current := PromptLease{Generation: 4, IssuedAt: testNow, ExpiresAt: testNow.Add(30 * time.Second)}
+	issued := testNow.Add(10 * time.Second)
+	proposed := PromptLease{Generation: 5, IssuedAt: issued, ExpiresAt: issued.Add(45 * time.Second)}
+	// A replayed or slow renewal arrives seconds after it was issued.
+	if err := ValidatePromptLeaseRenewal(current, proposed, 4, issued.Add(15*time.Second), time.Minute); err != nil {
+		t.Fatalf("late renewal error = %v", err)
+	}
+	early := proposed
+	early.IssuedAt = testNow.Add(-time.Second)
+	if err := ValidatePromptLeaseRenewal(current, early, 4, issued, time.Minute); err == nil || !strings.Contains(err.Error(), "before the lease") {
+		t.Fatalf("renewal issued before the current lease error = %v", err)
+	}
+	if err := ValidatePromptLeaseRenewal(current, proposed, 4, issued.Add(-2*time.Second), time.Minute); err == nil || !strings.Contains(err.Error(), "clock skew") {
+		t.Fatalf("future-issued renewal error = %v", err)
+	}
+	// Arriving late never lengthens the lease beyond its own duration.
+	if err := ValidatePromptLeaseRenewal(current, proposed, 4, issued.Add(46*time.Second), time.Minute); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired renewal error = %v", err)
+	}
+}
+
 func TestPermissionDecisionAndLateCancellationSemantics(t *testing.T) {
 	if err := (PermissionDecision{Outcome: PermissionDecisionCancelled, OptionID: "allow"}).Validate(); err == nil {
 		t.Fatal("cancelled permission decision selected an option")

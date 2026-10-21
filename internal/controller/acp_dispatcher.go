@@ -2899,6 +2899,7 @@ func waitForRuntimeSessionAdmissionState(
 	}
 }
 
+//nolint:gocyclo // Planned-session reconciliation keeps each fenced lifecycle branch in order.
 func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -6422,6 +6423,7 @@ func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *co
 	return false, d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeSessionStartFailed", runtimeSessionStartFailureMessage(err))
 }
 
+//nolint:gocyclo // Each prompt-stream failure class maps to a distinct terminal or retry outcome.
 func (d *ACPDispatcher) handlePromptStreamError(
 	ctx context.Context,
 	promptTrace *acpSpan,

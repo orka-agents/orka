@@ -309,10 +309,6 @@ func approvalTargetArguments(args json.RawMessage, customTool *corev1alpha1.Tool
 	return approvals.TargetArguments(args, customTool)
 }
 
-func approvalAuthBodyKey(customTool *corev1alpha1.Tool) string {
-	return approvals.AuthBodyKey(customTool)
-}
-
 func approvalTTSEndpointIdentity(value string) (string, string) {
 	value = strings.TrimSpace(value)
 	if value == "" {

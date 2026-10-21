@@ -17,6 +17,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+//nolint:gocyclo // One table covers every terminal lifecycle projection.
 func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.T) {
 	const assistantResult = "fixture-assistant-result-must-not-become-status"
 	for _, test := range []struct {

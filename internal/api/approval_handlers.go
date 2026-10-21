@@ -85,6 +85,8 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 }
 
 // DecideTaskApproval handles POST /api/v1/tasks/{id}/approvals/{approvalID}/decision.
+//
+//nolint:gocyclo // Decision validation, authorization, and replay checks stay together so none can be skipped.
 func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	taskName := c.Params("id")
 	approvalID, err := url.PathUnescape(c.Params("approvalID"))

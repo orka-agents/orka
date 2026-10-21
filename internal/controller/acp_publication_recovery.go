@@ -522,10 +522,9 @@ func (d *ACPDispatcher) loadPersistedPullRequestRequest(
 	withoutMetadata.Intent = withoutTaskPullRequestMetadata(withoutMetadata.Intent)
 	legacy := withoutMetadata
 	legacy.Intent.SessionUID = ""
-	const requestKey = "request"
 	for _, candidate := range []publisherservice.PullRequestReconcileRequest{request, withoutMetadata, legacy} {
 		digest, digestErr := acpDomainDigest("external-effect-request", map[string]any{
-			"identity": identity, requestKey: candidate,
+			identityKey: identity, requestKey: candidate,
 		})
 		if digestErr != nil {
 			return request, nil, digestErr

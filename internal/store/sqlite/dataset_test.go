@@ -77,6 +77,12 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
+	// The upgrade drops the empty harness v1 tables; every other table is unchanged.
+	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
+		require.Contains(t, before, retired)
+		require.Empty(t, before[retired])
+		delete(before, retired)
+	}
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })

@@ -9,6 +9,19 @@ The `orka` CLI talks to the Orka controller REST API and is intended for day-to-
 
 ## Installation
 
+On macOS or Linux, if your installation runs the latest stable release, install the CLI
+with [Homebrew](https://brew.sh). Use the fully qualified name; `brew install orka`
+resolves to an unrelated cask:
+
+```bash
+brew install orka-agents/tap/orka
+orka version
+```
+
+The formula follows the latest stable release, possibly a few hours after it is published,
+and installs shell completions. Check `orka version` after installing; for any other
+version, use the release archives below.
+
 Download the CLI from [GitHub Releases](https://github.com/orka-agents/orka/releases).
 Choose a published release that matches your installed Helm chart and controller version.
 The `v0.3.0` value below is an example. Replace it with your installation's release tag,
