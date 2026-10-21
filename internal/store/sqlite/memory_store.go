@@ -587,29 +587,13 @@ func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryP
 		hook()
 	}
 
-	existing, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
+	// Apply writes its memory and marks the proposal applied in this one
+	// transaction, so a memory that already names a proposal that is not yet
+	// applied was written some other way. Its content was not reviewed with the
+	// proposal, so refuse it rather than link it.
+	_, err = scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
 	if err == nil {
-		if err := authorizeExistingProposalMemory(ctx, apply, existing.Namespace, existing.ID); err != nil {
-			return nil, err
-		}
-		now := time.Now()
-		res, err := tx.ExecContext(ctx,
-			`UPDATE memory_proposals
-			 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = COALESCE(applied_at, ?), updated_at = ?
-			 WHERE namespace = ? AND id = ? AND status = ? AND (applied_memory_id = '' OR applied_memory_id = ?)`,
-			proposalStatusApplied, existing.ID, apply.AppliedBy, now, now, apply.Namespace, apply.ID, proposalStatusAccepted, existing.ID,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if err := ensureRowsAffectedConflict(res); err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		committed = true
-		return existing, nil
+		return nil, errProposalMemoryExists
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
@@ -644,26 +628,14 @@ func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryP
 		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
 		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
 	); err != nil {
-		if !isSQLiteConstraintError(err) {
-			return nil, err
+		// The unique source-proposal index found a memory the read above did
+		// not; refuse it for the same reason.
+		if isSQLiteConstraintError(err) {
+			return nil, errProposalMemoryExists
 		}
-		existing, lookupErr := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
-		if lookupErr != nil {
-			return nil, err
-		}
-		if err := authorizeExistingProposalMemory(ctx, apply, existing.Namespace, existing.ID); err != nil {
-			return nil, err
-		}
-		if err := markMemoryProposalApplied(ctx, tx, apply, existing.ID, true); err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		committed = true
-		return existing, nil
+		return nil, err
 	}
-	if err := markMemoryProposalApplied(ctx, tx, apply, memory.ID, false); err != nil {
+	if err := markMemoryProposalApplied(ctx, tx, apply, memory.ID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -680,19 +652,19 @@ func authorizeExistingProposalMemory(ctx context.Context, apply store.MemoryProp
 	return apply.AuthorizeExistingMemory(ctx, namespace, id)
 }
 
-func markMemoryProposalApplied(ctx context.Context, tx *sql.Tx, apply store.MemoryProposalApply, memoryID string, allowExistingAppliedID bool) error {
+// errProposalMemoryExists reports a memory that names a proposal apply has not
+// applied. It leaves out the memory's ID, which the caller may not be allowed
+// to read.
+var errProposalMemoryExists = fmt.Errorf("%w: another memory already references this proposal", store.ErrConflict)
+
+func markMemoryProposalApplied(ctx context.Context, tx *sql.Tx, apply store.MemoryProposalApply, memoryID string) error {
 	now := time.Now()
-	query := `UPDATE memory_proposals
+	res, err := tx.ExecContext(ctx,
+		`UPDATE memory_proposals
 		 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = ?, updated_at = ?
-		 WHERE namespace = ? AND id = ? AND status = ? AND applied_memory_id = ''`
-	args := []any{proposalStatusApplied, memoryID, apply.AppliedBy, now, now, apply.Namespace, apply.ID, proposalStatusAccepted}
-	if allowExistingAppliedID {
-		query = `UPDATE memory_proposals
-		 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = COALESCE(applied_at, ?), updated_at = ?
-		 WHERE namespace = ? AND id = ? AND status = ? AND (applied_memory_id = '' OR applied_memory_id = ?)`
-		args = append(args, memoryID)
-	}
-	res, err := tx.ExecContext(ctx, query, args...)
+		 WHERE namespace = ? AND id = ? AND status = ? AND applied_memory_id = ''`,
+		proposalStatusApplied, memoryID, apply.AppliedBy, now, now, apply.Namespace, apply.ID, proposalStatusAccepted,
+	)
 	if err != nil {
 		return err
 	}
