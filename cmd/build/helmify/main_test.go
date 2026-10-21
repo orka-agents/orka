@@ -1125,16 +1125,22 @@ func TestStaticChartUsesOnlyHarnessV2(t *testing.T) {
 	}
 }
 
-func TestStaticChartRejectsHarnessV1Settings(t *testing.T) {
-	for _, value := range []string{
-		"enabled=true", "image.digest=sha256:" + strings.Repeat("1", 64), "auth.existingSecret=obsolete-auth",
-	} {
-		t.Run(value, func(t *testing.T) {
-			output, err := helmTemplateStaticChart(t, "--set-string", "harnessV1."+value)
-			if err == nil || !strings.Contains(output, "harnessV1 settings are unsupported") {
-				t.Fatalf("helm render error = %v, want removed-settings rejection:\n%s", err, output)
-			}
-		})
+// helm upgrade --reuse-values carries an older chart's defaults, including its
+// harnessV1 block, so leftover values must still render only harness-v2.
+func TestStaticChartIgnoresLeftoverHarnessV1Values(t *testing.T) {
+	rendered := requireHelmRender(t,
+		"--set-string", "harnessV1.image.repository=ghcr.io/orka-agents/orka/agent-harness-wrapper",
+		"--set-string", "harnessV1.image.tag=0.3.0",
+		"--set-string", "harnessV1.auth.existingSecret=obsolete-auth",
+		"--set-string", "harnessV1.codexSandboxMode=workspace-write",
+	)
+	if !strings.Contains(rendered, "--controller-mode=harness-v2") {
+		t.Fatalf("harness-v2 render is missing its controller mode:\n%s", rendered)
+	}
+	for _, leftover := range []string{"agent-harness-wrapper", "obsolete-auth", "codexSandboxMode"} {
+		if strings.Contains(rendered, leftover) {
+			t.Fatalf("leftover harnessV1 value %q reached the render:\n%s", leftover, rendered)
+		}
 	}
 }
 

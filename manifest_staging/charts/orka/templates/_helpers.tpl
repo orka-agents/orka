@@ -380,14 +380,13 @@ Default the tenant namespace to the Helm release namespace.
 
 {{/*
 Every release owns the harness-v2 execution contract and one tenant namespace.
+controller.mode alone selects the protocol. Leftover harnessV1 values are inert:
+helm upgrade --reuse-values carries an older chart's defaults, including them.
 */}}
 {{- define "orka.validateControllerMode" -}}
 {{- $watchNamespace := include "orka.watchNamespace" . -}}
 {{- if ne .Values.controller.mode "harness-v2" -}}
 {{- fail "controller.mode must be harness-v2; other harness protocols are unsupported" -}}
-{{- end -}}
-{{- if hasKey .Values "harnessV1" -}}
-{{- fail "harnessV1 settings are unsupported; Orka only supports harness-v2" -}}
 {{- end -}}
 {{- if ne $watchNamespace .Release.Namespace -}}
 {{- fail (printf "controller.watchNamespace must equal the Helm release namespace %q" .Release.Namespace) -}}

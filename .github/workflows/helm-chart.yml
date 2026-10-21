@@ -281,11 +281,13 @@ jobs:
             fi
             grep -Fq -- "controller.mode must be harness-v2" "${unsafe_render}"
           done
-          if helm template unsafe manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --set harnessV1.enabled=true >"${unsafe_render}" 2>&1; then
-            echo "Helm accepted removed harnessV1 settings." >&2
+          # helm upgrade --reuse-values carries an older chart's harnessV1 defaults.
+          helm template orka manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" \
+            --set-string harnessV1.image.repository=ghcr.io/orka-agents/orka/agent-harness-wrapper >"${unsafe_render}"
+          if grep -Fq -- "agent-harness-wrapper" "${unsafe_render}"; then
+            echo "Leftover harnessV1 values rendered the removed wrapper." >&2
             exit 1
           fi
-          grep -Fq -- "harnessV1 settings are unsupported" "${unsafe_render}"
           assert_worker_identity secondary-orka "${secondary_render}" "${secondary_serviceaccounts}" "${secondary_rbac}" "${secondary_gateway_policy}"
           for rendered in "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${long_controller_webhook}" "${long_controller_webhook_service}"; do
             resource_name=$(awk '$1 == "name:" { print $2; exit }' "${rendered}")
