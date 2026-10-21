@@ -183,6 +183,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
 }
 
+// repositoryMonitorPullRequestInScope reports whether pr is an open, included
+// pull request on the monitor's base branch.
+func repositoryMonitorPullRequestInScope(monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) bool {
+	return pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == effectiveRepositoryMonitorBranch(monitor) && repositoryMonitorPullRequestIncluded(monitor.Spec, pr)
+}
+
 // GitHub statuses belong to commits, not PRs. Aggregate every outcome across
 // open PRs sharing the head, so peers neither overwrite a blocker with success
 // nor alternate persistent blocking descriptions on every inventory poll.
@@ -192,14 +198,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx c
 		return "", "", err
 	}
 	for _, peer := range peers {
-		if peer.Number == pr.Number || peer.HeadSHA != pr.HeadSHA || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+		if peer.Number == pr.Number || peer.HeadSHA != pr.HeadSHA || !repositoryMonitorPullRequestInScope(monitor, peer) {
 			continue
 		}
 		peer, err = r.refreshRepositoryMonitorReadinessPullRequest(ctx, peer, endpoint, token)
 		if err != nil {
 			return "", "", err
 		}
-		if peer.HeadSHA != pr.HeadSHA || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+		if peer.HeadSHA != pr.HeadSHA || !repositoryMonitorPullRequestInScope(monitor, peer) {
 			continue
 		}
 		item, err := r.repositoryMonitorSharedHeadItem(ctx, monitor, peer)
@@ -268,7 +274,7 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if err != nil {
 		return err
 	}
-	outOfScope := pr.State != repositoryMonitorItemStateOpen || pr.BaseBranch != effectiveRepositoryMonitorBranch(monitor)
+	outOfScope := !repositoryMonitorPullRequestInScope(monitor, *pr)
 	previous, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
@@ -350,14 +356,14 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx
 	}
 	peers = slices.DeleteFunc(peers, func(peer repositoryMonitorPullRequest) bool { return peer.Number == departingNumber })
 	for _, peer := range peers {
-		if peer.HeadSHA != sha || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+		if peer.HeadSHA != sha || !repositoryMonitorPullRequestInScope(monitor, peer) {
 			continue
 		}
 		peer, err = r.refreshRepositoryMonitorReadinessPullRequest(ctx, peer, endpoint, token)
 		if err != nil {
 			return err
 		}
-		if peer.HeadSHA != sha || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+		if peer.HeadSHA != sha || !repositoryMonitorPullRequestInScope(monitor, peer) {
 			continue
 		}
 		item, err := r.repositoryMonitorSharedHeadItem(ctx, monitor, peer)

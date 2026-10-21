@@ -49,6 +49,7 @@ const (
 	repositoryMonitorPublishSkipBaseBranchMismatch         = "base_branch_mismatch"
 	repositoryMonitorPublishSkipDraftPR                    = "draft_pr"
 	repositoryMonitorPublishSkipBlockedLabel               = "blocked_label"
+	repositoryMonitorPublishSkipNotIncluded                = "not_included"
 	repositoryMonitorPublishSkipDuplicateSameHead          = "duplicate_same_head"
 	repositoryMonitorPublishSkipSecuritySensitiveNotPublic = "security_sensitive_not_public"
 	repositoryMonitorPublishSkipBodyTooLarge               = "body_too_large"
@@ -220,6 +221,9 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	}
 	if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, currentPR.Labels); blockedLabel != "" {
 		return skip(repositoryMonitorPublishSkipBlockedLabel, fmt.Sprintf("Pull request #%d review publishing skipped: blocked label %q is present", item.Number, blockedLabel), map[string]any{"label": blockedLabel})
+	}
+	if !repositoryMonitorPullRequestIncluded(monitor.Spec, *currentPR) {
+		return skip(repositoryMonitorPublishSkipNotIncluded, fmt.Sprintf("Pull request #%d review publishing skipped: no include label is present", item.Number), nil)
 	}
 
 	exists, err := r.repositoryMonitorReviewPublishRecordExists(ctx, monitor, item, reviewedHead)
@@ -466,7 +470,8 @@ func repositoryMonitorPublishSkipReasonRecoverable(reason string) bool {
 		repositoryMonitorPublishSkipPRClosed,
 		repositoryMonitorPublishSkipBaseBranchMismatch,
 		repositoryMonitorPublishSkipDraftPR,
-		repositoryMonitorPublishSkipBlockedLabel:
+		repositoryMonitorPublishSkipBlockedLabel,
+		repositoryMonitorPublishSkipNotIncluded:
 		return true
 	default:
 		return false

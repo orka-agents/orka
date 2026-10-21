@@ -135,6 +135,20 @@ kubectl apply -f repository-monitor.yaml
 
 The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
 
+### Limit the monitor to labelled pull requests
+
+By default a monitor covers every open pull request on its branch. To opt pull requests in one at a time, set `spec.targets.pullRequests.includeLabels`:
+
+```yaml
+spec:
+  targets:
+    pullRequests:
+      includeLabels:
+        - orka:review
+```
+
+Only pull requests with at least one of these labels (case-insensitive) are reviewed, repaired, or given a readiness status. Orka reads the labels on every inventory run, so no webhook is needed. Removing the label retires the pull request from the monitor: a readiness status it already published turns to failure, and a review that finishes afterwards is not published. Commands that target an unlabelled pull request are blocked with `target_not_included`. This setting cannot be combined with issue implementation, because the pull requests Orka opens would not carry the label.
+
 If an existing monitor still uses `validation.mode` and `validation.commands`, migrate it before upgrading the controller. Apply the new CRD first, replace the legacy fields with a digest-pinned `validation.image`, and remove the old fields. The compatibility schema preserves a non-empty legacy command list long enough for the controller to report `LegacyValidationCommandsUnsupported`; it will not run the monitor with validation silently disabled.
 
 ## Run manually
