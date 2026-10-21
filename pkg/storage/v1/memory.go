@@ -142,6 +142,9 @@ type MemoryStore interface {
 //     review or apply outcome: a status other than
 //     MemoryProposalStatusPending, or a reviewer, review note, review time,
 //     applied memory ID, applier or application time, returns ErrValidation.
+//     A blank reviewer, review note or applier counts as absent; any nonempty
+//     AppliedMemoryID, even whitespace, is an apply outcome, as it is for
+//     review and archive.
 //   - A proposal is read, reviewed and archived only in its namespace. A
 //     missing proposal returns ErrNotFound.
 //   - ListMemoryProposals requires a namespace and returns proposals newest
