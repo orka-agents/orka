@@ -230,6 +230,7 @@ func (r *RepositoryMonitorReconciler) refreshRepositoryMonitorReadinessPullReque
 	}
 	pr.State, pr.HeadSHA, pr.BaseBranch = current.State, current.Head.SHA, current.Base.Ref
 	pr.MergeableState, pr.Draft = current.MergeableState, current.Draft
+	pr.MaintainerCanModify = current.MaintainerCanModify
 	pr.Labels = nil
 	for _, label := range current.Labels {
 		pr.Labels = append(pr.Labels, label.Name)

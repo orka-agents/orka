@@ -352,6 +352,13 @@ spec:
               repair:
                 description: Repair controls bounded repair behavior.
                 properties:
+                  allowForkPullRequests:
+                    description: |-
+                      AllowForkPullRequests lets repairs push to the head branch of a pull
+                      request opened from a fork when its author allows edits from maintainers.
+                      GitHub reports that permission only when one pull request is read, so a
+                      pull request seen only in an inventory list is never repaired as a fork.
+                    type: boolean
                   enabled:
                     description: Enabled enables repair jobs.
                     type: boolean

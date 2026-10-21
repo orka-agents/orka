@@ -438,6 +438,13 @@ type RepositoryMonitorRepairSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxValidationRetries *int32 `json:"maxValidationRetries,omitempty"`
+
+	// AllowForkPullRequests lets repairs push to the head branch of a pull
+	// request opened from a fork when its author allows edits from maintainers.
+	// GitHub reports that permission only when one pull request is read, so a
+	// pull request seen only in an inventory list is never repaired as a fork.
+	// +optional
+	AllowForkPullRequests bool `json:"allowForkPullRequests,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.

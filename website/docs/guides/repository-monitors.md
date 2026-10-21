@@ -285,11 +285,17 @@ orka monitor actions get '<action-id>' --namespace orka-system
 The controller starts bounded repairs automatically when enabled. Ad hoc PR commands can request the same operations:
 
 - `review` API/CLI command queues an exact-head review run.
-- `fix` API/CLI command queues a repair task on the current same-repository PR head branch.
+- `fix` API/CLI command queues a repair task on the current PR head branch. Fork PR heads require [`repair.allowForkPullRequests`](#pull-requests-from-forks).
 - `fix_ci` API/CLI command queues a CI repair task using the same repair path.
 - `update_branch` API/CLI command queues a base-update repair task and allows empty push-branch updates.
 
 Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expectedRemoteSHA` bind the selected PR head, and publication targets that same branch. A repair succeeds only with a matching `VerifiedExact` delivery receipt. An `update-branch` no-change result is accepted only after the controller independently verifies that the exact PR head contains the requested base revision. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready; GitHub owns the merge decision.
+
+### Pull requests from forks
+
+By default, repairs only push to branches in the monitored repository, and a PR from a fork is blocked with `fork_pr_repair_not_writable`. Set `spec.repair.allowForkPullRequests: true` to also repair fork PRs whose authors [allow edits from maintainers](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/allowing-changes-to-a-pull-request-branch-created-from-a-fork). The repair Task then clones the fork and publishes to the fork's head branch, with the same exact-head and `VerifiedExact` checks. If the author turns maintainer edits off, the repair is blocked with `fork_pr_maintainer_edits_disabled`.
+
+GitHub reports the maintainer-edit setting only when Orka reads one pull request: for commands, for pull request events, and for the readiness check when `review.publish.enabled` is true. A fork PR that Orka has only seen in an inventory list is never repaired. GitHub still authorizes every push: the publication credentials must be able to read the fork and push to it, which GitHub allows only for accounts with push access to the monitored repository.
 
 ## GitHub merge readiness
 
