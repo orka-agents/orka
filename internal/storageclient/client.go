@@ -2,19 +2,24 @@
 //
 // Every Orka consumer receives a Client rather than a concrete database. The
 // client composes a state.v1 provider and an artifacts.v1 provider from the
-// public storage contract (pkg/storage/v1). Families that still carry
-// plaintext protected data or Go callbacks into a database transaction are
-// served through Embedded, which only the in-process SQLite store implements.
+// public storage contract (pkg/storage/v1). Families that still run Go
+// callbacks inside a database transaction or carry plaintext connector custody
+// are served through Embedded, which only the in-process SQLite store
+// implements.
 //
 // The client applies Orka's redaction, payload sanitization and usage
 // attribution before any provider call, so providers store only content Orka
-// has already made safe to persist.
+// has already made safe to persist. It also owns the snapshot key: it seals
+// execution snapshots and native session state before a provider sees them
+// and opens them after a provider returns them, so a provider stores only
+// sealed bytes and never holds the key.
 package storageclient
 
 import (
 	"context"
 	"errors"
 	"reflect"
+	"sync/atomic"
 
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
@@ -23,19 +28,17 @@ import (
 
 // Embedded is the part of the application store that is not yet expressed in
 // the public provider contract. These families either receive plaintext
-// protected data (execution snapshots, native sessions, connector custody,
-// turn finalization with native capture) or run Orka callbacks inside a
-// database transaction (task data transactions, scan ingestion and memory
-// proposal application). Only the in-process SQLite store implements
-// Embedded, and it must be the same store that serves both contracts so
-// transaction-scoped contexts reach every participating record.
+// connector custody or run Orka callbacks inside a database transaction (task
+// data transactions, scan ingestion and memory proposal application). Only
+// the in-process SQLite store implements Embedded, and it must be the same
+// store that serves both contracts so transaction-scoped contexts reach every
+// participating record. The embedded store must also accept the connector
+// custody sealer the client hands over when it activates the snapshot key
+// (see ActivateSnapshotKey); that method is deliberately not part of this
+// interface, so it never joins the client's method set.
 type Embedded interface {
-	store.AgentExecutionSnapshotStore
-	store.AgentExecutionSnapshotLifecycleStore
-	store.NativeSessionImportStore
 	store.ConnectorCredentialStore
 	store.ConnectorConsentStore
-	store.SessionTurnPersistenceStore
 	harness.RuntimeSessionStore
 
 	ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error)
@@ -66,11 +69,18 @@ type Options struct {
 }
 
 // Client implements every application store interface Orka consumes. Its
-// method set is the union of the state, artifact and embedded families.
+// method set is the union of the state, artifact and embedded families, plus
+// the plaintext views of the sealed families.
 type Client struct {
 	storagev1.StateProvider
 	storagev1.ArtifactStore
 	Embedded
+
+	// custody holds the snapshot key once ActivateSnapshotKey succeeds.
+	custody atomic.Pointer[keyCustody]
+	// nativeSessionMaxBytes limits new native bundles; zero selects the
+	// default.
+	nativeSessionMaxBytes atomic.Int64
 }
 
 // ErrSplitEmbeddedStore rejects a client whose embedded families would not

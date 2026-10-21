@@ -780,6 +780,17 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	if err != nil {
 		return nil, err
 	}
+	if err := validateNativeFinalizationShape(request.NativeSession, request.NativeSessionCarried, request.TerminalKind, request.SkipTranscriptAppend); err != nil {
+		return nil, err
+	}
+	userMessageID, terminalMessageID, err := newFinalizationMessageIDs(request.SkipTranscriptAppend, request.SkipUserPromptAppend)
+	if err != nil {
+		return nil, err
+	}
+	native, err := s.sealDuplicateControlNativeSessionTx(ctx, tx, control, request, userMessageID, terminalMessageID)
+	if err != nil {
+		return nil, err
+	}
 	messageCountDelta := 0
 	if !request.SkipTranscriptAppend {
 		terminalRole := sessionTurnRoleAssistant
@@ -788,7 +799,7 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		}
 		messageCountDelta, err = appendSessionTurnTranscript(
 			ctx, tx, control.Namespace, control.SessionName, turn.UserPrompt,
-			terminalRole, request.TerminalContent, request.FinalizedAt, request.SkipUserPromptAppend,
+			terminalRole, request.TerminalContent, request.FinalizedAt, userMessageID, terminalMessageID,
 		)
 		if err != nil {
 			return nil, err
@@ -805,10 +816,8 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		request.Key, messageCountDelta, inputTokens, outputTokens, request.FinalizedAt); err != nil {
 		return nil, err
 	}
-	if err := validateNativeFinalization(request.NativeSession, request.NativeSessionCarried, request.TerminalKind, request.SkipTranscriptAppend); err != nil {
-		return nil, err
-	}
-	if err := s.commitNativeSessionFinalizationTx(ctx, tx, turn.ID, control.Namespace, control.SessionName, request.Key.SessionUID, request.NativeSession, request.NativeSessionCarried); err != nil {
+	if err := commitSealedNativeFinalizationTx(ctx, tx, turn.ID, control.Namespace, control.SessionName, request.Key.SessionUID,
+		native, store.NativeSessionCaptureDigest(request.NativeSession)); err != nil {
 		return nil, err
 	}
 

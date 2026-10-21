@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 )
 
 var (
-	_ store.AgentExecutionSnapshotStore          = (*Store)(nil)
 	_ store.AgentExecutionSnapshotLifecycleStore = (*Store)(nil)
 	_ store.SessionLineageStore                  = (*Store)(nil)
 	_ store.HarnessV1AttemptStore                = (*Store)(nil)
@@ -37,19 +37,10 @@ func newCoexistenceTestStore(t *testing.T) *Store {
 	return NewStore(db, dbPath)
 }
 
-func testSnapshotCipher(t *testing.T) *AgentExecutionSnapshotCipher {
-	t.Helper()
-	cipher, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatalf("NewAgentExecutionSnapshotCipher: %v", err)
-	}
-	return cipher
-}
-
 func persistLifecycleSnapshot(
 	t *testing.T,
 	ctx context.Context,
-	s *Store,
+	snapshots store.AgentExecutionSnapshotStore,
 	taskUID string,
 	body []byte,
 	createdAt time.Time,
@@ -59,7 +50,7 @@ func persistLifecycleSnapshot(
 		TaskUID: taskUID,
 		Digest:  store.CanonicalAgentExecutionSnapshotDigest(body),
 	}
-	if err := s.PersistAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshot{
+	if err := snapshots.PersistAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshot{
 		TaskUID:       key.TaskUID,
 		Digest:        key.Digest,
 		SchemaVersion: store.AgentExecutionSnapshotSchemaVersion,
@@ -74,6 +65,7 @@ func persistLifecycleSnapshot(
 func TestAgentExecutionSnapshotFailsClosedWithoutCipher(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
+	c := orkaClient(t, s)
 	body := []byte(`{"prompt":"resolved"}`)
 	snapshot := store.AgentExecutionSnapshot{
 		TaskUID:       "task-uid-1",
@@ -81,20 +73,18 @@ func TestAgentExecutionSnapshotFailsClosedWithoutCipher(t *testing.T) {
 		SchemaVersion: store.AgentExecutionSnapshotSchemaVersion,
 		Body:          body,
 	}
-	if err := s.PersistAgentExecutionSnapshot(ctx, snapshot); err == nil {
-		t.Fatal("persist without a cipher must fail closed")
+	if err := c.PersistAgentExecutionSnapshot(ctx, snapshot); !errors.Is(err, storageclient.ErrSnapshotKeyNotActive) {
+		t.Fatalf("persist without a key must fail closed, got %v", err)
 	}
-	if _, err := s.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid-1", Digest: snapshot.Digest}); err == nil {
-		t.Fatal("get without a cipher must fail closed")
+	if _, err := c.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid-1", Digest: snapshot.Digest}); !errors.Is(err, storageclient.ErrSnapshotKeyNotActive) {
+		t.Fatalf("get without a key must fail closed, got %v", err)
 	}
 }
 
 func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
-		t.Fatal(err)
-	}
+	c := activateTestKey(t, s)
 
 	body := []byte(`{"prompt":"SENSITIVE-RESOLVED-PROMPT","model":"provider/model"}`)
 	snapshot := store.AgentExecutionSnapshot{
@@ -103,21 +93,21 @@ func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 		SchemaVersion: store.AgentExecutionSnapshotSchemaVersion,
 		Body:          body,
 	}
-	if err := s.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
+	if err := c.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
 		t.Fatalf("persist snapshot: %v", err)
 	}
 	// Idempotent identical persist.
-	if err := s.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
+	if err := c.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
 		t.Fatalf("idempotent persist: %v", err)
 	}
 	// Same key with different content is rejected.
 	different := snapshot
 	different.SchemaVersion = snapshot.SchemaVersion + 1
-	if err := s.PersistAgentExecutionSnapshot(ctx, different); !errors.Is(err, store.ErrDuplicateMismatch) {
+	if err := c.PersistAgentExecutionSnapshot(ctx, different); !errors.Is(err, store.ErrDuplicateMismatch) {
 		t.Fatalf("expected ErrDuplicateMismatch, got %v", err)
 	}
 
-	got, err := s.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid-1", Digest: snapshot.Digest})
+	got, err := c.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid-1", Digest: snapshot.Digest})
 	if err != nil {
 		t.Fatalf("get snapshot: %v", err)
 	}
@@ -137,25 +127,22 @@ func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 	// Digest mismatch on persist is rejected.
 	bad := snapshot
 	bad.Digest = store.CanonicalAgentExecutionSnapshotDigest([]byte("other"))
-	if err := s.PersistAgentExecutionSnapshot(ctx, bad); err == nil {
+	if err := c.PersistAgentExecutionSnapshot(ctx, bad); err == nil {
 		t.Fatal("digest/body mismatch must be rejected")
 	}
 
 	if err := s.DeleteAgentExecutionSnapshots(ctx, "task-uid-1"); err != nil {
 		t.Fatalf("delete snapshots: %v", err)
 	}
-	if _, err := s.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid-1", Digest: snapshot.Digest}); !errors.Is(err, store.ErrNotFound) {
+	if _, err := c.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid-1", Digest: snapshot.Digest}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound after delete, got %v", err)
 	}
 }
 
-func TestAgentExecutionSnapshotCipherActivationRejectsRotationWithRetainedSnapshots(t *testing.T) {
+func TestAgentExecutionSnapshotKeyActivationRejectsRotationWithRetainedSnapshots(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	previousCipher := testSnapshotCipher(t)
-	if err := s.SetAgentExecutionSnapshotCipher(previousCipher); err != nil {
-		t.Fatal(err)
-	}
+	c := activateTestKey(t, s)
 	body := []byte(`{"prompt":"retained"}`)
 	snapshot := store.AgentExecutionSnapshot{
 		TaskUID:       "task-uid-rotation",
@@ -163,24 +150,21 @@ func TestAgentExecutionSnapshotCipherActivationRejectsRotationWithRetainedSnapsh
 		SchemaVersion: store.AgentExecutionSnapshotSchemaVersion,
 		Body:          body,
 	}
-	if err := s.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
+	if err := c.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}
 
-	rotatedCipher, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x43}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	restarted := NewStore(s.db, "restart-with-rotated-key")
-	if err := restarted.SetAgentExecutionSnapshotCipher(rotatedCipher); err == nil || !strings.Contains(err.Error(), "cannot authenticate retained snapshot") {
+	rotatedKey := bytes.Repeat([]byte{0x43}, storageclient.SnapshotKeyBytes)
+	restarted := orkaClient(t, NewStore(s.db, "restart-with-rotated-key"))
+	if err := restarted.ActivateSnapshotKey(ctx, rotatedKey); err == nil || !strings.Contains(err.Error(), "cannot authenticate retained snapshot") {
 		t.Fatalf("rotated key activation error = %v", err)
 	}
-	if err := restarted.PersistAgentExecutionSnapshot(ctx, snapshot); !errors.Is(err, errSnapshotCipherRequired) {
+	if err := restarted.PersistAgentExecutionSnapshot(ctx, snapshot); !errors.Is(err, storageclient.ErrSnapshotKeyNotActive) {
 		t.Fatalf("failed key activation must leave snapshot persistence closed, got %v", err)
 	}
 
-	restartedWithPreviousKey := NewStore(s.db, "restart-with-previous-key")
-	if err := restartedWithPreviousKey.SetAgentExecutionSnapshotCipher(previousCipher); err != nil {
+	restartedWithPreviousKey := orkaClient(t, NewStore(s.db, "restart-with-previous-key"))
+	if err := restartedWithPreviousKey.ActivateSnapshotKey(ctx, testSnapshotKey); err != nil {
 		t.Fatalf("activate previous key after restart: %v", err)
 	}
 	if _, err := restartedWithPreviousKey.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
@@ -193,8 +177,8 @@ func TestAgentExecutionSnapshotCipherActivationRejectsRotationWithRetainedSnapsh
 	if err := s.DeleteAgentExecutionSnapshots(ctx, snapshot.TaskUID); err != nil {
 		t.Fatal(err)
 	}
-	restartedAfterRetention := NewStore(s.db, "restart-after-retention")
-	if err := restartedAfterRetention.SetAgentExecutionSnapshotCipher(rotatedCipher); err != nil {
+	restartedAfterRetention := orkaClient(t, NewStore(s.db, "restart-after-retention"))
+	if err := restartedAfterRetention.ActivateSnapshotKey(ctx, rotatedKey); err != nil {
 		t.Fatalf("activate rotated key after retained snapshots are removed: %v", err)
 	}
 }
@@ -202,17 +186,15 @@ func TestAgentExecutionSnapshotCipherActivationRejectsRotationWithRetainedSnapsh
 func TestAgentExecutionSnapshotLifecycleMetadataOrderingAndStrictCutoff(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
-		t.Fatal(err)
-	}
+	c := activateTestKey(t, s)
 
 	base := time.Date(2026, 8, 6, 8, 0, 0, 0, time.UTC)
-	early := persistLifecycleSnapshot(t, ctx, s, "task-z", []byte(`{"snapshot":"early"}`), base)
+	early := persistLifecycleSnapshot(t, ctx, c, "task-z", []byte(`{"snapshot":"early"}`), base)
 	tiedAt := base.Add(time.Minute)
 	tied := []store.AgentExecutionSnapshotKey{
-		persistLifecycleSnapshot(t, ctx, s, "task-b", []byte(`{"snapshot":"task-b"}`), tiedAt),
-		persistLifecycleSnapshot(t, ctx, s, "task-a", []byte(`{"snapshot":"task-a-1"}`), tiedAt),
-		persistLifecycleSnapshot(t, ctx, s, "task-a", []byte(`{"snapshot":"task-a-2"}`), tiedAt),
+		persistLifecycleSnapshot(t, ctx, c, "task-b", []byte(`{"snapshot":"task-b"}`), tiedAt),
+		persistLifecycleSnapshot(t, ctx, c, "task-a", []byte(`{"snapshot":"task-a-1"}`), tiedAt),
+		persistLifecycleSnapshot(t, ctx, c, "task-a", []byte(`{"snapshot":"task-a-2"}`), tiedAt),
 	}
 	sort.Slice(tied, func(i, j int) bool {
 		if tied[i].TaskUID != tied[j].TaskUID {
@@ -221,8 +203,8 @@ func TestAgentExecutionSnapshotLifecycleMetadataOrderingAndStrictCutoff(t *testi
 		return tied[i].Digest < tied[j].Digest
 	})
 	cutoff := base.Add(2 * time.Minute)
-	_ = persistLifecycleSnapshot(t, ctx, s, "task-boundary", []byte(`{"snapshot":"boundary"}`), cutoff)
-	_ = persistLifecycleSnapshot(t, ctx, s, "task-late", []byte(`{"snapshot":"late"}`), cutoff.Add(time.Nanosecond))
+	_ = persistLifecycleSnapshot(t, ctx, c, "task-boundary", []byte(`{"snapshot":"boundary"}`), cutoff)
+	_ = persistLifecycleSnapshot(t, ctx, c, "task-late", []byte(`{"snapshot":"late"}`), cutoff.Add(time.Nanosecond))
 
 	metadata, err := s.ListAgentExecutionSnapshotMetadataBefore(ctx, cutoff)
 	if err != nil {
@@ -271,13 +253,11 @@ func TestAgentExecutionSnapshotLifecycleMetadataRejectsCorruptStoredIdentity(t *
 func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
-		t.Fatal(err)
-	}
+	c := activateTestKey(t, s)
 	now := time.Date(2026, 8, 6, 10, 0, 0, 0, time.UTC)
-	key := persistLifecycleSnapshot(t, ctx, s, "task-uid", []byte(`{"snapshot":"target"}`), now)
-	otherDigestKey := persistLifecycleSnapshot(t, ctx, s, key.TaskUID, []byte(`{"snapshot":"other"}`), now)
-	otherTaskKey := persistLifecycleSnapshot(t, ctx, s, "other-task-uid", []byte(`{"snapshot":"target"}`), now)
+	key := persistLifecycleSnapshot(t, ctx, c, "task-uid", []byte(`{"snapshot":"target"}`), now)
+	otherDigestKey := persistLifecycleSnapshot(t, ctx, c, key.TaskUID, []byte(`{"snapshot":"other"}`), now)
+	otherTaskKey := persistLifecycleSnapshot(t, ctx, c, "other-task-uid", []byte(`{"snapshot":"target"}`), now)
 	bindingDigest := store.CanonicalAgentExecutionSnapshotDigest([]byte("binding"))
 	requestDigest := store.CanonicalAgentExecutionSnapshotDigest([]byte("request"))
 
@@ -374,23 +354,21 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 func TestAgentExecutionSnapshotLifecycleDeletesOnlyExactKey(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
-		t.Fatal(err)
-	}
+	c := activateTestKey(t, s)
 	now := time.Date(2026, 8, 6, 11, 0, 0, 0, time.UTC)
 	targetBody := []byte(`{"snapshot":"target"}`)
-	target := persistLifecycleSnapshot(t, ctx, s, "task-uid", targetBody, now)
-	sibling := persistLifecycleSnapshot(t, ctx, s, target.TaskUID, []byte(`{"snapshot":"sibling"}`), now)
-	otherTask := persistLifecycleSnapshot(t, ctx, s, "other-task-uid", targetBody, now)
+	target := persistLifecycleSnapshot(t, ctx, c, "task-uid", targetBody, now)
+	sibling := persistLifecycleSnapshot(t, ctx, c, target.TaskUID, []byte(`{"snapshot":"sibling"}`), now)
+	otherTask := persistLifecycleSnapshot(t, ctx, c, "other-task-uid", targetBody, now)
 
 	if err := s.DeleteAgentExecutionSnapshot(ctx, target); err != nil {
 		t.Fatalf("DeleteAgentExecutionSnapshot: %v", err)
 	}
-	if _, err := s.GetAgentExecutionSnapshot(ctx, target); !errors.Is(err, store.ErrNotFound) {
+	if _, err := c.GetAgentExecutionSnapshot(ctx, target); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("deleted target error = %v, want ErrNotFound", err)
 	}
 	for _, retained := range []store.AgentExecutionSnapshotKey{sibling, otherTask} {
-		if _, err := s.GetAgentExecutionSnapshot(ctx, retained); err != nil {
+		if _, err := c.GetAgentExecutionSnapshot(ctx, retained); err != nil {
 			t.Fatalf("retained snapshot %s: %v", retained.ID(), err)
 		}
 	}

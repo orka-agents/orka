@@ -30,9 +30,10 @@ var ErrOutboxStoreNotConfigured = errors.New("outbox persistence is not configur
 // never observe or mutate the cluster-scoped claims owned by harness v2.
 var ErrBranchClaimAccessDisabled = errors.New("cluster-scoped branch claim access is disabled")
 
-// SQLitePersistence is the complete SQLite-owned half of the hard-cutover
-// control store. The concrete sqlite.Store satisfies this interface without
-// treating any SQLite control row as authoritative.
+// SQLitePersistence is the complete database-owned half of the hard-cutover
+// control store. The storage client satisfies this interface, sealing native
+// session state before its provider sees it, without treating any database
+// control row as authoritative.
 type SQLitePersistence interface {
 	store.SessionTurnPersistenceStore
 	store.OutboxPersistenceStore

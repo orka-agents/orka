@@ -1630,7 +1630,7 @@ func TestDeletingRestoredACPTaskReclaimsSourcePromptAttemptAndRemovesFinalizer(t
 				t.Fatal(err)
 			}
 			defer db.Close() //nolint:errcheck
-			persistence := sqlite.NewStore(db, "restored-finalizer")
+			persistence := sealedStore(t, sqlite.NewStore(db, "restored-finalizer"))
 			controlStore, err := kubestore.NewComposite(intercepted, "default", persistence, kubestore.WithAPIReader(intercepted))
 			if err != nil {
 				t.Fatal(err)
@@ -2906,7 +2906,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	sqliteStore := sqlite.NewStore(db, "test")
+	sqliteStore := sealedStore(t, sqlite.NewStore(db, "test"))
 
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

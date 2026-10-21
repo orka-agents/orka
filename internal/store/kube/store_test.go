@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/taskterminal"
@@ -2572,7 +2573,8 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{Namespace: "tenant-a", Name: "session-finalize", SessionType: "task"}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	kubeStore, err := NewComposite(rawClient, testControlNamespace, sqliteStore)
+	persistence := storageclienttest.Client(t, sqliteStore)
+	kubeStore, err := NewComposite(rawClient, testControlNamespace, persistence)
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
 	}
@@ -2756,12 +2758,12 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	}
 
 	activationErr := errors.New("simulated outbox activation crash")
-	failingActivation := &failOnceSessionTurnActivationStore{SessionTurnPersistenceStore: sqliteStore, err: activationErr}
+	failingActivation := &failOnceSessionTurnActivationStore{SessionTurnPersistenceStore: persistence, err: activationErr}
 	kubeStore.sessionTurns = failingActivation
 	if _, err := kubeStore.ResumeSessionTurnFinalization(ctx, resumeRequest); !errors.Is(err, activationErr) {
 		t.Fatalf("activation-boundary ResumeSessionTurnFinalization error = %v, want simulated error", err)
 	}
-	kubeStore.sessionTurns = sqliteStore
+	kubeStore.sessionTurns = persistence
 	finalized, err := kubeStore.ResumeSessionTurnFinalization(ctx, controlstore.ResumeSessionTurnFinalizationRequest{
 		Key: committedTurn.Key, PromptAttemptID: committedTurn.PromptAttemptID,
 		FinalizationDigest: committedTurn.FinalizationDigest, Fence: fence,
@@ -2856,7 +2858,7 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{Namespace: "tenant-a", Name: "session-publication", SessionType: "task"}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	kubeStore, err := NewComposite(rawClient, testControlNamespace, sqliteStore)
+	kubeStore, err := NewComposite(rawClient, testControlNamespace, storageclienttest.Client(t, sqliteStore))
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
 	}
@@ -3124,7 +3126,7 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	kubeStore, err = NewComposite(rawClient, testControlNamespace, sqlitestore.NewStore(reopened, databasePath))
+	kubeStore, err = NewComposite(rawClient, testControlNamespace, storageclienttest.Client(t, sqlitestore.NewStore(reopened, databasePath)))
 	if err != nil {
 		t.Fatal(err)
 	}

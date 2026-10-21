@@ -2411,11 +2411,11 @@ func newHarnessV1DispatcherPreparedFixture(t *testing.T) *harnessV1DispatcherSta
 	t.Helper()
 	ctx := context.Background()
 	reconciler, task := newHarnessV1RecoveryBindingFixture(t, ctx)
-	durable, ok := reconciler.AgentExecutionSnapshots.(*sqlite.Store)
+	durable, ok := reconciler.AgentExecutionSnapshots.(*sealedTestStore)
 	if !ok {
 		t.Fatalf("snapshot store type = %T, want *sqlite.Store", reconciler.AgentExecutionSnapshots)
 	}
-	fence := seedHarnessV1AttemptEpoch(t, durable)
+	fence := seedHarnessV1AttemptEpoch(t, durable.Store)
 	verified, err := reconciler.loadVerifiedHarnessV1ExecutionForRecovery(
 		ctx,
 		task,
@@ -2465,7 +2465,7 @@ func newHarnessV1DispatcherPreparedFixture(t *testing.T) *harnessV1DispatcherSta
 		ResultStore: durable, EventStore: storetest.NewFakeExecutionEventStore(),
 	}
 	return &harnessV1DispatcherStateFixture{
-		ctx: ctx, dispatcher: dispatcher, durable: durable, task: task,
+		ctx: ctx, dispatcher: dispatcher, durable: durable.Store, task: task,
 		verified: verified, attempt: attempt, request: request, fence: fence,
 	}
 }

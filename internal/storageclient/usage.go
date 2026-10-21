@@ -25,7 +25,7 @@ func (c *Client) TaskTokenUsage(ctx context.Context, namespace, taskUID string) 
 // before the provider commits the finalization, which adds it to the
 // Session's token counters the first time the turn is finalized. Totals
 // beyond the exact reporting range stay out of the counters rather than block
-// finalization.
+// finalization. Native state is sealed before the provider sees it.
 func (c *Client) CommitSessionTurnFinalization(
 	ctx context.Context, request store.CommitSessionTurnFinalizationRequest,
 ) (*store.SessionTurn, error) {
@@ -40,7 +40,7 @@ func (c *Client) CommitSessionTurnFinalization(
 	} else if err != nil {
 		return nil, fmt.Errorf("attribute session turn usage: %w", err)
 	}
-	return c.Embedded.CommitSessionTurnFinalization(ctx, request)
+	return c.commitSessionTurnFinalization(ctx, request)
 }
 
 // deriveExecutionEventUsage attaches the usage observation Orka derives from

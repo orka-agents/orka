@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -109,10 +108,7 @@ func TestPrepareHarnessV1TaskSessionRejectsNativeImportBeforeMutation(t *testing
 			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "native-harness-v1.db"))
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = db.Close() })
-			transcripts := sqlite.NewStore(db, "")
-			cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
-			require.NoError(t, err)
-			require.NoError(t, transcripts.SetAgentExecutionSnapshotCipher(cipher))
+			transcripts := sealedStore(t, sqlite.NewStore(db, ""))
 			snapshot := storetest.NativeSessionSnapshot(t, "native history must not enter harness v1")
 			snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""
 			_, err = transcripts.StageNativeSessionImport(ctx, store.NativeSessionImport{

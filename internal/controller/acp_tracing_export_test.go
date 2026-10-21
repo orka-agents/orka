@@ -139,7 +139,7 @@ func RunACPTraceBoundary(t *testing.T, tasks []*corev1alpha1.Task, agent *corev1
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	persistence := sqlite.NewStore(db, "test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "test"))
 	control, err := kubestore.NewComposite(kc, "orka-system", persistence, kubestore.WithAPIReader(kc))
 	if err != nil {
 		t.Fatal(err)

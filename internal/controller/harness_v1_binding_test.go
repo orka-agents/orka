@@ -21,7 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 type harnessV1CandidateErrorReader struct {
@@ -1268,7 +1267,7 @@ func TestHandlePendingRoutesExpiredHarnessV1BindingBeforeACPTimeout(t *testing.T
 		t.Fatal(err)
 	}
 
-	attempts, ok := fixture.reconciler.AgentExecutionSnapshots.(*sqlite.Store)
+	attempts, ok := fixture.reconciler.AgentExecutionSnapshots.(*sealedTestStore)
 	if !ok {
 		t.Fatalf("snapshot store type = %T, want *sqlite.Store", fixture.reconciler.AgentExecutionSnapshots)
 	}
@@ -1407,7 +1406,7 @@ func newHarnessV1CandidateFixture(
 	}
 
 	reconciler, durable := newBindingTestReconciler(t, task, namespace, authSecret)
-	fence := seedHarnessV1AttemptEpoch(t, durable)
+	fence := seedHarnessV1AttemptEpoch(t, durable.Store)
 	reconciler.HarnessV1Endpoint = "http://harness-v1.default.svc:8080"
 	reconciler.HarnessV1AuthSecretNamespace = authSecret.Namespace
 	reconciler.HarnessV1AuthSecretName = authSecret.Name

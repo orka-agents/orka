@@ -17,10 +17,14 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			path, db := historicalSchemaDB(t, revision)
 			seedMigrationRecords(t, db, path)
 			old := NewStore(db, path)
-			old.snapshotCipher = testSnapshotCipher(t)
+			// The storage client seals with the record formats earlier
+			// releases used; historical layouts cannot activate a key, so a
+			// scratch client seals for them.
+			sealer := newScratchSealer(t)
+			old.connectorSealer = newTestConnectorSealer(t, testSnapshotKey)
 			body := []byte(`{"prompt":"synthetic retained snapshot"}`)
 			key := store.AgentExecutionSnapshotKey{TaskUID: "historical-task", Digest: store.CanonicalAgentExecutionSnapshotDigest(body)}
-			require.NoError(t, old.PersistAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshot{TaskUID: key.TaskUID, Digest: key.Digest, SchemaVersion: 1, Body: body}))
+			sealer.persistSnapshot(t, old, store.AgentExecutionSnapshot{TaskUID: key.TaskUID, Digest: key.Digest, SchemaVersion: 1, Body: body})
 			for _, summary := range []string{"first", "second"} {
 				_, err := old.AppendExecutionEvent(t.Context(), &store.ExecutionEvent{Namespace: "ns", StreamType: "task", StreamID: "task", TaskName: "task", Type: events.ExecutionEventTypeTaskStarted, Summary: summary})
 				require.NoError(t, err)
@@ -30,8 +34,7 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 				require.NoError(t, old.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "synthetic-migration-value"}))
 			}
 			if revision == "abd2c040" {
-				_, err := old.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "native", "retained native history"))
-				require.NoError(t, err)
+				sealer.stageNativeImport(t, old, nativeImportFixture(t, "native", "retained native history"))
 			}
 			before := applicationRows(t, db)
 			require.NoError(t, db.Close())
@@ -46,8 +49,8 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			require.NoError(t, err)
 			require.False(t, info.CanBootstrapSnapshotKey)
 			require.Equal(t, SchemaVersion, info.SchemaVersion)
-			require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
-			snapshot, err := s.GetAgentExecutionSnapshot(t.Context(), key)
+			client := activateTestKey(t, s)
+			snapshot, err := client.GetAgentExecutionSnapshot(t.Context(), key)
 			require.NoError(t, err)
 			require.True(t, bytes.Equal(body, snapshot.Body), "retained snapshot changed")
 			events, err := s.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "ns", StreamType: "task", StreamID: "task"})
@@ -64,7 +67,7 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 				require.True(t, got.AccessToken == "synthetic-migration-value", "retained credential changed")
 			}
 			if revision == "abd2c040" {
-				got, err := s.GetNativeSession(t.Context(), "tenant", "native", "")
+				got, err := client.GetNativeSession(t.Context(), "tenant", "native", "")
 				require.NoError(t, err)
 				require.NotEmpty(t, got.Snapshot.Data)
 			}

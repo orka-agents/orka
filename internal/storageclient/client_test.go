@@ -71,13 +71,14 @@ type taskTokenUsageReader interface {
 // Kubernetes-authoritative control records. Production wiring uses the
 // Kubernetes control store for those records (see the storage ownership doc).
 var sqliteOnlyMethods = map[string]string{
-	"Close":                           "lifecycle",
-	"DatasetInfo":                     "lifecycle",
-	"NeedLeaderElection":              "lifecycle",
-	"SetAgentExecutionSnapshotCipher": "startup key configuration",
-	"SetNativeSessionMaxBytes":        "startup configuration",
-	"Start":                           "lifecycle",
-	"AcquireLockUntil":                "SQLite test helper",
+	"Close":                              "lifecycle",
+	"DatasetInfo":                        "lifecycle",
+	"NeedLeaderElection":                 "lifecycle",
+	"ActivateConnectorCustody":           "startup key configuration through ActivateSnapshotKey",
+	"CompleteDatasetBootstrap":           "startup bootstrap history",
+	"SetNativeSessionFinalizationSealer": "duplicate SQL control finalization",
+	"Start":                              "lifecycle",
+	"AcquireLockUntil":                   "SQLite test helper",
 
 	"CompareAndSwapControllerEpoch":     "controller epoch control record",
 	"GetControllerEpoch":                "controller epoch control record",

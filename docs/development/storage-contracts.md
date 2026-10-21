@@ -35,7 +35,8 @@ requires an existing key. Operator key-file mode always requires a supplied key.
 
 Key activation authenticates retained execution snapshots, native sessions and
 connector custody before recording bootstrap completion and exposing the store
-to consumers. Failure closes SQLite and releases the lock. An interrupted fresh
+to consumers. The storage client performs it (see "Key custody and sealing").
+Failure closes SQLite and releases the lock. An interrupted fresh
 start can resume with the same identity; an API-committed Secret key is reused
 after a lost response or an update conflict. Clearing ordinary records does not
 reopen permission to mint a key after completion. Existing key-rotation rules
@@ -62,11 +63,11 @@ Kubernetes authority remains separate from either boundary.
 | --- | --- | --- |
 | `ResultStore`, `PromptResultReceiptStore` | Results and immutable attempt-bound result receipts; state. | Task reconciler, ACP dispatch/recovery, worker API and result API. A result receipt precedes prompt settling. |
 | `SessionStore`, `SessionTurnCommitter`, `FencedSessionWriteStore` | Sessions, transcript messages, token counters and Task/chat ownership locks; state. | Session manager, chat, compatibility APIs and transcript tools. Turn commit groups messages with usage; fenced writes require the exact owner. `GetSessionType` is also consumed through a narrow local reader. |
-| `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Encrypted immutable snapshots keyed by Task UID/digest, metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
+| `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Immutable snapshots keyed by Task UID/digest, sealed by the storage client, with metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
 | `SessionLineageStore`, `HarnessV1AttemptStore`, `harness.RuntimeSessionStore` | Lineage claims, harness-v1 attempt receipts and runtime-session history; state. | Session continuity, harness-v1 dispatch/recovery and session APIs. These remain necessary while current upstream supports harness v1. |
-| `NativeSessionStore`, `NativeSessionImportStore` | Encrypted private native session bytes, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
+| `NativeSessionStore`, `NativeSessionImportStore` | Private native session records sealed by the storage client, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
 | `ConnectorCredentialStore`, `ConnectorConsentStore` | Sealed credentials/consents, grants, retired custody, completion receipts, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. |
-| `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable native capture) atomically; projection activates after Kubernetes finalization. |
+| `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable sealed native state) atomically; projection activates after Kubernetes finalization. |
 | `OutboxPersistenceStore` | Projection payloads, claims and completion receipts; state. | Kubernetes composite control store and projection reconciler. Database persistence does not choose controller ownership. |
 | `SessionCleanupPersistenceStore`, `SessionTurnCleanupReceiptStore` | Cleanup identity, durable intents, completion tombstones and retained turn receipts; state. | Kubernetes composite and cleanup recovery. These close crash windows across Kubernetes deletion and transcript deletion. |
 | `GatewayEventStore`, `GatewayDeliveryStore` | Ingress deduplication/claims, canonical transcript projection, deliveries, budgets, retries and event tombstones; state. | Gateway service, adapters, task reconciliation and conversation reply tools. Existing grouped admission/projection and delivery idempotency must survive a future adapter. |
@@ -111,8 +112,10 @@ event vocabulary and two provider interfaces:
   writes, soul pinning and lineage), harness-v1 attempts, Session cleanup
   persistence, the controller epoch mirror, outbox persistence, Task Job
   revocations, execution events, gateway records, security records, repository
-  monitors, usage, and memories with their proposals (creation, review and
-  archiving; applying a proposal is still an embedded family).
+  monitors, usage, memories with their proposals (creation, review and
+  archiving; applying a proposal is still an embedded family), SessionTurn
+  records with their finalization, and sealed execution snapshots and native
+  session records (see "Key custody and sealing").
 - `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
 
 `internal/store` keeps aliases for the moved names, so Orka callers keep their
@@ -269,18 +272,16 @@ the named step.
   a shared provider (a schema or key prefix) instead of a new provider per
   case, so the suite stays practical against a managed database.
 
-`cmd/main.go` builds one `internal/storageclient.Client` over the SQLite store
-and passes it to every application consumer. The SQLite store itself is used
-only for its process lock, bootstrap and key setup, configuration and manager
-lifecycle. The client composes the state and artifact providers and serves the
+`cmd/main.go` builds one `internal/storageclient.Client` over the SQLite store,
+activates the snapshot key on it, and passes it to every application consumer.
+The SQLite store itself is used only for its process lock, bootstrap history,
+configuration and manager lifecycle. The client composes the state and artifact providers and serves the
 remaining families through `storageclient.Embedded`, which only the SQLite
 store implements:
 
 | Embedded family | Why it is outside the provider contract |
 | --- | --- |
-| `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Snapshot bodies arrive in plaintext; SQLite encrypts them. |
-| `NativeSessionImportStore`, `SessionTurnPersistenceStore` | Native session bytes arrive in plaintext, including the native capture in turn finalization. |
-| `ConnectorCredentialStore`, `ConnectorConsentStore` | Tokens arrive in plaintext; SQLite performs row-bound sealing. |
+| `ConnectorCredentialStore`, `ConnectorConsentStore` | Tokens arrive in plaintext; SQLite performs row-bound sealing with a sealer the storage client provides (see "Key custody and sealing"). |
 | `MemoryProposalStore.ApplyMemoryProposal` | Proposal application calls `AuthorizeExistingMemory` inside the database transaction. |
 | `TaskDataTransactionStore` transaction methods | Go callbacks run inside a database transaction. |
 | `SecurityStore.ApplyScanTaskIngestion` | Go callbacks run inside a database transaction. |
@@ -355,8 +356,84 @@ persist:
 Two tests in `internal/storageclient` send secrets through these paths over a
 recording SQLite provider and fail if the provider receives any of them:
 `TestProviderReceivesOnlySanitizedGatewayText` covers the gateway writes and
-`TestProviderReceivesOnlyRedactedContent` covers the others. Encryption of snapshots, native
-sessions and connector custody still happens inside SQLite.
+`TestProviderReceivesOnlyRedactedContent` covers the others.
+
+### Key custody and sealing
+
+The storage client owns the 32-byte snapshot key. Startup loads the key,
+calls `Client.ActivateSnapshotKey`, and only then records bootstrap completion
+and hands the client to consumers. Activation pages through every retained
+sealed snapshot and native session record
+(`ListSealedAgentExecutionSnapshots`, `ListSealedNativeSessions`) and
+authenticates each one with the candidate key (native records one at a time,
+since each can hold a large bundle), then has the embedded
+connector families authenticate their retained custody. A key that cannot
+open retained data is rejected and not installed, so one dataset never holds
+records sealed under different keys. Until activation succeeds, every sealed
+operation fails closed with `ErrSnapshotKeyNotActive`.
+
+The sealing formats live in `internal/storageclient` and are the formats the
+embedded store wrote before, so existing datasets open unchanged:
+
+- An execution snapshot body is sealed with AES-256-GCM under a fresh random
+  nonce, with associated data
+  `orka.agent-execution-snapshot\x00<task UID>\x00<digest>\x00<schema version>`.
+  On read the client also checks the body against the digest in its key.
+- A native session record is sealed as its whole JSON encoding, with
+  associated data
+  `orka.native-session.v1\x00<namespace>\x00<Session name>\x00<owner UID>\x00<record digest>`,
+  where the record digest is the canonical digest of that encoding. The
+  provider stores the owner UID, record and bundle digests, source operation,
+  runtime generation and transcript boundary in plain fields so it can enforce
+  ownership, boundaries and monotonic history without opening the record. The
+  client checks each of those fields against the plaintext when it opens a
+  record.
+
+Providers see only sealed records and the conditional commands of
+`state.v1`: `CreateSealedAgentExecutionSnapshot` returns `ErrConflict` for an
+existing key and the client then compares the stored snapshot, so a repeated
+persist succeeds and different content returns `ErrDuplicateMismatch`.
+`SaveSealedNativeSession` and `StageSealedNativeSessionImport` carry the
+request digest the client computed from the plaintext.
+
+A turn finalization that carries native state is read, decided and sealed in
+the client, then committed conditionally. The embedded store used to append
+the terminal messages with IDs it generated and seal the native record against
+the boundary it derived, which needs the key inside the transaction. Now the
+client reads the turn, the Session's transcript boundary and its stored native
+record (`ReadSessionTurnFinalizationBasis`), assigns the IDs of the messages
+the finalization appends, and seals the record against the boundary after
+them; a carried checkpoint is opened and compared with the stored one first.
+`CommitSealedSessionTurnFinalization` commits only if the transcript still has
+the boundary the client read and, for a carried checkpoint, the stored record
+is the one it opened; otherwise it returns `ErrConflict` and changes nothing.
+A finalization without native state appends at the current end of the
+transcript, as before. When the turn is already finalized, the client sends no
+native state and the provider only compares the recorded finalization.
+
+Connector custody is still sealed inside SQLite, under the same key, until
+connector sealing moves above the client. The client hands the embedded
+connector families a `store.ConnectorCustodySealer` when it activates the
+key; they seal and open through it and never hold the key. The sealer accepts
+only associated data that starts with `orka.connector-`, the prefix of every
+connector custody format, so it cannot open or forge snapshot or native
+session records. Only `ActivateSnapshotKey` hands it over: the embedded
+store's activation method is not on the client, so connector custody cannot
+be rekeyed apart from the snapshot key. SQLite's duplicate
+SQL control implementation, which tests use in place of the Kubernetes control
+store, finalizes turns itself and seals native state through the client's
+`store.NativeSessionFinalizationSealer`; production never installs it.
+
+`TestProviderReceivesOnlySealedSnapshotsAndNativeSessions` records every
+provider call while snapshots, imports, captures and turn finalizations with
+captured and carried native state go through the client, and fails if the
+provider receives a snapshot body, a native bundle in raw or base64 form, or
+the key. `TestSealedFormatsMatchStoredRecords` seals records with an
+independent implementation of the stored formats and reads them through the
+client, and the reverse. The suite's `sealed-snapshots`,
+`sealed-native-sessions` and `session-turn-records` families check that a
+provider stores opaque bytes exactly and decides each conditional commit from
+the plain fields.
 
 ## Kubernetes control authority and retained SQL compatibility
 
@@ -411,5 +488,5 @@ deduplicated event/plan append, native-session finalization and cleanup intents
 already express grouped workflows. Future work should preserve these guarantees
 before introducing new protocol names, lost-response receipts, transport or
 backend selection. Encryption/sealing and memory protections must remain owned
-by Orka above an eventual external adapter; this contribution leaves the current
-implementations and formats intact.
+by Orka above an eventual external adapter; the storage client already owns
+snapshot and native session sealing, and their stored formats are unchanged.

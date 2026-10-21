@@ -104,6 +104,11 @@ type StateProvider interface {
 	SessionCleanupPersistenceStore
 	HarnessV1AttemptStore
 
+	SessionTurnRecordStore
+	SealedNativeSessionStore
+	SealedAgentExecutionSnapshotStore
+	AgentExecutionSnapshotLifecycleStore
+
 	ControllerEpochMirror
 	OutboxPersistenceStore
 	OutboxBacklogReader
