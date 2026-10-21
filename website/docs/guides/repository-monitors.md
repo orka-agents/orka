@@ -295,7 +295,7 @@ Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expected
 
 By default, repairs only push to branches in the monitored repository, and a PR from a fork is blocked with `fork_pr_repair_not_writable`. Set `spec.repair.allowForkPullRequests: true` to also repair fork PRs whose authors [allow edits from maintainers](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/allowing-changes-to-a-pull-request-branch-created-from-a-fork). The repair Task then clones the fork and publishes to the fork's head branch, with the same exact-head and `VerifiedExact` checks. If the author turns maintainer edits off, the repair is blocked with `fork_pr_maintainer_edits_disabled`.
 
-GitHub reports the maintainer-edit setting only when Orka reads one pull request: for commands, for pull request events, and for the readiness check when `review.publish.enabled` is true. A fork PR that Orka has only seen in an inventory list is never repaired. GitHub still authorizes every push: the publication credentials must be able to read the fork and push to it, which GitHub allows only for accounts with push access to the monitored repository.
+GitHub reports the maintainer-edit setting only when Orka reads a single pull request, which repair always does before it starts; pull request list responses omit it and never count as writable. GitHub still authorizes every push: the publication credentials must be able to read the fork and push to it, which GitHub allows only for accounts with push access to the monitored repository.
 
 ## GitHub merge readiness
 
