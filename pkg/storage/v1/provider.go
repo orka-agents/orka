@@ -20,17 +20,16 @@
 //
 // # Execution semantics
 //
-// Each provider method commits atomically and is linearizable with respect to
-// every other call on the same dataset: the outcome is as if the calls ran one
-// at a time, in an order consistent with when they were made. A method that
-// reads and then writes, such as claiming a gateway event, reserving a chat
-// turn or recording a terminal approval, keeps that guarantee across its read
-// and its write, and a method that returns several records, such as a Session
-// with its transcript, reads them from one snapshot. A nil error means the
-// change is durable: it survives a
-// provider restart and any failover the provider declares automatic (see
-// [DurabilityClass]). No operation or transaction spans state.v1 and
-// artifacts.v1.
+// Each provider method is atomic and linearizable with respect to every other
+// call on the same dataset: the outcome is as if the calls ran one at a time,
+// in an order consistent with when they were made. A method that reads and
+// then writes, such as claiming a gateway event, reserving a chat turn or
+// recording a terminal approval, keeps that guarantee across its read and its
+// write, and a method that returns several records, such as a Session with its
+// transcript, reads them from one snapshot. A nil error from a write means its
+// change is durable: it survives a provider restart and any failover the
+// provider declares automatic (see [DurabilityClass]). No operation or
+// transaction spans state.v1 and artifacts.v1.
 //
 // # Errors
 //

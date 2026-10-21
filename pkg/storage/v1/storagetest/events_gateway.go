@@ -650,13 +650,47 @@ func runGatewayCleanup(t *testing.T, newProvider StateFactory) {
 			require.ErrorIs(t, err, storagev1.ErrValidation)
 			require.Equal(t, storagev1.GatewaySessionCleanupPage{}, page, "invalid filters must not report progress")
 		}
-		now := time.Now().UTC().Truncate(time.Second)
-		admitGateway(t, p, gatewayEvent(now.Add(-time.Hour), eventsTenant, "active"))
-		page, err := p.ListGatewaySessionCleanupCandidates(t.Context(), storagev1.GatewaySessionCleanupFilter{
-			TerminalCutoff: now.Add(time.Hour), Limit: 10,
-		})
+		now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+		cutoff, expiredAt := now.Add(-time.Hour), now.Add(-90*time.Minute)
+		suffixes := []string{"candidate-a", "candidate-b", "candidate-c"}
+		want := make([]string, 0, len(suffixes))
+		for _, suffix := range suffixes {
+			event := linkGatewayTask(t, p, gatewayEvent(now.Add(-2*time.Hour), eventsTenant, suffix), "task-uid-"+suffix)
+			// An ACP Session identity keeps retention from reclaiming the transcript.
+			require.NoError(t, p.BindSessionCleanupIdentity(t.Context(), event.Namespace, event.SessionName, "session-uid-"+suffix))
+			delivered := gatewayDelivery(event, "gdl-"+suffix, "error", expiredAt)
+			delivered.State, delivered.ProviderMessageID, delivered.DeliveredAt = storagev1.GatewayDeliveryDelivered, "provider", &expiredAt
+			_, _, err := p.ExpireGatewayEventWithDelivery(t.Context(), storagev1.GatewayExpiryProjection{
+				EventID: event.ID, Reason: "expired", CompletedAt: expiredAt, Delivery: delivered,
+			})
+			require.NoError(t, err)
+			want = append(want, event.SessionName)
+		}
+		admitGateway(t, p, gatewayEvent(now.Add(-2*time.Hour), eventsTenant, "active"))
+		result, err := p.MaintainGatewayRecords(t.Context(), eventsTenant, now, cutoff)
 		require.NoError(t, err)
-		require.Empty(t, page.Candidates, "a transcript with retained messages or events is not a candidate")
-		require.True(t, page.Complete)
+		require.Equal(t, len(want), result.DeletedEvents)
+		require.Zero(t, result.DeletedSessions)
+
+		filter := storagev1.GatewaySessionCleanupFilter{TerminalCutoff: cutoff, Limit: 2}
+		var got []string
+		for pages := 1; ; pages++ {
+			require.LessOrEqual(t, pages, len(want), "candidate pages must finish")
+			page, err := p.ListGatewaySessionCleanupCandidates(t.Context(), filter)
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(page.Candidates), filter.Limit)
+			for _, candidate := range page.Candidates {
+				require.Equal(t, eventsTenant, candidate.Namespace)
+				require.Equal(t, "gateway-uid", candidate.Proof.GatewayUID)
+				require.Equal(t, "binding-uid", candidate.Proof.BindingUID)
+				require.True(t, cutoff.Equal(candidate.Proof.TerminalCutoff))
+				got = append(got, candidate.SessionName)
+			}
+			if page.Complete {
+				break
+			}
+			filter.AfterNamespace, filter.AfterSessionName = page.NextNamespace, page.NextSessionName
+		}
+		require.Equal(t, want, got, "candidates are the compacted transcripts in name order, never the active one")
 	})
 }

@@ -3,7 +3,9 @@ package storagetest
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,6 +53,53 @@ func requireOneWinner(t *testing.T, errs []error, want error) int {
 	return winner
 }
 
+// readDuringWrites calls write writes times while concurrentCallers-1 readers
+// call read in a loop, and fails on the first error either returns. Each write
+// waits for a read to start after the previous one, so reads overlap the whole
+// workload even when a provider could finish every write before a reader runs.
+func readDuringWrites(t *testing.T, writes int, write func(i int) error, read func() error) {
+	t.Helper()
+	var started, readers atomic.Int64
+	readers.Store(concurrentCallers - 1)
+	failures := make(chan error, concurrentCallers)
+	written := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer close(written)
+		for i := range writes {
+			if err := write(i); err != nil {
+				failures <- err
+				return
+			}
+			for seen := started.Load(); started.Load() == seen && readers.Load() > 0; {
+				runtime.Gosched()
+			}
+		}
+	})
+	for range concurrentCallers - 1 {
+		wg.Go(func() {
+			defer readers.Add(-1)
+			for {
+				select {
+				case <-written:
+					return
+				default:
+				}
+				started.Add(1)
+				if err := read(); err != nil {
+					failures <- err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		require.NoError(t, err)
+	}
+}
+
 func runConcurrency(t *testing.T, newProvider StateFactory) {
 	t.Run("parallel Session creation admits one", func(t *testing.T) {
 		provider := newProvider(t)
@@ -70,46 +119,50 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 	t.Run("Session reads see one snapshot during appends", func(t *testing.T) {
 		provider := newProvider(t)
 		createSessionFixture(t, provider, "tenant-a", "busy", sessionsTypeTask, time.Now().UTC())
-		const appends = 50
-		failures := make(chan error, concurrentCallers)
-		appended := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			defer close(appended)
-			for i := range appends {
-				if err := provider.AppendMessages(t.Context(), "tenant-a", "busy", []storagev1.SessionMessage{
-					{ID: fmt.Sprintf("message-%d", i), Role: "user", Content: "hello"},
-				}); err != nil {
-					failures <- err
-					return
+		readDuringWrites(t, 50, func(i int) error {
+			return provider.AppendMessages(t.Context(), "tenant-a", "busy", []storagev1.SessionMessage{
+				{ID: fmt.Sprintf("message-%d", i), Role: "user", Content: "hello"},
+			})
+		}, func() error {
+			session, err := provider.GetSession(t.Context(), "tenant-a", "busy")
+			if err != nil {
+				return err
+			}
+			if session.MessageCount != len(session.Messages) {
+				return fmt.Errorf("session reports %d messages but returned %d", session.MessageCount, len(session.Messages))
+			}
+			return nil
+		})
+	})
+
+	t.Run("stream heads are read from one snapshot during appends", func(t *testing.T) {
+		provider := newProvider(t)
+		// Enough streams that a provider reading heads in bounded batches reads
+		// the first and last streams in different queries.
+		streams := make([]string, 1024)
+		for i := range streams {
+			streams[i] = fmt.Sprintf("task-%d", i)
+		}
+		first, last := streams[0], streams[len(streams)-1]
+		readDuringWrites(t, 25, func(int) error {
+			for _, stream := range []string{first, last} {
+				if _, err := provider.AppendExecutionEvent(t.Context(),
+					taskEvent(eventsTenant, stream, storagev1.ExecutionEventTypeModelMessage)); err != nil {
+					return err
 				}
 			}
+			return nil
+		}, func() error {
+			heads, err := provider.GetLatestExecutionEventSeqs(t.Context(), eventsTenant, storagev1.ExecutionEventStreamTypeTask, streams)
+			if err != nil {
+				return err
+			}
+			// Each write appends to first before last, so no snapshot has last ahead.
+			if heads[last] > heads[first] {
+				return fmt.Errorf("stream %s is at %d but %s, appended first, is at %d", last, heads[last], first, heads[first])
+			}
+			return nil
 		})
-		for range concurrentCallers - 1 {
-			wg.Go(func() {
-				for {
-					select {
-					case <-appended:
-						return
-					default:
-					}
-					session, err := provider.GetSession(t.Context(), "tenant-a", "busy")
-					if err != nil {
-						failures <- err
-						return
-					}
-					if session.MessageCount != len(session.Messages) {
-						failures <- fmt.Errorf("session reports %d messages but returned %d", session.MessageCount, len(session.Messages))
-						return
-					}
-				}
-			})
-		}
-		wg.Wait()
-		close(failures)
-		for err := range failures {
-			require.NoError(t, err)
-		}
 	})
 
 	t.Run("parallel chat turns admit one", func(t *testing.T) {
