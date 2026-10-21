@@ -61,11 +61,11 @@ spec:
             - name: ORKA_PUBLISHER_OPERATION_CAPABILITY_SECRET_FILE
               value: /var/run/orka/publisher-auth/operation-capability-secret
             - name: ORKA_PUBLISHER_ARTIFACT_AUTHORIZATION_BROKER_URL
-              value: http://orka-api.orka-system.svc:8080
+              value: http://orka-api-internal.orka-system.svc:8080
             - name: ORKA_PUBLISHER_ARTIFACT_API_URL
-              value: http://orka-api.orka-system.svc:8080
+              value: http://orka-api-internal.orka-system.svc:8080
             - name: ORKA_PUBLISHER_CREDENTIAL_BROKER_URL
-              value: http://orka-api.orka-system.svc:8080
+              value: http://orka-api-internal.orka-system.svc:8080
             - name: ORKA_PUBLISHER_ALLOWED_SCM_HOSTS
               value: github.com
             - name: ORKA_PUBLISHER_GITHUB_PR_ENABLED

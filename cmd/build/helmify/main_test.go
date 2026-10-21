@@ -442,6 +442,26 @@ func helmTemplateStaticChartWithExistingControllerSnapshot(
 	args ...string,
 ) (string, error) {
 	t.Helper()
+	return helmTemplateStaticChartWithAnnotatedController(
+		t,
+		existingControllerArgs,
+		existingSnapshotSecret,
+		existingSnapshotKey,
+		"",
+		args...,
+	)
+}
+
+// existingFullname, when set, is the controller's orka.ai/chart-fullname annotation.
+func helmTemplateStaticChartWithAnnotatedController(
+	t *testing.T,
+	existingControllerArgs []string,
+	existingSnapshotSecret string,
+	existingSnapshotKey string,
+	existingFullname string,
+	args ...string,
+) (string, error) {
+	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Skip("helm is required for static chart render tests")
@@ -464,10 +484,14 @@ func helmTemplateStaticChartWithExistingControllerSnapshot(
 		for _, arg := range existingControllerArgs {
 			quotedControllerArgs = append(quotedControllerArgs, strconv.Quote(arg))
 		}
+		annotations := ""
+		if existingFullname != "" {
+			annotations = ` "annotations" (dict "orka.ai/chart-fullname" ` + strconv.Quote(existingFullname) + `)`
+		}
 		forcedLookup = `{{- $existingControllerList := dict "items" (list (dict ` +
 			`"metadata" (dict "name" "test-orka-controller" "labels" (dict ` +
 			`"app.kubernetes.io/instance" "test" "app.kubernetes.io/component" "controller" ` +
-			`"app.kubernetes.io/managed-by" "Helm")) ` +
+			`"app.kubernetes.io/managed-by" "Helm")` + annotations + `) ` +
 			`"spec" (dict "template" (dict "spec" (dict ` +
 			`"containers" (list (dict "name" "controller" "args" (list ` +
 			strings.Join(quotedControllerArgs, " ") + `))) ` +
@@ -739,7 +763,7 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	if got := strings.Count(rendered, "--controller-url="); got != 1 {
 		t.Fatalf("controller URL argument count = %d, want 1", got)
 	}
-	if !strings.Contains(rendered, "--controller-url=http://test-orka.orka-test.svc:18080") {
+	if !strings.Contains(rendered, "--controller-url=http://test-orka-internal.orka-test.svc:18080") {
 		t.Fatalf("controller URL does not use service.port:\n%s", rendered)
 	}
 	for _, variable := range []string{
@@ -747,7 +771,7 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 		"ORKA_PUBLISHER_ARTIFACT_API_URL",
 		"ORKA_PUBLISHER_CREDENTIAL_BROKER_URL",
 	} {
-		marker := "name: " + variable + "\n              value: http://test-orka:18080"
+		marker := "name: " + variable + "\n              value: http://test-orka-internal:18080"
 		if !strings.Contains(rendered, marker) {
 			t.Fatalf("%s does not use service.port", variable)
 		}
@@ -760,6 +784,15 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	)
 	if !strings.Contains(service, "port: 18080") || !strings.Contains(service, "targetPort: api") {
 		t.Fatalf("controller Service does not preserve service port to named API target:\n%s", service)
+	}
+
+	internal := requireHelmRender(t,
+		"--set", "service.port=18080",
+		"--set", "controller.apiPort=8080",
+		"--show-only", "templates/controller-internal-service.yaml",
+	)
+	if !strings.Contains(internal, "port: 18080") || !strings.Contains(internal, "targetPort: api") {
+		t.Fatalf("controller internal Service does not preserve service port to named API target:\n%s", internal)
 	}
 }
 
@@ -1400,6 +1433,85 @@ func TestStaticChartRejectsHarnessV2IdentityChangesOnUpgrade(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := helmTemplateStaticChartWithExistingController(t, staticControllerArgs, tt.args...)
+			if err == nil || !strings.Contains(output, tt.wantError) {
+				t.Fatalf("helm render error = %v, want immutable identity rejection %q:\n%s", err, tt.wantError, output)
+			}
+		})
+	}
+}
+
+func TestStaticChartPinsTheExactFullnameAcrossUpgrades(t *testing.T) {
+	render := requireHelmRender(t)
+	if !strings.Contains(render, `orka.ai/chart-fullname: "test-orka"`) {
+		t.Fatalf("controller Deployment does not record its exact chart fullname:\n%s", render)
+	}
+
+	longFullname := strings.Repeat("a", 60)
+	samePrefixFullname := strings.Repeat("a", 59) + "b"
+	internalURL := func(fullname string) string {
+		return "--controller-url=http://" + fullname[:min(len(fullname), 54)] + "-internal.orka-test.svc:8080"
+	}
+	tests := []struct {
+		name             string
+		existingFullname string
+		controllerURL    string
+		args             []string
+		wantError        string
+	}{
+		{
+			name:             "annotated controller",
+			existingFullname: "test-orka",
+			controllerURL:    internalURL("test-orka"),
+		},
+		{
+			name:             "annotated long fullname",
+			existingFullname: longFullname,
+			controllerURL:    internalURL(longFullname),
+			args:             []string{"--set-string", "fullnameOverride=" + longFullname},
+		},
+		{
+			name:             "long fullname sharing the internal Service name",
+			existingFullname: longFullname,
+			controllerURL:    internalURL(longFullname),
+			args:             []string{"--set-string", "fullnameOverride=" + samePrefixFullname},
+			wantError:        "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+		{
+			name:             "annotated fullname override",
+			existingFullname: "test-orka",
+			controllerURL:    internalURL("test-orka"),
+			args:             []string{"--set-string", "fullnameOverride=renamed"},
+			wantError:        "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+		{
+			name:          "internal Service without the annotation",
+			controllerURL: internalURL("test-orka"),
+			wantError:     "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controllerArgs := []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+				tt.controllerURL,
+				"--acp-runtime-namespace=orka-runtimes",
+			}
+			output, err := helmTemplateStaticChartWithAnnotatedController(
+				t,
+				controllerArgs,
+				"snapshot-key",
+				"encryption-key",
+				tt.existingFullname,
+				tt.args...,
+			)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("upgrade with an unchanged fullname failed: %v\n%s", err, output)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(output, tt.wantError) {
 				t.Fatalf("helm render error = %v, want immutable identity rejection %q:\n%s", err, tt.wantError, output)
 			}

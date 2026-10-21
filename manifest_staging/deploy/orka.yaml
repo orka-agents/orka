@@ -2392,6 +2392,26 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
     control-plane: controller-manager
+  name: orka-api-internal
+  namespace: orka-system
+spec:
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: orka
+    control-plane: controller-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    control-plane: controller-manager
   name: orka-controller-manager-metrics-service
   namespace: orka-system
 spec:
@@ -2637,7 +2657,7 @@ spec:
         - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
         - --agent-execution-snapshot-retention=720h
         - --agent-execution-snapshot-retention-interval=1h
-        - --controller-url=http://orka-api.orka-system.svc:8080
+        - --controller-url=http://orka-api-internal.orka-system.svc:8080
         - --controller-mode=harness-v2
         - --watch-namespace=orka-system
         - --enforce-namespace-isolation=true
@@ -3039,11 +3059,11 @@ spec:
         - name: ORKA_PUBLISHER_OPERATION_CAPABILITY_SECRET_FILE
           value: /var/run/orka/publisher-auth/operation-capability-secret
         - name: ORKA_PUBLISHER_ARTIFACT_AUTHORIZATION_BROKER_URL
-          value: http://orka-api.orka-system.svc:8080
+          value: http://orka-api-internal.orka-system.svc:8080
         - name: ORKA_PUBLISHER_ARTIFACT_API_URL
-          value: http://orka-api.orka-system.svc:8080
+          value: http://orka-api-internal.orka-system.svc:8080
         - name: ORKA_PUBLISHER_CREDENTIAL_BROKER_URL
-          value: http://orka-api.orka-system.svc:8080
+          value: http://orka-api-internal.orka-system.svc:8080
         - name: ORKA_PUBLISHER_ALLOWED_SCM_HOSTS
           value: github.com
         - name: ORKA_PUBLISHER_GITHUB_PR_ENABLED

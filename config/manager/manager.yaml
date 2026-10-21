@@ -76,7 +76,7 @@ spec:
           - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
           - --agent-execution-snapshot-retention=720h
           - --agent-execution-snapshot-retention-interval=1h
-          - --controller-url=http://orka-api.orka-system.svc:8080
+          - --controller-url=http://orka-api-internal.orka-system.svc:8080
           - --controller-mode=harness-v2
           - --watch-namespace=orka-system
           - --enforce-namespace-isolation=true

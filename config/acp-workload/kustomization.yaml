@@ -16,6 +16,7 @@ resources:
   - v2_controller_cluster_role.yaml
   - metrics_service.yaml
   - api_service.yaml
+  - api_internal_service.yaml
 patches:
   - path: manager_metrics_patch.yaml
     target:

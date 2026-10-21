@@ -15,8 +15,11 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.model.provider
+    - jsonPath: .spec.providerRef.name
       name: Provider
+      type: string
+    - jsonPath: .spec.model.provider
+      name: Model Provider
       type: string
     - jsonPath: .spec.model.name
       name: Model

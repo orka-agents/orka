@@ -303,8 +303,8 @@ jobs:
           helm template "${long_release}" manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-pvc.yaml > "${long_v1_wrapper_pvc}"
           "$(pwd)/bin/kustomize" build config/harness-wrapper > "${harness_v1_kustomize}"
 
-          grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
-          grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
+          grep -Fq -- "--controller-url=http://orka-internal.${NAMESPACE}.svc:8080" "${default_render}"
+          grep -Fq -- "--controller-url=http://secondary-orka-internal.${NAMESPACE}.svc:8080" "${secondary_render}"
           grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
           grep -Fq -- "--upstream-base-url=http://model-gateway.models.svc:8080" "${default_render}"
           if grep -Eq -- 'namespace: (models|vekil-system)$' "${default_render}"; then

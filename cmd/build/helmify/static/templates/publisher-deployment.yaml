@@ -66,11 +66,11 @@ spec:
             - {name: ORKA_PUBLISHER_CONTROLLER_TOKEN_FILE, value: /var/run/orka/publisher-auth/controller-token}
             - {name: ORKA_PUBLISHER_OPERATION_CAPABILITY_SECRET_FILE, value: /var/run/orka/publisher-auth/operation-capability-secret}
             - name: ORKA_PUBLISHER_ARTIFACT_AUTHORIZATION_BROKER_URL
-              value: http://{{ include "orka.fullname" . }}:{{ .Values.service.port }}
+              value: http://{{ include "orka.controllerInternalServiceName" . }}:{{ .Values.service.port }}
             - name: ORKA_PUBLISHER_ARTIFACT_API_URL
-              value: http://{{ include "orka.fullname" . }}:{{ .Values.service.port }}
+              value: http://{{ include "orka.controllerInternalServiceName" . }}:{{ .Values.service.port }}
             - name: ORKA_PUBLISHER_CREDENTIAL_BROKER_URL
-              value: http://{{ include "orka.fullname" . }}:{{ .Values.service.port }}
+              value: http://{{ include "orka.controllerInternalServiceName" . }}:{{ .Values.service.port }}
             - {name: ORKA_PUBLISHER_ALLOWED_SCM_HOSTS, value: {{ .Values.publisher.allowedSCMHosts | quote }}}
             - {name: ORKA_PUBLISHER_GITHUB_PR_ENABLED, value: {{ .Values.publisher.githubPR.enabled | quote }}}
             {{- if .Values.publisher.githubPR.enabled }}

@@ -2893,7 +2893,9 @@ run_concurrency_check() {
   [[ "$(grep -c . "${uid_file}")" == "${concurrency_tasks}" ]] || die "concurrent Tasks have empty RuntimeSession UIDs"
   [[ "$(sort -u "${uid_file}" | grep -c .)" == "${concurrency_tasks}" ]] || \
     die "concurrent Tasks did not receive distinct task-scoped RuntimeSession UIDs"
-  wait_until "RuntimePool/${expected_pool} transient counters to settle" "${state_wait_seconds}" pool_transient_counters_zero "${expected_pool}" 1
+  # The earlier durable read Session is not resident either: Codex supports
+  # native Sessions, so its runtime session retires after every turn.
+  wait_until "RuntimePool/${expected_pool} transient counters to settle" "${state_wait_seconds}" pool_transient_counters_zero "${expected_pool}" 0
   log "Shared-pool concurrency passed (maxRunning=${max_seen}, queued=${queued_seen}, limit=${limit})"
 }
 

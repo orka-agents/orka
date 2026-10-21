@@ -405,7 +405,8 @@ type AgentStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.model.provider`
+// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerRef.name`
+// +kubebuilder:printcolumn:name="Model Provider",type=string,JSONPath=`.spec.model.provider`
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.name`
 // +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
 // +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.activeTasks`

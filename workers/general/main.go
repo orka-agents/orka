@@ -23,6 +23,9 @@ import (
 	"strings"
 	"syscall"
 
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
 	"github.com/orka-agents/orka/internal/security"
 	securityslices "github.com/orka-agents/orka/internal/security/slices"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -36,6 +39,9 @@ var (
 )
 
 func main() {
+	// Shared packages log through controller-runtime; without a sink their
+	// warnings, such as controller-unreachable event retries, are dropped.
+	ctrllog.SetLogger(zap.New())
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(generalWorkerExitCode(err))

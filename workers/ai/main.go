@@ -38,6 +38,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
@@ -100,6 +102,9 @@ const (
 )
 
 func main() {
+	// Shared packages log through controller-runtime; without a sink their
+	// warnings, such as controller-unreachable event retries, are dropped.
+	ctrllog.SetLogger(zap.New())
 	if err := run("/session/transcript.jsonl"); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

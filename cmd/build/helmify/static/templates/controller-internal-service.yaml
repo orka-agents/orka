@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orka.controllerInternalServiceName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  # Workers, ACP runtimes, and the Workspace/Publisher report results, events,
+  # broker calls, and artifact authorizations here. Controller readiness is
+  # false during the preStop drain, which removes it from the external
+  # Service; publishing unready addresses keeps these in-cluster callers
+  # connected to the controller that is still draining.
+  publishNotReadyAddresses: true
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: api
+      protocol: TCP
+      name: api
+  selector:
+    {{- include "orka.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller

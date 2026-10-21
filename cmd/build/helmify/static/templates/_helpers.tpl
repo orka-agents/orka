@@ -351,7 +351,7 @@ spec:
 {{- end -}}
 {{- end }}
 
-{{/* Read the exact chart fullname from the live controller's in-cluster URL. */}}
+{{/* Read the exact chart fullname from a pre-annotation controller's in-cluster URL. */}}
 {{- define "orka.existingControllerFullname" -}}
 {{- $fullnames := list -}}
 {{- $namespaceSuffix := printf ".%s.svc" .namespace -}}
@@ -533,6 +533,16 @@ spec:
 
 {{- define "orka.controllerName" -}}
 {{- printf "%s-controller" (include "orka.fullname" . | trunc 52 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.controllerInternalServiceName" -}}
+{{- $fullname := include "orka.fullname" . -}}
+{{- $name := printf "%s-internal" ($fullname | trunc 54 | trimSuffix "-") -}}
+{{- if eq $name $fullname -}}
+{{- /* A long fullname that already ends in -internal would name the external Service. */ -}}
+{{- $name = printf "%s-internal-api" ($fullname | trunc 50 | trimSuffix "-") -}}
+{{- end -}}
+{{- $name -}}
 {{- end }}
 
 {{- define "orka.controllerWebhookServiceName" -}}
@@ -788,9 +798,13 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- fail (printf "controller.agentExecutionSnapshot.key is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotKey) -}}
 {{- end -}}
 {{- if eq .Values.controller.mode "harness-v2" -}}
-{{- $existingFullname := include "orka.existingControllerFullname" (dict "controller" $existingController "namespace" .Release.Namespace) | trim -}}
+{{- $existingFullname := dig "metadata" "annotations" "orka.ai/chart-fullname" "" $existingController | toString -}}
 {{- if not $existingFullname -}}
-{{- fail "cannot determine the existing harness-v2 chart fullname from the live controller; restore its exact --controller-url argument before upgrading" -}}
+{{- /* Controllers rendered before the annotation address the fullname Service directly. */ -}}
+{{- $existingFullname = include "orka.existingControllerFullname" (dict "controller" $existingController "namespace" .Release.Namespace) | trim -}}
+{{- end -}}
+{{- if not $existingFullname -}}
+{{- fail "cannot determine the existing harness-v2 chart fullname from the live controller; restore its orka.ai/chart-fullname annotation or exact --controller-url argument before upgrading" -}}
 {{- end -}}
 {{- $desiredFullname := include "orka.fullname" . -}}
 {{- if ne $existingFullname $desiredFullname -}}
