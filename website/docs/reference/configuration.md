@@ -732,6 +732,7 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_acp_runtime_pool_queued_tasks` | Gauge | `namespace`, `runtime_pool` | Durable unsatisfied Task demand assigned to the pool |
 | `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
 | `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
+| `orka_approval_decision_duration_seconds` | Histogram | `outcome`, `path` | Seconds from approval request to committed decision; see [Observability](../guides/observability.md#approval-decision-duration) |
 
 All context-token metric labels use low-cardinality values only. See [Transaction tokens](../concepts/transaction-tokens.md) for the authentication they measure.
 
