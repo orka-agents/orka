@@ -55,7 +55,18 @@
 // encoding: several persisted fields, such as gateway claim ownership and
 // usage phase history, are tagged json:"-". A provider that crosses a process
 // boundary defines its own wire records and must not encode these structs
-// with encoding/json.
+// with encoding/json. The orka.storage.v1 wire protocol in package wire
+// carries every field, including the json:"-" ones.
+//
+// Three rules let a record cross the wire unchanged, so callers and providers
+// must not depend on anything they do not preserve:
+//
+//   - Nil and empty slices and maps are equivalent. A caller must not tell a
+//     nil result apart from an empty one.
+//   - Strings are valid UTF-8.
+//   - Times are within 0001-01-01 and 9999-12-31 UTC. The zero time.Time is
+//     "no time"; a *time.Time keeps nil apart from a pointer to the zero
+//     time.
 //
 // The contract is unstable until a release advertises storage extension
 // support; names and semantics may change before then.

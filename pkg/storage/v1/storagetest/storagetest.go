@@ -60,20 +60,51 @@ var stateFamilies = []stateFamily{
 	{"describe", runDescribe},
 }
 
+// Option changes how RunState and RunArtifacts run the suite.
+type Option func(*options)
+
+type options struct {
+	parallel bool
+}
+
+// Parallel runs the contract families in parallel with each other. Cases
+// within a family still run in order. The factory must then be safe for
+// concurrent use, and each dataset it returns must stay isolated from the
+// others, as a schema per case on a shared database is.
+func Parallel() Option {
+	return func(o *options) { o.parallel = true }
+}
+
+func runOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
 // RunState runs every state.v1 case against providers from newProvider.
-func RunState(t *testing.T, newProvider StateFactory) {
+func RunState(t *testing.T, newProvider StateFactory, opts ...Option) {
 	t.Helper()
+	o := runOptions(opts)
 	for _, family := range stateFamilies {
 		t.Run(family.name, func(t *testing.T) {
+			if o.parallel {
+				t.Parallel()
+			}
 			family.run(t, newProvider)
 		})
 	}
 }
 
 // RunArtifacts runs every artifacts.v1 case against providers from newProvider.
-func RunArtifacts(t *testing.T, newProvider ArtifactFactory) {
+func RunArtifacts(t *testing.T, newProvider ArtifactFactory, opts ...Option) {
 	t.Helper()
+	o := runOptions(opts)
 	t.Run("artifacts", func(t *testing.T) {
+		if o.parallel {
+			t.Parallel()
+		}
 		runArtifacts(t, newProvider)
 	})
 }

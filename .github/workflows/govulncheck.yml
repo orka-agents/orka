@@ -7,6 +7,8 @@ on:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
+      - "pkg/storage/go.mod"
+      - "pkg/storage/go.sum"
       - ".github/workflows/govulncheck.yml"
   push:
     branches:
@@ -15,6 +17,8 @@ on:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
+      - "pkg/storage/go.mod"
+      - "pkg/storage/go.sum"
       - ".github/workflows/govulncheck.yml"
   schedule:
     - cron: "17 5 * * 1"
@@ -39,3 +43,6 @@ jobs:
 
       - name: Run govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
+
+      - name: Run govulncheck on the storage contract module
+        run: go -C pkg/storage run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...

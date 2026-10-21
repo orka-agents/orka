@@ -204,11 +204,16 @@ the observable parts.
   Persisted fields such as gateway claim ownership, lease expiry, the frozen
   Task tool policy, usage phase history, scan-run cancellation state and
   finding decision times are tagged `json:"-"`, so a provider that sends these
-  structs as JSON loses them. The
-  network protocol (step 6) defines its own wire records with a round-trip
-  test over every record type. `ExecutionEvent.Usage` is also tagged
-  `json:"-"`: it carries the usage observation Orka derived from the event
-  (see "Orka policy above the client").
+  structs as JSON loses them. The wire protocol (see "Wire protocol" below)
+  defines its own wire records, carries every field including the `json:"-"`
+  ones, and round-trips every record type in a test. `ExecutionEvent.Usage` is
+  also tagged `json:"-"`: it carries the usage observation Orka derived from
+  the event (see "Orka policy above the client").
+- **What the wire preserves.** Nil and empty slices and maps are equivalent,
+  so a caller must not tell a nil result apart from an empty one. Strings are
+  valid UTF-8. Times are within 0001-01-01 and 9999-12-31 UTC; the zero
+  `time.Time` means "no time", and a `*time.Time` keeps nil apart from a
+  pointer to the zero time.
 - **Artifacts.** Requests carry an `ArtifactOwner` (namespace, Task name and
   Task UID) so the identity can grow with a Job and cleanup generation without
   another signature change. The Task UID is reserved: Orka passes it where it
@@ -292,13 +297,80 @@ cross-contract transactions" above.
 
 `pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
 `RunArtifacts` exercise each provider family through the public interfaces.
-The SQLite provider runs it directly, and the storage client runs it over
-SQLite.
+The SQLite provider runs it directly and again over the wire loopback (see
+"Wire protocol"), and the storage client runs it over SQLite. The
+`storagetest.Parallel()` option runs the families in parallel for a factory
+that returns isolated datasets concurrently.
 
 SQLite also implements the duplicate SQL control-record methods described in
 the next section. They are not part of the provider contract or the client. A
 client test fails if any other SQLite method is missing from the client, so a
 consumer's type assertion cannot silently lose a capability.
+
+### Wire protocol
+
+`pkg/storage` is its own Go module, `github.com/orka-agents/orka/pkg/storage`,
+so a separately built provider imports the contract, the suite and the wire
+library without Orka's module graph. Its only direct requirements are gRPC,
+protobuf, the `google.rpc` status types and the assertion library the suite
+uses, and no package in it imports Orka's internal packages. The root module
+requires it through a `replace` directive, so Dockerfiles copy
+`pkg/storage/go.mod` and `go.sum` before downloading modules, and root `./...`
+patterns do not include it: `make fmt`, `vet`, `test` and `lint` run it
+separately. Each release also tags the module as `pkg/storage/<version>`.
+
+The protocol is gRPC with protobuf. The hand-written `.proto`
+files under `pkg/storage/proto/orka/storage/v1` are the wire source of truth:
+one service per contract family, one RPC per contract method, named after it,
+and wire records named after the Go records, with fields in snake case.
+`make generate-storage` (part of `make generate`) compiles them with a pinned
+buf and protoc plugins into `pkg/storage/v1/wire/storagepb`, then runs
+`wiregen`, which reads the Go contract and the descriptors and writes the
+mapping in `pkg/storage/v1/wire`. Parameters map to request fields by name and
+results to response fields by position. Generation fails when a contract
+method has no RPC or an RPC no method, when any parameter, result or record
+field, including a `json:"-"` field, has no wire field or the reverse, or when
+a pair of types is outside the mapping table. CI regenerates the code and
+fails on a difference.
+
+The wire currently serves `Describe` and `HealthCheck`, inter-agent messages
+and plan state. The other families stay in process until their RPCs land.
+`wiretest.State` serves a provider over an in-memory loopback with TLS 1.3 and
+bearer authentication, sending each family that has RPCs through the server
+library and the generated client; the SQLite provider passes the whole suite
+that way.
+
+- **Call metadata.** Every request names `orka-storage-contract`
+  (`orka.storage.v1`) and its `orka-storage-revision`; the server refuses a
+  call without them (`CONTRACT_MISMATCH`). A bound client names its dataset in
+  `orka-storage-dataset`, and responses name the contract, the server's
+  revision and, once a `Describe` has reported it, the serving dataset. A write's `WriteEnvelope` travels as the
+  binary header `orka-storage-envelope-bin`, and the server puts it in the
+  provider's context with `WithWriteEnvelope`.
+- **Unknown fields.** The server refuses a request with a field it does not
+  know anywhere in its message tree (`UNSUPPORTED_FIELD`), so an older server
+  never ignores a newer precondition. The protocol revision starts at 1; a
+  release raises it when it adds RPCs or request fields, and the client calls
+  an RPC only on a server of at least the revision that introduced it.
+- **Errors.** Every status the server library produces carries a
+  `google.rpc.ErrorInfo` in domain `storage.orka.ai` whose reason names the
+  contract error. The client rebuilds the typed error, so `errors.Is` and
+  `errors.As` behave as in process, including a `FencedError` that matches
+  `ErrConflict`. Only `VALIDATION`, `FENCED` and `CONFLICT` forward their
+  message, bounded and stripped of control characters. Any other provider
+  error, and a provider panic, is reported without its text as
+  `PROVIDER_ERROR` with a correlation ID the server logs; the client returns
+  it as `ErrOutcomeUnknown` for a write and a plain error for a read.
+- **Send evidence.** A status without that ErrorInfo came from the gRPC
+  library or a proxy. On a connection built with `wire.Dial`, the client's
+  stats handler and an innermost interceptor record whether a call's request
+  headers could have left the process: a call that never sent them is
+  `ErrUnavailable`, and a write that may have been sent is
+  `ErrOutcomeUnknown`. Without that evidence, a write's transport failure is
+  `ErrOutcomeUnknown`. Storage connections disable gRPC's configured retries;
+  only its transparent retries of attempts the server never processed remain.
+  The client refuses invalid UTF-8, out-of-range times and requests over the
+  16 MiB message limit before sending anything.
 
 ### Orka policy above the client
 

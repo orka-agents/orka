@@ -147,12 +147,25 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 	scripts/sync-helm-crds.sh
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen generate-storage ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
+
+# The storage contract is a nested Go module (pkg/storage). The root module's
+# ./... patterns do not include it, so its targets run with go -C.
+STORAGE_MODULE := pkg/storage
+
+.PHONY: generate-storage
+generate-storage: ## Generate the orka.storage.v1 protobuf code and the Go-to-wire mapping.
+	scripts/generate-storage-proto.sh generate
+
+.PHONY: verify-storage-generated
+verify-storage-generated: ## Check that the orka.storage.v1 generated code matches its sources.
+	scripts/generate-storage-proto.sh verify
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
+	go -C $(STORAGE_MODULE) fmt ./...
 
 .PHONY: ensure-ui-embed
 ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/build without full UI build).
@@ -164,6 +177,7 @@ ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/bu
 .PHONY: vet
 vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
+	go -C $(STORAGE_MODULE) vet ./...
 
 
 .PHONY: repository-monitor-fake-e2e
@@ -181,6 +195,7 @@ repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMoni
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	go -C $(STORAGE_MODULE) test ./...
 
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
@@ -238,10 +253,12 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 .PHONY: lint
 lint: ensure-ui-embed golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run --new
+	cd $(STORAGE_MODULE) && "$(GOLANGCI_LINT)" run --new
 
 .PHONY: lint-fix
 lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix --new
+	cd $(STORAGE_MODULE) && "$(GOLANGCI_LINT)" run --fix --new
 
 ##@ Demos
 
