@@ -29,7 +29,7 @@ func TestSessionTranscriptPreservesToolArguments(t *testing.T) {
 			db, err := sqlite.NewDB(":memory:")
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, db.Close()) })
-			ss := sqlite.NewStore(db, ":memory:")
+			ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 			ctx := t.Context()
 			require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 				Namespace: "default", Name: "precise-tools", SessionType: store.SessionTypeChat,

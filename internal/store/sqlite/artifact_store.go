@@ -19,6 +19,12 @@ import (
 // store.MaxArtifactBytes is rejected with store.ErrTooLarge. The Task UID is
 // not stored yet; artifacts are keyed by namespace, Task name and filename.
 func (s *Store) SaveArtifact(ctx context.Context, request store.SaveArtifactRequest) error {
+	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		return s.saveArtifactUnfenced(ctx, request)
+	})
+}
+
+func (s *Store) saveArtifactUnfenced(ctx context.Context, request store.SaveArtifactRequest) error {
 	if len(request.Data) > store.MaxArtifactBytes {
 		return store.TooLargeError{
 			What:  fmt.Sprintf("artifact %q", request.Filename),

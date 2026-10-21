@@ -116,6 +116,16 @@ func (s *Store) GetHarnessV1Attempt(ctx context.Context, key store.HarnessV1Atte
 
 // ListHarnessV1AttemptsByTask implements store.HarnessV1AttemptStore.
 func (s *Store) ListHarnessV1AttemptsByTask(ctx context.Context, namespace, taskUID string) ([]store.HarnessV1Attempt, error) {
+	var attempts []store.HarnessV1Attempt
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		attempts, err = s.listHarnessV1AttemptsByTaskUnfenced(ctx, namespace, taskUID)
+		return err
+	})
+	return attempts, err
+}
+
+func (s *Store) listHarnessV1AttemptsByTaskUnfenced(ctx context.Context, namespace, taskUID string) ([]store.HarnessV1Attempt, error) {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskUID) == "" {
 		return nil, store.ValidationErrorf("harness v1 attempt namespace and task UID are required")
 	}

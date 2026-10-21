@@ -45,6 +45,40 @@ func (s *Store) AppendExecutionEventIfAbsent(
 	return s.appendExecutionEvent(ctx, event, dedupeKey, nil)
 }
 
+// AppendExecutionEventsIfAbsent appends deduplicated events in order in one
+// transaction; a failing entry appends none of them.
+func (s *Store) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	keys := make([]string, len(appends))
+	for i, entry := range appends {
+		key, err := store.NormalizeExecutionEventDedupeKey(entry.DedupeKey)
+		if err != nil {
+			return nil, err
+		}
+		keys[i] = key
+	}
+	results := make([]store.ExecutionEventAppendResult, len(appends))
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		appendAll := func(txCtx context.Context) error {
+			for i, entry := range appends {
+				persisted, appended, err := s.appendExecutionEventUnfenced(txCtx, entry.Event, keys[i], nil)
+				if err != nil {
+					return err
+				}
+				results[i] = store.ExecutionEventAppendResult{Event: persisted, Appended: appended}
+			}
+			return nil
+		}
+		if s.taskDataTx(ctx) != nil {
+			return appendAll(ctx)
+		}
+		return s.withTaskDataTransaction(ctx, appendAll)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // AppendExecutionEventWithPlanIfAbsent atomically appends an execution event
 // and updates its task plan projection. Duplicate event keys leave the current
 // plan unchanged.
@@ -66,6 +100,22 @@ func (s *Store) AppendExecutionEventWithPlanIfAbsent(
 }
 
 func (s *Store) appendExecutionEvent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
+	var appended *store.ExecutionEvent
+	var created bool
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		appended, created, err = s.appendExecutionEventUnfenced(ctx, event, dedupeKey, plan)
+		return err
+	})
+	return appended, created, err
+}
+
+func (s *Store) appendExecutionEventUnfenced(
 	ctx context.Context,
 	event *store.ExecutionEvent,
 	dedupeKey string,
@@ -404,6 +454,16 @@ func sqliteSessionCursorSeq(ctx context.Context, querier sqliteSessionCursorQuer
 
 // ListExecutionEvents returns execution events matching filter in stream sequence order.
 func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	var listed []store.ExecutionEvent
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		listed, err = s.listExecutionEventsUnfenced(ctx, filter)
+		return err
+	})
+	return listed, err
+}
+
+func (s *Store) listExecutionEventsUnfenced(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
 	started := time.Now()
 	success := false
 	defer func() {

@@ -85,6 +85,36 @@ type MemoryProposalReview struct {
 	ReviewNote string
 }
 
+// MemoryProposalApplyTarget names what applying a proposal would return,
+// without the content of any memory. Orka authorizes MemoryID, when it is
+// set, before it commits the application.
+type MemoryProposalApplyTarget struct {
+	Namespace  string
+	ProposalID string
+	// ProposalStatus and AppliedMemoryID are the proposal state the target
+	// was resolved from. They are the version the commit checks.
+	ProposalStatus  string
+	AppliedMemoryID string
+	// MemoryID is the existing memory the application returns: the memory
+	// the proposal names, or the memory already created from it. It is empty
+	// when the application creates a memory.
+	MemoryID string
+}
+
+// MemoryProposalApplication commits a resolved proposal application.
+type MemoryProposalApplication struct {
+	// Target is the target ResolveMemoryProposalApplication returned.
+	Target    MemoryProposalApplyTarget
+	AppliedBy string
+	// AppliedAt is recorded as the application time.
+	AppliedAt time.Time
+	// Memory is the memory to create when Target.MemoryID is empty, and must
+	// be nil otherwise. Orka builds it from the proposal and redacts it. The
+	// provider sets its namespace, source and source proposal, and assigns an
+	// ID when it has none.
+	Memory *Memory
+}
+
 // Memory sources and memory proposal vocabulary.
 const (
 	// MemorySourceManual is recorded when a created memory names no source.
@@ -131,9 +161,7 @@ type MemoryStore interface {
 
 // MemoryProposalStore holds governance proposals for worker-proposed memory
 // and skill changes. Orka redacts proposal and review text before a provider
-// receives it. Applying an accepted proposal is not part of this contract
-// version: it authorizes an existing memory inside the application
-// transaction.
+// receives it.
 //
 //   - CreateMemoryProposal requires a namespace and a title and creates a
 //     pending proposal. It assigns an ID when the record has none, trims and
@@ -150,9 +178,9 @@ type MemoryStore interface {
 //   - ListMemoryProposals requires a namespace and returns proposals newest
 //     first. Query matches the title, description, content and skill name
 //     case-insensitively; a zero Limit selects the provider's default.
-//   - Only proposal application, which is outside this contract version,
-//     applies a proposal. A proposal counts as applied when its status is
-//     MemoryProposalStatusApplied or it names an AppliedMemoryID.
+//   - Only CommitMemoryProposalApplication applies a proposal. A proposal
+//     counts as applied when its status is MemoryProposalStatusApplied or it
+//     names an AppliedMemoryID.
 //   - ReviewMemoryProposal records MemoryProposalStatusAccepted or
 //     MemoryProposalStatusRejected, with the reviewer, note and review time,
 //     once and only on a pending proposal that is not applied; any other
@@ -161,10 +189,33 @@ type MemoryStore interface {
 //     proposal. A review never applies a proposal.
 //   - ArchiveMemoryProposal is idempotent and refuses an applied proposal
 //     with ErrValidation.
+//
+// Applying a proposal is a conditional command in two steps, so that Orka can
+// authorize the exact memory it would return before any memory content
+// leaves the provider:
+//
+//   - ResolveMemoryProposalApplication returns the target without memory
+//     content. An applied proposal targets the memory it names; a proposal
+//     that names none returns an error. An accepted proposal of type
+//     MemoryProposalTypeMemory targets the memory already created from it
+//     (its SourceProposalID), or no memory when applying would create one.
+//     Any other type or status returns ErrValidation. A missing proposal
+//     returns ErrNotFound.
+//   - CommitMemoryProposalApplication resolves the target again and applies
+//     only if it equals Target, returning ErrPreconditionFailed with no
+//     memory and no change otherwise. For an applied proposal it returns the
+//     named memory unchanged. For an existing memory created from the
+//     proposal it records the proposal as applied to that memory, keeping an
+//     earlier application time. Otherwise it creates Memory and records the
+//     proposal as applied to it, in the same transaction. Two applications
+//     that race create one memory: the loser returns ErrPreconditionFailed
+//     and its retry resolves the winner's memory.
 type MemoryProposalStore interface {
 	CreateMemoryProposal(ctx context.Context, proposal *MemoryProposal) error
 	GetMemoryProposal(ctx context.Context, namespace, id string) (*MemoryProposal, error)
 	ListMemoryProposals(ctx context.Context, filter MemoryProposalFilter) ([]MemoryProposal, error)
 	ReviewMemoryProposal(ctx context.Context, review MemoryProposalReview) error
 	ArchiveMemoryProposal(ctx context.Context, namespace, id string) error
+	ResolveMemoryProposalApplication(ctx context.Context, namespace, id string) (MemoryProposalApplyTarget, error)
+	CommitMemoryProposalApplication(ctx context.Context, application MemoryProposalApplication) (*Memory, error)
 }

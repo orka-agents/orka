@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
@@ -68,7 +69,7 @@ func TestBrokeredTranscriptSearchRejectsStaleOrUnavailableIdentity(t *testing.T)
 	for _, failure := range []string{"replaced", "completed", "execution outcome", "deleted", "reader unavailable", "transactions unavailable", "namespace mismatch", "missing UID", "missing cutoff", "prompt guard unavailable"} {
 		t.Run(failure, func(t *testing.T) {
 			task, kube, data := setupBrokeredTranscriptSearch(t)
-			capture := &countingTranscriptSearchStore{SessionStore: data, TaskDataTransactionStore: data}
+			capture := &countingTranscriptSearchStore{SessionStore: data, TaskDataAccessStore: data}
 			var sessions store.SessionStore = capture
 			var reader client.Reader = kube
 			uid := string(task.UID)
@@ -202,7 +203,11 @@ func TestBrokeredTranscriptSearchReauthorizesAfterNamespaceCleanup(t *testing.T)
 	}
 }
 
-func TestBrokeredTranscriptSearchSerializesReadWithCleanup(t *testing.T) {
+// TestBrokeredTranscriptSearchRefusesReadAfterCleanup deletes the searched
+// Session after the brokered search is authorized but before it reads. The
+// fenced read is refused instead of returning deleted history, and the
+// repeated search with a fresh fence finds nothing.
+func TestBrokeredTranscriptSearchRefusesReadAfterCleanup(t *testing.T) {
 	task, kube, _ := setupBrokeredTranscriptSearch(t)
 	dbPath := filepath.Join(t.TempDir(), "search.db")
 	readDB, err := sqlite.NewDB(dbPath)
@@ -213,12 +218,15 @@ func TestBrokeredTranscriptSearchSerializesReadWithCleanup(t *testing.T) {
 	t.Cleanup(func() { _ = cleanupDB.Close() })
 	_, err = cleanupDB.ExecContext(t.Context(), `PRAGMA busy_timeout=0`)
 	require.NoError(t, err)
-	data, cleanup := sqlite.NewStore(readDB, dbPath), sqlite.NewStore(cleanupDB, dbPath)
+	data, cleanup := testStorageClient(sqlite.NewStore(readDB, dbPath)), testStorageClient(sqlite.NewStore(cleanupDB, dbPath))
 	require.NoError(t, data.CreateSession(t.Context(), &store.SessionRecord{Namespace: task.Namespace, Name: "own-session", SessionType: "task"}))
 	require.NoError(t, data.AppendMessages(t.Context(), task.Namespace, "own-session", []store.SessionMessage{{ID: "cutoff", Role: "user", Content: "needle in original history"}}))
 	var cleanupErr error
 	attempted := false
-	racing := &taskReadRaceStore{Store: data, beforeRead: func(ctx context.Context) error {
+	racing := &taskReadRaceStore{Client: data, beforeRead: func(ctx context.Context) error {
+		if attempted {
+			return nil
+		}
 		attempted = true
 		cleanupErr = cleanup.DeleteSession(ctx, task.Namespace, "own-session")
 		return nil
@@ -226,10 +234,9 @@ func TestBrokeredTranscriptSearchSerializesReadWithCleanup(t *testing.T) {
 	ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, racing, data, client.ObjectKeyFromObject(task), string(task.UID), true, allowBrokeredTaskData))
 	result, err := tools.NewSearchTranscriptTool().Execute(ctx, json.RawMessage(`{"query":"needle"}`))
 	require.NoError(t, err)
-	require.Contains(t, result, "original history")
 	require.True(t, attempted)
-	require.ErrorContains(t, cleanupErr, "locked")
-	require.NoError(t, cleanup.DeleteSession(t.Context(), task.Namespace, "own-session"))
+	require.NoError(t, cleanupErr, "cleanup must not wait for an authorized search")
+	require.NotContains(t, result, "original history")
 }
 
 func brokeredTranscriptSearchContext(t *testing.T, task *corev1alpha1.Task, searcher tools.TranscriptSearcher) context.Context {
@@ -239,12 +246,12 @@ func brokeredTranscriptSearchContext(t *testing.T, task *corev1alpha1.Task, sear
 	})
 }
 
-func setupBrokeredTranscriptSearch(t *testing.T) (*corev1alpha1.Task, client.WithWatch, *sqlite.Store) {
+func setupBrokeredTranscriptSearch(t *testing.T) (*corev1alpha1.Task, client.WithWatch, *storageclient.Client) {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	data := sqlite.NewStore(db, ":memory:")
+	data := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	task := internalCallerAuthTaskObject("caller", "caller-uid", "", "root", "own-session")
 	task.Spec.Type = corev1alpha1.TaskTypeAgent
 	task.Spec.SessionRef.MaxMessages, task.Spec.SessionRef.ThroughMessageID = 1, "cutoff"

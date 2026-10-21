@@ -3,8 +3,14 @@
 // Every Orka consumer receives a Client rather than a concrete database. The
 // client composes a state.v1 provider and an artifacts.v1 provider from the
 // public storage contract (pkg/storage/v1). Families that still carry
-// plaintext protected data or Go callbacks into a database transaction are
-// served through Embedded, which only the in-process SQLite store implements.
+// plaintext protected data are served through Embedded, which only the
+// in-process SQLite store implements.
+//
+// Orka's callbacks run here, never in a provider: memory proposal application
+// authorizes the exact memory it would return, task data access authorizes a
+// caller against a cleanup fence, and scan ingestion validates and computes
+// its writes, each with no provider transaction open, before a conditional
+// provider command applies the result.
 //
 // The client applies Orka's redaction, payload sanitization and usage
 // attribution before any provider call, so providers store only content Orka
@@ -22,13 +28,12 @@ import (
 )
 
 // Embedded is the part of the application store that is not yet expressed in
-// the public provider contract. These families either receive plaintext
-// protected data (execution snapshots, native sessions, connector custody,
-// turn finalization with native capture) or run Orka callbacks inside a
-// database transaction (task data transactions, scan ingestion and memory
-// proposal application). Only the in-process SQLite store implements
-// Embedded, and it must be the same store that serves both contracts so
-// transaction-scoped contexts reach every participating record.
+// the public provider contract. These families receive plaintext protected
+// data (execution snapshots, native sessions, connector custody, turn
+// finalization with native capture) or are defined in internal/harness. Only
+// the in-process SQLite store implements Embedded, and it must be the same
+// store that serves both contracts, which also keeps fenced artifact writes on
+// the store whose cleanup generations fence them.
 type Embedded interface {
 	store.AgentExecutionSnapshotStore
 	store.AgentExecutionSnapshotLifecycleStore
@@ -37,21 +42,6 @@ type Embedded interface {
 	store.ConnectorConsentStore
 	store.SessionTurnPersistenceStore
 	harness.RuntimeSessionStore
-
-	ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error)
-	WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error
-	WithAuthorizedTaskDataTransaction(
-		ctx context.Context,
-		namespace, taskName string,
-		authorize func(context.Context) error,
-		fn func(context.Context) error,
-	) error
-	ApplyScanTaskIngestion(
-		ctx context.Context,
-		ingestion *store.ScanTaskIngestion,
-		validate func(*store.ScanRun) error,
-		apply func(store.SecurityStore, *store.ScanRun) error,
-	) (bool, error)
 }
 
 // Options selects the providers behind a Client.
@@ -72,6 +62,15 @@ type Client struct {
 	storagev1.ArtifactStore
 	Embedded
 }
+
+// The client implements Orka's side of each conditional protocol on top of
+// the provider contract, and still serves the whole contract itself.
+var (
+	_ store.MemoryProposalStore = (*Client)(nil)
+	_ store.TaskDataAccessStore = (*Client)(nil)
+	_ store.SecurityStore       = (*Client)(nil)
+	_ storagev1.StateProvider   = (*Client)(nil)
+)
 
 // ErrSplitEmbeddedStore rejects a client whose embedded families would not
 // share the transaction scope of the state and artifact records they touch.

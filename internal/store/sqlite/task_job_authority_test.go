@@ -23,7 +23,7 @@ func TestTaskJobRevocationSerializesAcrossConnections(t *testing.T) {
 	require.NoError(t, err)
 	data, controller := NewStore(db, path), NewStore(otherDB, path)
 	identity := store.TaskJobIdentity{Namespace: "ns", TaskUID: "task-uid", JobUID: "old-job-uid"}
-	require.NoError(t, data.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
+	require.NoError(t, data.withTaskDataTransaction(t.Context(), func(ctx context.Context) error {
 		require.NoError(t, data.CheckTaskJobAuthority(ctx, identity))
 		err := controller.RevokeTaskJob(t.Context(), identity)
 		require.Error(t, err)
@@ -32,7 +32,7 @@ func TestTaskJobRevocationSerializesAcrossConnections(t *testing.T) {
 	}))
 	require.NoError(t, controller.RevokeTaskJob(t.Context(), identity))
 	require.NoError(t, controller.RevokeTaskJob(t.Context(), identity))
-	err = data.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
+	err = data.withTaskDataTransaction(t.Context(), func(ctx context.Context) error {
 		return data.CheckTaskJobAuthority(ctx, identity)
 	})
 	require.ErrorIs(t, err, store.ErrTaskJobRevoked)
@@ -59,7 +59,7 @@ func TestTaskJobRevocationCleanupFencesAccess(t *testing.T) {
 			other := store.TaskJobIdentity{Namespace: "ns", TaskUID: "other-task-uid", JobUID: "other-job-uid"}
 			require.NoError(t, data.RevokeTaskJob(t.Context(), identity))
 			require.NoError(t, data.RevokeTaskJob(t.Context(), other))
-			require.NoError(t, data.WithTaskDataTransaction(t.Context(), func(context.Context) error {
+			require.NoError(t, data.withTaskDataTransaction(t.Context(), func(context.Context) error {
 				err := cleanup.DeleteTaskJobRevocations(t.Context(), "ns", "task", identity.TaskUID)
 				require.Error(t, err)
 				require.True(t, isSQLiteRetryableError(err), "cleanup must serialize with data access")
@@ -67,8 +67,8 @@ func TestTaskJobRevocationCleanupFencesAccess(t *testing.T) {
 			}))
 			require.ErrorIs(t, data.CheckTaskJobAuthority(t.Context(), identity), store.ErrTaskJobRevoked)
 			accessed := false
-			err = data.WithAuthorizedTaskDataTransaction(t.Context(), "ns", taskName, func(ctx context.Context) error {
-				return cleanup.DeleteTaskJobRevocations(ctx, "ns", "task", identity.TaskUID)
+			err = orkaClient(t, data).WithAuthorizedTaskDataAccess(t.Context(), "ns", taskName, func(ctx context.Context) ([]store.TaskJobIdentity, error) {
+				return nil, cleanup.DeleteTaskJobRevocations(ctx, "ns", "task", identity.TaskUID)
 			}, func(context.Context) error {
 				accessed = true
 				return nil
@@ -83,11 +83,11 @@ func TestTaskJobRevocationCleanupFencesAccess(t *testing.T) {
 
 func TestTaskFinalizationReclaimsGenerationRows(t *testing.T) {
 	s := newCoexistenceTestStore(t)
-	allow := func(context.Context) error { return nil }
-	require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "active", allow, allow))
+	client := orkaClient(t, s)
+	require.NoError(t, client.WithAuthorizedTaskDataAccess(t.Context(), "ns", "active", allowTaskData, accessNothing))
 	for index := range 25 {
 		name := "finished-" + strconv.Itoa(index)
-		require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", name, allow, allow))
+		require.NoError(t, client.WithAuthorizedTaskDataAccess(t.Context(), "ns", name, allowTaskData, accessNothing))
 		require.NoError(t, s.DeleteResult(t.Context(), "ns", name))
 		require.NoError(t, s.DeleteTaskJobRevocations(t.Context(), "ns", name, "uid-"+name))
 	}
@@ -103,22 +103,22 @@ func TestTaskGenerationReclamationDoesNotReuseAnAuthorization(t *testing.T) {
 		for _, reused := range []bool{false, true} {
 			t.Run("registered="+strconv.FormatBool(registered)+"/reused="+strconv.FormatBool(reused), func(t *testing.T) {
 				s := newCoexistenceTestStore(t)
-				allow := func(context.Context) error { return nil }
+				client := orkaClient(t, s)
 				if registered {
-					require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "task", allow, allow))
+					require.NoError(t, client.WithAuthorizedTaskDataAccess(t.Context(), "ns", "task", allowTaskData, accessNothing))
 					require.NoError(t, s.DeletePlan(t.Context(), "ns", "task"))
 				}
 				accessed := false
-				err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "task", func(ctx context.Context) error {
+				err := client.WithAuthorizedTaskDataAccess(t.Context(), "ns", "task", func(ctx context.Context) ([]store.TaskJobIdentity, error) {
 					if err := s.DeleteTaskJobRevocations(ctx, "ns", "task", "old-task-uid"); err != nil {
-						return err
+						return nil, err
 					}
 					if reused {
 						// A new incarnation re-registers the same name before the old
-						// request reaches its data transaction.
-						return s.WithAuthorizedTaskDataTransaction(ctx, "ns", "task", allow, allow)
+						// request reaches its data access.
+						return nil, client.WithAuthorizedTaskDataAccess(ctx, "ns", "task", allowTaskData, accessNothing)
 					}
-					return nil
+					return nil, nil
 				}, func(context.Context) error {
 					accessed = true
 					return nil

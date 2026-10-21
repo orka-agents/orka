@@ -13,6 +13,12 @@ import (
 
 // SaveResult inserts or replaces a task result.
 func (s *Store) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
+	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		return s.saveResultUnfenced(ctx, namespace, taskName, data)
+	})
+}
+
+func (s *Store) saveResultUnfenced(ctx context.Context, namespace, taskName string, data []byte) error {
 	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO results (namespace, task_name, data, created_at, updated_at)
 		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)

@@ -47,6 +47,9 @@ type (
 	SessionExecutionEvent                     = storagev1.SessionExecutionEvent
 	ExecutionEventStore                       = storagev1.ExecutionEventStore
 	DeduplicatingExecutionEventStore          = storagev1.DeduplicatingExecutionEventStore
+	GroupedExecutionEventStore                = storagev1.GroupedExecutionEventStore
+	ExecutionEventAppend                      = storagev1.ExecutionEventAppend
+	ExecutionEventAppendResult                = storagev1.ExecutionEventAppendResult
 	AtomicExecutionEventPlanStore             = storagev1.AtomicExecutionEventPlanStore
 	GatewaySessionCleanupProof                = storagev1.GatewaySessionCleanupProof
 	GatewaySessionCleanupCandidate            = storagev1.GatewaySessionCleanupCandidate
@@ -97,6 +100,17 @@ type (
 	OutboxPersistenceStore                    = storagev1.OutboxPersistenceStore
 	ScanTaskIdentity                          = storagev1.ScanTaskIdentity
 	ScanTaskIngestion                         = storagev1.ScanTaskIngestion
+	ScanRunKey                                = storagev1.ScanRunKey
+	ReviewSliceKey                            = storagev1.ReviewSliceKey
+	ThreatModelKey                            = storagev1.ThreatModelKey
+	FindingKey                                = storagev1.FindingKey
+	ReviewSliceStatusUpdate                   = storagev1.ReviewSliceStatusUpdate
+	FindingDuplicate                          = storagev1.FindingDuplicate
+	ScanIngestionStep                         = storagev1.ScanIngestionStep
+	ScanIngestionReadResult                   = storagev1.ScanIngestionReadResult
+	ScanIngestionPreview                      = storagev1.ScanIngestionPreview
+	ScanTaskIngestionCommit                   = storagev1.ScanTaskIngestionCommit
+	ScanIngestionStore                        = storagev1.ScanIngestionStore
 	ScanRun                                   = storagev1.ScanRun
 	ThreatModel                               = storagev1.ThreatModel
 	FindingEvidenceRef                        = storagev1.FindingEvidenceRef
@@ -149,6 +163,7 @@ type (
 	ArtifactKey                               = storagev1.ArtifactKey
 	SaveArtifactRequest                       = storagev1.SaveArtifactRequest
 	FencedError                               = storagev1.FencedError
+	PreconditionFailedError                   = storagev1.PreconditionFailedError
 	TooLargeError                             = storagev1.TooLargeError
 	PlanState                                 = storagev1.PlanState
 	TranscriptSearchFilter                    = storagev1.TranscriptSearchFilter
@@ -169,6 +184,8 @@ type (
 	MemoryProposal                            = storagev1.MemoryProposal
 	MemoryProposalFilter                      = storagev1.MemoryProposalFilter
 	MemoryProposalReview                      = storagev1.MemoryProposalReview
+	MemoryProposalApplyTarget                 = storagev1.MemoryProposalApplyTarget
+	MemoryProposalApplication                 = storagev1.MemoryProposalApplication
 	MemoryStore                               = storagev1.MemoryStore
 	TaskUsageObservationReader                = storagev1.TaskUsageObservationReader
 )
@@ -278,10 +295,15 @@ var (
 	ErrFenced                       = storagev1.ErrFenced
 	ErrTooLarge                     = storagev1.ErrTooLarge
 	ErrGatewaySessionCleanupPending = storagev1.ErrGatewaySessionCleanupPending
+	ErrPreconditionFailed           = storagev1.ErrPreconditionFailed
 )
 
 func FencedErrorf(format string, args ...any) error {
 	return storagev1.FencedErrorf(format, args...)
+}
+
+func PreconditionFailedErrorf(format string, args ...any) error {
+	return storagev1.PreconditionFailedErrorf(format, args...)
 }
 
 func ConflictErrorf(format string, args ...any) error {

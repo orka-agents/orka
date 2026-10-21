@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -86,12 +87,12 @@ func TestInternalReadRejectsCleanupDuringAuthorization(t *testing.T) {
 }
 
 type taskReadRaceStore struct {
-	*sqlite.Store
+	*storageclient.Client
 	beforeRead func(context.Context) error
 }
 
 func (s *taskReadRaceStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
-	sessionType, err := s.Store.GetSessionType(ctx, namespace, name)
+	sessionType, err := s.Client.GetSessionType(ctx, namespace, name)
 	if err != nil {
 		return "", err
 	}
@@ -102,17 +103,22 @@ func (s *taskReadRaceStore) SearchTranscript(ctx context.Context, filter store.T
 	if err := s.beforeRead(ctx); err != nil {
 		return nil, err
 	}
-	return s.Store.SearchTranscript(ctx, filter)
+	return s.Client.SearchTranscript(ctx, filter)
 }
 
 func (s *taskReadRaceStore) GetPlan(ctx context.Context, namespace, taskName string) (*store.PlanState, error) {
 	if err := s.beforeRead(ctx); err != nil {
 		return nil, err
 	}
-	return s.Store.GetPlan(ctx, namespace, taskName)
+	return s.Client.GetPlan(ctx, namespace, taskName)
 }
 
-func TestInternalReadsSerializeAuthorizationWithTaskReuse(t *testing.T) {
+// TestInternalReadsFenceAuthorizationAgainstTaskReuse races finalizer cleanup
+// and Task name reuse with a worker read that is already authorized. Cleanup
+// does not wait for the read: it moves the cleanup fence, so the read is
+// refused rather than served from the replacement Task, and the fresh
+// authorization that follows rejects the stale worker.
+func TestInternalReadsFenceAuthorizationAgainstTaskReuse(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		path    string
@@ -137,8 +143,8 @@ func TestInternalReadsSerializeAuthorizationWithTaskReuse(t *testing.T) {
 			t.Cleanup(func() { _ = cleanupDB.Close() })
 			_, err = cleanupDB.ExecContext(t.Context(), `PRAGMA busy_timeout=0`)
 			require.NoError(t, err)
-			reader, cleanup := sqlite.NewStore(readerDB, dbPath), sqlite.NewStore(cleanupDB, dbPath)
-			seed := func(ctx context.Context, data *sqlite.Store, content string) error {
+			reader, cleanup := testStorageClient(sqlite.NewStore(readerDB, dbPath)), testStorageClient(sqlite.NewStore(cleanupDB, dbPath))
+			seed := func(ctx context.Context, data *storageclient.Client, content string) error {
 				if err := data.CreateSession(ctx, &store.SessionRecord{
 					Namespace: "default", Name: "my-session", SessionType: "task",
 				}); err != nil {
@@ -181,7 +187,7 @@ func TestInternalReadsSerializeAuthorizationWithTaskReuse(t *testing.T) {
 			}
 			var cleanupErr error
 			attemptedCleanup := false
-			racing := &taskReadRaceStore{Store: reader, beforeRead: func(ctx context.Context) error {
+			racing := &taskReadRaceStore{Client: reader, beforeRead: func(ctx context.Context) error {
 				if attemptedCleanup {
 					return nil
 				}
@@ -198,20 +204,14 @@ func TestInternalReadsSerializeAuthorizationWithTaskReuse(t *testing.T) {
 			app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
 			request := taskScopedRequest{method: http.MethodGet, path: test.path}
 			resp := doTaskScopedInternalRequest(t, app, request)
-			require.Equal(t, http.StatusOK, resp.StatusCode)
 			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
-			require.Contains(t, string(body), "original Task history")
-			require.NotContains(t, string(body), "replacement Task history")
-			if test.through {
-				require.NotContains(t, string(body), "later Task history")
-			}
 			require.True(t, attemptedCleanup)
-			require.ErrorContains(t, cleanupErr, "locked")
+			require.NoError(t, cleanupErr, "cleanup must not wait for an authorized read")
+			require.Equal(t, http.StatusForbidden, resp.StatusCode, string(body))
+			require.NotContains(t, string(body), "original Task history")
+			require.NotContains(t, string(body), "replacement Task history")
 
-			// Once the read finishes, cleanup can complete and stale workers lose access.
-			require.NoError(t, cleanup.DeletePlan(t.Context(), "default", "my-task"))
-			require.NoError(t, recreateTask(t.Context()))
 			stale := doTaskScopedInternalRequest(t, app, request)
 			require.Equal(t, http.StatusForbidden, stale.StatusCode)
 		})

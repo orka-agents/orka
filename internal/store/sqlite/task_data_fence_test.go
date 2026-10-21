@@ -13,6 +13,12 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// allowTaskData authorizes a task data request without Job identities.
+func allowTaskData(context.Context) ([]store.TaskJobIdentity, error) { return nil, nil }
+
+// accessNothing is task data access that reads and writes nothing.
+func accessNothing(context.Context) error { return nil }
+
 func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "task-data.db")
@@ -27,9 +33,9 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	// or timing assertions, even when cleanup uses another controller connection.
 	_, err = cleanupDB.ExecContext(ctx, `PRAGMA busy_timeout=0`)
 	require.NoError(t, err)
-	require.NoError(t, writer.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
-		// The database callback excludes cleanup before any payload is read
-		// or written. Network authorization runs before this callback.
+	require.NoError(t, writer.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
+		// The store's internal transaction, which a fenced call also uses,
+		// excludes cleanup before any payload is read or written.
 		cleanupErr := cleanup.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"})
 		require.Error(t, cleanupErr)
 		require.True(t, isSQLiteRetryableError(cleanupErr))
@@ -98,8 +104,8 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 			t.Cleanup(func() { _ = cleanupDB.Close() })
 			data, cleanup := NewStore(db, path), NewStore(cleanupDB, path)
 			accessed := false
-			err = data.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "", func(ctx context.Context) error {
-				return test.cleanup(ctx, cleanup)
+			err = orkaClient(t, data).WithAuthorizedTaskDataAccess(t.Context(), "ns", "", func(ctx context.Context) ([]store.TaskJobIdentity, error) {
+				return nil, test.cleanup(ctx, cleanup)
 			}, func(context.Context) error {
 				accessed = true
 				return nil
@@ -112,11 +118,11 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 
 func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
 	s := newCoexistenceTestStore(t)
-	err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "", func(ctx context.Context) error {
+	err := orkaClient(t, s).WithAuthorizedTaskDataAccess(t.Context(), "ns", "", func(ctx context.Context) ([]store.TaskJobIdentity, error) {
 		if err := s.SaveResult(ctx, "ns", "other-task", []byte("unrelated write")); err != nil {
-			return err
+			return nil, err
 		}
-		return s.DeleteResult(ctx, "other-namespace", "task")
+		return nil, s.DeleteResult(ctx, "other-namespace", "task")
 	}, func(ctx context.Context) error {
 		return s.SaveResult(ctx, "ns", "task", []byte("authorized write"))
 	})
@@ -128,18 +134,20 @@ func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
 
 func TestTaskGenerationRegistrationRequiresAuthorization(t *testing.T) {
 	s := newCoexistenceTestStore(t)
-	allow := func(context.Context) error { return nil }
+	client := orkaClient(t, s)
 	denied := errors.New("task identity unavailable")
-	err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "missing", func(context.Context) error { return denied }, allow)
+	err := client.WithAuthorizedTaskDataAccess(t.Context(), "ns", "missing", func(context.Context) ([]store.TaskJobIdentity, error) {
+		return nil, denied
+	}, accessNothing)
 	require.ErrorIs(t, err, denied)
 	var count int
 	require.NoError(t, s.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM task_data_task_generations`).Scan(&count))
 	require.Zero(t, count, "rejected requests must not create persistent generation rows")
 
-	require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "active", allow, allow))
-	require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "active", func(ctx context.Context) error {
-		return s.DeleteTaskJobRevocations(ctx, "ns", "unrelated", "other-uid")
-	}, allow), "an authorized live Task must not retry because another Task was finalized")
+	require.NoError(t, client.WithAuthorizedTaskDataAccess(t.Context(), "ns", "active", allowTaskData, accessNothing))
+	require.NoError(t, client.WithAuthorizedTaskDataAccess(t.Context(), "ns", "active", func(ctx context.Context) ([]store.TaskJobIdentity, error) {
+		return nil, s.DeleteTaskJobRevocations(ctx, "ns", "unrelated", "other-uid")
+	}, accessNothing), "an authorized live Task must not retry because another Task was finalized")
 }
 
 func TestTaskGenerationRegistrationIsRemovedAfterRejectedAccess(t *testing.T) {
@@ -150,15 +158,15 @@ func TestTaskGenerationRegistrationIsRemovedAfterRejectedAccess(t *testing.T) {
 			defer cancel()
 			denied := errors.New("access denied")
 			authorizations := 0
-			err := s.WithAuthorizedTaskDataTransaction(ctx, "ns", "task", func(context.Context) error {
+			err := orkaClient(t, s).WithAuthorizedTaskDataAccess(ctx, "ns", "task", func(context.Context) ([]store.TaskJobIdentity, error) {
 				authorizations++
 				if authorizations == 1 || failure == "data access" {
-					return nil
+					return nil, nil
 				}
 				if failure == "cancellation" {
 					cancel()
 				}
-				return denied
+				return nil, denied
 			}, func(context.Context) error { return denied })
 			require.ErrorIs(t, err, denied)
 			require.Equal(t, 2, authorizations, "registration must not reuse its initial authorization")
@@ -173,7 +181,7 @@ func TestTaskDataTransactionRollsBackRejectedMutation(t *testing.T) {
 	s := newCoexistenceTestStore(t)
 	ctx := context.Background()
 	denied := errors.New("task identity changed")
-	err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+	err := s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		if err := s.SaveResult(txCtx, "ns", "task", []byte("stale")); err != nil {
 			return err
 		}
@@ -198,7 +206,7 @@ func TestTaskDataTransactionEventAndInboxCommitRollback(t *testing.T) {
 				Namespace: "ns", FromTask: "peer", ToTask: "task", ParentTask: "parent", Content: "message",
 			}))
 			denied := errors.New("task identity changed")
-			err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+			err := s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
 				messages, err := s.GetMessages(txCtx, "ns", "task", "parent", true)
 				if err != nil {
 					return err

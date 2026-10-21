@@ -22,6 +22,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -742,7 +743,7 @@ func setupAuthenticatedExecutionEventApp(
 	return app
 }
 
-func newSQLiteExecutionEventStoreForTest(t *testing.T) *sqlite.Store {
+func newSQLiteExecutionEventStoreForTest(t *testing.T) *storageclient.Client {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
 	db, err := sqlite.NewDB(dbPath)
@@ -750,7 +751,7 @@ func newSQLiteExecutionEventStoreForTest(t *testing.T) *sqlite.Store {
 		t.Fatalf("sqlite.NewDB: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return sqlite.NewStore(db, dbPath)
+	return testStorageClient(sqlite.NewStore(db, dbPath))
 }
 
 func doStreamRequestAllowUnexpectedEOF(t *testing.T, app *fiber.App, target string) string {

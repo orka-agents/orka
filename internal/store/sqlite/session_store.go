@@ -71,6 +71,16 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 // GetSession loads a session with all its messages.
 func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	var session *store.SessionRecord
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		session, err = s.getSessionUnfenced(ctx, namespace, name)
+		return err
+	})
+	return session, err
+}
+
+func (s *Store) getSessionUnfenced(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	var session *store.SessionRecord
 	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
 		var err error
 		session, err = getSession(ctx, q, namespace, name)
@@ -112,6 +122,16 @@ func getSession(ctx context.Context, q taskDataExecutor, namespace, name string)
 
 // GetSessionType returns the stored Session type without loading transcript messages.
 func (s *Store) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	var sessionType string
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		sessionType, err = s.getSessionTypeUnfenced(ctx, namespace, name)
+		return err
+	})
+	return sessionType, err
+}
+
+func (s *Store) getSessionTypeUnfenced(ctx context.Context, namespace, name string) (string, error) {
 	var sessionType string
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT session_type FROM sessions WHERE namespace = ? AND name = ?`,
@@ -1008,11 +1028,35 @@ func verifySessionWriteLockTx(ctx context.Context, tx *sql.Tx, namespace, name, 
 
 // LoadTranscript retrieves messages in logical conversation order.
 func (s *Store) LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]store.SessionMessage, error) {
+	var messages []store.SessionMessage
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		messages, err = s.loadTranscriptUnfenced(ctx, namespace, name, maxMessages)
+		return err
+	})
+	return messages, err
+}
+
+func (s *Store) loadTranscriptUnfenced(ctx context.Context, namespace, name string, maxMessages int) ([]store.SessionMessage, error) {
 	return s.loadTranscript(ctx, namespace, name, 0, maxMessages)
 }
 
 // LoadTranscriptThrough retrieves logical history through one stable message ID.
 func (s *Store) LoadTranscriptThrough(
+	ctx context.Context,
+	namespace, name, throughMessageID string,
+	maxMessages int,
+) ([]store.SessionMessage, error) {
+	var messages []store.SessionMessage
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		messages, err = s.loadTranscriptThroughUnfenced(ctx, namespace, name, throughMessageID, maxMessages)
+		return err
+	})
+	return messages, err
+}
+
+func (s *Store) loadTranscriptThroughUnfenced(
 	ctx context.Context,
 	namespace, name, throughMessageID string,
 	maxMessages int,

@@ -40,6 +40,16 @@ const sessionSoulHistorySQL = `WITH history AS (
 // ReadSessionSoul uses existing transcript metadata rather than introducing an
 // independent Session identity store or changing the persisted SQLite schema.
 func (s *Store) ReadSessionSoul(ctx context.Context, namespace, name, taskName, taskUID string) (store.SessionSoulState, error) {
+	var soul store.SessionSoulState
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		soul, err = s.readSessionSoulUnfenced(ctx, namespace, name, taskName, taskUID)
+		return err
+	})
+	return soul, err
+}
+
+func (s *Store) readSessionSoulUnfenced(ctx context.Context, namespace, name, taskName, taskUID string) (store.SessionSoulState, error) {
 	var state store.SessionSoulState
 	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
 		var err error

@@ -368,7 +368,7 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 
 	slice.CreatedAt = utcTime(slice.CreatedAt)
 	slice.LastReviewedAt = utcTimePtr(slice.LastReviewedAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if slice.CreatedAt.IsZero() {
 		slice.CreatedAt = now
 	}
@@ -533,7 +533,7 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 
 // UpdateReviewSliceStatus updates slice status and review timestamp.
 func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
-	now := time.Now().UTC()
+	now := s.securityNow()
 	res, err := s.securityDB().ExecContext(ctx,
 		`UPDATE security_review_slices
 		 SET status = ?, last_reviewed_at = CASE WHEN ? IN ('reviewed', 'completed') THEN ? ELSE last_reviewed_at END,
@@ -615,7 +615,7 @@ func (s *Store) saveThreatModel(ctx context.Context, model *store.ThreatModel, e
 	}
 
 	model.CreatedAt = utcTime(model.CreatedAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if model.CreatedAt.IsZero() {
 		model.CreatedAt = now
 	}
@@ -687,7 +687,7 @@ func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, obser
 	finding.CreatedAt = utcTime(finding.CreatedAt)
 	decisionAtProvided := findingUserFinalState(finding.State) && !finding.DecisionAt.IsZero()
 	finding.DecisionAt = utcTime(finding.DecisionAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if finding.CreatedAt.IsZero() {
 		finding.CreatedAt = now
 	}
@@ -1130,7 +1130,7 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 	if findingUserFinalState(sourceState) && (!findingUserFinalState(canonicalState) || newerSourceDecision) {
 		if _, err := s.securityDB().ExecContext(ctx,
 			`UPDATE security_findings SET state = ?, decision_at = ?, updated_at = ? WHERE namespace = ? AND id = ?`,
-			sourceState, sourceDecision, time.Now().UTC(), namespace, canonicalID,
+			sourceState, sourceDecision, s.securityNow(), namespace, canonicalID,
 		); err != nil {
 			return err
 		}
@@ -1144,12 +1144,12 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 		 WHERE finding.namespace = ? AND finding.repository_scan = ?
 	)
 	UPDATE security_findings
-	 SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP
+	 SET duplicate_of = ?, updated_at = ?
 	 WHERE namespace = ? AND repository_scan = ? AND id IN (SELECT id FROM descendants)`,
-		namespace, sourceRepo, id, namespace, sourceRepo, canonicalID, namespace, sourceRepo); err != nil {
+		namespace, sourceRepo, id, namespace, sourceRepo, canonicalID, s.securityNow(), namespace, sourceRepo); err != nil {
 		return err
 	}
-	if _, err := s.securityDB().ExecContext(ctx, `UPDATE security_findings SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`, canonicalID, namespace, id); err != nil {
+	if _, err := s.securityDB().ExecContext(ctx, `UPDATE security_findings SET duplicate_of = ?, updated_at = ? WHERE namespace = ? AND id = ?`, canonicalID, s.securityNow(), namespace, id); err != nil {
 		return err
 	}
 	return nil
@@ -1491,12 +1491,12 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 			dropped.SliceID,
 			dropped.Reason,
 			dropped.SampleJSON,
-			time.Now().UTC().Format(time.RFC3339Nano),
+			s.securityNow().Format(time.RFC3339Nano),
 		}, "|"))
 	}
 	dropped.CreatedAt = utcTime(dropped.CreatedAt)
 	if dropped.CreatedAt.IsZero() {
-		dropped.CreatedAt = time.Now().UTC()
+		dropped.CreatedAt = s.securityNow()
 	}
 	_, err := s.securityDB().ExecContext(ctx,
 		`INSERT OR IGNORE INTO security_dropped_findings

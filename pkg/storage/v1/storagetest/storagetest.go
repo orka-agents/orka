@@ -7,7 +7,8 @@
 // without Orka's internal packages. Cases assert contract behavior: identity
 // and namespace isolation, the typed errors providers return, idempotent
 // replays, atomic grouped writes, bounded queries, one winner among
-// concurrent callers, exact nanosecond times and the provider description.
+// concurrent callers, conditional commands that refuse a changed target or a
+// stale fence, exact nanosecond times and the provider description.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
 package storagetest
@@ -56,6 +57,11 @@ var stateFamilies = []stateFamily{
 	{"repository-monitors", runRepositoryMonitors},
 	{"usage", runUsage},
 	{"memories", runMemories},
+	{"memory-proposal-application", runMemoryProposalApplication},
+	{"task-data-fences", runTaskDataFences},
+	{"artifact-fence", runArtifactFence},
+	{"grouped-execution-events", runGroupedExecutionEvents},
+	{"scan-ingestion", runScanIngestion},
 	{"timestamps", runTimestamps},
 	{"concurrency", runConcurrency},
 	{"describe", runDescribe},

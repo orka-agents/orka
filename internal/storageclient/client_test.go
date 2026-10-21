@@ -52,7 +52,7 @@ var (
 	_ store.GatewayTaskCleanupReceiptStore            = (*storageclient.Client)(nil)
 	_ store.GatewayTaskCleanupReceiptMaintenanceStore = (*storageclient.Client)(nil)
 	_ store.GatewaySessionCleanupCandidateStore       = (*storageclient.Client)(nil)
-	_ store.TaskDataTransactionStore                  = (*storageclient.Client)(nil)
+	_ store.TaskDataAccessStore                       = (*storageclient.Client)(nil)
 	_ store.ControllerEpochMirror                     = (*storageclient.Client)(nil)
 	_ kube.SQLitePersistence                          = (*storageclient.Client)(nil)
 	_ store.HealthChecker                             = (*storageclient.Client)(nil)

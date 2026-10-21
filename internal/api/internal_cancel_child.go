@@ -65,7 +65,7 @@ func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 	}
 	var child *corev1alpha1.Task
 	result := tools.CancelTaskResult{TaskName: childName}
-	if err := withInternalTaskDataTransaction(c, h.resultStore, taskName, func(ctx context.Context) error {
+	if err := withInternalTaskData(c, h.resultStore, taskName, func(ctx context.Context) error {
 		if err := authorizer.revalidateTaskCaller(c, parent); err != nil {
 			return err
 		}

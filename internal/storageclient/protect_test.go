@@ -122,9 +122,9 @@ func (r *recordingStore) ReviewMemoryProposal(ctx context.Context, review store.
 	return r.Store.ReviewMemoryProposal(ctx, review)
 }
 
-func (r *recordingStore) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
-	r.record("ApplyMemoryProposal", apply)
-	return r.Store.ApplyMemoryProposal(ctx, apply)
+func (r *recordingStore) CommitMemoryProposalApplication(ctx context.Context, application store.MemoryProposalApplication) (*store.Memory, error) {
+	r.record("CommitMemoryProposalApplication", application)
+	return r.Store.CommitMemoryProposalApplication(ctx, application)
 }
 
 func (r *recordingStore) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
@@ -137,31 +137,14 @@ func (r *recordingStore) SaveThreatModelIfVersion(ctx context.Context, model *st
 	return r.Store.SaveThreatModelIfVersion(ctx, model, expectedVersion)
 }
 
-// ApplyScanTaskIngestion hands the callback a recording transaction store,
-// standing in for the provider's transaction-scoped store.
-func (r *recordingStore) ApplyScanTaskIngestion(
-	_ context.Context,
-	ingestion *store.ScanTaskIngestion,
-	_ func(*store.ScanRun) error,
-	apply func(store.SecurityStore, *store.ScanRun) error,
-) (bool, error) {
-	r.record("ApplyScanTaskIngestion", ingestion)
-	return true, apply(recordingSecurityStore{SecurityStore: r.Store, recorder: r}, &store.ScanRun{})
+func (r *recordingStore) PreviewScanTaskIngestion(ctx context.Context, preview store.ScanIngestionPreview) ([]store.ScanIngestionReadResult, error) {
+	r.record("PreviewScanTaskIngestion", preview)
+	return r.Store.PreviewScanTaskIngestion(ctx, preview)
 }
 
-type recordingSecurityStore struct {
-	store.SecurityStore
-	recorder *recordingStore
-}
-
-func (s recordingSecurityStore) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
-	s.recorder.record("ingestion SaveThreatModel", model)
-	return s.SecurityStore.SaveThreatModel(ctx, model)
-}
-
-func (s recordingSecurityStore) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
-	s.recorder.record("ingestion SaveThreatModelIfVersion", model, expectedVersion)
-	return s.SecurityStore.SaveThreatModelIfVersion(ctx, model, expectedVersion)
+func (r *recordingStore) CommitScanTaskIngestion(ctx context.Context, commit store.ScanTaskIngestionCommit) (bool, error) {
+	r.record("CommitScanTaskIngestion", commit)
+	return r.Store.CommitScanTaskIngestion(ctx, commit)
 }
 
 func (r *recordingStore) RecordUsage(ctx context.Context, observation store.UsageObservation) error {
@@ -290,18 +273,26 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	}
 	require.NoError(t, client.SaveThreatModel(ctx, threatModel("api_key="+openAI)))
 	require.NoError(t, client.SaveThreatModelIfVersion(ctx, threatModel("token is "+github), 1))
-	_, err = client.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{}, nil, func(tx store.SecurityStore, _ *store.ScanRun) error {
+	require.NoError(t, client.CreateScanRun(ctx, &store.ScanRun{ID: "run", Namespace: "tenant", RepositoryScan: "repo", Phase: "running"}))
+	ingestion := &store.ScanTaskIngestion{ScanTaskIdentity: store.ScanTaskIdentity{
+		Namespace: "tenant", RepositoryScan: "repo", ScanRunID: "run", TaskName: "threat-model", TaskUID: "task-uid", Stage: "threat-model",
+	}}
+	applied, err := client.ApplyScanTaskIngestion(ctx, ingestion, nil, func(tx store.SecurityStore, _ *store.ScanRun) error {
 		if err := tx.SaveThreatModel(ctx, threatModel("Authorization: Bearer "+bearer)); err != nil {
 			return err
 		}
-		return tx.SaveThreatModelIfVersion(ctx, threatModel("api_key="+openAI), 3)
+		// A read after the write is answered by a preview, which also
+		// carries the sanitized threat model.
+		_, err := tx.GetLatestThreatModel(ctx, "tenant", "repo")
+		return err
 	})
 	require.NoError(t, err)
+	require.True(t, applied)
 
 	recorder.requireCalled(t,
 		"AppendExecutionEvent", "AppendExecutionEventIfAbsent", "AppendExecutionEventWithPlanIfAbsent", "RecordUsage",
-		"CreateMemory", "UpdateMemory", "CreateMemoryProposal", "ReviewMemoryProposal", "ApplyMemoryProposal",
-		"SaveThreatModel", "SaveThreatModelIfVersion", "ingestion SaveThreatModel", "ingestion SaveThreatModelIfVersion",
+		"CreateMemory", "UpdateMemory", "CreateMemoryProposal", "ReviewMemoryProposal", "CommitMemoryProposalApplication",
+		"SaveThreatModel", "SaveThreatModelIfVersion", "PreviewScanTaskIngestion", "CommitScanTaskIngestion",
 	)
 	recorder.requireNoSecret(t, secrets)
 	// The provider received the content around the secrets, so the check
@@ -310,7 +301,8 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	recorder.requireReceived(t, "AppendExecutionEvent", "task-uid/call-1")
 	recorder.requireReceived(t, "AppendExecutionEventIfAbsent", "acp/task-uid/prompt/1/")
 	recorder.requireReceived(t, "CreateMemory", "the deploy token is")
-	recorder.requireReceived(t, "ingestion SaveThreatModel", "Authorization:")
+	recorder.requireReceived(t, "CommitScanTaskIngestion", "Authorization:")
+	recorder.requireReceived(t, "CommitMemoryProposalApplication", "Authorization:")
 }
 
 func TestClientDerivesWorkerUsageOnlyForTheAttributedTask(t *testing.T) {

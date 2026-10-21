@@ -17,7 +17,7 @@ import (
 )
 
 type approvalTerminalProjectionOutageStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	unavailable atomic.Bool
 	attempts    atomic.Int32
@@ -69,7 +69,7 @@ func TestMCPApprovalTerminalReceiptSurvivesProjectionOutage(t *testing.T) {
 				_, err := original.ExecuteACPMCPTool(ctx, request, descriptor)
 				return tc.toolResult, err
 			})
-			projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+			projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 			projection.unavailable.Store(true)
 			f.broker.ApprovalEvents = projection
 			f.dispatcher.EventStore = projection
@@ -155,7 +155,7 @@ func TestMCPApprovalReplayRejectsUnverifiedReceiptBeforeProjection(t *testing.T)
 	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 	awaitMCPApprovalResult(t, done)
 
-	projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	projection.unavailable.Store(true)
 	f.broker.ApprovalEvents = projection
 	f.broker.Effects = approvalUnverifiedReceiptStore{ExternalEffectStore: f.broker.Effects}
@@ -166,7 +166,7 @@ func TestMCPApprovalReplayRejectsUnverifiedReceiptBeforeProjection(t *testing.T)
 }
 
 type approvalAppendOutageStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	attempts atomic.Int32
 }
@@ -186,7 +186,7 @@ func TestMCPApprovalReplaysTerminalReceiptDuringEventStoreOutage(t *testing.T) {
 
 	// Exact redelivery of a completed call must return the durable receipt
 	// even when no event can be appended; recovery repairs projection later.
-	outage := &approvalAppendOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	outage := &approvalAppendOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	f.broker.ApprovalEvents = outage
 	replayed := awaitMCPApprovalResult(t, f.start(f.request))
 	require.True(t, replayed.Replayed)

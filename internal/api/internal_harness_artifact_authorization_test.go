@@ -22,6 +22,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -29,7 +30,7 @@ import (
 type harnessArtifactFixture struct {
 	handlers      *InternalHandlers
 	kube          client.Client
-	data          *sqlite.Store
+	data          *storageclient.Client
 	app           *fiber.App
 	task          *corev1alpha1.Task
 	pod           *corev1.Pod
@@ -89,8 +90,9 @@ func newHarnessArtifactFixture(t *testing.T) *harnessArtifactFixture {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	data := sqlite.NewStore(db, ":memory:")
-	epoch, err := data.CompareAndSwapControllerEpoch(ctx, store.ControllerEpochCAS{
+	raw := sqlite.NewStore(db, ":memory:")
+	data := testStorageClient(raw)
+	epoch, err := raw.CompareAndSwapControllerEpoch(ctx, store.ControllerEpochCAS{
 		NewEpoch: 1, HolderID: "controller", RequestDigest: artifactcap.DigestBytes([]byte("epoch")), UpdatedAt: time.Now().UTC(),
 	})
 	require.NoError(t, err)
@@ -125,13 +127,13 @@ func newHarnessArtifactFixture(t *testing.T) *harnessArtifactFixture {
 
 // artifactOwnerRecorder records the owner of each saved artifact.
 type artifactOwnerRecorder struct {
-	*sqlite.Store
+	*storageclient.Client
 	owners []store.ArtifactOwner
 }
 
 func (r *artifactOwnerRecorder) SaveArtifact(ctx context.Context, request store.SaveArtifactRequest) error {
 	r.owners = append(r.owners, request.Owner)
-	return r.Store.SaveArtifact(ctx, request)
+	return r.Client.SaveArtifact(ctx, request)
 }
 
 func (f *harnessArtifactFixture) advanceAttempt(t *testing.T, state store.HarnessV1AttemptState) {
@@ -260,7 +262,7 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHarnessArtifactFixture(t)
-			recorder := &artifactOwnerRecorder{Store: f.data}
+			recorder := &artifactOwnerRecorder{Client: f.data}
 			f.handlers.artifactStore = recorder
 			if tc.change != nil {
 				tc.change(t, f)

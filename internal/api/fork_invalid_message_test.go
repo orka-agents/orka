@@ -88,7 +88,7 @@ func TestKubernetesInvalidWritesReturnBadRequest(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	store := sqlite.NewStore(db, ":memory:")
+	store := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SecurityStore: store, RepositoryMonitorStore: store})
 
 	app := fiber.New()

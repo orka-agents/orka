@@ -21,12 +21,12 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/usage"
 )
 
-func seedUsageAPIWork(t *testing.T, backend *sqlite.Store, namespace string, tokens int64) string {
+func seedUsageAPIWork(t *testing.T, backend *storageclient.Client, namespace string, tokens int64) string {
 	t.Helper()
 	at := time.Now().UTC().Add(-time.Hour)
 	namespaceUID := "namespace-uid"
@@ -149,16 +149,23 @@ func TestUsageAPIRejectsOversizedReportsAndLoadsRequestedWork(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	work := seedUsageAPIWork(t, f.store, "default", 100)
 	at := time.Now().UTC().Add(-time.Minute)
-	require.NoError(t, f.store.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
-		for i := range usageMaxRecords {
-			id := fmt.Sprint("chat-", i)
-			if err := f.store.RecordUsage(ctx, store.UsageObservation{Namespace: "default", NamespaceUID: "namespace-uid", ID: id,
-				CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, ObservedAt: at}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	// Seed the observations in one SQLite transaction, as RecordUsage would
+	// store them, so the oversized report needs no 20,000 separate commits.
+	tx, err := f.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	for i := range usageMaxRecords {
+		id := fmt.Sprint("chat-", i)
+		observation := store.UsageObservation{Namespace: "default", NamespaceUID: "namespace-uid", ID: id,
+			CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, ObservedAt: at}
+		require.NoError(t, store.ValidateUsageObservation(observation))
+		data, err := json.Marshal(observation)
+		require.NoError(t, err)
+		_, err = tx.ExecContext(t.Context(), `INSERT INTO usage_observations(namespace, id, task_uid, counter_id, observed_at, data)
+			VALUES (?, ?, ?, ?, ?, ?)`, observation.Namespace, observation.ID, observation.TaskUID, observation.CounterID,
+			observation.ObservedAt.UnixNano(), string(data))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
 	f.allowRoute(t, "GET /api/v1/usage")
 	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01&limit=1", "")
 	require.Equal(t, http.StatusUnprocessableEntity, status, body)

@@ -285,10 +285,12 @@ type DroppedFindingFilter struct {
 	Cursor         string
 }
 
-// SecurityStore handles repository security scanning persistence. Scan
-// ingestion is not part of this provider contract: its validation and
-// application steps are Orka callbacks.
+// SecurityStore handles repository security scanning persistence. Scan Task
+// ingestion is a conditional command (see ScanIngestionStore); its
+// validation and application logic stays in Orka.
 type SecurityStore interface {
+	ScanIngestionStore
+
 	GetScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) (*ScanTaskIngestion, error)
 	CompleteScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) error
 

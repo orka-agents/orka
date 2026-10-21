@@ -177,6 +177,28 @@ type ExecutionEventStore interface {
 	DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error
 }
 
+// ExecutionEventAppend is one deduplicated event of a grouped append.
+type ExecutionEventAppend struct {
+	Event     *ExecutionEvent
+	DedupeKey string
+}
+
+// ExecutionEventAppendResult reports one entry of a grouped append: the
+// persisted event and whether this call appended it.
+type ExecutionEventAppendResult struct {
+	Event    *ExecutionEvent
+	Appended bool
+}
+
+// GroupedExecutionEventStore appends several deduplicated events in one
+// transaction, in order. Each entry behaves as AppendExecutionEventIfAbsent
+// would, including a terminal approval conflict; when any entry fails, none
+// is appended. Orka uses it for evidence that must not be recorded in part,
+// such as a recovered approval decision and its execution outcome.
+type GroupedExecutionEventStore interface {
+	AppendExecutionEventsIfAbsent(ctx context.Context, appends []ExecutionEventAppend) ([]ExecutionEventAppendResult, error)
+}
+
 // DeduplicatingExecutionEventStore atomically appends one event for a caller-
 // supplied key scoped to its execution-event stream. A repeated key returns the
 // existing event with appended=false.

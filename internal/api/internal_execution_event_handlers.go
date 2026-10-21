@@ -106,7 +106,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		}
 	}
 	var appended *store.ExecutionEvent
-	if err := withInternalTaskDataTransaction(c, h.executionEventStore, "", func(context.Context) error {
+	if err := withInternalTaskData(c, h.executionEventStore, "", func(context.Context) error {
 		current, err := authorizer.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
 		if err != nil {
 			return err

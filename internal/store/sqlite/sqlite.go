@@ -999,8 +999,11 @@ func currentSchemaStatements() []string {
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db               *sql.DB
-	securityTx       *sql.Tx
+	db         *sql.DB
+	securityTx *sql.Tx
+	// securityClock, set on a scan ingestion's transaction-scoped store,
+	// supplies the times the security writes of one step assign.
+	securityClock    func() time.Time
 	dbPath           string
 	processLock      io.Closer
 	executionEventMu sync.Mutex

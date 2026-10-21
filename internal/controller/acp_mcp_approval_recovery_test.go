@@ -86,7 +86,7 @@ func newMCPApprovalRecoveryFixture(t *testing.T, configure ...func(*harnessv2.MC
 	f.stopEpoch = stop
 	f.fence, err = epochs.CurrentFence(ctx)
 	require.NoError(t, err)
-	f.dispatcher = &ACPDispatcher{Client: f.kube, APIReader: f.kube, Store: f.control, EventStore: f.events, Epochs: epochs}
+	f.dispatcher = &ACPDispatcher{Client: f.kube, APIReader: f.kube, Store: f.control, EventStore: f.storage, Epochs: epochs}
 	f.broker.Effects, f.broker.EpochMutations = f.control, f.control
 	f.broker.Prompts = DurableACPMCPPromptAuthorizer{Attempts: f.control, PromptLeases: &ACPMCPPromptLeaseRegistry{}}
 	f.createRunningAttempt(t)
@@ -377,7 +377,7 @@ func TestMCPApprovalRecoveryValidatesPersistedCallBinding(t *testing.T) {
 }
 
 type approvalLostOutcomeEventStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	lost atomic.Bool
 }
@@ -413,7 +413,7 @@ func TestMCPApprovalRecoveryAfterBrokerReceiptCommit(t *testing.T) {
 				_, err := original.ExecuteACPMCPTool(ctx, request, descriptor)
 				return json.RawMessage(`{ "isError":true, "z":1e-7, "error":"simulated failure" }`), err
 			})
-			lost := &approvalLostOutcomeEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+			lost := &approvalLostOutcomeEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 			f.broker.ApprovalEvents = lost
 			done := f.start(f.request)
 			pending := f.pending()
@@ -499,7 +499,7 @@ func TestMCPApprovalPostPollCancellationPersistsUnstartedReceipt(t *testing.T) {
 }
 
 type approvalRecoveryEventStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	lists                 atomic.Int32
 	sequences             atomic.Int32
@@ -511,11 +511,11 @@ type approvalRecoveryEventStore struct {
 	afterCommit           func()
 }
 
-func (s *approvalRecoveryEventStore) WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error {
-	err := s.TaskDataTransactionStore.WithTaskDataTransaction(ctx, fn)
+func (s *approvalRecoveryEventStore) WithTaskDataAccess(ctx context.Context, namespace, taskName string, access func(context.Context) error) error {
+	err := s.TaskDataAccessStore.WithTaskDataAccess(ctx, namespace, taskName, access)
 	if err == nil && s.afterCommit != nil {
-		// A late broker writer is independent of recovery's transaction.
-		// Inject only after commit so it can acquire SQLite's single writer.
+		// A late broker writer is independent of recovery's fenced access.
+		// Inject it only after recovery's projection has committed.
 		s.afterCommit()
 	}
 	return err
@@ -566,7 +566,7 @@ func TestMCPApprovalRecoveryOnlyReadsOwningTaskAndSkipsUnchangedHistory(t *testi
 	})
 	require.NoError(t, err)
 
-	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	f.dispatcher.EventStore = observed
 	require.NoError(t, f.reconcile(t))
 	require.Zero(t, observed.sequences.Load(), "recovery must not read sequences one Task at a time")
@@ -625,7 +625,7 @@ func TestMCPApprovalRecoveryBatchesHistoricalTaskSequences(t *testing.T) {
 		retained.ResponseDigest = store.CanonicalBytesDigest(retained.Response)
 		effects[retained.ID] = acpMCPApprovalEffect{ExternalEffect: retained, taskUID: other.UID}
 	}
-	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	f.dispatcher.EventStore = observed
 	reconcile := func() {
 		t.Helper()
@@ -654,7 +654,7 @@ func TestMCPApprovalRecoveryBatchesHistoricalTaskSequences(t *testing.T) {
 func TestMCPApprovalRecoveryRetriesFailedSequenceBatch(t *testing.T) {
 	f := newMCPApprovalRecoveryFixture(t)
 	call, _ := f.seed(t, store.ExternalEffectSucceeded, "", true, json.RawMessage(`{"workOrder":"simulated-1"}`))
-	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	f.dispatcher.EventStore = observed
 	require.NoError(t, f.reconcile(t))
 	require.NoError(t, f.reconcile(t))
@@ -678,7 +678,7 @@ func TestMCPApprovalRecoveryCacheDoesNotHideEventRacingWithProjection(t *testing
 	f := newMCPApprovalRecoveryFixture(t)
 	call, _ := f.seed(t, store.ExternalEffectSucceeded, "", true, json.RawMessage(`{"workOrder":"simulated-1"}`))
 	var injected atomic.Bool
-	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	observed.afterCommit = func() {
 		if injected.CompareAndSwap(false, true) {
 			require.NoError(t, f.broker.approvalOutcome(f.ctx, call, "running", "Late start event", nil))
@@ -699,7 +699,7 @@ func TestMCPApprovalRecoveryRetriesFailedAndSupersededProjection(t *testing.T) {
 	f := newMCPApprovalRecoveryFixture(t)
 	call, effect := f.seed(t, store.ExternalEffectInFlight, "", true, nil)
 	f.restart(t)
-	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	observed.failNext.Store(true)
 	f.dispatcher.EventStore = observed
 	require.EqualError(t, f.reconcile(t), "injected approval projection outage")
@@ -735,7 +735,7 @@ func TestMCPApprovalRecoveryPreservesCurrentLeaseAndPendingCalls(t *testing.T) {
 		t.Run(string(state), func(t *testing.T) {
 			f := newMCPApprovalRecoveryFixture(t)
 			_, effect := f.seed(t, state, "", false, nil)
-			observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+			observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 			f.dispatcher.EventStore = observed
 			_, before := f.approval(t)
 			reads := f.exactReads.Load()
@@ -780,7 +780,7 @@ func TestMCPApprovalRecoverySkipsMismatchedEffectsAndEmptyNamespaces(t *testing.
 		t.Run(mismatch, func(t *testing.T) {
 			f := newMCPApprovalRecoveryFixture(t)
 			_, effect := f.seed(t, store.ExternalEffectSucceeded, "running", true, json.RawMessage(`{"workOrder":"simulated-1"}`))
-			observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+			observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 			f.dispatcher.EventStore = observed
 			candidate := acpMCPApprovalEffect{ExternalEffect: *effect, taskUID: f.task.UID}
 			effects := map[string]acpMCPApprovalEffect{effect.ID: candidate}

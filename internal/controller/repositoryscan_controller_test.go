@@ -34,6 +34,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/storageclient"
 	storepkg "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/workers/common"
@@ -605,7 +606,7 @@ func reviewSlicePaths(slice storepkg.ReviewSlice) []string {
 	return paths
 }
 
-func saveMapperArtifactWithContexts(t *testing.T, store *sqlitestore.Store, task *corev1alpha1.Task, artifact security.ReviewSlicesArtifact) {
+func saveMapperArtifactWithContexts(t *testing.T, store *storageclient.Client, task *corev1alpha1.Task, artifact security.ReviewSlicesArtifact) {
 	t.Helper()
 	ctx := context.Background()
 	data, err := json.Marshal(artifact)
@@ -649,7 +650,7 @@ func reviewedSliceWithContext(t *testing.T, repositoryScan, runID, sliceID strin
 
 func saveFindingsTaskResult(
 	t *testing.T,
-	store *sqlitestore.Store,
+	store *storageclient.Client,
 	task *corev1alpha1.Task,
 	repositoryScan, scanID, policyDigest, contextDigest, sliceID string,
 	findings security.FindingsV2Artifact,
@@ -692,7 +693,7 @@ func saveFindingsTaskResult(
 
 type reviewResultRetryFixture struct {
 	ctx        context.Context
-	store      *sqlitestore.Store
+	store      *storageclient.Client
 	client     client.Client
 	reconciler *RepositoryScanReconciler
 	scan       *corev1alpha1.RepositoryScan
@@ -1168,7 +1169,7 @@ func TestIngestReviewTaskResultRetryEligibility(t *testing.T) {
 
 func saveValidationTaskResult(
 	t *testing.T,
-	store *sqlitestore.Store,
+	store *storageclient.Client,
 	task *corev1alpha1.Task,
 	repositoryScan, scanID, policyDigest string,
 	validation security.ValidationArtifact,
@@ -3636,7 +3637,7 @@ func TestCreateScanRunDoesNotAdoptUnreservedTask(t *testing.T) {
 }
 
 type patchIngestFixture struct {
-	store            *sqlitestore.Store
+	store            *storageclient.Client
 	publicationStore *patchPublicationStore
 	reconciler       *RepositoryScanReconciler
 	scan             *corev1alpha1.RepositoryScan
@@ -6267,7 +6268,10 @@ func TestRefreshScanRunStatusSetsBothTimestampsOnSuccess(t *testing.T) {
 	}
 }
 
-func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {
+// setupControllerSQLiteStore returns an in-memory SQLite store behind the
+// storage client, as production wires it. Scan ingestion and other Orka-side
+// protocols are implemented by the client.
+func setupControllerSQLiteStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 
 	db, err := sqlitestore.NewDB(":memory:")
@@ -6277,7 +6281,11 @@ func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {
 	t.Cleanup(func() {
 		_ = db.Close()
 	})
-	return sqlitestore.NewStore(db, ":memory:")
+	storage, err := storageclient.NewEmbedded(sqlitestore.NewStore(db, ":memory:"))
+	if err != nil {
+		t.Fatalf("storageclient.NewEmbedded() error = %v", err)
+	}
+	return storage
 }
 func TestShouldAutoValidateFindingHonorsModeAndThresholds(t *testing.T) {
 	reconciler := &RepositoryScanReconciler{}

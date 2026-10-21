@@ -210,14 +210,14 @@ func newTestSessionStore(t *testing.T) store.SessionStore {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	return sqlite.NewStore(db, ":memory:")
+	return testStorageClient(sqlite.NewStore(db, ":memory:"))
 }
 
 func newTestResultStore(t *testing.T) store.ResultStore {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	return sqlite.NewStore(db, ":memory:")
+	return testStorageClient(sqlite.NewStore(db, ":memory:"))
 }
 
 func newTestChatHandler(t *testing.T, c client.Client, ss store.SessionStore, rs store.ResultStore, cfg ChatConfig) *ChatHandler {
@@ -2023,7 +2023,7 @@ func TestLoadChatSessionRejectsGatewaySession(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
 		Namespace: "default", Name: "gateway-private", SessionType: store.SessionTypeGateway,
 	}))

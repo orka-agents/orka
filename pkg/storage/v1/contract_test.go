@@ -21,6 +21,31 @@ func TestFencedErrorMatchesFencedAndConflict(t *testing.T) {
 	require.NotErrorIs(t, storagev1.ErrConflict, storagev1.ErrFenced, "an ordinary conflict is not a fence rejection")
 }
 
+func TestPreconditionFailedErrorMatchesPreconditionAndConflict(t *testing.T) {
+	err := storagev1.PreconditionFailedErrorf("proposal %s changed", "p-1")
+	require.ErrorIs(t, err, storagev1.ErrPreconditionFailed)
+	require.ErrorIs(t, err, storagev1.ErrConflict, "callers that retry concurrent changes keep working")
+	require.NotErrorIs(t, err, storagev1.ErrFenced)
+	require.EqualError(t, err, "proposal p-1 changed")
+	require.NotErrorIs(t, storagev1.ErrConflict, storagev1.ErrPreconditionFailed, "an ordinary conflict is not a precondition failure")
+}
+
+func TestTaskDataFenceTravelsInContext(t *testing.T) {
+	_, ok := storagev1.TaskDataFenceFrom(context.Background())
+	require.False(t, ok, "a context without a fence carries none")
+
+	jobs := []storagev1.TaskJobIdentity{{Namespace: "ns", TaskUID: "task-uid", JobUID: "job-uid"}}
+	fence := storagev1.TaskDataFence{Namespace: "ns", TaskName: "task", Generation: 3, Jobs: jobs}
+	ctx := storagev1.WithTaskDataFence(context.Background(), fence)
+	jobs[0].JobUID = "changed after attaching"
+	got, ok := storagev1.TaskDataFenceFrom(ctx)
+	require.True(t, ok)
+	require.Equal(t, "job-uid", got.Jobs[0].JobUID, "the context keeps its own copy of the Jobs")
+	got.Jobs[0].JobUID = "changed after reading"
+	again, _ := storagev1.TaskDataFenceFrom(ctx)
+	require.Equal(t, "job-uid", again.Jobs[0].JobUID, "a reader cannot change the carried fence")
+}
+
 func TestTooLargeErrorReportsTheLimit(t *testing.T) {
 	err := error(storagev1.TooLargeError{What: `artifact "out.bin"`, Size: 11, Limit: 10})
 	require.ErrorIs(t, err, storagev1.ErrTooLarge)
