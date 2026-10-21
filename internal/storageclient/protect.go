@@ -27,7 +27,7 @@ func (c *Client) AppendExecutionEvent(ctx context.Context, event *store.Executio
 		recordExecutionEventRejection(event, started)
 		return nil, err
 	}
-	appended, err := c.StateProvider.AppendExecutionEvent(ctx, prepared)
+	appended, err := c.StateProvider.AppendExecutionEvent(providerContext(ctx), prepared)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func (c *Client) AppendExecutionEventIfAbsent(
 		recordExecutionEventRejection(event, started)
 		return nil, false, err
 	}
-	appended, isNew, err := c.StateProvider.AppendExecutionEventIfAbsent(ctx, prepared, dedupeKey)
+	appended, isNew, err := c.StateProvider.AppendExecutionEventIfAbsent(providerContext(ctx), prepared, dedupeKey)
 	if err != nil {
 		return nil, false, err
 	}
@@ -72,7 +72,7 @@ func (c *Client) AppendExecutionEventWithPlanIfAbsent(
 		recordExecutionEventRejection(event, started)
 		return nil, false, err
 	}
-	appended, isNew, err := c.StateProvider.AppendExecutionEventWithPlanIfAbsent(ctx, prepared, dedupeKey, plan)
+	appended, isNew, err := c.StateProvider.AppendExecutionEventWithPlanIfAbsent(providerContext(ctx), prepared, dedupeKey, plan)
 	if err != nil {
 		return nil, false, err
 	}
@@ -113,6 +113,16 @@ func (c *Client) prepareExecutionEvent(ctx context.Context, event *store.Executi
 		return nil, err
 	}
 	return &prepared, nil
+}
+
+// providerContext masks the controller's usage attribution once the client
+// has derived usage from it, so a provider receives only the derived and
+// redacted observation. Cancellation and transaction values are kept.
+func providerContext(ctx context.Context) context.Context {
+	if store.UsageAttributionFrom(ctx) == (store.UsageAttribution{}) {
+		return ctx
+	}
+	return store.WithUsageAttribution(ctx, store.UsageAttribution{})
 }
 
 func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {

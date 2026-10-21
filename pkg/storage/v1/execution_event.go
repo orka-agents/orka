@@ -166,6 +166,8 @@ func (f SessionExecutionEventFilter) Validate() error {
 }
 
 // ExecutionEventStore defines the persistence/query contract for execution
+// events. Content must be valid JSON when present; content that is only
+// whitespace is stored and returned as no content.
 type ExecutionEventStore interface {
 	AppendExecutionEvent(ctx context.Context, event *ExecutionEvent) (*ExecutionEvent, error)
 	ListExecutionEvents(ctx context.Context, filter ExecutionEventFilter) ([]ExecutionEvent, error)

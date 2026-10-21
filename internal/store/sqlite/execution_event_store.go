@@ -745,8 +745,12 @@ func normalizeSQLiteExecutionEvent(event *store.ExecutionEvent) error {
 		return store.ValidationErrorf("unsupported execution event type %q", event.Type)
 	}
 	// Orka redacts and bounds the payload above the storage client; the
-	// store only requires that structured content is valid JSON.
-	if len(bytes.TrimSpace(event.Content)) > 0 && !json.Valid(event.Content) {
+	// store only requires that structured content is valid JSON. Content that
+	// is only whitespace is no content.
+	event.Content = bytes.TrimSpace(event.Content)
+	if len(event.Content) == 0 {
+		event.Content = nil
+	} else if !json.Valid(event.Content) {
 		return store.ValidationErrorf("invalid execution event payload: content is not valid JSON")
 	}
 	return nil

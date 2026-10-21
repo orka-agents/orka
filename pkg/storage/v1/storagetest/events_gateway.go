@@ -93,6 +93,14 @@ func runExecutionEvents(t *testing.T, newProvider StateFactory) {
 			[]string{got.SessionName, got.AgentName, got.ToolName, got.ToolCallID, got.Summary, got.ContentText})
 		require.JSONEq(t, string(event.Content), string(got.Content))
 		require.True(t, createdAt.Equal(got.CreatedAt), "created at %s, want %s", got.CreatedAt, createdAt)
+
+		blank := taskEvent(eventsTenant, "task-blank", storagev1.ExecutionEventTypeToolCallCompleted)
+		blank.Content = json.RawMessage(" \n\t ")
+		appended := appendEvent(t, p, blank)
+		require.Empty(t, appended.Content, "content that is only whitespace is no content")
+		listed = listEvents(t, p, storagev1.ExecutionEventFilter{Namespace: eventsTenant, StreamID: "task-blank"})
+		require.Len(t, listed, 1)
+		require.Empty(t, listed[0].Content)
 	})
 
 	t.Run("invalid events and filters are rejected", func(t *testing.T) {
