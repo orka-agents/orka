@@ -19,8 +19,14 @@ const repositoryMonitorWorkflowPollInterval = 30 * time.Second
 
 // Repair.Enabled is the repository administrator's authorization for bounded
 // automatic repair. A controller policy action is never recorded as a human.
+// Repair labels narrow it to labelled pull requests; the account that added
+// the label is checked before each new repair.
 func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
 	if !monitor.Spec.Repair.Enabled || run.CommandEventID != "" || pr.Draft || pr.HeadSHA == "" {
+		return false, nil
+	}
+	full, ciOnly, labelled := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr)
+	if !full && !ciOnly {
 		return false, nil
 	}
 	if _, reason := repositoryMonitorRepairRepository(monitor, owner+"/"+repo, pr); reason != "" {
@@ -32,26 +38,53 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	if item.RepairState == repositoryMonitorRepairPhaseQueued {
 		return true, nil
 	}
+	// A repair label runs a review-fix loop: each head is reviewed, its
+	// findings are fixed first, and CI is fixed once the review has nothing to fix.
+	reviewFirst := full && len(monitor.Spec.Repair.IncludeLabels) > 0
+	if reviewFirst && item.LastReviewedHeadSHA != pr.HeadSHA {
+		return false, nil
+	}
 	intent := ""
-	if pr.MergeableState == repositoryMonitorMergeableStateDirty {
+	if full && pr.MergeableState == repositoryMonitorMergeableStateDirty {
 		intent = repositoryMonitorCommandIntentUpdateBranch
 	} else {
 		if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
 			return false, nil
 		}
-		ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
-		if err != nil {
-			return false, err
-		}
-		if ci.reason == repositoryMonitorCINotGreen {
-			intent = repositoryMonitorCommandIntentFixCI
-		}
-		if intent == "" && item.LastVerdict == repositoryMonitorReviewVerdictNeedsChanges && item.LastReviewedHeadSHA == pr.HeadSHA && item.LastReviewID != "" {
+		fixFindings := func() (bool, error) {
+			if !full || item.LastVerdict != repositoryMonitorReviewVerdictNeedsChanges || item.LastReviewedHeadSHA != pr.HeadSHA || item.LastReviewID == "" {
+				return false, nil
+			}
 			review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
 			if err != nil {
 				return false, err
 			}
-			if review.HeadSHA == pr.HeadSHA && review.Repairable {
+			return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
+		}
+		if reviewFirst {
+			fix, err := fixFindings()
+			if err != nil {
+				return false, err
+			}
+			if fix {
+				intent = repositoryMonitorCommandIntentFix
+			}
+		}
+		if intent == "" {
+			broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
+			if err != nil {
+				return false, err
+			}
+			if broke {
+				intent = repositoryMonitorCommandIntentFixCI
+			}
+		}
+		if intent == "" && !reviewFirst {
+			fix, err := fixFindings()
+			if err != nil {
+				return false, err
+			}
+			if fix {
 				intent = repositoryMonitorCommandIntentFix
 			}
 		}
@@ -73,6 +106,17 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	id := "policy-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d|%s|%s|%d|%d", monitor.UID, monitor.Generation, pr.Number, pr.HeadSHA, intent, prCount, headCount))
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
 	if errors.Is(err, store.ErrNotFound) {
+		if labelled {
+			permitted, err := r.repositoryMonitorRepairLabelActorPermitted(ctx, monitor, owner, repo, pr, repositoryMonitorRepairLabels(monitor.Spec, full))
+			if err != nil {
+				return false, err
+			}
+			if !permitted {
+				item.RepairState = repositoryMonitorRepairPhaseFailed
+				item.SkipReason = repositoryMonitorRepairSkipLabelActorNotPermitted
+				return true, r.Store.UpsertMonitorItem(ctx, item)
+			}
+		}
 		now := time.Now()
 		command = &store.CommandEvent{ID: id, CommentID: id, DedupeKey: id, IdempotencyKey: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, MonitorGeneration: monitor.Generation, Repo: owner + "/" + repo, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Source: repositoryMonitorControllerPolicySource, Author: repositoryMonitorControllerActor, Permission: "repository_repair_policy", Intent: intent, Command: intent, HeadSHA: pr.HeadSHA, Status: repositoryMonitorCommandAccepted, CreatedAt: now}
 		if err := r.Store.CreateCommandEvent(ctx, command); err != nil {

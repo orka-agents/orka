@@ -240,10 +240,17 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		return true, 0, r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentResume, repositoryMonitorWorkActionStatusSucceeded, "resumed", "", "")
 
 	case repositoryMonitorCommandIntentReview:
+		reason := ""
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
+			reason = repositoryMonitorSkipReasonBlockedLabel
+		} else if !repositoryMonitorPullRequestReviewed(monitor.Spec, pr) {
+			// A CI-only pull request's review could never be published.
+			reason = repositoryMonitorSkipReasonCIOnly
+		}
+		if reason != "" {
 			item.LastVerdict = repositoryMonitorVerdictSkipped
-			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
-			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusBlocked, "review_blocked", "", repositoryMonitorSkipReasonBlockedLabel); err != nil {
+			item.SkipReason = reason
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusBlocked, "review_blocked", "", reason); err != nil {
 				return true, 0, err
 			}
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)

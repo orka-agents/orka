@@ -149,7 +149,9 @@ type RepositoryMonitorPullRequestTarget struct {
 	// IncludeLabels optionally restricts pull request inventory to pull requests
 	// with any of these labels. Other pull requests get no review, repair, or
 	// readiness status. It cannot be combined with issue implementation, whose
-	// pull requests would not carry the label.
+	// pull requests would not carry the label. Pull requests with a
+	// spec.repair.includeLabels or spec.repair.ciOnlyLabels label are also
+	// included.
 	// +listType=set
 	// +optional
 	IncludeLabels []string `json:"includeLabels,omitempty"`
@@ -453,6 +455,23 @@ type RepositoryMonitorRepairSpec struct {
 	// pull request seen only in an inventory list is never repaired as a fork.
 	// +optional
 	AllowForkPullRequests bool `json:"allowForkPullRequests,omitempty"`
+	// IncludeLabels limits automatic repair to pull requests with any of these
+	// labels. Such a pull request is also reviewed, and each head is reviewed
+	// before it is repaired: findings are fixed first, then CI checks the pull
+	// request broke. The account that added the label must have the permission
+	// spec.triggers.github.labels.requireActorPermission requires. It cannot
+	// be combined with issue implementation.
+	// +listType=set
+	// +optional
+	IncludeLabels []string `json:"includeLabels,omitempty"`
+	// CIOnlyLabels marks pull requests whose CI is repaired without a review:
+	// only checks the pull request broke are fixed, and no review or readiness
+	// status is published unless the pull request is also selected for review.
+	// The same label permission check applies. It cannot be combined with
+	// issue implementation.
+	// +listType=set
+	// +optional
+	CIOnlyLabels []string `json:"ciOnlyLabels,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.

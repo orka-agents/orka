@@ -149,6 +149,39 @@ spec:
 
 Only pull requests with at least one of these labels (case-insensitive) are reviewed, repaired, or given a readiness status. Orka reads the labels on every inventory run, so no webhook is needed. Removing the label retires the pull request from the monitor: a readiness status it already published turns to failure, and a review that finishes afterwards is not published. Commands that target an unlabelled pull request are blocked with `target_not_included`. This setting cannot be combined with issue implementation, because the pull requests Orka opens would not carry the label.
 
+### Repair labelled pull requests
+
+With `spec.repair.enabled`, Orka repairs every pull request it reviews. Repair labels narrow that, so one label asks for a review and another for fixes:
+
+```yaml
+spec:
+  targets:
+    pullRequests:
+      includeLabels:
+        - orka:review
+  repair:
+    enabled: true
+    maxRepairsPerPR: 3
+    includeLabels:
+      - orka:fix
+    ciOnlyLabels:
+      - orka:fix-ci
+```
+
+| Label | Review | Fixes |
+| --- | --- | --- |
+| `orka:review` | Yes | None |
+| `orka:fix` | Yes | Review findings, CI the pull request broke, and merge conflicts |
+| `orka:fix-ci` | No | CI the pull request broke |
+
+A pull request with a `repair.includeLabels` label is reviewed even when `targets.pullRequests.includeLabels` does not list that label. Each head is reviewed before it is repaired, so the label runs a review-fix loop: findings from a `needs_changes` review are fixed first, CI is fixed once the review has nothing to fix, and every pushed fix is reviewed again. The loop stops when the review passes and no check the pull request broke is failing, or when the repair limits are reached.
+
+A `repair.ciOnlyLabels` pull request is not reviewed unless the monitor selects it for review anyway, for example because `targets.pullRequests.includeLabels` is empty. It gets no published review or readiness status, and a `review` command on it is blocked with `ci_only`.
+
+Before each new repair that a label grants, Orka reads the pull request's event history to find who added the label and checks that account's repository permission against `spec.triggers.github.labels.requireActorPermission` (default `write`) and `spec.policy.allowedRepositoryPermissions`. GitHub lets accounts with the Triage role add labels, so this check stops them from getting code pushed. A label added by an account without the permission, or one Orka cannot resolve, marks the repair `repair_label_actor_not_permitted`. Repair commands sent through the API are not label-gated.
+
+Repair labels cannot be combined with issue implementation.
+
 If an existing monitor still uses `validation.mode` and `validation.commands`, migrate it before upgrading the controller. Apply the new CRD first, replace the legacy fields with a digest-pinned `validation.image`, and remove the old fields. The compatibility schema preserves a non-empty legacy command list long enough for the controller to report `LegacyValidationCommandsUnsupported`; it will not run the monitor with validation silently disabled.
 
 ## Run manually
@@ -300,7 +333,7 @@ The controller starts bounded repairs automatically when enabled. Ad hoc PR comm
 
 - `review` API/CLI command queues an exact-head review run.
 - `fix` API/CLI command queues a repair task on the current PR head branch. Fork PR heads require [`repair.allowForkPullRequests`](#pull-requests-from-forks).
-- `fix_ci` API/CLI command queues a CI repair task using the same repair path.
+- `fix_ci` API/CLI command queues a CI repair task using the same repair path. Automatic CI repair only fixes checks the pull request broke: a check that also fails on the pull request's base commit is left alone.
 - `update_branch` API/CLI command queues a base-update repair task and allows empty push-branch updates.
 
 Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expectedRemoteSHA` bind the selected PR head, and publication targets that same branch. A repair succeeds only with a matching `VerifiedExact` delivery receipt. An `update-branch` no-change result is accepted only after the controller independently verifies that the exact PR head contains the requested base revision. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready; GitHub owns the merge decision.

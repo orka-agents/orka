@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -401,7 +402,9 @@ func repositoryMonitorAcceptsPullRequestEvent(monitor *corev1alpha1.RepositoryMo
 	if target.BaseBranch != "" && !strings.EqualFold(target.BaseBranch, effectiveRepositoryMonitorBranch(monitor)) {
 		return false
 	}
-	if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 && repositoryMonitorWebhookMatchingLabel(include, target.Labels) == "" {
+	// Mirrors the controller's repositoryMonitorPullRequestIncluded.
+	if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 &&
+		repositoryMonitorWebhookMatchingLabel(slices.Concat(include, monitor.Spec.Repair.IncludeLabels, monitor.Spec.Repair.CIOnlyLabels), target.Labels) == "" {
 		return false
 	}
 	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)

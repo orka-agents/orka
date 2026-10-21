@@ -64,8 +64,18 @@ func newRepositoryMonitorForkRepairTestReconciler(t *testing.T, name, body strin
 	original := server.Config.Handler
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if strings.HasSuffix(req.URL.Path, "/check-runs") {
+			// The base commit passes, so the failure is the pull request's own.
+			conclusion := "success"
+			if strings.Contains(req.URL.Path, "/commits/head31/") {
+				conclusion = "failure"
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":"failure"}]}`))
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":%q}]}`, conclusion)
+			return
+		}
+		if strings.HasSuffix(req.URL.Path, "/status") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"success","total_count":0,"statuses":[]}`))
 			return
 		}
 		original.ServeHTTP(w, req)

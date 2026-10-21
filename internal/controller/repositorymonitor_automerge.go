@@ -116,11 +116,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 			continue
 		}
 		if !repositoryMonitorCheckRunConclusionPassing(check.Conclusion) {
-			failed = append(failed, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
+			failed = append(failed, check.Name)
 		}
 	}
 	if len(failed) > 0 {
-		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
 	}
 	if len(pending) > 0 {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
@@ -149,7 +149,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 	if err != nil {
 		return repositoryMonitorCIResult{}, err
 	}
-	considered, pending := 0, false
+	considered, pending, incomplete := 0, false, false
+	var failed []string
 	// Combined status is paginated and contains only the latest status for each
 	// context. Recompute after excluding audited IDs; its aggregate includes us.
 	for page := 1; ; page++ {
@@ -171,15 +172,19 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 			case repositoryMonitorStatusPending:
 				pending = true
 			default:
-				return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen}, nil
+				failed = append(failed, status.Context)
 			}
 		}
 		if len(response.Statuses) < 100 {
-			if page*100-100+len(response.Statuses) < response.TotalCount {
-				return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
-			}
+			incomplete = page*100-100+len(response.Statuses) < response.TotalCount
 			break
 		}
+	}
+	if len(failed) > 0 {
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
+	}
+	if incomplete {
+		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
 	}
 	if pending {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
