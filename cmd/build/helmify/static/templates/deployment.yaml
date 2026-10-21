@@ -358,6 +358,10 @@ spec:
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
+            {{- with .Values.workers.sessionLoader }}
+            {{- $_ := required "workers.sessionLoader.image.digest is required" .image.digest }}
+            - --session-loader-image={{ include "orka.imageRef" .image }}
+            {{- end }}
             - --ai-worker-service-account-name={{ include "orka.aiWorkerServiceAccountName" . }}
             - --vendor-worker-service-account-name={{ include "orka.vendorWorkerServiceAccountName" . }}
             - --container-worker-service-account-name={{ include "orka.containerWorkerServiceAccountName" . }}
