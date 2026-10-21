@@ -77,6 +77,10 @@ func newDB(path string, allowMigration bool) (*sql.DB, error) {
 		db.Close() //nolint:errcheck
 		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", schemaErr)
 	}
+	if err := synchronizeDatasetMetadata(db); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
 
 	return db, nil
 }
@@ -84,6 +88,7 @@ func newDB(path string, allowMigration bool) (*sql.DB, error) {
 // currentSchemaStatements defines the complete supported SQLite layout.
 func currentSchemaStatements() []string {
 	statements := []string{
+		datasetSchema,
 		`CREATE TABLE IF NOT EXISTS task_data_cleanup_generations (
 			namespace TEXT PRIMARY KEY,
 			generation INTEGER NOT NULL
@@ -1054,6 +1059,9 @@ func (s *Store) close() error {
 	}
 	return lockErr
 }
+
+// Close releases the database and process lock, including a failed bootstrap.
+func (s *Store) Close() error { return s.close() }
 
 // updateDBSizeMetric reads the database file size and updates the gauge.
 func (s *Store) updateDBSizeMetric() {

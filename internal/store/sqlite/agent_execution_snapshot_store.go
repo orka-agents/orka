@@ -120,6 +120,9 @@ func (s *Store) SetAgentExecutionSnapshotCipher(snapshotCipher *AgentExecutionSn
 	if err := s.verifyConnectorRowsWithCipher(snapshotCipher); err != nil {
 		return err
 	}
+	if err := s.completeDatasetBootstrap(); err != nil {
+		return fmt.Errorf("complete SQLite dataset bootstrap: %w", err)
+	}
 	s.snapshotCipher = snapshotCipher
 	return nil
 }
