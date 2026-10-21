@@ -41,7 +41,7 @@ The chart validates its inputs before producing any manifests, so a bad install 
 | `image` | Use a valid tag or SHA256 digest. Runtime overrides need a full registry/repository reference. |
 | `replicas` / `leaderElect` | Must be `1` and `true`. The controller is a single writer. |
 | `caBundle or caInjectionAnnotations` | You set `webhooks.tls.existingSecret`, so the chart needs the CA that signed it. Leave both empty to let the controller issue its own certificate. |
-| `mode` | Only `harness-v1` or `harness-v2`, and it cannot change on upgrade. |
+| `mode` | Only `harness-v2` is supported. |
 
 ### The snapshot key
 
@@ -124,21 +124,20 @@ See [Image overrides](../reference/configuration.md#image-overrides).
 Orka watches exactly one namespace. Set `controller.watchNamespace` to the release
 namespace.
 
-**`controller-mode namespace claim failed`** or `namespace "..." is claimed by execution
-mode "harness-v1", not "harness-v2"`
+**`controller-mode namespace claim failed`** or `namespace "...": unsupported execution
+mode "..."`
 
-The namespace already carries an `orka.ai/controller-mode` label for the other
-mode. The controller claims an unlabeled namespace on its own, but it never
-takes over a namespace that belongs to the other harness, and the label cannot
-be changed once set. Install into a new namespace. If you run the controller
-with `--claim-namespace-mode=false`, label the namespace yourself before
-starting it:
+The namespace already carries an `orka.ai/controller-mode` label other than
+`harness-v2`. The controller claims an unlabeled namespace on its own, but it
+never takes over a namespace claimed for another mode, and the label cannot be
+changed once set. Install into a new namespace. If you run the controller with
+`--claim-namespace-mode=false`, label the namespace yourself before starting it:
 
 ```bash
 kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
 ```
 
-This is how two installs on one cluster avoid fighting over the same Tasks.
+Do not relabel a namespace another installation owns.
 
 **`unable to read controller-mode namespace`**
 

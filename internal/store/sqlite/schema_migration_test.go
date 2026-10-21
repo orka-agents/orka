@@ -20,6 +20,7 @@ func TestOpenLockedStoreMigrationLifecycle(t *testing.T) {
 		{"149", "0e567418", "", 1},
 		{"150", "1f18614c", "", 1},
 		{"162", "57583975", "", 1},
+		{"166", "abd2c040", "", 1},
 		{"rollback and retry", "0e567418", "failure", 2},
 		{"crash and retry", "0e567418", "crash", 2},
 	} {
@@ -110,6 +111,51 @@ func TestOpenLockedStoreRefusesUnsupportedIntermediateAndUnknownSchemas(t *testi
 	}
 }
 
+func TestOpenLockedStoreRefusesHarnessV1Records(t *testing.T) {
+	for table, insert := range map[string]string{
+		"harness_v1_attempts": `INSERT INTO harness_v1_attempts(id,namespace,task_uid,attempt,binding_digest,snapshot_digest,
+			request_digest,turn_id,state,retry_class,version,created_at,updated_at)
+			VALUES('a','ns','uid',1,'b','s','r','t','Prepared','none',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+		"runtime_sessions": `INSERT INTO runtime_sessions(id,namespace,session_name,provider,state,cleanup_policy)
+			VALUES('rs','ns','session','kubernetes-service','Ready','Delete')`,
+		"session_lineages": `INSERT INTO session_lineages(namespace,session_name,namespace_uid,session_uid,contract_version,
+			lineage_generation,runtime_identity,version,created_at,updated_at)
+			VALUES('ns','session','ns-uid','session-uid','orka.harness.v1',1,'runtime',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+	} {
+		t.Run(table, func(t *testing.T) {
+			path, db := historicalSchemaDB(t, "abd2c040")
+			_, err := db.Exec(insert)
+			require.NoError(t, err)
+			before := storedSchemaSQL(t, db)
+			require.NoError(t, db.Close())
+			opened, err := OpenLockedStore(path)
+			require.Nil(t, opened)
+			require.ErrorContains(t, err, "harness v1 "+table+" records")
+			raw := rawMigrationDB(t, path)
+			require.Equal(t, before, storedSchemaSQL(t, raw))
+			var rows int
+			require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&rows))
+			require.Equal(t, 1, rows)
+			require.NoError(t, raw.Close())
+		})
+	}
+}
+
+func TestOpenLockedStoreKeepsHarnessV2LineagesAcrossV1TableRemoval(t *testing.T) {
+	path, db := historicalSchemaDB(t, "abd2c040")
+	_, err := db.Exec(`INSERT INTO session_lineages(namespace,session_name,namespace_uid,session_uid,contract_version,
+		lineage_generation,runtime_identity,version,created_at,updated_at)
+		VALUES('ns','session','ns-uid','session-uid','orka.harness.v2',1,'runtime',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	s, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	var rows int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM session_lineages WHERE contract_version = 'orka.harness.v2'`).Scan(&rows))
+	require.Equal(t, 1, rows)
+	require.NoError(t, s.close())
+}
+
 func TestOpenLockedStoreCurrentDoesNotBackUp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	for range 2 {
@@ -123,12 +169,12 @@ func TestOpenLockedStoreCurrentDoesNotBackUp(t *testing.T) {
 // The newest prior layout uses only frozen historical DDL, never current
 // definitions. Changing current DDL without extending the chain fails here.
 func TestNewestHistoricalMigrationReproducesCurrentSchema(t *testing.T) {
-	_, db := historicalSchemaDB(t, "57583975")
+	_, db := historicalSchemaDB(t, "abd2c040")
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 	steps := schemaMigrations()
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema162, steps[len(steps)-1:]))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, steps[len(steps)-1:]))
 	schema, err := readSchema(conn)
 	require.NoError(t, err)
 	require.NoError(t, validateSchema(schema, currentSchemaStatements()))
@@ -250,6 +296,8 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 	switch revision {
 	case "57583975":
 		ddl += migration150To162
+	case "abd2c040":
+		ddl += migration150To162 + migration162To166
 	case "b5265055":
 		ddl += read("b5265055")
 	}
@@ -267,6 +315,7 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 		"1f18614c": "66de67c84e6cf135ea10f5aa98ebb0a65eb920f2742be8c0bd27c5d651167df8",
 		"b5265055": "c82fb870c7ed92488fbe33daf9f0693ffdee5aebff9f48db6fa115fdf99ce83b",
 		"57583975": "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7",
+		"abd2c040": "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36",
 	}
 	require.Equal(t, want[revision], schemaFingerprint(schema))
 	return path, db

@@ -75,12 +75,8 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		}
 		return nil, nil
 	}
-	// Only serialize a workspace when the user actually configured a workspace
-	// field: a bare {intent: "read"} — whether defaulted or passed explicitly —
-	// would make an otherwise valid prompt-only agent Task fail preflight in
-	// harness-v1 mode, which requires gitRepo on any non-nil workspace. An
-	// explicit write intent is a real configuration and proceeds so its
-	// missing-gitRepo validation error surfaces instead of being dropped.
+	// Omit the implicit read workspace when no workspace fields were configured.
+	// Preserve explicit write intent so its required repository is validated.
 	if !otherWorkspaceFlagsUsed && (!intentFlagUsed || intent != string(corev1alpha1.WorkspaceIntentWrite)) {
 		return nil, nil
 	}

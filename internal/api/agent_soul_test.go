@@ -21,7 +21,7 @@ import (
 )
 
 func TestHandlers_CreateAgent_ValidatesDefaultedSoulRuntime(t *testing.T) {
-	for _, mode := range []executionmode.Mode{executionmode.HarnessV1, executionmode.HarnessV2} {
+	for _, mode := range []executionmode.Mode{executionmode.Mode("harness-v1"), executionmode.HarnessV2} {
 		for _, runtimeType := range []corev1alpha1.AgentRuntimeType{
 			"", corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude,
 			corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode,
@@ -46,7 +46,7 @@ func TestHandlers_CreateAgent_ValidatesDefaultedSoulRuntime(t *testing.T) {
 				defer resp.Body.Close() //nolint:errcheck
 				created := &corev1alpha1.Agent{}
 				err = c.Get(context.Background(), types.NamespacedName{Name: "soul-agent", Namespace: "default"}, created)
-				if mode == executionmode.HarnessV1 && runtimeType != "" {
+				if mode == executionmode.Mode("harness-v1") && runtimeType != "" {
 					require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 					require.True(t, apierrors.IsNotFound(err), "unsupported soul must not be persisted")
 					return
@@ -63,7 +63,7 @@ func TestHandlers_CreateAgent_ValidatesDefaultedSoulRuntime(t *testing.T) {
 }
 
 func TestHandlers_UpdateAgent_ValidatesDefaultedSoulRuntime(t *testing.T) {
-	for _, mode := range []executionmode.Mode{executionmode.HarnessV1, executionmode.HarnessV2} {
+	for _, mode := range []executionmode.Mode{executionmode.Mode("harness-v1"), executionmode.HarnessV2} {
 		for _, runtimeType := range []corev1alpha1.AgentRuntimeType{"", corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode} {
 			t.Run(string(mode)+"/"+string(runtimeType), func(t *testing.T) {
 				scheme := runtime.NewScheme()
@@ -86,7 +86,7 @@ func TestHandlers_UpdateAgent_ValidatesDefaultedSoulRuntime(t *testing.T) {
 				defer resp.Body.Close() //nolint:errcheck
 				persisted := &corev1alpha1.Agent{}
 				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: original.Name, Namespace: original.Namespace}, persisted))
-				if mode == executionmode.HarnessV1 && runtimeType != "" {
+				if mode == executionmode.Mode("harness-v1") && runtimeType != "" {
 					require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 					require.Equal(t, original.Spec, persisted.Spec, "rejected update must preserve the stored Agent")
 					return
