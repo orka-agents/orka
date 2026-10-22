@@ -454,8 +454,9 @@ func saveConfig(cfg orkaConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	// A private temporary file renamed over the config: a concurrent reader
-	// sees the old config or the new one, never a partial one.
+	// A private temporary file renamed over the config, which os.Rename
+	// replaces on every platform: a concurrent reader never sees a partial
+	// config, and on Unix sees the old one or the new one.
 	file, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
 	if err != nil {
 		return fmt.Errorf("save config: %w", err)

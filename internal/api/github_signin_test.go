@@ -79,6 +79,7 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				"ghu_alice": {"id": 852750, "login": "alice"}, "ghu_alice_renewed": {"id": 852750, "login": "alice"},
 				"ghu_alice_refreshed": {"id": 852750, "login": "alice"}, "ghu_alice_left": {"id": 852750, "login": "alice"},
 				"ghu_bob": {"id": 1002, "login": "bob"}, "ghu_bob_refreshed": {"id": 1002, "login": "bob"},
+				"ghu_alice_unanswered": {"id": 852750, "login": "alice"},
 			}
 			user, known := users[body.AccessToken]
 			if !known {
@@ -90,6 +91,10 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 		}
 		if r.URL.Path == "/user/memberships/orgs/acme" {
 			switch r.Header.Get("Authorization") {
+			case "Bearer ghu_alice_unanswered":
+				// GitHub cannot answer for this token.
+				w.WriteHeader(http.StatusBadGateway)
+				return
 			case "Bearer ghu_alice", "Bearer ghu_alice_renewed", "Bearer ghu_alice_refreshed":
 				_ = json.NewEncoder(w).Encode(map[string]string{"state": "active"})
 				return
@@ -519,6 +524,32 @@ func TestSessionRenewsOnceAndSignsOut(t *testing.T) {
 	}
 	if err := h.asSession(renewed.Token); err == nil {
 		t.Fatal("a signed-out session must end")
+	}
+}
+
+// GitHub failing to answer a membership check is retried, never taken as
+// the person having left: sign-in and renewal answer 503, not 403.
+func TestMembershipThatCannotBeCheckedIsRetryable(t *testing.T) {
+	h := newSignInHarness(t)
+	revoked := &revocations{}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: fakeGitHub(t, revoked).URL}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice_unanswered"}); status != http.StatusServiceUnavailable || session.Token != "" {
+		t.Fatalf("sign-in GitHub could not check = %d, want 503 and no session", status)
+	}
+	if got := revoked.list(); len(got) != 1 || got[0] != "ghu_alice_unanswered" {
+		t.Fatalf("revoked = %v, want the unused token", got)
+	}
+	_, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
+	if err := h.asSession(session.Token); err != nil {
+		t.Fatal(err)
+	}
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice_unanswered"}
+	if resp, _ := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("renewal GitHub could not check = %d, want 503", resp.StatusCode)
+	}
+	if err := h.asSession(session.Token); err != nil {
+		t.Fatal("a renewal that could not check membership leaves the session live")
 	}
 }
 
