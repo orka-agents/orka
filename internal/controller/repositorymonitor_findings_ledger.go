@@ -225,14 +225,22 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 	}
 	if sensitive {
 		// A security-sensitive verdict may be about an open finding the
-		// review did not repeat; which one is unknown, so all stay restricted.
+		// review did not repeat, or one it marked fixed; which one is unknown,
+		// so all stay restricted.
 		for i := range ledger {
-			if repositoryMonitorFindingOpen(ledger[i]) {
+			if repositoryMonitorFindingRestrictedBySensitiveReview(ledger[i], headSHA) {
 				ledger[i].SecuritySensitive = true
 			}
 		}
 	}
 	return ledger
+}
+
+// repositoryMonitorFindingRestrictedBySensitiveReview reports whether a
+// security-sensitive review at headSHA restricts finding: every finding it
+// leaves open or that is fixed at its head.
+func repositoryMonitorFindingRestrictedBySensitiveReview(finding repositoryMonitorReviewFinding, headSHA string) bool {
+	return repositoryMonitorFindingOpen(finding) || (headSHA != "" && finding.ResolvedHead == headSHA)
 }
 
 func repositoryMonitorFindingID(recordID string, index int, finding repositoryMonitorReviewFinding) string {
@@ -287,9 +295,9 @@ func repositoryMonitorLedgerFromRecord(record *store.ReviewRecord) ([]repository
 			findings[i].FirstHead = firstNonEmptyString(findings[i].FirstHead, record.HeadSHA)
 			findings[i].FirstReview = firstNonEmptyString(findings[i].FirstReview, record.ID)
 		}
-		// Every finding a security-sensitive review left open stays
-		// restricted, as repositoryMonitorMergeFindingLedger records it.
-		if sensitive && repositoryMonitorFindingOpen(findings[i]) {
+		// A security-sensitive review restricts what
+		// repositoryMonitorMergeFindingLedger restricts.
+		if sensitive && repositoryMonitorFindingRestrictedBySensitiveReview(findings[i], record.HeadSHA) {
 			findings[i].SecuritySensitive = true
 		}
 	}

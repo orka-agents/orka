@@ -650,3 +650,33 @@ func TestRepositoryMonitorSensitiveReviewRestrictsCarriedFindings(t *testing.T) 
 		t.Fatalf("verdict = %q, want security_sensitive while the finding is open", verdict)
 	}
 }
+
+func TestRepositoryMonitorSensitiveReviewRestrictsFindingsItFixes(t *testing.T) {
+	base := &store.ReviewRecord{ID: "review-old", HeadSHA: "old"}
+	carried := []repositoryMonitorReviewFinding{ledgerFinding("f-carried", "P2", "a.go", 3, "Leaky log line")}
+	// The follow-up judged the carried finding sensitive while marking it fixed.
+	review := &repositoryMonitorReviewResult{
+		Verdict:          repositoryMonitorReviewVerdictSecuritySensitive,
+		PreviousFindings: []repositoryMonitorReviewPreviousFinding{{ID: "f-carried", Status: repositoryMonitorFindingStatusFixed}},
+	}
+	ledger := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: carried}, review, "new", "review-new", nil)
+	if len(ledger) != 1 || ledger[0].Status != repositoryMonitorFindingStatusFixed || !ledger[0].SecuritySensitive {
+		t.Fatalf("ledger = %+v, want the fixed finding restricted", ledger)
+	}
+	// A record from before the merge restricted fixed findings is read the same
+	// way; a finding fixed at an earlier head was never in this review's scope.
+	record := &store.ReviewRecord{ID: "review-new", HeadSHA: "new", SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: `[` +
+		`{"id":"f-carried","priority":"P2","title":"Leaky log line","status":"fixed","resolvedHead":"new"},` +
+		`{"id":"f-earlier","priority":"P2","title":"Typo","status":"fixed","resolvedHead":"old"}]`}
+	loaded, err := repositoryMonitorLedgerFromRecord(record)
+	if err != nil || len(loaded) != 2 || !loaded[0].SecuritySensitive || loaded[1].SecuritySensitive {
+		t.Fatalf("loaded = %+v err=%v, want only the finding fixed at the sensitive head restricted", loaded, err)
+	}
+	// A clean same-head review that carries the ledger never names it.
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "default"}}
+	same := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Ledger: loaded}, &repositoryMonitorReviewResult{Verdict: repositoryMonitorReviewVerdictPassed}, "new", "review-same", nil)
+	body := renderRepositoryMonitorReviewBody(monitor, &store.MonitorItem{Number: 1}, &corev1alpha1.Task{}, &store.ReviewRecord{ID: "review-same", HeadSHA: "new", Verdict: repositoryMonitorReviewVerdictPassed}, "publish-1", same)
+	if strings.Contains(body, "Leaky log line") {
+		t.Fatalf("published body names a finding a security-sensitive review fixed:\n%s", body)
+	}
+}
