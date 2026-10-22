@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,6 +34,8 @@ type inviteGitHub struct {
 	revoked  *revocations
 	// onApprove runs as GitHub hands out the approved tokens.
 	onApprove func()
+	// codes counts the device flows started.
+	codes atomic.Int32
 }
 
 func newInviteHarness(t *testing.T, approved map[string]any) (*connectorTestHarness, *inviteGitHub) {
@@ -44,6 +47,7 @@ func newInviteHarness(t *testing.T, approved map[string]any) (*connectorTestHarn
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/login/device/code":
+			gh.codes.Add(1)
 			_ = json.NewEncoder(w).Encode(githubauth.DeviceCode{DeviceCode: "dev", UserCode: "ABCD-1234", VerificationURI: "https://github.com/login/device", ExpiresIn: 900})
 		case "/login/oauth/access_token":
 			gh.mu.Lock()
@@ -175,6 +179,56 @@ func TestInviteRefusesAProviderChangedWhilePending(t *testing.T) {
 	}
 	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
 		t.Fatalf("revoked = %v, want the approved token", revoked)
+	}
+}
+
+// A change to the provider's scopes alone, outside its authority digest,
+// also refuses the invite: custody would record scopes the host path no
+// longer accepts.
+func TestInviteRefusesAScopeChangeWhilePending(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
+	gh.onApprove = func() {
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+			t.Error(err)
+			return
+		}
+		provider.Spec.OAuth.Scopes.Read = append(provider.Spec.OAuth.Scopes.Read, "read:org")
+		provider.Generation++
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Error(err)
+			return
+		}
+		// The provider is ready again by the time the invite checks it.
+		for i := range provider.Status.Conditions {
+			provider.Status.Conditions[i].ObservedGeneration = provider.Generation
+		}
+		if err := h.client.Status().Update(context.Background(), provider); err != nil {
+			t.Error(err)
+		}
+	}
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+		t.Fatalf("revoked = %v, want the approved token", revoked)
+	}
+}
+
+// A full invite table refuses before asking GitHub for a code.
+func TestInvitesReserveCapacityBeforeStartingTheDeviceFlow(t *testing.T) {
+	h, gh := newInviteHarness(t, nil)
+	for i := range maxPendingInvites {
+		if err := h.handlers.invites.add(&InviteResponse{ID: fmt.Sprint(i), State: InvitePending, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, _ := h.invite("alice"); status != http.StatusTooManyRequests {
+		t.Fatalf("invite with a full table = %d, want 429", status)
+	}
+	if got := gh.codes.Load(); got != 0 {
+		t.Fatalf("%d device flows started for invites that could not be held", got)
 	}
 }
 

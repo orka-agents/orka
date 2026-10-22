@@ -92,6 +92,23 @@ func (i *githubInvites) add(invite *InviteResponse) error {
 	return nil
 }
 
+// started fills in a reserved invite once GitHub's device flow started and
+// returns a copy to answer with.
+func (i *githubInvites) started(id string, code githubauth.DeviceCode, expires time.Time, agentHost bool) InviteResponse {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	invite := i.invites[id]
+	invite.UserCode, invite.VerificationURI, invite.ExpiresAt, invite.AgentHost = code.UserCode, code.VerificationURI, expires, agentHost
+	return *invite
+}
+
+// drop removes an invite whose device flow never started.
+func (i *githubInvites) drop(id string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	delete(i.invites, id)
+}
+
 func (i *githubInvites) finish(id, state, message, connection string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -134,25 +151,24 @@ func (h *Handlers) CreateInvite(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	code, err := cfg.GitHub.StartDeviceFlow(ctx, provider.Spec.OAuth.ClientID)
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadGateway, "could not start GitHub's device flow")
-	}
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not create the invite")
 	}
-	invite := &InviteResponse{
-		ID: hex.EncodeToString(idBytes), Login: login, State: InvitePending,
-		UserCode: code.UserCode, VerificationURI: code.VerificationURI,
-		ExpiresAt: cfg.now().Add(time.Duration(max(code.ExpiresIn, 60)) * time.Second).UTC(),
-		AgentHost: provider.Spec.AgentHost != nil && cfg.CreateHosts,
-	}
-	if err := h.invites.add(invite); err != nil {
+	id := hex.EncodeToString(idBytes)
+	// The slot is reserved before GitHub is asked for a code, so a full
+	// table never starts device flows it cannot track.
+	if err := h.invites.add(&InviteResponse{ID: id, Login: login, State: InvitePending, ExpiresAt: cfg.now().Add(time.Hour).UTC()}); err != nil {
 		return fiber.NewError(fiber.StatusTooManyRequests, err.Error())
 	}
-	response := *invite
-	go h.completeInvite(invite.ID, login, provider.DeepCopy(), code, invite.ExpiresAt)
+	code, err := cfg.GitHub.StartDeviceFlow(ctx, provider.Spec.OAuth.ClientID)
+	if err != nil {
+		h.invites.drop(id)
+		return fiber.NewError(fiber.StatusBadGateway, "could not start GitHub's device flow")
+	}
+	expires := cfg.now().Add(time.Duration(max(code.ExpiresIn, 60)) * time.Second).UTC()
+	response := h.invites.started(id, code, expires, provider.Spec.AgentHost != nil && cfg.CreateHosts)
+	go h.completeInvite(id, login, provider.DeepCopy(), code, expires)
 	return c.Status(fiber.StatusCreated).JSON(response)
 }
 
@@ -204,10 +220,11 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		h.invites.finish(id, InviteRefused, message, "")
 	}
 	// The person approved what the invite disclosed: a provider replaced or
-	// changed meanwhile, its agent host included, needs a new invite. The
-	// token is revoked with the app that issued it.
+	// changed meanwhile, its agent host or scopes included, needs a new
+	// invite. The token is revoked with the app that issued it.
 	current, err := h.signInProvider(ctx)
-	if err != nil || current.UID != provider.UID || connectors.ProviderAuthorityDigest(current) != connectors.ProviderAuthorityDigest(provider) {
+	if err != nil || current.UID != provider.UID || current.Generation != provider.Generation ||
+		connectors.ProviderAuthorityDigest(current) != connectors.ProviderAuthorityDigest(provider) {
 		refuse("the GitHub provider changed while the invite was pending; it was refused and its token revoked; invite again", tokens.AccessToken)
 		return
 	}
