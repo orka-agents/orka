@@ -145,6 +145,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	if err != nil {
 		return "", "", err
 	}
+	if ci.reason == repositoryMonitorCIAwaitingApproval {
+		return repositoryMonitorStatusPending, "Waiting for a maintainer to approve the CI workflow runs for this commit.", nil
+	}
 	if !ci.passed {
 		return repositoryMonitorStatusPending, "Waiting for repository CI to pass.", nil
 	}

@@ -29,6 +29,12 @@ const (
 	repositoryMonitorAutomergeStateStarted    = "started"
 	repositoryMonitorAutomergeStatePending    = repositoryMonitorReviewTaskStatePending
 	repositoryMonitorAutomergeReasonCIPending = "ci_pending"
+	// repositoryMonitorCIAwaitingApproval means GitHub holds the commit's
+	// workflow runs until a maintainer approves them.
+	repositoryMonitorCIAwaitingApproval = "ci_awaiting_approval"
+	// repositoryMonitorCIChecksIncomplete means GitHub returned fewer checks
+	// or statuses than it counted.
+	repositoryMonitorCIChecksIncomplete = "ci_checks_incomplete"
 )
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
@@ -72,6 +78,40 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
+	result, err := r.repositoryMonitorCheckReportedCI(ctx, baseURL, owner, repo, token, sha)
+	if err != nil || result.reason == repositoryMonitorCINotGreen || result.reason == repositoryMonitorCIChecksIncomplete {
+		return result, err
+	}
+	// A held workflow run reports no check run, so the reported checks can
+	// look pending or green while the repository's CI has not run at all.
+	awaiting, err := r.repositoryMonitorCIAwaitingApproval(ctx, baseURL, owner, repo, token, sha)
+	if err != nil || !awaiting {
+		return result, err
+	}
+	return repositoryMonitorCIResult{reason: repositoryMonitorCIAwaitingApproval}, nil
+}
+
+// repositoryMonitorCIAwaitingApproval reports whether GitHub holds a workflow
+// run for sha until a maintainer approves it, as it does for pull requests
+// from forks. A token without Actions access cannot tell and reports false.
+func (r *RepositoryMonitorReconciler) repositoryMonitorCIAwaitingApproval(ctx context.Context, baseURL, owner, repo, token, sha string) (bool, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/runs?head_sha=%s&status=action_required&per_page=1", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(sha))
+	var response struct {
+		TotalCount int `json:"total_count"`
+	}
+	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
+		var apiErr *repositoryMonitorGitHubAPIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return response.TotalCount > 0, nil
+}
+
+// repositoryMonitorCheckReportedCI evaluates the check runs and commit
+// statuses reported for sha.
+func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx context.Context, baseURL, owner, repo, token, sha string) (repositoryMonitorCIResult, error) {
 	total := -1
 	var checks []struct {
 		ID         int64  `json:"id"`
@@ -105,7 +145,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		return r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
 	}
 	if len(checks) < total {
-		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCIChecksIncomplete}, nil
 	}
 	var pending, failed []string
 	considered := 0
@@ -184,7 +224,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
 	}
 	if incomplete {
-		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCIChecksIncomplete}, nil
 	}
 	if pending {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil

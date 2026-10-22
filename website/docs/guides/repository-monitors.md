@@ -354,6 +354,8 @@ Reserve this context for Orka. Orka excludes only status IDs persisted in its mu
 
 The status stays pending or failed while review, validation, or repair is incomplete. Statuses are commit-scoped: when multiple open PRs on the monitored base branch share a head SHA, all must be ready before that commit receives success. A paused or unreviewed peer blocks the shared status. A new head requires new evidence. Repair defaults to at most five attempts per PR and two per head; explicit lower limits are honored. Workflow polling observes CI and completed Tasks without requiring another command label.
 
+GitHub holds workflow runs for some pull requests from forks until a maintainer approves them, and a held run reports no check run. When a commit has a held run and no failed check, the readiness status reads "Waiting for a maintainer to approve the CI workflow runs for this commit." This includes commits Orka pushed while repairing a fork pull request. Detecting held runs needs Actions read access (classic tokens: `repo`); a credential without it keeps the previous behaviour.
+
 GitHub merges only when its per-PR auto-merge setting is enabled and all required conditions pass. When disabled, the PR remains open and merge-ready. Orka never calls the merge endpoint or changes the auto-merge setting. There is no sensitive label or additional merge-approval classifier.
 
 ## API and authorization

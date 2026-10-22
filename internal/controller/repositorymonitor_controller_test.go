@@ -3730,6 +3730,9 @@ func newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t *testing.T, nu
 			t.Fatalf("Authorization header = %q, want %q", got, wantAuth)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			return
+		}
 		if r.URL.Path == wantPath+"/files" {
 			_, _ = w.Write([]byte(`[]`))
 			return
@@ -3760,8 +3763,22 @@ func newRepositoryMonitorReviewContextUnavailableServer(t *testing.T) *httptest.
 // request and pull request files endpoints the review-context builder calls,
 // derived from the same inventory body. It returns true when it handled the
 // request.
+// repositoryMonitorTestServesNoHeldWorkflowRuns answers the workflow-run
+// approval lookup: no run for the commit waits for a maintainer.
+func repositoryMonitorTestServesNoHeldWorkflowRuns(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet || r.URL.Path != "/repos/orka-agents/orka/actions/runs" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
+	return true
+}
+
 func repositoryMonitorInventoryServerRoutesReviewContext(t *testing.T, w http.ResponseWriter, r *http.Request, body string) bool {
 	t.Helper()
+	if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+		return true
+	}
 	const prefix = "/repos/orka-agents/orka/pulls/"
 	const comparePrefix = "/repos/orka-agents/orka/compare/"
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, comparePrefix) {

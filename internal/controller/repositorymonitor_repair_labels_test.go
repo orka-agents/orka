@@ -97,6 +97,8 @@ type repositoryMonitorRepairLabelsGitHub struct {
 	checks map[string]map[string]string // commit SHA -> check name -> conclusion
 	events []map[string]any
 	roles  map[string]string
+	// heldRuns lists, per commit SHA, workflow runs waiting for approval.
+	heldRuns map[string][]string
 }
 
 func (g *repositoryMonitorRepairLabelsGitHub) labeled(actor, label string) *repositoryMonitorRepairLabelsGitHub {
@@ -122,6 +124,8 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(runs), "check_runs": runs})
 	case strings.HasSuffix(path, "/status"):
 		_ = json.NewEncoder(w).Encode(map[string]any{"state": "success", "total_count": 0, "statuses": []any{}})
+	case path == "/repos/orka-agents/orka/actions/runs":
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(g.heldRuns[req.URL.Query().Get("head_sha")])})
 	case path == "/repos/orka-agents/orka/issues/31/events":
 		if req.URL.Query().Get("page") != "1" {
 			_, _ = w.Write([]byte(`[]`))
@@ -246,6 +250,14 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			mutate:      withoutRepositoryMonitorRepairLabelsAndBudget,
 			wantHandled: true,
 			wantSkip:    repositoryMonitorRepairPRBudgetReason,
+		},
+		{
+			name:   "a failed check wins over a held run",
+			labels: []string{"orka:fix-ci"},
+			github: (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}},
+				heldRuns: map[string][]string{"head31": {"CI"}}}).labeled("maintainer", "orka:fix-ci"),
+			wantHandled: true,
+			wantIntent:  repositoryMonitorCommandIntentFixCI,
 		},
 		{
 			name:        "label added by a non-collaborator is refused",
@@ -422,5 +434,55 @@ func TestRepositoryMonitorInventoryReviewsHeadAfterRepairRefusal(t *testing.T) {
 	item, err := db.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
 	if err != nil || item.LastVerdict != repositoryMonitorRunPhaseQueued || item.LastReviewID == "" || item.RepairState != repositoryMonitorRepairPhaseFailed {
 		t.Fatalf("item = %+v err=%v, want a queued review with the refused repair recorded", item, err)
+	}
+}
+
+func TestRepositoryMonitorCheckCIReportsHeldWorkflowRuns(t *testing.T) {
+	ctx := context.Background()
+	actionsStatus := http.StatusOK
+	held := 1
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/check-runs"):
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":1,"name":"license/cla","status":"completed","conclusion":"success"}]}`))
+		case strings.HasSuffix(req.URL.Path, "/status"):
+			_, _ = w.Write([]byte(`{"state":"success","total_count":0,"statuses":[]}`))
+		case req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			if req.URL.Query().Get("head_sha") != "head1" || req.URL.Query().Get("status") != "action_required" {
+				t.Errorf("approval lookup query = %q", req.URL.RawQuery)
+			}
+			w.WriteHeader(actionsStatus)
+			_, _ = fmt.Fprintf(w, `{"total_count":%d,"workflow_runs":[]}`, held)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+	}))
+	defer server.Close()
+	monitor, secret := repositoryMonitorInventoryTestObjects("held-ci")
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, GitHubAPIBaseURL: server.URL}
+	for _, tc := range []struct {
+		name   string
+		status int
+		held   int
+		want   repositoryMonitorCIResult
+	}{
+		{name: "held run", status: http.StatusOK, held: 1, want: repositoryMonitorCIResult{reason: repositoryMonitorCIAwaitingApproval}},
+		{name: "nothing held", status: http.StatusOK, held: 0, want: repositoryMonitorCIResult{passed: true}},
+		{name: "token without Actions access", status: http.StatusForbidden, held: 1, want: repositoryMonitorCIResult{passed: true}},
+	} {
+		actionsStatus, held = tc.status, tc.held
+		got, err := r.repositoryMonitorCheckCI(ctx, monitor, "head1")
+		if err != nil || got.passed != tc.want.passed || got.reason != tc.want.reason {
+			t.Fatalf("%s: CI = %+v err=%v, want %+v", tc.name, got, err, tc.want)
+		}
 	}
 }
