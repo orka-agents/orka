@@ -106,4 +106,24 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	if len(resolved) != 1 || resolved[0] != "T501" {
 		t.Fatalf("resolved threads = %q, want T501 once", resolved)
 	}
+
+	// A security-sensitive review, or a fix of a restricted finding, never
+	// links the finding to its fix.
+	restrictedJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{
+		{ID: "f-aaaa", Title: "Bug", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "newhead1", SecuritySensitive: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, restricted := range []*store.ReviewRecord{
+		{ID: "review-sensitive", HeadSHA: "newhead1", SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: findingsJSON},
+		{ID: "review-restricted", HeadSHA: "newhead1", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: restrictedJSON},
+	} {
+		if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, restricted); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(patched) != 1 || len(resolved) != 1 {
+		t.Fatalf("marked a restricted finding: patched=%q resolved=%q", patched, resolved)
+	}
 }

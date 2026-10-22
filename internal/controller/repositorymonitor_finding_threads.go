@@ -39,9 +39,17 @@ type repositoryMonitorReviewComment struct {
 // findings record found fixed: each comment gets an "Addressed in" note and
 // its thread is resolved. Only comments on reviews Orka published are
 // touched, so a comment that copies Orka's marker is ignored, and each
-// finding is marked once.
+// finding is marked once. Marking links a finding to its fix, so a
+// security-sensitive review or finding is never marked unless the monitor
+// posts security-sensitive reviews.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord) error {
-	if r.Store == nil || !monitor.Spec.Review.Publish.Enabled || record == nil {
+	publish := monitor.Spec.Review.Publish
+	if r.Store == nil || !publish.Enabled || record == nil {
+		return nil
+	}
+	if !publish.PostSecuritySensitive &&
+		(strings.EqualFold(strings.TrimSpace(record.SecurityStatus), repositoryMonitorReviewVerdictSecuritySensitive) ||
+			strings.EqualFold(strings.TrimSpace(record.Verdict), repositoryMonitorReviewVerdictSecuritySensitive)) {
 		return nil
 	}
 	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
@@ -50,6 +58,9 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(c
 	}
 	fixed := map[string]bool{}
 	for _, finding := range findings {
+		if finding.SecuritySensitive && !publish.PostSecuritySensitive {
+			continue
+		}
 		if finding.Status == repositoryMonitorFindingStatusFixed && finding.ResolvedHead == record.HeadSHA && finding.ID != "" {
 			fixed[finding.ID] = true
 		}
