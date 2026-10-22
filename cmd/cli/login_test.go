@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -312,15 +314,18 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 	}
 }
 
-// A renewal never writes its stale view of the config back: a token set
-// while it was in flight is kept.
-func TestRenewalKeepsAConfigChangedMeanwhile(t *testing.T) {
+// A config write during a renewal waits for it and builds on the saved
+// successor, so neither undoes the other.
+func TestConfigWritesWaitForARenewal(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	setter := make(chan error, 1)
 	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Another command replaces the session while this renewal runs.
-		if err := saveConfig(orkaConfig{Server: "https://elsewhere.example", Token: "static-token"}); err != nil {
-			t.Error(err)
-		}
+		// Another command changes the namespace while this renewal runs.
+		go func() {
+			_, err := runLoginCLI(t, "config", "set-namespace", "team")
+			setter <- err
+		}()
+		time.Sleep(50 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_renewed", "expiresAt": time.Now().Add(12 * time.Hour)}) //nolint:errcheck
@@ -336,8 +341,50 @@ func TestRenewalKeepsAConfigChangedMeanwhile(t *testing.T) {
 	if token := configuredSession(cmd, "", cfg); token != "orka_s_renewed" {
 		t.Fatalf("token = %q", token)
 	}
-	if saved := loadConfig(); saved.Token != "static-token" || saved.Server != "https://elsewhere.example" || saved.TokenKind != "" {
-		t.Fatalf("config = %+v, want the change made meanwhile", saved)
+	if err := <-setter; err != nil {
+		t.Fatal(err)
+	}
+	if saved := loadConfig(); saved.Token != "orka_s_renewed" || saved.Namespace != "team" {
+		t.Fatalf("config = %+v, want the successor and the namespace", saved)
+	}
+}
+
+// A lock file left by a process that exited holds nothing: the lock is the
+// operating system's, and only one caller holds it at a time.
+func TestConfigLockIsExclusiveAndNeverStale(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(configPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath()+".lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var holders, most atomic.Int32
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			unlock, err := lockConfig(ctx)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			now := holders.Add(1)
+			for {
+				seen := most.Load()
+				if now <= seen || most.CompareAndSwap(seen, now) {
+					break
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+			holders.Add(-1)
+			unlock()
+		})
+	}
+	wg.Wait()
+	if got := most.Load(); got != 1 {
+		t.Fatalf("%d callers held the config lock at once", got)
 	}
 }
 
@@ -356,7 +403,7 @@ func TestLogoutWaitsForARenewal(t *testing.T) {
 		TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := lockSessionRenewal(context.Background())
+	unlock, err := lockConfig(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
