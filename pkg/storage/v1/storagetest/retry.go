@@ -118,6 +118,14 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 		require.Len(t, events, 1)
 		_, err = provider.GetPlan(ctx, "tenant", "task")
 		require.ErrorIs(t, err, storagev1.ErrNotFound, "a refused append leaves the plan alone")
+
+		bare, appended, err := provider.AppendExecutionEventIfAbsent(ctx, caseEvent(), "event-2")
+		require.NoError(t, err)
+		require.True(t, appended)
+		again, appended, err := provider.AppendExecutionEventIfAbsent(ctx, toolEvent(), "event-2")
+		require.NoError(t, err, "a stored event without a Session or tool call matches a request that has them")
+		require.False(t, appended)
+		require.Equal(t, bare.ID, again.ID)
 	})
 
 	t.Run("outbox records commit only under the current fence", func(t *testing.T) {

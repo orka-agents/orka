@@ -94,8 +94,19 @@ func TestDeliveryMarkInsideAnOperationDoesNotWaitForTheAppendMutex(t *testing.T)
 	defer s.executionEventMu.Unlock()
 	now := time.Now().UTC()
 	markCtx, _ := testEnvelope(t, ctx, dataset, "MarkGatewayDeliveryDelivered", now, "ns", "delivery", "owner", "message", now)
-	err := s.MarkGatewayDeliveryDelivered(markCtx, "ns", "delivery", "owner", "message", now)
-	require.ErrorIs(t, err, store.ErrNotFound)
+	// Lock ignores ctx, so a call that waits for the mutex is detected by a
+	// bounded wait rather than its deadline.
+	done := make(chan error, 1)
+	go func() { done <- s.MarkGatewayDeliveryDelivered(markCtx, "ns", "delivery", "owner", "message", now) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, store.ErrNotFound)
+	case <-time.After(5 * time.Second):
+		s.executionEventMu.Unlock()
+		<-done
+		s.executionEventMu.Lock()
+		t.Fatal("an enveloped delivery mark waited for the event-append mutex while holding the connection")
+	}
 }
 
 func TestSecurityWritesStayInsideTheOperation(t *testing.T) {

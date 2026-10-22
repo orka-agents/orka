@@ -225,7 +225,7 @@ func (s *Store) inWriteTransaction(ctx context.Context, run func(context.Context
 			_, releaseErr := tx.ExecContext(context.WithoutCancel(ctx), `RELEASE orka_write_operation`)
 			return errors.Join(err, rollbackErr, releaseErr)
 		}
-		_, err := tx.ExecContext(ctx, `RELEASE orka_write_operation`)
+		_, err := tx.ExecContext(context.WithoutCancel(ctx), `RELEASE orka_write_operation`)
 		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
