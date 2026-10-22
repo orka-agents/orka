@@ -3,7 +3,9 @@ package storagetest
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,6 +53,53 @@ func requireOneWinner(t *testing.T, errs []error, want error) int {
 	return winner
 }
 
+// readDuringWrites calls write writes times while concurrentCallers-1 readers
+// call read in a loop, and fails on the first error either returns. Each write
+// waits for a read to start after the previous one, so reads overlap the whole
+// workload even when a provider could finish every write before a reader runs.
+func readDuringWrites(t *testing.T, writes int, write func(i int) error, read func() error) {
+	t.Helper()
+	var started, readers atomic.Int64
+	readers.Store(concurrentCallers - 1)
+	failures := make(chan error, concurrentCallers)
+	written := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer close(written)
+		for i := range writes {
+			if err := write(i); err != nil {
+				failures <- err
+				return
+			}
+			for seen := started.Load(); started.Load() == seen && readers.Load() > 0; {
+				runtime.Gosched()
+			}
+		}
+	})
+	for range concurrentCallers - 1 {
+		wg.Go(func() {
+			defer readers.Add(-1)
+			for {
+				select {
+				case <-written:
+					return
+				default:
+				}
+				started.Add(1)
+				if err := read(); err != nil {
+					failures <- err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		require.NoError(t, err)
+	}
+}
+
 func runConcurrency(t *testing.T, newProvider StateFactory) {
 	t.Run("parallel Session creation admits one", func(t *testing.T) {
 		provider := newProvider(t)
@@ -70,46 +119,135 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 	t.Run("Session reads see one snapshot during appends", func(t *testing.T) {
 		provider := newProvider(t)
 		createSessionFixture(t, provider, "tenant-a", "busy", sessionsTypeTask, time.Now().UTC())
-		const appends = 50
-		failures := make(chan error, concurrentCallers)
-		appended := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			defer close(appended)
-			for i := range appends {
-				if err := provider.AppendMessages(t.Context(), "tenant-a", "busy", []storagev1.SessionMessage{
-					{ID: fmt.Sprintf("message-%d", i), Role: "user", Content: "hello"},
-				}); err != nil {
-					failures <- err
-					return
+		readDuringWrites(t, 50, func(i int) error {
+			return provider.AppendMessages(t.Context(), "tenant-a", "busy", []storagev1.SessionMessage{
+				{ID: fmt.Sprintf("message-%d", i), Role: "user", Content: "hello"},
+			})
+		}, func() error {
+			session, err := provider.GetSession(t.Context(), "tenant-a", "busy")
+			if err != nil {
+				return err
+			}
+			if session.MessageCount != len(session.Messages) {
+				return fmt.Errorf("session reports %d messages but returned %d", session.MessageCount, len(session.Messages))
+			}
+			return nil
+		})
+	})
+
+	t.Run("stream heads are read from one snapshot during appends", func(t *testing.T) {
+		provider := newProvider(t)
+		// Enough streams that a provider reading heads in bounded batches reads
+		// the first and last streams in different queries.
+		streams := make([]string, 1024)
+		for i := range streams {
+			streams[i] = fmt.Sprintf("task-%d", i)
+		}
+		first, last := streams[0], streams[len(streams)-1]
+		readDuringWrites(t, 25, func(int) error {
+			for _, stream := range []string{first, last} {
+				if _, err := provider.AppendExecutionEvent(t.Context(),
+					taskEvent(eventsTenant, stream, storagev1.ExecutionEventTypeModelMessage)); err != nil {
+					return err
 				}
 			}
+			return nil
+		}, func() error {
+			heads, err := provider.GetLatestExecutionEventSeqs(t.Context(), eventsTenant, storagev1.ExecutionEventStreamTypeTask, streams)
+			if err != nil {
+				return err
+			}
+			// Each write appends to first before last, so no snapshot has last ahead.
+			if heads[last] > heads[first] {
+				return fmt.Errorf("stream %s is at %d but %s, appended first, is at %d", last, heads[last], first, heads[first])
+			}
+			return nil
 		})
-		for range concurrentCallers - 1 {
-			wg.Go(func() {
-				for {
-					select {
-					case <-appended:
-						return
-					default:
-					}
-					session, err := provider.GetSession(t.Context(), "tenant-a", "busy")
-					if err != nil {
-						failures <- err
-						return
-					}
-					if session.MessageCount != len(session.Messages) {
-						failures <- fmt.Errorf("session reports %d messages but returned %d", session.MessageCount, len(session.Messages))
-						return
-					}
-				}
+	})
+
+	t.Run("Session event pages are read from one snapshot during appends and deletes", func(t *testing.T) {
+		provider := newProvider(t)
+		const session = "snapshot-session"
+		filter := storagev1.SessionExecutionEventFilter{Namespace: eventsTenant, SessionName: session, Limit: 50}
+		// firstEventSeqs holds the Session sequence of each round's first event.
+		// A round appends two events to a new stream and then deletes the stream,
+		// so in any snapshot with an empty page the latest sequence is zero or a
+		// round's second event, never a first event that was still stored.
+		var firstEventSeqs sync.Map
+		appendToSession := func(stream, eventType string) error {
+			event := taskEvent(eventsTenant, stream, eventType)
+			event.SessionName = session
+			_, err := provider.AppendExecutionEvent(t.Context(), event)
+			return err
+		}
+		readDuringWrites(t, 25, func(i int) error {
+			stream := fmt.Sprintf("session-task-%d", i)
+			if err := appendToSession(stream, storagev1.ExecutionEventTypeTaskStarted); err != nil {
+				return err
+			}
+			_, latest, err := provider.ListSessionExecutionEvents(t.Context(), filter)
+			if err != nil {
+				return err
+			}
+			firstEventSeqs.Store(latest, struct{}{})
+			if err := appendToSession(stream, storagev1.ExecutionEventTypeTaskSucceeded); err != nil {
+				return err
+			}
+			return provider.DeleteExecutionEvents(t.Context(), eventsTenant, storagev1.ExecutionEventStreamTypeTask, stream)
+		}, func() error {
+			page, latest, err := provider.ListSessionExecutionEvents(t.Context(), filter)
+			if err != nil {
+				return err
+			}
+			if _, first := firstEventSeqs.Load(latest); first && len(page) == 0 {
+				return fmt.Errorf("empty page reports latest sequence %d, which belongs to an event that was still stored", latest)
+			}
+			return nil
+		})
+	})
+
+	t.Run("a Session UID stays fenced while its cleanup completes", func(t *testing.T) {
+		provider := newProvider(t)
+		// prepared holds one more than the last round whose cleanup intent was
+		// stored. From then on its Session UID is fenced, first by the intent and
+		// then by the completion that replaces it.
+		var prepared atomic.Int64
+		readDuringWrites(t, 25, func(i int) error {
+			name, uid := fmt.Sprintf("fenced-%d", i), fmt.Sprintf("fenced-uid-%d", i)
+			if err := provider.CreateSession(t.Context(), &storagev1.SessionRecord{
+				Namespace: "tenant", Name: name, SessionType: "task", CreatedAt: controlBaseTime, UpdatedAt: controlBaseTime,
+			}); err != nil {
+				return err
+			}
+			if err := provider.BindSessionCleanupIdentity(t.Context(), "tenant", name, uid); err != nil {
+				return err
+			}
+			intent := storagev1.SessionCleanupIntent{
+				Namespace: "tenant", SessionName: name, SessionUID: uid, OperationID: "delete-" + name,
+				OperationDigest: controlDigest("delete-" + name), PreparedAt: controlBaseTime,
+			}
+			if _, err := provider.PrepareSessionCleanup(t.Context(), intent); err != nil {
+				return err
+			}
+			prepared.Store(int64(i) + 1)
+			return provider.CompleteSessionCleanup(t.Context(), storagev1.CompleteSessionCleanupRequest{
+				Namespace: "tenant", SessionName: name, OperationID: intent.OperationID, OperationDigest: intent.OperationDigest,
 			})
-		}
-		wg.Wait()
-		close(failures)
-		for err := range failures {
-			require.NoError(t, err)
-		}
+		}, func() error {
+			round := prepared.Load()
+			if round == 0 {
+				return nil
+			}
+			uid := fmt.Sprintf("fenced-uid-%d", round-1)
+			fenced, err := provider.HasSessionCleanupFenceForUID(t.Context(), uid)
+			if err != nil {
+				return err
+			}
+			if !fenced {
+				return fmt.Errorf("session UID %s lost its cleanup fence", uid)
+			}
+			return nil
+		})
 	})
 
 	t.Run("parallel chat turns admit one", func(t *testing.T) {
