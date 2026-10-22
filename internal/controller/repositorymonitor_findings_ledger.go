@@ -223,6 +223,15 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 		finding.OutsideChanges = changed != nil && !changed.covers(finding.File, finding.Line)
 		ledger = append(ledger, finding)
 	}
+	if sensitive {
+		// A security-sensitive verdict may be about an open finding the
+		// review did not repeat; which one is unknown, so all stay restricted.
+		for i := range ledger {
+			if repositoryMonitorFindingOpen(ledger[i]) {
+				ledger[i].SecuritySensitive = true
+			}
+		}
+	}
 	return ledger
 }
 
@@ -278,8 +287,9 @@ func repositoryMonitorLedgerFromRecord(record *store.ReviewRecord) ([]repository
 			findings[i].FirstHead = firstNonEmptyString(findings[i].FirstHead, record.HeadSHA)
 			findings[i].FirstReview = firstNonEmptyString(findings[i].FirstReview, record.ID)
 		}
-		// A security-sensitive review's own findings stay restricted.
-		if sensitive && findings[i].FirstReview == record.ID {
+		// Every finding a security-sensitive review left open stays
+		// restricted, as repositoryMonitorMergeFindingLedger records it.
+		if sensitive && repositoryMonitorFindingOpen(findings[i]) {
 			findings[i].SecuritySensitive = true
 		}
 	}

@@ -630,3 +630,23 @@ func TestRepositoryMonitorReviewShownSensitiveFindingStaysUnpublished(t *testing
 		t.Fatalf("record = verdict %q security %q, want passed and still security_sensitive", record.Verdict, record.SecurityStatus)
 	}
 }
+
+func TestRepositoryMonitorSensitiveReviewRestrictsCarriedFindings(t *testing.T) {
+	base := &store.ReviewRecord{ID: "review-old", HeadSHA: "old"}
+	carried := []repositoryMonitorReviewFinding{ledgerFinding("f-carried", "P2", "a.go", 3, "Leaky log line")}
+	// The follow-up judged the carried finding sensitive without repeating it.
+	review := &repositoryMonitorReviewResult{Verdict: repositoryMonitorReviewVerdictSecuritySensitive}
+	ledger := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: carried}, review, "new", "review-new", nil)
+	if len(ledger) != 1 || !ledger[0].SecuritySensitive {
+		t.Fatalf("ledger = %+v, want the carried finding restricted", ledger)
+	}
+	// The next review keeps the restriction even though its own result is clean.
+	record := &store.ReviewRecord{ID: "review-new", HeadSHA: "new", Verdict: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: `[{"id":"f-carried","priority":"P2","title":"Leaky log line","status":"open"}]`}
+	loaded, err := repositoryMonitorLedgerFromRecord(record)
+	if err != nil || !loaded[0].SecuritySensitive {
+		t.Fatalf("loaded = %+v err=%v, want the restriction kept", loaded, err)
+	}
+	if verdict := repositoryMonitorDerivedReviewVerdict(corev1alpha1.RepositoryMonitorSpec{}, repositoryMonitorReviewVerdictPassed, loaded); verdict != repositoryMonitorReviewVerdictSecuritySensitive {
+		t.Fatalf("verdict = %q, want security_sensitive while the finding is open", verdict)
+	}
+}
