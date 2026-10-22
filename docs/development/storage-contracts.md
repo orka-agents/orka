@@ -125,22 +125,30 @@ These rules are part of the contract. The package documentation in
 `pkg/storage/v1` states them for provider authors, and the shared suite checks
 the observable parts.
 
-- **Execution.** Each provider method commits atomically and is linearizable
-  with respect to every other call on the same dataset, as if calls ran one at
-  a time. SQLite's single writer gives this for free, so a serial suite cannot
+- **Execution.** Each provider method is atomic, so a write commits all of its
+  changes or none, and is linearizable with respect to every other call on the
+  same dataset, as if calls ran one at a time. SQLite's single writer gives
+  this for free, so a serial suite cannot
   tell a correct provider from one running at a weaker isolation level. A
   PostgreSQL provider at the default `READ COMMITTED` isolation could pass a
   serial suite and still let two dispatchers claim one gateway event, because
   claims, chat-turn reservations and terminal approvals read and then write.
   A method that returns several records, such as a Session with its
   transcript, reads them from one snapshot; SQLite does this for `GetSession`,
-  `LoadTranscriptThrough`, `ReadSessionSoul`, `GetGatewayQueueStats` and
-  `ListPatchProposals`, the read methods found issuing more than one query. The
+  `LoadTranscriptThrough`, `ReadSessionSoul`, `GetGatewayQueueStats`,
+  `ListPatchProposals`, `GetLatestExecutionEventSeqs`,
+  `ListSessionExecutionEvents` and `HasSessionCleanupFenceForUID`, the read
+  methods found issuing more than one query. The
   suite's concurrency cases release eight callers at once against Session
   creation, chat-turn reservation, deduplicated event appends, terminal
   approvals and gateway claims, and require exactly one winner (or one claim
-  per event). Another case reads a Session while messages are appended and
-  requires its message count to match the messages returned.
+  per event). Four more cases read while writes run, and every write waits
+  for a read to start: one requires a Session's message count to match the
+  messages returned, one requires stream heads read in several batches to
+  come from one snapshot, one requires a Session events page and its latest
+  sequence to come from one snapshot while streams are appended to and
+  deleted, and one requires a Session UID to stay fenced while its cleanup
+  intent is replaced by a completion.
 - **Durability.** A nil error means the change survives a provider restart and
   any failover the provider declares automatic. `Describe` reports a
   `DurabilityClass` so Orka can refuse automatic continuation after a failover
@@ -196,10 +204,14 @@ the observable parts.
   times given in a non-UTC zone through Sessions, transcripts, gateway events,
   outbox projections, usage records, monitor runs, scan runs and the workflow
   families. SQLite opens its database with the driver's `_timezone=UTC`
-  option, so every time column is written and read in UTC, including rows
-  written earlier in another zone; its queries compare times as text, so one
-  zone also keeps those comparisons correct. Usage records are stored as JSON,
-  so SQLite converts their times to UTC when it writes and reads them.
+  option, so every time column is written and read in UTC. Its queries compare
+  times as text, which is correct only while every row uses one zone. The
+  option does not rewrite stored rows: a database written by an earlier
+  release on a host whose local zone was not UTC keeps those rows' offsets,
+  and they can sort or pass a cutoff incorrectly against newer rows. Orka's
+  container images run in UTC unless `TZ` is set, so this affects such
+  databases only, such as local development files. Usage records are stored
+  as JSON, so SQLite converts their times to UTC when it writes and reads them.
 - **Records are not the wire format.** Records carry JSON tags for Orka's API.
   Persisted fields such as gateway claim ownership, lease expiry, the frozen
   Task tool policy, usage phase history, scan-run cancellation state and
@@ -274,9 +286,9 @@ the named step.
   case, so the suite stays practical against a managed database.
 
 `cmd/main.go` builds one `internal/storageclient.Client` over the SQLite store
-and passes it to every application consumer. The SQLite store itself is used
-only for its process lock, bootstrap and key setup, configuration and manager
-lifecycle. The client composes the state and artifact providers and serves the
+and passes it to every application consumer. Outside the client, it uses the
+SQLite store directly only for its process lock, bootstrap and key setup,
+configuration and manager lifecycle. The client composes the state and artifact providers and serves the
 remaining families through `storageclient.Embedded`, which only the SQLite
 store implements:
 
