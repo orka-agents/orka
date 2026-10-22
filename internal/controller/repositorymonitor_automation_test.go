@@ -98,6 +98,9 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.Workspace == nil || task.Spec.Workspace.PushBranch != "feature-fix" || task.Spec.Workspace.ExpectedRemoteSHA != "head31" {
 		t.Fatalf("repair task spec = %#v, want exact-head repair publication", task.Spec)
 	}
+	if want := "fix: repair failing CI on #31\n\nOrka-Task: " + task.Name + "\n"; task.Spec.Workspace.CommitMessage != want {
+		t.Fatalf("repair commit message = %q, want %q", task.Spec.Workspace.CommitMessage, want)
+	}
 	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Create || task.Spec.SessionRef.Append || task.Spec.SessionRef.Name != repositoryMonitorPublicationSessionName(monitor, "feature-fix") {
 		t.Fatalf("repair task session = %#v, want stable non-appending branch owner", task.Spec.SessionRef)
 	}

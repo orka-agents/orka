@@ -134,6 +134,7 @@ workspace:
 | `prBaseBranch` | string | empty | Pull-request base branch. |
 | `prTitle` | string | prompt's first nonblank line | Exact pull-request title, up to 256 characters. Empty uses the default, which trims whitespace and truncates to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
 | `prBody` | string | publisher summary and Task namespace/name | Pull-request body, up to 32,768 characters. The publisher appends the publication generation and reconciliation markers to custom and default bodies. Reserved Orka reconciliation comments are rejected. |
+| `commitMessage` | string | `orka: apply agent task <name>` | Message of the commit that publishes the Task's changes, up to 4,000 bytes, ending in exactly one newline. Whitespace-only text, carriage returns, NUL, and secret-like text are rejected. Repository monitor repairs set it to the repair intent, the review findings being fixed, and an `Orka-Task` trailer. |
 | `createPR` | boolean | `false` | Reconcile a pull request only after verified branch publication. Requires `intent: write`. |
 
 The four credential references are distinct roles: `readCredentialRef` is source-read only,

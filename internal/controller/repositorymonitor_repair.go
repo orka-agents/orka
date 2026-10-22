@@ -1019,6 +1019,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		return 0, err
 	}
 	taskName := repositoryMonitorRepairTaskName(monitor, pr, command)
+	commitMessage, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, command.Intent, taskName, pr, item)
+	if err != nil {
+		return 0, err
+	}
 	job := &store.RepairJob{
 		ID:               "repair-" + repositoryMonitorShortHash(command.ID),
 		MonitorNamespace: monitor.Namespace,
@@ -1066,6 +1070,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		PRBaseBranch:                 pr.BaseBranch,
 		PushBranch:                   pr.HeadBranch,
 		ExpectedRemoteSHA:            pr.HeadSHA,
+		CommitMessage:                commitMessage,
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1158,6 +1163,53 @@ func repositoryMonitorRepairWorkflowActionKind(intent string) string {
 
 func repositoryMonitorRepairTaskName(monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, command *store.CommandEvent) string {
 	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monrepair-%s-%d-%s", monitor.Name, pr.Number, command.ID), 63)
+}
+
+// repositoryMonitorRepairCommitFindingLimit bounds the findings a repair
+// commit message lists.
+const repositoryMonitorRepairCommitFindingLimit = 10
+
+// repositoryMonitorRepairCommitMessage tells maintainers what a repair commit
+// fixes. Finding titles are model output about untrusted code, so each is
+// sanitized onto its own list line, where it cannot form a trailer.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, taskName string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {
+	subject := fmt.Sprintf("fix: address review findings on #%d", pr.Number)
+	switch intent {
+	case repositoryMonitorCommandIntentFixCI:
+		subject = fmt.Sprintf("fix: repair failing CI on #%d", pr.Number)
+	case repositoryMonitorCommandIntentUpdateBranch:
+		subject = fmt.Sprintf("chore: update #%d with %s", pr.Number, pr.BaseBranch)
+	}
+	var lines []string
+	if intent == repositoryMonitorCommandIntentFix && item != nil && item.LastReviewID != "" && r.Store != nil {
+		review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return "", err
+		}
+		var findings []repositoryMonitorReviewFinding
+		if review != nil && review.MonitorName == monitor.Name && review.Number == pr.Number && review.HeadSHA == pr.HeadSHA &&
+			json.Unmarshal([]byte(review.FindingsJSON), &findings) == nil {
+			for i, finding := range findings {
+				if len(lines) == repositoryMonitorRepairCommitFindingLimit {
+					lines = append(lines, fmt.Sprintf("- and %d more", len(findings)-i))
+					break
+				}
+				title := strings.Join(strings.Fields(sanitizeRepositoryMonitorReviewText(finding.Title, 120)), " ")
+				if title == "" {
+					continue
+				}
+				if priority := strings.TrimSpace(finding.Priority); priority != "" {
+					title = "[" + priority + "] " + title
+				}
+				lines = append(lines, "- "+title)
+			}
+		}
+	}
+	message := subject + "\n"
+	if len(lines) > 0 {
+		message += "\nReview findings:\n" + strings.Join(lines, "\n") + "\n"
+	}
+	return message + "\nOrka-Task: " + taskName + "\n", nil
 }
 
 func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {
