@@ -300,6 +300,42 @@ func TestDelay(t *testing.T) {
 	require.Equal(t, storagefault.Counts{Calls: 2, Delivered: 1}, faults.Counts(storagefault.Match{}))
 }
 
+// A call whose context has ended by the time its delay or hold ends is
+// abandoned. Delay(0) makes the delay and the context's end ready together;
+// the hold case is usually decided by the context alone here, and
+// TestHangAbandonsAnEndedCallReleasedAtTheSameMoment covers the tie.
+func TestEndedContextWinsOverDelayAndRelease(t *testing.T) {
+	client, faults := newClient(t)
+	ctx := t.Context()
+	ended, cancel := context.WithCancel(ctx)
+	cancel()
+	faults.Inject(storagefault.Fault{Match: storagefault.Match{Methods: []string{"HealthCheck"}}, Action: storagefault.Delay(0)})
+	for range 50 {
+		err := client.HealthCheck(ended)
+		requireInjected(t, err, storagev1.ErrUnavailable)
+		require.ErrorIs(t, err, context.Canceled)
+	}
+	require.Equal(t, storagefault.Counts{Calls: 50}, faults.Counts(storagefault.Match{Methods: []string{"HealthCheck"}}))
+
+	hang := storagefault.NewHang()
+	faults.Inject(storagefault.Fault{Match: storagefault.Match{Methods: []string{"GetResult"}}, Action: hang})
+	held, cancelHeld := context.WithCancel(ctx)
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.GetResult(held, "tenant", "task")
+		result <- err
+	}()
+	waitCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+	defer stop()
+	require.NoError(t, hang.WaitHeld(waitCtx, 1))
+	cancelHeld()
+	hang.Release()
+	err := <-result
+	requireInjected(t, err, storagev1.ErrUnavailable)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, storagefault.Counts{Calls: 1}, faults.Counts(storagefault.Match{Methods: []string{"GetResult"}}))
+}
+
 func TestMatchByCallClass(t *testing.T) {
 	client, faults := newClient(t)
 	ctx := t.Context()

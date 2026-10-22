@@ -38,8 +38,8 @@ func (a failAction) apply(context.Context, string, func(context.Context) error) 
 }
 
 // Delay waits for d before the call reaches the provider. A call whose
-// context ends first returns storagev1.ErrUnavailable, wrapping the context's
-// error, without reaching the provider.
+// context has ended when the delay is over returns storagev1.ErrUnavailable,
+// wrapping the context's error, without reaching the provider.
 func Delay(d time.Duration) Action {
 	return delayAction{d: d}
 }
@@ -51,6 +51,11 @@ func (a delayAction) apply(ctx context.Context, _ string, next func(context.Cont
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+		// When the delay and the context end together, select may pick
+		// either; the context's end still wins.
+		if ctx.Err() != nil {
+			return true, abandoned(ctx)
+		}
 		return false, next(ctx)
 	case <-ctx.Done():
 		return true, abandoned(ctx)
@@ -86,8 +91,9 @@ func abandoned(ctx context.Context) error {
 // Hang holds matching calls before they reach the provider until Release, as
 // a provider that stopped answering does. A held call whose context ends
 // returns storagev1.ErrUnavailable, wrapping the context's error, without
-// reaching the provider. After Release, held and later calls proceed. Create
-// one with NewHang; it is safe for concurrent use.
+// reaching the provider. After Release, held calls whose context has not
+// ended proceed, and later calls pass as if there were no fault. Create one
+// with NewHang; it is safe for concurrent use.
 type Hang struct {
 	mu       sync.Mutex
 	released bool
@@ -113,6 +119,11 @@ func (h *Hang) apply(ctx context.Context, _ string, next func(context.Context) e
 	select {
 	case <-h.release:
 		h.leave()
+		// When the release and the context's end arrive together, select may
+		// pick either; a held call whose context ended is still abandoned.
+		if ctx.Err() != nil {
+			return true, abandoned(ctx)
+		}
 		return false, next(ctx)
 	case <-ctx.Done():
 		h.leave()
@@ -127,8 +138,8 @@ func (h *Hang) leave() {
 	h.setHeldLocked(h.held - 1)
 }
 
-// Release lets every held call, and every later matching call, reach the
-// provider. Calling it again has no effect.
+// Release lets every held call whose context has not ended, and every later
+// matching call, reach the provider. Calling it again has no effect.
 func (h *Hang) Release() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
