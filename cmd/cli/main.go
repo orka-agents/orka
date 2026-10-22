@@ -61,6 +61,8 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newConnectCmd())
 	cmd.AddCommand(newConnectionCmd())
 	cmd.AddCommand(newHostCmd())
+	cmd.AddCommand(newLoginCmd())
+	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newAHPCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newConfigCmd())

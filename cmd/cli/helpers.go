@@ -44,6 +44,10 @@ type orkaConfig struct {
 	Server    string `yaml:"server,omitempty"`
 	Token     string `yaml:"token,omitempty"`
 	Namespace string `yaml:"namespace,omitempty"`
+	// TokenKind is github-session for a session from orka login, which
+	// renews itself and is sent only to Server.
+	TokenKind      string     `yaml:"tokenKind,omitempty"`
+	TokenExpiresAt *time.Time `yaml:"tokenExpiresAt,omitempty"`
 }
 
 // portForwardCache holds cached port-forward connection info to avoid re-creating on every command.
@@ -121,6 +125,9 @@ func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Clien
 	}
 	if token == "" {
 		token = cfg.Token
+		if cfg.TokenKind == tokenKindGitHubSession {
+			token = configuredSession(cmd, server, cfg)
+		}
 	}
 	if ns == "" {
 		ns = cfg.Namespace
