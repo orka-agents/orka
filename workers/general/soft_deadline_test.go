@@ -241,10 +241,80 @@ func TestGeneralWorkerSoftDeadlineHelper(t *testing.T) {
 		return
 	}
 	originalArgs := os.Args
-	os.Args = []string{"worker", "sh", "-c", `printf ready > "$ORKA_ARTIFACTS_DIR/ready.txt"; sleep 60`}
 	defer func() { os.Args = originalArgs }()
+	if os.Getenv("ORKA_TEST_GENERAL_SOFT_DEADLINE_MODE") == "failed-leader" {
+		// run() exits the process with the leader's code.
+		os.Args = []string{"worker", "sh", "-c",
+			`printf failed-leader; (sleep 8; touch "$ORKA_ARTIFACTS_DIR/survived") & exit 7`}
+		_ = run()
+		t.Fatal("run() returned instead of exiting with the command's code")
+	}
+	os.Args = []string{"worker", "sh", "-c", `printf ready > "$ORKA_ARTIFACTS_DIR/ready.txt"; sleep 60`}
 	if err := run(); errors.Is(err, errSoftDeadline) || err == nil {
 		t.Fatalf("run() error = %v, want the cancellation, not the soft deadline", err)
+	}
+}
+
+func TestSoftDeadlineDeliveryIsBoundedByTheTimeout(t *testing.T) {
+	start := time.Now()
+	delivery, upload := softDeadlineDelivery(start, time.Minute, start.Add(50*time.Second))
+	if want := start.Add(58 * time.Second); !delivery.Equal(want) {
+		t.Fatalf("delivery deadline = %s after start, want 58s", delivery.Sub(start))
+	}
+	if upload.Before(start.Add(55*time.Second)) || !upload.Before(delivery) {
+		t.Fatalf("upload deadline = %s after start, want two thirds of the 8s left", upload.Sub(start))
+	}
+}
+
+// TestRun_FailedLeaderKeepsItsResultAndLeavesNothingRunning covers a command
+// whose leader exits non-zero while a background child holds its output.
+func TestRun_FailedLeaderKeepsItsResultAndLeavesNothingRunning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group cleanup is Unix-specific")
+	}
+	for _, timeout := range []string{"", "2"} {
+		t.Run("timeout="+timeout, func(t *testing.T) {
+			const taskName = "failed-leader-task"
+			controller := &softDeadlineController{}
+			server := controller.serve(t, taskName)
+			artifacts := filepath.Join(t.TempDir(), "artifacts")
+			if err := os.MkdirAll(artifacts, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(self, "-test.run=^TestGeneralWorkerSoftDeadlineHelper$")
+			cmd.Env = append(os.Environ(),
+				"ORKA_TEST_GENERAL_SOFT_DEADLINE_HELPER=1",
+				"ORKA_TEST_GENERAL_SOFT_DEADLINE_MODE=failed-leader",
+				workerenv.ControllerURL+"="+server.URL,
+				workerenv.ResultEndpoint+"=",
+				workerenv.TaskNamespace+"=default",
+				workerenv.TaskName+"="+taskName,
+				workerenv.TimeoutSeconds+"="+timeout,
+				workerenv.GitRepo+"=",
+				workerenv.PriorTask+"=",
+				workerenv.ResultStdout+"=",
+				"ORKA_ARTIFACTS_DIR="+artifacts,
+			)
+			output, _ := cmd.CombinedOutput()
+			if code := cmd.ProcessState.ExitCode(); code != 7 {
+				t.Fatalf("worker exit = %d, want the leader's 7; output:\n%s", code, output)
+			}
+			controller.mu.Lock()
+			results := append([][]byte(nil), controller.results...)
+			controller.mu.Unlock()
+			// The child's death may add a shell notice on stderr.
+			if len(results) != 1 || !strings.HasPrefix(string(results[0]), "failed-leader") {
+				t.Fatalf("results = %q, want the leader's own output, not a soft-deadline account", results)
+			}
+			time.Sleep(4 * time.Second)
+			if _, err := os.Stat(filepath.Join(artifacts, "survived")); err == nil {
+				t.Fatal("the leader's background child outlived the command")
+			}
+		})
 	}
 }
 

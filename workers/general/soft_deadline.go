@@ -84,11 +84,10 @@ func stoppedAtSoftDeadline(ctx, runCtx context.Context) bool {
 func deliverAtSoftDeadline(ctx context.Context, start time.Time, timeout time.Duration, output string) error {
 	elapsed := time.Since(start).Round(time.Second)
 	fmt.Fprintf(os.Stderr, "soft deadline: stopped the command after %s of the %s timeout\n", elapsed, timeout)
-	budget := max(softDeadlineMargin(timeout)-2*time.Second, time.Second)
-	deliveryCtx, cancel := context.WithTimeout(ctx, budget)
+	delivery, upload := softDeadlineDelivery(start, timeout, time.Now())
+	deliveryCtx, cancel := context.WithDeadline(ctx, delivery)
 	defer cancel()
-	// Artifact uploads must leave time for the result, which says what happened.
-	uploadCtx, cancelUpload := context.WithTimeout(deliveryCtx, budget*2/3)
+	uploadCtx, cancelUpload := context.WithDeadline(deliveryCtx, upload)
 	defer cancelUpload()
 
 	data := map[string]any{
@@ -115,6 +114,15 @@ func deliverAtSoftDeadline(ctx context.Context, start time.Time, timeout time.Du
 		return fmt.Errorf("%w; partial result not delivered: %w", errSoftDeadline, err)
 	}
 	return fmt.Errorf("%w after %s", errSoftDeadline, elapsed)
+}
+
+// softDeadlineDelivery bounds delivery by what is left of the timeout, less a
+// small allowance (2s, or half the margin of a very short timeout), however
+// late it starts. Artifact uploads get two thirds of that, so the result,
+// which says what happened, is still posted.
+func softDeadlineDelivery(start time.Time, timeout time.Duration, now time.Time) (delivery, upload time.Time) {
+	delivery = start.Add(timeout - min(2*time.Second, softDeadlineMargin(timeout)/2))
+	return delivery, now.Add(delivery.Sub(now) * 2 / 3)
 }
 
 // softDeadlineSummary keeps the end of the output, which shows where a stuck

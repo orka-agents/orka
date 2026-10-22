@@ -133,7 +133,7 @@ func run() (err error) {
 		cmd.Dir = workDir
 	}
 
-	err = runCommand(runCtx, cmd)
+	stopped, err := runCommand(runCtx, cmd)
 	if errOutputHeldOpen(err) {
 		fmt.Fprintln(os.Stderr, "warning: the command exited but left processes holding its output open; they were stopped")
 		err = nil
@@ -147,7 +147,7 @@ func run() (err error) {
 	}
 
 	output := stdout.String() + stderr.String()
-	if err != nil && stoppedAtSoftDeadline(ctx, runCtx) {
+	if stopped && stoppedAtSoftDeadline(ctx, runCtx) {
 		return deliverAtSoftDeadline(ctx, start, timeout, output)
 	}
 	if err != nil {

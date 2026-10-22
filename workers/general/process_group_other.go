@@ -13,16 +13,16 @@ import (
 	"os/exec"
 )
 
-// runCommand kills only the command itself when ctx ends.
-func runCommand(ctx context.Context, cmd *exec.Cmd) error {
+// runCommand kills only the command itself when ctx ends. Without a signal
+// status, a command still running when ctx ended counts as stopped by it.
+func runCommand(ctx context.Context, cmd *exec.Cmd) (stopped bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return true, err
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return false, err
 	}
 	stop := context.AfterFunc(ctx, func() { _ = cmd.Process.Kill() })
-	err := cmd.Wait()
-	stop()
-	return err
+	err = cmd.Wait()
+	return !stop() && err != nil, err
 }
