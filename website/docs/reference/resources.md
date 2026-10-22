@@ -922,7 +922,7 @@ spec:
 | `review.publish.postNeedsChanges` | bool | No | Post `needs_changes` reviews when true. Defaults to `true`. |
 | `review.publish.postNeedsHuman` | bool | No | Post `needs_human` reviews when true. Defaults to `true`. |
 | `review.publish.postSecuritySensitive` | bool | No | Allow public publishing of `security_sensitive` results. Defaults to `false`; sensitive findings are skipped by default. |
-| `review.publish.sameHeadPolicy` | string | No | Duplicate policy for the same monitor, PR, and head SHA. V1 only supports `skip`. |
+| `review.publish.sameHeadPolicy` | string | No | What a later review of an already-published PR head does. `skip` (default) leaves the published review as it is. `update` rewrites the published review's summary when the later review reaches a different verdict; its inline comments stay as first published. Orka publishes at most one review per head either way. |
 | `review.publish.inline.enabled` | bool | No | Enables inline GitHub review comments when `mode` is `summary_with_inline_findings`. |
 | `review.publish.inline.minPriority` | string | No | Lowest priority eligible for inline comments (`P0`-`P3`). Defaults to `P2`; lower-priority findings remain in the summary. |
 | `review.publish.inline.maxComments` | int32 | No | Max inline comments per GitHub review. Defaults to `10`, allowed range `0` to `50`. |

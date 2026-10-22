@@ -4005,6 +4005,10 @@ type repositoryMonitorPublishTestServer struct {
 	*httptest.Server
 	PostCount    int
 	PostedReview repositoryMonitorPullRequestReviewRequest
+	// PutPath and PutBody record the last review summary update.
+	PutCount int
+	PutPath  string
+	PutBody  string
 }
 
 func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPublishTestServerConfig) *repositoryMonitorPublishTestServer {
@@ -4055,6 +4059,17 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 				t.Fatalf("decode posted review: %v", err)
 			}
 			w.WriteHeader(cfg.PostStatus)
+			_, _ = w.Write([]byte(cfg.PostBody))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/repos/orka-agents/orka/pulls/1/reviews/"):
+			testServer.PutCount++
+			testServer.PutPath = r.URL.Path
+			var update struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+				t.Fatalf("decode review update: %v", err)
+			}
+			testServer.PutBody = update.Body
 			_, _ = w.Write([]byte(cfg.PostBody))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.String())

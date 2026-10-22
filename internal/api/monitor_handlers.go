@@ -195,8 +195,10 @@ func validateRepositoryMonitorReviewPublishSpec(publish corev1alpha1.RepositoryM
 	if event := strings.TrimSpace(publish.Event); event != "" && event != "COMMENT" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.event only supports COMMENT in v1")
 	}
-	if policy := strings.TrimSpace(publish.SameHeadPolicy); policy != "" && policy != "skip" {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.sameHeadPolicy only supports skip in v1")
+	switch strings.TrimSpace(publish.SameHeadPolicy) {
+	case "", "skip", "update":
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.sameHeadPolicy must be skip or update")
 	}
 	if priority := strings.TrimSpace(publish.Inline.MinPriority); priority != "" {
 		switch priority {

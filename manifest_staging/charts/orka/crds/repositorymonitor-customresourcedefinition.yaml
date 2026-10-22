@@ -502,10 +502,13 @@ spec:
                       sameHeadPolicy:
                         default: skip
                         description: |-
-                          SameHeadPolicy controls duplicate handling for one monitor, PR, and exact head SHA.
-                          V1 only supports skip.
+                          SameHeadPolicy controls a later review of a pull request head that Orka
+                          already published a review for. skip leaves the published review as it
+                          is. update rewrites the published review's summary when the later review
+                          reaches a different verdict; its inline comments stay as first published.
                         enum:
                         - skip
+                        - update
                         type: string
                     type: object
                   requireGreenCI:

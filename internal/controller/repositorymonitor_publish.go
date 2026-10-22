@@ -33,24 +33,30 @@ const (
 
 	repositoryMonitorPublishEventComment = "COMMENT"
 
-	repositoryMonitorPublishModeSummaryOnly                     = "summary_only"
-	repositoryMonitorPublishModeSummaryWithInlineFindings       = "summary_with_inline_findings"
-	repositoryMonitorPublishSameHeadPolicySkip                  = "skip"
-	repositoryMonitorPublishDefaultInlineMinPriority            = "P2"
-	repositoryMonitorPublishDefaultInlineMaxComments      int32 = 10
+	repositoryMonitorPublishModeSummaryOnly               = "summary_only"
+	repositoryMonitorPublishModeSummaryWithInlineFindings = "summary_with_inline_findings"
+	repositoryMonitorPublishSameHeadPolicySkip            = "skip"
+	repositoryMonitorPublishSameHeadPolicyUpdate          = "update"
+	// repositoryMonitorPublishReviewReason is the audit reason of review writes.
+	repositoryMonitorPublishReviewReason                   = "publish_review"
+	repositoryMonitorPublishDefaultInlineMinPriority       = "P2"
+	repositoryMonitorPublishDefaultInlineMaxComments int32 = 10
 
-	repositoryMonitorPublishSkipDisabled                   = "publish_disabled"
-	repositoryMonitorPublishSkipMissingGitSecret           = "missing_git_secret"
-	repositoryMonitorPublishSkipInvalidReviewResult        = "invalid_review_result"
-	repositoryMonitorPublishSkipRepoMismatch               = "repo_mismatch"
-	repositoryMonitorPublishSkipPRNumberMismatch           = "pr_number_mismatch"
-	repositoryMonitorPublishSkipHeadSHAChanged             = "head_sha_changed"
-	repositoryMonitorPublishSkipPRClosed                   = "pr_closed"
-	repositoryMonitorPublishSkipBaseBranchMismatch         = "base_branch_mismatch"
-	repositoryMonitorPublishSkipDraftPR                    = "draft_pr"
-	repositoryMonitorPublishSkipBlockedLabel               = "blocked_label"
-	repositoryMonitorPublishSkipNotIncluded                = "not_included"
-	repositoryMonitorPublishSkipDuplicateSameHead          = "duplicate_same_head"
+	repositoryMonitorPublishSkipDisabled            = "publish_disabled"
+	repositoryMonitorPublishSkipMissingGitSecret    = "missing_git_secret"
+	repositoryMonitorPublishSkipInvalidReviewResult = "invalid_review_result"
+	repositoryMonitorPublishSkipRepoMismatch        = "repo_mismatch"
+	repositoryMonitorPublishSkipPRNumberMismatch    = "pr_number_mismatch"
+	repositoryMonitorPublishSkipHeadSHAChanged      = "head_sha_changed"
+	repositoryMonitorPublishSkipPRClosed            = "pr_closed"
+	repositoryMonitorPublishSkipBaseBranchMismatch  = "base_branch_mismatch"
+	repositoryMonitorPublishSkipDraftPR             = "draft_pr"
+	repositoryMonitorPublishSkipBlockedLabel        = "blocked_label"
+	repositoryMonitorPublishSkipNotIncluded         = "not_included"
+	repositoryMonitorPublishSkipDuplicateSameHead   = "duplicate_same_head"
+	// repositoryMonitorPublishSkipUpdatedPublishedReview marks a review that
+	// was applied by rewriting the review already published for its head.
+	repositoryMonitorPublishSkipUpdatedPublishedReview     = "updated_published_review"
 	repositoryMonitorPublishSkipSecuritySensitiveNotPublic = "security_sensitive_not_public"
 	repositoryMonitorPublishSkipBodyTooLarge               = "body_too_large"
 	repositoryMonitorPublishSkipInlineMappingFailed        = "inline_mapping_failed"
@@ -134,8 +140,9 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	if event := effectiveRepositoryMonitorPublishEvent(publish); event != repositoryMonitorPublishEventComment {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported publish event", item.Number), map[string]any{eventField: event})
 	}
-	if policy := effectiveRepositoryMonitorPublishSameHeadPolicy(publish); policy != repositoryMonitorPublishSameHeadPolicySkip {
-		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported same-head policy", item.Number), map[string]any{"sameHeadPolicy": policy})
+	sameHeadPolicy := effectiveRepositoryMonitorPublishSameHeadPolicy(publish)
+	if sameHeadPolicy != repositoryMonitorPublishSameHeadPolicySkip && sameHeadPolicy != repositoryMonitorPublishSameHeadPolicyUpdate {
+		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported same-head policy", item.Number), map[string]any{"sameHeadPolicy": sameHeadPolicy})
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: review task did not succeed", item.Number), map[string]any{"taskPhase": task.Status.Phase})
@@ -226,11 +233,20 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		return skip(repositoryMonitorPublishSkipNotIncluded, fmt.Sprintf("Pull request #%d review publishing skipped: no review label is present", item.Number), nil)
 	}
 
-	exists, err := r.repositoryMonitorReviewPublishRecordExists(ctx, monitor, item, reviewedHead)
+	published, err := r.repositoryMonitorSucceededReviewPublishRecord(ctx, monitor, item, reviewedHead)
 	if err != nil {
 		return err
 	}
-	if exists {
+	if published != nil {
+		if sameHeadPolicy == repositoryMonitorPublishSameHeadPolicyUpdate {
+			updated, err := r.updatePublishedRepositoryMonitorReview(ctx, monitor, item, task, record, published, token, owner, repository)
+			if err != nil {
+				return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "update_review"})
+			}
+			if updated {
+				return nil
+			}
+		}
 		return skip(repositoryMonitorPublishSkipDuplicateSameHead, fmt.Sprintf("Pull request #%d review publishing skipped: same head was already published", item.Number), nil)
 	}
 	matchedReview, matchedPublishID, err := r.repositoryMonitorGitHubReviewMarkerMatch(ctx, monitor, item, owner, repository, token, reviewedHead)
@@ -241,7 +257,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		mutationID := "ghmut-" + repositoryMonitorShortHash(matchedPublishID+"-submit-review")
 		mutation, mutationErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
 		if errors.Is(mutationErr, store.ErrNotFound) {
-			mutation = &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", GitHubURL: matchedReview.HTMLURL, ExternalID: strconv.FormatInt(matchedReview.ID, 10), Status: repositoryMonitorRunPhaseSucceeded}
+			mutation = &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: repositoryMonitorPublishReviewReason, GitHubURL: matchedReview.HTMLURL, ExternalID: strconv.FormatInt(matchedReview.ID, 10), Status: repositoryMonitorRunPhaseSucceeded}
 			if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 				return err
 			}
@@ -305,7 +321,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	}
 
 	mutationID := "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review")
-	mutation := &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", Status: repositoryMonitorAutomergeStateStarted}
+	mutation := &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: repositoryMonitorPublishReviewReason, Status: repositoryMonitorAutomergeStateStarted}
 	existing, mutationErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
 	if mutationErr == nil {
 		mutation = existing
@@ -646,7 +662,7 @@ func repositoryMonitorOwnerRepository(monitor *corev1alpha1.RepositoryMonitor) (
 	return security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 }
 
-func (r *RepositoryMonitorReconciler) repositoryMonitorReviewPublishRecordExists(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
+func (r *RepositoryMonitorReconciler) repositoryMonitorSucceededReviewPublishRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (*store.ReviewPublishRecord, error) {
 	records, _, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
 		Namespace:   monitor.Namespace,
 		MonitorName: monitor.Name,
@@ -656,10 +672,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewPublishRecordExists
 		Phase:       repositoryMonitorPublishPhaseSucceeded,
 		Limit:       1,
 	})
-	if err != nil {
-		return false, err
+	if err != nil || len(records) == 0 {
+		return nil, err
 	}
-	return len(records) > 0, nil
+	return &records[0], nil
 }
 
 func (r *RepositoryMonitorReconciler) renderRepositoryMonitorGitHubReview(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord, publishID, token, owner, repository string) (string, []repositoryMonitorPullRequestReviewComment, error) {

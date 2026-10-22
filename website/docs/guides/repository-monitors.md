@@ -133,7 +133,7 @@ Apply it with:
 kubectl apply -f repository-monitor.yaml
 ```
 
-The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
+The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip` or `update`.
 
 ### Limit the monitor to labelled pull requests
 
@@ -375,7 +375,7 @@ See [API Reference](../reference/api-reference.md#repository-monitors) for endpo
   never enter the Task spec. Codex reviewers are confined by the RuntimeSession boundary:
   the controller rejects elevation requests, the supervisor mediates file writes, and any
   turn that modifies the workspace fails read-intent validation.
-- Review publishing supports only neutral `COMMENT` reviews, with `sameHeadPolicy: skip`.
+- Review publishing supports only neutral `COMMENT` reviews, and at most one published review per pull request head. With `sameHeadPolicy: update`, a later review of the same head that reaches a different verdict rewrites that review's summary instead of being dropped.
 
 ## Prompt-orchestrated monitors
 
