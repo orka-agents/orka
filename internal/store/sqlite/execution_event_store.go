@@ -414,9 +414,9 @@ func nextSQLiteSessionExecutionEventSeq(ctx context.Context, conn sqliteExecutio
 	return next, nil
 }
 
-func (s *Store) latestSQLiteSessionExecutionEventSeq(ctx context.Context, namespace, sessionName string) (int64, error) {
+func latestSQLiteSessionExecutionEventSeq(ctx context.Context, q taskDataExecutor, namespace, sessionName string) (int64, error) {
 	eventSeq := int64(0)
-	if err := s.db.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END), 0)
 		 FROM execution_events
 		 WHERE namespace = ? AND session_name = ?`,
@@ -424,7 +424,7 @@ func (s *Store) latestSQLiteSessionExecutionEventSeq(ctx context.Context, namesp
 	).Scan(&eventSeq); err != nil {
 		return 0, err
 	}
-	cursorSeq, err := sqliteSessionCursorSeq(ctx, s.db, namespace, sessionName)
+	cursorSeq, err := sqliteSessionCursorSeq(ctx, q, namespace, sessionName)
 	if err != nil {
 		return 0, err
 	}
@@ -546,10 +546,6 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	}
 
 	baseArgs := []any{filter.Namespace, filter.SessionName}
-	latestSeq, err := s.latestSQLiteSessionExecutionEventSeq(ctx, filter.Namespace, filter.SessionName)
-	if err != nil {
-		return nil, 0, err
-	}
 
 	outerWhere := []string{"effective_session_seq > ?"}
 	queryArgs := append([]any{}, baseArgs...)
@@ -577,22 +573,32 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	WHERE ` + strings.Join(outerWhere, " AND ") + `
 	ORDER BY effective_session_seq ASC
 	LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close() //nolint:errcheck
-
 	out := []store.SessionExecutionEvent{}
-	for rows.Next() {
-		event, err := scanSessionExecutionEvent(rows)
+	var latestSeq int64
+	// The watermark, the retained Session cursor and the page read one
+	// snapshot, so a concurrent append and stream deletion cannot produce a
+	// page and latest sequence that never existed together.
+	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var err error
+		latestSeq, err = latestSQLiteSessionExecutionEventSeq(ctx, q, filter.Namespace, filter.SessionName)
 		if err != nil {
-			return nil, 0, err
+			return err
 		}
-		out = append(out, event)
-		latestSeq = max(latestSeq, event.SessionSeq)
-	}
-	if err := rows.Err(); err != nil {
+		rows, err := q.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close() //nolint:errcheck
+		for rows.Next() {
+			event, err := scanSessionExecutionEvent(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, event)
+			latestSeq = max(latestSeq, event.SessionSeq)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, 0, err
 	}
 	success = true
@@ -617,6 +623,7 @@ func (s *Store) GetLatestExecutionEventSeq(ctx context.Context, namespace, strea
 
 // GetLatestExecutionEventSeqs reads stream heads through the existing sequence
 // index, without scanning historical events or issuing one query per stream.
+// Every batch reads from one snapshot.
 func (s *Store) GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -634,16 +641,24 @@ func (s *Store) GetLatestExecutionEventSeqs(ctx context.Context, namespace, stre
 			requested = append(requested, streamID)
 		}
 	}
-	for start := 0; start < len(requested); start += sqliteExecutionEventSeqBatchSize {
-		end := min(start+sqliteExecutionEventSeqBatchSize, len(requested))
-		if err := s.readLatestExecutionEventSeqBatch(ctx, filter.Namespace, filter.StreamType, requested[start:end], sequences); err != nil {
-			return nil, err
+	if len(requested) == 0 {
+		return sequences, nil
+	}
+	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		for start := 0; start < len(requested); start += sqliteExecutionEventSeqBatchSize {
+			end := min(start+sqliteExecutionEventSeqBatchSize, len(requested))
+			if err := readLatestExecutionEventSeqBatch(ctx, q, filter.Namespace, filter.StreamType, requested[start:end], sequences); err != nil {
+				return err
+			}
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return sequences, nil
 }
 
-func (s *Store) readLatestExecutionEventSeqBatch(ctx context.Context, namespace, streamType string, streamIDs []string, sequences map[string]int64) error {
+func readLatestExecutionEventSeqBatch(ctx context.Context, q taskDataExecutor, namespace, streamType string, streamIDs []string, sequences map[string]int64) error {
 	values := make([]string, len(streamIDs))
 	args := make([]any, 0, len(streamIDs)+2)
 	for i, streamID := range streamIDs {
@@ -657,12 +672,10 @@ func (s *Store) readLatestExecutionEventSeqBatch(ctx context.Context, namespace,
 			WHERE namespace = ? AND stream_type = ? AND stream_id = requested.stream_id
 			ORDER BY seq DESC LIMIT 1
 		), 0) FROM requested`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
-	// Close each bounded batch before returning to recovery, which can append
-	// through this store's single database connection.
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
 		var streamID string
