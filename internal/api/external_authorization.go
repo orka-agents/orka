@@ -237,6 +237,9 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"DELETE /api/v1/connections/:name":         {identityOnly: true},
 	"POST /api/v1/connections/:name/authorize": {identityOnly: true},
 	"POST /api/v1/connections/:name/complete":  {identityOnly: true},
+	// A GitHub sign-in session renews and ends itself.
+	"POST /api/v1/auth/session/renew": {identityOnly: true},
+	"DELETE /api/v1/auth/session":     {identityOnly: true},
 	// A person's own agent host, found from their verified identity only.
 	"GET /api/v1/agent-hosts/me":       {identityOnly: true},
 	"POST /api/v1/agent-hosts/me/wake": {identityOnly: true},
@@ -311,6 +314,12 @@ func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	ui := GetUserInfo(c)
 	if ui == nil {
 		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	}
+	// A GitHub sign-in session reaches only routes that act on the caller's
+	// own links, host and AHP tokens; everything else needs OIDC or
+	// Kubernetes credentials.
+	if ui.AuthType == AuthTypeGitHubSession && !policy.identityOnly {
+		return fiber.NewError(fiber.StatusForbidden, "a GitHub sign-in session reaches only your own links, agent host and AHP tokens")
 	}
 	// Direct OIDC validation and transaction tokens have their own contracts.
 	// Do not reinterpret them as Kubernetes TokenReview identities.

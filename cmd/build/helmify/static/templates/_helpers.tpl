@@ -684,6 +684,18 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- end -}}
 {{- end }}
 
+{{- define "orka.githubSignInEnabled" -}}
+{{- if dig "githubSignIn" "enabled" false .Values.controller -}}
+{{- if not (include "orka.agentHostGitHubEnabled" .) -}}
+{{- fail "controller.githubSignIn.enabled requires controller.agentHosts.github: sign-in uses the agent-host GitHub App" -}}
+{{- end -}}
+{{- if not (or (dig "githubSignIn" "allowedOrgs" list .Values.controller) (dig "githubSignIn" "allowedTeams" list .Values.controller)) -}}
+{{- fail "controller.githubSignIn needs allowedOrgs or allowedTeams: only their active members may sign in" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end }}
+
 {{- define "orka.agentHostGitHubEnabled" -}}
 {{- if dig "agentHosts" "github" "enabled" false .Values.controller -}}true{{- end -}}
 {{- end }}

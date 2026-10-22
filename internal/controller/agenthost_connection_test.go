@@ -21,6 +21,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/connectors/credential"
+	"github.com/orka-agents/orka/internal/githubauth"
 )
 
 const testHostConnection = "github-alice"
@@ -329,5 +330,43 @@ func TestAgentHostSuspendsWhileItsLinkCannotBeChecked(t *testing.T) {
 	}
 	if _, ok := h.tokenCopy(); ok {
 		t.Fatal("the token copy must be deleted")
+	}
+}
+
+// With a sign-in allow-list, a refreshed token admits the host only while its
+// account is still a member; GitHub failing to answer is retried.
+func TestAgentHostStopsWhenItsAccountLeavesTheAllowedOrgs(t *testing.T) {
+	h, credentials, accounts := newConnectionHostHarness(t)
+	verdict := error(nil)
+	h.reconciler.Membership = func(context.Context, string, string) error { return verdict }
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatalf("a member's host must run; status = %+v", h.host().Status)
+	}
+
+	credentials.token = "ghu_second"
+	accounts["ghu_second"] = alice
+	verdict = errors.New("GitHub is unavailable")
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testUserNamespace, Name: "alice"}}
+	if _, err := h.reconciler.Reconcile(context.Background(), request); err == nil {
+		t.Fatal("a membership check that could not run must be retried")
+	}
+	if token, _ := h.tokenCopy(); token != "ghu_first" {
+		t.Fatal("no new token may reach the host before its membership is confirmed")
+	}
+	if _, ok := h.pod(); !ok {
+		t.Fatal("GitHub failing to answer must not stop the host")
+	}
+
+	verdict = githubauth.ErrNotMember
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("a host whose account left the allowed orgs must stop")
+	}
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("its token copy must be deleted")
+	}
+	if got := agentHostReady(h.host()); got.Reason != agentHostReasonGitHubMembershipEnded {
+		t.Fatalf("ready = %+v", got)
 	}
 }

@@ -129,8 +129,12 @@ type Handlers struct {
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
-	ahp                       *ahphost.Host
-	completionLocks           *completionLocks
+	githubSignIn              GitHubSignInConfig
+	// oidcEnabled says whether OIDC sign-in is configured, for clients
+	// choosing how to sign in.
+	oidcEnabled     bool
+	ahp             *ahphost.Host
+	completionLocks *completionLocks
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -159,6 +163,8 @@ type HandlersConfig struct {
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	GitHubSignIn              GitHubSignInConfig
+	OIDCEnabled               bool
 	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
 	AHP *ahphost.Host
 }
@@ -197,6 +203,8 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		githubSignIn:              cfg.GitHubSignIn,
+		oidcEnabled:               cfg.OIDCEnabled,
 		ahp:                       cfg.AHP,
 		completionLocks:           newCompletionLocks(),
 	}

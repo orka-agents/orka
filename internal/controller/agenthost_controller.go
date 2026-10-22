@@ -37,6 +37,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/connectors/credential"
+	"github.com/orka-agents/orka/internal/githubauth"
 )
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agenthosts,verbs=get;list;watch;update;patch
@@ -69,6 +70,7 @@ const (
 	agentHostReasonHostNamespaceChanged   = "HostNamespaceChanged"
 	agentHostReasonConnectionUnavailable  = "ConnectionUnavailable"
 	agentHostReasonGitHubIdentityChanged  = "GitHubIdentityChanged"
+	agentHostReasonGitHubMembershipEnded  = "GitHubMembershipEnded"
 
 	agentHostKindSecret           = "Secret"
 	agentHostKindConnectionSecret = "ConnectionSecret"
@@ -137,8 +139,11 @@ type AgentHostReconciler struct {
 	// GitHubAccounts says whose it is. Without them such hosts fail.
 	HostCredentials AgentHostCredentials
 	GitHubAccounts  GitHubAccountReader
-	Now             func() time.Time
-	Random          func([]byte) (int, error)
+	// Membership, when set, admits a host's new token only while its account
+	// is an active member of an allowed org or team (ADR 0037).
+	Membership GitHubMembershipChecker
+	Now        func() time.Time
+	Random     func([]byte) (int, error)
 }
 
 // AgentHostCredentials supplies the GitHub token of hosts fed by a
@@ -147,6 +152,11 @@ type AgentHostCredentials interface {
 	HostCredential(ctx context.Context, namespace, name string, horizon time.Duration) (credential.HostCredential, error)
 	CheckHostLink(ctx context.Context, namespace, name string) error
 }
+
+// GitHubMembershipChecker reports whether a token's account may still sign
+// in: nil, githubauth.ErrNotMember when GitHub says no, or another error when
+// GitHub could not be asked.
+type GitHubMembershipChecker func(ctx context.Context, token, login string) error
 
 // GitHubAccountReader reads the GitHub account a token belongs to.
 type GitHubAccountReader interface {
@@ -438,6 +448,17 @@ func (r *AgentHostReconciler) connectionToken(
 			return nil, "", agentHostFailed(agentHostReasonGitHubIdentityChanged,
 				"Connection %s now links GitHub account %q, but the host belongs to %q; reconnect with %q, or delete the AgentHost",
 				name, account.Login, pinned.Login, pinned.Login)
+		}
+		// Each new token, at least every refresh, admits the host only while
+		// its person may still sign in. Leaving the org stops the host as a
+		// disconnect does; GitHub failing to answer is retried.
+		if r.Membership != nil {
+			if err := r.Membership(ctx, held.AccessToken, account.Login); errors.Is(err, githubauth.ErrNotMember) {
+				return nil, "", agentHostFailed(agentHostReasonGitHubMembershipEnded,
+					"GitHub account %q is no longer an active member of an org or team allowed to sign in", account.Login)
+			} else if err != nil {
+				return nil, "", fmt.Errorf("check the host's GitHub membership: %w", err)
+			}
 		}
 		if host.Status.GitHub == nil {
 			host.Status.GitHub = &account
