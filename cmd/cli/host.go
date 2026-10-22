@@ -198,13 +198,14 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		switch {
 		// A host being deleted is not the one to use; its replacement follows.
 		case err == nil && host.Deleting:
+		// An operator's suspension is theirs to lift, and is checked first: a
+		// host just suspended can still report the Ready of its last run. A
+		// host that idled out is woken once, as 'orka host wake' would.
+		case err == nil && host.OperatorSuspended:
+			return fmt.Errorf("an operator suspended your agent host %s; ask them to resume it", host.Name)
 		case err == nil && host.Ready:
 			fmt.Fprintf(out, "Host ready: %s. Pick it in the Copilot app's Environments.\n", host.Environment) //nolint:errcheck
 			return nil
-		// An operator's suspension is theirs to lift; a host that idled out
-		// is woken once, as 'orka host wake' would.
-		case err == nil && host.OperatorSuspended:
-			return fmt.Errorf("an operator suspended your agent host %s; ask them to resume it", host.Name)
 		case err == nil && host.Suspended && !woken:
 			if _, err := c.DoJSON(ctx, http.MethodPost, agentHostAPIPath+"/wake", nil, nil); err != nil {
 				return agentHostError(err)
