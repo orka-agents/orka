@@ -237,8 +237,11 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		Username: user.Login, Namespace: h.watchNamespace,
 	}
 	declined := req.NoHost || !cfg.CreateHosts
-	connection, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, declined)
+	connection, held, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, declined)
 	if err != nil {
+		if !held {
+			h.revokeSignInToken(ctx, oauth, tokens.AccessToken)
+		}
 		return err
 	}
 	response, err := h.issueSession(ctx, ui)
@@ -365,12 +368,13 @@ var errSignInLinkUnrecorded = fiber.NewError(fiber.StatusInternalServerError, "f
 // linkGitHubSignIn records the sign-in's GitHub tokens as the person's
 // Connection to the provider. It takes the steps a browser consent takes, a
 // consent, a completion and its commit, so custody's fences hold as they do
-// for any link.
+// for any link. held reports whether Orka may hold the tokens: when it is
+// false the link stored nothing, and a failed caller revokes them.
 func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
-	oauth connectors.OAuthProviderConfig, tokens githubauth.Tokens, declined bool) (*corev1alpha1.Connection, error) {
-	connection, err := h.ensureSignInConnection(ctx, ui, provider, declined)
+	oauth connectors.OAuthProviderConfig, tokens githubauth.Tokens, declined bool) (connection *corev1alpha1.Connection, held bool, err error) {
+	connection, err = h.ensureSignInConnection(ctx, ui, provider, declined)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// Sign-ins for one Connection take turns, and each judges the link as
 	// the one before it left it: a sign-in that waited reuses what that one
@@ -378,7 +382,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	unlock := h.completionLocks.lock(string(connection.UID))
 	defer unlock()
 	if connection, err = h.reloadSignInConnection(ctx, connection, ui); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// Signing in again keeps a link that still holds the person's account:
 	// each commit retains the grant it replaces until disconnect, so linking
@@ -389,21 +393,21 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 				log.Error(err, "could not revoke a sign-in's unused GitHub token", "connection", connection.Name)
 			}
 		}
-		return connection, nil
+		return connection, false, nil
 	}
 	mode, err := normalizeConnectionMode(connection.Spec.Mode)
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusConflict, "your link has an invalid mode")
+		return nil, false, fiber.NewError(fiber.StatusConflict, "your link has an invalid mode")
 	}
 
 	now := h.connectors.now()
 	consentNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	verifier, _, err := connectors.GeneratePKCE()
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	subject := connectors.SubjectDigest(ui.Issuer, ui.Subject)
 	scopes := connectors.ScopesForMode(provider, mode)
@@ -414,11 +418,11 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 		AuthorityDigest:  connectors.ProviderAuthorityDigest(provider),
 		Scopes:           scopes, ExpiresAt: now.Add(connectors.ConsentTTL),
 	}); err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
 	consent, err := h.connectors.Consents.ConsumeConnectorConsent(ctx, consentNonce)
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
 	expires := now.Add(maxGitHubAccessTokenLife)
 	if tokens.ExpiresIn > 0 {
@@ -426,7 +430,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	}
 	completionNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	completion := store.ConnectorCompletion{
 		Nonce: completionNonce, ConnectionUID: consent.ConnectionUID, Namespace: consent.Namespace, Name: consent.Name,
@@ -441,28 +445,36 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	}
 	if err := h.connectors.Consents.CreateConnectorCompletion(ctx, completion); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
-			return nil, fiber.NewError(fiber.StatusConflict, "your GitHub link is being disconnected; sign in again in a moment")
+			return nil, false, fiber.NewError(fiber.StatusConflict, "your GitHub link is being disconnected; sign in again in a moment")
 		}
 		if errors.Is(err, store.ErrConnectorConsentSuperseded) {
-			return nil, fiber.NewError(fiber.StatusConflict, "another sign-in is linking GitHub at the same time; retry")
+			return nil, false, fiber.NewError(fiber.StatusConflict, "another sign-in is linking GitHub at the same time; retry")
 		}
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		// Whether the completion was stored is unknown.
+		return nil, true, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusConflict, "your link's identity is incomplete")
+		return nil, true, fiber.NewError(fiber.StatusConflict, "your link's identity is incomplete")
 	}
 	committed, err := h.connectors.Consents.CommitConnectorCompletion(ctx, completionNonce, ref, completion.Credential)
 	if err != nil {
-		return nil, h.completionCommitError(ctx, err, completion, completionNonce, connection.Name)
+		return nil, true, h.completionCommitError(ctx, err, completion, completionNonce, connection.Name)
 	}
 	if err := h.markConnectionLinked(ctx, connection, provider, committed); err != nil {
-		return connection, errSignInLinkUnrecorded
+		return connection, true, errSignInLinkUnrecorded
 	}
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, completionNonce); err != nil {
 		log.Error(err, "consumed sign-in completion could not be removed", "connection", connection.Name)
 	}
-	return connection, nil
+	return connection, true, nil
+}
+
+// revokeSignInToken revokes a token a sign-in obtained and did not store.
+func (h *Handlers) revokeSignInToken(ctx context.Context, oauth connectors.OAuthProviderConfig, token string) {
+	if err := h.githubSignIn.GitHub.DeleteToken(ctx, oauth.ClientID, oauth.ClientSecret, token); err != nil {
+		log.Error(err, "could not revoke a sign-in's unused GitHub token")
+	}
 }
 
 // signInLinkHolds returns the token custody holds for connection when it is

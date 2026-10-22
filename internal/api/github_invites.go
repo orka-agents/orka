@@ -279,7 +279,7 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		AuthType: AuthTypeGitHubSession, Issuer: githubauth.Issuer, Subject: strconv.FormatInt(user.ID, 10),
 		Username: user.Login, Namespace: h.watchNamespace,
 	}
-	connection, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, !cfg.CreateHosts)
+	connection, _, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, !cfg.CreateHosts)
 	if errors.Is(err, errSignInLinkUnrecorded) {
 		// Custody holds the grant; the Connection reconciler records the link.
 		h.invites.finish(id, InviteAccepted, inviteAcceptedMessage(provider, cfg.CreateHosts)+" once Orka finishes recording the link", connection.Name)
