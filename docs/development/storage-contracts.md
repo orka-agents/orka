@@ -467,8 +467,10 @@ command that names what it read:
   chose to replace or drop. The provider commits only if the Connection's
   completions are still exactly those.
 
-A refused command changes nothing, and the client reads again, up to eight
-times, before it returns `ErrConflict`. The provider still enforces the rules
+A refused command changes nothing. For a grant, a consent or a completion the
+client reads again, up to eight times, before it returns `ErrConflict`; a
+replacement returns `ErrConflict` at once, because its caller chose the
+version it replaces. The provider still enforces the rules
 it can decide from plain fields: tombstones, consent order against the
 committed consent, expiry at the request's time, pruning of retired material
 with nothing left to revoke, and the bounds on retained consent and refresh

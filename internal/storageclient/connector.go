@@ -775,6 +775,9 @@ func (c *Client) CommitConnectorCompletion(ctx context.Context, nonce string, re
 		if err != nil {
 			return store.ConnectorCredential{}, err
 		}
+		// The provider judges the completion's expiry when it commits, so a
+		// commit that stalled after the read redeems nothing.
+		request.command.Now = time.Now().UTC()
 		stored, err := c.CommitSealedConnectorCompletion(ctx, request.command)
 		switch {
 		case errors.Is(err, store.ErrConflict):

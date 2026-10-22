@@ -528,6 +528,26 @@ func (s *interleavingStore) ReadConnectorCustody(ctx context.Context, uid string
 	return custody, err
 }
 
+// TestConnectorCommitJudgesExpiryWhenItCommits covers a commit that stalls
+// after its read until the completion expires: the provider refuses it at the
+// commit's own time, nothing becomes custody and the completion is dropped.
+func TestConnectorCommitJudgesExpiryWhenItCommits(t *testing.T) {
+	ctx := t.Context()
+	backend := &interleavingStore{Store: openSQLite(t)}
+	client := activatedClient(t, backend, sealedTestKey)
+	ref := connectorRef("uid-stalled")
+	completion := connectorCompletion("completion-stalled", ref.ConnectionUID, 1, "stalled")
+	completion.ExpiresAt = time.Now().Add(300 * time.Millisecond)
+	require.NoError(t, client.CreateConnectorCompletion(ctx, completion))
+	backend.afterRead = func() { time.Sleep(time.Until(completion.ExpiresAt) + 50*time.Millisecond) }
+	_, err := client.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = client.GetConnectorCredential(ctx, ref)
+	require.ErrorIs(t, err, store.ErrNotFound, "an expired completion redeems nothing")
+	_, err = backend.GetSealedConnectorCompletion(ctx, completion.Nonce)
+	require.ErrorIs(t, err, store.ErrNotFound, "the expired completion is dropped")
+}
+
 // TestConnectorWritesRereadCustodyThatChanged covers concurrent writers: a
 // conditional command built from custody another replica changed is refused
 // and decided again from a fresh read, so a completion is committed once,
