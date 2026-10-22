@@ -135,9 +135,9 @@ func TestDatasetFreshCreationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
-	// A version-1 marker on another layout is not the version-1 store the
-	// version-1 upgrade accepts; a newer marker is unsupported outright.
-	for _, marker := range []int{1, SchemaVersion + 1} {
+	// A version-1 or version-2 marker on another layout is not the store the
+	// versioned upgrade accepts; a newer marker is unsupported outright.
+	for _, marker := range []int{1, 2, SchemaVersion + 1} {
 		for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
 			t.Run(fmt.Sprintf("%d/%s", marker, revision), func(t *testing.T) {
 				path, db := historicalSchemaDB(t, revision)

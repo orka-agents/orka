@@ -11,9 +11,10 @@ import (
 )
 
 // SchemaVersion records the metadata layout. It never replaces validation of
-// every schema object; upgrades from versions zero and one require the locked
-// migration path. Version 2 adds the Agent Host Protocol tables.
-const SchemaVersion = 2
+// every schema object; upgrades from versions zero, one and two require the
+// locked migration path. Version 2 adds the Agent Host Protocol tables, and
+// version 3 the GitHub sign-in sessions.
+const SchemaVersion = 3
 
 const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),

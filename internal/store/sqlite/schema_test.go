@@ -117,7 +117,8 @@ func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = legacy.Close() })
 	statements := currentSchemaStatements()
-	later := len(nativeSessionSchemaStatements()) + len(connectorSchemaStatements()) + len(ahpSchemaStatements())
+	later := len(nativeSessionSchemaStatements()) + len(connectorSchemaStatements()) + len(ahpSchemaStatements()) +
+		len(authSessionSchemaStatements())
 	preNative := append(statements[:len(statements)-later], connectorSchemaStatements()...)
 	for _, statement := range preNative {
 		_, err := legacy.Exec(statement)
