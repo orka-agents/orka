@@ -175,6 +175,12 @@ func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
 	polls := 0
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// Invites act in the namespace the controller watches; the CLI's
+		// default namespace would be refused.
+		if r.URL.Query().Has("namespace") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == agentHostInvitesAPIPath:
 			var body map[string]string

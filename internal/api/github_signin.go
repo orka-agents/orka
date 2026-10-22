@@ -341,6 +341,11 @@ func (h *Handlers) newSession(ui *UserInfo) (string, store.AuthSession, error) {
 	}, nil
 }
 
+// errSignInLinkUnrecorded is a sign-in whose custody was committed but whose
+// Connection status was not written: the Connection reconciler records it
+// from the committed completion.
+var errSignInLinkUnrecorded = fiber.NewError(fiber.StatusInternalServerError, "failed to record your GitHub link; sign in again")
+
 // linkGitHubSignIn records the sign-in's GitHub tokens as the person's
 // Connection to the provider. It takes the steps a browser consent takes, a
 // consent, a completion and its commit, so custody's fences hold as they do
@@ -430,7 +435,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 		return nil, h.completionCommitError(ctx, err, completion, completionNonce, connection.Name)
 	}
 	if err := h.markConnectionLinked(ctx, connection, provider, committed); err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to record your GitHub link; sign in again")
+		return connection, errSignInLinkUnrecorded
 	}
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, completionNonce); err != nil {
 		log.Error(err, "consumed sign-in completion could not be removed", "connection", connection.Name)

@@ -12,7 +12,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +31,8 @@ type inviteGitHub struct {
 	mu       sync.Mutex
 	approved map[string]any
 	revoked  *revocations
+	// onApprove runs as GitHub hands out the approved tokens.
+	onApprove func()
 }
 
 func newInviteHarness(t *testing.T, approved map[string]any) (*connectorTestHarness, *inviteGitHub) {
@@ -44,6 +48,9 @@ func newInviteHarness(t *testing.T, approved map[string]any) (*connectorTestHarn
 		case "/login/oauth/access_token":
 			gh.mu.Lock()
 			defer gh.mu.Unlock()
+			if gh.onApprove != nil {
+				gh.onApprove()
+			}
 			_ = json.NewEncoder(w).Encode(gh.approved)
 		}
 	}))
@@ -143,6 +150,48 @@ func TestInviteRefusesSomeoneElseOrAnOutsider(t *testing.T) {
 				t.Fatal("a refused invite links no one")
 			}
 		})
+	}
+}
+
+// A provider changed while the code was pending, its agent host included,
+// is not what the person was told about: the invite is refused and the
+// token revoked with the app that issued it.
+func TestInviteRefusesAProviderChangedWhilePending(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
+	gh.onApprove = func() {
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+			t.Error(err)
+			return
+		}
+		provider.Spec.AgentHost.TemplateRef.Name = "another-template"
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Error(err)
+		}
+	}
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || outcome.Connection != "" {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+		t.Fatalf("revoked = %v, want the approved token", revoked)
+	}
+}
+
+// Custody committed with a status write that failed is an accepted invite:
+// the Connection reconciler records the link from the committed completion.
+func TestInviteAcceptsALinkCommittedButNotYetRecorded(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
+	h.statusFailure = &atomic.Bool{}
+	h.statusFailure.Store(true)
+	_, invite := h.invite("alice")
+	outcome := h.inviteOutcome(invite.ID)
+	wantName := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	if outcome.State != InviteAccepted || outcome.Connection != wantName || !strings.Contains(outcome.Message, "finishes recording") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 0 {
+		t.Fatalf("a committed link revokes nothing: %v", revoked)
 	}
 }
 

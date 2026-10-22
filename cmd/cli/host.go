@@ -240,6 +240,10 @@ type inviteView struct {
 	AgentHost       bool      `json:"agentHost"`
 }
 
+// controllerWide sends no namespace: invites act in the namespace the
+// controller watches, which the CLI's default namespace would contradict.
+var controllerWide = map[string]string{"namespace": ""}
+
 // invitePollInterval paces waiting for an invite's outcome.
 var invitePollInterval = 3 * time.Second
 
@@ -259,7 +263,7 @@ func newHostInviteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			raw, err := c.DoJSON(context.Background(), http.MethodPost, agentHostInvitesAPIPath, nil, body)
+			raw, err := c.DoJSON(context.Background(), http.MethodPost, agentHostInvitesAPIPath, controllerWide, body)
 			if err != nil {
 				return err
 			}
@@ -285,7 +289,7 @@ func newHostInviteCmd() *cobra.Command {
 					return stopped
 				case <-time.After(invitePollInterval):
 				}
-				raw, err := c.DoJSON(ctx, http.MethodGet, outcome, nil, nil)
+				raw, err := c.DoJSON(ctx, http.MethodGet, outcome, controllerWide, nil)
 				if err != nil {
 					if ctx.Err() != nil {
 						return stopped

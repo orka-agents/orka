@@ -19,6 +19,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/githubauth"
 )
 
@@ -129,7 +130,7 @@ func (h *Handlers) CreateInvite(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "login must be a GitHub login")
 	}
 	ctx := c.Context()
-	provider, err := h.loadReadyConnectorProvider(ctx, h.watchNamespace, cfg.Provider)
+	provider, err := h.signInProvider(ctx)
 	if err != nil {
 		return err
 	}
@@ -151,7 +152,7 @@ func (h *Handlers) CreateInvite(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusTooManyRequests, err.Error())
 	}
 	response := *invite
-	go h.completeInvite(invite.ID, login, provider.Name, code, invite.ExpiresAt)
+	go h.completeInvite(invite.ID, login, provider.DeepCopy(), code, invite.ExpiresAt)
 	return c.Status(fiber.StatusCreated).JSON(response)
 }
 
@@ -168,16 +169,12 @@ func (h *Handlers) GetInvite(c fiber.Ctx) error {
 }
 
 // completeInvite polls GitHub until the invited person approves the code or
-// it expires, then makes the sign-in checks and links their account.
-func (h *Handlers) completeInvite(id, login, providerName string, code githubauth.DeviceCode, expires time.Time) {
+// it expires, then makes the sign-in checks and links their account. The
+// provider is the one the invite was created and disclosed for.
+func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.ConnectorProvider, code githubauth.DeviceCode, expires time.Time) {
 	waiting, stopWaiting := context.WithDeadline(context.Background(), expires)
 	defer stopWaiting()
 	cfg := h.githubSignIn
-	provider, err := h.loadReadyConnectorProvider(waiting, h.watchNamespace, providerName)
-	if err != nil {
-		h.invites.finish(id, InviteRefused, "the GitHub provider is no longer ready", "")
-		return
-	}
 	tokens, err := cfg.GitHub.PollDeviceFlow(waiting, provider.Spec.OAuth.ClientID, code)
 	if errors.Is(err, githubauth.ErrDeviceFlowDenied) || errors.Is(err, context.DeadlineExceeded) {
 		h.invites.finish(id, InviteExpired, "the code was not approved in time, or was declined", "")
@@ -205,6 +202,14 @@ func (h *Handlers) completeInvite(id, login, providerName string, code githubaut
 			}
 		}
 		h.invites.finish(id, InviteRefused, message, "")
+	}
+	// The person approved what the invite disclosed: a provider replaced or
+	// changed meanwhile, its agent host included, needs a new invite. The
+	// token is revoked with the app that issued it.
+	current, err := h.signInProvider(ctx)
+	if err != nil || current.UID != provider.UID || connectors.ProviderAuthorityDigest(current) != connectors.ProviderAuthorityDigest(provider) {
+		refuse("the GitHub provider changed while the invite was pending; it was refused and its token revoked; invite again", tokens.AccessToken)
+		return
 	}
 	user, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, tokens.AccessToken)
 	if err != nil {
@@ -240,6 +245,11 @@ func (h *Handlers) completeInvite(id, login, providerName string, code githubaut
 		Username: user.Login, Namespace: h.watchNamespace,
 	}
 	connection, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, !cfg.CreateHosts)
+	if errors.Is(err, errSignInLinkUnrecorded) {
+		// Custody holds the grant; the Connection reconciler records the link.
+		h.invites.finish(id, InviteAccepted, inviteAcceptedMessage(provider, cfg.CreateHosts)+" once Orka finishes recording the link", connection.Name)
+		return
+	}
 	if err != nil {
 		h.invites.finish(id, InviteRefused, "the GitHub account could not be linked; invite again", "")
 		return
