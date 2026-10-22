@@ -43,40 +43,12 @@ type repositoryMonitorReviewComment struct {
 // security-sensitive review or finding is never marked unless the monitor
 // posts security-sensitive reviews.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord) error {
-	publish := monitor.Spec.Review.Publish
-	if r.Store == nil || !publish.Enabled || record == nil {
+	if r.Store == nil || !monitor.Spec.Review.Publish.Enabled || record == nil {
 		return nil
 	}
-	if !publish.PostSecuritySensitive &&
-		(strings.EqualFold(strings.TrimSpace(record.SecurityStatus), repositoryMonitorReviewVerdictSecuritySensitive) ||
-			strings.EqualFold(strings.TrimSpace(record.Verdict), repositoryMonitorReviewVerdictSecuritySensitive)) {
-		return nil
-	}
-	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
-	if err != nil {
-		return nil //nolint:nilerr // An unreadable record has no findings to mark.
-	}
-	fixed := map[string]bool{}
-	for _, finding := range findings {
-		if finding.SecuritySensitive && !publish.PostSecuritySensitive {
-			continue
-		}
-		if finding.Status == repositoryMonitorFindingStatusFixed && finding.ResolvedHead == record.HeadSHA && finding.ID != "" {
-			fixed[finding.ID] = true
-		}
-	}
-	// Skip GitHub entirely once every fixed finding is marked.
-	for id := range fixed {
-		mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorFindingAddressedMutationID(record, id))
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
-		if err == nil && mutation.Status == repositoryMonitorRunPhaseSucceeded {
-			delete(fixed, id)
-		}
-	}
-	if len(fixed) == 0 {
-		return nil
+	fixed, err := r.repositoryMonitorUnmarkedFixedFindings(ctx, monitor, record)
+	if err != nil || len(fixed) == 0 {
+		return err
 	}
 	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
 	if err != nil {
@@ -89,16 +61,8 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(c
 	// The same live checks gate these writes as gate publishing: a head that
 	// moved since the review may have reintroduced the defect.
 	current, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, item.Number)
-	if err != nil {
+	if err != nil || !repositoryMonitorPullRequestThreadsMarkable(monitor, *current, record) {
 		return err
-	}
-	if !strings.EqualFold(strings.TrimSpace(current.State), repositoryMonitorItemStateOpen) ||
-		strings.TrimSpace(current.BaseBranch) != effectiveRepositoryMonitorBranch(monitor) ||
-		strings.TrimSpace(current.HeadSHA) != record.HeadSHA ||
-		(current.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts) ||
-		repositoryMonitorBlockedLabel(monitor.Spec, current.Labels) != "" ||
-		!repositoryMonitorPullRequestReviewed(monitor.Spec, *current) {
-		return nil
 	}
 	targets, err := r.repositoryMonitorFixedFindingComments(ctx, monitor, owner, repository, token, item.Number, fixed)
 	if err != nil || len(targets) == 0 {
@@ -115,6 +79,51 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(c
 		}
 	}
 	return nil
+}
+
+// repositoryMonitorUnmarkedFixedFindings returns the IDs of the findings
+// record found fixed that may be marked and are not marked yet.
+func (r *RepositoryMonitorReconciler) repositoryMonitorUnmarkedFixedFindings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) (map[string]bool, error) {
+	restricted := !monitor.Spec.Review.Publish.PostSecuritySensitive
+	if restricted &&
+		(strings.EqualFold(strings.TrimSpace(record.SecurityStatus), repositoryMonitorReviewVerdictSecuritySensitive) ||
+			strings.EqualFold(strings.TrimSpace(record.Verdict), repositoryMonitorReviewVerdictSecuritySensitive)) {
+		return nil, nil
+	}
+	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
+	if err != nil {
+		return nil, nil //nolint:nilerr // An unreadable record has no findings to mark.
+	}
+	fixed := map[string]bool{}
+	for _, finding := range findings {
+		if finding.SecuritySensitive && restricted {
+			continue
+		}
+		if finding.Status == repositoryMonitorFindingStatusFixed && finding.ResolvedHead == record.HeadSHA && finding.ID != "" {
+			fixed[finding.ID] = true
+		}
+	}
+	for id := range fixed {
+		mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorFindingAddressedMutationID(record, id))
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		if err == nil && mutation.Status == repositoryMonitorRunPhaseSucceeded {
+			delete(fixed, id)
+		}
+	}
+	return fixed, nil
+}
+
+// repositoryMonitorPullRequestThreadsMarkable reports whether the live pull
+// request still passes the checks that gate publishing record's review.
+func repositoryMonitorPullRequestThreadsMarkable(monitor *corev1alpha1.RepositoryMonitor, current repositoryMonitorPullRequest, record *store.ReviewRecord) bool {
+	return strings.EqualFold(strings.TrimSpace(current.State), repositoryMonitorItemStateOpen) &&
+		strings.TrimSpace(current.BaseBranch) == effectiveRepositoryMonitorBranch(monitor) &&
+		strings.TrimSpace(current.HeadSHA) == record.HeadSHA &&
+		(!current.Draft || monitor.Spec.Targets.PullRequests.IncludeDrafts) &&
+		repositoryMonitorBlockedLabel(monitor.Spec, current.Labels) == "" &&
+		repositoryMonitorPullRequestReviewed(monitor.Spec, current)
 }
 
 // repositoryMonitorFindingComment is an inline comment Orka posted for a
