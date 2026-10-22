@@ -179,6 +179,8 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client)
 	for {
 		host, err := getOwnAgentHost(ctx, c)
 		switch {
+		// A host being deleted is not the one to use; its replacement follows.
+		case err == nil && host.Deleting:
 		case err == nil && host.Ready:
 			fmt.Fprintf(out, "Host ready: %s. Pick it in the Copilot app's Environments.\n", host.Environment) //nolint:errcheck
 			return nil

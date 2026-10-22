@@ -103,7 +103,7 @@ func (h *Handlers) DeleteOwnAgentHost(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not delete the host")
 	}
 	response := agentHostResponse(host)
-	response.Deleting = true
+	response.Deleting, response.Ready = true, false
 	return c.Status(fiber.StatusAccepted).JSON(response)
 }
 
@@ -125,14 +125,12 @@ func (h *Handlers) ownAgentHost(c fiber.Ctx, action connectorAction) (*corev1alp
 	if err := h.client.List(ctx, providers, client.InNamespace(namespace)); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "could not read connector providers")
 	}
+	// Every provider counts, not only those serving hosts now: a host kept
+	// after its provider stopped serving them is still its person's to see
+	// and delete.
 	links := map[string]bool{}
 	for i := range providers.Items {
-		if providers.Items[i].Spec.AgentHost != nil {
-			links[connectors.ConnectionName(providers.Items[i].Name, ui.Issuer, ui.Subject)] = true
-		}
-	}
-	if len(links) == 0 {
-		return nil, fiber.NewError(fiber.StatusNotFound, "this Orka gives no one an agent host")
+		links[connectors.ConnectionName(providers.Items[i].Name, ui.Issuer, ui.Subject)] = true
 	}
 	hosts := &corev1alpha1.AgentHostList{}
 	if err := h.client.List(ctx, hosts, client.InNamespace(namespace)); err != nil {
@@ -163,7 +161,9 @@ func agentHostResponse(host *corev1alpha1.AgentHost) AgentHostResponse {
 		response.GitHubLogin = account.Login
 	}
 	if ready := meta.FindStatusCondition(host.Status.Conditions, "Ready"); ready != nil {
-		response.Ready = ready.Status == metav1.ConditionTrue
+		// A host being deleted keeps its last Ready condition; it is not
+		// ready for anyone.
+		response.Ready = ready.Status == metav1.ConditionTrue && !response.Deleting
 		response.Reason = ready.Reason
 		response.Message = strings.TrimSpace(ready.Message)
 	}

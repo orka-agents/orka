@@ -325,6 +325,12 @@ func TestStaticChartAgentHostGitHubRefusesIncompleteSettings(t *testing.T) {
 			"--set", "controller.agentHosts.github.clientSecret.value=x"),
 		"no connectors": append(agentHostGitHubValues("--set", "controller.agentHosts.github.clientSecret.value=x"),
 			"--set", "controller.connectors.enabled=false"),
+		"an invalid Secret name": agentHostGitHubValues(
+			"--set", "controller.agentHosts.github.clientSecret.existingSecret=Not_A_Name"),
+		"an empty Secret key": agentHostGitHubValues("--set", "controller.agentHosts.github.clientSecret.value=x",
+			"--set", "controller.agentHosts.github.clientSecret.key="),
+		"an invalid provider name": agentHostGitHubValues("--set", "controller.agentHosts.github.clientSecret.value=x",
+			"--set", "controller.agentHosts.github.providerName=GitHub_App"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := helmTemplateStaticChart(t, args...); err == nil {

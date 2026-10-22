@@ -84,12 +84,17 @@ func TestConnectWaitsForTheAgentHost(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "grantSequence": 1}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
 			hostPolls++
-			if hostPolls == 1 {
+			switch hostPolls {
+			case 1:
 				// The host follows the link by a moment.
 				w.WriteHeader(http.StatusNotFound)
 				return
+			case 2:
+				// An earlier host still being deleted is not the one to use.
+				json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Deleting", "ready": true, "deleting": true}) //nolint:errcheck
+				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": hostPolls >= 3}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": hostPolls >= 4}) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -98,7 +103,7 @@ func TestConnectWaitsForTheAgentHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v %q", err, out)
 	}
-	if !strings.Contains(out, "Linked github") || !strings.Contains(out, "Host ready: orka-gh-alice") || hostPolls < 3 {
+	if !strings.Contains(out, "Linked github") || !strings.Contains(out, "Host ready: orka-gh-alice") || hostPolls < 4 {
 		t.Fatalf("output = %q, host polls = %d", out, hostPolls)
 	}
 }

@@ -681,6 +681,16 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- if eq (empty $github.clientSecret.existingSecret) (empty $github.clientSecret.value) -}}
 {{- fail "set exactly one of controller.agentHosts.github.clientSecret.existingSecret and .value" -}}
 {{- end -}}
+{{- $secret := toString $github.clientSecret.existingSecret -}}
+{{- if and $secret (not (regexMatch `^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$` $secret)) -}}
+{{- fail "controller.agentHosts.github.clientSecret.existingSecret must be a Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch `^[-._a-zA-Z0-9]{1,253}$` (toString $github.clientSecret.key)) -}}
+{{- fail "controller.agentHosts.github.clientSecret.key must be a Secret data key" -}}
+{{- end -}}
+{{- if not (regexMatch `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$` (toString $github.providerName)) -}}
+{{- fail "controller.agentHosts.github.providerName must be a lowercase name of at most 63 characters" -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
