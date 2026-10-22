@@ -168,6 +168,110 @@ ends `Failed` before its Pod is created, and the message names the entry and the
 always allowed.
 :::
 
+## Custom image result and artifact contract {#custom-image-result-and-artifact-contract}
+
+A finished Task keeps one result and any number of artifacts: screenshots, traces, HAR
+files, reports. How they reach Orka depends on the image.
+
+### Images that use Orka's worker entrypoint
+
+The default worker image, and any custom image whose `ENTRYPOINT` is Orka's `/worker`
+binary, deliver for you:
+
+- The command's stdout and stderr become the result.
+- Every regular file in `/tmp/artifacts` is uploaded as an artifact when the command
+  ends: at most 10 MB per file and 50 MB per run. Subdirectories and symlinks are skipped.
+- When the Task has a `timeout`, the worker stops the command shortly before it, uploads
+  what is already in `/tmp/artifacts`, and posts the output so far with the outcome
+  `unknown_outcome`. The Task still ends `Failed`, and its worker exits with code 124.
+  The margin is a tenth of the timeout, from 20 seconds to 2 minutes, and never more than
+  half of a very short timeout. It is measured from the worker's start, so a slow image
+  pull or repository clone eats into it.
+
+With a custom image, put the command in `args` and leave `command` empty. An explicit
+`command` replaces the entrypoint, and then only the log fallback below applies.
+
+### Any other image
+
+Any other image posts its own result and artifacts over HTTP. The Pod has these
+environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `ORKA_RESULT_ENDPOINT` | Where to `POST` the result |
+| `ORKA_CONTROLLER_URL` | Base URL for artifact uploads |
+| `ORKA_TASK_NAMESPACE`, `ORKA_TASK_NAME`, `ORKA_TASK_UID` | The Task's identity |
+| `ORKA_SA_TOKEN_PATH` | The file holding the Pod's callback token |
+| `ORKA_TIMEOUT_SECONDS` | The Task's `timeout`, when it has one |
+
+Authenticate every request with `Authorization: Bearer <token>`, reading the token from
+`ORKA_SA_TOKEN_PATH` each time, because the kubelet rotates it. The token is bound to this
+Pod and to the audience `orka.ai/task-callback`. It works only for this Task's result,
+artifact, and event endpoints, and only while the Task is active. The Kubernetes API
+rejects it.
+
+```sh
+TOKEN="$(cat "$ORKA_SA_TOKEN_PATH")"
+
+# Upload an artifact. The last path segment is the artifact's name.
+curl -fsS -X POST \
+  "$ORKA_CONTROLLER_URL/internal/v1/artifacts/$ORKA_TASK_NAMESPACE/$ORKA_TASK_NAME/home.png" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: image/png" \
+  --data-binary @/tmp/home.png
+
+# Post the result.
+curl -fsS -X POST "$ORKA_RESULT_ENDPOINT" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  --data '{"version":1,"outcome":"completed","summary":"Checked the home page","data":{"title":"Example Domain"},"artifacts":[{"filename":"home.png","contentType":"image/png"}]}'
+```
+
+| | Result | Artifact |
+| --- | --- | --- |
+| Size limit | 10 MB | 10 MB per file |
+| Name | — | One path segment: at most 255 characters, no `/`, no control characters, not `.` or `..` |
+| Repeated `POST` | The last one wins | The same name replaces the earlier file |
+| Success status | `204` | `201` |
+| After the Task finishes | Refused with `403` | Refused with `403` |
+
+Without a result `POST`, the controller stores up to 5 MiB of the Pod's log as the result
+when the Task finishes. Artifacts have no fallback. Outside Orka's worker entrypoint,
+`/tmp/artifacts` is only a naming convention: files left there are discarded with the Pod.
+Upload them as they are written rather than at the end, because a Task stopped by its
+deadline uploads nothing more. `ORKA_TIMEOUT_SECONDS` lets the image stop itself in time.
+
+Read them back with the Task API or the CLI:
+
+| | API | CLI |
+| --- | --- | --- |
+| Result | `GET /api/v1/tasks/{name}/result` returns `{"result": "<the posted body>"}` | `orka task result <name>` |
+| List artifacts | `GET /api/v1/tasks/{name}/artifacts` | `orka task artifacts <name>` |
+| Download one | `GET /api/v1/tasks/{name}/artifacts/{filename}` | `orka task download <name> <filename>` |
+
+### Recommended result shape
+
+Orka stores any result body. A JSON object with `"version": 1` is parsed as a structured
+result, so a coordinator's `wait_for_tasks` returns its `outcome`, `summary`, `data`, and
+`artifacts` instead of raw text. Orka does not enforce this vocabulary for `outcome`, but
+coordinators can branch on it:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `completed` | The run did what it was asked; `summary` and `data` hold the answer |
+| `blocked` | The site refused it: an error page, rate limit, or bot wall |
+| `captcha` | A CAPTCHA stopped it |
+| `login_required` | The site needs a login the run does not have |
+| `decision_required` | Continuing needs a choice the Task was not asked to make |
+| `unknown_outcome` | The run stopped before it could tell whether its action took effect |
+
+Keep large payloads in artifacts and list them in `artifacts`; keep `summary` short.
+
+:::caution[Retry only runs that can safely repeat]
+`retryPolicy` reruns a failed Task from the start. That is fine for a read-only check. A run
+that may already have acted, by submitting a form, placing an order, or sending a message,
+must not be retried after `unknown_outcome` or a failure. Reconcile it instead: create a
+follow-up Task that checks at the source what actually happened.
+:::
+
 ## When an agent creates these
 
 Coordinator agents create container Tasks through the `create_container_task` tool to
