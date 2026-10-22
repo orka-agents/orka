@@ -142,6 +142,47 @@ func TestRuntimePoolBootUnenrolledBootRetiresAfterControllerTakeover(t *testing.
 	}
 }
 
+// A controller restart while a pool cold-starts renders a new per-epoch
+// template before the Pod ever serves, even though desiredReplicas stays 1.
+// The rollout path then adopts the Ready, never-enrolled boot and drains it;
+// that drain must complete so the new template can start.
+func TestRuntimePoolBootUnenrolledColdStartDrainsAcrossControllerRestart(t *testing.T) {
+	f := newNativePoolBootFixture(t, false)
+	previous := f.r.ControllerEpoch
+	f.r.ControllerEpoch++
+	epoch := f.r.ControllerEpoch
+	runtimePoolReconcile(t, f.r, f.pool)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	active := pool.Status.ActiveInstance
+	if f.supervisor.drainCalls != 1 || pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining ||
+		active == nil || active.PodUID != string(f.pod.UID) || active.ControllerEpoch != previous {
+		t.Fatalf("rollout did not adopt and drain the cold-started boot: drains=%d lifecycle=%s active=%#v",
+			f.supervisor.drainCalls, pool.Status.Lifecycle, active)
+	}
+	runtimePoolTestAssertNoBootEvidence(t, f)
+	f.supervisor.probe = runtimePoolValidProbe(f.pool, &f.pod, "native-boot", true)
+	runtimePoolReconcile(t, f.r, f.pool)
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent || pool.Status.ControllerEpoch != epoch {
+		t.Fatalf("rollout drain status = %s at epoch %d, want Quiescent at epoch %d", pool.Status.Lifecycle, pool.Status.ControllerEpoch, epoch)
+	}
+	runtimePoolReconcile(t, f.r, f.pool)
+	runtimePoolTestStopUnenrolledBoot(t, f)
+	runtimePoolReconcile(t, f.r, f.pool)
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || pool.Status.ActiveInstance != nil {
+		t.Fatalf("status after rollout = %s active=%#v, want Starting the new template", pool.Status.Lifecycle, pool.Status.ActiveInstance)
+	}
+	deployment := runtimePoolTestDeployment(t, f.r, f.pool.Namespace, runtimePoolResourceName(f.pool.Namespace, f.pool.Name))
+	if got := ptr.Deref(deployment.Spec.Replicas, -1); got != 1 {
+		t.Fatalf("new template replicas = %d, want 1", got)
+	}
+	if got := runtimePoolLiteralEnvironment(deployment.Spec.Template.Spec.Containers[0].Env)["ORKA_ACP_CONTROLLER_EPOCH"]; got != strconv.FormatInt(epoch, 10) {
+		t.Fatalf("new Deployment controller epoch = %q, want %d", got, epoch)
+	}
+	runtimePoolTestAssertNoBootEvidence(t, f)
+}
+
 // The never-enrolled path needs both the witness and the retention barrier to
 // be absent. Either half of the barrier, or a reserved but uncommitted witness,
 // shows enrollment reached retention, so the drain keeps failing closed and
