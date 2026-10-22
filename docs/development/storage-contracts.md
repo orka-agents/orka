@@ -362,12 +362,13 @@ that way.
   `PROVIDER_ERROR` with a correlation ID the server logs; the client returns
   it as `ErrOutcomeUnknown` for a write and a plain error for a read.
 - **Send evidence.** A status without that ErrorInfo came from the gRPC
-  library or a proxy. On a connection built with `wire.Dial`, the client's
-  stats handler and an innermost interceptor record whether a call's request
-  headers could have left the process: a call that never sent them is
-  `ErrUnavailable`, and a write that may have been sent is
-  `ErrOutcomeUnknown`. Without that evidence, a write's transport failure is
-  `ErrOutcomeUnknown`. Storage connections disable gRPC's configured retries;
+  library or a proxy. On a connection built with `wire.Dial`, which takes TLS
+  credentials, per-call credentials and a dialer but no interceptors, and
+  given to the client directly rather than wrapped, the client's stats
+  handler records whether a call's request headers could have left the
+  process: a call that never sent them is `ErrUnavailable`, and a write that
+  may have been sent is `ErrOutcomeUnknown`. On any other connection, a
+  write's transport failure is `ErrOutcomeUnknown`. Storage connections disable gRPC's configured retries;
   only its transparent retries of attempts the server never processed remain.
   The client refuses invalid UTF-8, out-of-range times and requests over the
   16 MiB message limit before sending anything.

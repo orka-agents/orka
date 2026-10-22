@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
@@ -49,10 +50,10 @@ func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 	})
 	t.Run("deadline while waiting for name resolution", func(t *testing.T) {
 		// The manual resolver never reports an address, so the call waits for
-		// resolution until its deadline.
-		builder := manual.NewBuilderWithScheme("never")
-		conn, err := wire.Dial("never:///storage", grpc.WithResolvers(builder),
-			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		// resolution until its deadline. Dial takes no resolver option, so the
+		// test registers the scheme globally.
+		resolver.Register(manual.NewBuilderWithScheme("wire-evidence-never"))
+		conn, err := wire.Dial("wire-evidence-never:///storage", wire.DialConfig{TransportCredentials: insecure.NewCredentials()})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
@@ -72,76 +73,125 @@ func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 			require.NoError(t, conn.Close())
 			err = wire.NewClient(conn, wire.ClientConfig{}).SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 			require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown,
-				"without Dial's coverage, a write's failure before any attempt stays an unknown outcome")
+				"without Dial's coverage, a write's transport failure stays an unknown outcome")
 		})
 	}
+	t.Run("dial without transport credentials", func(t *testing.T) {
+		_, err := wire.Dial("passthrough:///127.0.0.1:1", wire.DialConfig{})
+		require.Error(t, err)
+	})
 }
 
-// resendDetached is a caller interceptor that sends each call on a fresh
-// context carrying only its metadata, so the call leaves the client without
-// the client's send-evidence record.
-func resendDetached(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
+// slowFirstDial delays the first connection, so a call can start an attempt
+// and fail on its deadline before any stream exists.
+type slowFirstDial struct {
+	once  sync.Once
+	delay time.Duration
+}
+
+func (d *slowFirstDial) dial(ctx context.Context, address string) (net.Conn, error) {
+	d.once.Do(func() { time.Sleep(d.delay) })
+	return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+}
+
+// firstThenDetached is a caller interceptor that first tries the call on its
+// own context with a short deadline, which fails before a stream exists, and
+// then sends it again on a fresh context that carries only its metadata.
+func firstThenDetached(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
 	invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := invoker(short, method, req, reply, cc, opts...); err == nil {
+		return nil
+	}
 	header, _ := metadata.FromOutgoingContext(ctx)
 	return invoker(metadata.NewOutgoingContext(context.Background(), header), method, req, reply, cc, opts...)
 }
 
-// A caller's interceptor runs outside Dial's evidence interceptor. If it
-// sends the call where the evidence cannot follow, a write that reached the
-// provider must stay an unknown outcome, never "not sent".
-func TestSendEvidenceSurvivesCallerInterceptors(t *testing.T) {
-	for _, redirect := range []bool{false, true} {
-		name := "re-sent on a fresh context"
-		if redirect {
-			name = "re-sent on another connection"
+// A caller interceptor can retry a call where its send evidence cannot see
+// it. On a connection that admits caller interceptors, a write that reached
+// the provider must stay an unknown outcome, even when the evidence it can
+// see shows only an attempt that sent nothing.
+func TestSendEvidenceIsConservativeWithCallerInterceptors(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		name := "interceptor on a DialOptions connection"
+		if wrapped {
+			name = "wrapper around a Dial connection"
 		}
 		t.Run(name, func(t *testing.T) {
-			provider := newRecordingProvider()
-			release := make(chan struct{})
-			provider.block["SavePlan"] = release
-			server, err := wire.NewServer(wire.ServerConfig{State: provider})
-			require.NoError(t, err)
-			tcp, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			listener := &trackingListener{Listener: tcp}
-			grpcServer := grpc.NewServer(server.ServerOptions()...)
-			server.Register(grpcServer)
-			go func() { _ = grpcServer.Serve(listener) }()
-			t.Cleanup(grpcServer.Stop)
-
-			interceptor := grpc.UnaryClientInterceptor(resendDetached)
-			if redirect {
-				// A plain connection to the same server: it has no evidence
-				// handler, so only Dial's connection check can tell.
-				other, err := grpc.NewClient("passthrough:///"+tcp.Addr().String(),
-					grpc.WithTransportCredentials(insecure.NewCredentials()))
-				require.NoError(t, err)
-				t.Cleanup(func() { _ = other.Close() })
-				interceptor = func(ctx context.Context, method string, req, reply any, _ *grpc.ClientConn,
-					invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-					return invoker(ctx, method, req, reply, other, opts...)
-				}
-			}
-			client := wire.NewClient(dialInsecure(t, tcp.Addr().String(), grpc.WithChainUnaryInterceptor(interceptor)),
-				wire.ClientConfig{})
-
-			result := make(chan error, 1)
-			go func() { result <- client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{}) }()
-			select {
-			case <-provider.entered:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the call never reached the provider")
-			}
-			listener.resetAll()
-			select {
-			case err = <-result:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the call did not fail after the reset")
-			}
-			close(release)
-			require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
+			testRetriedWriteStaysUnknown(t, wrapped)
 		})
 	}
+}
+
+// retryingConn wraps a connection and retries each call the way
+// firstThenDetached does, outside the connection's own interceptors.
+type retryingConn struct {
+	inner *grpc.ClientConn
+}
+
+func (c retryingConn) Invoke(ctx context.Context, method string, args, reply any, opts ...grpc.CallOption) error {
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := c.inner.Invoke(short, method, args, reply, opts...); err == nil {
+		return nil
+	}
+	header, _ := metadata.FromOutgoingContext(ctx)
+	return c.inner.Invoke(metadata.NewOutgoingContext(context.Background(), header), method, args, reply, opts...)
+}
+
+func (c retryingConn) NewStream(ctx context.Context, desc *grpc.StreamDesc, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	return c.inner.NewStream(ctx, desc, method, opts...)
+}
+
+func testRetriedWriteStaysUnknown(t *testing.T, wrapped bool) {
+	provider := newRecordingProvider()
+	release := make(chan struct{})
+	provider.block["SavePlan"] = release
+	server, err := wire.NewServer(wire.ServerConfig{State: provider})
+	require.NoError(t, err)
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	listener := &trackingListener{Listener: tcp}
+	grpcServer := grpc.NewServer(server.ServerOptions()...)
+	server.Register(grpcServer)
+	go func() { _ = grpcServer.Serve(listener) }()
+	t.Cleanup(grpcServer.Stop)
+	dialer := &slowFirstDial{delay: 200 * time.Millisecond}
+	var client *wire.Client
+	if wrapped {
+		conn, err := wire.Dial("passthrough:///"+tcp.Addr().String(), wire.DialConfig{
+			TransportCredentials: insecure.NewCredentials(),
+			ContextDialer:        dialer.dial,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		client = wire.NewClient(retryingConn{inner: conn}, wire.ClientConfig{})
+	} else {
+		conn, err := grpc.NewClient("passthrough:///"+tcp.Addr().String(), append(wire.DialOptions(),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithContextDialer(dialer.dial),
+			grpc.WithChainUnaryInterceptor(firstThenDetached))...)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		client = wire.NewClient(conn, wire.ClientConfig{})
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{}) }()
+	select {
+	case <-provider.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call never reached the provider")
+	}
+	listener.resetAll()
+	select {
+	case err = <-result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call did not fail after the reset")
+	}
+	close(release)
+	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
 }
 
 // trackingListener remembers accepted connections so a test can reset them.

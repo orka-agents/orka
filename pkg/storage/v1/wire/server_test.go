@@ -301,10 +301,9 @@ func serveInsecure(t *testing.T, server *wire.Server) *grpc.ClientConn {
 	return dialInsecure(t, listener.Addr().String())
 }
 
-func dialInsecure(t *testing.T, address string, opts ...grpc.DialOption) *grpc.ClientConn {
+func dialInsecure(t *testing.T, address string) *grpc.ClientConn {
 	t.Helper()
-	conn, err := wire.Dial("passthrough:///"+address,
-		append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, opts...)...)
+	conn, err := wire.Dial("passthrough:///"+address, wire.DialConfig{TransportCredentials: insecure.NewCredentials()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn

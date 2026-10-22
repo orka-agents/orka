@@ -190,11 +190,11 @@ func TestServerRefusalsDecodeToTheirMarkers(t *testing.T) {
 func TestTransportFailuresAreClassifiedBySendEvidence(t *testing.T) {
 	failure := status.Error(codes.Unavailable, "connection reset")
 	notSent := &sendEvidence{}
-	notSent.attempted.Store(true)
+	notSent.covered.Store(true)
 	sent := &sendEvidence{}
-	sent.attempted.Store(true)
+	sent.covered.Store(true)
 	sent.sent.Store(true)
-	noHandler := &sendEvidence{}
+	uncovered := &sendEvidence{}
 
 	for _, m := range []*method{readMethod, writeMethod} {
 		err := decodeError(t.Context(), m, failure, notSent)
@@ -203,8 +203,8 @@ func TestTransportFailuresAreClassifiedBySendEvidence(t *testing.T) {
 	}
 	require.ErrorIs(t, decodeError(t.Context(), readMethod, failure, sent), storagev1.ErrUnavailable)
 	require.ErrorIs(t, decodeError(t.Context(), writeMethod, failure, sent), storagev1.ErrOutcomeUnknown)
-	require.ErrorIs(t, decodeError(t.Context(), writeMethod, failure, noHandler), storagev1.ErrOutcomeUnknown,
-		"without the evidence handler a write's transport failure is an unknown outcome")
+	require.ErrorIs(t, decodeError(t.Context(), writeMethod, failure, uncovered), storagev1.ErrOutcomeUnknown,
+		"without Dial's coverage a write's transport failure is an unknown outcome")
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

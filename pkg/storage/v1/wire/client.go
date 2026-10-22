@@ -2,7 +2,9 @@ package wire
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -10,6 +12,7 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -18,10 +21,9 @@ import (
 // DialOptions returns the options every storage client connection uses: the
 // send-evidence handler, no configured retries (grpc-go keeps only its
 // transparent retries of attempts the server never processed), no proxy,
-// keepalive and the message size limits. Callers add transport credentials,
-// which must be TLS. Prefer Dial, which also lets a client report a write
-// that failed before any attempt as not sent; on a connection built with
-// these options alone, such a write is an unknown outcome.
+// keepalive and the message size limits. Dial uses them. A connection built
+// with them directly may also carry caller interceptors, so on it every
+// transport failure of a write is an unknown outcome.
 func DialOptions() []grpc.DialOption {
 	return []grpc.DialOption{
 		grpc.WithStatsHandler(NewEvidenceHandler()),
@@ -54,22 +56,47 @@ type ClientConfig struct {
 // Client implements the orka.storage.v1 methods that have wire RPCs over a
 // gRPC connection. It returns the contract's typed errors.
 type Client struct {
-	stubs          clientStubs
+	stubs clientStubs
+	// conn is the connection when the client calls a *grpc.ClientConn
+	// directly; send evidence is trusted only on such a connection from Dial.
+	conn           *grpc.ClientConn
 	dataset        string
 	serverRevision int
 }
 
-// Dial creates a storage client connection to target with the caller's
-// options, which must include TLS transport credentials, followed by
-// DialOptions. It installs the evidence interceptor last, so it runs
-// innermost, directly before grpc-go starts the call on this connection: a
-// call it marks has no other interceptor left that could send it elsewhere,
-// and a write that fails before any attempt is reported as not sent.
-func Dial(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+// DialConfig configures Dial. It takes no other gRPC options, so no caller
+// interceptor can sit between a Client and grpc-go and send a call where its
+// send evidence cannot see it.
+type DialConfig struct {
+	// TransportCredentials secure the connection. They are required, and
+	// storage traffic uses TLS 1.3.
+	TransportCredentials credentials.TransportCredentials
+	// PerRPCCredentials, when set, authenticate each call, such as a bearer
+	// token that requires transport security.
+	PerRPCCredentials credentials.PerRPCCredentials
+	// ContextDialer, when set, opens the network connection, such as an
+	// in-memory listener in tests.
+	ContextDialer func(ctx context.Context, address string) (net.Conn, error)
+}
+
+// Dial creates a storage client connection to target with DialOptions and
+// config. Its only interceptor marks each call on this connection as covered
+// by send evidence, so a write that sent nothing, including one that failed
+// before any attempt, is reported as not sent.
+func Dial(target string, config DialConfig) (*grpc.ClientConn, error) {
+	if config.TransportCredentials == nil {
+		return nil, errors.New("storage connections require transport credentials")
+	}
 	var own atomic.Pointer[grpc.ClientConn]
-	all := append(append(append([]grpc.DialOption(nil), opts...), DialOptions()...),
+	opts := append(DialOptions(), grpc.WithTransportCredentials(config.TransportCredentials),
 		grpc.WithChainUnaryInterceptor(coverEvidence(&own)))
-	conn, err := grpc.NewClient(target, all...)
+	if config.PerRPCCredentials != nil {
+		opts = append(opts, grpc.WithPerRPCCredentials(config.PerRPCCredentials))
+	}
+	if config.ContextDialer != nil {
+		opts = append(opts, grpc.WithContextDialer(config.ContextDialer))
+	}
+	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -77,15 +104,17 @@ func Dial(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
-// NewClient returns a Client over conn. The connection should come from Dial,
-// so the client can tell a request that was never sent from one that may
-// have been.
+// NewClient returns a Client over conn. Only when conn is a connection from
+// Dial, passed directly rather than wrapped, can the client tell a request
+// that was never sent from one that may have been; over any other connection
+// a write's transport failure is an unknown outcome.
 func NewClient(conn grpc.ClientConnInterface, config ClientConfig) *Client {
 	revision := config.ServerRevision
 	if revision == 0 {
 		revision = ProtocolRevision
 	}
-	return &Client{stubs: newClientStubs(conn), dataset: config.Dataset, serverRevision: revision}
+	direct, _ := conn.(*grpc.ClientConn)
+	return &Client{stubs: newClientStubs(conn), conn: direct, dataset: config.Dataset, serverRevision: revision}
 }
 
 // DescribeServer returns the provider's description together with the
@@ -145,7 +174,7 @@ func (c *Client) invoke(ctx context.Context, m *method, req proto.Message, call 
 		pairs = append(pairs, HeaderEnvelope, string(raw))
 	}
 	ctx = metadata.AppendToOutgoingContext(ctx, pairs...)
-	evidence := &sendEvidence{}
+	evidence := &sendEvidence{conn: c.conn}
 	if err := call(withSendEvidence(ctx, evidence)); err != nil {
 		return decodeError(ctx, m, err, evidence)
 	}

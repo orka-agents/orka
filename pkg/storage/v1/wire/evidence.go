@@ -16,19 +16,17 @@ import (
 // as possibly sent: the classification can turn a harmless failure into an
 // unknown outcome, never the reverse.
 //
-// DialOptions installs it. On a connection without it, every transport
-// failure of a write is an unknown outcome; on one without Dial's coverage,
-// so is a write that failed before any attempt.
+// The absence of that point is evidence only on a connection Dial built,
+// which admits no caller interceptors that could send a call where the
+// handler cannot see it. On any other connection, every transport failure of
+// a write is an unknown outcome.
 type EvidenceHandler struct{}
 
 // NewEvidenceHandler returns the send-evidence handler.
 func NewEvidenceHandler() *EvidenceHandler { return &EvidenceHandler{} }
 
-// TagRPC notes that an attempt started for a Client call.
+// TagRPC implements stats.Handler.
 func (*EvidenceHandler) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context {
-	if evidence := sendEvidenceFrom(ctx); evidence != nil {
-		evidence.attempted.Store(true)
-	}
 	return ctx
 }
 
@@ -50,35 +48,35 @@ func (*EvidenceHandler) TagConn(ctx context.Context, _ *stats.ConnTagInfo) conte
 // HandleConn implements stats.Handler.
 func (*EvidenceHandler) HandleConn(context.Context, stats.ConnStats) {}
 
-// sendEvidence is one call's record. covered shows the call reached the
-// innermost interceptor of a connection Dial built, with nothing left between
-// it and grpc-go, so the handler sees every attempt; attempted shows the
-// handler saw an attempt. Either makes the absence of sent evidence rather
-// than a missing handler: grpc-go tags every attempt before it can create a
-// stream, so a covered call that never reached an attempt (a closed
-// connection, or a deadline spent waiting for name resolution) sent nothing.
-// A caller interceptor that sends the call on a context without this record
-// leaves it neither covered nor attempted, so the call stays possibly sent.
+// sendEvidence is one call's record. conn is the connection the Client
+// calls, when it is a *grpc.ClientConn. covered shows the call reached the
+// only interceptor of a connection Dial built, and that this connection is
+// the Client's own: nothing can sit between the client and grpc-go there,
+// every attempt of the call (transparent retries included) carries this
+// record, and the handler sees each one. So a covered call without sent
+// evidence sent nothing, including one that never reached an attempt (a
+// closed connection, or a deadline spent waiting for name resolution). An
+// uncovered call, such as one made through a wrapper connection, is always
+// possibly sent.
 type sendEvidence struct {
-	covered   atomic.Bool
-	attempted atomic.Bool
-	sent      atomic.Bool
+	conn    *grpc.ClientConn
+	covered atomic.Bool
+	sent    atomic.Bool
 }
 
 // possiblySent reports whether the request may have left the process.
 func (e *sendEvidence) possiblySent() bool {
-	return e == nil || e.sent.Load() || (!e.covered.Load() && !e.attempted.Load())
+	return e == nil || e.sent.Load() || !e.covered.Load()
 }
 
-// coverEvidence returns the unary client interceptor Dial installs last, so
-// it is innermost. It marks a call as covered just before grpc-go starts it,
-// and only when the call runs on the connection Dial built, whose handler
-// sees every attempt; a call an outer interceptor moved to another connection
-// stays uncovered.
+// coverEvidence returns the only unary client interceptor of a connection
+// Dial builds. It marks a call as covered just before grpc-go starts it, and
+// only when the call runs on that connection and the Client called it
+// directly.
 func coverEvidence(own *atomic.Pointer[grpc.ClientConn]) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
 		invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		if evidence := sendEvidenceFrom(ctx); evidence != nil && cc != nil && cc == own.Load() {
+		if evidence := sendEvidenceFrom(ctx); evidence != nil && cc != nil && cc == own.Load() && cc == evidence.conn {
 			evidence.covered.Store(true)
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)

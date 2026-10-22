@@ -75,11 +75,11 @@ func Dial(t testing.TB, provider storagev1.StateProvider) *grpc.ClientConn {
 	served := make(chan error, 1)
 	go func() { served <- grpcServer.Serve(listener) }()
 
-	conn, err := wire.Dial("passthrough:///"+ServerName,
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
-		grpc.WithTransportCredentials(credentials.NewTLS(material.clientTLS())),
-		grpc.WithPerRPCCredentials(bearerToken(material.bearer)),
-	)
+	conn, err := wire.Dial("passthrough:///"+ServerName, wire.DialConfig{
+		TransportCredentials: credentials.NewTLS(material.clientTLS()),
+		PerRPCCredentials:    bearerToken(material.bearer),
+		ContextDialer:        func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) },
+	})
 	if err != nil {
 		grpcServer.Stop()
 		t.Fatalf("dial storage server: %v", err)
