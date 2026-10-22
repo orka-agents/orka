@@ -308,6 +308,64 @@ func TestGitHubSignInRacingTheConnectionCreate(t *testing.T) {
 	}
 }
 
+// Two first sign-ins that overlap commit one grant: the one that waited for
+// the other reuses what it linked.
+func TestOverlappingSignInsCommitOneGrant(t *testing.T) {
+	h := newSignInHarness(t)
+	upstream := fakeGitHub(t, nil)
+	var mu sync.Mutex
+	arrived, together := 0, make(chan struct{})
+	// Both sign-ins pass check-token together, so each reaches the link
+	// before either has committed.
+	barrier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Method == http.MethodPost && strings.Contains(string(body), `"ghu_alice"`) {
+			mu.Lock()
+			if arrived++; arrived == 2 {
+				close(together)
+			}
+			mu.Unlock()
+			select {
+			case <-together:
+			case <-time.After(5 * time.Second):
+			}
+		}
+		request, _ := http.NewRequestWithContext(r.Context(), r.Method, upstream.URL+r.URL.Path, bytes.NewReader(body))
+		request.Header = r.Header.Clone()
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		defer func() { _ = response.Body.Close() }()
+		w.WriteHeader(response.StatusCode)
+		_, _ = io.Copy(w, response.Body)
+	}))
+	t.Cleanup(barrier.Close)
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: barrier.URL}
+	h.identity = nil
+	statuses := make(chan int, 2)
+	for range 2 {
+		go func() {
+			status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
+			statuses <- status
+		}()
+	}
+	for range 2 {
+		if status := <-statuses; status != http.StatusCreated {
+			t.Fatalf("overlapping sign-in: %d", status)
+		}
+	}
+	connection := &corev1alpha1.Connection{}
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.Status.GrantSequence != 1 {
+		t.Fatalf("grant sequence = %d, want one grant for two overlapping sign-ins", connection.Status.GrantSequence)
+	}
+}
+
 // A token GitHub gave no lifetime still ends in custody, so a link that
 // cannot refresh stops, and membership is checked again on each refresh.
 func TestGitHubSignInBoundsATokenWithoutExpiry(t *testing.T) {

@@ -372,6 +372,14 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if err != nil {
 		return nil, err
 	}
+	// Sign-ins for one Connection take turns, and each judges the link as
+	// the one before it left it: a sign-in that waited reuses what that one
+	// linked rather than commit a second grant.
+	unlock := h.completionLocks.lock(string(connection.UID))
+	defer unlock()
+	if connection, err = h.reloadSignInConnection(ctx, connection, ui); err != nil {
+		return nil, err
+	}
 	// Signing in again keeps a link that still holds the person's account:
 	// each commit retains the grant it replaces until disconnect, so linking
 	// every sign-in would soon refuse new ones. The unused token is revoked.
@@ -387,8 +395,6 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusConflict, "your link has an invalid mode")
 	}
-	unlock := h.completionLocks.lock(string(connection.UID))
-	defer unlock()
 
 	now := h.connectors.now()
 	consentNonce, err := connectors.GenerateStateNonce()
@@ -478,6 +484,25 @@ func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1
 		return "", false
 	}
 	return held.AccessToken, true
+}
+
+// reloadSignInConnection reads connection again, uncached, and requires it
+// to be the same live, protected link of ui's.
+func (h *Handlers) reloadSignInConnection(ctx context.Context, connection *corev1alpha1.Connection, ui *UserInfo) (*corev1alpha1.Connection, error) {
+	fresh := &corev1alpha1.Connection{}
+	if err := h.providerReader().Get(ctx, client.ObjectKeyFromObject(connection), fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "your GitHub link was removed; sign in again")
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read your GitHub link")
+	}
+	if fresh.UID != connection.UID || !fresh.DeletionTimestamp.IsZero() {
+		return nil, fiber.NewError(fiber.StatusConflict, "your GitHub link is being disconnected; sign in again in a moment")
+	}
+	if !connectionOwnedBy(fresh, ui) || !connectionCustodyProtected(fresh) {
+		return nil, fiber.NewError(fiber.StatusConflict, "your GitHub link changed; sign in again")
+	}
+	return fresh, nil
 }
 
 // ensureSignInConnection returns the person's canonical Connection to
