@@ -45,9 +45,6 @@ const (
 	// request that the open trigger already reviewed.
 	repositoryMonitorSkipReasonTriggerOpen = "review_trigger_open"
 
-	// repositoryMonitorFindingDuplicateLines is how close a new finding's
-	// line must be to an open finding in the same file to count as a repeat.
-	repositoryMonitorFindingDuplicateLines = 3
 	// repositoryMonitorGitHubCompareAhead is the compare status for a head
 	// that builds on the base commit.
 	repositoryMonitorGitHubCompareAhead = "ahead"
@@ -235,22 +232,20 @@ func repositoryMonitorFindingID(recordID string, index int, finding repositoryMo
 }
 
 // repositoryMonitorFindingRepeats reports whether finding restates an open
-// finding in the same file: the same title, or a nearby line at the same
-// priority. A finding more severe than the open one is never a repeat, so a
-// new blocker is not dropped in favor of an earlier minor finding.
+// finding: the same file and the same title. Nearness alone does not count,
+// because unrelated defects can sit a few lines apart and lines move between
+// heads; rewordings are left to the reviewer's instructions. A finding more
+// severe than the open one is never a repeat, so a new blocker is not dropped
+// in favor of an earlier minor finding.
 func repositoryMonitorFindingRepeats(finding repositoryMonitorReviewFinding, open []repositoryMonitorReviewFinding) bool {
 	file := strings.TrimSpace(finding.File)
 	title := repositoryMonitorNormalizedFindingText(finding.Title)
-	rank := repositoryMonitorFindingRank(finding)
+	if file == "" || title == "" {
+		return false
+	}
 	for _, other := range open {
-		if file == "" || file != strings.TrimSpace(other.File) || rank < repositoryMonitorFindingRank(other) {
-			continue
-		}
-		if title != "" && title == repositoryMonitorNormalizedFindingText(other.Title) {
-			return true
-		}
-		if rank == repositoryMonitorFindingRank(other) && finding.Line > 0 && other.Line > 0 &&
-			max(finding.Line-other.Line, other.Line-finding.Line) <= repositoryMonitorFindingDuplicateLines {
+		if file == strings.TrimSpace(other.File) && title == repositoryMonitorNormalizedFindingText(other.Title) &&
+			repositoryMonitorFindingRank(finding) >= repositoryMonitorFindingRank(other) {
 			return true
 		}
 	}

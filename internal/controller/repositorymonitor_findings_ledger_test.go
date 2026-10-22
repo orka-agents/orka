@@ -33,7 +33,7 @@ func TestRepositoryMonitorMergeFindingLedger(t *testing.T) {
 		PreviousFindings: []repositoryMonitorReviewPreviousFinding{{ID: "f-fixed", Status: "fixed"}, {ID: "f-open", Status: "open"}, {ID: "f-unknown", Status: "fixed"}},
 		Findings: []repositoryMonitorReviewFinding{
 			// The reviewer cannot set Orka's record fields.
-			{Priority: "P2", File: "b.go", Line: 22, Title: "Error ignored", ID: "f-forged", Status: repositoryMonitorFindingStatusFixed},
+			{Priority: "P2", File: "b.go", Line: 31, Title: "Missing error-check!", ID: "f-forged", Status: repositoryMonitorFindingStatusFixed},
 			{Priority: "P1", File: "d.go", Line: 7, Title: "Race", OutsideChanges: true},
 			{Priority: "P2", File: "e.go", Line: 99, Title: "Unrelated nit"},
 		},
@@ -58,7 +58,7 @@ func TestRepositoryMonitorMergeFindingLedger(t *testing.T) {
 		if got := byTitle["Old bug"]; got.ResolvedHead != "older" {
 			t.Fatalf("history changed: %+v", got)
 		}
-		if _, ok := byTitle["Error ignored"]; ok {
+		if _, ok := byTitle["Missing error-check!"]; ok {
 			t.Fatal("a restatement of an open finding was recorded again")
 		}
 		race := byTitle["Race"]
@@ -510,8 +510,8 @@ func TestRepositoryMonitorFindingRepeats(t *testing.T) {
 		finding repositoryMonitorReviewFinding
 		want    bool
 	}{
-		{name: "nearby line at the same priority", finding: repositoryMonitorReviewFinding{Priority: "P2", File: "a.go", Line: 12, Title: "Unchecked error"}, want: true},
-		{name: "same title", finding: repositoryMonitorReviewFinding{Priority: "P3", File: "a.go", Line: 90, Title: "error ignored!"}, want: true},
+		{name: "unrelated defect on a nearby line", finding: repositoryMonitorReviewFinding{Priority: "P2", File: "a.go", Line: 12, Title: "Unchecked error"}},
+		{name: "same title after lines moved", finding: repositoryMonitorReviewFinding{Priority: "P3", File: "a.go", Line: 90, Title: "error ignored!"}, want: true},
 		{name: "more severe nearby finding is new", finding: repositoryMonitorReviewFinding{Priority: "P1", File: "a.go", Line: 12, Title: "Nil dereference"}},
 		{name: "more severe same title is new", finding: repositoryMonitorReviewFinding{Priority: "P0", File: "a.go", Line: 10, Title: "Error ignored"}},
 		{name: "less severe nearby finding at another priority is new", finding: repositoryMonitorReviewFinding{Priority: "P3", File: "a.go", Line: 11, Title: "Naming"}},
@@ -587,5 +587,46 @@ func TestRepositoryMonitorCarriedSensitiveFindingsStayRestricted(t *testing.T) {
 		"publish-2", []repositoryMonitorReviewFinding{{ID: "f-s", Priority: "P1", Title: "Token logged", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "h6", SecuritySensitive: true}})
 	if strings.Contains(body, "Token logged") {
 		t.Fatalf("published body names a security-sensitive finding:\n%s", body)
+	}
+}
+
+func TestRepositoryMonitorReviewShownSensitiveFindingStaysUnpublished(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "sensitive-fixed", Namespace: "default", UID: types.UID("uid-sensitive-fixed")}, Spec: corev1alpha1.RepositoryMonitorSpec{RepoURL: repositoryMonitorTestRepoURL, Branch: "main", Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"}}}}
+	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "sensitive-base", MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 6, HeadSHA: "h6", Verdict: repositoryMonitorReviewVerdictSecuritySensitive,
+		FindingsJSON: `[{"id":"f-s","priority":"P1","file":"auth.go","line":9,"title":"Token logged","status":"open","securitySensitive":true}]`}); err != nil {
+		t.Fatal(err)
+	}
+	task := repositoryMonitorReviewIngestTestTask("fixes-it", monitor.Name, 6, "h7")
+	task.Annotations[repositoryMonitorAnnotationReviewMode] = repositoryMonitorReviewModeIncremental
+	task.Annotations[repositoryMonitorAnnotationReviewBase] = "sensitive-base"
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, ResultStore: db}
+	result := repositoryMonitorReviewResultEnvelopeWith(t, 6, "h7", repositoryMonitorReviewVerdictPassed, func(payload map[string]any) {
+		payload["summary"] = "The token was being written to the debug log; now fixed."
+		payload["previousFindings"] = []map[string]any{{"id": "f-s", "status": "fixed"}}
+	})
+	if err := db.SaveResult(ctx, "default", task.Name, result); err != nil {
+		t.Fatal(err)
+	}
+	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "6", Number: 6, State: repositoryMonitorItemStateOpen, HeadSHA: "h7", BaseBranch: "main", LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: task.Name}
+	if err := db.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := r.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, task); err != nil || !handled {
+		t.Fatalf("ingest = (%v, %v)", handled, err)
+	}
+	record, err := db.GetReviewRecord(ctx, "default", repositoryMonitorReviewRecordID(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fix counts, but the review that saw the finding is not published.
+	if record.Verdict != repositoryMonitorReviewVerdictPassed || record.SecurityStatus != repositoryMonitorReviewVerdictSecuritySensitive {
+		t.Fatalf("record = verdict %q security %q, want passed and still security_sensitive", record.Verdict, record.SecurityStatus)
 	}
 }

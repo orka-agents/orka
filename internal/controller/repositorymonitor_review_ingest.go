@@ -260,8 +260,10 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	}
 	reviewerVerdict := strings.TrimSpace(review.Verdict)
 	verdict := repositoryMonitorDerivedReviewVerdict(monitor.Spec, reviewerVerdict, ledger)
+	// A review shown an open security-sensitive finding may describe it in
+	// its own prose even after fixing it, so it stays unpublished.
 	securityStatus := strings.TrimSpace(review.Security.Status)
-	if repositoryMonitorLedgerSecuritySensitive(ledger) {
+	if repositoryMonitorLedgerSecuritySensitive(ledger) || repositoryMonitorLedgerSecuritySensitive(plan.Ledger) {
 		securityStatus = repositoryMonitorReviewVerdictSecuritySensitive
 	}
 	summary := strings.TrimSpace(review.Summary)
