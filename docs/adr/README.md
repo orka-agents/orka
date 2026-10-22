@@ -18,6 +18,7 @@ that way, read here.
 | **Accepted** | The decision is in force. The code should match it. |
 | **Superseded** | A later ADR replaced this one. Kept for the reasoning it records. |
 | **Deferred** | The decision was made but the work has not landed, usually because it depends on something outside Orka. |
+| **Proposed** | The decision is under review and has not been implemented. |
 
 ## The records
 
@@ -120,6 +121,14 @@ and serving the Agent Host Protocol from Orka itself.
 | [0035](0035-agent-hosts.md) | Run per-user agent hosts as Orka-owned Pods, relay first | Proposed |
 | [0036](0036-agent-hosts-from-connections.md) | Provision agent hosts from GitHub Connections | Proposed |
 | [0037](0037-github-sign-in.md) | Sign people in with GitHub | Proposed |
+
+### Repository monitors
+
+How monitors review and repair pull requests.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Proposed |
 
 ## Writing a new one
 
