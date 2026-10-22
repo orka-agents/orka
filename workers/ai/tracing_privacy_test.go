@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,6 +17,30 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/workers/common"
 )
+
+func TestAIWorkerErrorType(t *testing.T) {
+	providerErr := &llm.ProviderError{Provider: "mock", StatusCode: 429, Message: "SYNTHETIC_TOKEN"}
+	statuslessErr := &llm.ProviderError{Message: "SYNTHETIC_TOKEN"}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"provider status", providerErr, "llm_status_429"},
+		{"wrapped provider status", fmt.Errorf("model call: %w", providerErr), "llm_status_429"},
+		{"canceled", fmt.Errorf("SYNTHETIC_TOKEN: %w", context.Canceled), "context.canceled"},
+		{"deadline", context.DeadlineExceeded, "context.deadline_exceeded"},
+		{"wrapped provider without status", fmt.Errorf("model call: %w", statuslessErr), "*llm.ProviderError"},
+		{"plain", errors.New("SYNTHETIC_TOKEN"), "*errors.errorString"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := aiWorkerErrorType(tc.err); got != tc.want {
+				t.Fatalf("aiWorkerErrorType() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestAgentLoopErrorPrivacy(t *testing.T) {
 	const marker = "SYNTHETIC_TOKEN_PRIVATE_BODY"

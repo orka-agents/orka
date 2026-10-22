@@ -1646,7 +1646,7 @@ func aiWorkerErrorType(err error) string {
 	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
 		return fmt.Sprintf("llm_status_%d", providerErr.StatusCode)
 	}
-	return fmt.Sprintf("%T", err)
+	return tracing.ErrorType(err)
 }
 
 func startAgentStepSpan(
