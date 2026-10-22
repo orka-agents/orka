@@ -80,6 +80,77 @@ func TestMemoryCreateKeepsClientSource(t *testing.T) {
 	}
 }
 
+// memoryUpdateRoutes prefix the memory ID on the public and internal routes.
+var memoryUpdateRoutes = []string{"/api/v1/memories/", "/internal/v1/memories/default/"}
+
+func TestMemoryUpdateRejectsClientProposalSource(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		for _, tc := range []struct{ name, body string }{
+			{"proposal source", `{"source":"memory_proposal"}`},
+			{"proposal source folded", `{"content":"relabeled","source":" Memory_Proposal "}`},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				f := newExternalAuthorizationFixture(t)
+				f.allowOnly(t, memoryPermission("update", "memories", "protected"))
+				before := f.changes(t)
+				status, body := f.request(t, http.MethodPut, route+"protected", tc.body)
+				require.Equal(t, http.StatusBadRequest, status, body)
+				require.Contains(t, body, "source memory_proposal cannot be set by clients")
+				require.Equal(t, before, f.changes(t))
+				stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+				require.NoError(t, err)
+				require.Equal(t, "manual", stored.Source)
+				require.Equal(t, "protected-content", stored.Content)
+			})
+		}
+		t.Run(route+"/named source", func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			f.allowOnly(t, memoryPermission("update", "memories", "protected"))
+			status, body := f.request(t, http.MethodPut, route+"protected", `{"source":"user"}`)
+			require.Equal(t, http.StatusOK, status, body)
+			stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+			require.NoError(t, err)
+			require.Equal(t, "user", stored.Source)
+		})
+	}
+}
+
+// An applied memory can still be edited, including by sending back the memory
+// as read, and its proposal provenance stays as apply recorded it.
+func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		t.Run(route, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: "protected", Status: "accepted", Reviewer: "reviewer",
+			}))
+			applied, err := f.store.ApplyMemoryProposal(t.Context(), store.MemoryProposalApply{Namespace: "default", ID: "protected", AppliedBy: "applier"})
+			require.NoError(t, err)
+			f.allowOnly(t, memoryPermission("update", "memories", applied.ID))
+
+			read := *applied
+			read.Content = "edited after review"
+			roundTrip, err := json.Marshal(read)
+			require.NoError(t, err)
+			for _, body := range []string{
+				string(roundTrip),
+				`{"content":"edited again"}`,
+				`{"content":"edited with another link","sourceProposalId":"other"}`,
+			} {
+				status, response := f.request(t, http.MethodPut, route+applied.ID, body)
+				require.Equal(t, http.StatusOK, status, response)
+				stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
+				require.NoError(t, err)
+				require.Equal(t, memorySourceProposal, stored.Source)
+				require.Equal(t, "protected", stored.SourceProposalID)
+			}
+			stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
+			require.NoError(t, err)
+			require.Equal(t, "edited with another link", stored.Content)
+		})
+	}
+}
+
 // A memory writer cannot create a memory that names a pending proposal, so
 // applying the reviewed proposal writes and links the reviewed content.
 func TestReviewedProposalApplyLinksReviewedContent(t *testing.T) {

@@ -305,13 +305,32 @@ const memorySourceProposal = "memory_proposal"
 // proposal the memory came from. Empty values name nothing, so older clients
 // that send every key keep working.
 func rejectClientProposalProvenance(memory store.Memory) error {
-	if strings.EqualFold(strings.TrimSpace(memory.Source), memorySourceProposal) {
-		return fiber.NewError(fiber.StatusBadRequest, "source "+memorySourceProposal+" cannot be set by clients; it is recorded when a proposal is applied")
+	if isProposalSource(memory.Source) {
+		return errClientProposalSource()
 	}
 	if memory.SourceProposalID != "" {
 		return fiber.NewError(fiber.StatusBadRequest, "sourceProposalId cannot be set by clients; it is recorded when a proposal is applied")
 	}
 	return nil
+}
+
+// rejectClientProposalSourceUpdate stops an update from relabeling a memory
+// as applied from a proposal. Repeating the stored source unchanged is
+// accepted, so a client can send back a memory it read. Update never changes
+// sourceProposalId.
+func rejectClientProposalSourceUpdate(stored *store.Memory, req store.Memory) error {
+	if req.Source != stored.Source && isProposalSource(req.Source) {
+		return errClientProposalSource()
+	}
+	return nil
+}
+
+func isProposalSource(source string) bool {
+	return strings.EqualFold(strings.TrimSpace(source), memorySourceProposal)
+}
+
+func errClientProposalSource() error {
+	return fiber.NewError(fiber.StatusBadRequest, "source "+memorySourceProposal+" cannot be set by clients; it is recorded when a proposal is applied")
 }
 
 func getNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace string) error {
@@ -326,6 +345,9 @@ func updateNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	memory, err := memoryStore.GetMemory(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		return memoryStoreError("get memory", "memory", err)
+	}
+	if err := rejectClientProposalSourceUpdate(memory, req); err != nil {
+		return err
 	}
 	applyMemoryUpdate(memory, req)
 	memory.Namespace = namespace
