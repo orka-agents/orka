@@ -20,13 +20,30 @@ const maxMCPApprovalProjectionAttempts = 3
 // after the projection read the approval, so its derived state is stale.
 var errMCPApprovalHistoryChanged = errors.New("approval history changed during projection")
 
+// mcpApprovalFence selects the cleanup fence a projection runs under.
+type mcpApprovalFence int
+
+const (
+	// mcpApprovalTaskFence moves only with cleanup of the Task's own data. The
+	// broker writes the Session association from the call's credentials, not
+	// from history, so cleanup of other Tasks in the namespace must not refuse
+	// a live call's projection.
+	mcpApprovalTaskFence mcpApprovalFence = iota
+	// mcpApprovalNamespaceFence also moves with Session cleanup, which moves
+	// only the namespace fence. Recovery copies the request's Session
+	// association from history, so cleanup that detaches it must refuse the
+	// append and make recovery read again.
+	mcpApprovalNamespaceFence
+)
+
 // withRetainedMCPApproval runs one projection, including recovery's
-// decision/outcome pair, under the Task's cleanup fence. Authority and effect
-// reads must finish before entry. The request is read and the projection
-// appended as separate fenced calls: cleanup either removes the projection
-// after it is appended, or wins first and refuses the append, so no evidence
-// is projected onto a request cleanup removed. The appends are deduplicated,
-// so a projection repeated after a fence change does not duplicate evidence.
+// decision/outcome pair, under the selected cleanup fence. Authority and
+// effect reads must finish before entry. The request is read and the
+// projection appended as separate fenced calls: cleanup either removes the
+// projection after it is appended, or wins first and refuses the append, so
+// no evidence is projected onto a request cleanup removed. The appends are
+// deduplicated, so a projection repeated after a fence change does not
+// duplicate evidence.
 // Absence does not prove cleanup or execution outcome; receipts remain intact.
 // The callback returns a newly appended event (nil for replay/no-op). Observe
 // terminal decisions only after the projection commits, including recovery's
@@ -35,6 +52,7 @@ func withRetainedMCPApproval(
 	ctx context.Context,
 	eventStore store.ExecutionEventStore,
 	namespace, taskName string,
+	fence mcpApprovalFence,
 	expected approvals.Approval,
 	project func(context.Context, approvals.Approval, []store.ExecutionEvent) (*store.ExecutionEvent, error),
 ) (bool, error) {
@@ -45,7 +63,7 @@ func withRetainedMCPApproval(
 	var retained bool
 	var err error
 	for range maxMCPApprovalProjectionAttempts {
-		retained, err = projectRetainedMCPApproval(ctx, dataAccess, eventStore, namespace, taskName, expected, project)
+		retained, err = projectRetainedMCPApproval(ctx, dataAccess, eventStore, namespace, taskName, fence, expected, project)
 		if !errors.Is(err, store.ErrTaskDataCleanupChanged) && !errors.Is(err, errMCPApprovalHistoryChanged) {
 			break
 		}
@@ -58,13 +76,18 @@ func projectRetainedMCPApproval(
 	dataAccess store.TaskDataAccessStore,
 	eventStore store.ExecutionEventStore,
 	namespace, taskName string,
+	fence mcpApprovalFence,
 	expected approvals.Approval,
 	project func(context.Context, approvals.Approval, []store.ExecutionEvent) (*store.ExecutionEvent, error),
 ) (bool, error) {
+	fenceTask := taskName
+	if fence == mcpApprovalNamespaceFence {
+		fenceTask = ""
+	}
 	retained := false
 	var request approvals.Approval
 	var decision *store.ExecutionEvent
-	err := dataAccess.WithTaskDataAccess(ctx, namespace, taskName, func(txCtx context.Context) error {
+	err := dataAccess.WithTaskDataAccess(ctx, namespace, fenceTask, func(txCtx context.Context) error {
 		listed, err := approvals.ListEvents(txCtx, eventStore, namespace, taskName)
 		if err != nil {
 			return err

@@ -427,7 +427,7 @@ func (d *ACPDispatcher) projectMCPApprovalExecution(
 	if effect.Identity != identity || effect.RequestDigest != expected.Binding.RequestDigest {
 		return store.ErrConflict
 	}
-	_, err = withRetainedMCPApproval(ctx, d.EventStore, task.Namespace, task.Name, expected,
+	_, err = withRetainedMCPApproval(ctx, d.EventStore, task.Namespace, task.Name, mcpApprovalNamespaceFence, expected,
 		func(txCtx context.Context, approval approvals.Approval, listed []store.ExecutionEvent) (*store.ExecutionEvent, error) {
 			outcome, reason, result := mcpApprovalRecoveredOutcome(effect, approval.ID)
 			if mcpApprovalProjectionCurrent(approval, outcome, reason) {
