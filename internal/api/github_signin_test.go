@@ -279,6 +279,22 @@ func TestGitHubSignInNeedsAnAgentHostProvider(t *testing.T) {
 	}
 }
 
+// While two providers serve agent hosts, the controller provisions none, so
+// sign-in refuses rather than promise a host.
+func TestGitHubSignInRefusesWhileProvidersConflict(t *testing.T) {
+	h := newSignInHarness(t)
+	other := acceptedTestProvider()
+	other.Name, other.UID = "github-second", "provider-uid-2"
+	other.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	if err := h.client.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice"}); status != http.StatusServiceUnavailable || session.Token != "" {
+		t.Fatalf("sign-in while providers conflict: %d, want 503 and no session", status)
+	}
+}
+
 // Two sign-ins racing to create the person's Connection both finish: the
 // loser goes on with the winner's.
 func TestGitHubSignInRacingTheConnectionCreate(t *testing.T) {

@@ -124,6 +124,22 @@ func (h *Handlers) signInProvider(ctx context.Context) (*corev1alpha1.ConnectorP
 	if provider.Spec.AgentHost == nil {
 		return nil, fiber.NewError(fiber.StatusServiceUnavailable, "the GitHub sign-in provider does not serve agent hosts")
 	}
+	// The controller provisions no host while two providers in a namespace
+	// serve agent hosts, so sign-in would promise one that never comes.
+	providers := &corev1alpha1.ConnectorProviderList{}
+	if err := h.providerReader().List(ctx, providers, client.InNamespace(provider.Namespace)); err != nil {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read connector providers")
+	}
+	serving := 0
+	for i := range providers.Items {
+		if providers.Items[i].Spec.AgentHost != nil && providers.Items[i].DeletionTimestamp.IsZero() {
+			serving++
+		}
+	}
+	if serving > 1 {
+		return nil, fiber.NewError(fiber.StatusServiceUnavailable,
+			"more than one ConnectorProvider in this namespace serves agent hosts; sign-in waits until only one does")
+	}
 	return provider, nil
 }
 
