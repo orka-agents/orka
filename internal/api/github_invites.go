@@ -151,6 +151,12 @@ func (h *Handlers) CreateInvite(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// The app's credentials are read before GitHub issues anything, so a
+	// refusal can always revoke what it issued.
+	created, err := h.providerOAuthConfig(ctx, provider)
+	if err != nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "the GitHub App is not configured")
+	}
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not create the invite")
@@ -168,7 +174,7 @@ func (h *Handlers) CreateInvite(c fiber.Ctx) error {
 	}
 	expires := cfg.now().Add(time.Duration(max(code.ExpiresIn, 60)) * time.Second).UTC()
 	response := h.invites.started(id, code, expires, provider.Spec.AgentHost != nil && cfg.CreateHosts)
-	go h.completeInvite(id, login, provider.DeepCopy(), code, expires)
+	go h.completeInvite(id, login, provider.DeepCopy(), created, code, expires)
 	return c.Status(fiber.StatusCreated).JSON(response)
 }
 
@@ -186,8 +192,10 @@ func (h *Handlers) GetInvite(c fiber.Ctx) error {
 
 // completeInvite polls GitHub until the invited person approves the code or
 // it expires, then makes the sign-in checks and links their account. The
-// provider is the one the invite was created and disclosed for.
-func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.ConnectorProvider, code githubauth.DeviceCode, expires time.Time) {
+// provider is the one the invite was created and disclosed for, and created
+// its app's credentials then.
+func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.ConnectorProvider, created connectors.OAuthProviderConfig,
+	code githubauth.DeviceCode, expires time.Time) {
 	waiting, stopWaiting := context.WithDeadline(context.Background(), expires)
 	defer stopWaiting()
 	cfg := h.githubSignIn
@@ -202,10 +210,11 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), inviteCompletionTimeout)
 	defer cancel()
-	oauth, err := h.providerOAuthConfig(ctx, provider)
-	if err != nil {
-		h.invites.finish(id, InviteRefused, "the GitHub App is not configured", "")
-		return
+	// The app's credentials are read again, as a rotated secret would be;
+	// when they cannot be, the ones read at creation revoke the token.
+	oauth, oauthErr := h.providerOAuthConfig(ctx, provider)
+	if oauthErr != nil {
+		oauth = created
 	}
 	// Tokens obtained for someone other than the invited login, or from a
 	// person who may not sign in, are revoked with the app's credentials.
@@ -218,6 +227,10 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 			}
 		}
 		h.invites.finish(id, InviteRefused, message, "")
+	}
+	if oauthErr != nil {
+		refuse("the GitHub App is not configured; the approved token was revoked; invite again", tokens.AccessToken)
+		return
 	}
 	// The person approved what the invite disclosed: a provider replaced or
 	// changed meanwhile, its agent host or scopes included, needs a new

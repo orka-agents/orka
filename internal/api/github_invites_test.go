@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -204,6 +206,25 @@ func TestInviteRefusesAScopeChangeWhilePending(t *testing.T) {
 			provider.Status.Conditions[i].ObservedGeneration = provider.Generation
 		}
 		if err := h.client.Status().Update(context.Background(), provider); err != nil {
+			t.Error(err)
+		}
+	}
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+		t.Fatalf("revoked = %v, want the approved token", revoked)
+	}
+}
+
+// An app Secret that cannot be read after approval still lets the invite
+// revoke what GitHub issued, with the credentials read at creation.
+func TestInviteRevokesWhenTheAppSecretIsGone(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
+	gh.onApprove = func() {
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-oauth", Namespace: connectorTestNamespace}}
+		if err := h.client.Delete(context.Background(), secret); err != nil {
 			t.Error(err)
 		}
 	}
