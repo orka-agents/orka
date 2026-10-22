@@ -33,6 +33,10 @@ const (
 // maxPendingInvites bounds the invites a controller polls GitHub for at once.
 const maxPendingInvites = 64
 
+// inviteCompletionTimeout bounds checking and linking an approved invite:
+// the code's expiry ends only the wait for approval.
+const inviteCompletionTimeout = 2 * time.Minute
+
 // InviteResponse is an invite and how it ended. It never carries tokens.
 type InviteResponse struct {
 	ID              string    `json:"id"`
@@ -43,6 +47,9 @@ type InviteResponse struct {
 	VerificationURI string    `json:"verificationURI,omitempty"`
 	ExpiresAt       time.Time `json:"expiresAt"`
 	Connection      string    `json:"connection,omitempty"`
+	// AgentHost says accepting starts an agent host whose code can read the
+	// person's GitHub token, which the person must be told before approving.
+	AgentHost bool `json:"agentHost"`
 }
 
 // githubInvites holds invites in memory: one lasts as long as its device
@@ -138,6 +145,7 @@ func (h *Handlers) CreateInvite(c fiber.Ctx) error {
 		ID: hex.EncodeToString(idBytes), Login: login, State: InvitePending,
 		UserCode: code.UserCode, VerificationURI: code.VerificationURI,
 		ExpiresAt: cfg.now().Add(time.Duration(max(code.ExpiresIn, 60)) * time.Second).UTC(),
+		AgentHost: provider.Spec.AgentHost != nil && cfg.CreateHosts,
 	}
 	if err := h.invites.add(invite); err != nil {
 		return fiber.NewError(fiber.StatusTooManyRequests, err.Error())
@@ -162,15 +170,15 @@ func (h *Handlers) GetInvite(c fiber.Ctx) error {
 // completeInvite polls GitHub until the invited person approves the code or
 // it expires, then makes the sign-in checks and links their account.
 func (h *Handlers) completeInvite(id, login, providerName string, code githubauth.DeviceCode, expires time.Time) {
-	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	defer cancel()
+	waiting, stopWaiting := context.WithDeadline(context.Background(), expires)
+	defer stopWaiting()
 	cfg := h.githubSignIn
-	provider, err := h.loadReadyConnectorProvider(ctx, h.watchNamespace, providerName)
+	provider, err := h.loadReadyConnectorProvider(waiting, h.watchNamespace, providerName)
 	if err != nil {
 		h.invites.finish(id, InviteRefused, "the GitHub provider is no longer ready", "")
 		return
 	}
-	tokens, err := cfg.GitHub.PollDeviceFlow(ctx, provider.Spec.OAuth.ClientID, code)
+	tokens, err := cfg.GitHub.PollDeviceFlow(waiting, provider.Spec.OAuth.ClientID, code)
 	if errors.Is(err, githubauth.ErrDeviceFlowDenied) || errors.Is(err, context.DeadlineExceeded) {
 		h.invites.finish(id, InviteExpired, "the code was not approved in time, or was declined", "")
 		return
@@ -179,6 +187,8 @@ func (h *Handlers) completeInvite(id, login, providerName string, code githubaut
 		h.invites.finish(id, InviteRefused, "GitHub's device flow failed; invite again", "")
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), inviteCompletionTimeout)
+	defer cancel()
 	oauth, err := h.providerOAuthConfig(ctx, provider)
 	if err != nil {
 		h.invites.finish(id, InviteRefused, "the GitHub App is not configured", "")
@@ -198,7 +208,7 @@ func (h *Handlers) completeInvite(id, login, providerName string, code githubaut
 	}
 	user, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, tokens.AccessToken)
 	if err != nil {
-		refuse("the approved GitHub token could not be checked")
+		refuse("the approved GitHub token could not be checked; it was revoked", tokens.AccessToken)
 		return
 	}
 	if !strings.EqualFold(user.Login, login) {

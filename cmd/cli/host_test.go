@@ -181,7 +181,7 @@ func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
 			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{"id": "abc", "login": body["login"], "state": "Pending", "userCode": "ABCD-1234", //nolint:errcheck
-				"verificationURI": "https://github.com/login/device", "expiresAt": time.Now().Add(15 * time.Minute)})
+				"verificationURI": "https://github.com/login/device", "expiresAt": time.Now().Add(15 * time.Minute), "agentHost": true})
 		case r.Method == http.MethodGet && r.URL.Path == agentHostInvitesAPIPath+"/abc":
 			polls++
 			state := "Pending"
@@ -195,7 +195,15 @@ func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
 	}
 	out, err := runHostCLI(t, handler, "host", "invite", "carol", "--timeout", "5s")
 	if err != nil || !strings.Contains(out, "Ask carol to open https://github.com/login/device and enter the code ABCD-1234") ||
-		!strings.Contains(out, "carol accepted") {
+		!strings.Contains(out, "code running there can read their GitHub token") || !strings.Contains(out, "carol accepted") {
 		t.Fatalf("invite: %v %q", err, out)
+	}
+
+	// Waiting less than the invite lasts names where its outcome appears,
+	// and that running the command again starts another invite.
+	polls = -1 << 30
+	_, err = runHostCLI(t, handler, "host", "invite", "carol", "--timeout", "20ms")
+	if err == nil || !strings.Contains(err.Error(), agentHostInvitesAPIPath+"/abc") || !strings.Contains(err.Error(), "creates another invite") {
+		t.Fatalf("stopping early: %v", err)
 	}
 }

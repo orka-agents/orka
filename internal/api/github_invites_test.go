@@ -87,7 +87,7 @@ func (h *connectorTestHarness) inviteOutcome(id string) InviteResponse {
 func TestInviteLinksTheInvitedPerson(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	status, invite := h.invite("Alice")
-	if status != http.StatusCreated || invite.UserCode != "ABCD-1234" || invite.State != InvitePending {
+	if status != http.StatusCreated || invite.UserCode != "ABCD-1234" || invite.State != InvitePending || !invite.AgentHost {
 		t.Fatalf("invite: %d %+v", status, invite)
 	}
 	outcome := h.inviteOutcome(invite.ID)
@@ -122,6 +122,7 @@ func TestInviteRefusesSomeoneElseOrAnOutsider(t *testing.T) {
 		"another account approved the code": {login: "carol", approved: map[string]any{"access_token": "ghu_alice"}, revoked: "ghu_alice"},
 		"the invited person is outside the org": {login: "bob", approved: map[string]any{"access_token": "ghu_bob", "refresh_token": "ghr_bob"},
 			revoked: "ghu_bob_refreshed"},
+		"GitHub cannot check the approved token": {login: "alice", approved: map[string]any{"access_token": "ghu_unknown"}, revoked: "ghu_unknown"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, gh := newInviteHarness(t, test.approved)

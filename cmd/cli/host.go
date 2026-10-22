@@ -225,6 +225,7 @@ type inviteView struct {
 	UserCode        string    `json:"userCode"`
 	VerificationURI string    `json:"verificationURI"`
 	ExpiresAt       time.Time `json:"expiresAt"`
+	AgentHost       bool      `json:"agentHost"`
 }
 
 // invitePollInterval paces waiting for an invite's outcome.
@@ -257,16 +258,26 @@ func newHostInviteCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Ask %s to open %s and enter the code %s before %s.\n", //nolint:errcheck
 				invite.Login, invite.VerificationURI, invite.UserCode, invite.ExpiresAt.Local().Format(time.Kitchen))
+			if invite.AgentHost {
+				fmt.Fprintln(out, "Tell them first: approving starts their Copilot environment on Orka, and code running there can read their GitHub token.") //nolint:errcheck
+			}
+			outcome := agentHostInvitesAPIPath + "/" + url.PathEscape(invite.ID)
+			stopped := fmt.Errorf("stopped waiting; the invite stays open until %s, and GET %s reports its outcome. "+
+				"Running this command again creates another invite with a new code",
+				invite.ExpiresAt.Local().Format(time.Kitchen), outcome)
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			for {
 				select {
 				case <-ctx.Done():
-					return fmt.Errorf("the invite is still pending; check again with the same command later")
+					return stopped
 				case <-time.After(invitePollInterval):
 				}
-				raw, err := c.DoJSON(ctx, http.MethodGet, agentHostInvitesAPIPath+"/"+url.PathEscape(invite.ID), nil, nil)
+				raw, err := c.DoJSON(ctx, http.MethodGet, outcome, nil, nil)
 				if err != nil {
+					if ctx.Err() != nil {
+						return stopped
+					}
 					return err
 				}
 				var current inviteView
