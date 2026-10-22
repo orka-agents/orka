@@ -382,6 +382,10 @@ manifest_json() {
       rewrite_args(map(if startswith("--watch-namespace=") then "--watch-namespace=other" else . end))
     elif $mode == "legacy-controller-flag" then
       rewrite_args(. + ["--harness-v1-endpoint=https://legacy.invalid"])
+    elif $mode == "controller-selector-expressions" then
+      map(if controller then .spec.selector = {matchExpressions: [
+        .spec.selector.matchLabels | to_entries[] | {key, operator: "In", values: [.value]}
+      ]} else . end)
     else error("unknown FAKE_STATIC_MODE: " + $mode)
     end
     | if $grace == "" then .
@@ -478,6 +482,29 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "deploym
     metadata:{name:"orka-controller-manager",namespace:"orka-system"},
     spec:{template:{spec:({containers:[{name:"manager",args:$args}]} +
       (if $grace == "" then {} else {terminationGracePeriodSeconds:($grace | fromjson)} end))}}
+  }'
+  exit 0
+fi
+
+if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "pods" ]]; then
+  [[ $# -eq 8 && "$5" == "-l" && "$7" == "-o" && "$8" == "json" ]] || {
+    echo "unexpected controller Pod query: $*" >&2
+    exit 2
+  }
+  [[ "$(tr ',' '\n' <<<"$6" | sort | paste -sd, -)" == "app.kubernetes.io/name=orka,control-plane=controller-manager" ]] || {
+    echo "controller Pod query used selector $6" >&2
+    exit 2
+  }
+  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "controller-pods" && ! -e "${FAKE_KUBE_STATE}/failed-controller-pods" ]]; then
+    : >"${FAKE_KUBE_STATE}/failed-controller-pods"
+    printf 'fail-controller-pods\n' >>"${FAKE_KUBE_LOG}"
+    exit 62
+  fi
+  jq -n --arg graces "${FAKE_EXISTING_CONTROLLER_POD_GRACES:-}" '{
+    apiVersion:"v1",
+    kind:"List",
+    items:[$graces | select(length > 0) | split(",")[] |
+      {apiVersion:"v1", kind:"Pod", spec:{terminationGracePeriodSeconds:tonumber}}]
   }'
   exit 0
 fi
@@ -1066,6 +1093,7 @@ run_apply_scenario dependency-endpoints
 run_apply_scenario full
 run_apply_scenario rollout
 run_apply_scenario controller-rollout
+run_apply_scenario controller-pods
 run_apply_scenario endpoints
 run_apply_scenario smoke
 run_apply_scenario webhooks
@@ -1134,49 +1162,66 @@ FAKE_KUBE_STATE="${deleted_controller_state}" FAKE_KUBE_LOG="${deleted_controlle
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 assert_converged "${deleted_controller_state}"
 
-# The Recreate controller rollout waits for the old Pod's preStop drain, so the
-# wait covers the longer of the live and applied termination grace periods
-# plus a 3m startup margin, and is never less than 5m. An unset grace period
-# is the Kubernetes default of 30s.
+# The Recreate controller rollout waits for every old Pod's preStop drain, so
+# the wait covers the longest termination grace period among the applied and
+# live Deployments and the existing controller Pods, plus a 3m startup margin,
+# and is never less than 5m. An unset grace period is the Kubernetes default
+# of 30s.
 run_rollout_timeout_scenario() {
-  local name="$1" live_grace="$2" applied_grace="$3" want="$4"
+  local name="$1" live_grace="$2" applied_grace="$3" want="$4" pod_graces="${5:-}"
   local state_dir="${test_root}/state-rollout-timeout-${name}"
   mkdir -p "${state_dir}"
   : >"${state_dir}/apply.log"
   FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${state_dir}/apply.log" FAKE_KUBE_FAIL_MODE="" \
     FAKE_EXISTING_NAMESPACE_MODE="harness-v2" FAKE_EXISTING_CONTROLLER_MODE="static-v2" \
     FAKE_EXISTING_CONTROLLER_GRACE="${live_grace}" FAKE_CONTROLLER_GRACE="${applied_grace}" \
+    FAKE_EXISTING_CONTROLLER_POD_GRACES="${pod_graces}" \
     "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
   assert_converged "${state_dir}" "${want}"
 }
 
 run_rollout_timeout_scenario applied-longer 60 "" 540s
 run_rollout_timeout_scenario live-longer 900 "" 1080s
-run_rollout_timeout_scenario applied-shortened 360 60 540s
+run_rollout_timeout_scenario applied-shortened 360 60 540s 360
+# A retry after a redeploy that lowered the grace period, while the earlier
+# controller Pod is still terminating under its original grace period.
+run_rollout_timeout_scenario terminating-pod-longer 60 60 540s 360
 run_rollout_timeout_scenario above-floor "" 121 301s
 run_rollout_timeout_scenario floor "" 120 300s
 run_rollout_timeout_scenario default-grace "" unset 300s
 
-for invalid_grace in '"6m"' -1 1.5; do
-  invalid_grace_state="${test_root}/state-rollout-timeout-invalid"
-  rm -rf "${invalid_grace_state}"
-  mkdir -p "${invalid_grace_state}"
-  : >"${invalid_grace_state}/apply.log"
-  if invalid_grace_output="$(
-    FAKE_KUBE_STATE="${invalid_grace_state}" FAKE_KUBE_LOG="${invalid_grace_state}/apply.log" \
-      FAKE_KUBE_FAIL_MODE="" FAKE_EXISTING_NAMESPACE_MODE="harness-v2" \
-      FAKE_EXISTING_CONTROLLER_MODE="static-v2" FAKE_CONTROLLER_GRACE="${invalid_grace}" \
+expect_rollout_preflight_failure() {
+  local name="$1" message="$2"
+  shift 2
+  local state_dir="${test_root}/state-rollout-timeout-invalid-${name}"
+  local output
+  mkdir -p "${state_dir}"
+  : >"${state_dir}/apply.log"
+  if output="$(
+    env FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${state_dir}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+      FAKE_EXISTING_NAMESPACE_MODE="harness-v2" FAKE_EXISTING_CONTROLLER_MODE="static-v2" "$@" \
       "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1
   )"; then
-    echo "controller grace period ${invalid_grace} unexpectedly passed the rollout preflight" >&2
+    echo "${name} unexpectedly passed the controller rollout preflight" >&2
     exit 1
   fi
-  grep -F 'terminationGracePeriodSeconds must be a non-negative integer' <<<"${invalid_grace_output}" >/dev/null
-  if [[ -s "${invalid_grace_state}/apply.log" ]]; then
-    echo "controller grace period ${invalid_grace} caused writes before the rollout preflight failed" >&2
+  grep -F "${message}" <<<"${output}" >/dev/null || {
+    echo "${name} failed without '${message}': ${output}" >&2
+    exit 1
+  }
+  if [[ -s "${state_dir}/apply.log" ]]; then
+    echo "${name} caused writes before the controller rollout preflight failed" >&2
     exit 1
   fi
-done
+}
+
+invalid_grace_message='terminationGracePeriodSeconds must be a non-negative integer'
+expect_rollout_preflight_failure grace-string "${invalid_grace_message}" FAKE_CONTROLLER_GRACE='"6m"'
+expect_rollout_preflight_failure grace-negative "${invalid_grace_message}" FAKE_CONTROLLER_GRACE=-1
+expect_rollout_preflight_failure grace-fraction "${invalid_grace_message}" FAKE_CONTROLLER_GRACE=1.5
+expect_rollout_preflight_failure pod-grace-negative "${invalid_grace_message}" FAKE_EXISTING_CONTROLLER_POD_GRACES=-1
+expect_rollout_preflight_failure selector-expressions 'must select its Pods with matchLabels' \
+  FAKE_STATIC_MODE=controller-selector-expressions
 
 newline_key_state="${test_root}/state-base64-newline-key"
 mkdir -p "${newline_key_state}"
