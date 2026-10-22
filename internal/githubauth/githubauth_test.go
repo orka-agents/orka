@@ -68,6 +68,14 @@ func TestRequireMemberChecksOrgsAndTeamsAndFailsClosed(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"state": "active"})
 		case "/user/memberships/orgs/broken":
 			w.WriteHeader(http.StatusInternalServerError)
+		case "/user/memberships/orgs/throttled":
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.WriteHeader(http.StatusForbidden)
+		case "/user/memberships/orgs/slow-down":
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+		case "/user/memberships/orgs/forbidden":
+			w.WriteHeader(http.StatusForbidden)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -94,9 +102,16 @@ func TestRequireMemberChecksOrgsAndTeamsAndFailsClosed(t *testing.T) {
 			t.Fatalf("%s: err = %v, want ErrNotMember", name, err)
 		}
 	}
-	// GitHub failing is no membership too, but not a verdict to act on.
-	if err := member("ghu_alice", Allowed{Orgs: []string{"broken"}}); err == nil || errors.Is(err, ErrNotMember) {
-		t.Fatalf("GitHub failing: err = %v, want a retryable error", err)
+	// GitHub failing or rate-limiting is no membership too, but not a
+	// verdict to act on.
+	for _, org := range []string{"broken", "throttled", "slow-down"} {
+		if err := member("ghu_alice", Allowed{Orgs: []string{org}}); err == nil || errors.Is(err, ErrNotMember) {
+			t.Fatalf("%s: err = %v, want a retryable error", org, err)
+		}
+	}
+	// A plain 403 is GitHub refusing: no membership.
+	if err := member("ghu_alice", Allowed{Orgs: []string{"forbidden"}}); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("forbidden: err = %v, want ErrNotMember", err)
 	}
 	if err := member("ghu_revoked", Allowed{Orgs: []string{"acme"}}); err == nil {
 		t.Fatalf("a token GitHub refuses: err = %v", err)

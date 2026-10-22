@@ -124,7 +124,11 @@ func newLoginCmd() *cobra.Command {
 			if !session.AgentHost {
 				return nil
 			}
-			return waitForAgentHost(ctx, cmd, client.NewWithNamespace(server, session.Token, session.Namespace))
+			// The new session goes only to its own server: never through a
+			// redirect.
+			hosts := client.NewWithNamespace(server, session.Token, session.Namespace)
+			hosts.HTTPClient = noRedirectClient
+			return waitForAgentHost(ctx, cmd, hosts)
 		},
 	}
 	cmd.Flags().BoolVar(&noHost, "no-host", false, "Link GitHub without starting a Copilot environment on Orka")

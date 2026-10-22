@@ -200,6 +200,22 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 	if _, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--no-host", "--timeout", "10s"); err == nil {
 		t.Fatal("a redirected sign-in must fail")
 	}
+	// After a sign-in that succeeds, waiting for the host never follows a
+	// redirect with the new session either.
+	signedIn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/config":
+			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": true}}) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_new", "expiresAt": time.Now().Add(time.Hour), "login": "alice", "agentHost": true}) //nolint:errcheck
+		default:
+			http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+		}
+	}))
+	defer signedIn.Close()
+	_, _ = runLoginCLI(t, "login", "--server", signedIn.URL, "--no-open", "--timeout", "2s")
 	later := time.Now().Add(10 * time.Hour)
 	if err := saveConfig(orkaConfig{Server: orka.URL, Token: "orka_s_session", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)

@@ -98,7 +98,7 @@ func (c Client) CheckToken(ctx context.Context, clientID, clientSecret, token st
 			ClientID string `json:"client_id"`
 		} `json:"app"`
 	}
-	status, err := c.do(request, &checked)
+	status, _, err := c.do(request, &checked)
 	if err != nil {
 		return User{}, err
 	}
@@ -128,7 +128,7 @@ func (c Client) DeleteToken(ctx context.Context, clientID, clientSecret, token s
 	request.SetBasicAuth(clientID, clientSecret)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Content-Type", "application/json")
-	status, err := c.do(request, nil)
+	status, _, err := c.do(request, nil)
 	if err != nil {
 		return err
 	}
@@ -219,9 +219,14 @@ func (c Client) active(ctx context.Context, token, path string) (bool, error) {
 	var membership struct {
 		State string `json:"state"`
 	}
-	status, err := c.do(request, &membership)
+	status, header, err := c.do(request, &membership)
 	if err != nil {
 		return false, err
+	}
+	// GitHub answers rate limits with 403 or 429: that is no verdict on
+	// membership, and must not end a member's access.
+	if status == http.StatusTooManyRequests || header.Get("Retry-After") != "" || header.Get("X-RateLimit-Remaining") == "0" {
+		return false, fmt.Errorf("GitHub rate-limited the membership check: HTTP %d", status)
 	}
 	if status == http.StatusNotFound || status == http.StatusForbidden {
 		return false, nil
@@ -261,7 +266,7 @@ func (c Client) StartDeviceFlow(ctx context.Context, clientID string) (DeviceCod
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	var code DeviceCode
-	status, err := c.do(request, &code)
+	status, _, err := c.do(request, &code)
 	if err != nil {
 		return DeviceCode{}, err
 	}
@@ -306,7 +311,7 @@ func (c Client) PollDeviceFlow(ctx context.Context, clientID string, code Device
 			Error    string `json:"error"`
 			Interval int    `json:"interval"`
 		}
-		status, err := c.do(request, &answer)
+		status, _, err := c.do(request, &answer)
 		if err != nil {
 			return Tokens{}, err
 		}
@@ -324,23 +329,23 @@ func (c Client) PollDeviceFlow(ctx context.Context, clientID string, code Device
 	}
 }
 
-func (c Client) do(request *http.Request, into any) (int, error) {
+func (c Client) do(request *http.Request, into any) (int, http.Header, error) {
 	response, err := c.http().Do(request)
 	if err != nil {
-		return 0, fmt.Errorf("call GitHub: %w", err)
+		return 0, nil, fmt.Errorf("call GitHub: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes))
 	if err != nil {
-		return 0, fmt.Errorf("read GitHub's answer: %w", err)
+		return 0, response.Header, fmt.Errorf("read GitHub's answer: %w", err)
 	}
 	if into != nil && len(raw) > 0 && response.StatusCode < 300 {
 		if err := json.Unmarshal(raw, into); err != nil {
-			return response.StatusCode, fmt.Errorf("decode GitHub's answer: %w", err)
+			return response.StatusCode, response.Header, fmt.Errorf("decode GitHub's answer: %w", err)
 		}
 	} else if into != nil && len(raw) > 0 {
 		// Device-flow errors arrive as JSON with status 200 or 4xx.
 		_ = json.Unmarshal(raw, into)
 	}
-	return response.StatusCode, nil
+	return response.StatusCode, response.Header, nil
 }
