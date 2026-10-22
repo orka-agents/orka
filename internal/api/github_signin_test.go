@@ -101,7 +101,7 @@ func (f fakeSignInCredentials) HostCredential(context.Context, string, string, t
 	if f.token == "" {
 		return credential.HostCredential{}, credential.ErrHostLinkUnavailable
 	}
-	return credential.HostCredential{AccessToken: f.token}, nil
+	return credential.HostCredential{AccessToken: f.token, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
 func newSignInHarness(t *testing.T) *connectorTestHarness {
@@ -255,6 +255,27 @@ func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
 	}
 	if connection.Status.GrantSequence == grant {
 		t.Fatal("a sign-in over a link holding another account must replace its grant")
+	}
+}
+
+// Sign-in runs only through a provider that serves agent hosts: sessions
+// renew from the host link.
+func TestGitHubSignInNeedsAnAgentHostProvider(t *testing.T) {
+	h := newSignInHarness(t)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.AgentHost = nil
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice"}); status != http.StatusServiceUnavailable || session.Token != "" {
+		t.Fatalf("sign-in through a provider without hosts: %d, want 503 and no session", status)
+	}
+	if resp, _ := h.do(http.MethodGet, "/api/v1/auth/config", nil); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("auth config = %d, want 503", resp.StatusCode)
 	}
 }
 

@@ -454,7 +454,21 @@ func saveConfig(cfg orkaConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(path, data, 0o600)
+	// A private temporary file renamed over the config: a concurrent reader
+	// sees the old config or the new one, never a partial one.
+	file, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	if err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("save config: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return os.Rename(file.Name(), path)
 }
 
 // maskToken shows only the first 4 chars + *** for security.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,6 +30,14 @@ const agentHostPhaseFailed = "Failed"
 // agentHostReasonConnectionUnavailable is a host's reason while its link is
 // gone; linking again clears it.
 const agentHostReasonConnectionUnavailable = "ConnectionUnavailable"
+
+// A sign-in that just succeeded supersedes these reasons on a host kept from
+// before: its account is a member again, and its link holds a token that
+// expires. The host recovers at its next reconcile.
+const (
+	agentHostReasonGitHubMembershipEnded   = "GitHubMembershipEnded"
+	agentHostReasonGitHubTokenNeverExpires = "GitHubTokenNeverExpires"
+)
 
 // agentHostReadyPollInterval paces waiting for a host after linking.
 var agentHostReadyPollInterval = 2 * time.Second
@@ -178,7 +187,9 @@ func printAgentHost(out io.Writer, host agentHostView) {
 
 // waitForAgentHost waits until the person's host is ready after linking a
 // provider that serves agent hosts, and says how the Copilot app lists it.
-func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client) error {
+// waitForAgentHost waits for the caller's host to be ready. A Failed host is
+// waited on only for ConnectionUnavailable or one of the stale reasons.
+func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, stale ...string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "Waiting for your agent host...") //nolint:errcheck
 	for {
@@ -191,7 +202,8 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client)
 			return nil
 		// A host kept from an earlier link still says its Connection was
 		// unavailable until the controller sees the new link.
-		case err == nil && host.Phase == agentHostPhaseFailed && host.Reason != agentHostReasonConnectionUnavailable:
+		case err == nil && host.Phase == agentHostPhaseFailed && host.Reason != agentHostReasonConnectionUnavailable &&
+			!slices.Contains(stale, host.Reason):
 			return fmt.Errorf("your agent host %s failed: %s: %s", host.Name, host.Reason, host.Message)
 		case err != nil && !strings.Contains(err.Error(), "HTTP 404"):
 			// The host is created moments after the link; until then the

@@ -224,7 +224,8 @@ without a host.
   to localhost.
 - Signing in again keeps a link that still works, and Orka revokes the new GitHub token. A
   token that GitHub gave no expiry is held for at most 8 hours; without user-token expiration
-  on the app, the link then ends and the person signs in again.
+  on the app, the link then ends and the person signs in again. A person keeps at most 10
+  sessions; signing in beyond that ends their oldest.
 - A session reaches only the person's own links, host and connection routes. Every other API
   route still needs OIDC or Kubernetes credentials, and sessions cannot mint AHP tokens yet.
 - Someone who leaves the allowed orgs cannot renew, so their access ends within 12 hours. Their
@@ -344,6 +345,7 @@ because a pending or running workflow can be lost to suspension.
 | `HostNamespaceChanged` | The controller's `--agent-host-namespace` changed after the host was created. Delete and recreate it. |
 | `ConnectionUnavailable` | The host's Connection is gone, unlinked or needs a new consent: linking again restarts the host. Or its provider no longer serves agent hosts: an operator restores the provider's `agentHost`, then the person links again. |
 | `GitHubMembershipEnded` | The host's GitHub account is no longer an active member of an org or team allowed to sign in. Its Pod and token copy are gone and its volume is kept; it runs again once the account is a member and signs in. |
+| `GitHubTokenNeverExpires` | With GitHub sign-in on, the host's link holds a token that never expires, so membership would never be checked again. Turn on user-token expiration in the GitHub App, then link again or sign in. |
 | `GitHubIdentityChanged` | The Connection now links a different GitHub account than the one the host's volume belongs to. Link the original account, or delete the AgentHost. |
 
 A host that fails for a missing template or token has its Pod stopped and keeps its
