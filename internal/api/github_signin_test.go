@@ -295,6 +295,36 @@ func TestGitHubSignInRefusesWhileProvidersConflict(t *testing.T) {
 	}
 }
 
+// A sign-in that fails before anything is stored revokes the token it
+// obtained, since nothing else holds it.
+func TestGitHubSignInRevokesWhatItCouldNotStore(t *testing.T) {
+	h := newSignInHarness(t)
+	revoked := &revocations{}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: fakeGitHub(t, revoked).URL}
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	leaving := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connectorTestNamespace, Finalizers: []string{"orka.ai/test-hold"}},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject:     corev1alpha1.ConnectionSubject{Issuer: githubauth.Issuer, Subject: signInTestUserID},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+			Mode:        corev1alpha1.ConnectionModeReadOnly,
+		},
+	}
+	if err := h.client.Create(context.Background(), leaving); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), leaving); err != nil {
+		t.Fatal(err)
+	}
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800}); status != http.StatusConflict {
+		t.Fatalf("sign-in over a Connection being deleted: %d, want 409", status)
+	}
+	if got := revoked.list(); len(got) != 1 || got[0] != "ghu_alice_refreshed" {
+		t.Fatalf("revoked = %v, want the refreshed token nothing stored", got)
+	}
+}
+
 // Two sign-ins racing to create the person's Connection both finish: the
 // loser goes on with the winner's.
 func TestGitHubSignInRacingTheConnectionCreate(t *testing.T) {
