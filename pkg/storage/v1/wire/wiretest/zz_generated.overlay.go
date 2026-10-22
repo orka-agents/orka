@@ -43,10 +43,30 @@ func (overlay stateOverlay) DeletePlan(ctx context.Context, namespace string, ta
 	return overlay.client.DeletePlan(ctx, namespace, taskName)
 }
 
+func (overlay stateOverlay) DeleteResult(ctx context.Context, namespace string, taskName string) error {
+	return overlay.client.DeleteResult(ctx, namespace, taskName)
+}
+
 func (overlay stateOverlay) GetPlan(ctx context.Context, namespace string, taskName string) (*storagev1.PlanState, error) {
 	return overlay.client.GetPlan(ctx, namespace, taskName)
 }
 
+func (overlay stateOverlay) GetPromptResultReceipt(ctx context.Context, attemptID string) (*storagev1.PromptResultReceipt, error) {
+	return overlay.client.GetPromptResultReceipt(ctx, attemptID)
+}
+
+func (overlay stateOverlay) GetResult(ctx context.Context, namespace string, taskName string) ([]byte, error) {
+	return overlay.client.GetResult(ctx, namespace, taskName)
+}
+
 func (overlay stateOverlay) SavePlan(ctx context.Context, namespace string, taskName string, plan *storagev1.PlanState) error {
 	return overlay.client.SavePlan(ctx, namespace, taskName, plan)
+}
+
+func (overlay stateOverlay) SavePromptResultReceipt(ctx context.Context, receipt storagev1.PromptResultReceipt) error {
+	return overlay.client.SavePromptResultReceipt(ctx, receipt)
+}
+
+func (overlay stateOverlay) SaveResult(ctx context.Context, namespace string, taskName string, data []byte) error {
+	return overlay.client.SaveResult(ctx, namespace, taskName, data)
 }

@@ -306,7 +306,8 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"Describe", "HealthCheck", "SendMessage", "GetMessages", "DeleteTaskMessages",
-		"DeleteParentMessages", "SavePlan", "GetPlan", "DeletePlan"} {
+		"DeleteParentMessages", "SavePlan", "GetPlan", "DeletePlan", "SaveResult", "GetResult", "DeleteResult",
+		"SavePromptResultReceipt", "GetPromptResultReceipt", "SaveArtifact", "GetArtifact", "ListArtifacts", "DeleteArtifacts"} {
 		if !methods[name] {
 			t.Errorf("method %s has no RPC", name)
 		}
@@ -315,9 +316,89 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 	for _, rec := range m.records {
 		records[rec.name] = true
 	}
-	for _, name := range []string{"Message", "PlanState", "ProviderInfo", "ProviderLimits", "WriteEnvelope", "ControllerEpochFence"} {
+	for _, name := range []string{"Message", "PlanState", "ProviderInfo", "ProviderLimits", "WriteEnvelope", "ControllerEpochFence",
+		"PromptResultReceipt", "ArtifactOwner", "ArtifactKey", "ArtifactMetadata", "SaveArtifactRequest"} {
 		if !records[name] {
 			t.Errorf("record %s is not mapped", name)
 		}
 	}
+}
+
+func methodProto(t *testing.T, protos map[string]*descriptorpb.FileDescriptorProto, file, name string) *descriptorpb.MethodDescriptorProto {
+	t.Helper()
+	for _, method := range protos["orka/storage/v1/"+file].GetService()[0].GetMethod() {
+		if method.GetName() == name {
+			return method
+		}
+	}
+	t.Fatalf("no RPC %s in %s", name, file)
+	return nil
+}
+
+func field(t *testing.T, message *descriptorpb.DescriptorProto, name string) *descriptorpb.FieldDescriptorProto {
+	t.Helper()
+	for _, candidate := range message.GetField() {
+		if candidate.GetName() == name {
+			return candidate
+		}
+	}
+	t.Fatalf("no field %s in %s", name, message.GetName())
+	return nil
+}
+
+func setBlob(field *descriptorpb.FieldDescriptorProto, blob bool) {
+	if field.Options == nil {
+		field.Options = &descriptorpb.FieldOptions{}
+	}
+	proto.SetExtension(field.Options, storagepb.E_Blob, blob)
+}
+
+// A streaming RPC streams exactly one blob in its direction, and the stream
+// direction matches its kind.
+func TestGenerationFailsOnInconsistentStreams(t *testing.T) {
+	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
+		// A unary RPC with a blob.
+		setBlob(field(t, message(t, protos, "messages.proto", "Message"), "content"), true)
+		// A streaming read without its blob.
+		setBlob(field(t, message(t, protos, "results.proto", "GetResultResponse"), "data"), false)
+		// A streaming write declared as a read.
+		proto.SetExtension(methodProto(t, protos, "artifacts.proto", "SaveArtifact").GetOptions(), storagepb.E_Kind,
+			storagepb.MethodKind_METHOD_KIND_READ)
+		// A stream in both directions.
+		methodProto(t, protos, "results.proto", "GetPromptResultReceipt").ClientStreaming = new(true)
+	})
+	expectProblem(t, testContractDir, files,
+		"blob field orka.storage.v1.Message.content must be a singular bytes field",
+		"orka.storage.v1.Results.GetResult has 0 blob fields in its request and 0 in its response",
+		"orka.storage.v1.Artifacts.SaveArtifact streams its request, so it must be a write",
+		"orka.storage.v1.Results.GetPromptResultReceipt streams in both directions")
+}
+
+// A blob field must be the blob of a streaming RPC.
+func TestGenerationFailsOnABlobOutsideAStream(t *testing.T) {
+	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
+		setBlob(field(t, message(t, protos, "common.proto", "WriteEnvelope"), "request_digest"), true)
+	})
+	expectProblem(t, testContractDir, files,
+		"blob field orka.storage.v1.WriteEnvelope.request_digest is not the blob of a streaming RPC")
+}
+
+// SaveArtifact takes the record named SaveArtifactRequest, whose message is
+// the RPC's request; renaming the record breaks the pairing.
+func TestGenerationMapsAnInlineRecordToTheRequest(t *testing.T) {
+	m := realModel(t)
+	var inline *rpcMethod
+	for _, svc := range m.services {
+		for _, method := range svc.methods {
+			if method.name == "SaveArtifact" {
+				inline = method
+			}
+		}
+	}
+	if inline == nil || inline.inline == nil || inline.inline.name != "SaveArtifactRequest" || inline.stream != streamUpload {
+		t.Fatalf("SaveArtifact does not map its request record inline: %+v", inline)
+	}
+	contract := editedContract(t, "SaveArtifact(ctx context.Context, request SaveArtifactRequest) error",
+		"SaveArtifact(ctx context.Context, request SaveArtifactRequest, overwrite bool) error")
+	expectProblem(t, contract, wireFiles(), "parameter request of SaveArtifact has no field in SaveArtifactRequest")
 }

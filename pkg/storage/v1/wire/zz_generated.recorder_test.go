@@ -9,6 +9,10 @@ import (
 
 // wireMethods lists every contract method with a wire RPC.
 var wireMethods = []string{
+	"DeleteArtifacts",
+	"GetArtifact",
+	"ListArtifacts",
+	"SaveArtifact",
 	"Describe",
 	"HealthCheck",
 	"DeleteParentMessages",
@@ -16,8 +20,35 @@ var wireMethods = []string{
 	"GetMessages",
 	"SendMessage",
 	"DeletePlan",
+	"DeleteResult",
 	"GetPlan",
+	"GetPromptResultReceipt",
+	"GetResult",
 	"SavePlan",
+	"SavePromptResultReceipt",
+	"SaveResult",
+}
+
+func (p *recordingProvider) DeleteArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) error {
+	results, err := p.called(ctx, "DeleteArtifacts", owner)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) GetArtifact(ctx context.Context, key storagev1.ArtifactKey) ([]byte, string, error) {
+	results, err := p.called(ctx, "GetArtifact", key)
+	return resultAs[[]byte](results, 0), resultAs[string](results, 1), err
+}
+
+func (p *recordingProvider) ListArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) ([]storagev1.ArtifactMetadata, error) {
+	results, err := p.called(ctx, "ListArtifacts", owner)
+	return resultAs[[]storagev1.ArtifactMetadata](results, 0), err
+}
+
+func (p *recordingProvider) SaveArtifact(ctx context.Context, request storagev1.SaveArtifactRequest) error {
+	results, err := p.called(ctx, "SaveArtifact", request)
+	_ = results
+	return err
 }
 
 func (p *recordingProvider) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
@@ -60,13 +91,41 @@ func (p *recordingProvider) DeletePlan(ctx context.Context, namespace string, ta
 	return err
 }
 
+func (p *recordingProvider) DeleteResult(ctx context.Context, namespace string, taskName string) error {
+	results, err := p.called(ctx, "DeleteResult", namespace, taskName)
+	_ = results
+	return err
+}
+
 func (p *recordingProvider) GetPlan(ctx context.Context, namespace string, taskName string) (*storagev1.PlanState, error) {
 	results, err := p.called(ctx, "GetPlan", namespace, taskName)
 	return resultAs[*storagev1.PlanState](results, 0), err
 }
 
+func (p *recordingProvider) GetPromptResultReceipt(ctx context.Context, attemptID string) (*storagev1.PromptResultReceipt, error) {
+	results, err := p.called(ctx, "GetPromptResultReceipt", attemptID)
+	return resultAs[*storagev1.PromptResultReceipt](results, 0), err
+}
+
+func (p *recordingProvider) GetResult(ctx context.Context, namespace string, taskName string) ([]byte, error) {
+	results, err := p.called(ctx, "GetResult", namespace, taskName)
+	return resultAs[[]byte](results, 0), err
+}
+
 func (p *recordingProvider) SavePlan(ctx context.Context, namespace string, taskName string, plan *storagev1.PlanState) error {
 	results, err := p.called(ctx, "SavePlan", namespace, taskName, plan)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) SavePromptResultReceipt(ctx context.Context, receipt storagev1.PromptResultReceipt) error {
+	results, err := p.called(ctx, "SavePromptResultReceipt", receipt)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) SaveResult(ctx context.Context, namespace string, taskName string, data []byte) error {
+	results, err := p.called(ctx, "SaveResult", namespace, taskName, data)
 	_ = results
 	return err
 }

@@ -19,18 +19,28 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Results_SavePlan_FullMethodName   = "/orka.storage.v1.Results/SavePlan"
-	Results_GetPlan_FullMethodName    = "/orka.storage.v1.Results/GetPlan"
-	Results_DeletePlan_FullMethodName = "/orka.storage.v1.Results/DeletePlan"
+	Results_SaveResult_FullMethodName              = "/orka.storage.v1.Results/SaveResult"
+	Results_GetResult_FullMethodName               = "/orka.storage.v1.Results/GetResult"
+	Results_DeleteResult_FullMethodName            = "/orka.storage.v1.Results/DeleteResult"
+	Results_SavePromptResultReceipt_FullMethodName = "/orka.storage.v1.Results/SavePromptResultReceipt"
+	Results_GetPromptResultReceipt_FullMethodName  = "/orka.storage.v1.Results/GetPromptResultReceipt"
+	Results_SavePlan_FullMethodName                = "/orka.storage.v1.Results/SavePlan"
+	Results_GetPlan_FullMethodName                 = "/orka.storage.v1.Results/GetPlan"
+	Results_DeletePlan_FullMethodName              = "/orka.storage.v1.Results/DeletePlan"
 )
 
 // ResultsClient is the client API for Results service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Results serves autonomous plan state. Task results and prompt result
-// receipts join this service with blob framing.
+// Results serves Task results, prompt result receipts and autonomous plan
+// state. Result and receipt bytes travel with blob framing.
 type ResultsClient interface {
+	SaveResult(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SaveResultRequest, SaveResultResponse], error)
+	GetResult(ctx context.Context, in *GetResultRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetResultResponse], error)
+	DeleteResult(ctx context.Context, in *DeleteResultRequest, opts ...grpc.CallOption) (*DeleteResultResponse, error)
+	SavePromptResultReceipt(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse], error)
+	GetPromptResultReceipt(ctx context.Context, in *GetPromptResultReceiptRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetPromptResultReceiptResponse], error)
 	SavePlan(ctx context.Context, in *SavePlanRequest, opts ...grpc.CallOption) (*SavePlanResponse, error)
 	GetPlan(ctx context.Context, in *GetPlanRequest, opts ...grpc.CallOption) (*GetPlanResponse, error)
 	DeletePlan(ctx context.Context, in *DeletePlanRequest, opts ...grpc.CallOption) (*DeletePlanResponse, error)
@@ -43,6 +53,80 @@ type resultsClient struct {
 func NewResultsClient(cc grpc.ClientConnInterface) ResultsClient {
 	return &resultsClient{cc}
 }
+
+func (c *resultsClient) SaveResult(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SaveResultRequest, SaveResultResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Results_ServiceDesc.Streams[0], Results_SaveResult_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SaveResultRequest, SaveResultResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_SaveResultClient = grpc.ClientStreamingClient[SaveResultRequest, SaveResultResponse]
+
+func (c *resultsClient) GetResult(ctx context.Context, in *GetResultRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetResultResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Results_ServiceDesc.Streams[1], Results_GetResult_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GetResultRequest, GetResultResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_GetResultClient = grpc.ServerStreamingClient[GetResultResponse]
+
+func (c *resultsClient) DeleteResult(ctx context.Context, in *DeleteResultRequest, opts ...grpc.CallOption) (*DeleteResultResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteResultResponse)
+	err := c.cc.Invoke(ctx, Results_DeleteResult_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *resultsClient) SavePromptResultReceipt(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Results_ServiceDesc.Streams[2], Results_SavePromptResultReceipt_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_SavePromptResultReceiptClient = grpc.ClientStreamingClient[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse]
+
+func (c *resultsClient) GetPromptResultReceipt(ctx context.Context, in *GetPromptResultReceiptRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetPromptResultReceiptResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Results_ServiceDesc.Streams[3], Results_GetPromptResultReceipt_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GetPromptResultReceiptRequest, GetPromptResultReceiptResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_GetPromptResultReceiptClient = grpc.ServerStreamingClient[GetPromptResultReceiptResponse]
 
 func (c *resultsClient) SavePlan(ctx context.Context, in *SavePlanRequest, opts ...grpc.CallOption) (*SavePlanResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -78,9 +162,14 @@ func (c *resultsClient) DeletePlan(ctx context.Context, in *DeletePlanRequest, o
 // All implementations must embed UnimplementedResultsServer
 // for forward compatibility.
 //
-// Results serves autonomous plan state. Task results and prompt result
-// receipts join this service with blob framing.
+// Results serves Task results, prompt result receipts and autonomous plan
+// state. Result and receipt bytes travel with blob framing.
 type ResultsServer interface {
+	SaveResult(grpc.ClientStreamingServer[SaveResultRequest, SaveResultResponse]) error
+	GetResult(*GetResultRequest, grpc.ServerStreamingServer[GetResultResponse]) error
+	DeleteResult(context.Context, *DeleteResultRequest) (*DeleteResultResponse, error)
+	SavePromptResultReceipt(grpc.ClientStreamingServer[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse]) error
+	GetPromptResultReceipt(*GetPromptResultReceiptRequest, grpc.ServerStreamingServer[GetPromptResultReceiptResponse]) error
 	SavePlan(context.Context, *SavePlanRequest) (*SavePlanResponse, error)
 	GetPlan(context.Context, *GetPlanRequest) (*GetPlanResponse, error)
 	DeletePlan(context.Context, *DeletePlanRequest) (*DeletePlanResponse, error)
@@ -94,6 +183,21 @@ type ResultsServer interface {
 // pointer dereference when methods are called.
 type UnimplementedResultsServer struct{}
 
+func (UnimplementedResultsServer) SaveResult(grpc.ClientStreamingServer[SaveResultRequest, SaveResultResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method SaveResult not implemented")
+}
+func (UnimplementedResultsServer) GetResult(*GetResultRequest, grpc.ServerStreamingServer[GetResultResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method GetResult not implemented")
+}
+func (UnimplementedResultsServer) DeleteResult(context.Context, *DeleteResultRequest) (*DeleteResultResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteResult not implemented")
+}
+func (UnimplementedResultsServer) SavePromptResultReceipt(grpc.ClientStreamingServer[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method SavePromptResultReceipt not implemented")
+}
+func (UnimplementedResultsServer) GetPromptResultReceipt(*GetPromptResultReceiptRequest, grpc.ServerStreamingServer[GetPromptResultReceiptResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method GetPromptResultReceipt not implemented")
+}
 func (UnimplementedResultsServer) SavePlan(context.Context, *SavePlanRequest) (*SavePlanResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SavePlan not implemented")
 }
@@ -123,6 +227,60 @@ func RegisterResultsServer(s grpc.ServiceRegistrar, srv ResultsServer) {
 	}
 	s.RegisterService(&Results_ServiceDesc, srv)
 }
+
+func _Results_SaveResult_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ResultsServer).SaveResult(&grpc.GenericServerStream[SaveResultRequest, SaveResultResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_SaveResultServer = grpc.ClientStreamingServer[SaveResultRequest, SaveResultResponse]
+
+func _Results_GetResult_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(GetResultRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ResultsServer).GetResult(m, &grpc.GenericServerStream[GetResultRequest, GetResultResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_GetResultServer = grpc.ServerStreamingServer[GetResultResponse]
+
+func _Results_DeleteResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteResultRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ResultsServer).DeleteResult(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Results_DeleteResult_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ResultsServer).DeleteResult(ctx, req.(*DeleteResultRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Results_SavePromptResultReceipt_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ResultsServer).SavePromptResultReceipt(&grpc.GenericServerStream[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_SavePromptResultReceiptServer = grpc.ClientStreamingServer[SavePromptResultReceiptRequest, SavePromptResultReceiptResponse]
+
+func _Results_GetPromptResultReceipt_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(GetPromptResultReceiptRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ResultsServer).GetPromptResultReceipt(m, &grpc.GenericServerStream[GetPromptResultReceiptRequest, GetPromptResultReceiptResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Results_GetPromptResultReceiptServer = grpc.ServerStreamingServer[GetPromptResultReceiptResponse]
 
 func _Results_SavePlan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SavePlanRequest)
@@ -186,6 +344,10 @@ var Results_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*ResultsServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
+			MethodName: "DeleteResult",
+			Handler:    _Results_DeleteResult_Handler,
+		},
+		{
 			MethodName: "SavePlan",
 			Handler:    _Results_SavePlan_Handler,
 		},
@@ -198,6 +360,27 @@ var Results_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Results_DeletePlan_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "SaveResult",
+			Handler:       _Results_SaveResult_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "GetResult",
+			Handler:       _Results_GetResult_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SavePromptResultReceipt",
+			Handler:       _Results_SavePromptResultReceipt_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "GetPromptResultReceipt",
+			Handler:       _Results_GetPromptResultReceipt_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "orka/storage/v1/results.proto",
 }

@@ -11,6 +11,33 @@ import (
 
 var recordCodecs = []recordCodec{
 	{
+		name:     "ArtifactKey",
+		goType:   reflect.TypeFor[storagev1.ArtifactKey](),
+		newWire:  func() proto.Message { return &storagepb.ArtifactKey{} },
+		toWire:   func(value any) (proto.Message, error) { return toWireArtifactKey(value.(storagev1.ArtifactKey)) },
+		fromWire: func(message proto.Message) (any, error) { return fromWireArtifactKey(message.(*storagepb.ArtifactKey)) },
+	},
+	{
+		name:    "ArtifactMetadata",
+		goType:  reflect.TypeFor[storagev1.ArtifactMetadata](),
+		newWire: func() proto.Message { return &storagepb.ArtifactMetadata{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireArtifactMetadata(value.(storagev1.ArtifactMetadata))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireArtifactMetadata(message.(*storagepb.ArtifactMetadata))
+		},
+	},
+	{
+		name:    "ArtifactOwner",
+		goType:  reflect.TypeFor[storagev1.ArtifactOwner](),
+		newWire: func() proto.Message { return &storagepb.ArtifactOwner{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireArtifactOwner(value.(storagev1.ArtifactOwner)) },
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireArtifactOwner(message.(*storagepb.ArtifactOwner))
+		},
+	},
+	{
 		name:    "ControllerEpochFence",
 		goType:  reflect.TypeFor[storagev1.ControllerEpochFence](),
 		newWire: func() proto.Message { return &storagepb.ControllerEpochFence{} },
@@ -36,6 +63,17 @@ var recordCodecs = []recordCodec{
 		fromWire: func(message proto.Message) (any, error) { return fromWirePlanState(message.(*storagepb.PlanState)) },
 	},
 	{
+		name:    "PromptResultReceipt",
+		goType:  reflect.TypeFor[storagev1.PromptResultReceipt](),
+		newWire: func() proto.Message { return &storagepb.PromptResultReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePromptResultReceipt(value.(storagev1.PromptResultReceipt))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWirePromptResultReceipt(message.(*storagepb.PromptResultReceipt))
+		},
+	},
+	{
 		name:    "ProviderInfo",
 		goType:  reflect.TypeFor[storagev1.ProviderInfo](),
 		newWire: func() proto.Message { return &storagepb.ProviderInfo{} },
@@ -51,6 +89,17 @@ var recordCodecs = []recordCodec{
 		toWire:  func(value any) (proto.Message, error) { return toWireProviderLimits(value.(storagev1.ProviderLimits)) },
 		fromWire: func(message proto.Message) (any, error) {
 			return fromWireProviderLimits(message.(*storagepb.ProviderLimits))
+		},
+	},
+	{
+		name:    "SaveArtifactRequest",
+		goType:  reflect.TypeFor[storagev1.SaveArtifactRequest](),
+		newWire: func() proto.Message { return &storagepb.SaveArtifactRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSaveArtifactRequest(value.(storagev1.SaveArtifactRequest))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSaveArtifactRequest(message.(*storagepb.SaveArtifactRequest))
 		},
 	},
 	{

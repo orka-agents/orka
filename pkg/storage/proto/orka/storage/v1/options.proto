@@ -51,4 +51,9 @@ extend google.protobuf.FieldOptions {
   // library marks a response field the server library sets, which has no Go
   // contract counterpart.
   bool library = 51033;
+  // blob marks the bytes field a streaming RPC carries in chunks. A
+  // client-streaming RPC has exactly one blob field in its request, and a
+  // server-streaming RPC exactly one in its response, either at the top level
+  // or inside singular message fields. A unary RPC has none.
+  bool blob = 51034;
 }

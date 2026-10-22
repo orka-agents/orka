@@ -32,8 +32,13 @@ func TestSendEvidenceRefusedDialIsNotSent(t *testing.T) {
 	address := listener.Addr().String()
 	require.NoError(t, listener.Close())
 
-	client := wire.NewClient(dialInsecure(t, address), wire.ClientConfig{})
+	client := wire.NewClient(dialInsecure(t, address), boundConfig)
 	err = client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "nothing was sent: %v", err)
+
+	// A streaming write carries the same evidence.
+	err = client.SaveResult(t.Context(), "n", "t", []byte("result"))
 	require.ErrorIs(t, err, storagev1.ErrUnavailable)
 	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "nothing was sent: %v", err)
 }
@@ -44,7 +49,7 @@ func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 	t.Run("closed connection", func(t *testing.T) {
 		conn := dialInsecure(t, "127.0.0.1:1")
 		require.NoError(t, conn.Close())
-		err := wire.NewClient(conn, wire.ClientConfig{}).SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
+		err := wire.NewClient(conn, boundConfig).SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 		require.ErrorIs(t, err, storagev1.ErrUnavailable)
 		require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "nothing was sent: %v", err)
 	})
@@ -58,7 +63,7 @@ func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 		t.Cleanup(func() { _ = conn.Close() })
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
-		err = wire.NewClient(conn, wire.ClientConfig{}).SavePlan(ctx, "n", "t", &storagev1.PlanState{})
+		err = wire.NewClient(conn, boundConfig).SavePlan(ctx, "n", "t", &storagev1.PlanState{})
 		require.ErrorIs(t, err, storagev1.ErrUnavailable)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "nothing was sent: %v", err)
@@ -71,7 +76,7 @@ func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 			conn, err := grpc.NewClient("passthrough:///127.0.0.1:1", opts...)
 			require.NoError(t, err)
 			require.NoError(t, conn.Close())
-			err = wire.NewClient(conn, wire.ClientConfig{}).SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
+			err = wire.NewClient(conn, boundConfig).SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 			require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown,
 				"without Dial's coverage, a write's transport failure stays an unknown outcome")
 		})
@@ -166,7 +171,7 @@ func testRetriedWriteStaysUnknown(t *testing.T, wrapped bool) {
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
-		client = wire.NewClient(retryingConn{inner: conn}, wire.ClientConfig{})
+		client = wire.NewClient(retryingConn{inner: conn}, boundConfig)
 	} else {
 		conn, err := grpc.NewClient("passthrough:///"+tcp.Addr().String(), append(wire.DialOptions(),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -174,16 +179,12 @@ func testRetriedWriteStaysUnknown(t *testing.T, wrapped bool) {
 			grpc.WithChainUnaryInterceptor(firstThenDetached))...)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
-		client = wire.NewClient(conn, wire.ClientConfig{})
+		client = wire.NewClient(conn, boundConfig)
 	}
 
 	result := make(chan error, 1)
 	go func() { result <- client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{}) }()
-	select {
-	case <-provider.entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the call never reached the provider")
-	}
+	provider.waitEntered(t, "SavePlan")
 	listener.resetAll()
 	select {
 	case err = <-result:
@@ -233,6 +234,8 @@ func TestSendEvidenceResetAfterTheServerReceivedTheCall(t *testing.T) {
 	}{
 		{"SavePlan", func(c *wire.Client) error { return c.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{}) }, true},
 		{"GetPlan", func(c *wire.Client) error { _, err := c.GetPlan(t.Context(), "n", "t"); return err }, false},
+		{"SaveResult", func(c *wire.Client) error { return c.SaveResult(t.Context(), "n", "t", make([]byte, 3<<20)) }, true},
+		{"GetResult", func(c *wire.Client) error { _, err := c.GetResult(t.Context(), "n", "t"); return err }, false},
 	} {
 		t.Run(call.method, func(t *testing.T) {
 			provider := newRecordingProvider()
@@ -247,15 +250,11 @@ func TestSendEvidenceResetAfterTheServerReceivedTheCall(t *testing.T) {
 			server.Register(grpcServer)
 			go func() { _ = grpcServer.Serve(listener) }()
 			t.Cleanup(grpcServer.Stop)
-			client := wire.NewClient(dialInsecure(t, tcp.Addr().String()), wire.ClientConfig{})
+			client := wire.NewClient(dialInsecure(t, tcp.Addr().String()), boundConfig)
 
 			result := make(chan error, 1)
 			go func() { result <- call.invoke(client) }()
-			select {
-			case <-provider.entered:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the call never reached the provider")
-			}
+			provider.waitEntered(t, call.method)
 			listener.resetAll()
 			var err2 error
 			select {
@@ -345,7 +344,7 @@ func TestSendEvidenceGoAwayBeforeProcessingIsRetriedTransparently(t *testing.T) 
 	server.Register(grpcServer)
 	go func() { _ = grpcServer.Serve(listener) }()
 	t.Cleanup(grpcServer.Stop)
-	client := wire.NewClient(dialInsecure(t, tcp.Addr().String()), wire.ClientConfig{})
+	client := wire.NewClient(dialInsecure(t, tcp.Addr().String()), boundConfig)
 
 	require.NoError(t, client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{Summary: "once"}))
 	select {

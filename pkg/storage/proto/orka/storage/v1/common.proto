@@ -15,6 +15,30 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // is an absent field. Nil and empty lists, maps and byte strings are
 // equivalent. A server refuses a request that carries a field it does not know.
 //
+// Datasets
+//
+// Every request names the dataset it expects in the orka-storage-dataset
+// header, and every response names the dataset the server serves. Only
+// Describe and HealthCheck may omit the request header. The server refuses a
+// call that omits it or names another dataset with DATASET_MISMATCH before the
+// provider runs.
+//
+// Blob framing
+//
+// A client-streaming RPC uploads a request whose blob field (marked with the
+// blob option) may be larger than one message. The request headers
+// orka-storage-blob-size (decimal bytes) and orka-storage-blob-sha256
+// (lowercase hex) describe the whole blob. The first message carries every
+// request field, with at most the first 1 MiB of the blob in its blob field;
+// each later message carries only the next part of the blob, at most 1 MiB and
+// never empty, in the same field. The server calls the provider once, after
+// the client ends the stream and the reassembled blob matches its size and
+// digest. A stream that ends early or fails its digest is refused with
+// UNAVAILABLE, and one larger than the server accepts with TOO_LARGE, so a
+// refused upload never reaches the provider. A server-streaming RPC returns
+// its response the same way, with the size and digest in the response
+// headers.
+//
 // Errors
 //
 // Every status the server library or a provider produces carries a
@@ -23,11 +47,11 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // reasons are NOT_FOUND, CONFLICT, FENCED, SESSION_CONFIGURATION_MISMATCH,
 // NOT_READY, DUPLICATE_MISMATCH, GATEWAY_MESSAGE_REPLAY_ONLY, CAPACITY,
 // VALIDATION, GATEWAY_OWNED_SESSION, GATEWAY_SESSION_CLEANUP_PENDING,
-// TASK_JOB_REVOKED, USAGE_SELECTION_TOO_LARGE, TOO_LARGE, UNAVAILABLE,
-// OUTCOME_UNKNOWN, UNAUTHENTICATED, CONTRACT_MISMATCH, UNSUPPORTED_FIELD and
-// PROVIDER_ERROR. VALIDATION, FENCED and CONFLICT carry a client-safe
-// "message" in the ErrorInfo metadata; TOO_LARGE carries "what", "size" and
-// "limit".
+// TASK_JOB_REVOKED, USAGE_SELECTION_TOO_LARGE, DATASET_MISMATCH, TOO_LARGE,
+// UNAVAILABLE, OUTCOME_UNKNOWN, UNAUTHENTICATED, CONTRACT_MISMATCH,
+// UNSUPPORTED_FIELD, OVERLOADED and PROVIDER_ERROR. VALIDATION, FENCED and
+// CONFLICT carry a client-safe "message" in the ErrorInfo metadata; TOO_LARGE
+// carries "what", "size" and "limit".
 
 // NullableTime carries a Go *time.Time. An absent NullableTime is a nil
 // pointer; a present one with no value points to the zero time.

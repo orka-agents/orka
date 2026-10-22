@@ -345,25 +345,59 @@ field, including a `json:"-"` field, has no wire field or the reverse, or when
 a pair of types is outside the mapping table. CI regenerates the code and
 fails on a difference.
 
-The wire currently serves `Describe` and `HealthCheck`, inter-agent messages
-and plan state. The other families stay in process until their RPCs land.
-`wiretest.State` serves a provider over an in-memory loopback with TLS 1.3 and
-bearer authentication, sending each family that has RPCs through the server
-library and the generated client; the SQLite provider passes the whole suite
-that way.
+The wire currently serves `Describe` and `HealthCheck`, inter-agent messages,
+plan state, Task results, prompt result receipts and the whole `artifacts.v1`
+contract. The other state families stay in process until their RPCs land.
+`wiretest.State` serves a state provider over an in-memory loopback with TLS
+1.3 and bearer authentication, sending each family that has RPCs through the
+server library and the generated client, and `wiretest.Artifacts` serves an
+artifacts provider entirely over the wire; the SQLite provider passes both
+suites that way.
 
 - **Call metadata.** Every request names `orka-storage-contract`
   (`orka.storage.v1`) and its `orka-storage-revision`; the server refuses a
-  call without them (`CONTRACT_MISMATCH`). A bound client names its dataset in
-  `orka-storage-dataset`, and responses name the contract, the server's
-  revision and, once a `Describe` has reported it, the serving dataset. A write's `WriteEnvelope` travels as the
+  call without them (`CONTRACT_MISMATCH`). A write's `WriteEnvelope` travels as the
   binary header `orka-storage-envelope-bin`, and the server puts it in the
   provider's context with `WithWriteEnvelope`.
+- **Dataset binding.** Every request names the dataset it expects in
+  `orka-storage-dataset`; only `Describe` and `HealthCheck` may omit it, so a
+  client can learn the dataset before it binds. The server describes its
+  providers before the first call that needs the dataset, and again on every
+  `Describe` and `Server.Refresh`, and refuses a call that omits the header or
+  names another dataset with `DATASET_MISMATCH` (`ErrDatasetMismatch`) before
+  the provider runs. Responses name the contract, the server's revision and
+  the serving dataset. One server serves one dataset: state and artifacts
+  providers that report different datasets, or a provider that reports none,
+  serve nothing until a description finds one dataset again. A gRPC server
+  built with the storage options authenticates every call and refuses any
+  method the protocol does not define.
+- **Blob framing.** Task results, prompt result receipts and artifacts move
+  on streaming RPCs. The request or response field marked with the `blob`
+  option crosses in messages of at most 1 MiB: the first message carries every
+  other field and the first part of the blob, and each later message only the
+  next part. The headers `orka-storage-blob-size` and
+  `orka-storage-blob-sha256` describe the whole blob, so the receiver refuses
+  an oversized blob before reading it. The server calls the provider once,
+  after the client ends the stream and the reassembled blob matches its size
+  and digest; a stream that ends early or fails its digest is refused as
+  `UNAVAILABLE`, one over the server's limit (64 MiB by default, and the
+  provider's `MaxArtifactBytes` for an artifact) as `TOO_LARGE`, and one that
+  breaks the framing as `VALIDATION`, so a refused upload never reaches the
+  provider. The client refuses a blob over its own limit, or an artifact over
+  the provider's described limit, without sending it. Given a second
+  connection (`ClientConfig.Bulk`), the client sends streaming calls over it,
+  so a large transfer has its own HTTP/2 flow-control window.
 - **Unknown fields.** The server refuses a request with a field it does not
-  know anywhere in its message tree (`UNSUPPORTED_FIELD`), so an older server
-  never ignores a newer precondition. The protocol revision starts at 1; a
-  release raises it when it adds RPCs or request fields, and the client calls
-  an RPC only on a server of at least the revision that introduced it.
+  know anywhere in its message tree, including any message of a stream
+  (`UNSUPPORTED_FIELD`), so an older server never ignores a newer
+  precondition. The protocol revision starts at 1; a release raises it when it
+  adds RPCs or request fields, and the client calls an RPC only on a server of
+  at least the revision that introduced it.
+- **Server limits.** A server can cap the calls it runs at once per class
+  (`health` for `Describe` and `HealthCheck`, `control` for other unary calls,
+  `bulk` for streaming calls) and how long each class may run. A call over its
+  class's limit is refused with `OVERLOADED` before the provider runs, which
+  the client returns as `ErrUnavailable`.
 - **Errors.** Every status the server library produces carries a
   `google.rpc.ErrorInfo` in domain `storage.orka.ai` whose reason names the
   contract error. The client rebuilds the typed error, so `errors.Is` and
@@ -384,6 +418,23 @@ that way.
   only its transparent retries of attempts the server never processed remain.
   The client refuses invalid UTF-8, out-of-range times and requests over the
   16 MiB message limit before sending anything.
+
+`pkg/storage/v1/wire/adapterkit` serves a provider as a separately deployed
+adapter. `adapterkit.Serve` requires TLS 1.3 with a serving certificate and
+key from files, reloaded when they change, and at least one client
+authentication method: bearer tokens from a mounted directory (every file named
+`token*` is accepted, so a token rotates by adding a second key, moving clients
+to it and removing the first), an mTLS client CA bundle with the client URI or
+DNS names it allows, or both, in which case a call must pass both. It applies
+per-class concurrency and duration limits, serves `/healthz`, `/readyz` (the
+providers describe a dataset and pass their health checks) and `/metrics` on a
+separate plain HTTP port that carries no stored data, and on shutdown reports
+not ready and lets calls in progress finish. `adapterkit.SettleContext` gives a
+provider a context, bounded by a settle timeout (10 seconds by default), to
+finish a commit it has already sent after the caller's context ends, so the
+outcome the client reports as unknown is settled for its retry or resolution.
+The server library does not yet recompute a write's request digest; that check
+needs the canonical request digest the operation receipts define.
 
 ### Orka policy above the client
 

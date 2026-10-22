@@ -14,6 +14,13 @@
 // per-call send evidence: a call whose request never left the process returns
 // [storagev1.ErrUnavailable], and a write that may have been sent returns
 // [storagev1.ErrOutcomeUnknown].
+//
+// Every call names the dataset it expects, and the Server refuses a call for
+// another dataset before the provider runs. Blobs, such as artifact bytes,
+// move on streaming RPCs in parts of at most [MaxChunkBytes], and the Server
+// calls the provider only with a whole blob that matches its declared size
+// and digest. Package adapterkit serves a provider as a separately deployed
+// adapter with TLS, client authentication, limits and probes.
 package wire
 
 //go:generate go run ./internal/wiregen

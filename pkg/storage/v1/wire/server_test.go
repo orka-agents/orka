@@ -28,7 +28,7 @@ import (
 // every result back, through the generated client and server over real TLS.
 func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 	clientValue := reflect.ValueOf(client)
 	require.NotEmpty(t, wireMethods)
 	for _, name := range wireMethods {
@@ -43,6 +43,14 @@ func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 			var results []any
 			for index := 0; index < methodType.NumOut()-1; index++ {
 				results = append(results, wire.FillValue(methodType.Out(index), fmt.Sprintf("%s.result%d", name, index)).Interface())
+			}
+			if len(results) > 0 {
+				if described, isInfo := results[0].(storagev1.ProviderInfo); isInfo {
+					// A Describe notes the serving dataset, which every later
+					// call must name.
+					described.DatasetID = recordingDataset
+					results[0] = described
+				}
 			}
 			provider.set(name, results, nil)
 
@@ -62,10 +70,11 @@ func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 	}
 }
 
-// contractContext names the contract and revision, as the client does, for a
-// raw stub call.
+// contractContext names the contract, revision and the recording provider's
+// dataset, as a bound client does, for a raw stub call.
 func contractContext(ctx context.Context) context.Context {
-	return metadata.AppendToOutgoingContext(ctx, wire.HeaderContract, storagev1.ContractVersion, wire.HeaderRevision, "1")
+	return metadata.AppendToOutgoingContext(ctx, wire.HeaderContract, storagev1.ContractVersion, wire.HeaderRevision, "1",
+		wire.HeaderDataset, recordingDataset)
 }
 
 func reasonOf(t *testing.T, err error) (codes.Code, string) {
@@ -83,7 +92,7 @@ func reasonOf(t *testing.T, err error) (codes.Code, string) {
 
 func TestServerRefusesCallsWithoutTheContractHeaders(t *testing.T) {
 	provider := newRecordingProvider()
-	plans := storagepb.NewResultsClient(wiretest.Dial(t, provider))
+	plans := storagepb.NewResultsClient(wiretest.Dial(t, serveBoth(provider)))
 
 	var refusedHeader metadata.MD
 	_, err := plans.GetPlan(t.Context(), &storagepb.GetPlanRequest{Namespace: "n", TaskName: "t"}, grpc.Header(&refusedHeader))
@@ -113,7 +122,7 @@ func TestServerRefusesCallsWithoutTheContractHeaders(t *testing.T) {
 // precondition cannot be dropped silently.
 func TestServerRefusesUnknownRequestFields(t *testing.T) {
 	provider := newRecordingProvider()
-	plans := storagepb.NewResultsClient(wiretest.Dial(t, provider))
+	plans := storagepb.NewResultsClient(wiretest.Dial(t, serveBoth(provider)))
 	unknown := []byte{0xf8, 0x07, 0x01} // field 127, varint 1
 
 	request := &storagepb.DeletePlanRequest{Namespace: "n", TaskName: "t"}
@@ -134,7 +143,7 @@ func TestServerRefusesUnknownRequestFields(t *testing.T) {
 
 func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 	envelope := storagev1.WriteEnvelope{
 		DatasetID:     "dataset-1",
 		Fence:         storagev1.ControllerEpochFence{Name: "orka", Epoch: 7, HolderID: "holder"},
@@ -159,7 +168,7 @@ func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 
 func TestProviderFailuresCrossTheWire(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 
 	provider.set("GetPlan", nil, fmt.Errorf("lookup: %w", storagev1.ErrNotFound))
 	_, err := client.GetPlan(t.Context(), "n", "t")
@@ -193,7 +202,7 @@ func TestProviderFailuresCrossTheWire(t *testing.T) {
 
 func TestClientRefusesInvalidRequestsWithoutSending(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 
 	err := client.SendMessage(t.Context(), &storagev1.Message{Namespace: "n", Content: "bad \xff"})
 	require.ErrorIs(t, err, storagev1.ErrValidation)
@@ -226,7 +235,7 @@ func TestClientRefusesInvalidRequestsWithoutSending(t *testing.T) {
 // the client reports an unknown outcome rather than a refused request.
 func TestUnencodableResultsAreProviderErrors(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 
 	provider.set("GetMessages", []any{[]storagev1.Message{{Content: "stored \xff"}}}, nil)
 	_, err := client.GetMessages(t.Context(), "n", "t", "p", true)
@@ -245,7 +254,7 @@ func TestResponsesNameTheContractRevisionAndDataset(t *testing.T) {
 		DatasetID: "dataset-7", DatasetOrigin: storagev1.DatasetOriginNew, SchemaVersion: "1",
 		Durability: storagev1.DurabilityLocalFsync,
 	}}, nil)
-	conn := wiretest.Dial(t, provider)
+	conn := wiretest.Dial(t, serveBoth(provider))
 	info, server, err := wire.NewClient(conn, wire.ClientConfig{}).DescribeServer(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "dataset-7", info.DatasetID)
@@ -254,7 +263,9 @@ func TestResponsesNameTheContractRevisionAndDataset(t *testing.T) {
 	require.NotEmpty(t, server.LibraryVersion)
 
 	var header metadata.MD
-	_, err = storagepb.NewResultsClient(conn).GetPlan(contractContext(t.Context()), &storagepb.GetPlanRequest{}, grpc.Header(&header))
+	bound := metadata.AppendToOutgoingContext(t.Context(), wire.HeaderContract, storagev1.ContractVersion,
+		wire.HeaderRevision, "1", wire.HeaderDataset, "dataset-7")
+	_, err = storagepb.NewResultsClient(conn).GetPlan(bound, &storagepb.GetPlanRequest{}, grpc.Header(&header))
 	require.NoError(t, err)
 	require.Equal(t, []string{storagev1.ContractVersion}, header.Get(wire.HeaderContract))
 	require.Equal(t, []string{"1"}, header.Get(wire.HeaderRevision))
@@ -283,7 +294,7 @@ func TestFailedAuthenticationIsUnavailableAndMarked(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"))
 }
 
-func TestNewServerRequiresAStateProvider(t *testing.T) {
+func TestNewServerRequiresAProvider(t *testing.T) {
 	_, err := wire.NewServer(wire.ServerConfig{})
 	require.Error(t, err)
 }
@@ -292,13 +303,20 @@ func TestNewServerRequiresAStateProvider(t *testing.T) {
 // inject transport faults below TLS use it; wiretest always uses TLS.
 func serveInsecure(t *testing.T, server *wire.Server) *grpc.ClientConn {
 	t.Helper()
+	return dialInsecure(t, serveInsecureWith(t, server))
+}
+
+// serveInsecureWith serves server on a TCP loopback without TLS, with extra
+// gRPC server options, and returns its address.
+func serveInsecureWith(t *testing.T, server *wire.Server, opts ...grpc.ServerOption) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	grpcServer := grpc.NewServer(server.ServerOptions()...)
+	grpcServer := grpc.NewServer(append(server.ServerOptions(), opts...)...)
 	server.Register(grpcServer)
 	go func() { _ = grpcServer.Serve(listener) }()
 	t.Cleanup(grpcServer.Stop)
-	return dialInsecure(t, listener.Addr().String())
+	return listener.Addr().String()
 }
 
 func dialInsecure(t *testing.T, address string) *grpc.ClientConn {

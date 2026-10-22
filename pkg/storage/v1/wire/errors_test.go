@@ -40,6 +40,7 @@ var contractSentinels = map[string]error{
 	"ErrGatewaySessionCleanupPending": storagev1.ErrGatewaySessionCleanupPending,
 	"ErrTaskJobRevoked":               storagev1.ErrTaskJobRevoked,
 	"ErrUsageSelectionTooLarge":       storagev1.ErrUsageSelectionTooLarge,
+	"ErrDatasetMismatch":              storagev1.ErrDatasetMismatch,
 }
 
 // A contract error the codec does not know would reach the client as a

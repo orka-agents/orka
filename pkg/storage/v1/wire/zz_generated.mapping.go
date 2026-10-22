@@ -7,6 +7,77 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
+func toWireArtifactKey(in storagev1.ArtifactKey) (*storagepb.ArtifactKey, error) {
+	out := &storagepb.ArtifactKey{}
+	var err error
+	if out.Owner, err = toWireArtifactOwner(in.Owner); err != nil {
+		return nil, err
+	}
+	out.Filename = in.Filename
+	return out, err
+}
+
+func fromWireArtifactKey(in *storagepb.ArtifactKey) (storagev1.ArtifactKey, error) {
+	var out storagev1.ArtifactKey
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	if out.Owner, err = fromWireArtifactOwner(in.Owner); err != nil {
+		return out, err
+	}
+	out.Filename = in.Filename
+	return out, err
+}
+
+func toWireArtifactMetadata(in storagev1.ArtifactMetadata) (*storagepb.ArtifactMetadata, error) {
+	out := &storagepb.ArtifactMetadata{}
+	var err error
+	out.Filename = in.Filename
+	out.ContentType = in.ContentType
+	out.Size = in.Size
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "ArtifactMetadata.CreatedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireArtifactMetadata(in *storagepb.ArtifactMetadata) (storagev1.ArtifactMetadata, error) {
+	var out storagev1.ArtifactMetadata
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Filename = in.Filename
+	out.ContentType = in.ContentType
+	out.Size = in.Size
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "ArtifactMetadata.CreatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireArtifactOwner(in storagev1.ArtifactOwner) (*storagepb.ArtifactOwner, error) {
+	out := &storagepb.ArtifactOwner{}
+	var err error
+	out.Namespace = in.Namespace
+	out.TaskName = in.TaskName
+	out.TaskUid = in.TaskUID
+	return out, err
+}
+
+func fromWireArtifactOwner(in *storagepb.ArtifactOwner) (storagev1.ArtifactOwner, error) {
+	var out storagev1.ArtifactOwner
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.TaskName = in.TaskName
+	out.TaskUID = in.TaskUid
+	return out, err
+}
+
 func toWireControllerEpochFence(in storagev1.ControllerEpochFence) (*storagepb.ControllerEpochFence, error) {
 	out := &storagepb.ControllerEpochFence{}
 	var err error
@@ -104,6 +175,33 @@ func fromWirePlanState(in *storagepb.PlanState) (storagev1.PlanState, error) {
 	return out, err
 }
 
+func toWirePromptResultReceipt(in storagev1.PromptResultReceipt) (*storagepb.PromptResultReceipt, error) {
+	out := &storagepb.PromptResultReceipt{}
+	var err error
+	out.AttemptId = in.AttemptID
+	out.Namespace = in.Namespace
+	out.TaskName = in.TaskName
+	out.OperationId = in.OperationID
+	out.OperationDigest = in.OperationDigest
+	out.Data = []byte(in.Data)
+	return out, err
+}
+
+func fromWirePromptResultReceipt(in *storagepb.PromptResultReceipt) (storagev1.PromptResultReceipt, error) {
+	var out storagev1.PromptResultReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.AttemptID = in.AttemptId
+	out.Namespace = in.Namespace
+	out.TaskName = in.TaskName
+	out.OperationID = in.OperationId
+	out.OperationDigest = in.OperationDigest
+	out.Data = []byte(in.Data)
+	return out, err
+}
+
 func toWireProviderInfo(in storagev1.ProviderInfo) (*storagepb.ProviderInfo, error) {
 	out := &storagepb.ProviderInfo{}
 	var err error
@@ -169,6 +267,33 @@ func fromWireProviderLimits(in *storagepb.ProviderLimits) (storagev1.ProviderLim
 	var err error
 	out.MaxArtifactBytes = in.MaxArtifactBytes
 	out.MaxValueBytes = in.MaxValueBytes
+	return out, err
+}
+
+func toWireSaveArtifactRequest(in storagev1.SaveArtifactRequest) (*storagepb.SaveArtifactRequest, error) {
+	out := &storagepb.SaveArtifactRequest{}
+	var err error
+	if out.Owner, err = toWireArtifactOwner(in.Owner); err != nil {
+		return nil, err
+	}
+	out.Filename = in.Filename
+	out.ContentType = in.ContentType
+	out.Data = []byte(in.Data)
+	return out, err
+}
+
+func fromWireSaveArtifactRequest(in *storagepb.SaveArtifactRequest) (storagev1.SaveArtifactRequest, error) {
+	var out storagev1.SaveArtifactRequest
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	if out.Owner, err = fromWireArtifactOwner(in.Owner); err != nil {
+		return out, err
+	}
+	out.Filename = in.Filename
+	out.ContentType = in.ContentType
+	out.Data = []byte(in.Data)
 	return out, err
 }
 

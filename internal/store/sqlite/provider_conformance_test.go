@@ -43,3 +43,12 @@ func TestArtifactProviderConformance(t *testing.T) {
 		return openConformanceStore(t)
 	})
 }
+
+// The artifacts suite runs again with every artifacts.v1 method served over
+// the TLS loopback, artifact bytes moving with blob framing on a separate
+// bulk connection.
+func TestArtifactProviderConformanceOverWire(t *testing.T) {
+	storagetest.RunArtifacts(t, func(t *testing.T) storagev1.ArtifactProvider {
+		return wiretest.Artifacts(t, openConformanceStore(t))
+	})
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"sync/atomic"
@@ -44,24 +45,43 @@ func DialOptions() []grpc.DialOption {
 // ClientConfig configures a Client.
 type ClientConfig struct {
 	// Dataset is the dataset ID every call names in its request header. It
-	// is empty only for a client that has not yet bound a dataset.
+	// is empty only for a client that has not yet bound a dataset; such a
+	// client can call only Describe and HealthCheck.
 	Dataset string
 	// ServerRevision is the server's protocol revision, from its Describe.
 	// The client calls an RPC, and sets a request field, only when the
 	// server's revision is at least the one that introduced it. Zero means
 	// this library's ProtocolRevision.
 	ServerRevision int
+	// Bulk, when set, carries the streaming RPCs that move blobs, so a large
+	// transfer has its own HTTP/2 flow-control window and cannot hold up
+	// ordinary calls or health checks. Nil sends them over the main
+	// connection.
+	Bulk grpc.ClientConnInterface
+	// MaxBlobBytes caps the blob the client sends or accepts in one call.
+	// Zero means DefaultMaxBlobBytes.
+	MaxBlobBytes int64
+	// Limits are the provider's limits from its Describe. The client refuses
+	// an artifact larger than Limits.MaxArtifactBytes without sending it.
+	// Zero leaves that check to the server.
+	Limits storagev1.ProviderLimits
 }
 
 // Client implements the orka.storage.v1 methods that have wire RPCs over a
 // gRPC connection. It returns the contract's typed errors.
 type Client struct {
 	stubs clientStubs
-	// conn is the connection when the client calls a *grpc.ClientConn
-	// directly; send evidence is trusted only on such a connection from Dial.
+	// bulk holds the stubs for streaming RPCs.
+	bulk clientStubs
+	// conn and bulkConn are the connections when the client calls a
+	// *grpc.ClientConn directly; send evidence is trusted only on such a
+	// connection from Dial.
 	conn           *grpc.ClientConn
+	bulkConn       *grpc.ClientConn
 	dataset        string
 	serverRevision int
+	maxBlobBytes   int64
+	limits         storagev1.ProviderLimits
 }
 
 // DialConfig configures Dial. It takes no other gRPC options, so no caller
@@ -80,7 +100,7 @@ type DialConfig struct {
 }
 
 // Dial creates a storage client connection to target with DialOptions and
-// config. Its only interceptor marks each call on this connection as covered
+// config. Its only interceptors mark each call on this connection as covered
 // by send evidence, so a write that sent nothing, including one that failed
 // before any attempt, is reported as not sent.
 func Dial(target string, config DialConfig) (*grpc.ClientConn, error) {
@@ -89,7 +109,7 @@ func Dial(target string, config DialConfig) (*grpc.ClientConn, error) {
 	}
 	var own atomic.Pointer[grpc.ClientConn]
 	opts := append(DialOptions(), grpc.WithTransportCredentials(config.TransportCredentials),
-		grpc.WithChainUnaryInterceptor(coverEvidence(&own)))
+		grpc.WithChainUnaryInterceptor(coverEvidence(&own)), grpc.WithChainStreamInterceptor(coverStreamEvidence(&own)))
 	if config.PerRPCCredentials != nil {
 		opts = append(opts, grpc.WithPerRPCCredentials(config.PerRPCCredentials))
 	}
@@ -104,17 +124,30 @@ func Dial(target string, config DialConfig) (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
-// NewClient returns a Client over conn. Only when conn is a connection from
-// Dial, passed directly rather than wrapped, can the client tell a request
-// that was never sent from one that may have been; over any other connection
-// a write's transport failure is an unknown outcome.
+// NewClient returns a Client over conn. Only when conn (and config.Bulk, for
+// streaming RPCs) is a connection from Dial, passed directly rather than
+// wrapped, can the client tell a request that was never sent from one that
+// may have been; over any other connection a write's transport failure is an
+// unknown outcome.
 func NewClient(conn grpc.ClientConnInterface, config ClientConfig) *Client {
 	revision := config.ServerRevision
 	if revision == 0 {
 		revision = ProtocolRevision
 	}
+	maxBlob := config.MaxBlobBytes
+	if maxBlob <= 0 {
+		maxBlob = DefaultMaxBlobBytes
+	}
+	bulk := config.Bulk
+	if bulk == nil {
+		bulk = conn
+	}
 	direct, _ := conn.(*grpc.ClientConn)
-	return &Client{stubs: newClientStubs(conn), conn: direct, dataset: config.Dataset, serverRevision: revision}
+	bulkDirect, _ := bulk.(*grpc.ClientConn)
+	return &Client{
+		stubs: newClientStubs(conn), bulk: newClientStubs(bulk), conn: direct, bulkConn: bulkDirect,
+		dataset: config.Dataset, serverRevision: revision, maxBlobBytes: maxBlob, limits: config.Limits,
+	}
 }
 
 // DescribeServer returns the provider's description together with the
@@ -136,24 +169,27 @@ func (c *Client) DescribeServer(ctx context.Context) (storagev1.ProviderInfo, Se
 	return info, serverInfoFromWire(resp.GetServer()), nil
 }
 
-// invoke checks and sends one call. Nothing is sent when the request is
-// invalid, too large, or names an RPC the server's revision does not have.
-func (c *Client) invoke(ctx context.Context, m *method, req proto.Message, call func(context.Context, ...grpc.CallOption) error) error {
+// prepare checks one call and returns the context to send it with: the
+// request headers, extra headers and the call's send evidence for conn.
+// Nothing is sent when the request is invalid, larger than limit, or names an
+// RPC the server's revision does not have.
+func (c *Client) prepare(ctx context.Context, m *method, req proto.Message, conn *grpc.ClientConn, limit int,
+	extra ...string) (context.Context, *sendEvidence, error) {
 	if err := ctx.Err(); err != nil {
 		// gRPC starts no attempt for a call whose context is already done.
-		return fmt.Errorf("%w: %s was not sent: %w", storagev1.ErrUnavailable, m.name, err)
+		return nil, nil, fmt.Errorf("%w: %s was not sent: %w", storagev1.ErrUnavailable, m.name, err)
 	}
 	if m.since > c.serverRevision {
-		return markedError{
+		return nil, nil, markedError{
 			err:    storagev1.ValidationErrorf("storage server protocol revision %d does not serve %s", c.serverRevision, m.name),
 			marker: ErrIncompatible,
 		}
 	}
 	if field, invalid := firstInvalidString(req.ProtoReflect()); invalid {
-		return storagev1.ValidationErrorf("%s request field %s is not valid UTF-8", m.name, field)
+		return nil, nil, storagev1.ValidationErrorf("%s request field %s is not valid UTF-8", m.name, field)
 	}
-	if size := proto.Size(req); size > MaxMessageBytes {
-		return storagev1.TooLargeError{What: m.name + " request", Size: int64(size), Limit: MaxMessageBytes}
+	if size := proto.Size(req); size > limit {
+		return nil, nil, storagev1.TooLargeError{What: m.name + " request", Size: int64(size), Limit: int64(limit)}
 	}
 	pairs := []string{
 		HeaderContract, storagev1.ContractVersion,
@@ -165,20 +201,113 @@ func (c *Client) invoke(ctx context.Context, m *method, req proto.Message, call 
 	if envelope, ok := storagev1.WriteEnvelopeFrom(ctx); ok && m.kind == KindWrite {
 		encoded, err := toWireWriteEnvelope(envelope)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		raw, err := proto.Marshal(encoded)
 		if err != nil {
-			return storagev1.ValidationErrorf("%s write envelope cannot be encoded", m.name)
+			return nil, nil, storagev1.ValidationErrorf("%s write envelope cannot be encoded", m.name)
 		}
 		pairs = append(pairs, HeaderEnvelope, string(raw))
 	}
-	ctx = metadata.AppendToOutgoingContext(ctx, pairs...)
-	evidence := &sendEvidence{conn: c.conn}
-	if err := call(withSendEvidence(ctx, evidence)); err != nil {
+	evidence := &sendEvidence{conn: conn}
+	ctx = metadata.AppendToOutgoingContext(ctx, append(pairs, extra...)...)
+	return withSendEvidence(ctx, evidence), evidence, nil
+}
+
+// invoke checks and sends one unary call.
+func (c *Client) invoke(ctx context.Context, m *method, req proto.Message, call func(context.Context, ...grpc.CallOption) error) error {
+	callCtx, evidence, err := c.prepare(ctx, m, req, c.conn, MaxMessageBytes)
+	if err != nil {
+		return err
+	}
+	if err := call(callCtx); err != nil {
 		return decodeError(ctx, m, err, evidence)
 	}
 	return nil
+}
+
+// upload sends a streaming write: request with its blob in parts on the
+// bulk connection, then reads response. Nothing is sent when the blob is
+// larger than the client accepts.
+func (c *Client) upload(ctx context.Context, m *method, request, response proto.Message,
+	open func(context.Context, ...grpc.CallOption) (grpc.ClientStream, error)) error {
+	path := blobPathOf(request.ProtoReflect().Descriptor())
+	data := takeBlob(request.ProtoReflect(), path)
+	what, limit := m.name+" blob", c.maxBlobBytes
+	if m.contract == storagev1.ArtifactsContract && c.limits.MaxArtifactBytes > 0 && c.limits.MaxArtifactBytes < limit {
+		what, limit = "artifact", c.limits.MaxArtifactBytes
+	}
+	if int64(len(data)) > limit {
+		return storagev1.TooLargeError{What: what, Size: int64(len(data)), Limit: limit}
+	}
+	callCtx, evidence, err := c.prepare(ctx, m, request, c.bulkConn, MaxMessageBytes-MaxChunkBytes, describeBlob(data).pairs()...)
+	if err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithCancel(callCtx)
+	defer cancel()
+	stream, err := open(callCtx)
+	if err != nil {
+		return decodeError(ctx, m, err, evidence)
+	}
+	// io.EOF from a send means the server ended the call; its status comes
+	// from the receive below.
+	if err := sendBlob(stream.SendMsg, request, path, data); err != nil && !errors.Is(err, io.EOF) {
+		return decodeError(ctx, m, err, evidence)
+	}
+	if err := stream.CloseSend(); err != nil && !errors.Is(err, io.EOF) {
+		return decodeError(ctx, m, err, evidence)
+	}
+	if err := stream.RecvMsg(response); err != nil {
+		return decodeError(ctx, m, err, evidence)
+	}
+	return nil
+}
+
+// download sends a streaming read on the bulk connection and reassembles
+// response with its blob. A blob larger than the client accepts is refused
+// before it is read.
+func (c *Client) download(ctx context.Context, m *method, request, response proto.Message,
+	open func(context.Context, ...grpc.CallOption) (grpc.ClientStream, error)) error {
+	callCtx, evidence, err := c.prepare(ctx, m, request, c.bulkConn, MaxMessageBytes)
+	if err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithCancel(callCtx)
+	defer cancel()
+	stream, err := open(callCtx)
+	if err != nil {
+		return decodeError(ctx, m, err, evidence)
+	}
+	if err := stream.RecvMsg(response); err != nil {
+		if errors.Is(err, io.EOF) {
+			return c.responseError(m, errors.New("the response stream is empty"))
+		}
+		return decodeError(ctx, m, err, evidence)
+	}
+	header, err := stream.Header()
+	if err != nil {
+		return decodeError(ctx, m, err, evidence)
+	}
+	declared, err := parseBlobHeader(header)
+	if err != nil {
+		return c.responseError(m, err)
+	}
+	if declared.size > c.maxBlobBytes {
+		return storagev1.TooLargeError{What: m.name + " response blob", Size: declared.size, Limit: c.maxBlobBytes}
+	}
+	err = reassemble(response, func() (proto.Message, error) {
+		part := response.ProtoReflect().New().Interface()
+		return part, stream.RecvMsg(part)
+	}, declared)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errBlobFraming), errors.Is(err, errBlobShort), errors.Is(err, errBlobDigest):
+		return c.responseError(m, err)
+	default:
+		return decodeError(ctx, m, err, evidence)
+	}
 }
 
 // responseError reports a successful call whose response this client cannot

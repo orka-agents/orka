@@ -1,7 +1,8 @@
-// Package wiretest serves a storage provider over a real gRPC loopback for
+// Package wiretest serves storage providers over a real gRPC loopback for
 // tests: TLS 1.3 with a test certificate authority, bearer authentication,
 // the server library and the generated client, over an in-memory listener.
-// There is no plaintext mode.
+// Streaming calls use a second connection, as a remote client's bulk
+// connection does. There is no plaintext mode.
 package wiretest
 
 import (
@@ -37,34 +38,56 @@ const ServerName = "storage.wiretest.invalid"
 // other family is served by provider in process until it gains its RPCs.
 func State(t testing.TB, provider storagev1.StateProvider) storagev1.StateProvider {
 	t.Helper()
-	return stateOverlay{StateProvider: provider, client: Serve(t, provider)}
+	return stateOverlay{StateProvider: provider, client: Serve(t, wire.ServerConfig{State: provider})}
 }
 
-// Serve serves provider over the loopback and returns a client bound to the
-// provider's dataset. The server and connection stop when the test ends.
-func Serve(t testing.TB, provider storagev1.StateProvider) *wire.Client {
+// Artifacts serves provider over the loopback and returns an artifacts.v1
+// provider whose every method goes through the generated client and server.
+func Artifacts(t testing.TB, provider storagev1.ArtifactProvider) storagev1.ArtifactProvider {
 	t.Helper()
-	conn := Dial(t, provider)
+	return Serve(t, wire.ServerConfig{Artifacts: provider})
+}
+
+// Serve serves the providers in config over the loopback and returns a
+// client bound to their dataset. Streaming RPCs use a second connection, as a
+// remote client's bulk connection does. An unset Info or Authenticator
+// defaults to the loopback's adapter name and bearer authentication. The
+// server and connections stop when the test ends.
+func Serve(t testing.TB, config wire.ServerConfig) *wire.Client {
+	t.Helper()
+	dial := serve(t, config)
+	conn := dial()
 	info, server, err := wire.NewClient(conn, wire.ClientConfig{}).DescribeServer(t.Context())
 	if err != nil {
 		t.Fatalf("describe the storage server: %v", err)
 	}
-	return wire.NewClient(conn, wire.ClientConfig{Dataset: info.DatasetID, ServerRevision: int(server.ProtocolRevision)})
+	return wire.NewClient(conn, wire.ClientConfig{
+		Dataset: info.DatasetID, ServerRevision: int(server.ProtocolRevision), Bulk: dial(), Limits: info.Limits,
+	})
 }
 
-// Dial serves provider over the loopback and returns an authenticated client
-// connection to it.
-func Dial(t testing.TB, provider storagev1.StateProvider) *grpc.ClientConn {
+// Dial serves the providers in config over the loopback, as Serve does, and
+// returns an authenticated client connection to them.
+func Dial(t testing.TB, config wire.ServerConfig) *grpc.ClientConn {
+	t.Helper()
+	return serve(t, config)()
+}
+
+// serve starts a loopback server for config and returns a function that
+// opens authenticated connections to it.
+func serve(t testing.TB, config wire.ServerConfig) func() *grpc.ClientConn {
 	t.Helper()
 	material, err := loadMaterial()
 	if err != nil {
 		t.Fatalf("create loopback TLS material: %v", err)
 	}
-	storageServer, err := wire.NewServer(wire.ServerConfig{
-		State:         provider,
-		Info:          wire.ServerInfo{AdapterName: "wiretest", AdapterVersion: "test"},
-		Authenticator: bearerAuthenticator{bearer: material.bearer},
-	})
+	if config.Info == (wire.ServerInfo{}) {
+		config.Info = wire.ServerInfo{AdapterName: "wiretest", AdapterVersion: "test"}
+	}
+	if config.Authenticator == nil {
+		config.Authenticator = bearerAuthenticator{bearer: material.bearer}
+	}
+	storageServer, err := wire.NewServer(config)
 	if err != nil {
 		t.Fatalf("create storage server: %v", err)
 	}
@@ -74,24 +97,25 @@ func Dial(t testing.TB, provider storagev1.StateProvider) *grpc.ClientConn {
 	storageServer.Register(grpcServer)
 	served := make(chan error, 1)
 	go func() { served <- grpcServer.Serve(listener) }()
-
-	conn, err := wire.Dial("passthrough:///"+ServerName, wire.DialConfig{
-		TransportCredentials: credentials.NewTLS(material.clientTLS()),
-		PerRPCCredentials:    bearerToken(material.bearer),
-		ContextDialer:        func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) },
-	})
-	if err != nil {
-		grpcServer.Stop()
-		t.Fatalf("dial storage server: %v", err)
-	}
 	t.Cleanup(func() {
-		_ = conn.Close()
 		grpcServer.Stop()
 		if err := <-served; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			t.Errorf("storage server: %v", err)
 		}
 	})
-	return conn
+	return func() *grpc.ClientConn {
+		t.Helper()
+		conn, err := wire.Dial("passthrough:///"+ServerName, wire.DialConfig{
+			TransportCredentials: credentials.NewTLS(material.clientTLS()),
+			PerRPCCredentials:    bearerToken(material.bearer),
+			ContextDialer:        func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) },
+		})
+		if err != nil {
+			t.Fatalf("dial storage server: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
 }
 
 // material is the process-wide test certificate authority, server

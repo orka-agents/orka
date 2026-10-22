@@ -10,51 +10,157 @@ import (
 )
 
 var (
-	methodDescribe             = method{name: "Describe", fullName: "/orka.storage.v1.Dataset/Describe", kind: KindRead, since: 1}
-	methodHealthCheck          = method{name: "HealthCheck", fullName: "/orka.storage.v1.Dataset/HealthCheck", kind: KindRead, since: 1}
-	methodDeleteParentMessages = method{name: "DeleteParentMessages", fullName: "/orka.storage.v1.Messages/DeleteParentMessages", kind: KindWrite, since: 1}
-	methodDeleteTaskMessages   = method{name: "DeleteTaskMessages", fullName: "/orka.storage.v1.Messages/DeleteTaskMessages", kind: KindWrite, since: 1}
-	methodGetMessages          = method{name: "GetMessages", fullName: "/orka.storage.v1.Messages/GetMessages", kind: KindWrite, since: 1}
-	methodSendMessage          = method{name: "SendMessage", fullName: "/orka.storage.v1.Messages/SendMessage", kind: KindWrite, since: 1}
-	methodDeletePlan           = method{name: "DeletePlan", fullName: "/orka.storage.v1.Results/DeletePlan", kind: KindWrite, since: 1}
-	methodGetPlan              = method{name: "GetPlan", fullName: "/orka.storage.v1.Results/GetPlan", kind: KindRead, since: 1}
-	methodSavePlan             = method{name: "SavePlan", fullName: "/orka.storage.v1.Results/SavePlan", kind: KindWrite, since: 1}
+	methodDeleteArtifacts         = method{name: "DeleteArtifacts", fullName: "/orka.storage.v1.Artifacts/DeleteArtifacts", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.ArtifactsContract}
+	methodGetArtifact             = method{name: "GetArtifact", fullName: "/orka.storage.v1.Artifacts/GetArtifact", kind: KindRead, since: 1, stream: streamDownload, contract: storagev1.ArtifactsContract}
+	methodListArtifacts           = method{name: "ListArtifacts", fullName: "/orka.storage.v1.Artifacts/ListArtifacts", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.ArtifactsContract}
+	methodSaveArtifact            = method{name: "SaveArtifact", fullName: "/orka.storage.v1.Artifacts/SaveArtifact", kind: KindWrite, since: 1, stream: streamUpload, contract: storagev1.ArtifactsContract}
+	methodDescribe                = method{name: "Describe", fullName: "/orka.storage.v1.Dataset/Describe", kind: KindRead, since: 1, stream: streamNone, contract: ""}
+	methodHealthCheck             = method{name: "HealthCheck", fullName: "/orka.storage.v1.Dataset/HealthCheck", kind: KindRead, since: 1, stream: streamNone, contract: ""}
+	methodDeleteParentMessages    = method{name: "DeleteParentMessages", fullName: "/orka.storage.v1.Messages/DeleteParentMessages", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodDeleteTaskMessages      = method{name: "DeleteTaskMessages", fullName: "/orka.storage.v1.Messages/DeleteTaskMessages", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodGetMessages             = method{name: "GetMessages", fullName: "/orka.storage.v1.Messages/GetMessages", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodSendMessage             = method{name: "SendMessage", fullName: "/orka.storage.v1.Messages/SendMessage", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodDeletePlan              = method{name: "DeletePlan", fullName: "/orka.storage.v1.Results/DeletePlan", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodDeleteResult            = method{name: "DeleteResult", fullName: "/orka.storage.v1.Results/DeleteResult", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodGetPlan                 = method{name: "GetPlan", fullName: "/orka.storage.v1.Results/GetPlan", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodGetPromptResultReceipt  = method{name: "GetPromptResultReceipt", fullName: "/orka.storage.v1.Results/GetPromptResultReceipt", kind: KindRead, since: 1, stream: streamDownload, contract: storagev1.StateContract}
+	methodGetResult               = method{name: "GetResult", fullName: "/orka.storage.v1.Results/GetResult", kind: KindRead, since: 1, stream: streamDownload, contract: storagev1.StateContract}
+	methodSavePlan                = method{name: "SavePlan", fullName: "/orka.storage.v1.Results/SavePlan", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodSavePromptResultReceipt = method{name: "SavePromptResultReceipt", fullName: "/orka.storage.v1.Results/SavePromptResultReceipt", kind: KindWrite, since: 1, stream: streamUpload, contract: storagev1.StateContract}
+	methodSaveResult              = method{name: "SaveResult", fullName: "/orka.storage.v1.Results/SaveResult", kind: KindWrite, since: 1, stream: streamUpload, contract: storagev1.StateContract}
 )
 
 var methodsByFullName = map[string]*method{
-	methodDescribe.fullName:             &methodDescribe,
-	methodHealthCheck.fullName:          &methodHealthCheck,
-	methodDeleteParentMessages.fullName: &methodDeleteParentMessages,
-	methodDeleteTaskMessages.fullName:   &methodDeleteTaskMessages,
-	methodGetMessages.fullName:          &methodGetMessages,
-	methodSendMessage.fullName:          &methodSendMessage,
-	methodDeletePlan.fullName:           &methodDeletePlan,
-	methodGetPlan.fullName:              &methodGetPlan,
-	methodSavePlan.fullName:             &methodSavePlan,
+	methodDeleteArtifacts.fullName:         &methodDeleteArtifacts,
+	methodGetArtifact.fullName:             &methodGetArtifact,
+	methodListArtifacts.fullName:           &methodListArtifacts,
+	methodSaveArtifact.fullName:            &methodSaveArtifact,
+	methodDescribe.fullName:                &methodDescribe,
+	methodHealthCheck.fullName:             &methodHealthCheck,
+	methodDeleteParentMessages.fullName:    &methodDeleteParentMessages,
+	methodDeleteTaskMessages.fullName:      &methodDeleteTaskMessages,
+	methodGetMessages.fullName:             &methodGetMessages,
+	methodSendMessage.fullName:             &methodSendMessage,
+	methodDeletePlan.fullName:              &methodDeletePlan,
+	methodDeleteResult.fullName:            &methodDeleteResult,
+	methodGetPlan.fullName:                 &methodGetPlan,
+	methodGetPromptResultReceipt.fullName:  &methodGetPromptResultReceipt,
+	methodGetResult.fullName:               &methodGetResult,
+	methodSavePlan.fullName:                &methodSavePlan,
+	methodSavePromptResultReceipt.fullName: &methodSavePromptResultReceipt,
+	methodSaveResult.fullName:              &methodSaveResult,
 }
 
 // clientStubs holds one generated stub per service.
 type clientStubs struct {
-	dataset  storagepb.DatasetClient
-	messages storagepb.MessagesClient
-	results  storagepb.ResultsClient
+	artifacts storagepb.ArtifactsClient
+	dataset   storagepb.DatasetClient
+	messages  storagepb.MessagesClient
+	results   storagepb.ResultsClient
 }
 
 func newClientStubs(conn grpc.ClientConnInterface) clientStubs {
 	return clientStubs{
-		dataset:  storagepb.NewDatasetClient(conn),
-		messages: storagepb.NewMessagesClient(conn),
-		results:  storagepb.NewResultsClient(conn),
+		artifacts: storagepb.NewArtifactsClient(conn),
+		dataset:   storagepb.NewDatasetClient(conn),
+		messages:  storagepb.NewMessagesClient(conn),
+		results:   storagepb.NewResultsClient(conn),
 	}
 }
 
 // The Client implements every contract interface that has a wire service.
 var (
-	_ storagev1.HealthChecker     = (*Client)(nil)
-	_ storagev1.ProviderDescriber = (*Client)(nil)
-	_ storagev1.MessageStore      = (*Client)(nil)
-	_ storagev1.PlanStore         = (*Client)(nil)
+	_ storagev1.ArtifactStore            = (*Client)(nil)
+	_ storagev1.HealthChecker            = (*Client)(nil)
+	_ storagev1.ProviderDescriber        = (*Client)(nil)
+	_ storagev1.MessageStore             = (*Client)(nil)
+	_ storagev1.ResultStore              = (*Client)(nil)
+	_ storagev1.PromptResultReceiptStore = (*Client)(nil)
+	_ storagev1.PlanStore                = (*Client)(nil)
 )
+
+// DeleteArtifacts calls orka.storage.v1.Artifacts.DeleteArtifacts.
+func (client *Client) DeleteArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) error {
+	wireRequest := &storagepb.DeleteArtifactsRequest{}
+	var err error
+	if wireRequest.Owner, err = toWireArtifactOwner(owner); err != nil {
+		return err
+	}
+	_ = err
+	if err := client.invoke(ctx, &methodDeleteArtifacts, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		_, callErr := client.stubs.artifacts.DeleteArtifacts(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetArtifact calls orka.storage.v1.Artifacts.GetArtifact.
+func (client *Client) GetArtifact(ctx context.Context, key storagev1.ArtifactKey) ([]byte, string, error) {
+	wireRequest := &storagepb.GetArtifactRequest{}
+	var err error
+	if wireRequest.Key, err = toWireArtifactKey(key); err != nil {
+		return nil, "", err
+	}
+	_ = err
+	wireResponse := &storagepb.GetArtifactResponse{}
+	if err := client.download(ctx, &methodGetArtifact, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.artifacts.GetArtifact(ctx, wireRequest, opts...)
+	}); err != nil {
+		return nil, "", err
+	}
+	var r0 []byte
+	r0 = []byte(wireResponse.Data)
+	var r1 string
+	r1 = wireResponse.ContentType
+	return r0, r1, nil
+}
+
+// ListArtifacts calls orka.storage.v1.Artifacts.ListArtifacts.
+func (client *Client) ListArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) ([]storagev1.ArtifactMetadata, error) {
+	wireRequest := &storagepb.ListArtifactsRequest{}
+	var err error
+	if wireRequest.Owner, err = toWireArtifactOwner(owner); err != nil {
+		return nil, err
+	}
+	_ = err
+	var wireResponse *storagepb.ListArtifactsResponse
+	if err := client.invoke(ctx, &methodListArtifacts, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.artifacts.ListArtifacts(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return nil, err
+	}
+	var r0 []storagev1.ArtifactMetadata
+	if len(wireResponse.Artifacts) > 0 {
+		r0 = make([]storagev1.ArtifactMetadata, 0, len(wireResponse.Artifacts))
+	}
+	for _, e1 := range wireResponse.Artifacts {
+		g2, err := fromWireArtifactMetadata(e1)
+		if err != nil {
+			return nil, client.responseError(&methodListArtifacts, err)
+		}
+		r0 = append(r0, g2)
+	}
+	return r0, nil
+}
+
+// SaveArtifact calls orka.storage.v1.Artifacts.SaveArtifact.
+func (client *Client) SaveArtifact(ctx context.Context, request storagev1.SaveArtifactRequest) error {
+	wireRequest, err := toWireSaveArtifactRequest(request)
+	if err != nil {
+		return err
+	}
+	wireResponse := &storagepb.SaveArtifactResponse{}
+	if err := client.upload(ctx, &methodSaveArtifact, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.artifacts.SaveArtifact(ctx, opts...)
+	}); err != nil {
+		return err
+	}
+	return nil
+}
 
 // Describe calls orka.storage.v1.Dataset.Describe.
 func (client *Client) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
@@ -143,12 +249,12 @@ func (client *Client) GetMessages(ctx context.Context, namespace string, taskNam
 	if len(wireResponse.Messages) > 0 {
 		r0 = make([]storagev1.Message, 0, len(wireResponse.Messages))
 	}
-	for _, e1 := range wireResponse.Messages {
-		g2, err := fromWireMessage(e1)
+	for _, e3 := range wireResponse.Messages {
+		g4, err := fromWireMessage(e3)
 		if err != nil {
 			return nil, client.responseError(&methodGetMessages, err)
 		}
-		r0 = append(r0, g2)
+		r0 = append(r0, g4)
 	}
 	return r0, nil
 }
@@ -188,6 +294,22 @@ func (client *Client) DeletePlan(ctx context.Context, namespace string, taskName
 	return nil
 }
 
+// DeleteResult calls orka.storage.v1.Results.DeleteResult.
+func (client *Client) DeleteResult(ctx context.Context, namespace string, taskName string) error {
+	wireRequest := &storagepb.DeleteResultRequest{}
+	var err error
+	wireRequest.Namespace = namespace
+	wireRequest.TaskName = taskName
+	_ = err
+	if err := client.invoke(ctx, &methodDeleteResult, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		_, callErr := client.stubs.results.DeleteResult(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
 // GetPlan calls orka.storage.v1.Results.GetPlan.
 func (client *Client) GetPlan(ctx context.Context, namespace string, taskName string) (*storagev1.PlanState, error) {
 	wireRequest := &storagepb.GetPlanRequest{}
@@ -205,12 +327,53 @@ func (client *Client) GetPlan(ctx context.Context, namespace string, taskName st
 	}
 	var r0 *storagev1.PlanState
 	if wireResponse.Plan != nil {
-		var v3 storagev1.PlanState
-		if v3, err = fromWirePlanState(wireResponse.Plan); err != nil {
+		var v5 storagev1.PlanState
+		if v5, err = fromWirePlanState(wireResponse.Plan); err != nil {
 			return nil, client.responseError(&methodGetPlan, err)
 		}
-		r0 = &v3
+		r0 = &v5
 	}
+	return r0, nil
+}
+
+// GetPromptResultReceipt calls orka.storage.v1.Results.GetPromptResultReceipt.
+func (client *Client) GetPromptResultReceipt(ctx context.Context, attemptID string) (*storagev1.PromptResultReceipt, error) {
+	wireRequest := &storagepb.GetPromptResultReceiptRequest{}
+	var err error
+	wireRequest.AttemptId = attemptID
+	_ = err
+	wireResponse := &storagepb.GetPromptResultReceiptResponse{}
+	if err := client.download(ctx, &methodGetPromptResultReceipt, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.results.GetPromptResultReceipt(ctx, wireRequest, opts...)
+	}); err != nil {
+		return nil, err
+	}
+	var r0 *storagev1.PromptResultReceipt
+	if wireResponse.Receipt != nil {
+		var v6 storagev1.PromptResultReceipt
+		if v6, err = fromWirePromptResultReceipt(wireResponse.Receipt); err != nil {
+			return nil, client.responseError(&methodGetPromptResultReceipt, err)
+		}
+		r0 = &v6
+	}
+	return r0, nil
+}
+
+// GetResult calls orka.storage.v1.Results.GetResult.
+func (client *Client) GetResult(ctx context.Context, namespace string, taskName string) ([]byte, error) {
+	wireRequest := &storagepb.GetResultRequest{}
+	var err error
+	wireRequest.Namespace = namespace
+	wireRequest.TaskName = taskName
+	_ = err
+	wireResponse := &storagepb.GetResultResponse{}
+	if err := client.download(ctx, &methodGetResult, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.results.GetResult(ctx, wireRequest, opts...)
+	}); err != nil {
+		return nil, err
+	}
+	var r0 []byte
+	r0 = []byte(wireResponse.Data)
 	return r0, nil
 }
 
@@ -235,10 +398,132 @@ func (client *Client) SavePlan(ctx context.Context, namespace string, taskName s
 	return nil
 }
 
+// SavePromptResultReceipt calls orka.storage.v1.Results.SavePromptResultReceipt.
+func (client *Client) SavePromptResultReceipt(ctx context.Context, receipt storagev1.PromptResultReceipt) error {
+	wireRequest := &storagepb.SavePromptResultReceiptRequest{}
+	var err error
+	if wireRequest.Receipt, err = toWirePromptResultReceipt(receipt); err != nil {
+		return err
+	}
+	_ = err
+	wireResponse := &storagepb.SavePromptResultReceiptResponse{}
+	if err := client.upload(ctx, &methodSavePromptResultReceipt, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.results.SavePromptResultReceipt(ctx, opts...)
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SaveResult calls orka.storage.v1.Results.SaveResult.
+func (client *Client) SaveResult(ctx context.Context, namespace string, taskName string, data []byte) error {
+	wireRequest := &storagepb.SaveResultRequest{}
+	var err error
+	wireRequest.Namespace = namespace
+	wireRequest.TaskName = taskName
+	wireRequest.Data = []byte(data)
+	_ = err
+	wireResponse := &storagepb.SaveResultResponse{}
+	if err := client.upload(ctx, &methodSaveResult, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.results.SaveResult(ctx, opts...)
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Server) registerServices(registrar grpc.ServiceRegistrar) {
-	storagepb.RegisterDatasetServer(registrar, &datasetService{server: s, provider: s.state})
-	storagepb.RegisterMessagesServer(registrar, &messagesService{server: s, provider: s.state})
-	storagepb.RegisterResultsServer(registrar, &resultsService{server: s, provider: s.state})
+	storagepb.RegisterDatasetServer(registrar, &datasetService{server: s, provider: s.dataset})
+	if s.state != nil {
+		storagepb.RegisterMessagesServer(registrar, &messagesService{server: s, provider: s.state})
+		storagepb.RegisterResultsServer(registrar, &resultsService{server: s, provider: s.state})
+	}
+	if s.artifacts != nil {
+		storagepb.RegisterArtifactsServer(registrar, &artifactsService{server: s, provider: s.artifacts})
+	}
+}
+
+// artifactsService serves orka.storage.v1.Artifacts from a provider.
+type artifactsService struct {
+	storagepb.UnimplementedArtifactsServer
+	server   *Server
+	provider interface {
+		storagev1.ArtifactStore
+	}
+}
+
+func (service *artifactsService) DeleteArtifacts(ctx context.Context, wireRequest *storagepb.DeleteArtifactsRequest) (*storagepb.DeleteArtifactsResponse, error) {
+	var err error
+	var a0 storagev1.ArtifactOwner
+	if a0, err = fromWireArtifactOwner(wireRequest.Owner); err != nil {
+		return nil, requestStatus(err)
+	}
+	err = service.provider.DeleteArtifacts(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodDeleteArtifacts, err)
+	}
+	wireResponse := &storagepb.DeleteArtifactsResponse{}
+	return wireResponse, nil
+}
+
+func (service *artifactsService) GetArtifact(wireRequest *storagepb.GetArtifactRequest, stream grpc.ServerStreamingServer[storagepb.GetArtifactResponse]) error {
+	ctx := stream.Context()
+	var err error
+	var a0 storagev1.ArtifactKey
+	if a0, err = fromWireArtifactKey(wireRequest.Key); err != nil {
+		return requestStatus(err)
+	}
+	var r0 []byte
+	var r1 string
+	r0, r1, err = service.provider.GetArtifact(ctx, a0)
+	if err != nil {
+		return service.server.providerError(ctx, &methodGetArtifact, err)
+	}
+	wireResponse := &storagepb.GetArtifactResponse{}
+	wireResponse.Data = []byte(r0)
+	wireResponse.ContentType = r1
+	return service.server.sendDownload(stream, &methodGetArtifact, wireResponse)
+}
+
+func (service *artifactsService) ListArtifacts(ctx context.Context, wireRequest *storagepb.ListArtifactsRequest) (*storagepb.ListArtifactsResponse, error) {
+	var err error
+	var a0 storagev1.ArtifactOwner
+	if a0, err = fromWireArtifactOwner(wireRequest.Owner); err != nil {
+		return nil, requestStatus(err)
+	}
+	var r0 []storagev1.ArtifactMetadata
+	r0, err = service.provider.ListArtifacts(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodListArtifacts, err)
+	}
+	wireResponse := &storagepb.ListArtifactsResponse{}
+	for _, e7 := range r0 {
+		w8, err := toWireArtifactMetadata(e7)
+		if err != nil {
+			return nil, service.server.encodeError(ctx, &methodListArtifacts, err)
+		}
+		wireResponse.Artifacts = append(wireResponse.Artifacts, w8)
+	}
+	return wireResponse, nil
+}
+
+func (service *artifactsService) SaveArtifact(stream grpc.ClientStreamingServer[storagepb.SaveArtifactRequest, storagepb.SaveArtifactResponse]) error {
+	ctx := stream.Context()
+	wireRequest := &storagepb.SaveArtifactRequest{}
+	if err := service.server.receiveUpload(stream, &methodSaveArtifact, wireRequest); err != nil {
+		return err
+	}
+	var err error
+	var a0 storagev1.SaveArtifactRequest
+	if a0, err = fromWireSaveArtifactRequest(wireRequest); err != nil {
+		return requestStatus(err)
+	}
+	err = service.provider.SaveArtifact(ctx, a0)
+	if err != nil {
+		return service.server.providerError(ctx, &methodSaveArtifact, err)
+	}
+	wireResponse := &storagepb.SaveArtifactResponse{}
+	return stream.SendAndClose(wireResponse)
 }
 
 // datasetService serves orka.storage.v1.Dataset from a provider.
@@ -329,12 +614,12 @@ func (service *messagesService) GetMessages(ctx context.Context, wireRequest *st
 		return nil, service.server.providerError(ctx, &methodGetMessages, err)
 	}
 	wireResponse := &storagepb.GetMessagesResponse{}
-	for _, e4 := range r0 {
-		w5, err := toWireMessage(e4)
+	for _, e9 := range r0 {
+		w10, err := toWireMessage(e9)
 		if err != nil {
 			return nil, service.server.encodeError(ctx, &methodGetMessages, err)
 		}
-		wireResponse.Messages = append(wireResponse.Messages, w5)
+		wireResponse.Messages = append(wireResponse.Messages, w10)
 	}
 	return wireResponse, nil
 }
@@ -343,11 +628,11 @@ func (service *messagesService) SendMessage(ctx context.Context, wireRequest *st
 	var err error
 	var a0 *storagev1.Message
 	if wireRequest.Msg != nil {
-		var v6 storagev1.Message
-		if v6, err = fromWireMessage(wireRequest.Msg); err != nil {
+		var v11 storagev1.Message
+		if v11, err = fromWireMessage(wireRequest.Msg); err != nil {
 			return nil, requestStatus(err)
 		}
-		a0 = &v6
+		a0 = &v11
 	}
 	err = service.provider.SendMessage(ctx, a0)
 	if err != nil {
@@ -362,6 +647,8 @@ type resultsService struct {
 	storagepb.UnimplementedResultsServer
 	server   *Server
 	provider interface {
+		storagev1.ResultStore
+		storagev1.PromptResultReceiptStore
 		storagev1.PlanStore
 	}
 }
@@ -377,6 +664,20 @@ func (service *resultsService) DeletePlan(ctx context.Context, wireRequest *stor
 		return nil, service.server.providerError(ctx, &methodDeletePlan, err)
 	}
 	wireResponse := &storagepb.DeletePlanResponse{}
+	return wireResponse, nil
+}
+
+func (service *resultsService) DeleteResult(ctx context.Context, wireRequest *storagepb.DeleteResultRequest) (*storagepb.DeleteResultResponse, error) {
+	var err error
+	var a0 string
+	a0 = wireRequest.Namespace
+	var a1 string
+	a1 = wireRequest.TaskName
+	err = service.provider.DeleteResult(ctx, a0, a1)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodDeleteResult, err)
+	}
+	wireResponse := &storagepb.DeleteResultResponse{}
 	return wireResponse, nil
 }
 
@@ -400,6 +701,42 @@ func (service *resultsService) GetPlan(ctx context.Context, wireRequest *storage
 	return wireResponse, nil
 }
 
+func (service *resultsService) GetPromptResultReceipt(wireRequest *storagepb.GetPromptResultReceiptRequest, stream grpc.ServerStreamingServer[storagepb.GetPromptResultReceiptResponse]) error {
+	ctx := stream.Context()
+	var err error
+	var a0 string
+	a0 = wireRequest.AttemptId
+	var r0 *storagev1.PromptResultReceipt
+	r0, err = service.provider.GetPromptResultReceipt(ctx, a0)
+	if err != nil {
+		return service.server.providerError(ctx, &methodGetPromptResultReceipt, err)
+	}
+	wireResponse := &storagepb.GetPromptResultReceiptResponse{}
+	if r0 != nil {
+		if wireResponse.Receipt, err = toWirePromptResultReceipt(*r0); err != nil {
+			return service.server.encodeError(ctx, &methodGetPromptResultReceipt, err)
+		}
+	}
+	return service.server.sendDownload(stream, &methodGetPromptResultReceipt, wireResponse)
+}
+
+func (service *resultsService) GetResult(wireRequest *storagepb.GetResultRequest, stream grpc.ServerStreamingServer[storagepb.GetResultResponse]) error {
+	ctx := stream.Context()
+	var err error
+	var a0 string
+	a0 = wireRequest.Namespace
+	var a1 string
+	a1 = wireRequest.TaskName
+	var r0 []byte
+	r0, err = service.provider.GetResult(ctx, a0, a1)
+	if err != nil {
+		return service.server.providerError(ctx, &methodGetResult, err)
+	}
+	wireResponse := &storagepb.GetResultResponse{}
+	wireResponse.Data = []byte(r0)
+	return service.server.sendDownload(stream, &methodGetResult, wireResponse)
+}
+
 func (service *resultsService) SavePlan(ctx context.Context, wireRequest *storagepb.SavePlanRequest) (*storagepb.SavePlanResponse, error) {
 	var err error
 	var a0 string
@@ -408,11 +745,11 @@ func (service *resultsService) SavePlan(ctx context.Context, wireRequest *storag
 	a1 = wireRequest.TaskName
 	var a2 *storagev1.PlanState
 	if wireRequest.Plan != nil {
-		var v7 storagev1.PlanState
-		if v7, err = fromWirePlanState(wireRequest.Plan); err != nil {
+		var v12 storagev1.PlanState
+		if v12, err = fromWirePlanState(wireRequest.Plan); err != nil {
 			return nil, requestStatus(err)
 		}
-		a2 = &v7
+		a2 = &v12
 	}
 	err = service.provider.SavePlan(ctx, a0, a1, a2)
 	if err != nil {
@@ -420,4 +757,44 @@ func (service *resultsService) SavePlan(ctx context.Context, wireRequest *storag
 	}
 	wireResponse := &storagepb.SavePlanResponse{}
 	return wireResponse, nil
+}
+
+func (service *resultsService) SavePromptResultReceipt(stream grpc.ClientStreamingServer[storagepb.SavePromptResultReceiptRequest, storagepb.SavePromptResultReceiptResponse]) error {
+	ctx := stream.Context()
+	wireRequest := &storagepb.SavePromptResultReceiptRequest{}
+	if err := service.server.receiveUpload(stream, &methodSavePromptResultReceipt, wireRequest); err != nil {
+		return err
+	}
+	var err error
+	var a0 storagev1.PromptResultReceipt
+	if a0, err = fromWirePromptResultReceipt(wireRequest.Receipt); err != nil {
+		return requestStatus(err)
+	}
+	err = service.provider.SavePromptResultReceipt(ctx, a0)
+	if err != nil {
+		return service.server.providerError(ctx, &methodSavePromptResultReceipt, err)
+	}
+	wireResponse := &storagepb.SavePromptResultReceiptResponse{}
+	return stream.SendAndClose(wireResponse)
+}
+
+func (service *resultsService) SaveResult(stream grpc.ClientStreamingServer[storagepb.SaveResultRequest, storagepb.SaveResultResponse]) error {
+	ctx := stream.Context()
+	wireRequest := &storagepb.SaveResultRequest{}
+	if err := service.server.receiveUpload(stream, &methodSaveResult, wireRequest); err != nil {
+		return err
+	}
+	var err error
+	var a0 string
+	a0 = wireRequest.Namespace
+	var a1 string
+	a1 = wireRequest.TaskName
+	var a2 []byte
+	a2 = []byte(wireRequest.Data)
+	err = service.provider.SaveResult(ctx, a0, a1, a2)
+	if err != nil {
+		return service.server.providerError(ctx, &methodSaveResult, err)
+	}
+	wireResponse := &storagepb.SaveResultResponse{}
+	return stream.SendAndClose(wireResponse)
 }

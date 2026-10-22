@@ -35,6 +35,7 @@ const (
 	ReasonGatewaySessionCleanupPending = "GATEWAY_SESSION_CLEANUP_PENDING"
 	ReasonTaskJobRevoked               = "TASK_JOB_REVOKED"
 	ReasonUsageSelectionTooLarge       = "USAGE_SELECTION_TOO_LARGE"
+	ReasonDatasetMismatch              = "DATASET_MISMATCH"
 	ReasonTooLarge                     = "TOO_LARGE"
 	ReasonUnavailable                  = "UNAVAILABLE"
 	ReasonOutcomeUnknown               = "OUTCOME_UNKNOWN"
@@ -46,6 +47,9 @@ const (
 	// ReasonUnsupportedField refuses a request that carries a field the server
 	// does not know, so an older server never ignores a newer precondition.
 	ReasonUnsupportedField = "UNSUPPORTED_FIELD"
+	// ReasonOverloaded refuses a call over the server's concurrency limit for
+	// its class, before the provider runs.
+	ReasonOverloaded = "OVERLOADED"
 	// ReasonProviderError reports a provider error that is not a contract
 	// error, or a provider panic. A write that fails this way may have
 	// committed.
@@ -86,6 +90,7 @@ var sentinelReasons = []struct {
 	{ReasonGatewaySessionCleanupPending, codes.Unavailable, storagev1.ErrGatewaySessionCleanupPending},
 	{ReasonTaskJobRevoked, codes.FailedPrecondition, storagev1.ErrTaskJobRevoked},
 	{ReasonUsageSelectionTooLarge, codes.ResourceExhausted, storagev1.ErrUsageSelectionTooLarge},
+	{ReasonDatasetMismatch, codes.FailedPrecondition, storagev1.ErrDatasetMismatch},
 	{ReasonNotFound, codes.NotFound, storagev1.ErrNotFound},
 	{ReasonNotReady, codes.Unavailable, storagev1.ErrNotReady},
 	{ReasonCapacity, codes.ResourceExhausted, storagev1.ErrCapacity},
@@ -226,6 +231,8 @@ func decodeReason(m *method, info *errdetails.ErrorInfo) error {
 		return storagev1.TooLargeError{What: sanitizeText(metadata["what"], messageLimit), Size: size, Limit: limit}
 	case ReasonUnauthenticated:
 		return markedError{err: fmt.Errorf("%w: authentication failed", storagev1.ErrUnavailable), marker: ErrAuthentication}
+	case ReasonOverloaded:
+		return fmt.Errorf("%w: the storage server is overloaded", storagev1.ErrUnavailable)
 	case ReasonContractMismatch, ReasonUnsupportedField:
 		return markedError{
 			err:    storagev1.ValidationErrorf("storage server refused %s: %s", m.name, info.GetReason()),

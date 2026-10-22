@@ -1,6 +1,15 @@
 package v1
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrDatasetMismatch is returned when a request names a dataset other than
+// the one the provider serves. Nothing was committed, and retrying the same
+// request cannot succeed: the caller must not treat the provider as empty or
+// switch to it.
+var ErrDatasetMismatch = errors.New("dataset mismatch")
 
 // WriteEnvelope carries the cross-cutting identity of one controller write:
 // the dataset it targets, the controller epoch fence it was issued under, and
