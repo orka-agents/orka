@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -134,13 +135,21 @@ func TestDatasetFreshCreationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
-	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
+	// Version 1 is an earlier release's marker, which only the exact version-1
+	// layout may carry; version 3 is newer than this release.
+	for _, test := range []struct {
+		revision string
+		version  int
+	}{
+		{"0e567418", 1}, {"1f18614c", 3}, {"57583975", 1}, {"abd2c040", 3}, {"fdb64ecd", 1},
+	} {
+		revision := test.revision
 		t.Run(revision, func(t *testing.T) {
 			path, db := historicalSchemaDB(t, revision)
 			seedMigrationRecords(t, db, path)
 			before := applicationRows(t, db)
 			beforeSchema := storedSchemaSQL(t, db)
-			_, err := db.Exec(`PRAGMA user_version=2`)
+			_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, test.version))
 			require.NoError(t, err)
 			require.NoError(t, db.Close())
 			s, err := OpenLockedStore(path)
@@ -152,7 +161,7 @@ func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
 			require.Equal(t, beforeSchema, storedSchemaSQL(t, raw))
 			version, err := readSchemaVersion(raw)
 			require.NoError(t, err)
-			require.Equal(t, 2, version)
+			require.Equal(t, test.version, version)
 		})
 	}
 }

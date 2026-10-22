@@ -77,12 +77,15 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
-	// The upgrade drops the empty harness v1 tables; every other table is unchanged.
+	// The upgrade drops the empty harness v1 tables and adds an empty
+	// operation receipt table; every other table is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
 		delete(before, retired)
 	}
+	require.NotContains(t, before, "operation_receipts")
+	before["operation_receipts"] = nil
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -247,7 +250,8 @@ func TestDatasetUnbootstrappedDataRequiresExistingKey(t *testing.T) {
 
 func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 	for name, statement := range map[string]string{
-		"newer":               `PRAGMA user_version=2`,
+		"newer":               `PRAGMA user_version=3`,
+		"older":               `PRAGMA user_version=1`,
 		"unknown":             `PRAGMA user_version=2147483647`,
 		"negative":            `PRAGMA user_version=-1`,
 		"version reset":       `PRAGMA user_version=0`,
@@ -257,7 +261,7 @@ func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 		"nil identity":        `UPDATE store_dataset SET dataset_id='00000000-0000-0000-0000-000000000000'`,
 		"bad origin":          `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET origin='unknown'`,
 		"bad bootstrap state": `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET bootstrap_complete=2`,
-		"extra identity":      `PRAGMA ignore_check_constraints=ON; INSERT INTO store_dataset VALUES(2,'22222222-2222-4222-8222-222222222222','new',0)`,
+		"extra identity":      `PRAGMA ignore_check_constraints=ON; INSERT INTO store_dataset(singleton, dataset_id, origin, bootstrap_complete) VALUES(2,'22222222-2222-4222-8222-222222222222','new',0)`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := setupDiskStore(t)

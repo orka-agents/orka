@@ -113,7 +113,7 @@ func TestControllerSQLiteBootstrapRejectsSchemaBeforeKeyLoader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "newer.db")
 	db, err := sqlite.NewDB(path)
 	require.NoError(t, err)
-	_, err = db.Exec(`PRAGMA user_version=2`)
+	_, err = db.Exec(`PRAGMA user_version=3`)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	called := false

@@ -26,6 +26,12 @@ var _ store.AtomicExecutionEventPlanStore = (*Store)(nil)
 // AppendExecutionEvent appends an execution event and allocates the next sequence
 // number transactionally for its (namespace, stream_type, stream_id) stream.
 func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	return writeOperation(ctx, s, "AppendExecutionEvent", nil, func(ctx context.Context) (*store.ExecutionEvent, error) {
+		return s.appendExecutionEventWrite(ctx, event)
+	})
+}
+
+func (s *Store) appendExecutionEventWrite(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	appended, _, err := s.appendExecutionEvent(ctx, event, "", nil)
 	return appended, err
 }
@@ -34,6 +40,18 @@ func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.Execution
 // stream-scoped deduplication key is absent. A repeated key returns the existing
 // event without allocating another sequence.
 func (s *Store) AppendExecutionEventIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
+	result, err := writeOperation(ctx, s, "AppendExecutionEventIfAbsent", nil, func(ctx context.Context) (resultPair[*store.ExecutionEvent, bool], error) {
+		first, second, err := s.appendExecutionEventIfAbsentWrite(ctx, event, dedupeKey)
+		return resultPair[*store.ExecutionEvent, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) appendExecutionEventIfAbsentWrite(
 	ctx context.Context,
 	event *store.ExecutionEvent,
 	dedupeKey string,
@@ -49,6 +67,19 @@ func (s *Store) AppendExecutionEventIfAbsent(
 // and updates its task plan projection. Duplicate event keys leave the current
 // plan unchanged.
 func (s *Store) AppendExecutionEventWithPlanIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
+	result, err := writeOperation(ctx, s, "AppendExecutionEventWithPlanIfAbsent", nil, func(ctx context.Context) (resultPair[*store.ExecutionEvent, bool], error) {
+		first, second, err := s.appendExecutionEventWithPlanIfAbsentWrite(ctx, event, dedupeKey, plan)
+		return resultPair[*store.ExecutionEvent, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) appendExecutionEventWithPlanIfAbsentWrite(
 	ctx context.Context,
 	event *store.ExecutionEvent,
 	dedupeKey string,
@@ -207,6 +238,10 @@ func appendSQLiteExecutionEvent(
 			return nil, false, err
 		}
 		if found {
+			if !sameExecutionEventIdentity(*existing, event) {
+				return nil, false, fmt.Errorf("%w: execution event dedupe key %q names a different event in stream %s/%s",
+					store.ErrDuplicateMismatch, dedupeKey, event.StreamType, event.StreamID)
+			}
 			return existing, false, nil
 		}
 	}
@@ -255,6 +290,17 @@ func appendSQLiteExecutionEvent(
 	}
 	event.Usage = nil
 	return &event, true, nil
+}
+
+// sameExecutionEventIdentity reports whether a request with a stored event's
+// dedupe key belongs to that event's Task, Session and tool call. The type,
+// content and summary may differ: competing outcomes share one key so the
+// first durable outcome wins, and Orka can derive an event again under newer
+// redaction rules.
+func sameExecutionEventIdentity(stored, requested store.ExecutionEvent) bool {
+	return stored.TaskName == requested.TaskName &&
+		stored.SessionName == requested.SessionName &&
+		stored.ToolCallID == requested.ToolCallID
 }
 
 func existingSQLiteExecutionEventByDedupeKey(
@@ -630,6 +676,12 @@ func readLatestExecutionEventSeqBatch(ctx context.Context, q taskDataExecutor, n
 
 // DeleteExecutionEvents removes all execution events for one stream.
 func (s *Store) DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error {
+	return writeOperationErr(ctx, s, "DeleteExecutionEvents", func(ctx context.Context) error {
+		return s.deleteExecutionEventsWrite(ctx, namespace, streamType, streamID)
+	})
+}
+
+func (s *Store) deleteExecutionEventsWrite(ctx context.Context, namespace, streamType, streamID string) error {
 	filter := store.ExecutionEventFilter{Namespace: namespace, StreamType: streamType, StreamID: streamID}.Normalized()
 	if err := filter.Validate(); err != nil {
 		return err

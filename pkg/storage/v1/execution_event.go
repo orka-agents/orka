@@ -182,7 +182,14 @@ type ExecutionEventStore interface {
 
 // DeduplicatingExecutionEventStore atomically appends one event for a caller-
 // supplied key scoped to its execution-event stream. A repeated key returns the
-// existing event with appended=false.
+// existing event with appended=false when the request belongs to the same
+// Task, Session and tool call as that event; otherwise it returns
+// ErrDuplicateMismatch. The stream needs no comparison, because the key is
+// scoped to it. The type, content and summary may differ: competing outcomes
+// of one step, such as a completion and a failure, share a key so the first
+// durable outcome wins, and Orka may derive an event again after a restart
+// under newer redaction rules. An approval is identified by its tool call;
+// terminal approval events are limited to one per approval separately.
 type DeduplicatingExecutionEventStore interface {
 	ExecutionEventStore
 	AppendExecutionEventIfAbsent(

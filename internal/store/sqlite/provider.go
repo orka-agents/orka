@@ -42,7 +42,12 @@ func (s *Store) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		DatasetID:       record.id,
 		DatasetOrigin:   storagev1.DatasetOrigin(record.origin),
 		SchemaVersion:   "sqlite/" + strconv.Itoa(version),
-		Limits:          storagev1.ProviderLimits{MaxArtifactBytes: storagev1.MaxArtifactBytes},
-		Durability:      storagev1.DurabilityLocalBuffered,
+		Limits: storagev1.ProviderLimits{
+			MaxArtifactBytes:      storagev1.MaxArtifactBytes,
+			ReceiptRetention:      receiptRetention,
+			MaxReceiptResultBytes: maxReceiptResultBytes,
+		},
+		Durability: storagev1.DurabilityLocalBuffered,
+		State:      s.datasetState(),
 	}, nil
 }

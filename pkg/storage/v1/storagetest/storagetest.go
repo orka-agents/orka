@@ -58,6 +58,12 @@ var stateFamilies = []stateFamily{
 	{"timestamps", runTimestamps},
 	{"concurrency", runConcurrency},
 	{"describe", runDescribe},
+	{"operation-receipts", runOperationReceipts},
+	{"controller-ownership", runControllerOwnership},
+	{"lost-responses", runLostResponses},
+	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
+		runWriteCatalog(t, newProvider, stateWriteCases)
+	}},
 }
 
 // RunState runs every state.v1 case against providers from newProvider.
@@ -75,5 +81,8 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory) {
 	t.Helper()
 	t.Run("artifacts", func(t *testing.T) {
 		runArtifacts(t, newProvider)
+	})
+	t.Run("write-envelopes", func(t *testing.T) {
+		runWriteCatalog(t, newProvider, artifactWriteCases)
 	})
 }

@@ -94,6 +94,12 @@ func readSessionSoul(ctx context.Context, q taskDataExecutor, namespace, name, t
 // no transcript content or visible message count is created by this operation.
 // An empty digest explicitly pins absence of a soul, not an unused Session.
 func (s *Store) EnsureSessionSoulWithLock(ctx context.Context, namespace, name, taskName, taskUID, digest string) error {
+	return writeOperationErr(ctx, s, "EnsureSessionSoulWithLock", func(ctx context.Context) error {
+		return s.ensureSessionSoulWithLockWrite(ctx, namespace, name, taskName, taskUID, digest)
+	})
+}
+
+func (s *Store) ensureSessionSoulWithLockWrite(ctx context.Context, namespace, name, taskName, taskUID, digest string) error {
 	if digest != "" {
 		if err := store.ValidateCanonicalDigest("Session soul digest", digest); err != nil {
 			return err
@@ -102,7 +108,7 @@ func (s *Store) EnsureSessionSoulWithLock(ctx context.Context, namespace, name, 
 	if taskName == "" || taskUID == "" {
 		return store.ConflictErrorf("Task identity is required to pin Session soul context")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -118,7 +124,7 @@ func (s *Store) EnsureSessionSoulWithLock(ctx context.Context, namespace, name, 
 		return store.ConflictErrorf("Gateway owns its canonical Session soul context")
 	}
 	// This also checks expiry and the cross-store cleanup fence.
-	if err := verifySessionWriteLockTx(ctx, tx, namespace, name, taskName, taskUID); err != nil {
+	if err := verifySessionWriteLockTx(ctx, tx.Tx, namespace, name, taskName, taskUID); err != nil {
 		return err
 	}
 	var existing sql.NullString

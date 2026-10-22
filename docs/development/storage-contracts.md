@@ -10,14 +10,21 @@ selection.
 ## Dataset metadata
 
 `store_dataset` contains exactly one canonical, nonzero UUID, an origin (`new` or
-`adopted`), and a bootstrap-completion flag. `PRAGMA user_version = 1` identifies
-this metadata layout. Opening a database still validates every table and index
-definition: a version marker alone cannot establish compatibility.
+`adopted`), a bootstrap-completion flag and the installation the dataset is
+bound to, empty until the first controller epoch advance.
+`PRAGMA user_version = 2` identifies this metadata layout. Opening a database
+still validates every table and index definition: a version marker alone cannot
+establish compatibility.
 
 Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
-process lock and one `BEGIN IMMEDIATE` transaction. The final 167-to-168 transition
-adds the metadata table and records an adopted identity. Missing or malformed
+process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
+adds the metadata table, the 168-to-169 transition adds operation receipts and
+the epoch advance columns, and the upgrade records an adopted identity. A store
+at an earlier schema version upgrades through numbered version steps under the
+same lock, backup and transaction: a version-1 store (the 159-object layout)
+gains the 168-to-169 objects and keeps its identity row, records and bootstrap
+state unchanged. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -246,12 +253,14 @@ writing (#512 step 3). The types are in `pkg/storage/v1`: `WriteEnvelope`,
 `RequestDigest`, the method catalog (`LookupMethod`, `Methods`),
 `OperationReceiptStore`, `ControllerEpochAdvancer`, the errors
 `ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted` and
-`ErrClockSkew`, and the new `ProviderInfo` fields. Nothing enforces the rules
-yet: Orka does not attach envelopes, SQLite does not check them, providers
-must keep accepting writes without one, and the shared suite does not test
-them. They become provider obligations when the storage client attaches
-envelopes. The suite's write catalog (`storagetest`) then gains one case per
-write method.
+`ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
+`OperationReceiptStore` and `ControllerEpochAdvancer`, and check every write
+that carries an envelope when it commits. SQLite does, and the shared suite's
+write catalog (`storagetest`) runs the dataset, receipt, age, fence and
+resolution checks for every write method except `CompleteScanTaskIngestion`,
+which joins the catalog when scan ingestion becomes a conditional command.
+Orka does not attach envelopes yet, so providers must keep accepting writes
+without one until the storage client does.
 
 - **Method catalog.** Every provider method is a read, a write or an
   administrative method. Reads carry no envelope and need no stored receipt.
@@ -473,8 +482,17 @@ write method.
   catalog names a natural key for it or the step is idempotent by the state
   it changes, as an outbox claim or a receipt deletion is; Session cleanup
   preparation has no natural key, because after completion it records a new
-  intent. The Session turn steps are still an embedded family; they follow
-  these rules once they join `state.v1`.
+  intent. The Session turn steps are still an embedded family: SQLite checks
+  the fence each of them carries against the dataset's controller epoch when
+  it commits, and they gain operation receipts when they join `state.v1`.
+- **Execution event dedupe keys.** A repeated dedupe key returns the stored
+  event only for a request with the same Task, Session and tool call;
+  anything else returns `ErrDuplicateMismatch`, so a reused key is not
+  dropped silently. The key is scoped to the stream, so the stream needs no
+  comparison. The type, content and summary may differ: competing outcomes
+  of one step, such as a completion and a failure, share one key so the first
+  durable outcome wins, and an event derived again after a restart may be
+  redacted differently.
 
 ### Rules reserved for later steps
 

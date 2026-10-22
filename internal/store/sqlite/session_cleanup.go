@@ -16,7 +16,7 @@ var _ store.SessionCleanupPersistenceStore = (*Store)(nil)
 // GetSessionCleanupIntent returns the durable cross-store cleanup plan.
 func (s *Store) GetSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (*store.SessionCleanupIntent, error) {
 	var encoded []byte
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT plan FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
 		namespace, sessionName,
 	).Scan(&encoded)
@@ -65,7 +65,7 @@ func (s *Store) ListSessionCleanupIntents(ctx context.Context) ([]store.SessionC
 // after the Session row and intent have been atomically removed.
 func (s *Store) GetSessionCleanupCompletion(ctx context.Context, namespace, sessionName string) (*store.SessionCleanupCompletion, error) {
 	completion := &store.SessionCleanupCompletion{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT namespace, session_name, session_uid, operation_id, operation_digest, completed_at
 		 FROM session_cleanup_completions WHERE namespace = ? AND session_name = ?`,
 		namespace, sessionName,
@@ -130,7 +130,7 @@ func (s *Store) HasSessionCleanupFenceForUID(ctx context.Context, sessionUID str
 // to a transcript row, including a bind-before-control crash residue.
 func (s *Store) GetSessionCleanupIdentity(ctx context.Context, namespace, sessionName string) (string, error) {
 	var sessionUID string
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT control_session_uid FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName,
 	).Scan(&sessionUID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -143,6 +143,12 @@ func (s *Store) GetSessionCleanupIdentity(ctx context.Context, namespace, sessio
 // transcript row so deletion cannot confuse a pre-cutover replacement with the
 // control record left by an older Session incarnation.
 func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessionName, sessionUID string) error {
+	return writeOperationErr(ctx, s, "BindSessionCleanupIdentity", func(ctx context.Context) error {
+		return s.bindSessionCleanupIdentityWrite(ctx, namespace, sessionName, sessionUID)
+	})
+}
+
+func (s *Store) bindSessionCleanupIdentityWrite(ctx context.Context, namespace, sessionName, sessionUID string) error {
 	trimmedNamespace := strings.TrimSpace(namespace)
 	if namespace != trimmedNamespace {
 		return store.ValidationErrorf("session namespace must not contain surrounding whitespace")
@@ -163,7 +169,7 @@ func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessi
 	if err := store.ValidateControlIdentifier("session UID", sessionUID); err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE sessions SET control_session_uid = ?
 		 WHERE namespace = ? AND name = ?
 		   AND (control_session_uid = '' OR control_session_uid = ?)
@@ -189,7 +195,7 @@ func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessi
 		return nil
 	}
 	var count int
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName,
 	).Scan(&count); err != nil {
 		return err
@@ -204,7 +210,7 @@ func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessi
 // Session whose deletion has crossed the durable intent boundary.
 func (s *Store) HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
 		strings.TrimSpace(namespace), strings.TrimSpace(sessionName),
 	).Scan(&count); err != nil {
@@ -216,16 +222,22 @@ func (s *Store) HasSessionCleanupIntent(ctx context.Context, namespace, sessionN
 // PrepareSessionCleanup atomically re-proves SQLite quiescence and records the
 // exact Kubernetes cleanup plan before any authoritative object is deleted.
 func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionCleanupIntent) (*store.SessionCleanupIntent, error) {
+	return writeOperation(ctx, s, "PrepareSessionCleanup", nil, func(ctx context.Context) (*store.SessionCleanupIntent, error) {
+		return s.prepareSessionCleanupWrite(ctx, intent)
+	})
+}
+
+func (s *Store) prepareSessionCleanupWrite(ctx context.Context, intent store.SessionCleanupIntent) (*store.SessionCleanupIntent, error) {
 	if err := normalizeSessionCleanupIntent(&intent); err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if existing, getErr := getSessionCleanupIntentTx(ctx, tx, intent.Namespace, intent.SessionName); getErr == nil {
+	if existing, getErr := getSessionCleanupIntentTx(ctx, tx.Tx, intent.Namespace, intent.SessionName); getErr == nil {
 		if existing.Gateway != nil && intent.Gateway == nil {
 			return nil, store.ErrGatewayOwnedSession
 		}
@@ -236,7 +248,7 @@ func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionC
 	} else if !errors.Is(getErr, store.ErrNotFound) {
 		return nil, getErr
 	}
-	if err := validateSessionCleanupEligibilityTx(ctx, tx, intent); err != nil {
+	if err := validateSessionCleanupEligibilityTx(ctx, tx.Tx, intent); err != nil {
 		return nil, err
 	}
 	encoded, err := json.Marshal(intent)
@@ -259,6 +271,12 @@ func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionC
 // CompleteSessionCleanup removes SQLite-owned turn/outbox/transcript state only
 // after the caller has reclaimed the exact Kubernetes plan in the intent.
 func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.CompleteSessionCleanupRequest) error {
+	return writeOperationErr(ctx, s, "CompleteSessionCleanup", func(ctx context.Context) error {
+		return s.completeSessionCleanupWrite(ctx, request)
+	})
+}
+
+func (s *Store) completeSessionCleanupWrite(ctx context.Context, request store.CompleteSessionCleanupRequest) error {
 	namespace := strings.TrimSpace(request.Namespace)
 	if request.Namespace != namespace {
 		return store.ValidationErrorf("session namespace must not contain surrounding whitespace")
@@ -283,12 +301,12 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := completeSessionCleanupTx(ctx, tx, request); err != nil {
+	if err := completeSessionCleanupTx(ctx, tx.Tx, request); err != nil {
 		return err
 	}
 	return tx.Commit()

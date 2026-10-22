@@ -36,6 +36,9 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireControllerEpoch(ctx, tx, request.Fence); err != nil {
+		return nil, err
+	}
 	if existing, getErr := getSessionTurn(ctx, tx, normalized.ID); getErr == nil {
 		if !store.SameSessionTurnCreation(existing, normalized) {
 			return nil, store.ConflictErrorf("session turn %q was reused with different prompt input or request digest", normalized.ID)
@@ -80,7 +83,8 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 
 // CommitSessionTurnFinalization atomically persists optional transcript entries,
 // the finalized turn receipt, and a deliberately deferred terminal projection.
-// It never reads or mutates SQLite control-plane mirror tables.
+// It commits only while the request's fence equals the dataset's controller
+// epoch, and mutates no SQLite control-plane mirror table.
 func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store.CommitSessionTurnFinalizationRequest) (*store.SessionTurn, error) {
 	normalized, projection, err := normalizeSessionTurnPersistenceFinalization(request)
 	if err != nil {
@@ -94,6 +98,9 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireControllerEpoch(ctx, tx, normalized.Fence); err != nil {
+		return nil, err
+	}
 	turnID, err := normalized.Key.CanonicalID()
 	if err != nil {
 		return nil, err
@@ -233,6 +240,9 @@ func (s *Store) ActivateSessionTurnProjection(ctx context.Context, request store
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireControllerEpoch(ctx, tx, normalized.Fence); err != nil {
+		return nil, err
+	}
 	turn, err := getSessionTurn(ctx, tx, normalized.TurnID)
 	if err != nil {
 		return nil, err

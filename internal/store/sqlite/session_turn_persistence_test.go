@@ -159,6 +159,9 @@ func sessionTurnFinalizationOwnershipFixture(t *testing.T, s *Store, persistence
 	key := store.SessionTurnKey{SessionUID: "session-uid", LeaseGeneration: 1, TaskUID: taskUID, Attempt: 1, PromptID: "prompt"}
 	turn := store.SessionTurn{Key: key, PromptAttemptID: "attempt", RequestDigest: controlTestDigest("turn"), UserPrompt: "user prompt"}
 	sessionVersion := int64(1)
+	if persistenceOnly {
+		mirrorTestFence(t, s, fence)
+	}
 	if !persistenceOnly {
 		fence = seedControlEpoch(t, s)
 		control, err := s.CreateSessionControl(ctx, &store.SessionControl{

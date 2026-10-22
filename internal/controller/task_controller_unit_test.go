@@ -8779,11 +8779,12 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	defer persistDB.Close() //nolint:errcheck
 	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	persistence := sqlite.NewStore(persistDB, "reclaim-test")
+	controlStore, err := storekube.NewComposite(controlClient, "default", persistence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "reclaim-controller")
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithMirror(persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

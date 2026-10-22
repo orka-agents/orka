@@ -78,6 +78,13 @@ func utcTimePtr(value *time.Time) *time.Time {
 
 // CreateScanRun inserts a new scan run.
 func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
+	_, err := writeOperationInto(ctx, s, "CreateScanRun", nil, run, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).createScanRunWrite(ctx, run)
+	})
+	return err
+}
+
+func (s *Store) createScanRunWrite(ctx context.Context, run *store.ScanRun) error {
 	run.StartedAt = utcTime(run.StartedAt)
 	run.CompletedAt = utcTimePtr(run.CompletedAt)
 	now := time.Now().UTC()
@@ -130,6 +137,13 @@ func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
 // UpdateScanRun updates progress without rebinding a run or reactivating an old
 // run after a newer run has been admitted, even when that newer run is terminal.
 func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
+	_, err := writeOperationInto(ctx, s, "UpdateScanRun", nil, run, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).updateScanRunWrite(ctx, run)
+	})
+	return err
+}
+
+func (s *Store) updateScanRunWrite(ctx context.Context, run *store.ScanRun) error {
 	run.StartedAt = utcTime(run.StartedAt)
 	run.CompletedAt = utcTimePtr(run.CompletedAt)
 	result, err := s.securityDB().ExecContext(ctx,
@@ -270,6 +284,13 @@ func (s *Store) listScanRuns(ctx context.Context, namespace, repositoryScan, pre
 // RequestScanRunCancellation freezes ordinary progress before Task deletion.
 // Each new request fences older cleanup attempts so they cannot erase a retry.
 func (s *Store) RequestScanRunCancellation(ctx context.Context, run *store.ScanRun, reason string) error {
+	_, err := writeOperationInto(ctx, s, "RequestScanRunCancellation", nil, run, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).requestScanRunCancellationWrite(ctx, run, reason)
+	})
+	return err
+}
+
+func (s *Store) requestScanRunCancellationWrite(ctx context.Context, run *store.ScanRun, reason string) error {
 	err := s.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
 		SET cancellation_version = cancellation_version + 1, cancellation_pending = TRUE,
 		    error_message = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE error_message END,
@@ -293,6 +314,13 @@ func (s *Store) RequestScanRunCancellation(ctx context.Context, run *store.ScanR
 // CompleteScanRunCancellation releases active reservations only after cleanup.
 // Late-Task cleanup preserves the result of an already terminal run.
 func (s *Store) CompleteScanRunCancellation(ctx context.Context, run *store.ScanRun) error {
+	_, err := writeOperationInto(ctx, s, "CompleteScanRunCancellation", nil, run, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).completeScanRunCancellationWrite(ctx, run)
+	})
+	return err
+}
+
+func (s *Store) completeScanRunCancellationWrite(ctx context.Context, run *store.ScanRun) error {
 	result, err := s.securityDB().ExecContext(ctx, `UPDATE security_scan_runs
 		SET cancellation_pending = FALSE,
 		    phase = CASE WHEN phase IN ('pending', 'running') THEN 'failed' ELSE phase END,
@@ -320,6 +348,13 @@ func (s *Store) CompleteScanRunCancellation(ctx context.Context, run *store.Scan
 
 // UpsertReviewSlice inserts or updates a deterministic review slice.
 func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice) error {
+	_, err := writeOperationInto(ctx, s, "UpsertReviewSlice", nil, slice, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).upsertReviewSliceWrite(ctx, slice)
+	})
+	return err
+}
+
+func (s *Store) upsertReviewSliceWrite(ctx context.Context, slice *store.ReviewSlice) error {
 	if slice.SchemaVersion == 0 {
 		slice.SchemaVersion = 1
 	}
@@ -533,6 +568,12 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 
 // UpdateReviewSliceStatus updates slice status and review timestamp.
 func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
+	return writeOperationErr(ctx, s, "UpdateReviewSliceStatus", func(ctx context.Context) error {
+		return s.securityWriteStore(ctx).updateReviewSliceStatusWrite(ctx, namespace, repositoryScan, id, lastScanRunID, status)
+	})
+}
+
+func (s *Store) updateReviewSliceStatusWrite(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
 	now := time.Now().UTC()
 	res, err := s.securityDB().ExecContext(ctx,
 		`UPDATE security_review_slices
@@ -580,6 +621,13 @@ func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryS
 // SaveThreatModel stores the current threat model, replacing any older copies for the repository.
 // When Version is zero, the revision number is incremented from the latest stored model.
 func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
+	_, err := writeOperationInto(ctx, s, "SaveThreatModel", nil, model, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).saveThreatModelWrite(ctx, model)
+	})
+	return err
+}
+
+func (s *Store) saveThreatModelWrite(ctx context.Context, model *store.ThreatModel) error {
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, nil)
 	})
@@ -589,6 +637,13 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 // the latest stored version equals expectedVersion. Otherwise it returns
 // store.ErrConflict and leaves the stored model unchanged.
 func (s *Store) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
+	_, err := writeOperationInto(ctx, s, "SaveThreatModelIfVersion", nil, model, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).saveThreatModelIfVersionWrite(ctx, model, expectedVersion)
+	})
+	return err
+}
+
+func (s *Store) saveThreatModelIfVersionWrite(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, &expectedVersion)
 	})
@@ -665,12 +720,26 @@ func unmarshalEvidence(payload string) ([]store.FindingEvidenceRef, error) {
 
 // UpsertFinding inserts or updates a finding keyed by repository fingerprint.
 func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error {
+	_, err := writeOperationInto(ctx, s, "UpsertFinding", nil, finding, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).upsertFindingWrite(ctx, finding)
+	})
+	return err
+}
+
+func (s *Store) upsertFindingWrite(ctx context.Context, finding *store.Finding) error {
 	return s.upsertFinding(ctx, finding, false)
 }
 
 // UpsertObservedFinding inserts or updates a finding from a current scan
 // observation, which may explicitly reopen a remediated finding.
 func (s *Store) UpsertObservedFinding(ctx context.Context, finding *store.Finding) error {
+	_, err := writeOperationInto(ctx, s, "UpsertObservedFinding", nil, finding, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).upsertObservedFindingWrite(ctx, finding)
+	})
+	return err
+}
+
+func (s *Store) upsertObservedFindingWrite(ctx context.Context, finding *store.Finding) error {
 	return s.upsertFinding(ctx, finding, true)
 }
 
@@ -1039,6 +1108,12 @@ func (s *Store) GetFindingCounts(ctx context.Context, namespace, repositoryScan 
 
 // UpdateFindingState updates the user-visible finding state.
 func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state string) error {
+	return writeOperationErr(ctx, s, "UpdateFindingState", func(ctx context.Context) error {
+		return s.securityWriteStore(ctx).updateFindingStateWrite(ctx, namespace, id, state)
+	})
+}
+
+func (s *Store) updateFindingStateWrite(ctx context.Context, namespace, id, state string) error {
 	now := time.Now().UTC()
 	res, err := s.securityDB().ExecContext(ctx,
 		`WITH RECURSIVE canonical(id, duplicate_of) AS (
@@ -1071,6 +1146,12 @@ func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state str
 
 // ResolveFindingIfCurrent resolves only the pr_open occurrence and PR selected by the caller.
 func (s *Store) ResolveFindingIfCurrent(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error) {
+	return writeOperation(ctx, s, "ResolveFindingIfCurrent", nil, func(ctx context.Context) (bool, error) {
+		return s.securityWriteStore(ctx).resolveFindingIfCurrentWrite(ctx, namespace, id, scanRunID, prNumber)
+	})
+}
+
+func (s *Store) resolveFindingIfCurrentWrite(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error) {
 	now := time.Now().UTC()
 	res, err := s.securityDB().ExecContext(ctx,
 		`UPDATE security_findings
@@ -1100,6 +1181,12 @@ func findingUserFinalState(state string) bool {
 // MarkFindingDuplicate keeps an old finding addressable while removing it from
 // canonical lists and counts.
 func (s *Store) MarkFindingDuplicate(ctx context.Context, namespace, id, canonicalID string) error {
+	return writeOperationErr(ctx, s, "MarkFindingDuplicate", func(ctx context.Context) error {
+		return s.securityWriteStore(ctx).markFindingDuplicateWrite(ctx, namespace, id, canonicalID)
+	})
+}
+
+func (s *Store) markFindingDuplicateWrite(ctx context.Context, namespace, id, canonicalID string) error {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(id) == "" || strings.TrimSpace(canonicalID) == "" || id == canonicalID {
 		return store.ValidationErrorf("duplicate finding namespace, ID, and distinct canonical ID are required")
 	}
@@ -1157,6 +1244,13 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 
 // CreatePatchProposal inserts a new patch proposal.
 func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
+	_, err := writeOperationInto(ctx, s, "CreatePatchProposal", nil, proposal, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).createPatchProposalWrite(ctx, proposal)
+	})
+	return err
+}
+
+func (s *Store) createPatchProposalWrite(ctx context.Context, proposal *store.PatchProposal) error {
 	if proposal.PublicationEvidence != nil {
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
@@ -1181,11 +1275,18 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 // immutable governed-publication tuple. Identical replay is a no-op; any
 // differing replay conflicts and leaves the first tuple unchanged.
 func (s *Store) BindPatchProposalPublicationEvidence(ctx context.Context, proposal *store.PatchProposal) error {
+	_, err := writeOperationInto(ctx, s, "BindPatchProposalPublicationEvidence", nil, proposal, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).bindPatchProposalPublicationEvidenceWrite(ctx, proposal)
+	})
+	return err
+}
+
+func (s *Store) bindPatchProposalPublicationEvidenceWrite(ctx context.Context, proposal *store.PatchProposal) error {
 	evidenceJSON, err := validatePatchProposalPublicationBinding(proposal)
 	if err != nil {
 		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -1375,6 +1476,13 @@ func samePatchProposalPublicationBinding(existing store.PatchProposal, desired *
 
 // UpdatePatchProposal updates an existing patch proposal.
 func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
+	_, err := writeOperationInto(ctx, s, "UpdatePatchProposal", nil, proposal, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).updatePatchProposalWrite(ctx, proposal)
+	})
+	return err
+}
+
+func (s *Store) updatePatchProposalWrite(ctx context.Context, proposal *store.PatchProposal) error {
 	if proposal == nil || strings.TrimSpace(proposal.Namespace) == "" || strings.TrimSpace(proposal.ID) == "" {
 		return store.ValidationErrorf("patch proposal namespace and ID are required")
 	}
@@ -1482,6 +1590,13 @@ func listPatchProposals(ctx context.Context, q securityDB, namespace, findingID 
 
 // CreateDroppedFinding records a rejected finding diagnostic.
 func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.DroppedFinding) error {
+	_, err := writeOperationInto(ctx, s, "CreateDroppedFinding", nil, dropped, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.securityWriteStore(ctx).createDroppedFindingWrite(ctx, dropped)
+	})
+	return err
+}
+
+func (s *Store) createDroppedFindingWrite(ctx context.Context, dropped *store.DroppedFinding) error {
 	if dropped.ID == "" {
 		dropped.ID = "drop_" + shortStoreHash(strings.Join([]string{
 			dropped.Namespace,

@@ -26,6 +26,12 @@ func (s *Store) usageTransaction(ctx context.Context, fn func(context.Context) e
 }
 
 func (s *Store) RegisterUsageWork(ctx context.Context, work store.UsageWorkRequest) error {
+	return writeOperationErr(ctx, s, "RegisterUsageWork", func(ctx context.Context) error {
+		return s.registerUsageWorkWrite(ctx, work)
+	})
+}
+
+func (s *Store) registerUsageWorkWrite(ctx context.Context, work store.UsageWorkRequest) error {
 	work.Repository = strings.ToLower(strings.TrimSpace(work.Repository))
 	if work.Namespace == "" || work.MonitorUID == "" || work.MonitorName == "" || work.Repository == "" || work.Number <= 0 ||
 		(work.Kind != "issue" && work.Kind != "pull_request") {
@@ -47,6 +53,12 @@ func (s *Store) RegisterUsageWork(ctx context.Context, work store.UsageWorkReque
 }
 
 func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) error {
+	return writeOperationErr(ctx, s, "RegisterUsageTask", func(ctx context.Context) error {
+		return s.registerUsageTaskWrite(ctx, task)
+	})
+}
+
+func (s *Store) registerUsageTaskWrite(ctx context.Context, task store.UsageTask) error {
 	utcUsageTimes(&task)
 	task.Repository = strings.ToLower(task.Repository)
 	if task.Namespace == "" || task.TaskUID == "" || task.TaskName == "" {
@@ -209,6 +221,12 @@ func mergeUsageTaskSnapshot(task *store.UsageTask, existing store.UsageTask) err
 }
 
 func (s *Store) RecordUsage(ctx context.Context, observation store.UsageObservation) error {
+	return writeOperationErr(ctx, s, "RecordUsage", func(ctx context.Context) error {
+		return s.recordUsageWrite(ctx, observation)
+	})
+}
+
+func (s *Store) recordUsageWrite(ctx context.Context, observation store.UsageObservation) error {
 	return recordUsage(ctx, s.taskDataExecutor(ctx), observation)
 }
 
@@ -257,6 +275,12 @@ func recordUsage(ctx context.Context, db taskDataExecutor, observation store.Usa
 }
 
 func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink) error {
+	return writeOperationErr(ctx, s, "LinkUsagePullRequest", func(ctx context.Context) error {
+		return s.linkUsagePullRequestWrite(ctx, link)
+	})
+}
+
+func (s *Store) linkUsagePullRequestWrite(ctx context.Context, link store.UsagePRLink) error {
 	utcUsageTimes(&link)
 	link.Repository = strings.ToLower(link.Repository)
 	if link.Namespace == "" || link.WorkID == "" || link.Repository == "" || link.Number <= 0 || link.EvidenceID == "" {
@@ -300,6 +324,12 @@ func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink
 }
 
 func (s *Store) RecordUsagePullRequest(ctx context.Context, pr store.UsagePullRequest) error {
+	return writeOperationErr(ctx, s, "RecordUsagePullRequest", func(ctx context.Context) error {
+		return s.recordUsagePullRequestWrite(ctx, pr)
+	})
+}
+
+func (s *Store) recordUsagePullRequestWrite(ctx context.Context, pr store.UsagePullRequest) error {
 	utcUsageTimes(&pr)
 	pr.Repository = strings.ToLower(pr.Repository)
 	if pr.Namespace == "" || pr.Repository == "" || pr.Number <= 0 || pr.ObservedAt.IsZero() {
@@ -477,6 +507,12 @@ func readUsageRows[T any](ctx context.Context, db taskDataExecutor, query string
 // attempts from a retained request. Cumulative counter baselines remain until
 // the counter itself expires, so retention cannot turn an old total into new usage.
 func (s *Store) PruneUsage(ctx context.Context, before time.Time) error {
+	return writeOperationErr(ctx, s, "PruneUsage", func(ctx context.Context) error {
+		return s.pruneUsageWrite(ctx, before)
+	})
+}
+
+func (s *Store) pruneUsageWrite(ctx context.Context, before time.Time) error {
 	return s.usageTransaction(ctx, func(ctx context.Context) error {
 		db := s.taskDataExecutor(ctx)
 		// A work remains active while any Task is nonterminal, a linked PR is
