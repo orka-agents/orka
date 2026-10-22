@@ -102,16 +102,13 @@ func TestRequireMemberChecksOrgsAndTeamsAndFailsClosed(t *testing.T) {
 			t.Fatalf("%s: err = %v, want ErrNotMember", name, err)
 		}
 	}
-	// GitHub failing or rate-limiting is no membership too, but not a
-	// verdict to act on.
-	for _, org := range []string{"broken", "throttled", "slow-down"} {
+	// GitHub failing, rate-limiting, or refusing with a bare 403 (which may
+	// be a secondary rate limit) is no membership too, but not a verdict to
+	// act on.
+	for _, org := range []string{"broken", "throttled", "slow-down", "forbidden"} {
 		if err := member("ghu_alice", Allowed{Orgs: []string{org}}); err == nil || errors.Is(err, ErrNotMember) {
 			t.Fatalf("%s: err = %v, want a retryable error", org, err)
 		}
-	}
-	// A plain 403 is GitHub refusing: no membership.
-	if err := member("ghu_alice", Allowed{Orgs: []string{"forbidden"}}); !errors.Is(err, ErrNotMember) {
-		t.Fatalf("forbidden: err = %v, want ErrNotMember", err)
 	}
 	if err := member("ghu_revoked", Allowed{Orgs: []string{"acme"}}); err == nil {
 		t.Fatalf("a token GitHub refuses: err = %v", err)

@@ -223,12 +223,17 @@ func (c Client) active(ctx context.Context, token, path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// GitHub answers rate limits with 403 or 429: that is no verdict on
-	// membership, and must not end a member's access.
-	if status == http.StatusTooManyRequests || header.Get("Retry-After") != "" || header.Get("X-RateLimit-Remaining") == "0" {
-		return false, fmt.Errorf("GitHub rate-limited the membership check: HTTP %d", status)
+	// Only GitHub saying the person is not a member is a verdict. It answers
+	// rate limits, including secondary ones without any header, with 403 or
+	// 429, so those must never end a member's access.
+	if status == http.StatusForbidden || status == http.StatusTooManyRequests {
+		limited := ""
+		if header.Get("Retry-After") != "" || header.Get("X-RateLimit-Remaining") == "0" {
+			limited = ", rate-limited"
+		}
+		return false, fmt.Errorf("GitHub refused the membership check: HTTP %d%s", status, limited)
 	}
-	if status == http.StatusNotFound || status == http.StatusForbidden {
+	if status == http.StatusNotFound {
 		return false, nil
 	}
 	if status != http.StatusOK {
