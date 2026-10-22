@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -987,6 +988,11 @@ type Store struct {
 	// completed by this process's first custody operation.
 	pendingWALTruncate atomic.Bool
 
+	// incarnation identifies this open of the database. Describe reports it,
+	// so a reopen, the only way SQLite's serving database can restart, is
+	// visible as a new incarnation.
+	incarnation string
+
 	// snapshotCipher encrypts immutable agent execution snapshot bodies at
 	// rest. Snapshot persistence fails closed while it is nil.
 	snapshotCipher *AgentExecutionSnapshotCipher
@@ -1008,6 +1014,7 @@ type Store struct {
 func NewStore(db *sql.DB, dbPath string) *Store {
 	s := &Store{db: db, dbPath: dbPath, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
 	return s
 }
 
@@ -1027,6 +1034,7 @@ func OpenLockedStore(path string) (*Store, error) {
 	}
 	store := &Store{db: db, dbPath: path, processLock: lock, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	store.pendingWALTruncate.Store(true)
+	store.incarnation = uuid.NewString()
 	return store, nil
 }
 

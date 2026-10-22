@@ -58,6 +58,19 @@ var ErrFenced = errors.New("fenced")
 // of the provider. Providers report it with [TooLargeError].
 var ErrTooLarge = errors.New("too large")
 
+// ErrUnauthenticated is returned when the provider rejects the caller's
+// credentials: they are missing, expired, invalid or not permitted to use the
+// dataset. Nothing was committed. Retrying with the same credentials fails
+// again, so the caller reloads its credentials before it retries. An
+// in-process provider never returns it.
+var ErrUnauthenticated = errors.New("storage authentication failed")
+
+// ErrIncompatible is returned when the provider cannot serve the contract
+// revision a call needs, or cannot serve the dataset's schema (see
+// [DatasetIncompatible]). Nothing was committed. Retrying cannot succeed until
+// the provider or the dataset is replaced.
+var ErrIncompatible = errors.New("storage incompatible")
+
 // FencedError reports a write rejected by a stale fence. It matches
 // [ErrFenced]. Orka callers written before ErrFenced existed branch on
 // [ErrConflict], so a FencedError also matches ErrConflict until those callers
@@ -119,6 +132,15 @@ func ValidationErrorf(format string, args ...any) error {
 }
 
 // HealthChecker can verify its underlying storage is reachable.
+//
+// A provider's HealthCheck reaches the dataset, not only the provider process,
+// takes no write lock and is cheap: Orka calls it every few seconds with a
+// short deadline, so it should finish in tens of milliseconds. It works before
+// Orka has bound the dataset or advanced its controller epoch. It returns nil
+// when the dataset can serve calls, [ErrUnavailable] when it cannot be
+// reached, [ErrNotReady] while it is migrating or importing,
+// [ErrUnauthenticated] when the caller's credentials are rejected, and
+// [ErrIncompatible] when the provider cannot serve the dataset's schema.
 type HealthChecker interface {
 	HealthCheck(ctx context.Context) error
 }

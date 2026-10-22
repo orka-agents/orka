@@ -39,7 +39,24 @@
 // cursor), [ErrTooLarge], [ErrCapacity], [ErrNotReady], or a family error such
 // as [ErrDuplicateMismatch] or [ErrGatewaySessionCleanupPending]. A provider that could not run an operation
 // returns [ErrUnavailable] only when nothing was committed. When a write may
-// have committed, it returns [ErrOutcomeUnknown], never success.
+// have committed, it returns [ErrOutcomeUnknown], never success. A provider
+// that rejects the caller's credentials returns [ErrUnauthenticated], and one
+// that cannot serve the contract revision a call needs, or the dataset's
+// schema, returns [ErrIncompatible]; neither commits anything.
+//
+// # Validation and health
+//
+// Before Orka uses a provider, and again while it runs, it validates the
+// binding with [ProviderDescriber.Describe]: the contract version and
+// [ContractRevision], the contract parts served, the dataset's identity and
+// state, the limits, the durability class and the provider clock. Orka does
+// not interpret a provider's SchemaVersion; the provider gives its own verdict
+// on the dataset's schema through [ProviderInfo.State]. Between validations
+// Orka probes the binding with [HealthChecker.HealthCheck].
+//
+// [LookupMethod] gives each method a [CallClass] as well as a kind, so a
+// storage client or transport can keep long transfers and background work
+// from delaying health checks and ordinary calls.
 //
 // # Times
 //
@@ -78,6 +95,15 @@ import "context"
 const (
 	// ContractVersion identifies this storage extension contract.
 	ContractVersion = "orka.storage.v1"
+	// ContractRevision is the latest revision of ContractVersion this package
+	// defines. A provider that meets its obligations, which this package's
+	// shared suite checks, reports it in [ProviderInfo.ContractRevision]. A
+	// change that adds an obligation every provider must meet increments it,
+	// so Orka can refuse a provider that is too old for a contract part with
+	// one precise reason instead of failing at the first missing method. An
+	// optional family is announced through [ProviderInfo.Capabilities]
+	// instead.
+	ContractRevision = 1
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.

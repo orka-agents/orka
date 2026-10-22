@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
+	"time"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
@@ -30,9 +32,13 @@ func (s *Store) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		return storagev1.ProviderInfo{}, err
 	}
 	if version != SchemaVersion {
-		return storagev1.ProviderInfo{}, fmt.Errorf("unsupported SQLite schema version %d", version)
+		return storagev1.ProviderInfo{}, fmt.Errorf("%w: unsupported SQLite schema version %d", storagev1.ErrIncompatible, version)
 	}
 	record, err := readDataset(tx)
+	if err != nil {
+		return storagev1.ProviderInfo{}, err
+	}
+	populated, err := datasetHasRecords(ctx, tx)
 	if err != nil {
 		return storagev1.ProviderInfo{}, err
 	}
@@ -44,5 +50,34 @@ func (s *Store) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		SchemaVersion:   "sqlite/" + strconv.Itoa(version),
 		Limits:          storagev1.ProviderLimits{MaxArtifactBytes: storagev1.MaxArtifactBytes},
 		Durability:      storagev1.DurabilityLocalBuffered,
+
+		ContractRevision: storagev1.ContractRevision,
+		// The schema is upgraded when the store opens, under the process lock,
+		// so an open store always serves a ready dataset.
+		State:       storagev1.DatasetReady,
+		Incarnation: s.incarnation,
+		ObservedAt:  time.Now().UTC(),
+		Bootstrap:   storagev1.DatasetBootstrap{Complete: record.complete, Empty: !populated},
+		Usage:       datasetUsage(s.dbPath),
 	}, nil
+}
+
+// inMemoryPath is the path of a database that SQLite keeps in memory.
+const inMemoryPath = ":memory:"
+
+// datasetUsage returns the size of the database file and its write-ahead log,
+// or nil for an in-memory database or a file it cannot read.
+func datasetUsage(path string) *storagev1.DatasetUsage {
+	if path == "" || path == inMemoryPath {
+		return nil
+	}
+	file, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	size := file.Size()
+	if wal, err := os.Stat(path + "-wal"); err == nil {
+		size += wal.Size()
+	}
+	return &storagev1.DatasetUsage{DatasetBytes: size}
 }

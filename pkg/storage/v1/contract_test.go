@@ -57,4 +57,5 @@ func TestDescribeVocabulary(t *testing.T) {
 		require.True(t, storagev1.IsValidDurabilityClass(class), class)
 	}
 	require.False(t, storagev1.IsValidDurabilityClass("eventual"))
+	require.GreaterOrEqual(t, storagev1.ContractRevision, 1, "revisions start at 1")
 }

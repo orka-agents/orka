@@ -65,6 +65,7 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - `**/zz_generated.*.go` — `make generate`
 - `PROJECT` — kubebuilder CLI
 - `ui/src/routeTree.gen.ts` — TanStack Router
+- `internal/storageclient/storagefault/wrappers_gen.go` — `go generate ./internal/storageclient/storagefault`
 
 ## Code Style
 

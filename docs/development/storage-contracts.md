@@ -178,7 +178,13 @@ the observable parts.
   and owner-fenced Session writes this way; gateway claim and outbox lease
   owner mismatches still report `ErrConflict` or `ErrNotFound`. As an
   in-process store, SQLite returns its driver's errors for infrastructure
-  failures; no commit outcome can be lost in transit.
+  failures; no commit outcome can be lost in transit. A provider reached over
+  a network returns `ErrUnauthenticated` when it rejects the caller's
+  credentials (missing, expired, invalid or not permitted for the dataset);
+  retrying with the same credentials fails again, so Orka reloads them first.
+  `ErrIncompatible` means the provider cannot serve the contract revision a
+  call needs or the dataset's schema; retrying cannot succeed until the
+  provider or the dataset is replaced. Neither commits anything.
 - **Write envelope.** `WriteEnvelope{DatasetID, Fence, OperationID,
   RequestDigest, IssuedAt, Sequence}` travels in the context
   (`WithWriteEnvelope`, `WriteEnvelopeFrom`). Orka does not attach it yet and
@@ -197,11 +203,60 @@ the observable parts.
   optional capabilities beyond the contract parts (none in v1), size limits
   and the durability class. It is there for startup validation (step 4),
   installation binding (step 5) and migration; nothing in Orka calls it yet.
-  It also has fields for the dataset's write state (`ready`, `migrating` or
-  `importing`), an `Incarnation` that changes when the serving database may
-  have restarted or switched, the provider clock when `Describe` ran
-  (`ObservedAt`), and the operation receipt retention and result limit. They
-  stay empty until providers report them.
+  It also reports the contract revision the provider implements, the
+  dataset's state, an `Incarnation` that changes when the serving database
+  may have restarted or switched and stays the same otherwise, the provider
+  clock when `Describe` ran (`ObservedAt`, in UTC), how far the dataset is
+  through its first start (`Bootstrap`: whether it completed, and whether the
+  dataset holds no application record, which a provider may report as false
+  when it cannot prove it cheaply), and optionally the dataset's size
+  (`Usage`). The operation receipt retention and result limit stay zero until
+  providers keep receipts. `Describe` is read-only, may take up to about a
+  second, and answers for a dataset Orka has not yet bound, bootstrapped or
+  advanced to a controller epoch, so it carries no envelope and is never
+  fenced. It returns `ErrUnavailable` when the dataset cannot be reached,
+  `ErrUnauthenticated` when credentials are rejected, and `ErrIncompatible`
+  when the provider cannot report on the dataset at all, for example because
+  it does not recognize the dataset's schema version. The embedded
+  SQLite store reports revision 1, `ready` (it upgrades its schema when it
+  opens, under the process lock), an incarnation generated each time it
+  opens, its bootstrap flag and a scan of its tables, and the size of its
+  file plus the write-ahead log. A schema version it does not support returns
+  `ErrIncompatible`.
+- **Contract revisions and schema verdicts.** `ContractRevision` counts the
+  additions to `orka.storage.v1` that every provider must implement; a
+  provider reports the highest revision whose obligations it meets, and
+  revisions are additive. A change that adds such an obligation increments
+  `storagev1.ContractRevision`, so startup validation can refuse an older
+  provider with one precise reason instead of failing at the first missing
+  method; an optional family is announced as a capability instead. The
+  revision Orka requires for each part belongs to Orka, not to the contract.
+  Orka never interprets a provider's `SchemaVersion` beyond equality: a
+  provider gives its own verdict on its schema. One that can still read the
+  identity of a dataset it cannot serve reports the state `incompatible`;
+  such a dataset answers `Describe` and returns `ErrIncompatible` from every
+  other call, committing nothing, until an operator replaces the provider or
+  the dataset. One that cannot read the identity answers `Describe` with
+  `ErrIncompatible`. Orka treats both as the same verdict.
+- **Health checks.** `HealthCheck` reaches the dataset, not only the provider
+  process, takes no write lock and is cheap: Orka probes every few seconds
+  with a short deadline, so it should finish in tens of milliseconds. It
+  works before binding and before the controller epoch is advanced. It
+  returns nil, `ErrUnavailable` (unreachable), `ErrNotReady` (`migrating` or
+  `importing`), `ErrUnauthenticated` or `ErrIncompatible`. SQLite, whose
+  database the controller process holds open, runs `SELECT 1` on that
+  connection.
+- **Call classes.** The method catalog gives every method a call class, which
+  a storage client uses to choose its deadline, retries and concurrency limit
+  and a network transport uses to carry bulk transfers on their own
+  connection: `control` for `HealthCheck`, `Describe` and the controller epoch
+  and operation resolution methods, which must get through when everything
+  else is saturated; `background` for retention, receipt pruning and recovery
+  scans; `bulk` for results, prompt result receipts and artifacts, which move
+  whole bodies of up to several megabytes; and `interactive` for everything
+  else. A fifth class, `stream`, is never assigned by the catalog: a poller,
+  such as an event stream, chooses it for its reads so the number of open
+  streams cannot use up the interactive limit.
 - **Times.** A provider preserves every caller-supplied time exactly, to the
   nanosecond, and returns stored times in UTC. Connector consent and
   completion encryption bind `ExpiresAt.UTC().UnixNano()` into associated
@@ -286,7 +341,8 @@ write method.
   3. the operation's age: `IssuedAt` more than `MaxOperationAge` (15 minutes)
      before the provider clock returns `ErrOperationExpired`, and more than
      `MaxClockSkew` (30 seconds) after it returns `ErrClockSkew`;
-  4. the dataset state: anything but `ready` returns `ErrNotReady`;
+  4. the dataset state: `migrating` or `importing` returns `ErrNotReady`
+     (an `incompatible` dataset refuses every call with `ErrIncompatible`);
   5. the fence, which must equal the dataset's stored controller epoch, or
      `ErrFenced`. The provider reads it under a lock that conflicts with an
      epoch advance;
@@ -524,6 +580,14 @@ the named step.
 - **Suite isolation.** A suite factory may return a fresh isolated dataset on
   a shared provider (a schema or key prefix) instead of a new provider per
   case, so the suite stays practical against a managed database.
+- **Change feed.** While one controller is the only writer, the storage
+  client knows every committed change, so pollers can be woken in process and
+  a poll budget can bound what they read. Standby controllers or writers
+  outside Orka would need a contract-level change feed instead. Its reserved
+  shape is a read, `ListChanges(ctx, ChangesRequest{AfterCursor, Families,
+  Limit})`, that returns the keys changed after an opaque, provider-issued
+  cursor in commit order, under the same visibility rule as
+  provider-assigned sequences. It is not part of the contract yet.
 
 `cmd/main.go` builds one `internal/storageclient.Client` over the SQLite store
 and passes it to every application consumer. Outside the client, it uses the
@@ -551,6 +615,21 @@ cross-contract transactions" above.
 `RunArtifacts` exercise each provider family through the public interfaces.
 The SQLite provider runs it directly, and the storage client runs it over
 SQLite.
+
+`internal/storageclient/storagefault` injects storage faults for Orka's own
+tests. It wraps a state provider, an artifact provider or the embedded store
+(`NewEmbeddedClient` builds a complete storage client over one), so a test
+can take state or artifact storage down and bring it back separately, fail
+chosen methods or kinds with any error (such as `ErrUnauthenticated` or
+`ErrNotReady`), delay calls, hold them until released, let a write commit
+and then lose its response (`ErrOutcomeUnknown`), or change what `Describe`
+reports, such as a new incarnation or another dataset ID. It counts every
+call it receives and every call that reached the provider. On the embedded
+store, `Describe` and `HealthCheck` are state calls; a binding check for
+artifacts wraps the same store as an artifact provider, which shares the
+faults. Its wrappers are generated from the provider interfaces, and tests
+fail when they are out of date or miss a catalog method the embedded store
+serves.
 
 SQLite also implements the duplicate SQL control-record methods described in
 the next section. They are not part of the provider contract or the client. A
