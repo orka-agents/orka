@@ -520,3 +520,37 @@ func TestLoginWaitsThroughAStaleMembershipFailure(t *testing.T) {
 		t.Fatalf("login: %v %q", err, out)
 	}
 }
+
+// An answer cut off after its headers is a failure: neither login nor a
+// renewal saves an empty session over the one it holds.
+func TestATruncatedAnswerSavesNoSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeGitHubDeviceFlow(t)
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/config" {
+			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app"}}) //nolint:errcheck
+			return
+		}
+		// A 201 that promises a body and closes before sending it.
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer orka.Close()
+	soon := time.Now().Add(time.Hour)
+	held := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_held", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon}
+	if err := saveConfig(held); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--no-host", "--timeout", "10s"); err == nil {
+		t.Fatal("a truncated sign-in answer must fail")
+	}
+	cmd := &cobra.Command{}
+	cmd.SetErr(new(bytes.Buffer))
+	if token := configuredSession(cmd, "", held); token != "orka_s_held" {
+		t.Fatalf("token = %q, want the held session", token)
+	}
+	if saved := loadConfig(); saved.Token != "orka_s_held" {
+		t.Fatalf("config token = %q, want the held session", saved.Token)
+	}
+}

@@ -119,6 +119,9 @@ func newLoginCmd() *cobra.Command {
 			if err := plainJSON(ctx, http.MethodPost, server+"/api/v1/auth/github", "", body, &session); err != nil {
 				return fmt.Errorf("sign in to %s: %w", server, err)
 			}
+			if session.Token == "" {
+				return fmt.Errorf("sign in to %s: the server answered without a session", server)
+			}
 			if err := updateConfig(func(cfg *orkaConfig) error {
 				cfg.Server, cfg.Token, cfg.TokenKind, cfg.Namespace = server, session.Token, tokenKindGitHubSession, session.Namespace
 				expires := session.ExpiresAt
@@ -247,7 +250,11 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 		return cfg.Token
 	}
 	var session sessionView
-	if err := plainJSON(ctx, http.MethodPost, cfg.SessionServer+"/api/v1/auth/session/renew", cfg.Token, nil, &session); err != nil {
+	err = plainJSON(ctx, http.MethodPost, cfg.SessionServer+"/api/v1/auth/session/renew", cfg.Token, nil, &session)
+	if err == nil && session.Token == "" {
+		err = errors.New("the server answered without a session")
+	}
+	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not renew your Orka session (%v); run 'orka login' before %s.\n", //nolint:errcheck
 			err, cfg.TokenExpiresAt.Local().Format(time.Kitchen))
 		return cfg.Token
@@ -303,7 +310,10 @@ func plainJSON(ctx context.Context, method, target, token string, body []byte, i
 		return err
 	}
 	defer func() { _ = response.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read the answer: %w", err)
+	}
 	if response.StatusCode >= 300 {
 		var problem struct {
 			Error struct {
