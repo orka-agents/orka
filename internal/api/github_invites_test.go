@@ -237,6 +237,19 @@ func TestInviteRevokesWhenTheAppSecretIsGone(t *testing.T) {
 	}
 }
 
+// Without host creation an invite would only link an account its owner
+// cannot use, so none is started.
+func TestInvitesNeedHostCreation(t *testing.T) {
+	h, gh := newInviteHarness(t, nil)
+	h.handlers.githubSignIn.CreateHosts = false
+	if status, _ := h.invite("alice"); status != http.StatusNotImplemented {
+		t.Fatalf("invite without host creation = %d, want 501", status)
+	}
+	if got := gh.codes.Load(); got != 0 {
+		t.Fatalf("%d device flows started", got)
+	}
+}
+
 // A full invite table refuses before asking GitHub for a code.
 func TestInvitesReserveCapacityBeforeStartingTheDeviceFlow(t *testing.T) {
 	h, gh := newInviteHarness(t, nil)

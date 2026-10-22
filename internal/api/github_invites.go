@@ -138,6 +138,11 @@ func (h *Handlers) CreateInvite(c fiber.Ctx) error {
 	if !cfg.Enabled || !h.connectors.Enabled {
 		return fiber.NewError(fiber.StatusNotImplemented, "GitHub sign-in is not enabled on this controller")
 	}
+	// An invite gives someone who cannot reach Orka a Copilot environment;
+	// a link alone would leave them nothing to use.
+	if !cfg.CreateHosts {
+		return fiber.NewError(fiber.StatusNotImplemented, "this controller starts no agent hosts for sign-ins (--github-sign-in-create-hosts=false), so it has nothing to invite to")
+	}
 	var req createInviteRequest
 	if err := decodeStrictJSON(c.Body(), &req); err != nil {
 		return err
