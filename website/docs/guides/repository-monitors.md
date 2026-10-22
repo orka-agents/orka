@@ -299,7 +299,7 @@ Each accepted review stores the pull request's record of findings: every finding
 - **Findings outside the new changes** count only at `P1` or above; lower ones are listed under "Outside the new changes (not blocking)".
 - **A re-review of an unchanged head**, such as a `review` command, can add findings but cannot mark any fixed, so the verdict does not flip without a code change.
 
-The published review lists the open findings (marking those open since an earlier commit) and the findings fixed in this commit. Inline comments go only on findings first reported at this head, so earlier findings keep their original threads.
+The published review lists the open findings (marking those open since an earlier commit) and the findings fixed in this commit. Inline comments go only on findings first reported at this head, so earlier findings keep their original threads. When a follow-up review finds a finding fixed, Orka prefixes its inline comment with "✅ Addressed in `<commit>`" and resolves the comment's thread. It only touches comments on reviews it published, marks each finding once, and a GitHub failure here does not hold up the review.
 
 With `spec.review.exhaustive: true`, a full review repeats on the same head until a pass finds nothing new, at most three passes, so follow-up reviews start from every finding instead of uncovering them one round at a time. Each pass sees the findings already recorded and reports only additional ones. Until the last pass, the head does not count as reviewed: readiness and repairs wait, and only the last pass is published, with every finding. Follow-up reviews run once.
 

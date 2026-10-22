@@ -348,6 +348,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
 		return false, err
 	}
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
 	return true, nil
 }
 
@@ -973,6 +974,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
 		return false, err
 	}
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
 	return true, nil
 }
 
@@ -1006,6 +1008,7 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx con
 	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
 		return false, err
 	}
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
 	return true, nil
 }
 
