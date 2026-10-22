@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"maps"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,7 +117,7 @@ func TestRequestDigestEncodingIsTheDocumentedOne(t *testing.T) {
 	text(&want, "b")
 	scalar(&want, 'i', binary.AppendVarint(nil, 2))
 	text(&want, "JSON")
-	scalar(&want, 'j', []byte(`{"k":[1,"\u003c"]}`))
+	scalar(&want, 'j', []byte(`{"k":[1.0,"\u003c"]}`))
 	sum = sha256.Sum256(want.Bytes())
 	require.Equal(t, "sha256:"+hex.EncodeToString(sum[:]), requestDigest(t, "M", kinds{
 		B: true, U: 300, F: -1.5, Y: []byte{0, 1}, L: []string{"", "a"}, M: map[string]int{"b": 2, "a": 0},
@@ -140,7 +141,7 @@ func TestRequestDigestIsStable(t *testing.T) {
 		ToolCalls: []any{map[string]any{"arguments": json.RawMessage(`{"n":1.0,"r":0.25}`), "id": "call-1"}},
 		Metadata:  map[string]string{"z": "", "a": "x"},
 	}}, map[string]any{"score": 0.75, "nested": &nested, "flag": false}, []float64{math.NaN(), 0, 2.5}, uint8(9))
-	require.Equal(t, "sha256:7a27b3f441db3c75e0ece6cac38818f91fa6ab8a072795d3a34a9d952621129c", digest)
+	require.Equal(t, "sha256:bf1404437b7d09f85f72974b2f884077be1860cf9e37703a24c92c5f7a9e4059", digest)
 }
 
 func TestRequestDigestSeparatesMethodsArgumentsAndFields(t *testing.T) {
@@ -248,37 +249,44 @@ func TestRequestDigestCanonicalizesDynamicValues(t *testing.T) {
 	require.Equal(t, requestDigest(t, "M", typed), requestDigest(t, "M", decoded),
 		"a typed value and its decoded JSON form digest the same")
 
-	// Numbers written in another form, such as raw tool-call arguments, match
-	// the float64 copy a server decodes.
+	// Raw tool-call arguments keep their numbers exactly as written: a copy
+	// decoded losslessly matches, and a float64 copy that changed a number's
+	// text fails closed instead of matching another request.
 	type toolCall struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	written := message{ToolCalls: []toolCall{{Name: "f", Arguments: json.RawMessage(`{"a":1.0,"b":1e2,"c":0.50,"d":-0.0,"e":2.5E-3}`)}}}
-	decodedCopy := message{ToolCalls: []any{map[string]any{"name": "f", "arguments": map[string]any{
-		"a": 1.0, "b": 100.0, "c": 0.5, "d": math.Copysign(0, -1), "e": 0.0025,
-	}}}}
-	require.Equal(t, requestDigest(t, "M", written), requestDigest(t, "M", decodedCopy))
-	for _, same := range [][2]string{{`1.0`, `1`}, {`1e2`, `100`}, {`0.50`, `0.5`}, {`1E+21`, `1e21`}, {`0.1`, `1e-1`}, {`1152921504606846976`, `1152921504606847000`}, {`18446744073709551616`, `18446744073709552000`}} {
-		require.Equal(t, requestDigest(t, "M", message{Payload: json.RawMessage(same[0])}),
-			requestDigest(t, "M", message{Payload: json.RawMessage(same[1])}), "%s and %s are forms of the same float64", same[0], same[1])
-	}
+	written := message{ToolCalls: []toolCall{{Name: "f", Arguments: json.RawMessage(`{"a":1.0,"b":1e2,"n":1152921504606846976}`)}}}
+	wire := `[{"name":"f","arguments":{"n":1152921504606846976,"b":1e2,"a":1.0}}]`
+	var lossless any
+	decoder := json.NewDecoder(strings.NewReader(wire))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&lossless))
+	require.Equal(t, requestDigest(t, "M", written), requestDigest(t, "M", message{ToolCalls: lossless}),
+		"a copy decoded with UseNumber matches")
+	var lossy any
+	require.NoError(t, json.Unmarshal([]byte(wire), &lossy))
+	require.NotEqual(t, requestDigest(t, "M", written), requestDigest(t, "M", message{ToolCalls: lossy}),
+		"a float64 copy that rewrote the numbers fails closed")
+
 	for _, different := range [][2]string{
+		{`1152921504606846976`, `1152921504606847000`},
 		{`1152921504606846977`, `1152921504606846976`},
+		{`1.0`, `1`},
 		{`0.1000000000000000055511151231257827`, `0.1`},
 		{`1e400`, `1e401`},
 		{`1`, `-1`},
 	} {
 		require.NotEqual(t, requestDigest(t, "M", message{Payload: json.RawMessage(different[0])}),
-			requestDigest(t, "M", message{Payload: json.RawMessage(different[1])}), "%s and %s differ", different[0], different[1])
+			requestDigest(t, "M", message{Payload: json.RawMessage(different[1])}),
+			"%s and %s are distinct numbers, even where a float64 cannot tell them apart", different[0], different[1])
 	}
-	big := int64(1)<<60 + 1
-	require.Equal(t, requestDigest(t, "M", message{ToolCalls: int64(1) << 60}),
+	require.Equal(t, requestDigest(t, "M", message{ToolCalls: int64(1) << 53}),
+		requestDigest(t, "M", message{ToolCalls: float64(int64(1) << 53)}),
+		"an integer up to 2^53 matches its float64 copy")
+	require.NotEqual(t, requestDigest(t, "M", message{ToolCalls: int64(1) << 60}),
 		requestDigest(t, "M", message{ToolCalls: float64(int64(1) << 60)}),
-		"an integer a float64 holds exactly matches its float64 copy")
-	require.NotEqual(t, requestDigest(t, "M", message{ToolCalls: big}),
-		requestDigest(t, "M", message{ToolCalls: float64(big)}),
-		"a number with more precision than a float64 does not match its rounded copy")
+		"a larger integer does not match a float64 copy written differently")
 
 	_, err := storagev1.RequestDigest("M", message{Payload: json.RawMessage(`{"a":`)})
 	require.ErrorIs(t, err, storagev1.ErrValidation)

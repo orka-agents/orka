@@ -303,18 +303,16 @@ write method.
   and left unset does not change the digest; a non-nil pointer counts even
   when it points to a zero value; maps are sorted; times are UTC seconds and
   nanoseconds; and dynamic values (`any`, non-empty maps of `any` and
-  `json.RawMessage`) are canonical JSON with sorted keys. A number is written
-  as encoding/json writes its float64 value when it is written in that form or
-  is an integer the float64 holds exactly (`1.0` becomes `1`), and
-  otherwise keeps its text, so a typed value and its float64-decoded copy
-  differ only for integers a float64 cannot hold; raw JSON that writes a
-  number in any other form, such as `1152921504606846976.0`, keeps its text
-  and differs too. In exchange, an integer a float64 holds exactly and that
-  float64's shortest text
-  (`1152921504606846976` and `1152921504606847000`) digest the same. A JSON
-  null counts as absent; an empty JSON array or object is a value. A server
-  that decodes dynamic values with `UseNumber`, or keeps `json.RawMessage`
-  bytes, recomputes the digest exactly.
+  `json.RawMessage`) are canonical JSON with sorted keys and every number
+  kept exactly as written, so distinct numbers, such as
+  `1152921504606846976` and `1152921504606847000`, never share a digest. A
+  JSON null counts as absent; an empty JSON array or object is a value. A
+  server that recomputes the digest must decode dynamic values losslessly,
+  with `UseNumber` or as `json.RawMessage` bytes, as it must anyway to store
+  them unchanged; a copy decoded into float64 is only guaranteed to match a
+  typed value's floating-point numbers and integers up to 2^53, and where it
+  rewrote a number it fails the digest check rather than matching another
+  request.
 - **Receipts.** A receipt commits with its change. A replay returns the
   original outcome and changes nothing; a provider either keeps the typed
   result with the receipt, up to `MaxReceiptResultBytes` (1 MiB) in its own

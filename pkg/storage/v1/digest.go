@@ -10,11 +10,8 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/big"
 	"reflect"
 	"slices"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -81,30 +78,19 @@ var (
 //     zero. (Inside dynamic JSON, -0 stays -0, as encoding/json writes it.)
 //   - Dynamic values (interface values, non-empty maps whose keys or values
 //     are interfaces, and json.RawMessage) are encoded as canonical JSON: the
-//     encoding/json form, decoded and encoded again with object keys sorted.
-//     An empty or whitespace-only json.RawMessage is zero.
-//     Each number is written as encoding/json writes its float64 value when
-//     the number is written in that form (ignoring zeros and exponent
-//     notation) or is a plain integer that the float64
-//     holds exactly, so 1.0, 1e2 and 0.50 become 1, 100 and 0.5; any other
-//     number keeps its text. Decoding replaces invalid UTF-8 and unpaired
-//     surrogate escapes with U+FFFD and keeps the last of duplicate object
-//     keys, so JSON texts that differ only in those ways digest the same. A
+//     encoding/json form, decoded and encoded again with object keys sorted
+//     and every number kept exactly as written, so distinct numbers never
+//     share a digest. An empty or whitespace-only json.RawMessage is zero. A
 //     JSON null is zero; an empty JSON array or object is a value like any
-//     other. A typed value and a copy decoded into map[string]any and float64
-//     therefore digest the same, unless it holds an integer that a float64
-//     cannot hold exactly and that is not written as the float64's shortest
-//     text; then the digests differ rather than matching another request.
-//     Raw JSON that writes a number in any other form, such
-//     as 1152921504606846976.0, keeps its text and likewise differs from a
-//     float64 copy. The price of that match is that an integer a float64
-//     holds exactly and the float64's shortest text, such as
-//     1152921504606846976 and 1152921504606847000, digest the same even where
-//     they are distinct integers. A server that recomputes the digest from a
-//     decoded request matches exactly when it decodes dynamic values with
-//     json.Decoder.UseNumber or keeps json.RawMessage bytes, and matches for
-//     typed values whenever it decodes them into float64, with the same
-//     exception.
+//     other. Decoding replaces invalid UTF-8 and unpaired surrogate escapes
+//     with U+FFFD and keeps the last of duplicate object keys, so JSON texts
+//     that differ only in those ways digest the same. A server that
+//     recomputes the digest from a decoded request must decode dynamic values
+//     losslessly, with json.Decoder.UseNumber or as json.RawMessage bytes, as
+//     it must anyway to store them unchanged. A copy decoded into float64
+//     instead is only guaranteed to match a typed value's floating-point
+//     numbers and integers up to 2^53; where it rewrote a number, it digests
+//     differently rather than matching another request.
 //
 // A typed request that holds an unexported struct field, a channel, a
 // function, a complex number, invalid JSON, a dynamic value encoding/json
@@ -265,8 +251,8 @@ func jsonDigestNode(encoded []byte) (digestNode, error) {
 	return digestNode{tag: digestTagJSON, raw: canonical}, nil
 }
 
-// canonicalJSON decodes one JSON value and encodes it again with object keys
-// sorted and every number in canonical form.
+// canonicalJSON decodes one JSON value, keeping every number exactly as
+// written, and encodes it again with object keys sorted.
 func canonicalJSON(encoded []byte) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.UseNumber()
@@ -277,103 +263,7 @@ func canonicalJSON(encoded []byte) ([]byte, error) {
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("invalid JSON: data after the value")
 	}
-	return json.Marshal(canonicalJSONNumbers(value))
-}
-
-// canonicalJSONNumbers rewrites every number in a decoded JSON value with
-// canonicalJSONNumber.
-func canonicalJSONNumbers(value any) any {
-	switch v := value.(type) {
-	case json.Number:
-		return canonicalJSONNumber(v)
-	case []any:
-		for i, item := range v {
-			v[i] = canonicalJSONNumbers(item)
-		}
-	case map[string]any:
-		for key, item := range v {
-			v[key] = canonicalJSONNumbers(item)
-		}
-	}
-	return value
-}
-
-// canonicalJSONNumber returns the text encoding/json writes for the number's
-// float64 value when the number is written in that form (ignoring zeros and
-// exponent notation), or is a plain integer that the
-// float64 holds exactly, so 1.0, 1e2, 0.50 and 1152921504606846976 become 1,
-// 100, 0.5 and 1152921504606847000, as they do in a copy decoded into float64.
-// Any other number keeps its text.
-func canonicalJSONNumber(number json.Number) json.Number {
-	parsed, err := strconv.ParseFloat(string(number), 64)
-	if err != nil {
-		return number
-	}
-	encoded, err := json.Marshal(parsed)
-	if err != nil {
-		return number
-	}
-	if !sameDecimal(string(number), string(encoded)) && !exactInteger(string(number), parsed) {
-		return number
-	}
-	return json.Number(encoded)
-}
-
-// exactInteger reports whether number is a plain JSON integer whose value
-// parsed holds exactly. ParseFloat has already accepted number, so a plain
-// integer here has at most 309 digits.
-func exactInteger(number string, parsed float64) bool {
-	text := strings.TrimPrefix(number, "-")
-	if magnitude, err := strconv.ParseUint(text, 10, 64); err == nil {
-		// 2^64 is the first float64 that does not fit a uint64.
-		return math.Abs(parsed) < 1<<64 && uint64(math.Abs(parsed)) == magnitude
-	}
-	written, ok := new(big.Int).SetString(text, 10)
-	if !ok {
-		return false
-	}
-	held, accuracy := new(big.Float).SetFloat64(math.Abs(parsed)).Int(nil)
-	return accuracy == big.Exact && held.Cmp(written) == 0
-}
-
-// maxDecimalExponent bounds the exponents sameDecimal compares, far beyond
-// the float64 range, so the arithmetic cannot overflow.
-const maxDecimalExponent = 1 << 30
-
-// sameDecimal reports whether two JSON numbers denote the same decimal value.
-func sameDecimal(a, b string) bool {
-	aNegative, aDigits, aExponent, aOK := decimalParts(a)
-	bNegative, bDigits, bExponent, bOK := decimalParts(b)
-	return aOK && bOK && aNegative == bNegative && aDigits == bDigits && aExponent == bExponent
-}
-
-// decimalParts splits a JSON number into its sign, its significant digits
-// without leading or trailing zeros, and the exponent e for which the value is
-// 0.digits times 10 to the e. Zero has no digits and exponent 0, whatever
-// exponent it is written with.
-func decimalParts(number string) (negative bool, digits string, exponent int, ok bool) {
-	negative = strings.HasPrefix(number, "-")
-	number = strings.TrimPrefix(number, "-")
-	mantissa, written := number, ""
-	if i := strings.IndexAny(number, "eE"); i >= 0 {
-		mantissa, written = number[:i], number[i+1:]
-	}
-	whole, fraction, _ := strings.Cut(mantissa, ".")
-	all := whole + fraction
-	trimmed := strings.TrimLeft(all, "0")
-	digits = strings.TrimRight(trimmed, "0")
-	if digits == "" {
-		return negative, "", 0, true
-	}
-	power := 0
-	if written != "" {
-		parsed, err := strconv.Atoi(written)
-		if err != nil || parsed > maxDecimalExponent || parsed < -maxDecimalExponent {
-			return false, "", 0, false
-		}
-		power = parsed
-	}
-	return negative, digits, len(whole) - (len(all) - len(trimmed)) + power, true
+	return json.Marshal(value)
 }
 
 func sequenceDigestNode(v reflect.Value, depth int) (digestNode, error) {
