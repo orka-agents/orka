@@ -352,6 +352,9 @@ type connectorTamperingStore struct {
 	credential func(*storagev1.SealedConnectorCredential)
 	completion func(*storagev1.SealedConnectorCompletion)
 	consent    func(*storagev1.SealedConnectorConsent)
+	// foreign is another Connection's completion the provider adds to a
+	// custody read.
+	foreign *storagev1.SealedConnectorCompletion
 }
 
 func (s *connectorTamperingStore) GetSealedConnectorCredential(ctx context.Context, uid string) (*storagev1.SealedConnectorCredential, error) {
@@ -371,6 +374,9 @@ func (s *connectorTamperingStore) ReadConnectorCustody(ctx context.Context, uid 
 		for i := range custody.Completions {
 			s.completion(&custody.Completions[i])
 		}
+	}
+	if err == nil && s.foreign != nil {
+		custody.Completions = append(custody.Completions, *s.foreign)
 	}
 	return custody, err
 }
@@ -448,6 +454,17 @@ func TestClientRejectsModifiedConnectorRecords(t *testing.T) {
 		require.NotContains(t, err.Error(), "parked-tampered", name)
 	}
 	backend.completion = nil
+	// Another Connection's own, intact completion in this Connection's
+	// custody is refused rather than judged or committed.
+	foreign := connectorCompletion("completion-foreign", other.ConnectionUID, 1, "parked-foreign")
+	require.NoError(t, client.CreateConnectorCompletion(ctx, foreign))
+	backend.foreign, err = backend.Store.GetSealedConnectorCompletion(ctx, foreign.Nonce)
+	require.NoError(t, err)
+	_, err = client.ListConnectorCompletionsForConnection(ctx, ref.ConnectionUID)
+	require.ErrorContains(t, err, "another Connection")
+	_, err = client.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential)
+	require.ErrorContains(t, err, "another Connection")
+	backend.foreign = nil
 	committed, err := client.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, committed.GrantSequence, "no refused attempt took a grant")

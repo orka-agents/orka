@@ -352,13 +352,24 @@ func connectorRetirementFor(previous, replacement store.ConnectorCredential, now
 	return &storagev1.ConnectorRetirement{RevocableUntil: revocableUntil.UTC()}
 }
 
+// readConnectorCustody reads a Connection's custody and refuses records the
+// provider returned for another Connection, so a decision never counts or
+// commits another Connection's material.
 func (c *Client) readConnectorCustody(ctx context.Context, connectionUID string) (*storagev1.ConnectorCustody, error) {
 	custody, err := c.ReadConnectorCustody(ctx, connectionUID)
 	if err != nil {
 		return nil, err
 	}
-	if custody == nil || custody.ConnectionUID != connectionUID {
-		return nil, fmt.Errorf("connector custody provider returned another Connection for %s", connectionUID)
+	foreign := custody == nil || custody.ConnectionUID != connectionUID ||
+		(custody.Credential != nil && custody.Credential.ConnectionUID != connectionUID)
+	for i := 0; !foreign && i < len(custody.Retired); i++ {
+		foreign = custody.Retired[i].ConnectionUID != connectionUID
+	}
+	for i := 0; !foreign && i < len(custody.Completions); i++ {
+		foreign = custody.Completions[i].ConnectionUID != connectionUID
+	}
+	if foreign {
+		return nil, fmt.Errorf("connector custody provider returned another Connection's records for %s", connectionUID)
 	}
 	return custody, nil
 }
