@@ -34,7 +34,7 @@ func TestRepositoryMonitorReadinessStatusLifecycle(t *testing.T) {
 			writes := []repositoryMonitorCommitStatus{}
 			latest := map[string]repositoryMonitorCommitStatus{}
 			failAudit := false
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			server := httptest.NewServer(repositoryMonitorTestWithoutHeldWorkflowRuns(func(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/1"):
@@ -73,8 +73,6 @@ func TestRepositoryMonitorReadinessStatusLifecycle(t *testing.T) {
 						failAudit = false
 					}
 					_ = json.NewEncoder(w).Encode(status)
-				case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
-					_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 				default:
 					t.Errorf("unexpected mutation or request: %s %s", req.Method, req.URL.Path)
 					http.Error(w, "unexpected", 500)

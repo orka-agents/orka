@@ -3774,6 +3774,16 @@ func repositoryMonitorTestServesNoHeldWorkflowRuns(w http.ResponseWriter, r *htt
 	return true
 }
 
+// repositoryMonitorTestWithoutHeldWorkflowRuns serves no held workflow runs
+// and passes every other request to next.
+func repositoryMonitorTestWithoutHeldWorkflowRuns(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			next(w, r)
+		}
+	}
+}
+
 func repositoryMonitorInventoryServerRoutesReviewContext(t *testing.T, w http.ResponseWriter, r *http.Request, body string) bool {
 	t.Helper()
 	if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
