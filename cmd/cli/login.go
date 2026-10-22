@@ -109,8 +109,11 @@ func newLoginCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Without the disclosure above, no host may start: a host
+			// enabled while the code was pending is declined.
 			body, err := json.Marshal(map[string]any{
-				"accessToken": tokens.AccessToken, "refreshToken": tokens.RefreshToken, "expiresIn": tokens.ExpiresIn, "noHost": noHost,
+				"accessToken": tokens.AccessToken, "refreshToken": tokens.RefreshToken, "expiresIn": tokens.ExpiresIn,
+				"noHost": noHost || !options.GitHub.AgentHost,
 			})
 			if err != nil {
 				return err
@@ -135,7 +138,7 @@ func newLoginCmd() *cobra.Command {
 			// redirect.
 			hosts := client.NewWithNamespace(server, session.Token, session.Namespace)
 			hosts.HTTPClient = noRedirectClient
-			return waitForAgentHost(ctx, cmd, hosts)
+			return waitForAgentHost(ctx, cmd, hosts, agentHostReasonGitHubMembershipEnded, agentHostReasonGitHubTokenNeverExpires)
 		},
 	}
 	cmd.Flags().BoolVar(&noHost, "no-host", false, "Link GitHub without starting a Copilot environment on Orka")
@@ -150,6 +153,15 @@ func newLogoutCmd() *cobra.Command {
 		Short: "End your Orka session from orka login",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			// A renewal in flight would leave this the ended token while its
+			// successor stays live: logout waits for it and ends what is saved.
+			unlock, err := lockSessionRenewal(ctx)
+			if err != nil {
+				return fmt.Errorf("wait for a session renewal: %w", err)
+			}
+			defer unlock()
 			cfg := loadConfig()
 			if cfg.TokenKind != tokenKindGitHubSession || cfg.Token == "" {
 				return errors.New("not signed in with orka login")
@@ -157,8 +169,6 @@ func newLogoutCmd() *cobra.Command {
 			if err := sessionServerAllowed(cfg.SessionServer); err != nil {
 				return fmt.Errorf("the saved session is not sent to its server: %w", err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
 			if err := plainJSON(ctx, http.MethodDelete, cfg.SessionServer+"/api/v1/auth/session", cfg.Token, nil, nil); err != nil &&
 				!strings.Contains(err.Error(), "HTTP 401") {
 				return fmt.Errorf("end the session: %w", err)
@@ -230,11 +240,14 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 		return cfg.Token
 	}
 	defer unlock()
-	if saved := loadConfig(); saved.TokenKind == tokenKindGitHubSession && saved.SessionServer == cfg.SessionServer && saved.Token != "" {
-		cfg = saved
-		if !sessionEndsSoon(cmd, cfg) {
-			return cfg.Token
-		}
+	saved := loadConfig()
+	if !holdsSession(saved, cfg.SessionServer, "") {
+		// The session was replaced or ended meanwhile: nothing to renew.
+		return cfg.Token
+	}
+	cfg = saved
+	if !sessionEndsSoon(cmd, cfg) {
+		return cfg.Token
 	}
 	var session sessionView
 	if err := plainJSON(ctx, http.MethodPost, cfg.SessionServer+"/api/v1/auth/session/renew", cfg.Token, nil, &session); err != nil {
@@ -242,13 +255,25 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 			err, cfg.TokenExpiresAt.Local().Format(time.Kitchen))
 		return cfg.Token
 	}
-	cfg.Token = session.Token
-	expires := session.ExpiresAt
-	cfg.TokenExpiresAt = &expires
-	if err := saveConfig(cfg); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Could not save the renewed session: %v\n", err) //nolint:errcheck
+	// The successor goes onto the config as it is now, and only while it
+	// still holds the session renewed: a command that changed the server or
+	// token meanwhile keeps its change.
+	latest := loadConfig()
+	if holdsSession(latest, cfg.SessionServer, cfg.Token) {
+		expires := session.ExpiresAt
+		latest.Token, latest.TokenExpiresAt = session.Token, &expires
+		if err := saveConfig(latest); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Could not save the renewed session: %v\n", err) //nolint:errcheck
+		}
 	}
-	return cfg.Token
+	return session.Token
+}
+
+// holdsSession reports whether cfg holds a session from server, and when
+// token is set, that very session.
+func holdsSession(cfg orkaConfig, server, token string) bool {
+	return cfg.TokenKind == tokenKindGitHubSession && cfg.SessionServer == server && cfg.Token != "" &&
+		(token == "" || cfg.Token == token)
 }
 
 // sessionEndsSoon reports a session in its renewal window. One that already

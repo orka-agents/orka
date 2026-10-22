@@ -27,8 +27,10 @@ import (
 const testHostConnection = "github-alice"
 
 type fakeHostCredentials struct {
-	token       string
-	unavailable bool
+	token string
+	// neverExpires hands out a token without an expiry.
+	neverExpires bool
+	unavailable  bool
 	// broken makes every call fail as a store outage would.
 	broken bool
 	// connection is the Connection that feeds hosts; empty means testHostConnection.
@@ -39,7 +41,11 @@ func (f *fakeHostCredentials) HostCredential(_ context.Context, namespace, name 
 	if err := f.CheckHostLink(context.Background(), namespace, name); err != nil {
 		return credential.HostCredential{}, err
 	}
-	return credential.HostCredential{AccessToken: f.token}, nil
+	held := credential.HostCredential{AccessToken: f.token}
+	if !f.neverExpires {
+		held.ExpiresAt = time.Now().Add(8 * time.Hour)
+	}
+	return held, nil
 }
 
 func (f *fakeHostCredentials) CheckHostLink(_ context.Context, namespace, name string) error {
@@ -367,6 +373,28 @@ func TestAgentHostStopsWhenItsAccountLeavesTheAllowedOrgs(t *testing.T) {
 		t.Fatal("its token copy must be deleted")
 	}
 	if got := agentHostReady(h.host()); got.Reason != agentHostReasonGitHubMembershipEnded {
+		t.Fatalf("ready = %+v", got)
+	}
+}
+
+// Under a sign-in allow-list, a token that never expires would never bring
+// a membership check, so the host refuses it.
+func TestAgentHostRefusesANeverExpiringTokenUnderAnAllowList(t *testing.T) {
+	h, credentials, _ := newConnectionHostHarness(t)
+	h.reconciler.Membership = func(context.Context, string, string) error { return nil }
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatalf("a member's host must run; status = %+v", h.host().Status)
+	}
+	credentials.neverExpires = true
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("a host fed a token that never expires must stop")
+	}
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("its token copy must be deleted")
+	}
+	if got := agentHostReady(h.host()); got.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("ready = %+v", got)
 	}
 }

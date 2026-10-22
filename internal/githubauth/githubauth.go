@@ -49,11 +49,16 @@ type Client struct {
 	MinPollInterval time.Duration
 }
 
+// http never follows redirects: every call carries a token or device code,
+// in its body or headers, that a redirect would send elsewhere.
 func (c Client) http() *http.Client {
+	client := &http.Client{Timeout: 15 * time.Second}
 	if c.HTTP != nil {
-		return c.HTTP
+		copied := *c.HTTP
+		client = &copied
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return client
 }
 
 func (c Client) webURL() string {

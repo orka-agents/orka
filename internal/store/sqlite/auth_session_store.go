@@ -55,13 +55,42 @@ func authSessionArgs(session store.AuthSession) []any {
 		session.CreatedAt.UTC(), session.ExpiresAt.UTC()}
 }
 
-// CreateAuthSession stores a new session. The hash must be unique.
+// CreateAuthSession stores a new session. The hash must be unique. Sessions
+// that ended are dropped, and a person keeps their maxAuthSessionsPerSubject
+// most recently issued ones.
 func (s *Store) CreateAuthSession(ctx context.Context, session store.AuthSession) error {
 	if err := validAuthSession(session); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, insertAuthSession, authSessionArgs(session)...); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return fmt.Errorf("create sign-in session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := pruneAuthSessionsTx(ctx, tx, session.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, insertAuthSession, authSessionArgs(session)...); err != nil {
+		return fmt.Errorf("create sign-in session: %w", err)
+	}
+	// A person holds a bounded number of sessions; a sign-in beyond it ends
+	// their least recently issued one.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE issuer = ? AND subject = ? AND id NOT IN (
+		SELECT id FROM auth_sessions WHERE issuer = ? AND subject = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+		session.Issuer, session.Subject, session.Issuer, session.Subject, maxAuthSessionsPerSubject); err != nil {
+		return fmt.Errorf("bound sign-in sessions: %w", err)
+	}
+	return tx.Commit()
+}
+
+// maxAuthSessionsPerSubject bounds the live sessions one person holds.
+const maxAuthSessionsPerSubject = 10
+
+// pruneAuthSessionsTx drops sessions that ended before now: nothing accepts
+// or renews them again.
+func pruneAuthSessionsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE revoked_at IS NOT NULL OR expires_at <= ?`, now.UTC()); err != nil {
+		return fmt.Errorf("prune sign-in sessions: %w", err)
 	}
 	return nil
 }
@@ -113,6 +142,9 @@ func (s *Store) RenewAuthSession(ctx context.Context, id string, next store.Auth
 		return fmt.Errorf("renew sign-in session: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := pruneAuthSessionsTx(ctx, tx, at); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx,
 		`UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL AND expires_at > ?`,
 		at.UTC(), id, at.UTC())

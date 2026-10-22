@@ -181,3 +181,31 @@ func TestDeviceFlowStopsWhenRefused(t *testing.T) {
 		t.Fatalf("err = %v, want ErrDeviceFlowDenied", err)
 	}
 }
+
+// No call follows a redirect: a 307 or 308 would replay its body, which
+// carries a token or device code, to another origin.
+func TestCallsNeverFollowARedirect(t *testing.T) {
+	var leaked []string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = append(leaked, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer elsewhere.Close()
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusPermanentRedirect)
+	}))
+	defer redirecting.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for name, c := range map[string]Client{
+		"default client": {APIURL: redirecting.URL, WebURL: redirecting.URL, MinPollInterval: time.Millisecond},
+		"custom client":  {HTTP: &http.Client{}, APIURL: redirecting.URL, WebURL: redirecting.URL, MinPollInterval: time.Millisecond},
+	} {
+		_, _ = c.CheckToken(ctx, "Iv23app", "app-secret", "ghu_ours")
+		_ = c.DeleteToken(ctx, "Iv23app", "app-secret", "ghu_ours")
+		_, _ = c.PollDeviceFlow(ctx, "Iv23app", DeviceCode{DeviceCode: "dev", ExpiresIn: 1, Interval: 1})
+		if len(leaked) != 0 {
+			t.Fatalf("%s followed a redirect to %v", name, leaked)
+		}
+	}
+}

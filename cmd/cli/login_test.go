@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -308,5 +309,167 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 	_, _ = runLoginCLI(t, "host", "status")
 	if leaked {
 		t.Fatal("a redirect carried credentials to another origin")
+	}
+}
+
+// A renewal never writes its stale view of the config back: a token set
+// while it was in flight is kept.
+func TestRenewalKeepsAConfigChangedMeanwhile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Another command replaces the session while this renewal runs.
+		if err := saveConfig(orkaConfig{Server: "https://elsewhere.example", Token: "static-token"}); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_renewed", "expiresAt": time.Now().Add(12 * time.Hour)}) //nolint:errcheck
+	}))
+	defer orka.Close()
+	soon := time.Now().Add(time.Hour)
+	cfg := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &cobra.Command{}
+	cmd.SetErr(new(bytes.Buffer))
+	if token := configuredSession(cmd, "", cfg); token != "orka_s_renewed" {
+		t.Fatalf("token = %q", token)
+	}
+	if saved := loadConfig(); saved.Token != "static-token" || saved.Server != "https://elsewhere.example" || saved.TokenKind != "" {
+		t.Fatalf("config = %+v, want the change made meanwhile", saved)
+	}
+}
+
+// Logout waits for a renewal in flight and ends the session it saved, not
+// the one it replaced.
+func TestLogoutWaitsForARenewal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var ended atomic.Value
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ended.Store(r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer orka.Close()
+	later := time.Now().Add(10 * time.Hour)
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession,
+		TokenExpiresAt: &later}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockSessionRenewal(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := runLoginCLI(t, "logout")
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_successor", TokenKind: tokenKindGitHubSession,
+		TokenExpiresAt: &later}); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := ended.Load().(string); got != "Bearer orka_s_successor" {
+		t.Fatalf("logout ended %q, want the saved successor", got)
+	}
+}
+
+// When the server offers no host, so the CLI showed no disclosure, the
+// sign-in declines a host even if one is enabled while the code is pending.
+func TestLoginDeclinesAHostItDidNotDisclose(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeGitHubDeviceFlow(t)
+	var signedIn map[string]any
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/config":
+			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": false}}) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
+			json.NewDecoder(r.Body).Decode(&signedIn) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer orka.Close()
+	if out, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--timeout", "10s"); err != nil {
+		t.Fatalf("login: %v %q", err, out)
+	}
+	if signedIn["noHost"] != true {
+		t.Fatalf("sign-in body = %v, want noHost", signedIn)
+	}
+}
+
+// Readers never see a partly written config while another command saves it.
+func TestConfigSavesAreAtomic(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := orkaConfig{Server: "https://orka.example", Namespace: strings.Repeat("n", 4096)}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := saveConfig(cfg); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}
+	})
+	for range 2000 {
+		if got := loadConfig(); got.Server != cfg.Server {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("a reader saw a partial config: %+v", got.Server)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// A host kept from before the person left the org still reports that until
+// the controller sees the new sign-in; login waits through it.
+func TestLoginWaitsThroughAStaleMembershipFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeGitHubDeviceFlow(t)
+	previousHost := agentHostReadyPollInterval
+	agentHostReadyPollInterval = time.Millisecond
+	t.Cleanup(func() { agentHostReadyPollInterval = previousHost })
+	var polls atomic.Int32
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/config":
+			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": true}}) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "agentHost": true}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
+			if polls.Add(1) < 3 {
+				json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "phase": "Failed", "reason": "GitHubMembershipEnded", "message": "left"}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer orka.Close()
+	out, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--timeout", "10s")
+	if err != nil || !strings.Contains(out, "Host ready: orka-gh-alice") {
+		t.Fatalf("login: %v %q", err, out)
 	}
 }

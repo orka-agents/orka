@@ -29,6 +29,8 @@ type AuthSession struct {
 
 // AuthSessionStore keeps sign-in sessions.
 type AuthSessionStore interface {
+	// CreateAuthSession stores a session, drops ended ones, and keeps a
+	// person's ten most recently issued live sessions.
 	CreateAuthSession(ctx context.Context, session AuthSession) error
 	// GetAuthSessionByHash returns ErrNotFound for an unknown hash.
 	GetAuthSessionByHash(ctx context.Context, tokenHash string) (AuthSession, error)

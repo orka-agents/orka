@@ -113,11 +113,25 @@ type GitHubAuthConfigOption struct {
 	AgentHost bool `json:"agentHost"`
 }
 
+// signInProvider is the ready provider sign-in links people through. It
+// must serve agent hosts: sessions renew from the host link, and sign-in
+// starts hosts unless the person declines one.
+func (h *Handlers) signInProvider(ctx context.Context) (*corev1alpha1.ConnectorProvider, error) {
+	provider, err := h.loadReadyConnectorProvider(ctx, h.watchNamespace, h.githubSignIn.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if provider.Spec.AgentHost == nil {
+		return nil, fiber.NewError(fiber.StatusServiceUnavailable, "the GitHub sign-in provider does not serve agent hosts")
+	}
+	return provider, nil
+}
+
 // GetAuthConfig serves GET /api/v1/auth/config, unauthenticated.
 func (h *Handlers) GetAuthConfig(c fiber.Ctx) error {
 	response := AuthConfigResponse{OIDC: h.oidcEnabled}
 	if cfg := h.githubSignIn; cfg.Enabled {
-		provider, err := h.loadReadyConnectorProvider(c.Context(), h.watchNamespace, cfg.Provider)
+		provider, err := h.signInProvider(c.Context())
 		if err != nil {
 			return err
 		}
@@ -165,7 +179,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "accessToken is required")
 	}
 	ctx := c.Context()
-	provider, err := h.loadReadyConnectorProvider(ctx, h.watchNamespace, cfg.Provider)
+	provider, err := h.signInProvider(ctx)
 	if err != nil {
 		return err
 	}
@@ -243,7 +257,7 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 	}
 	// The link must still hold this person's own grant: the session's
 	// subject, not whoever the refreshed token belongs to, renews.
-	provider, err := h.loadReadyConnectorProvider(ctx, h.watchNamespace, cfg.Provider)
+	provider, err := h.signInProvider(ctx)
 	if err != nil {
 		return err
 	}
@@ -425,7 +439,9 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 }
 
 // signInLinkHolds returns the token custody holds for connection when it is
-// linked and the token is still ui's GitHub account's.
+// linked and the token is still ui's GitHub account's. A token that never
+// expires is not kept: membership is checked again only at refreshes, so the
+// sign-in replaces it with one that ends.
 func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1.Connection,
 	oauth connectors.OAuthProviderConfig, ui *UserInfo) (string, bool) {
 	cfg := h.githubSignIn
@@ -433,7 +449,7 @@ func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1
 		return "", false
 	}
 	held, err := cfg.Credentials.HostCredential(ctx, connection.Namespace, connection.Name, sessionRenewHorizon)
-	if err != nil {
+	if err != nil || held.ExpiresAt.IsZero() {
 		return "", false
 	}
 	account, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, held.AccessToken)

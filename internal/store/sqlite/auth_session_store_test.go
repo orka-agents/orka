@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package sqlite
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -82,6 +83,38 @@ func TestAuthSessionRenewsOnceAndOnlyWhileLive(t *testing.T) {
 
 	// Nor an unknown one.
 	require.ErrorIs(t, s.RenewAuthSession(ctx, "missing", testAuthSession("sess-5", "hash-5", later), later), store.ErrConflict)
+}
+
+// The table stays bounded: ended sessions are dropped by the next write, and
+// a person keeps only their most recently issued sessions.
+func TestAuthSessionsAreBounded(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	now := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	for i := range maxAuthSessionsPerSubject + 2 {
+		at := now.Add(time.Duration(i) * time.Second)
+		require.NoError(t, s.CreateAuthSession(ctx, testAuthSession(fmt.Sprintf("sess-%d", i), fmt.Sprintf("hash-%d", i), at)))
+	}
+	for i := range maxAuthSessionsPerSubject + 2 {
+		_, err := s.GetAuthSessionByHash(ctx, fmt.Sprintf("hash-%d", i))
+		if i < 2 {
+			require.ErrorIs(t, err, store.ErrNotFound, "the oldest sessions beyond the bound end")
+		} else {
+			require.NoError(t, err)
+		}
+	}
+	other := testAuthSession("bob-1", "bob-hash-1", now)
+	other.Subject = "1002"
+	require.NoError(t, s.CreateAuthSession(ctx, other))
+	_, err := s.GetAuthSessionByHash(ctx, "hash-11")
+	require.NoError(t, err, "another person's sign-in ends none of alice's sessions")
+
+	require.NoError(t, s.RevokeAuthSession(ctx, "sess-2", now))
+	later := now.Add(13 * time.Hour)
+	require.NoError(t, s.CreateAuthSession(ctx, testAuthSession("sess-new", "hash-new", later)))
+	var rows int
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_sessions`).Scan(&rows))
+	require.Equal(t, 1, rows, "revoked and expired sessions are dropped")
 }
 
 // A successor whose hash is taken fails the renewal as a whole: the old
