@@ -21,7 +21,6 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			// releases used; historical layouts cannot activate a key, so a
 			// scratch client seals for them.
 			sealer := newScratchSealer(t)
-			old.connectorSealer = newTestConnectorSealer(t, testSnapshotKey)
 			body := []byte(`{"prompt":"synthetic retained snapshot"}`)
 			key := store.AgentExecutionSnapshotKey{TaskUID: "historical-task", Digest: store.CanonicalAgentExecutionSnapshotDigest(body)}
 			sealer.persistSnapshot(t, old, store.AgentExecutionSnapshot{TaskUID: key.TaskUID, Digest: key.Digest, SchemaVersion: 1, Body: body})
@@ -31,7 +30,7 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			}
 			require.NoError(t, old.SendMessage(t.Context(), &store.Message{Namespace: "ns", FromTask: "sender", ToTask: "receiver", ParentTask: "parent", Content: "retained message"}))
 			if revision != "0e567418" && revision != "1f18614c" {
-				require.NoError(t, old.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "synthetic-migration-value"}))
+				sealer.putConnectorCredential(t, old, testCredentialRef(), store.ConnectorCredential{AccessToken: "synthetic-migration-value"})
 			}
 			if revision == "abd2c040" || revision == "fdb64ecd" {
 				sealer.stageNativeImport(t, old, nativeImportFixture(t, "native", "retained native history"))
@@ -62,7 +61,7 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, messages, 1)
 			if revision != "0e567418" && revision != "1f18614c" {
-				got, err := s.GetConnectorCredential(t.Context(), testCredentialRef())
+				got, err := client.GetConnectorCredential(t.Context(), testCredentialRef())
 				require.NoError(t, err)
 				require.True(t, got.AccessToken == "synthetic-migration-value", "retained credential changed")
 			}

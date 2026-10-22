@@ -1,7 +1,6 @@
 package storageclient
 
 import (
-	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -69,61 +68,18 @@ func (k *keyCustody) open(nonce, ciphertext, additionalData []byte) ([]byte, err
 	return k.aead.Open(nil, nonce, ciphertext, additionalData)
 }
 
-// connectorCustodyDomain prefixes the associated data of every connector
-// custody format. The sealer handed to the embedded connector families
-// refuses any other associated data, so it cannot open or forge execution
-// snapshots or native session records sealed under the same key.
-const connectorCustodyDomain = "orka.connector-"
-
-var errNotConnectorCustody = errors.New("associated data is not a connector custody format")
-
-// connectorSealer is the connector custody view of the snapshot key.
-type connectorSealer struct {
-	custody *keyCustody
-}
-
-// SealConnectorCustody implements store.ConnectorCustodySealer.
-func (s connectorSealer) SealConnectorCustody(additionalData, plaintext []byte) ([]byte, []byte, error) {
-	if !bytes.HasPrefix(additionalData, []byte(connectorCustodyDomain)) {
-		return nil, nil, errNotConnectorCustody
-	}
-	return s.custody.seal(additionalData, plaintext)
-}
-
-// OpenConnectorCustody implements store.ConnectorCustodySealer.
-func (s connectorSealer) OpenConnectorCustody(nonce, ciphertext, additionalData []byte) ([]byte, error) {
-	if !bytes.HasPrefix(additionalData, []byte(connectorCustodyDomain)) {
-		return nil, errNotConnectorCustody
-	}
-	return s.custody.open(nonce, ciphertext, additionalData)
-}
-
-var _ store.ConnectorCustodySealer = connectorSealer{}
-
-// connectorCustodyActivator is the embedded store's connector key
-// activation. It stays off the client's method set: only
-// ActivateSnapshotKey hands connector custody a sealer, so the connector
-// families cannot be rekeyed apart from the snapshot key.
-type connectorCustodyActivator interface {
-	ActivateConnectorCustody(sealer store.ConnectorCustodySealer) error
-}
-
 // ActivateSnapshotKey makes key the client's snapshot key. It first
-// authenticates every retained sealed snapshot and native session through
-// the provider, then has the embedded connector families authenticate their
-// retained custody, and installs the key only if all of them open. A key that
-// cannot open retained data is rejected, so one dataset never accumulates
-// records sealed under different keys. Startup activates the key before any
-// consumer uses the client; until then, sealed records fail closed with
+// authenticates every retained sealed snapshot, native session and connector
+// custody record through the provider, and installs the key only if all of
+// them open. A key that cannot open retained data is rejected, so one dataset
+// never accumulates records sealed under different keys and linked accounts
+// remain usable and revocable. Startup activates the key before any consumer
+// uses the client; until then, sealed records fail closed with
 // ErrSnapshotKeyNotActive.
 func (c *Client) ActivateSnapshotKey(ctx context.Context, key []byte) error {
 	custody, err := newKeyCustody(key)
 	if err != nil {
 		return err
-	}
-	activator, ok := c.Embedded.(connectorCustodyActivator)
-	if !ok {
-		return errors.New("embedded store cannot authenticate connector custody with the snapshot key")
 	}
 	if err := c.verifyRetainedSnapshots(ctx, custody); err != nil {
 		return err
@@ -131,10 +87,7 @@ func (c *Client) ActivateSnapshotKey(ctx context.Context, key []byte) error {
 	if err := c.verifyRetainedNativeSessions(ctx, custody); err != nil {
 		return err
 	}
-	// Connector custody is sealed under the same key. The embedded store
-	// verifies every retained row before it starts sealing with the key, so
-	// linked accounts remain usable and revocable.
-	if err := activator.ActivateConnectorCustody(connectorSealer{custody: custody}); err != nil {
+	if err := c.verifyRetainedConnectorCustody(ctx, custody); err != nil {
 		return err
 	}
 	c.custody.Store(custody)

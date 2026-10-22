@@ -13,10 +13,12 @@
 //
 // Orka reaches every provider through its storage client. Provider methods
 // never receive Go callbacks; Kubernetes authority, authorization and
-// controller-side orchestration stay in Orka. Some application families are
-// not yet part of this contract because they still carry plaintext protected
-// data or callbacks into the embedded SQLite store. Those families remain
-// internal to Orka until their provider shape is defined.
+// controller-side orchestration stay in Orka. Protected records, such as
+// execution snapshots, native session state and connector custody, reach a
+// provider only sealed. Some application families are not yet part of this
+// contract because they still run callbacks inside the embedded SQLite
+// store's transactions. Those families remain internal to Orka until their
+// provider shape is defined.
 //
 // # Execution semantics
 //
@@ -106,6 +108,8 @@ type StateProvider interface {
 	SealedNativeSessionStore
 	SealedAgentExecutionSnapshotStore
 	AgentExecutionSnapshotLifecycleStore
+	SealedConnectorCustodyStore
+	SealedConnectorConsentStore
 
 	ControllerEpochMirror
 	OutboxPersistenceStore

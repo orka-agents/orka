@@ -195,14 +195,6 @@ func (r *recordingStore) StageSealedNativeSessionImport(ctx context.Context, req
 	return r.Store.StageSealedNativeSessionImport(ctx, request)
 }
 
-// ActivateConnectorCustody records that the embedded connector families
-// received a sealer. The sealer is a capability, not key material; the
-// sealed-record test checks the key bytes never reach any recorded value.
-func (r *recordingStore) ActivateConnectorCustody(sealer store.ConnectorCustodySealer) error {
-	r.record("ActivateConnectorCustody")
-	return r.Store.ActivateConnectorCustody(sealer)
-}
-
 func (r *recordingStore) requireCalled(t *testing.T, methods ...string) {
 	t.Helper()
 	r.mu.Lock()

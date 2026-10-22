@@ -146,7 +146,7 @@ func TestProviderReceivesOnlySealedSnapshotsAndNativeSessions(t *testing.T) {
 	require.Equal(t, 4, carried.MessageCount)
 
 	recorder.requireCalled(t, "CreateSealedAgentExecutionSnapshot", "StageSealedNativeSessionImport", "SaveSealedNativeSession",
-		"CommitSealedSessionTurnFinalization", "ActivateConnectorCustody")
+		"CommitSealedSessionTurnFinalization")
 	secrets := map[string]string{
 		"key":        string(sealedTestKey),
 		"hex key":    hex.EncodeToString(sealedTestKey),
@@ -309,10 +309,6 @@ func TestClientRejectsWrongKeysAndModifiedRecords(t *testing.T) {
 
 	missing, err := storageclient.NewEmbedded(backend)
 	require.NoError(t, err)
-	_, exposed := any(missing).(interface {
-		ActivateConnectorCustody(store.ConnectorCustodySealer) error
-	})
-	require.False(t, exposed, "connector custody is rekeyed only through ActivateSnapshotKey")
 	_, err = missing.GetAgentExecutionSnapshot(ctx, key)
 	require.ErrorIs(t, err, storageclient.ErrSnapshotKeyNotActive)
 	_, err = missing.GetNativeSession(ctx, "tenant", "imported", "")

@@ -3,11 +3,8 @@ package sqlite
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"errors"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
@@ -57,41 +54,6 @@ func activateTestKey(t *testing.T, s *Store) *storageclient.Client {
 	return client
 }
 
-// testConnectorSealer seals connector custody with AES-256-GCM under a
-// given key without authenticating retained rows first, for tests that
-// install a key directly, such as on a historical schema.
-type testConnectorSealer struct {
-	aead cipher.AEAD
-}
-
-func newTestConnectorSealer(t *testing.T, key []byte) testConnectorSealer {
-	t.Helper()
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return testConnectorSealer{aead: aead}
-}
-
-func (s testConnectorSealer) SealConnectorCustody(additionalData, plaintext []byte) ([]byte, []byte, error) {
-	nonce := make([]byte, s.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, nil, err
-	}
-	return nonce, s.aead.Seal(nil, nonce, plaintext, additionalData), nil
-}
-
-func (s testConnectorSealer) OpenConnectorCustody(nonce, ciphertext, additionalData []byte) ([]byte, error) {
-	if len(nonce) != s.aead.NonceSize() {
-		return nil, errors.New("invalid nonce")
-	}
-	return s.aead.Open(nil, nonce, ciphertext, additionalData)
-}
-
 // scratchSealer seals records with testSnapshotKey through the storage client
 // over a separate empty store, so tests can write sealed records into
 // historical schemas that cannot activate a key.
@@ -113,6 +75,17 @@ func (s scratchSealer) persistSnapshot(t *testing.T, target *Store, snapshot sto
 	sealed, err := s.store.GetSealedAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{TaskUID: snapshot.TaskUID, Digest: snapshot.Digest})
 	require.NoError(t, err)
 	require.NoError(t, target.CreateSealedAgentExecutionSnapshot(t.Context(), *sealed))
+}
+
+// putConnectorCredential seals the credential as a first grant and stores it
+// in target.
+func (s scratchSealer) putConnectorCredential(t *testing.T, target *Store, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) {
+	t.Helper()
+	require.NoError(t, s.client.PutConnectorCredential(t.Context(), ref, credential))
+	sealed, err := s.store.GetSealedConnectorCredential(t.Context(), ref.ConnectionUID)
+	require.NoError(t, err)
+	_, err = target.PutSealedConnectorCredential(t.Context(), storagev1.PutSealedConnectorCredentialRequest{Credential: *sealed, Now: time.Now()})
+	require.NoError(t, err)
 }
 
 // stageNativeImport seals the import and stages it in target.
