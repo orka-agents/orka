@@ -76,6 +76,13 @@ func TestRequireMemberChecksOrgsAndTeamsAndFailsClosed(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 		case "/user/memberships/orgs/forbidden":
 			w.WriteHeader(http.StatusForbidden)
+		case "/user/memberships/orgs/empty":
+		case "/user/memberships/orgs/no-state":
+			_, _ = w.Write([]byte(`{}`))
+		case "/user/memberships/orgs/null-state":
+			_, _ = w.Write([]byte(`{"state":null}`))
+		case "/user/memberships/orgs/odd-state":
+			_ = json.NewEncoder(w).Encode(map[string]string{"state": "suspended"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -102,10 +109,10 @@ func TestRequireMemberChecksOrgsAndTeamsAndFailsClosed(t *testing.T) {
 			t.Fatalf("%s: err = %v, want ErrNotMember", name, err)
 		}
 	}
-	// GitHub failing, rate-limiting, or refusing with a bare 403 (which may
-	// be a secondary rate limit) is no membership too, but not a verdict to
-	// act on.
-	for _, org := range []string{"broken", "throttled", "slow-down", "forbidden"} {
+	// GitHub failing, rate-limiting, refusing with a bare 403 (which may be
+	// a secondary rate limit), or answering without a known state is no
+	// membership too, but not a verdict to act on.
+	for _, org := range []string{"broken", "throttled", "slow-down", "forbidden", "empty", "no-state", "null-state", "odd-state"} {
 		if err := member("ghu_alice", Allowed{Orgs: []string{org}}); err == nil || errors.Is(err, ErrNotMember) {
 			t.Fatalf("%s: err = %v, want a retryable error", org, err)
 		}

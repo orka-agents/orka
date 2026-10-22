@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +26,10 @@ const (
 	tokenKindGitHubSession = "github-session"
 	// sessionRenewWindow is how long before its end a session renews.
 	sessionRenewWindow = 2 * time.Hour
+	// sessionRenewTimeout bounds one renewal, and staleRenewLock is how old
+	// a renewal lock is when the process holding it is gone.
+	sessionRenewTimeout = 30 * time.Second
+	staleRenewLock      = 2 * sessionRenewTimeout
 	// plainHTTPScheme carries sessions only to this machine.
 	plainHTTPScheme = "http"
 )
@@ -115,6 +121,7 @@ func newLoginCmd() *cobra.Command {
 			}
 			cfg := loadConfig()
 			cfg.Server, cfg.Token, cfg.TokenKind, cfg.Namespace = server, session.Token, tokenKindGitHubSession, session.Namespace
+			cfg.SessionServer = server
 			expires := session.ExpiresAt
 			cfg.TokenExpiresAt = &expires
 			if err := saveConfig(cfg); err != nil {
@@ -147,13 +154,16 @@ func newLogoutCmd() *cobra.Command {
 			if cfg.TokenKind != tokenKindGitHubSession || cfg.Token == "" {
 				return errors.New("not signed in with orka login")
 			}
+			if err := sessionServerAllowed(cfg.SessionServer); err != nil {
+				return fmt.Errorf("the saved session is not sent to its server: %w", err)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			if err := plainJSON(ctx, http.MethodDelete, cfg.Server+"/api/v1/auth/session", cfg.Token, nil, nil); err != nil &&
+			if err := plainJSON(ctx, http.MethodDelete, cfg.SessionServer+"/api/v1/auth/session", cfg.Token, nil, nil); err != nil &&
 				!strings.Contains(err.Error(), "HTTP 401") {
 				return fmt.Errorf("end the session: %w", err)
 			}
-			cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt = "", "", nil
+			cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer = "", "", nil, ""
 			if err := saveConfig(cfg); err != nil {
 				return err
 			}
@@ -198,26 +208,36 @@ func sessionServerAllowed(server string) error {
 }
 
 // configuredSession returns the configured session token for server, renewed
-// when it ends soon. A session is sent only to the server it came from.
+// when it ends soon. A session is sent only to the server that issued it.
 func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string {
-	if cfg.Token == "" || (server != "" && strings.TrimRight(server, "/") != cfg.Server) || sessionServerAllowed(cfg.Server) != nil {
+	if server == "" {
+		server = cfg.Server
+	}
+	if cfg.Token == "" || strings.TrimRight(server, "/") != cfg.SessionServer || sessionServerAllowed(cfg.SessionServer) != nil {
 		return ""
 	}
-	if cfg.TokenExpiresAt == nil {
+	if !sessionEndsSoon(cmd, cfg) {
 		return cfg.Token
 	}
-	left := time.Until(*cfg.TokenExpiresAt)
-	if left <= 0 {
-		fmt.Fprintln(cmd.ErrOrStderr(), "Your Orka session ended; run 'orka login'.") //nolint:errcheck
-		return cfg.Token
-	}
-	if left > sessionRenewWindow {
-		return cfg.Token
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), sessionRenewTimeout)
 	defer cancel()
+	// The server renews a session once: another orka process renewing it
+	// at the same time would leave this one the ended token. Renewals take
+	// turns, and one that finds a successor saved meanwhile uses it.
+	unlock, err := lockSessionRenewal(ctx)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Could not renew your Orka session (%v).\n", err) //nolint:errcheck
+		return cfg.Token
+	}
+	defer unlock()
+	if saved := loadConfig(); saved.TokenKind == tokenKindGitHubSession && saved.SessionServer == cfg.SessionServer && saved.Token != "" {
+		cfg = saved
+		if !sessionEndsSoon(cmd, cfg) {
+			return cfg.Token
+		}
+	}
 	var session sessionView
-	if err := plainJSON(ctx, http.MethodPost, cfg.Server+"/api/v1/auth/session/renew", cfg.Token, nil, &session); err != nil {
+	if err := plainJSON(ctx, http.MethodPost, cfg.SessionServer+"/api/v1/auth/session/renew", cfg.Token, nil, &session); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not renew your Orka session (%v); run 'orka login' before %s.\n", //nolint:errcheck
 			err, cfg.TokenExpiresAt.Local().Format(time.Kitchen))
 		return cfg.Token
@@ -229,6 +249,49 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not save the renewed session: %v\n", err) //nolint:errcheck
 	}
 	return cfg.Token
+}
+
+// sessionEndsSoon reports a session in its renewal window. One that already
+// ended is not renewed: the person signs in again.
+func sessionEndsSoon(cmd *cobra.Command, cfg orkaConfig) bool {
+	if cfg.TokenExpiresAt == nil {
+		return false
+	}
+	left := time.Until(*cfg.TokenExpiresAt)
+	if left <= 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Your Orka session ended; run 'orka login'.") //nolint:errcheck
+		return false
+	}
+	return left <= sessionRenewWindow
+}
+
+// lockSessionRenewal holds a lock file beside the config until unlock is
+// called, waiting while another orka process holds it.
+func lockSessionRenewal(ctx context.Context) (func(), error) {
+	path := configPath()
+	if path == "" {
+		return nil, errors.New("cannot determine home directory")
+	}
+	path += ".renew-lock"
+	for {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_ = file.Close()
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, err
+		}
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) > staleRenewLock {
+			_ = os.Remove(path)
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 // plainJSON sends one JSON request outside the API client, for the sign-in
