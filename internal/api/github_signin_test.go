@@ -35,6 +35,8 @@ const signInTestUserID = "852750"
 type revocations struct {
 	mu     sync.Mutex
 	tokens []string
+	// fail makes GitHub refuse every revocation.
+	fail bool
 }
 
 func (r *revocations) list() []string {
@@ -63,8 +65,12 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 			if r.Method == http.MethodDelete {
 				if revoked != nil {
 					revoked.mu.Lock()
+					defer revoked.mu.Unlock()
+					if revoked.fail {
+						w.WriteHeader(http.StatusBadGateway)
+						return
+					}
 					revoked.tokens = append(revoked.tokens, body.AccessToken)
-					revoked.mu.Unlock()
 				}
 				w.WriteHeader(http.StatusNoContent)
 				return

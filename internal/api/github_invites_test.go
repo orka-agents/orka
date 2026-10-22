@@ -250,6 +250,47 @@ func TestInvitesNeedHostCreation(t *testing.T) {
 	}
 }
 
+// A link that fails before storing anything revokes the approved token,
+// since nothing else holds it.
+func TestInviteRevokesWhenLinkingStoresNothing(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "expires_in": 28800})
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	leaving := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connectorTestNamespace, Finalizers: []string{"orka.ai/test-hold"}},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject:     corev1alpha1.ConnectionSubject{Issuer: githubauth.Issuer, Subject: signInTestUserID},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+			Mode:        corev1alpha1.ConnectionModeReadOnly,
+		},
+	}
+	if err := h.client.Create(context.Background(), leaving); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), leaving); err != nil {
+		t.Fatal(err)
+	}
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || !strings.Contains(outcome.Message, "was revoked") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+		t.Fatalf("revoked = %v, want the approved token", revoked)
+	}
+}
+
+// A revocation GitHub did not confirm is reported as such, never as done.
+func TestInviteReportsARevocationThatFailed(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
+	gh.revoked.mu.Lock()
+	gh.revoked.fail = true
+	gh.revoked.mu.Unlock()
+	_, invite := h.invite("carol")
+	outcome := h.inviteOutcome(invite.ID)
+	if outcome.State != InviteRefused || !strings.Contains(outcome.Message, "may still be active") || strings.Contains(outcome.Message, "was revoked") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+}
+
 // A full invite table refuses before asking GitHub for a code.
 func TestInvitesReserveCapacityBeforeStartingTheDeviceFlow(t *testing.T) {
 	h, gh := newInviteHarness(t, nil)

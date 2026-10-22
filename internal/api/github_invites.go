@@ -223,18 +223,29 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	}
 	// Tokens obtained for someone other than the invited login, or from a
 	// person who may not sign in, are revoked with the app's credentials.
+	// The outcome says whether GitHub confirmed it.
 	refuse := func(message string, revoke ...string) {
+		attempted, failed := false, false
 		for _, token := range revoke {
-			if token != "" {
-				if err := cfg.GitHub.DeleteToken(context.Background(), oauth.ClientID, oauth.ClientSecret, token); err != nil {
-					log.Error(err, "could not revoke an invite's GitHub token", "invite", id)
-				}
+			if token == "" {
+				continue
 			}
+			attempted = true
+			if err := cfg.GitHub.DeleteToken(context.Background(), oauth.ClientID, oauth.ClientSecret, token); err != nil {
+				log.Error(err, "could not revoke an invite's GitHub token", "invite", id)
+				failed = true
+			}
+		}
+		switch {
+		case failed:
+			message += "; revoking the approved GitHub token failed, so it may still be active"
+		case attempted:
+			message += "; the approved GitHub token was revoked"
 		}
 		h.invites.finish(id, InviteRefused, message, "")
 	}
 	if oauthErr != nil {
-		refuse("the GitHub App is not configured; the approved token was revoked; invite again", tokens.AccessToken)
+		refuse("the GitHub App is not configured", tokens.AccessToken)
 		return
 	}
 	// The person approved what the invite disclosed: a provider replaced or
@@ -243,16 +254,16 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	current, err := h.signInProvider(ctx)
 	if err != nil || current.UID != provider.UID || current.Generation != provider.Generation ||
 		connectors.ProviderAuthorityDigest(current) != connectors.ProviderAuthorityDigest(provider) {
-		refuse("the GitHub provider changed while the invite was pending; it was refused and its token revoked; invite again", tokens.AccessToken)
+		refuse("the GitHub provider changed while the invite was pending", tokens.AccessToken)
 		return
 	}
 	user, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, tokens.AccessToken)
 	if err != nil {
-		refuse("the approved GitHub token could not be checked; it was revoked", tokens.AccessToken)
+		refuse("the approved GitHub token could not be checked", tokens.AccessToken)
 		return
 	}
 	if !strings.EqualFold(user.Login, login) {
-		refuse("the code was approved by another GitHub account; it was refused and its token revoked", tokens.AccessToken)
+		refuse("the code was approved by another GitHub account", tokens.AccessToken)
 		return
 	}
 	if strings.TrimSpace(tokens.RefreshToken) != "" {
@@ -279,10 +290,15 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		AuthType: AuthTypeGitHubSession, Issuer: githubauth.Issuer, Subject: strconv.FormatInt(user.ID, 10),
 		Username: user.Login, Namespace: h.watchNamespace,
 	}
-	connection, _, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, !cfg.CreateHosts)
+	connection, held, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, !cfg.CreateHosts)
 	if errors.Is(err, errSignInLinkUnrecorded) {
 		// Custody holds the grant; the Connection reconciler records the link.
 		h.invites.finish(id, InviteAccepted, inviteAcceptedMessage(provider, cfg.CreateHosts)+" once Orka finishes recording the link", connection.Name)
+		return
+	}
+	if err != nil && !held {
+		// Nothing stored the tokens, so nothing else will revoke them.
+		refuse("the GitHub account could not be linked", tokens.AccessToken)
 		return
 	}
 	if err != nil {
