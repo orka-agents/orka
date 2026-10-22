@@ -279,22 +279,25 @@ func (c *Client) download(ctx context.Context, m *method, request, response prot
 	if err != nil {
 		return decodeError(ctx, m, err, evidence)
 	}
+	// The blob's size arrives in the response headers, before any of its
+	// bytes, so an oversized blob is refused without reading it.
+	header, err := stream.Header()
+	if err != nil {
+		return decodeError(ctx, m, err, evidence)
+	}
+	declared, headerErr := parseBlobHeader(header)
+	if headerErr == nil && declared.size > c.maxBlobBytes {
+		return storagev1.TooLargeError{What: m.name + " response blob", Size: declared.size, Limit: c.maxBlobBytes}
+	}
 	if err := stream.RecvMsg(response); err != nil {
+		// A refused call carries its status instead of a response.
 		if errors.Is(err, io.EOF) {
 			return c.responseError(m, errors.New("the response stream is empty"))
 		}
 		return decodeError(ctx, m, err, evidence)
 	}
-	header, err := stream.Header()
-	if err != nil {
-		return decodeError(ctx, m, err, evidence)
-	}
-	declared, err := parseBlobHeader(header)
-	if err != nil {
-		return c.responseError(m, err)
-	}
-	if declared.size > c.maxBlobBytes {
-		return storagev1.TooLargeError{What: m.name + " response blob", Size: declared.size, Limit: c.maxBlobBytes}
+	if headerErr != nil {
+		return c.responseError(m, headerErr)
 	}
 	err = reassemble(response, func() (proto.Message, error) {
 		part := response.ProtoReflect().New().Interface()

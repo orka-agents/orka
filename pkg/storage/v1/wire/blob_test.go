@@ -83,15 +83,19 @@ func TestBlobsCrossTheWireWhole(t *testing.T) {
 	require.Empty(t, result)
 }
 
-// chunkCounter counts the messages each side of a call sends and records the
-// largest.
+// chunkCounter counts the messages its side of a call sends, records the
+// largest, and counts the messages it receives.
 type chunkCounter struct {
 	messages atomic.Int64
 	largest  atomic.Int64
+	inbound  atomic.Int64
 }
 
 func (*chunkCounter) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context { return ctx }
 func (c *chunkCounter) HandleRPC(_ context.Context, event stats.RPCStats) {
+	if _, ok := event.(*stats.InPayload); ok {
+		c.inbound.Add(1)
+	}
 	if payload, ok := event.(*stats.OutPayload); ok {
 		c.messages.Add(1)
 		for size := int64(payload.Length); ; {

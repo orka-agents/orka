@@ -2,7 +2,6 @@ package adapterkit
 
 import (
 	"fmt"
-	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -77,7 +76,9 @@ func (m *metrics) setReady(ready bool) {
 	m.ready = ready
 }
 
-func (m *metrics) write(w io.Writer) {
+// exposition renders the metrics in the text format. It holds the lock only
+// while rendering, so a slow scrape never delays the calls that record metrics.
+func (m *metrics) exposition() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out strings.Builder
@@ -135,7 +136,7 @@ func (m *metrics) write(w io.Writer) {
 		ready = 1
 	}
 	fmt.Fprintf(&out, "orka_storage_server_ready %d\n", ready)
-	_, _ = io.WriteString(w, out.String())
+	return out.String()
 }
 
 // quote renders a label value with the escapes the text format requires.

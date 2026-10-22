@@ -33,6 +33,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -262,7 +263,9 @@ func Serve(ctx context.Context, config Config) error {
 	}
 	serving = true
 	readiness := &readiness{config: &config, server: server, metrics: metrics, logger: logger}
-	probe := &http.Server{Handler: probeHandler(readiness, metrics), ReadHeaderTimeout: 5 * time.Second}
+	probe := &http.Server{
+		Handler: probeHandler(readiness, metrics), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second,
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -430,7 +433,7 @@ func probeHandler(readiness *readiness, metrics *metrics) http.Handler {
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		metrics.write(w)
+		_, _ = io.WriteString(w, metrics.exposition())
 	})
 	return mux
 }

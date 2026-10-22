@@ -36,8 +36,11 @@ type Limits struct {
 	// call over its class's limit is refused with OVERLOADED before the
 	// provider runs, and before an upload's blob is read.
 	MaxConcurrent map[Class]int
-	// MaxDuration caps how long the provider runs for a call of each class;
-	// the provider still gets the caller's deadline when that is shorter.
+	// MaxDuration caps how long a call of each class may run: describing the
+	// providers for its dataset check, reading an upload, the provider's work
+	// and sending a download. The caller's deadline still applies when it is
+	// shorter. An upload or download that does not finish in time is ended
+	// as unavailable.
 	MaxDuration map[Class]time.Duration
 }
 
@@ -101,12 +104,22 @@ type Server struct {
 	admission     map[Class]chan struct{}
 	maxBlobBytes  int64
 
-	// datasetID is the serving dataset from the provider's last Describe.
+	// datasetID is the serving dataset from the providers' latest
+	// description.
 	datasetID atomic.Pointer[string]
 	// artifactLimit is the artifacts provider's MaxArtifactBytes from its
-	// last Describe.
+	// latest description.
 	artifactLimit atomic.Int64
-	describeMu    sync.Mutex
+	// describeMu keeps concurrent first calls from each describing the
+	// providers.
+	describeMu sync.Mutex
+	// describeSeq numbers descriptions as they start. publishMu and
+	// published let only a description newer than the last one published
+	// change the serving dataset, so a slow description cannot restore a
+	// dataset a newer one replaced or dropped.
+	describeSeq atomic.Uint64
+	publishMu   sync.Mutex
+	published   uint64
 }
 
 // NewServer returns a Server for config.
@@ -197,6 +210,7 @@ func (s *Server) DatasetID() string {
 
 // describe describes the served providers and records the serving dataset.
 func (s *Server) describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	seq := s.describeSeq.Add(1)
 	var info storagev1.ProviderInfo
 	var err error
 	if s.state != nil {
@@ -208,7 +222,7 @@ func (s *Server) describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		return storagev1.ProviderInfo{}, err
 	}
 	if info.DatasetID == "" {
-		s.forgetDataset(ctx, "the storage provider reports no dataset ID")
+		s.publish(ctx, seq, "", 0, "the storage provider reports no dataset ID")
 		return storagev1.ProviderInfo{}, errors.New("the storage provider reports no dataset ID")
 	}
 	limits := info.Limits
@@ -218,29 +232,40 @@ func (s *Server) describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 			return storagev1.ProviderInfo{}, err
 		}
 		if artifacts.DatasetID != info.DatasetID {
-			s.forgetDataset(ctx, "the state and artifacts providers serve different datasets")
+			s.publish(ctx, seq, "", 0, "the state and artifacts providers serve different datasets")
 			return storagev1.ProviderInfo{}, fmt.Errorf("the state provider serves dataset %q and the artifacts provider %q",
 				info.DatasetID, artifacts.DatasetID)
 		}
 		limits = artifacts.Limits
 	}
-	if s.artifacts != nil {
-		s.artifactLimit.Store(max(limits.MaxArtifactBytes, storagev1.MaxArtifactBytes))
-	}
-	dataset := info.DatasetID
-	if previous := s.datasetID.Swap(&dataset); previous != nil && *previous != dataset {
-		s.logger.WarnContext(ctx, "storage provider now serves another dataset", "previous", *previous, "dataset", dataset)
-	}
+	s.publish(ctx, seq, info.DatasetID, max(limits.MaxArtifactBytes, storagev1.MaxArtifactBytes), "")
 	return info, nil
 }
 
-// forgetDataset drops the serving dataset after a description that names no
-// single dataset, so no call is admitted until a consistent description
-// succeeds. A description that merely fails, such as one that times out,
-// keeps the dataset: the providers' own errors then report the outage.
-func (s *Server) forgetDataset(ctx context.Context, reason string) {
-	if previous := s.datasetID.Swap(nil); previous != nil {
-		s.logger.ErrorContext(ctx, "storage server no longer has a serving dataset", "previous", *previous, "reason", reason)
+// publish records the outcome of description seq unless a newer description
+// has already been published. An empty dataset drops the serving dataset
+// after a description that names no single dataset, so no call is admitted
+// until a consistent description succeeds; reason says why. A description
+// that merely fails, such as one that times out, publishes nothing and keeps
+// the dataset: the providers' own errors then report the outage.
+func (s *Server) publish(ctx context.Context, seq uint64, dataset string, artifactLimit int64, reason string) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	if seq < s.published {
+		return
+	}
+	s.published = seq
+	if dataset == "" {
+		if previous := s.datasetID.Swap(nil); previous != nil {
+			s.logger.ErrorContext(ctx, "storage server no longer has a serving dataset", "previous", *previous, "reason", reason)
+		}
+		return
+	}
+	if s.artifacts != nil {
+		s.artifactLimit.Store(artifactLimit)
+	}
+	if previous := s.datasetID.Swap(&dataset); previous != nil && *previous != dataset {
+		s.logger.WarnContext(ctx, "storage provider now serves another dataset", "previous", *previous, "dataset", dataset)
 	}
 }
 
@@ -258,7 +283,11 @@ func (s *Server) servingDataset(ctx context.Context) (string, error) {
 	if _, err := s.describe(ctx); err != nil {
 		return "", err
 	}
-	return s.DatasetID(), nil
+	dataset := s.DatasetID()
+	if dataset == "" {
+		return "", errors.New("a newer description found no single dataset")
+	}
+	return dataset, nil
 }
 
 // datasetProvider answers Describe and HealthCheck for every contract part
@@ -412,15 +441,15 @@ func unsupportedFieldStatus() error {
 		"the request carries a field this storage server does not know", nil)
 }
 
-// admit checks a call's contract and dataset headers, admits it within its
-// class's concurrency limit, decodes its write envelope and caps its
-// duration. release frees the call's admission when it ends.
+// admit checks a call's contract header, admits it within its class's
+// concurrency limit, caps its duration, checks its dataset header and decodes
+// its write envelope. The dataset check runs within the admission and the
+// cap, so a slow first description of the providers holds a slot and ends at
+// the cap rather than queueing calls without limit. release frees the call's
+// admission when it ends; a refused call has already released it.
 func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, release func(), err error) {
 	header, _ := metadata.FromIncomingContext(ctx)
 	if err := checkContract(header); err != nil {
-		return nil, nil, err
-	}
-	if err := s.checkDataset(ctx, m, header); err != nil {
 		return nil, nil, err
 	}
 	release = func() {}
@@ -433,15 +462,19 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 				"the storage server is at its "+m.class().String()+" call limit", nil)
 		}
 	}
-	if ctx, err = withEnvelope(ctx, header); err != nil {
-		release()
-		return nil, nil, err
-	}
 	if limit := s.maxDuration[m.class()]; limit > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, limit)
 		admitted := release
 		release = func() { cancel(); admitted() }
+	}
+	if err := s.checkDataset(ctx, m, header); err != nil {
+		release()
+		return nil, nil, err
+	}
+	if ctx, err = withEnvelope(ctx, header); err != nil {
+		release()
+		return nil, nil, err
 	}
 	return ctx, release, nil
 }
@@ -549,7 +582,8 @@ func (s *Server) blobLimit(m *method) int64 {
 // matches its declared size and digest, so a refused or broken upload never
 // reaches it.
 func (s *Server) receiveUpload(stream grpc.ServerStream, m *method, request proto.Message) error {
-	header, _ := metadata.FromIncomingContext(stream.Context())
+	ctx := stream.Context()
+	header, _ := metadata.FromIncomingContext(ctx)
 	declared, err := parseBlobHeader(header)
 	if err != nil {
 		return blobValidationStatus(err)
@@ -558,15 +592,15 @@ func (s *Server) receiveUpload(stream grpc.ServerStream, m *method, request prot
 		encoded, _ := contractStatus(storagev1.TooLargeError{What: m.name + " blob", Size: declared.size, Limit: limit})
 		return encoded
 	}
-	if err := stream.RecvMsg(request); err != nil {
+	if err := withinCall(ctx, func() error { return stream.RecvMsg(request) }); err != nil {
 		if errors.Is(err, io.EOF) {
 			return blobValidationStatus(fmt.Errorf("%w: the stream carries no request", errBlobFraming))
 		}
-		return err
+		return streamError(ctx, err)
 	}
 	err = reassemble(request, func() (proto.Message, error) {
 		part := request.ProtoReflect().New().Interface()
-		return part, stream.RecvMsg(part)
+		return part, withinCall(ctx, func() error { return stream.RecvMsg(part) })
 	}, declared)
 	switch {
 	case err == nil:
@@ -576,8 +610,35 @@ func (s *Server) receiveUpload(stream grpc.ServerStream, m *method, request prot
 	case errors.Is(err, errBlobShort), errors.Is(err, errBlobDigest):
 		return errorStatus(codes.Unavailable, ReasonUnavailable, err.Error(), nil)
 	default:
-		return err
+		return streamError(ctx, err)
 	}
+}
+
+// withinCall runs one blocking stream operation and returns ctx's error if
+// ctx ends first. gRPC ends a stream only when its handler returns, so this
+// is how a call capped by the server's duration limit stops waiting for a
+// peer that stalls; the abandoned operation fails once the handler returns
+// and the stream ends. The caller must not use the operation's message after
+// abandoning it.
+func withinCall(ctx context.Context, operation func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- operation() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// streamError reports a stream that ended before the provider ran. A call
+// that ran out of time is unavailable: nothing was committed.
+func streamError(ctx context.Context, err error) error {
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return errorStatus(codes.Unavailable, ReasonUnavailable,
+			"the call did not finish within the storage server's time limit", nil)
+	}
+	return err
 }
 
 func blobValidationStatus(err error) error {
@@ -599,7 +660,13 @@ func (s *Server) sendDownload(stream grpc.ServerStream, m *method, response prot
 	if err := stream.SetHeader(metadata.Pairs(describeBlob(data).pairs()...)); err != nil {
 		return status.Error(codes.Internal, "cannot set storage response headers")
 	}
-	return sendBlob(stream.SendMsg, response, path, data)
+	err := sendBlob(func(message any) error {
+		return withinCall(ctx, func() error { return stream.SendMsg(message) })
+	}, response, path, data)
+	if err != nil {
+		return streamError(ctx, err)
+	}
+	return nil
 }
 
 // requestStatus reports a request the server cannot decode into Go values.
