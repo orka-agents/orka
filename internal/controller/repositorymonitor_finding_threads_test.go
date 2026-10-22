@@ -22,12 +22,15 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	var mu sync.Mutex
 	var patched []string
 	var resolved []string
+	currentHead := "moved99"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(req.Body)
 		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/pulls/1":
+			_, _ = w.Write([]byte(`{"number":1,"state":"open","draft":false,"base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"` + currentHead + `","repo":{"full_name":"orka-agents/orka"}},"labels":[]}`))
 		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/pulls/1/reviews/123/comments":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{"id": 501, "body": "**P1: Bug**\n\n<!-- orka:repo-monitor-inline review=r1 finding=f-aaaa -->"},
@@ -84,6 +87,14 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	}
 	record := &store.ReviewRecord{ID: "review-new", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "newhead1", FindingsJSON: findingsJSON}
 	item := &store.MonitorItem{Number: 1}
+	// The head moved after the review, so the fix may no longer hold.
+	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
+		t.Fatal(err)
+	}
+	if len(patched) != 0 || len(resolved) != 0 {
+		t.Fatalf("marked threads for a head that moved: patched=%q resolved=%q", patched, resolved)
+	}
+	currentHead = "newhead1"
 	for range 2 {
 		if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
 			t.Fatal(err)

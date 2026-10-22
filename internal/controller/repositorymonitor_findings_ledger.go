@@ -88,7 +88,7 @@ func (r *RepositoryMonitorReconciler) planRepositoryMonitorReview(ctx context.Co
 	if err != nil || base == nil {
 		return full, err
 	}
-	ledger, err := repositoryMonitorReviewFindingsFromRecord(base)
+	ledger, err := repositoryMonitorLedgerFromRecord(base)
 	if err != nil {
 		// An unreadable record cannot be built on; review from scratch.
 		return full, nil //nolint:nilerr // A corrupt earlier record only costs a full review.
@@ -97,9 +97,10 @@ func (r *RepositoryMonitorReconciler) planRepositoryMonitorReview(ctx context.Co
 		return repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Base: base, Ledger: ledger}, nil
 	}
 	compare, err := r.fetchRepositoryMonitorCompare(ctx, owner, repository, token, base.HeadSHA, pr.HeadSHA, 1)
-	if err != nil || compare.Status != repositoryMonitorGitHubCompareAhead {
-		// A rebase, force-push, or unreachable base gets a full review.
-		return full, nil //nolint:nilerr // Without a provable ancestor, a full review is the safe plan.
+	if err != nil || compare.Status != repositoryMonitorGitHubCompareAhead || len(compare.Files) >= repositoryMonitorGitHubCompareMaxFiles {
+		// A rebase, force-push, or unreachable base gets a full review, and
+		// so does a comparison GitHub may have cut off at its file limit.
+		return full, nil //nolint:nilerr // Without a provable, complete delta, a full review is the safe plan.
 	}
 	delta := compare.Files
 	if prFiles != nil {
@@ -156,7 +157,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewPlanForTask(ctx con
 	if base.MonitorName != monitor.Name || base.Kind != repositoryMonitorPullRequestKind || base.Number != item.Number {
 		return full, nil
 	}
-	ledger, err := repositoryMonitorReviewFindingsFromRecord(base)
+	ledger, err := repositoryMonitorLedgerFromRecord(base)
 	if err != nil {
 		return full, nil //nolint:nilerr // See planRepositoryMonitorReview.
 	}
@@ -187,8 +188,8 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 	fixed := map[string]bool{}
 	if plan.Mode == repositoryMonitorReviewModeIncremental {
 		for _, previous := range review.PreviousFindings {
-			if strings.TrimSpace(previous.Status) == repositoryMonitorFindingStatusFixed {
-				fixed[strings.TrimSpace(previous.ID)] = true
+			if id := strings.TrimSpace(previous.ID); id != "" && strings.TrimSpace(previous.Status) == repositoryMonitorFindingStatusFixed {
+				fixed[id] = true
 			}
 		}
 	}
@@ -231,22 +232,54 @@ func repositoryMonitorFindingID(recordID string, index int, finding repositoryMo
 }
 
 // repositoryMonitorFindingRepeats reports whether finding restates an open
-// finding: same file and a nearby line, or the same title.
+// finding in the same file: the same title, or a nearby line at the same
+// priority. A finding more severe than the open one is never a repeat, so a
+// new blocker is not dropped in favor of an earlier minor finding.
 func repositoryMonitorFindingRepeats(finding repositoryMonitorReviewFinding, open []repositoryMonitorReviewFinding) bool {
 	file := strings.TrimSpace(finding.File)
 	title := repositoryMonitorNormalizedFindingText(finding.Title)
+	rank := repositoryMonitorFindingRank(finding)
 	for _, other := range open {
-		if file == "" || file != strings.TrimSpace(other.File) {
+		if file == "" || file != strings.TrimSpace(other.File) || rank < repositoryMonitorFindingRank(other) {
 			continue
 		}
 		if title != "" && title == repositoryMonitorNormalizedFindingText(other.Title) {
 			return true
 		}
-		if finding.Line > 0 && other.Line > 0 && max(finding.Line-other.Line, other.Line-finding.Line) <= repositoryMonitorFindingDuplicateLines {
+		if rank == repositoryMonitorFindingRank(other) && finding.Line > 0 && other.Line > 0 &&
+			max(finding.Line-other.Line, other.Line-finding.Line) <= repositoryMonitorFindingDuplicateLines {
 			return true
 		}
 	}
 	return false
+}
+
+// repositoryMonitorFindingRank orders findings by priority, P0 first; an
+// unrecognized priority ranks as P1.
+func repositoryMonitorFindingRank(finding repositoryMonitorReviewFinding) int {
+	if rank, ok := repositoryMonitorPriorityRank(finding.Priority); ok {
+		return rank
+	}
+	return 1
+}
+
+// repositoryMonitorLedgerFromRecord reads a review's record of findings. A
+// record written before findings had IDs gets deterministic ones, derived
+// from the record, so planning and ingestion agree and a follow-up review can
+// report each finding separately.
+func repositoryMonitorLedgerFromRecord(record *store.ReviewRecord) ([]repositoryMonitorReviewFinding, error) {
+	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
+	if err != nil {
+		return nil, err
+	}
+	for i := range findings {
+		if findings[i].ID == "" {
+			findings[i].ID = repositoryMonitorFindingID(record.ID, i, findings[i])
+			findings[i].FirstHead = firstNonEmptyString(findings[i].FirstHead, record.HeadSHA)
+			findings[i].FirstReview = firstNonEmptyString(findings[i].FirstReview, record.ID)
+		}
+	}
+	return findings, nil
 }
 
 func repositoryMonitorNormalizedFindingText(text string) string {
@@ -263,10 +296,7 @@ func repositoryMonitorFindingBlocks(spec corev1alpha1.RepositoryMonitorSpec, fin
 	if !repositoryMonitorFindingOpen(finding) {
 		return false
 	}
-	rank, ok := repositoryMonitorPriorityRank(finding.Priority)
-	if !ok {
-		rank = 1
-	}
+	rank := repositoryMonitorFindingRank(finding)
 	blocking, ok := repositoryMonitorPriorityRank(spec.Review.BlockingPriority)
 	if !ok {
 		blocking = 1
@@ -418,7 +448,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewChangedLines(ctx co
 		return nil
 	}
 	compare, err := r.fetchRepositoryMonitorCompare(ctx, owner, repository, token, plan.Base.HeadSHA, headSHA, 1)
-	if err != nil || compare.Status != repositoryMonitorGitHubCompareAhead {
+	if err != nil || compare.Status != repositoryMonitorGitHubCompareAhead || len(compare.Files) >= repositoryMonitorGitHubCompareMaxFiles {
 		return nil
 	}
 	return repositoryMonitorChangedLinesFromFiles(compare.Files)

@@ -54,6 +54,16 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(c
 			fixed[finding.ID] = true
 		}
 	}
+	// Skip GitHub entirely once every fixed finding is marked.
+	for id := range fixed {
+		mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorFindingAddressedMutationID(record, id))
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err == nil && mutation.Status == repositoryMonitorRunPhaseSucceeded {
+			delete(fixed, id)
+		}
+	}
 	if len(fixed) == 0 {
 		return nil
 	}
@@ -64,6 +74,20 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(c
 	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		return err
+	}
+	// The same live checks gate these writes as gate publishing: a head that
+	// moved since the review may have reintroduced the defect.
+	current, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, item.Number)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(current.State), repositoryMonitorItemStateOpen) ||
+		strings.TrimSpace(current.BaseBranch) != effectiveRepositoryMonitorBranch(monitor) ||
+		strings.TrimSpace(current.HeadSHA) != record.HeadSHA ||
+		(current.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts) ||
+		repositoryMonitorBlockedLabel(monitor.Spec, current.Labels) != "" ||
+		!repositoryMonitorPullRequestReviewed(monitor.Spec, *current) {
+		return nil
 	}
 	targets, err := r.repositoryMonitorFixedFindingComments(ctx, monitor, owner, repository, token, item.Number, fixed)
 	if err != nil || len(targets) == 0 {
@@ -120,7 +144,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFixedFindingComments(ctx 
 // markRepositoryMonitorFindingAddressed notes the fix on one comment and
 // resolves its thread, once per finding and review.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFindingAddressed(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, record *store.ReviewRecord, target repositoryMonitorFindingComment, threads map[int64]repositoryMonitorReviewThread, owner, repository, token, note string) error {
-	mutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"|"+target.findingID+"|addressed")
+	mutationID := repositoryMonitorFindingAddressedMutationID(record, target.findingID)
 	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -321,4 +345,10 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreadsBe
 	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
 		log.FromContext(ctx).Info("could not mark fixed finding threads", "pr", item.Number, "review", record.ID, "error", err.Error())
 	}
+}
+
+// repositoryMonitorFindingAddressedMutationID names the GitHub mutation that
+// marks one finding addressed by one review.
+func repositoryMonitorFindingAddressedMutationID(record *store.ReviewRecord, findingID string) string {
+	return "ghmut-" + repositoryMonitorShortHash(record.ID+"|"+findingID+"|addressed")
 }

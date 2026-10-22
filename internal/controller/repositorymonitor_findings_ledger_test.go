@@ -148,17 +148,21 @@ func TestRepositoryMonitorPlanReview(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
 	monitor, _ := repositoryMonitorInventoryTestObjects("plan")
-	compareStatus := "ahead"
+	compareStatus, capped := "ahead", false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if req.URL.Path != "/repos/orka-agents/orka/compare/reviewed...newer" {
 			http.NotFound(w, req)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": compareStatus, "files": []map[string]any{
+		files := []map[string]any{
 			{"filename": "pr.go", "patch": "@@ -1 +1 @@\n-a\n+b"},
 			{"filename": "from-main.go", "patch": "@@ -1 +1 @@\n-a\n+b"},
-		}})
+		}
+		for i := 0; capped && len(files) < repositoryMonitorGitHubCompareMaxFiles; i++ {
+			files = append(files, map[string]any{"filename": fmt.Sprintf("merged-%d.go", i)})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": compareStatus, "files": files})
 	}))
 	defer server.Close()
 	r := &RepositoryMonitorReconciler{Store: db, GitHubAPIBaseURL: server.URL}
@@ -194,6 +198,11 @@ func TestRepositoryMonitorPlanReview(t *testing.T) {
 	if got := plan("newer"); got.Mode != repositoryMonitorReviewModeFull {
 		t.Fatalf("rewritten history plan = %+v, want full", got)
 	}
+	compareStatus, capped = "ahead", true
+	if got := plan("newer"); got.Mode != repositoryMonitorReviewModeFull {
+		t.Fatalf("plan for a comparison at GitHub's file limit = %+v, want full", got)
+	}
+	capped = false
 	if got := plan("unknown"); got.Mode != repositoryMonitorReviewModeFull {
 		t.Fatalf("compare failure plan = %+v, want full", got)
 	}
@@ -491,5 +500,42 @@ func TestRepositoryMonitorExhaustiveReviewSkipsFollowUps(t *testing.T) {
 	}
 	if pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, rec); err != nil || pending {
 		t.Fatalf("pending = %t err=%v, want follow-up reviews to run once", pending, err)
+	}
+}
+
+func TestRepositoryMonitorFindingRepeats(t *testing.T) {
+	open := []repositoryMonitorReviewFinding{{Priority: "P2", File: "a.go", Line: 10, Title: "Error ignored"}}
+	for _, tc := range []struct {
+		name    string
+		finding repositoryMonitorReviewFinding
+		want    bool
+	}{
+		{name: "nearby line at the same priority", finding: repositoryMonitorReviewFinding{Priority: "P2", File: "a.go", Line: 12, Title: "Unchecked error"}, want: true},
+		{name: "same title", finding: repositoryMonitorReviewFinding{Priority: "P3", File: "a.go", Line: 90, Title: "error ignored!"}, want: true},
+		{name: "more severe nearby finding is new", finding: repositoryMonitorReviewFinding{Priority: "P1", File: "a.go", Line: 12, Title: "Nil dereference"}},
+		{name: "more severe same title is new", finding: repositoryMonitorReviewFinding{Priority: "P0", File: "a.go", Line: 10, Title: "Error ignored"}},
+		{name: "less severe nearby finding at another priority is new", finding: repositoryMonitorReviewFinding{Priority: "P3", File: "a.go", Line: 11, Title: "Naming"}},
+		{name: "other file", finding: repositoryMonitorReviewFinding{Priority: "P2", File: "b.go", Line: 10, Title: "Error ignored"}},
+	} {
+		if got := repositoryMonitorFindingRepeats(tc.finding, open); got != tc.want {
+			t.Errorf("%s: repeats = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRepositoryMonitorLegacyFindingsGetIDs(t *testing.T) {
+	legacy := &store.ReviewRecord{ID: "review-legacy", HeadSHA: "old", FindingsJSON: `[{"priority":"P1","file":"a.go","line":1,"title":"One"},{"priority":"P1","file":"b.go","line":2,"title":"Two"}]`}
+	ledger, err := repositoryMonitorLedgerFromRecord(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := repositoryMonitorLedgerFromRecord(legacy)
+	if ledger[0].ID == "" || ledger[0].ID == ledger[1].ID || ledger[0].ID != again[0].ID || ledger[0].FirstHead != "old" {
+		t.Fatalf("legacy ledger = %+v, want distinct, deterministic IDs", ledger)
+	}
+	review := &repositoryMonitorReviewResult{PreviousFindings: []repositoryMonitorReviewPreviousFinding{{ID: ledger[0].ID, Status: "fixed"}, {ID: "", Status: "fixed"}}}
+	merged := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: legacy, Ledger: ledger}, review, "new", "review-new", nil)
+	if merged[0].Status != repositoryMonitorFindingStatusFixed || merged[1].Status != repositoryMonitorFindingStatusOpen {
+		t.Fatalf("merged = %+v, want only the named legacy finding fixed", merged)
 	}
 }
