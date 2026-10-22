@@ -244,10 +244,10 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	}
 	declined := req.NoHost || !cfg.CreateHosts
 	connection, held, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, declined)
+	if !held {
+		h.revokeSignInToken(ctx, oauth, tokens.AccessToken)
+	}
 	if err != nil {
-		if !held {
-			h.revokeSignInToken(ctx, oauth, tokens.AccessToken)
-		}
 		return err
 	}
 	response, err := h.issueSession(ctx, ui)
@@ -373,7 +373,8 @@ func (h *Handlers) newSession(ui *UserInfo) (string, store.AuthSession, error) {
 // Connection to the provider. It takes the steps a browser consent takes, a
 // consent, a completion and its commit, so custody's fences hold as they do
 // for any link. held reports whether Orka may hold the tokens: when it is
-// false the link stored nothing, and a failed caller revokes them.
+// false nothing stored them, after a failure or when an existing link was
+// kept, and the caller revokes them.
 func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
 	oauth connectors.OAuthProviderConfig, tokens githubauth.Tokens, declined bool) (connection *corev1alpha1.Connection, held bool, err error) {
 	connection, err = h.ensureSignInConnection(ctx, ui, provider, declined)
@@ -390,14 +391,10 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	}
 	// Signing in again keeps a link that still holds the person's account:
 	// each commit retains the grant it replaces until disconnect, so linking
-	// every sign-in would soon refuse new ones. The unused token is revoked.
-	if held, ok := h.signInLinkHolds(ctx, connection, oauth, ui); ok {
-		if tokens.AccessToken != held {
-			if err := h.githubSignIn.GitHub.DeleteToken(ctx, oauth.ClientID, oauth.ClientSecret, tokens.AccessToken); err != nil {
-				log.Error(err, "could not revoke a sign-in's unused GitHub token", "connection", connection.Name)
-			}
-		}
-		return connection, false, nil
+	// every sign-in would soon refuse new ones. The caller revokes the
+	// unused token, unless custody holds that very token.
+	if custody, ok := h.signInLinkHolds(ctx, connection, oauth, ui); ok {
+		return connection, tokens.AccessToken == custody, nil
 	}
 	mode, err := normalizeConnectionMode(connection.Spec.Mode)
 	if err != nil {
