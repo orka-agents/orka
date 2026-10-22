@@ -75,6 +75,20 @@ func TestBrokeredDelegateTaskSubjectTokenResolverUsesOwnedIncomingSecret(t *test
 	}
 }
 
+func TestParseContainerTaskRuntimeClasses(t *testing.T) {
+	got, err := parseContainerTaskRuntimeClasses(" gvisor, kata-qemu ,,")
+	if err != nil || !slices.Equal(got, []string{"gvisor", "kata-qemu"}) {
+		t.Fatalf("parseContainerTaskRuntimeClasses() = %v, %v", got, err)
+	}
+	if got, err := parseContainerTaskRuntimeClasses(""); err != nil || got != nil {
+		t.Fatalf("empty allowlist = %v, %v; want none", got, err)
+	}
+	_, err = parseContainerTaskRuntimeClasses("gvisor,Kata_QEMU")
+	if err == nil || !strings.Contains(err.Error(), "Kata_QEMU") {
+		t.Fatalf("invalid RuntimeClass name error = %v", err)
+	}
+}
+
 func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
 	first := controllerHolderIDForIncarnation("workstation", "first-process")
 	second := controllerHolderIDForIncarnation("workstation", "second-process")

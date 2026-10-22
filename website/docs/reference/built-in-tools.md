@@ -74,7 +74,7 @@ how to use them together.
 |------|-------------|------------|
 | `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `taskNamespace`, `agentNamespace`, `priority`, `timeout`, `workspace`, `maxTurns`, `allowBash`, `prior_task`, `feedback`, `auto_retry`, `max_retries` |
 | `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
-| `create_container_task` | Create a child container task | `image`, `command`/`args`; `workspace`, `prior_task`, `namespace`, `timeout`, `priority`, `schedule` |
+| `create_container_task` | Create a child container task | `image`, `command`/`args`; `env`, `resources`, `retryPolicy`, `execution`, `workspace`, `prior_task`, `namespace`, `timeout`, `priority`, `schedule`. See [below](#create_container_task). |
 | `cancel_task` | Cancel a running child task | `task_name` (required); `namespace`, `reason` |
 | `send_message` | Send a message to a sibling task | `to_task` (required, or `*` to broadcast), `content` (required) |
 | `check_messages` | Check for messages from sibling tasks | `mark_read` (boolean, default true) |
@@ -152,6 +152,22 @@ the controller, and any `diff` field is stripped so it does not flood the coordi
 A child delegated with `auto_retry: true` that failed carries `failureDetails` with its
 message, `retryCount`, and `maxRetries`. The tool does not retry it; see
 [retrying failed children](../guides/multi-agent-coordination.md#retry-failed-children).
+
+### `create_container_task`
+
+Creates a `type: container` Task from the chat and from coordinator Agents alike. The
+fields below map onto the Task spec; every limit is checked before anything is created.
+See [Container tasks](../guides/container-tasks.md) for the filesystem and image rules.
+
+| Parameter | Description |
+| --- | --- |
+| `image`, `command`, `args` | The container to run. Omit `image` for the default worker image. |
+| `env` | Up to 64 literal `{name, value}` pairs; values up to 32 KiB. Names starting with `ORKA_` or `OTEL_EXPORTER_OTLP`, and `OTEL_RESOURCE_ATTRIBUTES`, are reserved and refused. `valueFrom` is not accepted. Values are stored in the Task spec, so never pass credentials here. |
+| `resources` | `requests` and `limits` maps of Kubernetes quantities, such as `{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"cpu":"2","memory":"2Gi"}}`. Quantities must parse, be non-negative, and keep each request at or below its limit. Namespace `ResourceQuota` and `LimitRange` remain the caps. Omitted, the Pod gets requests `100m`/`512Mi` and limits `1`/`2Gi`. |
+| `retryPolicy` | `maxRetries` (0–5), `backoffMultiplier` (1–10, default 2), and `initialDelay` (a duration up to `5m`, default `10s`). Retry only idempotent commands: a run with side effects whose outcome is unknown should be checked by a follow-up Task, not retried. Retry delays are not yet preserved across controller restarts ([#577](https://github.com/orka-agents/orka/issues/577)). |
+| `execution.runtimeClassName` | A RuntimeClass such as `gvisor`. Accepted only when it is in the operator's `--container-task-runtime-classes` allowlist; with an empty allowlist the field is refused. Node selectors, tolerations, and affinity stay operator-only. |
+| `workspace`, `prior_task` | The repository to check out, or a prior Task whose workspace and diff to reuse. |
+| `namespace`, `timeout`, `priority`, `schedule` | As on the other Task-creating tools. |
 
 ### `cancel_task`
 

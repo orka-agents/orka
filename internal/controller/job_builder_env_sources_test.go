@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func envSourceTestTask(taskType corev1alpha1.TaskType, image string, env ...corev1.EnvVar) *corev1alpha1.Task {
@@ -129,5 +130,35 @@ func TestBuildLeavesAITaskEnvSourcesToTheTrustedWorkerPolicy(t *testing.T) {
 	}
 	if _, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "API_TOKEN"); !ok {
 		t.Fatal("AI Task env secretKeyRef should keep its existing behavior")
+	}
+}
+
+func TestBuildPassesContainerTaskRuntimeClassAllowlistOnlyToAIWorkers(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.ContainerTaskRuntimeClasses = []string{"gvisor", "kata-qemu"}
+	spoofed := corev1.EnvVar{Name: workerenv.ContainerTaskRuntimeClasses, Value: "runc-host"}
+
+	aiTask := envSourceTestTask(corev1alpha1.TaskTypeAI, "", spoofed)
+	job, err := builder.Build(context.Background(), aiTask, nil, nil)
+	if err != nil {
+		t.Fatalf("Build(ai) error = %v", err)
+	}
+	var values []string
+	for _, envVar := range job.Spec.Template.Spec.Containers[0].Env {
+		if envVar.Name == workerenv.ContainerTaskRuntimeClasses {
+			values = append(values, envVar.Value)
+		}
+	}
+	if len(values) != 1 || values[0] != "gvisor,kata-qemu" {
+		t.Fatalf("AI worker %s = %v, want only the operator allowlist", workerenv.ContainerTaskRuntimeClasses, values)
+	}
+
+	containerTask := envSourceTestTask(corev1alpha1.TaskTypeContainer, testBusyboxImage, spoofed)
+	job, err = builder.Build(context.Background(), containerTask, nil, nil)
+	if err != nil {
+		t.Fatalf("Build(container) error = %v", err)
+	}
+	if got, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.ContainerTaskRuntimeClasses); ok {
+		t.Fatalf("container Task env %s = %q, want it removed", workerenv.ContainerTaskRuntimeClasses, got.Value)
 	}
 }

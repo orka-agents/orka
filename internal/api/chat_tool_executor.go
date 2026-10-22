@@ -74,6 +74,8 @@ type ToolExecutor struct {
 	authorizeConnectorRead func() *tools.ChatToolError
 	// dashboardEnabled lets list_connections name the dashboard page.
 	dashboardEnabled bool
+	// containerTaskRuntimeClasses mirrors --container-task-runtime-classes.
+	containerTaskRuntimeClasses []string
 	// createdTasks is shared by every tool call of this turn.
 	createdTasks            *tools.CreatedTasks
 	registry                *tools.Registry
@@ -276,6 +278,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 			return chatToolAuthorizationError(authorize, ctx, nil, "Use a context token authorized to read the git credential secret")
 		},
 		RequireSecretReadAuthorization: e.authorizeSecretRead != nil,
+		ContainerTaskRuntimeClasses:    e.containerTaskRuntimeClasses,
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
 				return &tools.ChatToolError{

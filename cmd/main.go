@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
@@ -119,6 +120,18 @@ func splitCommaList(raw string) []string {
 		}
 	}
 	return out
+}
+
+// parseContainerTaskRuntimeClasses reads the create_container_task RuntimeClass
+// allowlist. A malformed name fails startup rather than never matching.
+func parseContainerTaskRuntimeClasses(raw string) ([]string, error) {
+	names := splitCommaList(raw)
+	for _, name := range names {
+		if errs := utilvalidation.IsDNS1123Subdomain(name); len(errs) > 0 {
+			return nil, fmt.Errorf("--container-task-runtime-classes: %q is not a valid RuntimeClass name: %s", name, strings.Join(errs, "; "))
+		}
+	}
+	return names, nil
 }
 
 func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
@@ -241,6 +254,7 @@ func main() {
 	var nativeSessionMaxBytes int
 	var watchNamespace string
 	var generalWorkerImage string
+	var containerTaskRuntimeClassesFlag string
 	var aiWorkerServiceAccountName string
 	var vendorWorkerServiceAccountName string
 	var containerWorkerServiceAccountName string
@@ -432,6 +446,9 @@ func main() {
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&containerTaskRuntimeClassesFlag, "container-task-runtime-classes",
+		os.Getenv("ORKA_CONTAINER_TASK_RUNTIME_CLASSES"),
+		"Comma-separated RuntimeClass names that create_container_task may request through execution.runtimeClassName. Empty refuses the field.")
 	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
 		controller.AIWorkerServiceAccount, "ServiceAccount name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerServiceAccountName, "vendor-worker-service-account-name",
@@ -785,6 +802,11 @@ func main() {
 		os.Exit(1)
 	}
 	acpUpgradeDrainOptions.WatchNamespace = watchNamespace
+	containerTaskRuntimeClasses, err := parseContainerTaskRuntimeClasses(containerTaskRuntimeClassesFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if !enforceNamespaceIsolation {
 		fmt.Fprintln(os.Stderr, "--enforce-namespace-isolation=true is required for a static controller installation")
 		os.Exit(1)
@@ -1481,6 +1503,7 @@ func main() {
 	jobBuilder.ControllerMode = mode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.ContainerTaskRuntimeClasses = containerTaskRuntimeClasses
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
@@ -2014,19 +2037,20 @@ func main() {
 		},
 		DashboardEnabled: dashboardEnabled,
 		Chat: api.ChatConfig{
-			LinkedAccounts:         chatLinkedAccounts,
-			ConnectorsEnabled:      connectorsEnabled,
-			Enabled:                chatEnabled,
-			Provider:               chatProvider,
-			Model:                  chatModel,
-			MaxIterations:          chatMaxIterations,
-			MaxDuration:            chatMaxDuration,
-			ToolTimeout:            chatToolTimeout,
-			MaxConcurrent:          chatMaxConcurrent,
-			MaxTasksPerTurn:        chatMaxTasksPerTurn,
-			MaxSessionSize:         chatMaxSessionSize,
-			MaxPrematureEndRetries: chatMaxPrematureEndRetries,
-			RuntimeAvailability:    runtimeAvailability,
+			LinkedAccounts:              chatLinkedAccounts,
+			ConnectorsEnabled:           connectorsEnabled,
+			Enabled:                     chatEnabled,
+			Provider:                    chatProvider,
+			Model:                       chatModel,
+			MaxIterations:               chatMaxIterations,
+			MaxDuration:                 chatMaxDuration,
+			ToolTimeout:                 chatToolTimeout,
+			MaxConcurrent:               chatMaxConcurrent,
+			MaxTasksPerTurn:             chatMaxTasksPerTurn,
+			MaxSessionSize:              chatMaxSessionSize,
+			MaxPrematureEndRetries:      chatMaxPrematureEndRetries,
+			RuntimeAvailability:         runtimeAvailability,
+			ContainerTaskRuntimeClasses: containerTaskRuntimeClasses,
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{

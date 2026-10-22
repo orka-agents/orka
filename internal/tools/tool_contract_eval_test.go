@@ -1232,6 +1232,67 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
+			name: "create_container_task env and retryPolicy",
+			limits: func() []string {
+				limits := make([]string, 0, 16)
+				for _, label := range []string{"chat", "worker"} {
+					for _, limit := range []string{
+						".env maxItems=64", ".env[] additionalProperties=false", ".env[].name required", ".env[].value maxLength=32768",
+						".retryPolicy.backoffMultiplier maximum=10", ".retryPolicy.backoffMultiplier minimum=1",
+						".retryPolicy.maxRetries maximum=5", ".retryPolicy.maxRetries minimum=0",
+					} {
+						limits = append(limits, label+"/create_container_task"+limit)
+					}
+				}
+				return limits
+			}(),
+			check: func(t *testing.T) (bool, string) {
+				t.Setenv(envOrkaTaskName, "parent")
+				chatContainer := func() (Tool, context.Context) { return chatTool("create_container_task", newFakeClient()) }
+				workerContainer := func() (Tool, context.Context) { return workerTool("create_container_task", evalParentTaskCluster()) }
+				args := func(fragment string) string {
+					return `{"image":"cgr.dev/chainguard/bash:latest","command":["echo","hi"],` + fragment + `}`
+				}
+				envs := func(n int) string {
+					items := make([]string, n)
+					for i := range items {
+						items[i] = fmt.Sprintf(`{"name":"V%d","value":"x"}`, i)
+					}
+					return `"env":[` + strings.Join(items, ",") + `]`
+				}
+				retry := func(field, value string) string { return `"retryPolicy":{"` + field + `":` + value + `}` }
+				checks := make([]func() (bool, string), 0, 16)
+				for _, call := range []evalCall{chatContainer, workerContainer} {
+					checks = append(checks,
+						func() (bool, string) { return evalRejectsChange(call, args(envs(64)), args(envs(65)), "env") },
+						func() (bool, string) {
+							return evalRejectsChange(call, args(`"env":[{"name":"A","value":"b"}]`), args(`"env":[{"name":"A","value":"b","valueFrom":{}}]`), "valueFrom")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(`"env":[{"name":"A"}]`), args(`"env":[{"value":"b"}]`), "name")
+						},
+						func() (bool, string) {
+							value := func(n int) string { return `"env":[{"name":"A","value":"` + long(n) + `"}]` }
+							return evalRejectsChange(call, args(value(32768)), args(value(32769)), "value")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(retry("backoffMultiplier", "10")), args(retry("backoffMultiplier", "10.5")), "backoffMultiplier")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(retry("backoffMultiplier", "1")), args(retry("backoffMultiplier", "0.9")), "backoffMultiplier")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(retry("maxRetries", "5")), args(retry("maxRetries", "6")), "maxRetries")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(retry("maxRetries", "0")), args(retry("maxRetries", "-1")), "maxRetries")
+						},
+					)
+				}
+				return evalAll(checks...)
+			},
+		},
+		{
 			name:   "chat create_pr_monitor",
 			limits: []string{"chat/create_pr_monitor.per_page maximum=100", "chat/create_pr_monitor.per_page minimum=1", "chat/create_pr_monitor.review_event enum=COMMENT|APPROVE|REQUEST_CHANGES"},
 			check: func(t *testing.T) (bool, string) {
@@ -2191,6 +2252,10 @@ func evalArgumentValue(path []string, schema map[string]any) any {
 		return map[string]any{"cpu": "100m"}
 	case "resources.requests.*", "resources.limits.*":
 		return "100m"
+	case "retryPolicy.initialDelay":
+		return "10s"
+	case "execution.runtimeClassName":
+		return "" // Without an operator allowlist only an omitted runtime class is valid.
 	case "roles.[]":
 		return "assistant"
 	case "soul":

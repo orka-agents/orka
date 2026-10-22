@@ -10,12 +10,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -53,6 +58,32 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 			"pushBranch":               map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name. Omit for read-only validation. Requires publicationCredentialRef and the default worker image; not supported with a custom image."},
 		},
 		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command. If workspace is omitted, Orka copies the workspace from this prior task when available."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000", jsonSchemaMinimumField: 0, jsonSchemaMaximumField: 1000}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
+		envField: map[string]any{
+			jsonSchemaTypeField:        jsonSchemaTypeArray,
+			jsonSchemaDescriptionField: "Literal env vars, readable by anyone who can read the Task: never credentials. ORKA_* and OTEL_EXPORTER_OTLP* names are reserved.",
+			jsonSchemaMaxItemsField:    maxContainerTaskEnvVars,
+			itemsField: map[string]any{
+				jsonSchemaTypeField: jsonSchemaTypeObject,
+				jsonSchemaPropertiesField: map[string]any{
+					nameField:  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString},
+					valueField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaMaxLengthField: maxContainerTaskEnvValueBytes},
+				},
+				jsonSchemaRequiredField:        []string{nameField},
+				jsonSchemaAdditionalProperties: false,
+			},
+		},
+		resourcesField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: `Requests/limits, e.g. {requests:{cpu:"500m",memory:"1Gi"},limits:{cpu:"2",memory:"2Gi"}}. Default limits: 1 CPU, 2Gi.`, jsonSchemaPropertiesField: map[string]any{
+			resourceRequestsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaAdditionalProperties: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
+			resourceLimitsField:   map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaAdditionalProperties: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
+		}},
+		retryPolicyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Retries with backoff, only for idempotent commands", jsonSchemaPropertiesField: map[string]any{
+			maxRetriesField:        map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 0, jsonSchemaMaximumField: maxContainerTaskRetries},
+			backoffMultiplierField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeNumber, jsonSchemaMinimumField: minContainerTaskBackoffMultiplier, jsonSchemaMaximumField: maxContainerTaskBackoffMultiplier},
+			initialDelayField:      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Go duration, at most 5m"},
+		}},
+		executionField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+			runtimeClassNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Isolation RuntimeClass such as gvisor, only if the operator allows it"},
+		}},
 	},
 	})
 }
@@ -84,6 +115,9 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		return r, nil
 	}
 	task := buildContainerTask(a)
+	if r, ok := applyContainerTaskSpecArgs(tc, a, task); !ok {
+		return r, nil
+	}
 	if err := applyContainerPriorTaskWorkspace(ctx, tc.Client, namespace, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
@@ -155,6 +189,9 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		return r, nil
 	}
 	task := buildContainerTask(a)
+	if r, ok := applyContainerTaskSpecArgs(GetToolContext(ctx), a, task); !ok {
+		return r, nil
+	}
 	if err := applyContainerPriorTaskWorkspace(ctx, t.k8sClient, namespace, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
@@ -416,4 +453,231 @@ func buildContainerTask(a map[string]any) *corev1alpha1.Task {
 		task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: strings.TrimSpace(priorTask)}
 	}
 	return task
+}
+
+const (
+	envField                       = "env"
+	valueField                     = "value"
+	resourcesField                 = "resources"
+	resourceRequestsField          = "requests"
+	resourceLimitsField            = "limits"
+	retryPolicyField               = "retryPolicy"
+	maxRetriesField                = "maxRetries"
+	backoffMultiplierField         = "backoffMultiplier"
+	initialDelayField              = "initialDelay"
+	executionField                 = "execution"
+	runtimeClassNameField          = "runtimeClassName"
+	jsonSchemaMaxItemsField        = "maxItems"
+	jsonSchemaAdditionalProperties = "additionalProperties"
+
+	maxContainerTaskEnvVars           = 64
+	maxContainerTaskEnvValueBytes     = 32 << 10
+	maxContainerTaskRetries           = 5
+	minContainerTaskBackoffMultiplier = 1
+	maxContainerTaskBackoffMultiplier = 10
+	maxContainerTaskInitialDelay      = 5 * time.Minute
+)
+
+// applyContainerTaskSpecArgs copies the container settings a coordinator may
+// choose onto the Task. The schema advertises these limits; this enforces them,
+// so nothing is created from a value the schema would have refused.
+func applyContainerTaskSpecArgs(tc *ToolContext, a map[string]any, task *corev1alpha1.Task) (string, bool) {
+	env, errResult, ok := parseContainerTaskEnvArg(a)
+	if !ok {
+		return errResult, false
+	}
+	task.Spec.Env = env
+
+	resources, errResult, ok := parseContainerTaskResourcesArg(a)
+	if !ok {
+		return errResult, false
+	}
+	task.Spec.Resources = resources
+
+	retryPolicy, errResult, ok := parseContainerTaskRetryPolicyArg(a)
+	if !ok {
+		return errResult, false
+	}
+	task.Spec.RetryPolicy = retryPolicy
+
+	var allowed []string
+	if tc != nil {
+		allowed = tc.ContainerTaskRuntimeClasses
+	}
+	execution, errResult, ok := parseContainerTaskExecutionArg(a, allowed)
+	if !ok {
+		return errResult, false
+	}
+	task.Spec.Execution = execution
+	return "", true
+}
+
+func containerTaskArgError(message, suggestion string) string {
+	result, _ := ChatToolErrorResult(invalidArgumentsErrorType, message, suggestion)
+	return result
+}
+
+func parseContainerTaskEnvArg(a map[string]any) ([]corev1.EnvVar, string, bool) {
+	raw, ok := a[envField]
+	if !ok || raw == nil {
+		return nil, "", true
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		r := containerTaskArgError("env must be an array of {name, value} objects", `Pass env as [{"name":"MODE","value":"smoke"}]`)
+		return nil, r, false
+	}
+	if len(items) > maxContainerTaskEnvVars {
+		r := containerTaskArgError(fmt.Sprintf("env has %d entries; at most %d are allowed", len(items), maxContainerTaskEnvVars), "Pass fewer variables, or bake static configuration into the image")
+		return nil, r, false
+	}
+	env := make([]corev1.EnvVar, 0, len(items))
+	seen := make(map[string]bool, len(items))
+	for i, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			r := containerTaskArgError(fmt.Sprintf("env[%d] must be an object with name and value", i), `Pass each entry as {"name":"MODE","value":"smoke"}`)
+			return nil, r, false
+		}
+		for key := range entry {
+			switch key {
+			case nameField, valueField:
+			case "valueFrom":
+				r := containerTaskArgError(fmt.Sprintf("env[%d].valueFrom is not supported: create_container_task accepts only literal env values", i), "Pass a literal value. Secrets cannot be passed through env by this tool.")
+				return nil, r, false
+			default:
+				r := containerTaskArgError(fmt.Sprintf("env[%d] has unsupported field %q", i, key), "Each env entry takes only name and value")
+				return nil, r, false
+			}
+		}
+		name, _ := entry[nameField].(string)
+		if name == "" {
+			r := containerTaskArgError(fmt.Sprintf("env[%d].name is required", i), "Give every env entry a name")
+			return nil, r, false
+		}
+		if errs := validation.IsEnvVarName(name); len(errs) > 0 {
+			r := containerTaskArgError(fmt.Sprintf("env[%d].name %q is not a valid environment variable name: %s", i, name, strings.Join(errs, "; ")), "Use letters, digits, '_', '-', or '.', not starting with a digit")
+			return nil, r, false
+		}
+		if reservedContainerTaskEnvName(name) {
+			result, _ := ChatToolErrorResult("reserved_env_name", fmt.Sprintf("env[%d].name %q is reserved for the controller", i, name), "Rename the variable: names starting with ORKA_ or OTEL_EXPORTER_OTLP, and OTEL_RESOURCE_ATTRIBUTES, are set by Orka")
+			return nil, result, false
+		}
+		if seen[name] {
+			r := containerTaskArgError(fmt.Sprintf("env[%d].name %q is duplicated", i, name), "Set each variable once")
+			return nil, r, false
+		}
+		seen[name] = true
+		value := chatGetStringArg(entry, valueField)
+		if len(value) > maxContainerTaskEnvValueBytes {
+			r := containerTaskArgError(fmt.Sprintf("env[%d].value is %d bytes; at most %d are allowed", i, len(value), maxContainerTaskEnvValueBytes), "Write large inputs to a file in the image or workspace instead")
+			return nil, r, false
+		}
+		env = append(env, corev1.EnvVar{Name: name, Value: value})
+	}
+	if len(env) == 0 {
+		return nil, "", true
+	}
+	return env, "", true
+}
+
+// reservedContainerTaskEnvName reports names the job builder sets or reserves:
+// Orka's own ORKA_* settings and the OpenTelemetry exporter configuration.
+func reservedContainerTaskEnvName(name string) bool {
+	return strings.HasPrefix(name, "ORKA_") || strings.HasPrefix(name, "OTEL_EXPORTER_OTLP") || name == "OTEL_RESOURCE_ATTRIBUTES"
+}
+
+func parseContainerTaskResourcesArg(a map[string]any) (corev1.ResourceRequirements, string, bool) {
+	resources, errResult, ok := parseResourceRequirementsArg(a)
+	if !ok {
+		return resources, errResult, false
+	}
+	for _, list := range []struct {
+		key    string
+		values corev1.ResourceList
+	}{{resourceRequestsField, resources.Requests}, {resourceLimitsField, resources.Limits}} {
+		for name, quantity := range list.values {
+			if quantity.Sign() < 0 {
+				r := containerTaskArgError(fmt.Sprintf("resources.%s.%s must not be negative", list.key, name), "Use a positive Kubernetes quantity such as 500m or 1Gi")
+				return resources, r, false
+			}
+		}
+	}
+	for name, request := range resources.Requests {
+		if limit, ok := resources.Limits[name]; ok && request.Cmp(limit) > 0 {
+			r := containerTaskArgError(fmt.Sprintf("resources.requests.%s (%s) exceeds resources.limits.%s (%s)", name, request.String(), name, limit.String()), "Set each request at or below its limit")
+			return resources, r, false
+		}
+	}
+	return resources, "", true
+}
+
+func parseContainerTaskRetryPolicyArg(a map[string]any) (*corev1alpha1.RetryPolicy, string, bool) {
+	raw, ok := a[retryPolicyField]
+	if !ok || raw == nil {
+		return nil, "", true
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		r := containerTaskArgError("retryPolicy must be an object", `Pass retryPolicy as {"maxRetries":2,"initialDelay":"30s"}`)
+		return nil, r, false
+	}
+	policy := &corev1alpha1.RetryPolicy{}
+	if value, ok := values[maxRetriesField]; ok && value != nil {
+		retries, err := chatParseIntArg(value)
+		if err != nil || retries < 0 || retries > maxContainerTaskRetries {
+			r := containerTaskArgError(fmt.Sprintf("retryPolicy.maxRetries must be a whole number from 0 to %d", maxContainerTaskRetries), "Retry only idempotent commands, and only a few times")
+			return nil, r, false
+		}
+		policy.MaxRetries = int32(retries)
+	}
+	if value, ok := values[backoffMultiplierField]; ok && value != nil {
+		multiplier, isNumber := value.(float64)
+		if !isNumber || math.IsNaN(multiplier) || multiplier < minContainerTaskBackoffMultiplier || multiplier > maxContainerTaskBackoffMultiplier {
+			r := containerTaskArgError(fmt.Sprintf("retryPolicy.backoffMultiplier must be a number from %d to %d", minContainerTaskBackoffMultiplier, maxContainerTaskBackoffMultiplier), "Omit it to use 2")
+			return nil, r, false
+		}
+		policy.BackoffMultiplier = multiplier
+	}
+	if text := strings.TrimSpace(chatGetStringArg(values, initialDelayField)); text != "" {
+		delay, err := time.ParseDuration(text)
+		if err != nil || delay <= 0 || delay > maxContainerTaskInitialDelay {
+			r := containerTaskArgError(fmt.Sprintf("retryPolicy.initialDelay must be a positive Go duration up to %s", maxContainerTaskInitialDelay), "Use a duration such as 10s or 1m")
+			return nil, r, false
+		}
+		policy.InitialDelay = &metav1.Duration{Duration: delay}
+	}
+	return policy, "", true
+}
+
+func parseContainerTaskExecutionArg(a map[string]any, allowed []string) (*corev1alpha1.ExecutionSpec, string, bool) {
+	raw, ok := a[executionField]
+	if !ok || raw == nil {
+		return nil, "", true
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		r := containerTaskArgError("execution must be an object", `Pass execution as {"runtimeClassName":"gvisor"}`)
+		return nil, r, false
+	}
+	for key := range values {
+		if key != runtimeClassNameField {
+			r := containerTaskArgError(fmt.Sprintf("execution.%s is not supported: only execution.runtimeClassName can be set", key), "Node placement is configured by the operator")
+			return nil, r, false
+		}
+	}
+	name := strings.TrimSpace(chatGetStringArg(values, runtimeClassNameField))
+	if name == "" {
+		return nil, "", true
+	}
+	if !slices.Contains(allowed, name) {
+		message := fmt.Sprintf("execution.runtimeClassName %q is not allowed for container tasks", name)
+		suggestion := "Omit execution.runtimeClassName: the operator has not allowed any runtime classes for container tasks"
+		if len(allowed) > 0 {
+			suggestion = "Use one of the allowed runtime classes: " + strings.Join(allowed, ", ")
+		}
+		result, _ := ChatToolErrorResult("runtime_class_not_allowed", message, suggestion)
+		return nil, result, false
+	}
+	return &corev1alpha1.ExecutionSpec{RuntimeClassName: name}, "", true
 }

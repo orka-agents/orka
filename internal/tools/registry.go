@@ -153,6 +153,10 @@ type ToolContext struct {
 	// the complete temporary resource set before code_exec creates anything.
 	AuthorizeCodeExecResources     func(context.Context, []client.Object) error
 	RequireSecretReadAuthorization bool
+	// ContainerTaskRuntimeClasses is the operator allowlist of RuntimeClass
+	// names create_container_task accepts as execution.runtimeClassName.
+	// Empty refuses the field.
+	ContainerTaskRuntimeClasses []string
 	// RequireGitHubTaskCredentials disables controller-global repository and
 	// credential fallback for external GitHub tool calls.
 	RequireGitHubTaskCredentials bool
