@@ -96,6 +96,11 @@ These workers use dedicated ServiceAccounts bound to `orka-ai-worker-role`,
 `orka-vendor-worker-role`, or `orka-container-worker-role`. Include these identities when
 auditing Kubernetes access.
 
+Container Tasks are untrusted compute. Their `spec.secretRef` and any `spec.env` entry that
+reads a Secret or ConfigMap through `valueFrom` reach the Pod only when an operator sets
+`ORKA_AGENT_DIRECT_SECRET_MOUNTS=true`; otherwise the Task fails before its Pod is created.
+See [Container tasks](../guides/container-tasks.md#other-fields).
+
 ### ACP RuntimePool Pods
 
 Built-in `type: agent` Tasks run as private RuntimeSessions inside one controller-owned ACP RuntimePool Pod per trust domain/profile. The Pod:

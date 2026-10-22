@@ -495,6 +495,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
+	if err := b.validateContainerTaskEnvSources(task); err != nil {
+		return nil, err
+	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		if err := validatePreparedAISoul(task, agent, opts.AISoul); err != nil {
 			return nil, err
@@ -980,6 +983,42 @@ func otlpSignalFromEnvName(name string) string {
 		}
 	}
 	return ""
+}
+
+// validateContainerTaskEnvSources applies the direct Secret mount policy to
+// spec.env. The kubelet resolves secretKeyRef and configMapKeyRef with node
+// credentials, so passing them through would hand a container Task any Secret
+// in its namespace that the controller refuses to mount from spec.secretRef.
+// Only sources that read the Pod's own metadata are always allowed; any other
+// source, including ones added to the API later, needs the operator opt-in.
+func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task) error {
+	if !isUntrustedComputeTask(task) || b.directSecretMountsAllowed(task) {
+		return nil
+	}
+	for i, envVar := range task.Spec.Env {
+		source := envVar.ValueFrom
+		if source == nil {
+			continue
+		}
+		var field string
+		switch {
+		case source.SecretKeyRef != nil:
+			field = "valueFrom.secretKeyRef"
+		case source.ConfigMapKeyRef != nil:
+			field = "valueFrom.configMapKeyRef"
+		case source.FileKeyRef != nil:
+			field = "valueFrom.fileKeyRef"
+		case source.FieldRef != nil || source.ResourceFieldRef != nil:
+			continue
+		default:
+			field = "an unrecognized valueFrom source"
+		}
+		return fmt.Errorf(
+			"container Task spec.env[%d] (%s) uses %s, which container Tasks receive only when the operator enables direct Secret mounts (%s=true); valueFrom.fieldRef and valueFrom.resourceFieldRef are always allowed",
+			i, envVar.Name, field, directSecretMountsEnvVar,
+		)
+	}
+	return nil
 }
 
 func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {

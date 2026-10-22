@@ -135,6 +135,7 @@ entrypoint that you want, use that instead.
 | `mkdir /root/.cache: read-only file system` | Go build cache outside `/tmp` | `export GOCACHE=/tmp/gocache` |
 | Second command in a chain fails, first succeeded | Inline env prefix, not `export` | Use `export ... && ...` |
 | `EACCES` / `EROFS` from npm or pip | Cache outside `/tmp` | Set `npm_config_cache` or `PIP_CACHE_DIR` |
+| `spec.env[N] (NAME) uses valueFrom.secretKeyRef, which container Tasks receive only when the operator enables direct Secret mounts` | An `env` entry reads a Secret or ConfigMap | Drop the entry, or ask an operator to enable `ORKA_AGENT_DIRECT_SECRET_MOUNTS` |
 
 ## Other fields
 
@@ -159,6 +160,12 @@ you need from `/secrets/task/<key>`. [Security](../concepts/security.md) explain
 boundary.
 
 Environment-variable injection applies to an Agent's `secretRef`, not a Task's.
+
+`spec.env` follows the same policy. Without the opt-in, a container Task whose `env`
+entry uses `valueFrom.secretKeyRef`, `valueFrom.configMapKeyRef`, or `valueFrom.fileKeyRef`
+ends `Failed` before its Pod is created, and the message names the entry and the opt-in.
+`valueFrom.fieldRef` and `valueFrom.resourceFieldRef` read the Pod's own metadata and are
+always allowed.
 :::
 
 ## When an agent creates these

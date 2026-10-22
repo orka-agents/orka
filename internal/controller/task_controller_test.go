@@ -346,6 +346,46 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(ContainSubstring("failed to get agent"))
 		})
+
+		It("should fail a container task whose env reads a Secret without the direct mount opt-in", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-pending-env-secret-ref"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ns},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "busybox:latest",
+					Command: []string{"env"},
+					Env: []corev1.EnvVar{{
+						Name: "API_TOKEN",
+						ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "other-team-secret"},
+							Key:                  "token",
+						}},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.JobName).To(BeEmpty())
+			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Message).To(ContainSubstring("spec.env[0] (API_TOKEN) uses valueFrom.secretKeyRef"))
+			Expect(cond.Message).To(ContainSubstring(directSecretMountsEnvVar + "=true"))
+		})
 	})
 
 	Context("handleRunning", func() {
