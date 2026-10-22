@@ -10,9 +10,12 @@ selection.
 ## Dataset metadata
 
 `store_dataset` contains exactly one canonical, nonzero UUID, an origin (`new` or
-`adopted`), a bootstrap-completion flag and the installation the dataset is
-bound to, empty until the first controller epoch advance.
-`PRAGMA user_version = 2` identifies this metadata layout. Opening a database
+`adopted`), a bootstrap-completion flag and the dataset's installation binding:
+the installation that owns it (recorded by `BindDataset`, or by the first
+controller epoch advance until the installation binds it itself), the record
+UID and storage switch generation that bound it, the snapshot key fingerprint,
+whether the installation has detached it, and when the binding last changed.
+`PRAGMA user_version = 3` identifies this metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -20,11 +23,14 @@ Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
 process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
 adds the metadata table, the 168-to-169 transition adds operation receipts and
-the epoch advance columns, and the upgrade records an adopted identity. A store
-at an earlier schema version upgrades through numbered version steps under the
-same lock, backup and transaction: a version-1 store (the 159-object layout)
-gains the 168-to-169 objects and keeps its identity row, records and bootstrap
-state unchanged. Missing or malformed
+the epoch advance columns, the 169-to-170 transition adds the binding columns,
+and the upgrade records an adopted identity. A store at an earlier schema
+version upgrades through numbered version steps under the same lock, backup and
+transaction: a version-1 store (the 159-object layout) gains the 168-to-169 and
+169-to-170 objects, a version-2 store gains the 169-to-170 columns, and both
+keep their identity row, records and bootstrap state unchanged. An installation
+a version-2 store's epoch advance recorded stays its owner, at switch
+generation 0 with no record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -49,11 +55,13 @@ reopen permission to mint a key after completion. Existing key-rotation rules
 remain, including authentication of protected retained ciphertext and the
 existing expiry handling for connector consents.
 
-This is dataset-local history. There is no independent installation binding in
-this contribution: replacing the whole database also replaces its history. A
-UUID does not detect rollback or establish that a replacement empty database
-belongs to an installation. Backup/restore and that future binding require
-additional protocols.
+This is dataset-local history. The store-side binding records which
+installation owns the dataset, but Orka does not yet keep the matching
+Kubernetes installation record or check the two against each other at
+startup: replacing the whole database also replaces its history. A UUID does
+not detect rollback or establish that a replacement empty database belongs to
+an installation. Backup/restore and the installation record require additional
+protocols.
 
 ## Application persistence
 
@@ -265,9 +273,11 @@ without one until the storage client does.
 - **Method catalog.** Every provider method is a read, a write or an
   administrative method. Reads carry no envelope and need no stored receipt.
   Every write carries an envelope and leaves an operation receipt.
-  `AdvanceControllerEpoch`, `ResolveOperation`, `PruneOperationReceipts` and,
-  until it is replaced, `SyncControllerEpochMirror` are administrative: they
-  carry no envelope and are not checked against the current fence.
+  `AdvanceControllerEpoch`, `ResolveOperation`, `PruneOperationReceipts`, the
+  dataset binding writes (`BindDataset`, `DetachDatasetBinding`,
+  `UpdateBindingKeyFingerprint`, `CompleteDatasetBootstrap`) and, until it is
+  replaced, `SyncControllerEpochMirror` are administrative: they carry no
+  envelope and are not checked against the current fence.
   `GetMessages` counts as a write because it can mark messages read, until it
   is split into a plain read and a consuming write, and so does `IsLocked`,
   because SQLite clears an expired Task lock when it finds one. A contract
@@ -295,7 +305,9 @@ without one until the storage client does.
   3. the operation's age: `IssuedAt` more than `MaxOperationAge` (15 minutes)
      before the provider clock returns `ErrOperationExpired`, and more than
      `MaxClockSkew` (30 seconds) after it returns `ErrClockSkew`;
-  4. the dataset state: anything but `ready` returns `ErrNotReady`;
+  4. the dataset state: anything but `ready` returns `ErrNotReady`, and a
+     dataset its installation has detached returns `ErrDatasetDetached`,
+     which matches `ErrNotReady`;
   5. the fence, which must equal the dataset's stored controller epoch, or
      `ErrFenced`. The provider reads it under a lock that conflicts with an
      epoch advance;
@@ -398,9 +410,12 @@ without one until the storage client does.
   only moves forward. A lower epoch or another installation returns
   `ErrFenced`, a repeat of the stored epoch with the same holder and request
   digest succeeds, any other record at the same epoch returns `ErrConflict`,
-  and forward jumps are allowed. A refused advance commits nothing. A dataset
-  that holds an epoch but no installation binds the installation of its first
-  successful advance, including a repeat of the stored epoch. The advance
+  and forward jumps are allowed. A detached dataset returns
+  `ErrDatasetDetached`. A refused advance commits nothing. A dataset that
+  belongs to no installation records the installation of its first successful
+  advance, including a repeat of the stored epoch; that installation owns the
+  dataset at switch generation 0 until it binds the dataset itself (see
+  "Installation binding"). The advance
   waits for fenced writes in progress, and once it returns, no write with an
   older fence commits, however long it was delayed. Today the controller
   epoch manager syncs each mirror it is given with `SyncControllerEpochMirror`
@@ -493,6 +508,66 @@ without one until the storage client does.
   of one step, such as a completion and a failure, share one key so the first
   durable outcome wins, and an event derived again after a restart may be
   redacted differently.
+
+### Installation binding
+
+Each dataset records the one installation that owns it, written once, so a
+second installation can never claim a dataset another one bound and a dataset
+the installation has left refuses writes (#512 step 5). The types are in
+`pkg/storage/v1`: `DatasetBindingStore`, `DatasetBinding`, `BindMode`, the
+request types, `BindingConflictError` and `ErrDatasetDetached`. Both providers
+implement it, `Describe` reports the binding, and the shared suite checks it.
+Orka does not call it yet: the Kubernetes installation record that names each
+dataset, the create-once startup protocol and the checks on every restart come
+later.
+
+- **State.** A dataset is unbound, bound or detached. `BindDataset` records the
+  installation ID, the UID of the installation record that bound it, the
+  storage switch generation and the snapshot key fingerprint (an equality-only
+  identifier Orka derives from the key; never key material). The first
+  controller epoch advance on an unbound dataset records its installation too,
+  without a record, at switch generation 0, so a dataset an installation
+  already advanced stays that installation's and is bound by it later.
+- **Create once.** Moving a dataset from unbound to bound is atomic and
+  linearizable with every other call on it. A repeat with the same
+  installation, record UID, generation and key fingerprint returns the stored
+  binding, whatever the mode. A dataset that belongs to another installation
+  returns a `BindingConflictError`, which matches `ErrConflict` and carries the
+  stored binding, so the caller can tell another installation, another record
+  and a detached dataset apart without another read.
+- **Modes.** `fresh` needs a new dataset (origin `new`) holding no record of
+  any kind, including control records such as a controller epoch, whose
+  bootstrap has not completed; a dataset an advance has reached is never
+  fresh. `embedded` is accepted only by an embedded
+  provider that opened the dataset under its process lock, in any bootstrap
+  state; others return `ErrValidation`. `migrated` needs an imported dataset
+  whose import finished. Those three need the dataset unclaimed: unbound, or
+  recorded only by the same installation's advance. `adopt` also accepts a
+  dataset the same installation detached at a lower generation, and `rebind`
+  moves a dataset the installation already owns (bound, detached or recorded
+  by its advance) to a higher generation. The generation never moves backward for a dataset.
+- **Detach.** `DetachDatasetBinding` records that the installation left the
+  dataset at a higher generation, keeping its installation and key
+  fingerprint. A detached dataset refuses every write that carries an
+  envelope, and the controller epoch advance, with `ErrDatasetDetached`.
+  Reads, replays of committed operations, `ResolveOperation` and receipt
+  pruning still work, because none of them can make a new change, and only
+  `adopt` or `rebind` binds it again.
+- **Key fingerprint.** `UpdateBindingKeyFingerprint` is a compare-and-swap on
+  a bound dataset's fingerprint, for a key rotation Orka has already proved by
+  authenticating the dataset's sealed records under the new key.
+- **Bootstrap.** `CompleteDatasetBootstrap` records that the dataset finished
+  its first start. It never reverts, so a completed dataset is never bound
+  `fresh` and never receives a newly minted key.
+- **Authority.** The binding methods are administrative: no envelope and no
+  fence, because they establish identity before any fence exists. Binding a
+  dataset records its installation as the advance does, so the advance then
+  accepts only that installation and `SyncControllerEpochMirror` is refused.
+- **SQLite.** The binding lives in the `store_dataset` row (schema version 3).
+  Every binding method runs in one transaction that reserves the writer, and a
+  successful call checkpoints the WAL before it returns, as dataset identity
+  does. A row whose binding columns contradict one another is refused when the
+  store opens, never repaired.
 
 ### Rules reserved for later steps
 

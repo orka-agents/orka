@@ -62,6 +62,14 @@
 // envelope. Orka does not attach envelopes yet, so until it does providers
 // must also accept writes without one.
 //
+// # Installation binding
+//
+// Each dataset records the one installation that owns it, written once
+// ([DatasetBindingStore]): a second installation can never claim a dataset
+// another one bound, and a dataset the installation has left refuses writes.
+// The controller epoch advance accepts only the bound installation. Both
+// providers implement it; Orka does not call it yet.
+//
 // # Records and wire format
 //
 // The records in this package carry JSON tags for Orka's API, not a storage
@@ -119,6 +127,7 @@ type StateProvider interface {
 	ControllerEpochMirror
 	ControllerEpochAdvancer
 	OperationReceiptStore
+	DatasetBindingStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -147,5 +156,6 @@ type ArtifactProvider interface {
 	ProviderDescriber
 	ControllerEpochAdvancer
 	OperationReceiptStore
+	DatasetBindingStore
 	ArtifactStore
 }

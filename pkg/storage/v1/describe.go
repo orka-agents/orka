@@ -145,6 +145,10 @@ type ProviderInfo struct {
 	// the clock difference between itself and the provider. It is zero when
 	// the provider does not report it yet.
 	ObservedAt time.Time
+	// Binding is the installation the dataset is bound to, as
+	// [DatasetBindingStore.GetDatasetBinding] returns it, or nil when the
+	// dataset is unbound.
+	Binding *DatasetBinding
 }
 
 // ProviderDescriber reports what a provider serves and guarantees.

@@ -13,9 +13,9 @@ const (
 	// attaches write envelopes, it carries a [WriteEnvelope], commits only
 	// under the current fence, and leaves an operation receipt with its change.
 	MethodWrite
-	// MethodAdmin marks an administrative write that establishes the fence or
-	// settles operations. It carries no envelope and is not checked against the
-	// current fence.
+	// MethodAdmin marks an administrative write that establishes the fence,
+	// settles operations or binds the dataset to an installation. It carries
+	// no envelope and is not checked against the current fence.
 	MethodAdmin
 )
 
@@ -63,9 +63,10 @@ func LookupMethod(name string) (MethodInfo, bool) {
 }
 
 // Methods returns a copy of the method catalog, keyed by method name. It lists
-// every method of [StateProvider], [ArtifactProvider], [OperationReceiptStore]
-// and [ControllerEpochAdvancer], so a storage client, a transport or the
-// shared suite can tell reads from writes without guessing from names.
+// every method of [StateProvider], [ArtifactProvider], [OperationReceiptStore],
+// [ControllerEpochAdvancer] and [DatasetBindingStore], so a storage client, a
+// transport or the shared suite can tell reads from writes without guessing
+// from names.
 func Methods() map[string]MethodInfo {
 	return maps.Clone(methodCatalog)
 }
@@ -89,6 +90,7 @@ var methodCatalog = map[string]MethodInfo{
 	"AppendMessages":                            stateWrite(""),
 	"AppendMessagesWithLock":                    stateWrite(""),
 	"ArchiveMemoryProposal":                     stateWrite(""),
+	"BindDataset":                               {Kind: MethodAdmin},
 	"BindPatchProposalPublicationEvidence":      stateWrite(""),
 	"BindSessionCleanupIdentity":                stateWrite(""),
 	"CancelWorkActions":                         stateWrite(""),
@@ -97,6 +99,7 @@ var methodCatalog = map[string]MethodInfo{
 	"ClaimNextGatewayEvent":                     stateWrite(""),
 	"ClaimOutboxProjectionRecords":              stateWrite(""),
 	"CommitSessionTurn":                         stateWrite(""),
+	"CompleteDatasetBootstrap":                  {Kind: MethodAdmin},
 	"CompleteOutboxProjectionRecord":            stateWrite("$1.ID, $1.OperationID, $1.OperationDigest"),
 	"CompleteScanRunCancellation":               stateWrite(""),
 	"CompleteScanTaskIngestion":                 stateWrite(""),
@@ -133,6 +136,7 @@ var methodCatalog = map[string]MethodInfo{
 	"DeleteTaskJobRevocations":                  stateWrite(""),
 	"DeleteTaskMessages":                        stateWrite(""),
 	"Describe":                                  {Kind: MethodRead},
+	"DetachDatasetBinding":                      {Kind: MethodAdmin},
 	"EnqueueGatewayMessage":                     stateWrite("$1.Namespace, $1.EventID, $1.RequestID"),
 	"EnqueueOutboxProjectionRecord":             stateWrite("$1.ID, $1.PayloadDigest"),
 	"EnsureSessionSoulWithLock":                 stateWrite(""),
@@ -143,6 +147,7 @@ var methodCatalog = map[string]MethodInfo{
 	"GetArtifact":                               {Kind: MethodRead, Contract: ArtifactsContract},
 	"GetCommandEvent":                           stateRead(),
 	"GetControllerEpochMirror":                  {Kind: MethodRead},
+	"GetDatasetBinding":                         {Kind: MethodRead},
 	"GetFinding":                                stateRead(),
 	"GetFindingCounts":                          stateRead(),
 	"GetGatewayDelivery":                        stateRead(),
@@ -264,6 +269,7 @@ var methodCatalog = map[string]MethodInfo{
 	"SetMemoryDisabled":                   stateWrite(""),
 	"SyncControllerEpochMirror":           {Kind: MethodAdmin, Contract: StateContract},
 	"UpdateActionRecord":                  stateWrite(""),
+	"UpdateBindingKeyFingerprint":         {Kind: MethodAdmin},
 	"UpdateCommandEvent":                  stateWrite(""),
 	"UpdateFindingState":                  stateWrite(""),
 	"UpdateGitHubMutationRecord":          stateWrite(""),

@@ -135,10 +135,10 @@ func TestDatasetFreshCreationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
-	// Version 1 is an earlier release's marker, which only the exact version-1
-	// layout may carry; version 2 is this release's and version 3 is newer.
+	// Versions 1 and 2 are earlier releases' markers, which only their exact
+	// layouts may carry; SchemaVersion is this release's and the next is newer.
 	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
-		for _, marker := range []int{1, SchemaVersion, SchemaVersion + 1} {
+		for marker := 1; marker <= SchemaVersion+1; marker++ {
 			t.Run(fmt.Sprintf("%s/version-%d", revision, marker), func(t *testing.T) {
 				path, db := historicalSchemaDB(t, revision)
 				seedMigrationRecords(t, db, path)

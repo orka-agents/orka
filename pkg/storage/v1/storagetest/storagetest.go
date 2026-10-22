@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
+	"github.com/stretchr/testify/require"
 )
 
 // StateFactory returns a state.v1 provider over a fresh, empty dataset: a new
@@ -60,6 +61,11 @@ var stateFamilies = []stateFamily{
 	{"describe", runDescribe},
 	{"operation-receipts", runOperationReceipts},
 	{"controller-ownership", runControllerOwnership},
+	{"dataset-binding", func(t *testing.T, newProvider StateFactory) {
+		runDatasetBinding(t, newProvider, func(t *testing.T, provider storagev1.StateProvider) {
+			require.NoError(t, provider.SaveResult(t.Context(), "tenant-a", "task-1", []byte("result")))
+		})
+	}},
 	{"lost-responses", runLostResponses},
 	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
 		runWriteCatalog(t, newProvider, stateWriteCases)
@@ -84,5 +90,10 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory) {
 	})
 	t.Run("write-envelopes", func(t *testing.T) {
 		runWriteCatalog(t, newProvider, artifactWriteCases)
+	})
+	t.Run("dataset-binding", func(t *testing.T) {
+		runDatasetBinding(t, newProvider, func(t *testing.T, provider storagev1.ArtifactProvider) {
+			saveArtifact(t, provider, artifactOwner("tenant-a", "task-1"), "report.txt", "text/plain", []byte("report"))
+		})
 	})
 }

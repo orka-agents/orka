@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -250,18 +251,27 @@ func TestDatasetUnbootstrappedDataRequiresExistingKey(t *testing.T) {
 
 func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 	for name, statement := range map[string]string{
-		"newer":               `PRAGMA user_version=3`,
-		"older":               `PRAGMA user_version=1`,
-		"unknown":             `PRAGMA user_version=2147483647`,
-		"negative":            `PRAGMA user_version=-1`,
-		"version reset":       `PRAGMA user_version=0`,
-		"missing table":       `DROP TABLE store_dataset`,
-		"missing identity":    `DELETE FROM store_dataset`,
-		"malformed identity":  `UPDATE store_dataset SET dataset_id='invalid'`,
-		"nil identity":        `UPDATE store_dataset SET dataset_id='00000000-0000-0000-0000-000000000000'`,
-		"bad origin":          `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET origin='unknown'`,
-		"bad bootstrap state": `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET bootstrap_complete=2`,
-		"extra identity":      `PRAGMA ignore_check_constraints=ON; INSERT INTO store_dataset(singleton, dataset_id, origin, bootstrap_complete) VALUES(2,'22222222-2222-4222-8222-222222222222','new',0)`,
+		"newer":                         fmt.Sprintf(`PRAGMA user_version=%d`, SchemaVersion+1),
+		"version 1":                     `PRAGMA user_version=1`,
+		"version 2":                     `PRAGMA user_version=2`,
+		"unknown":                       `PRAGMA user_version=2147483647`,
+		"negative":                      `PRAGMA user_version=-1`,
+		"version reset":                 `PRAGMA user_version=0`,
+		"missing table":                 `DROP TABLE store_dataset`,
+		"missing identity":              `DELETE FROM store_dataset`,
+		"malformed identity":            `UPDATE store_dataset SET dataset_id='invalid'`,
+		"nil identity":                  `UPDATE store_dataset SET dataset_id='00000000-0000-0000-0000-000000000000'`,
+		"bad origin":                    `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET origin='unknown'`,
+		"bad bootstrap state":           `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET bootstrap_complete=2`,
+		"extra identity":                `PRAGMA ignore_check_constraints=ON; INSERT INTO store_dataset(singleton, dataset_id, origin, bootstrap_complete) VALUES(2,'22222222-2222-4222-8222-222222222222','new',0)`,
+		"bad binding state":             `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET installation_id='installation', record_uid='record', switch_generation=1, binding_state='claimed'`,
+		"bound without record":          `UPDATE store_dataset SET installation_id='installation', switch_generation=1, binding_state='bound'`,
+		"bound at generation 0":         `UPDATE store_dataset SET installation_id='installation', record_uid='record', binding_state='bound'`,
+		"detached without installation": `UPDATE store_dataset SET record_uid='record', switch_generation=1, binding_state='detached'`,
+		"unbound with a record":         `UPDATE store_dataset SET record_uid='record'`,
+		"unbound with a bind time":      `UPDATE store_dataset SET bound_at_ns=1`,
+		"negative bind time":            `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET installation_id='installation', bound_at_ns=-1`,
+		"malformed installation":        `UPDATE store_dataset SET installation_id=' installation'`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := setupDiskStore(t)

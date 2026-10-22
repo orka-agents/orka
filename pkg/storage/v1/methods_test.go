@@ -20,6 +20,7 @@ var catalogInterfaces = map[string]reflect.Type{
 	"ArtifactProvider":        reflect.TypeFor[storagev1.ArtifactProvider](),
 	"OperationReceiptStore":   reflect.TypeFor[storagev1.OperationReceiptStore](),
 	"ControllerEpochAdvancer": reflect.TypeFor[storagev1.ControllerEpochAdvancer](),
+	"DatasetBindingStore":     reflect.TypeFor[storagev1.DatasetBindingStore](),
 }
 
 // readPrefixes are the name prefixes of methods that change nothing.
@@ -86,15 +87,20 @@ func TestMethodCatalogKinds(t *testing.T) {
 		}
 	}
 	for name, kind := range map[string]storagev1.MethodKind{
-		"AdvanceControllerEpoch":    storagev1.MethodAdmin,
-		"SyncControllerEpochMirror": storagev1.MethodAdmin,
-		"ResolveOperation":          storagev1.MethodAdmin,
-		"PruneOperationReceipts":    storagev1.MethodAdmin,
-		"GetControllerEpochMirror":  storagev1.MethodRead,
-		"GetMessages":               storagev1.MethodWrite,
-		"IsLocked":                  storagev1.MethodWrite,
-		"Describe":                  storagev1.MethodRead,
-		"SaveArtifact":              storagev1.MethodWrite,
+		"AdvanceControllerEpoch":      storagev1.MethodAdmin,
+		"SyncControllerEpochMirror":   storagev1.MethodAdmin,
+		"ResolveOperation":            storagev1.MethodAdmin,
+		"PruneOperationReceipts":      storagev1.MethodAdmin,
+		"GetControllerEpochMirror":    storagev1.MethodRead,
+		"BindDataset":                 storagev1.MethodAdmin,
+		"DetachDatasetBinding":        storagev1.MethodAdmin,
+		"UpdateBindingKeyFingerprint": storagev1.MethodAdmin,
+		"CompleteDatasetBootstrap":    storagev1.MethodAdmin,
+		"GetDatasetBinding":           storagev1.MethodRead,
+		"GetMessages":                 storagev1.MethodWrite,
+		"IsLocked":                    storagev1.MethodWrite,
+		"Describe":                    storagev1.MethodRead,
+		"SaveArtifact":                storagev1.MethodWrite,
 	} {
 		info, ok := storagev1.LookupMethod(name)
 		require.True(t, ok, name)

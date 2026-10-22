@@ -279,6 +279,9 @@ func (s *Store) checkWrite(
 	if state := s.datasetState(); state != storagev1.DatasetReady {
 		return nil, false, store.NotReadyErrorf("SQLite dataset is %s", state)
 	}
+	if err := requireNotDetached(ctx, tx); err != nil {
+		return nil, false, err
+	}
 	if err := requireControllerEpoch(ctx, tx, envelope.Fence); err != nil {
 		return nil, false, err
 	}

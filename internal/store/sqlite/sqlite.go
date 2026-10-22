@@ -978,10 +978,13 @@ func currentSchemaStatements() []string {
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db               *sql.DB
-	securityTx       *sql.Tx
-	dbPath           string
-	processLock      io.Closer
+	db          *sql.DB
+	securityTx  *sql.Tx
+	dbPath      string
+	processLock io.Closer
+	// ownsProcessLock is set for a store OpenLockedStore opened under the
+	// process lock, which an embedded dataset binding requires.
+	ownsProcessLock  bool
 	executionEventMu sync.Mutex
 	// pendingWALTruncate remembers a connector custody deletion whose log
 	// truncation found the log busy; the next custody operation finishes it.
@@ -1035,7 +1038,7 @@ func OpenLockedStore(path string) (*Store, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	store := &Store{db: db, dbPath: path, processLock: lock, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
+	store := &Store{db: db, dbPath: path, processLock: lock, ownsProcessLock: true, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	store.pendingWALTruncate.Store(true)
 	return store, nil
 }

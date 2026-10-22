@@ -65,6 +65,7 @@ type writeCaseProvider interface {
 	storagev1.ProviderDescriber
 	storagev1.ControllerEpochAdvancer
 	storagev1.OperationReceiptStore
+	storagev1.DatasetBindingStore
 }
 
 // writeCallTimeout bounds one call of a write case.
@@ -165,6 +166,7 @@ func runWriteCatalog[P writeCaseProvider](t *testing.T, newProvider func(t *test
 			t.Run("refusals", func(t *testing.T) { runWriteRefusals(t, newProvider(t), c) })
 			t.Run("receipts", func(t *testing.T) { runWriteReceipts(t, newProvider(t), c) })
 			t.Run("aborted", func(t *testing.T) { runWriteAborted(t, newProvider(t), c) })
+			t.Run("detached", func(t *testing.T) { runWriteDetached(t, newProvider(t), c) })
 		})
 	}
 }
@@ -288,6 +290,44 @@ func runWriteAborted[P writeCaseProvider](t *testing.T, provider P, c writeCase[
 	again, err := provider.ResolveOperation(ctx, request)
 	require.NoError(t, err)
 	require.Equal(t, resolved, again)
+}
+
+// runWriteDetached checks that a dataset its installation has detached
+// refuses the write and changes nothing, that the same operation commits once
+// the installation binds the dataset again, and that a replay of a committed
+// operation is still served after the dataset is detached again.
+func runWriteDetached[P writeCaseProvider](t *testing.T, provider P, c writeCase[P]) {
+	dataset, baseline := prepareWriteCase(t, provider, c)
+	ctx := t.Context()
+	detach := func(generation int64) {
+		t.Helper()
+		_, err := provider.DetachDatasetBinding(ctx, storagev1.DetachDatasetRequest{
+			DatasetID: dataset, InstallationID: suiteInstance, RecordUID: "suite-record", SwitchGeneration: generation,
+		})
+		require.NoError(t, err)
+	}
+	detach(1)
+	envelope := envelopeFor(t, dataset, c, suiteFence)
+	refused := callWrite(ctx, t, provider, c, envelope, suiteFence)
+	require.ErrorIs(t, refused.err, storagev1.ErrDatasetDetached)
+	require.ErrorIs(t, refused.err, storagev1.ErrNotReady)
+	require.Equal(t, baseline, c.observe(t, provider), "a write to a detached dataset changed state")
+
+	_, err := provider.BindDataset(ctx, storagev1.BindDatasetRequest{
+		DatasetID: dataset, InstallationID: suiteInstance, RecordUID: "suite-record", SwitchGeneration: 2,
+		Mode: storagev1.BindRebind,
+	})
+	require.NoError(t, err)
+	committed := callWrite(ctx, t, provider, c, envelope, suiteFence)
+	require.NoError(t, committed.err, "the refused operation commits once the dataset is bound again")
+	if c.afterCommit != nil {
+		c.afterCommit(t, provider)
+	}
+	after := c.observe(t, provider)
+
+	detach(3)
+	requireSameOutcome(t, committed, callWrite(ctx, t, provider, c, envelope, suiteFence))
+	require.Equal(t, after, c.observe(t, provider), "a replay on a detached dataset changed state")
 }
 
 // runConcurrentReplays runs callers copies of one write with the same
