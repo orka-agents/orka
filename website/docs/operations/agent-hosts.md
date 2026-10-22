@@ -211,8 +211,8 @@ controller:
 ```
 
 Each person then runs `orka login --server https://orka.<tailnet>.ts.net`, approves the code it
-shows on github.com, and gets `Host ready: orka-gh-<login>`. `orka login --no-host` links GitHub
-without a host.
+shows on github.com, and gets `Host ready: orka-gh-<login>`. A host that idled out is woken; one an
+operator suspended is reported and left suspended. `orka login --no-host` links GitHub without a host.
 
 - Orka checks that the token was issued to its own GitHub App, and that the person is an active
   member of an allowed org or team. Org membership never satisfies a team allow-list. Install

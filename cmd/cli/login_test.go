@@ -554,3 +554,50 @@ func TestATruncatedAnswerSavesNoSession(t *testing.T) {
 		t.Fatalf("config token = %q, want the held session", saved.Token)
 	}
 }
+
+// A returning person's host may be suspended: one that idled out is woken,
+// and one an operator suspended is reported, not overridden.
+func TestLoginWakesAnIdleHostAndReportsAnOperatorSuspension(t *testing.T) {
+	previousHost := agentHostReadyPollInterval
+	agentHostReadyPollInterval = time.Millisecond
+	t.Cleanup(func() { agentHostReadyPollInterval = previousHost })
+	for name, operator := range map[string]bool{"idle": false, "operator": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			fakeGitHubDeviceFlow(t)
+			var wakes atomic.Int32
+			orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/config":
+					json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": true}}) //nolint:errcheck
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
+					w.WriteHeader(http.StatusCreated)
+					json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "agentHost": true}) //nolint:errcheck
+				case r.Method == http.MethodPost && r.URL.Path == agentHostAPIPath+"/wake":
+					wakes.Add(1)
+					json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "suspended": true}) //nolint:errcheck
+				case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
+					if operator || wakes.Load() == 0 {
+						json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "phase": "Suspended", "suspended": true, "operatorSuspended": operator}) //nolint:errcheck
+						return
+					}
+					json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer orka.Close()
+			out, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--timeout", "10s")
+			if operator {
+				if err == nil || !strings.Contains(err.Error(), "an operator suspended") || wakes.Load() != 0 {
+					t.Fatalf("login with an operator-suspended host: %v, %d wakes", err, wakes.Load())
+				}
+				return
+			}
+			if err != nil || !strings.Contains(out, "Host ready: orka-gh-alice") || wakes.Load() != 1 {
+				t.Fatalf("login with an idle host: %v %q, %d wakes", err, out, wakes.Load())
+			}
+		})
+	}
+}

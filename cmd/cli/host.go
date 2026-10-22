@@ -192,6 +192,7 @@ func printAgentHost(out io.Writer, host agentHostView) {
 func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, stale ...string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "Waiting for your agent host...") //nolint:errcheck
+	woken := false
 	for {
 		host, err := getOwnAgentHost(ctx, c)
 		switch {
@@ -200,6 +201,16 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		case err == nil && host.Ready:
 			fmt.Fprintf(out, "Host ready: %s. Pick it in the Copilot app's Environments.\n", host.Environment) //nolint:errcheck
 			return nil
+		// An operator's suspension is theirs to lift; a host that idled out
+		// is woken once, as 'orka host wake' would.
+		case err == nil && host.OperatorSuspended:
+			return fmt.Errorf("an operator suspended your agent host %s; ask them to resume it", host.Name)
+		case err == nil && host.Suspended && !woken:
+			if _, err := c.DoJSON(ctx, http.MethodPost, agentHostAPIPath+"/wake", nil, nil); err != nil {
+				return agentHostError(err)
+			}
+			woken = true
+			fmt.Fprintln(out, "Your agent host idled out; waking it.") //nolint:errcheck
 		// A host kept from an earlier link still says its Connection was
 		// unavailable until the controller sees the new link.
 		case err == nil && host.Phase == agentHostPhaseFailed && host.Reason != agentHostReasonConnectionUnavailable &&
