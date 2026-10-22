@@ -143,8 +143,10 @@ type Config struct {
 	// health-checked for readiness. Zero means DefaultReadinessInterval.
 	ReadinessInterval time.Duration
 	// ShutdownTimeout bounds how long a graceful stop waits for calls in
-	// progress before it closes the remaining connections. Zero means
-	// DefaultShutdownTimeout.
+	// progress. When it passes, Serve closes every remaining connection and
+	// returns without waiting for handlers still running, such as one
+	// settling a commit with SettleContext; set it above SettleTimeout to
+	// let such commits settle. Zero means DefaultShutdownTimeout.
 	ShutdownTimeout time.Duration
 	// Logger receives the adapter's logs; it never receives request or
 	// response content or credential values. Nil means slog.Default().
@@ -271,11 +273,16 @@ func Serve(ctx context.Context, config Config) error {
 	defer cancel()
 	errs := make(chan error, 2)
 	var workers sync.WaitGroup
-	workers.Go(func() {
+	// grpcServer.Serve returns only once a stop completes, which a handler
+	// still settling can delay past the grace period, so it is not one of the
+	// workers Serve always waits for.
+	grpcServed := make(chan struct{})
+	go func() {
+		defer close(grpcServed)
 		if err := grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			errs <- fmt.Errorf("storage server: %w", err)
 		}
-	})
+	}()
 	workers.Go(func() {
 		if err := probe.Serve(probeListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- fmt.Errorf("probe server: %w", err)
@@ -293,12 +300,15 @@ func Serve(ctx context.Context, config Config) error {
 	}
 	readiness.drain()
 	cancel()
-	stopGracefully(grpcServer, config.ShutdownTimeout)
+	forced := stopGracefully(grpcServer, config.ShutdownTimeout)
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancelShutdown()
 	_ = probe.Shutdown(shutdownCtx)
 	workers.Wait()
-	logger.InfoContext(ctx, "storage adapter stopped")
+	if !forced {
+		<-grpcServed
+	}
+	logger.InfoContext(ctx, "storage adapter stopped", "forced", forced)
 	return serveErr
 }
 
@@ -334,8 +344,12 @@ func closeListeners(listeners ...net.Listener) {
 }
 
 // stopGracefully lets calls in progress finish for up to timeout, then
-// closes every connection.
-func stopGracefully(server *grpc.Server, timeout time.Duration) {
+// closes every connection and returns. It does not wait for handlers that
+// outlive their connections: GracefulStop waits for every handler while
+// holding the server's lock, so even Stop can block behind it, and both run
+// on in the background until the remaining handlers return.
+// It reports whether the timeout forced the stop.
+func stopGracefully(server *grpc.Server, timeout time.Duration) bool {
 	stopped := make(chan struct{})
 	go func() {
 		server.GracefulStop()
@@ -345,9 +359,10 @@ func stopGracefully(server *grpc.Server, timeout time.Duration) {
 	defer timer.Stop()
 	select {
 	case <-stopped:
+		return false
 	case <-timer.C:
-		server.Stop()
-		<-stopped
+		go server.Stop()
+		return true
 	}
 }
 

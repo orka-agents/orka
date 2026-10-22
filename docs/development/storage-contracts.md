@@ -433,10 +433,13 @@ DNS names it allows, or both, in which case a call must pass both. It applies
 per-class concurrency and duration limits, serves `/healthz`, `/readyz` (the
 providers describe a dataset and pass their health checks) and `/metrics` on a
 separate plain HTTP port that carries no stored data, and on shutdown reports
-not ready and lets calls in progress finish. `adapterkit.SettleContext` gives a
-provider a context, bounded by a settle timeout (10 seconds by default), to
-finish a commit it has already sent after the caller's context ends, so the
-outcome the client reports as unknown is settled for its retry or resolution.
+not ready and lets calls in progress finish for up to a grace period (30
+seconds by default), after which it closes the remaining connections and
+returns. `adapterkit.SettleContext` gives a provider a context, bounded by a
+settle timeout (10 seconds by default), to finish a commit it has already sent
+after the caller's context ends, so the outcome the client reports as unknown
+is settled for its retry or resolution; the grace period should exceed the
+settle timeout.
 The server library does not yet recompute a write's request digest; that check
 needs the canonical request digest the operation receipts define.
 

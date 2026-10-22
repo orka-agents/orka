@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -237,6 +238,16 @@ func (s *Server) describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 				info.DatasetID, artifacts.DatasetID)
 		}
 		limits = artifacts.Limits
+		// Describe the server as a whole: both contract parts, and the
+		// artifact limit the server enforces.
+		info.Limits.MaxArtifactBytes = artifacts.Limits.MaxArtifactBytes
+		contracts := slices.Clone(info.Contracts)
+		for _, contract := range artifacts.Contracts {
+			if !slices.Contains(contracts, contract) {
+				contracts = append(contracts, contract)
+			}
+		}
+		info.Contracts = contracts
 	}
 	s.publish(ctx, seq, info.DatasetID, max(limits.MaxArtifactBytes, storagev1.MaxArtifactBytes), "")
 	return info, nil
@@ -446,7 +457,9 @@ func unsupportedFieldStatus() error {
 // its write envelope. The dataset check runs within the admission and the
 // cap, so a slow first description of the providers holds a slot and ends at
 // the cap rather than queueing calls without limit. release frees the call's
-// admission when it ends; a refused call has already released it.
+// admission when it ends. admit owns the admission until it returns
+// successfully, so a refused call, or a provider that panics while it is
+// described, has already released it.
 func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, release func(), err error) {
 	header, _ := metadata.FromIncomingContext(ctx)
 	if err := checkContract(header); err != nil {
@@ -468,15 +481,23 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 		admitted := release
 		release = func() { cancel(); admitted() }
 	}
+	// free is released on a refusal and while a panic unwinds. It is a copy
+	// because returning a refusal clears the named release result before
+	// deferred calls run.
+	free, accepted := release, false
+	defer func() {
+		if !accepted {
+			free()
+		}
+	}()
 	if err := s.checkDataset(ctx, m, header); err != nil {
-		release()
 		return nil, nil, err
 	}
 	if ctx, err = withEnvelope(ctx, header); err != nil {
-		release()
 		return nil, nil, err
 	}
-	return ctx, release, nil
+	accepted = true
+	return ctx, free, nil
 }
 
 // checkContract refuses a call without the orka.storage.v1 contract header
