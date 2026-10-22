@@ -221,12 +221,12 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	if oauthErr != nil {
 		oauth = created
 	}
-	// Tokens obtained for someone other than the invited login, or from a
-	// person who may not sign in, are revoked with the app's credentials.
-	// The outcome says whether GitHub confirmed it.
-	refuse := func(message string, revoke ...string) {
-		attempted, failed := false, false
-		for _, token := range revoke {
+	// Tokens obtained for someone other than the invited login, from a
+	// person who may not sign in, or left unused, are revoked with the app's
+	// credentials. The outcome says whether GitHub confirmed it.
+	revoke := func(tokens ...string) (note string, failed bool) {
+		attempted := false
+		for _, token := range tokens {
 			if token == "" {
 				continue
 			}
@@ -238,11 +238,15 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		}
 		switch {
 		case failed:
-			message += "; revoking the approved GitHub token failed, so it may still be active"
+			return "; revoking the approved GitHub token failed, so it may still be active", true
 		case attempted:
-			message += "; the approved GitHub token was revoked"
+			return "; the approved GitHub token was revoked", false
 		}
-		h.invites.finish(id, InviteRefused, message, "")
+		return "", false
+	}
+	refuse := func(message string, tokens ...string) {
+		note, _ := revoke(tokens...)
+		h.invites.finish(id, InviteRefused, message+note, "")
 	}
 	if oauthErr != nil {
 		refuse("the GitHub App is not configured", tokens.AccessToken)
@@ -254,6 +258,9 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	current, err := h.signInProvider(ctx)
 	if err != nil || current.UID != provider.UID || current.Generation != provider.Generation ||
 		connectors.ProviderAuthorityDigest(current) != connectors.ProviderAuthorityDigest(provider) {
+		// The app may have changed with the provider: the token is revoked
+		// with the credentials of the app that issued it.
+		oauth = created
 		refuse("the GitHub provider changed while the invite was pending", tokens.AccessToken)
 		return
 	}
@@ -309,7 +316,15 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		h.invites.finish(id, InviteRefused, "the GitHub account could not be linked; invite again", "")
 		return
 	}
-	h.invites.finish(id, InviteAccepted, inviteAcceptedMessage(provider, cfg.CreateHosts), connection.Name)
+	message := inviteAcceptedMessage(provider, cfg.CreateHosts)
+	// A link that already held the person's account was kept, and the
+	// approved token went unused.
+	if !held {
+		if note, failed := revoke(tokens.AccessToken); failed {
+			message += "; the approved GitHub token was not needed" + note
+		}
+	}
+	h.invites.finish(id, InviteAccepted, message, connection.Name)
 }
 
 func inviteAcceptedMessage(provider *corev1alpha1.ConnectorProvider, createHosts bool) string {

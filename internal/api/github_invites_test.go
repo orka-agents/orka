@@ -293,6 +293,66 @@ func TestInviteReportsARevocationThatFailed(t *testing.T) {
 	}
 }
 
+// A provider moved to another GitHub app while the code was pending: the
+// approved token is revoked with the app that issued it, not with the new
+// app's secret.
+func TestInviteRevokesWithTheIssuingAppAfterAnAppChange(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
+	gh.onApprove = func() {
+		secret := &corev1.Secret{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github-oauth"}, secret); err != nil {
+			t.Error(err)
+			return
+		}
+		secret.Data["clientSecret"] = []byte("another-app-secret")
+		if err := h.client.Update(context.Background(), secret); err != nil {
+			t.Error(err)
+			return
+		}
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+			t.Error(err)
+			return
+		}
+		provider.Spec.OAuth.ClientID = "another-app"
+		provider.Generation++
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Error(err)
+		}
+	}
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || !strings.Contains(outcome.Message, "was revoked") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+		t.Fatalf("revoked = %v, want the approved token revoked by the issuing app", revoked)
+	}
+}
+
+// Inviting someone whose link already works keeps it and revokes the
+// approved token; a revocation GitHub refused is reported on the outcome.
+func TestInviteForAWorkingLinkRevokesTheUnusedToken(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
+	_, first := h.invite("alice")
+	if outcome := h.inviteOutcome(first.ID); outcome.State != InviteAccepted {
+		t.Fatalf("first invite = %+v", outcome)
+	}
+	_, second := h.invite("alice")
+	if outcome := h.inviteOutcome(second.ID); outcome.State != InviteAccepted || strings.Contains(outcome.Message, "may still be active") {
+		t.Fatalf("second invite = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice_refreshed" {
+		t.Fatalf("revoked = %v, want the unused token", revoked)
+	}
+	gh.revoked.mu.Lock()
+	gh.revoked.fail = true
+	gh.revoked.mu.Unlock()
+	_, third := h.invite("alice")
+	if outcome := h.inviteOutcome(third.ID); outcome.State != InviteAccepted || !strings.Contains(outcome.Message, "may still be active") {
+		t.Fatalf("invite whose unused token GitHub would not revoke = %+v", outcome)
+	}
+}
+
 // A full invite table refuses before asking GitHub for a code.
 func TestInvitesReserveCapacityBeforeStartingTheDeviceFlow(t *testing.T) {
 	h, gh := newInviteHarness(t, nil)
