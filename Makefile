@@ -6,6 +6,7 @@ VERSION ?= v0.0.0-dev
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
 GENERAL_WORKER_IMG ?= ghcr.io/orka-agents/orka/general-worker:latest
+BROWSER_WORKER_IMG ?= ghcr.io/orka-agents/orka/browser-worker:latest
 ACP_CODEX_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-codex-runtime:latest
 ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
@@ -357,6 +358,10 @@ docker-build-ai-worker: ## Build docker image for the AI worker.
 docker-build-general-worker: ## Build docker image for the general worker.
 	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
 
+.PHONY: docker-build-browser-worker
+docker-build-browser-worker: ## Build the browser worker image (Playwright Chromium behind the general worker).
+	$(CONTAINER_TOOL) build -t ${BROWSER_WORKER_IMG} -f workers/browser/Dockerfile .
+
 # Recipes for the docker-build-acp-<provider>-runtime targets are generated
 # from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
 # `make help` entries.
@@ -392,6 +397,10 @@ docker-push-ai-worker: ## Push docker image for the AI worker.
 .PHONY: docker-push-general-worker
 docker-push-general-worker: ## Push docker image for the general worker.
 	$(CONTAINER_TOOL) push ${GENERAL_WORKER_IMG}
+
+.PHONY: docker-push-browser-worker
+docker-push-browser-worker: ## Push the browser worker image.
+	$(CONTAINER_TOOL) push ${BROWSER_WORKER_IMG}
 
 # Recipes for the docker-push-acp-<provider>-runtime targets are generated
 # from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
@@ -431,10 +440,10 @@ docker-push-workspace-publisher: ## Push the clean-room workspace publisher imag
 	$(CONTAINER_TOOL) push ${WORKSPACE_PUBLISHER_IMG}
 
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
+docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-browser-worker docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
 
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
+docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-browser-worker docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
 
 ##@ Deployment
 

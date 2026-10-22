@@ -81,6 +81,10 @@ workers:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
       tag: "0.0.1"
+  browser:
+    image:
+      repository: ghcr.io/orka-agents/orka/browser-worker
+      tag: "0.0.1"
 EOF_VALUES
 
 cat >"${test_root}/config/manager/manager.yaml" <<'EOF_MANAGER'
@@ -101,7 +105,7 @@ EOF_KUSTOMIZATION
 grep -Fx 'VERSION ?= v9.8.7-rc.3' "${test_root}/Makefile" >/dev/null
 grep -Fx 'version: 9.8.7-rc.3' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
 grep -Fx 'appVersion: "v9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
-test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 4
+test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 5
 for provider in codex claude copilot opencode; do
   grep -Fx "    ${provider}Image: ghcr.io/orka-agents/orka/acp-${provider}-runtime:9.8.7-rc.3" \
     "${test_root}/cmd/build/helmify/static/values.yaml" >/dev/null

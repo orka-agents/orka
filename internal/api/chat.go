@@ -78,17 +78,20 @@ type ChatConfig struct {
 	// ContainerTaskRuntimeClasses mirrors --container-task-runtime-classes:
 	// the RuntimeClasses create_container_task may request.
 	ContainerTaskRuntimeClasses []string
-	Provider                    string
-	Model                       string
-	MaxIterations               int
-	MaxDuration                 time.Duration
-	ToolTimeout                 time.Duration
-	MaxConcurrent               int
-	MaxTasksPerTurn             int
-	MaxSessionSize              int // bytes
-	MaxPrematureEndRetries      int // re-prompts when the model emits text without the GOAL_STATE sentinel
-	RuntimeAvailability         ACPRuntimeAvailability
-	ExecutionMode               executionmode.Mode
+	// BrowserWorkerImage mirrors --browser-worker-image: the image the
+	// prompt points browser container tasks at.
+	BrowserWorkerImage     string
+	Provider               string
+	Model                  string
+	MaxIterations          int
+	MaxDuration            time.Duration
+	ToolTimeout            time.Duration
+	MaxConcurrent          int
+	MaxTasksPerTurn        int
+	MaxSessionSize         int // bytes
+	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
+	RuntimeAvailability    ACPRuntimeAvailability
+	ExecutionMode          executionmode.Mode
 	// LinkedAccounts builds the linked-account resolver for one signed-in
 	// person's chat turn; nil leaves built-in GitHub tools on their own
 	// credentials. The controller wires it when connectors are enabled.
@@ -409,6 +412,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
 	promptBuilder.SetChatProvider(providerInfo.Name)
+	promptBuilder.SetBrowserWorkerImage(ch.config.BrowserWorkerImage)
 	// The tool list itself is built later; filter the names the same way now
 	// so the prompt only describes tools this caller is offered.
 	chatToolNames := chattools.ChatToolNames()

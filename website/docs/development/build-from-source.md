@@ -35,6 +35,7 @@ export ORKA_IMAGE_TAG="dev-$(git rev-parse --short=12 HEAD)"
 export IMG="${ORKA_IMAGE_PREFIX}:${ORKA_IMAGE_TAG}"
 export AI_WORKER_IMG="${ORKA_IMAGE_PREFIX}/ai-worker:${ORKA_IMAGE_TAG}"
 export GENERAL_WORKER_IMG="${ORKA_IMAGE_PREFIX}/general-worker:${ORKA_IMAGE_TAG}"
+export BROWSER_WORKER_IMG="${ORKA_IMAGE_PREFIX}/browser-worker:${ORKA_IMAGE_TAG}"
 export ACP_CODEX_RUNTIME_IMG="${ORKA_IMAGE_PREFIX}/acp-codex-runtime:${ORKA_IMAGE_TAG}"
 export ACP_CLAUDE_RUNTIME_IMG="${ORKA_IMAGE_PREFIX}/acp-claude-runtime:${ORKA_IMAGE_TAG}"
 export ACP_COPILOT_RUNTIME_IMG="${ORKA_IMAGE_PREFIX}/acp-copilot-runtime:${ORKA_IMAGE_TAG}"
@@ -45,7 +46,8 @@ make docker-build-all
 make docker-push-all
 ```
 
-The Helm command below uses these repositories and the same tag for both native workers.
+The Helm command below uses these repositories and the same tag for the native and browser
+workers.
 The controller, publisher, and ACP runtimes require registry digests. After pushing, list
 their references and replace the corresponding digest placeholders in the Helm command:
 
@@ -72,6 +74,8 @@ helm install orka ./manifest_staging/charts/orka \
   --set-string workers.ai.image.tag="${ORKA_IMAGE_TAG}" \
   --set workers.general.image.repository="${ORKA_IMAGE_PREFIX}/general-worker" \
   --set-string workers.general.image.tag="${ORKA_IMAGE_TAG}" \
+  --set workers.browser.image.repository="${ORKA_IMAGE_PREFIX}/browser-worker" \
+  --set-string workers.browser.image.tag="${ORKA_IMAGE_TAG}" \
   --set publisher.image.repository="${ORKA_IMAGE_PREFIX}/workspace-publisher" \
   --set publisher.image.digest="sha256:<publisher-digest>" \
   --set controller.acpRuntime.codexImage="${ORKA_IMAGE_PREFIX}/acp-codex-runtime@sha256:<codex-digest>" \

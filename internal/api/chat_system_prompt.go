@@ -29,6 +29,9 @@ type SystemPromptBuilder struct {
 	namespace           string
 	runtimeAvailability ACPRuntimeAvailability
 	chatProvider        string
+	// browserWorkerImage, when set, is the Orka browser worker image the
+	// prompt points browser container tasks at.
+	browserWorkerImage string
 	// availableChatTools, when set, holds the only chat tools offered on the
 	// turn; nil means every chat tool is offered.
 	availableChatTools map[string]bool
@@ -47,6 +50,12 @@ func NewSystemPromptBuilder(c client.Client, namespace string, availability ACPR
 // can tell the model which provider to reuse.
 func (b *SystemPromptBuilder) SetChatProvider(name string) {
 	b.chatProvider = name
+}
+
+// SetBrowserWorkerImage names the Orka browser worker image, so the container
+// guidance can route browser work to it. Empty leaves the guidance out.
+func (b *SystemPromptBuilder) SetBrowserWorkerImage(image string) {
+	b.browserWorkerImage = strings.TrimSpace(image)
 }
 
 // SetAvailableChatTools limits the prompt to the chat tools offered on this
@@ -342,13 +351,32 @@ func taskTypeParts() []promptPart {
 	}
 }
 
+// browserTaskPart routes browser work to the browser worker image, and says
+// when a browser task is the right tool at all.
+func browserTaskPart(image string) promptPart {
+	return promptPart{text: fmt.Sprintf(`  Browser tasks (Playwright, Chromium): use image %q, put the script in args and leave command empty,
+  e.g. args: ["sh","-c","playwright screenshot --browser=chromium https://example.com /tmp/artifacts/page.png"].
+  Files in /tmp/artifacts become downloadable artifacts. Set resources: requests cpu 500m, memory 1Gi; limits cpu 2, memory 2Gi.
+  Use a browser task only when no connector or skill covers the site and fetched text cannot establish the fact:
+  the user asked to visit or act on a site, the fact depends on live state (availability, exact prices, account state),
+  or the page needs interaction (login, forms, JavaScript). A failed web_fetch proves nothing about the browser path,
+  and search snippets never establish availability, price, or booking state. Put stop conditions in the script,
+  and never put credentials in literal env values or commands.
+`, image), requires: []string{promptToolContainerTask}}
+}
+
 func buildTaskTypesSection() string {
 	return (&SystemPromptBuilder{}).taskTypesSection()
 }
 
 // taskTypesSection describes the task types whose tools are offered.
 func (b *SystemPromptBuilder) taskTypesSection() string {
-	parts := b.render(taskTypeParts())
+	typeParts := taskTypeParts()
+	if b.browserWorkerImage != "" {
+		// Browser guidance belongs right after the container task type.
+		typeParts = slices.Insert(typeParts, 1, browserTaskPart(b.browserWorkerImage))
+	}
+	parts := b.render(typeParts)
 	if parts == "" {
 		return ""
 	}
