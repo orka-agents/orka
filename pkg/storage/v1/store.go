@@ -19,7 +19,8 @@ var ErrSessionConfigurationMismatch = errors.New("session configuration mismatch
 // ErrNotReady is returned when a durable prerequisite is expected to become ready shortly.
 var ErrNotReady = errors.New("not ready")
 
-// ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
+// ErrDuplicateMismatch is returned when a stable external identifier, or an
+// operation ID (see [WriteEnvelope]), is reused with a different payload.
 var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
 
 // ErrGatewayMessageReplayOnly is returned when receipt-only admission finds no
@@ -43,7 +44,8 @@ var ErrUnavailable = errors.New("storage unavailable")
 // for example because the connection failed after the commit was sent. The
 // caller must not report success or repeat the action as a new operation. It
 // may retry only with the same operation ID and request digest (see
-// [WriteEnvelope]).
+// [WriteEnvelope]), or settle the outcome with
+// [OperationReceiptStore.ResolveOperation].
 var ErrOutcomeUnknown = errors.New("storage outcome unknown")
 
 // ErrFenced is returned when a write is rejected because the caller's

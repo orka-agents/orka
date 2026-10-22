@@ -1,6 +1,9 @@
 package v1
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // DatasetOrigin records how a provider's dataset came to exist.
 type DatasetOrigin string
@@ -68,6 +71,41 @@ type ProviderLimits struct {
 	// MaxValueBytes is the largest single stored value the provider accepts,
 	// or zero when the provider imposes no limit of its own.
 	MaxValueBytes int64
+	// ReceiptRetention is how long the provider keeps an operation receipt
+	// after recording it, at least MinReceiptRetention, or zero when the
+	// provider keeps no operation receipts yet.
+	ReceiptRetention time.Duration
+	// MaxReceiptResultBytes is the largest result the provider keeps with an
+	// operation receipt; it reads a larger result again from the records the
+	// write made. It is zero when the provider keeps no results, or no
+	// operation receipts yet.
+	MaxReceiptResultBytes int64
+}
+
+// DatasetState says whether a dataset accepts writes.
+type DatasetState string
+
+const (
+	// DatasetReady marks a dataset that accepts writes.
+	DatasetReady DatasetState = "ready"
+	// DatasetMigrating marks a dataset whose schema is changing. New writes
+	// return ErrNotReady and commit nothing until the migration finishes; a
+	// replay of a committed operation is still served, and reads keep
+	// working.
+	DatasetMigrating DatasetState = "migrating"
+	// DatasetImporting marks a dataset receiving a migration import. New
+	// writes return ErrNotReady and commit nothing until the import finishes.
+	DatasetImporting DatasetState = "importing"
+)
+
+// IsValidDatasetState reports whether state is a defined dataset state.
+func IsValidDatasetState(state DatasetState) bool {
+	switch state {
+	case DatasetReady, DatasetMigrating, DatasetImporting:
+		return true
+	default:
+		return false
+	}
 }
 
 // ProviderInfo describes a provider and the dataset it serves. It exists for
@@ -96,6 +134,17 @@ type ProviderInfo struct {
 	Limits ProviderLimits
 	// Durability states what a successful write survives.
 	Durability DurabilityClass
+	// State says whether the dataset accepts writes. It is empty when the
+	// provider does not report it yet.
+	State DatasetState
+	// Incarnation changes whenever the serving database may have restarted or
+	// switched to another node, so Orka can validate the dataset again before
+	// trusting it. It is empty when the provider does not report it yet.
+	Incarnation string
+	// ObservedAt is the provider clock when Describe ran, so Orka can estimate
+	// the clock difference between itself and the provider. It is zero when
+	// the provider does not report it yet.
+	ObservedAt time.Time
 }
 
 // ProviderDescriber reports what a provider serves and guarantees.
