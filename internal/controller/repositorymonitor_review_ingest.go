@@ -1022,6 +1022,14 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 		if validationRetry.associated && repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) {
 			marksFresh = validationRetry.exhausted
 		}
+		if marksFresh {
+			// An exhaustive review is not done until its last pass.
+			pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, record)
+			if err != nil {
+				return err
+			}
+			marksFresh = !pending
+		}
 		if reason == "" && marksFresh && repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
 			item.LastReviewedHeadSHA = record.HeadSHA
 		} else {

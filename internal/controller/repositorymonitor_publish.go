@@ -140,6 +140,11 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	if event := effectiveRepositoryMonitorPublishEvent(publish); event != repositoryMonitorPublishEventComment {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported publish event", item.Number), map[string]any{eventField: event})
 	}
+	if pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, record); err != nil {
+		return err
+	} else if pending {
+		return skip(repositoryMonitorPublishSkipExhaustivePassPending, fmt.Sprintf("Pull request #%d review publishing deferred: another exhaustive review pass is due", item.Number), nil)
+	}
 	sameHeadPolicy := effectiveRepositoryMonitorPublishSameHeadPolicy(publish)
 	if sameHeadPolicy != repositoryMonitorPublishSameHeadPolicySkip && sameHeadPolicy != repositoryMonitorPublishSameHeadPolicyUpdate {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported same-head policy", item.Number), map[string]any{"sameHeadPolicy": sameHeadPolicy})

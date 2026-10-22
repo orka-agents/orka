@@ -446,6 +446,14 @@ spec:
                     description: ExactEventEnabled enables exact-head review from
                       repository events.
                     type: boolean
+                  exhaustive:
+                    description: |-
+                      Exhaustive repeats the full review of a pull request head until a pass
+                      finds nothing new, at most three passes, so later follow-up reviews
+                      start from every finding. Only full reviews (a pull request's first
+                      review, or a head that rewrote history) repeat; intermediate passes are
+                      not published.
+                    type: boolean
                   publish:
                     description: |-
                       Publish controls deterministic GitHub pull request review publishing after review ingestion.

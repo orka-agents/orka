@@ -13,6 +13,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // A review record's findings are the pull request's record of findings at
@@ -49,6 +51,12 @@ const (
 	// repositoryMonitorGitHubCompareAhead is the compare status for a head
 	// that builds on the base commit.
 	repositoryMonitorGitHubCompareAhead = "ahead"
+	// repositoryMonitorExhaustiveMaxPasses bounds the review passes an
+	// exhaustive review runs on one head.
+	repositoryMonitorExhaustiveMaxPasses = 3
+	// repositoryMonitorPublishSkipExhaustivePassPending skips publishing a
+	// pass that another pass will extend; the last pass publishes them all.
+	repositoryMonitorPublishSkipExhaustivePassPending = "exhaustive_pass_pending"
 )
 
 // repositoryMonitorReviewPlan is how a review Task reviews its head.
@@ -438,4 +446,52 @@ func repositoryMonitorReviewsEveryPush(spec corev1alpha1.RepositoryMonitorSpec, 
 	}
 	full, _, _ := repositoryMonitorPullRequestRepairScope(spec, pr)
 	return spec.Repair.Enabled && full
+}
+
+// repositoryMonitorExhaustivePassPending reports whether another pass is due
+// on record's head: exhaustive review is on, record is the head's latest
+// accepted review, the head's first accepted review was a full review, record
+// added a finding, and fewer than repositoryMonitorExhaustiveMaxPasses passes
+// ran. A review whose Task is gone cannot be placed in a pass chain and ends it.
+func (r *RepositoryMonitorReconciler) repositoryMonitorExhaustivePassPending(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) (bool, error) {
+	if !monitor.Spec.Review.Exhaustive || record == nil || !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
+		return false, nil
+	}
+	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
+	if err != nil {
+		return false, nil //nolint:nilerr // An unreadable record ends the chain.
+	}
+	added := false
+	for _, finding := range findings {
+		if finding.FirstReview == record.ID {
+			added = true
+			break
+		}
+	}
+	if !added {
+		return false, nil
+	}
+	records, _, err := r.Store.ListReviewRecords(ctx, store.ReviewRecordFilter{
+		Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: record.Number, HeadSHA: record.HeadSHA, Limit: 50,
+	})
+	if err != nil {
+		return false, err
+	}
+	var accepted []store.ReviewRecord
+	for _, candidate := range records {
+		if repositoryMonitorReviewVerdictMarksHeadFresh(candidate.Verdict) {
+			accepted = append(accepted, candidate)
+		}
+	}
+	// Records are newest first.
+	if len(accepted) == 0 || accepted[0].ID != record.ID || len(accepted) >= repositoryMonitorExhaustiveMaxPasses {
+		return false, nil
+	}
+	first := accepted[len(accepted)-1]
+	var task corev1alpha1.Task
+	if err := r.Get(ctx, types.NamespacedName{Namespace: first.TaskNamespace, Name: first.TaskName}, &task); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	mode := strings.TrimSpace(task.Annotations[repositoryMonitorAnnotationReviewMode])
+	return mode == "" || mode == repositoryMonitorReviewModeFull, nil
 }

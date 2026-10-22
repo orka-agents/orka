@@ -301,6 +301,8 @@ Each accepted review stores the pull request's record of findings: every finding
 
 The published review lists the open findings (marking those open since an earlier commit) and the findings fixed in this commit. Inline comments go only on findings first reported at this head, so earlier findings keep their original threads.
 
+With `spec.review.exhaustive: true`, a full review repeats on the same head until a pass finds nothing new, at most three passes, so follow-up reviews start from every finding instead of uncovering them one round at a time. Each pass sees the findings already recorded and reports only additional ones. Until the last pass, the head does not count as reviewed: readiness and repairs wait, and only the last pass is published, with every finding. Follow-up reviews run once.
+
 With `spec.review.trigger: open`, Orka reviews each pull request once; later heads are reviewed only on a `review` command. Pull requests that automatic repair may fix are still reviewed on every push, because each pushed fix needs a review.
 
 For status summaries, open PRs with `needs_changes`, `needs_human`, `security_sensitive`, stale, failed, or skipped review state count as blocked items. Open PRs with queued review work count as pending reviews.

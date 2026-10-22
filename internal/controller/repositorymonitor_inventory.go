@@ -1084,6 +1084,17 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 	if err != nil {
 		return false, err
 	}
+	for i := range records {
+		if !repositoryMonitorReviewVerdictMarksHeadFresh(records[i].Verdict) {
+			continue
+		}
+		// The head's latest accepted review decides whether another
+		// exhaustive pass is due; until it runs, the head is not reviewed.
+		if pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, &records[i]); err != nil || pending {
+			return false, err
+		}
+		break
+	}
 	for _, record := range records {
 		marksFresh := repositoryMonitorReviewRecordMarksHeadFresh(&record)
 		if repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) {

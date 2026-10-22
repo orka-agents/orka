@@ -368,3 +368,128 @@ func TestRepositoryMonitorOpenTriggerReviewsOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryMonitorExhaustiveReviewPasses(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("exhaustive")
+	monitor.Spec.Review.Exhaustive = true
+	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
+		{"number":1,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"orka-agents/orka"}}}
+	]`)
+	defer server.Close()
+	firstTask := repositoryMonitorReviewIngestTestTask("pass-1", monitor.Name, 1, "sha1")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(append(repositoryMonitorControllerObjects(monitor, secret), firstTask)...).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, ResultStore: db, GitHubAPIBaseURL: server.URL}
+	record := func(id, task string, added bool) *store.ReviewRecord {
+		t.Helper()
+		finding := ledgerFinding("f-"+id, "P2", "a.go", 1, "Finding "+id)
+		finding.FirstHead, finding.FirstReview = "sha1", "review-before"
+		if added {
+			finding.FirstReview = id
+		}
+		findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{finding})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := &store.ReviewRecord{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "sha1", TaskName: task, TaskNamespace: monitor.Namespace, Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
+		if err := db.CreateReviewRecord(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+		return rec
+	}
+	pending := func(rec *store.ReviewRecord) bool {
+		t.Helper()
+		got, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	first := record("pass-1", firstTask.Name, true)
+	if !pending(first) {
+		t.Fatal("a first full pass that added a finding must be followed by another pass")
+	}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "sha1", BaseBranch: "main"}
+	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, first, ""); err != nil {
+		t.Fatal(err)
+	}
+	if item.LastReviewedHeadSHA != "" {
+		t.Fatalf("head counted as reviewed while a pass is due: %+v", item)
+	}
+	if fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, &store.MonitorItem{Number: 1, LastReviewedHeadSHA: "sha1"}, "sha1"); err != nil || fresh {
+		t.Fatalf("fresh = %t err=%v while a pass is due", fresh, err)
+	}
+	if _, created, _, err := r.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: "poll", TargetKind: repositoryMonitorPullRequestKind}, "orka-agents", "orka"); err != nil || created != 1 {
+		t.Fatalf("next pass not queued: created=%d err=%v", created, err)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := cl.List(ctx, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	queued := false
+	for _, task := range tasks.Items {
+		if task.Annotations[repositoryMonitorAnnotationReviewMode] == repositoryMonitorReviewModeSameHead && task.Annotations[repositoryMonitorAnnotationReviewBase] == "pass-1" {
+			queued = true
+		}
+	}
+	if !queued {
+		t.Fatal("the next pass is not a same-head review built on the first pass")
+	}
+	monitor.Spec.Review.Publish.Enabled = true
+	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, firstTask, first); err != nil {
+		t.Fatal(err)
+	}
+	publishes, _, err := db.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ReviewRecordID: first.ID, Limit: 5})
+	if err != nil || len(publishes) != 1 || publishes[0].SkipReason != repositoryMonitorPublishSkipExhaustivePassPending {
+		t.Fatalf("intermediate pass publish records = %+v err=%v, want a deferred skip", publishes, err)
+	}
+	monitor.Spec.Review.Publish.Enabled = false
+
+	if second := record("pass-2", "pass-2-task", false); pending(second) {
+		t.Fatal("a pass that added nothing must end the review")
+	}
+	if pending(first) {
+		t.Fatal("only the head's latest review decides whether a pass is due")
+	}
+	if third := record("pass-3", "pass-3-task", true); pending(third) {
+		t.Fatalf("a %d-pass review must stop", repositoryMonitorExhaustiveMaxPasses)
+	}
+	monitor.Spec.Review.Exhaustive = false
+	if pending(first) {
+		t.Fatal("exhaustive review is off")
+	}
+}
+
+func TestRepositoryMonitorExhaustiveReviewSkipsFollowUps(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, _ := repositoryMonitorInventoryTestObjects("exhaustive-follow-up")
+	monitor.Spec.Review.Exhaustive = true
+	task := repositoryMonitorReviewIngestTestTask("follow-up", monitor.Name, 1, "sha2")
+	task.Annotations[repositoryMonitorAnnotationReviewMode] = repositoryMonitorReviewModeIncremental
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build(), Scheme: scheme, Store: db}
+	findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{{ID: "f-new", Priority: "P2", FirstHead: "sha2", FirstReview: "follow-up-review", Status: repositoryMonitorFindingStatusOpen}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &store.ReviewRecord{ID: "follow-up-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "sha2", TaskName: task.Name, TaskNamespace: monitor.Namespace, Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
+	if err := db.CreateReviewRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, rec); err != nil || pending {
+		t.Fatalf("pending = %t err=%v, want follow-up reviews to run once", pending, err)
+	}
+}

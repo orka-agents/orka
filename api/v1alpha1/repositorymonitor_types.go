@@ -367,6 +367,14 @@ type RepositoryMonitorReviewSpec struct {
 	// +optional
 	BlockingPriority string `json:"blockingPriority,omitempty"`
 
+	// Exhaustive repeats the full review of a pull request head until a pass
+	// finds nothing new, at most three passes, so later follow-up reviews
+	// start from every finding. Only full reviews (a pull request's first
+	// review, or a head that rewrote history) repeat; intermediate passes are
+	// not published.
+	// +optional
+	Exhaustive bool `json:"exhaustive,omitempty"`
+
 	// StaleReviewTTL bounds how long an unchanged head review remains fresh.
 	// +optional
 	StaleReviewTTL *metav1.Duration `json:"staleReviewTTL,omitempty"`

@@ -916,6 +916,7 @@ spec:
 | `review.requireGreenCI` | bool | No | Wait for green CI before selecting a pull request for review. |
 | `review.trigger` | string | No | `push` (default) reviews every new head, with a follow-up review of the new changes and open findings when the head builds on the last reviewed one. `open` reviews each pull request once; later heads need a `review` command, except pull requests automatic repair may fix. |
 | `review.blockingPriority` | string | No | Lowest open finding priority (`P0`–`P3`) that makes the verdict `needs_changes`. Defaults to `P1`. Findings outside a follow-up review's changes block only at `P1` or above. |
+| `review.exhaustive` | bool | No | Repeat a full review on the same head until a pass finds nothing new, at most three passes; only the last pass is published. Follow-up reviews run once. |
 | `review.event` | string | No | Legacy/default review event value included in review task input. It does not publish to GitHub; use `review.publish.event`. Defaults to `COMMENT`. |
 | `review.publish.enabled` | bool | No | Enables controller-owned GitHub pull request review publishing. Defaults to `false`. |
 | `review.publish.mode` | string | No | `summary_only` or `summary_with_inline_findings`. Inline comments are only attempted for changed RIGHT-side diff lines. |
