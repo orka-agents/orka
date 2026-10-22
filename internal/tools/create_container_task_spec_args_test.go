@@ -27,7 +27,12 @@ const containerSpecArgsBase = `"image":"mcr.microsoft.com/playwright:v1.64.0-nob
 // chat and worker calls do, against one of its two Task construction paths.
 type containerSpecArgsPath struct {
 	name string
-	run  func(t *testing.T, allowed []string, args string) (string, client.Client)
+	run  func(t *testing.T, configure func(*ToolContext), args string) (string, client.Client)
+}
+
+// allowRuntimeClasses configures the operator RuntimeClass allowlist.
+func allowRuntimeClasses(names ...string) func(*ToolContext) {
+	return func(tc *ToolContext) { tc.ContainerTaskRuntimeClasses = names }
 }
 
 func containerSpecArgsPaths() []containerSpecArgsPath {
@@ -41,18 +46,23 @@ func containerSpecArgsPaths() []containerSpecArgsPath {
 		return result
 	}
 	return []containerSpecArgsPath{
-		{name: "chat", run: func(t *testing.T, allowed []string, args string) (string, client.Client) {
+		{name: "chat", run: func(t *testing.T, configure func(*ToolContext), args string) (string, client.Client) {
 			fc := newFakeClient()
 			ctx := newCreateContainerTaskToolCtx(fc)
-			GetToolContext(ctx).ContainerTaskRuntimeClasses = allowed
+			if configure != nil {
+				configure(GetToolContext(ctx))
+			}
 			return execute(ctx, &CreateContainerTaskTool{}, args), fc
 		}},
-		{name: "coordinator", run: func(t *testing.T, allowed []string, args string) (string, client.Client) {
+		{name: "coordinator", run: func(t *testing.T, configure func(*ToolContext), args string) (string, client.Client) {
 			t.Setenv(envOrkaTaskName, parentTaskName)
 			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 			fc := newFakeClient(parentTask())
-			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, ContainerTaskRuntimeClasses: allowed})
-			return execute(ctx, NewCreateContainerTaskTool(fc), args), fc
+			tc := &ToolContext{Client: fc}
+			if configure != nil {
+				configure(tc)
+			}
+			return execute(WithToolContext(context.Background(), tc), NewCreateContainerTaskTool(fc), args), fc
 		}},
 	}
 }
@@ -80,7 +90,7 @@ func TestCreateContainerTaskTool_AppliesBrowserTaskSpecArgs(t *testing.T) {
 		"execution":{"runtimeClassName":"gvisor"}}`
 	for _, path := range containerSpecArgsPaths() {
 		t.Run(path.name, func(t *testing.T) {
-			result, fc := path.run(t, []string{"kata-qemu", "gvisor"}, args)
+			result, fc := path.run(t, allowRuntimeClasses("kata-qemu", "gvisor"), args)
 			expectContainerTaskSuccess(t, result)
 			created := createdContainerTasks(t, fc)
 			if len(created) != 1 {
@@ -124,7 +134,13 @@ func TestCreateContainerTaskTool_RejectsInvalidSpecArgs(t *testing.T) {
 		errorType string
 		mention   string
 	}{
-		{name: "env valueFrom", fragment: `"env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":{"name":"s","key":"k"}}}]`, mention: "env[0].valueFrom"},
+		{name: "env configMap source", fragment: `"env":[{"name":"MODE","valueFrom":{"configMapKeyRef":{"name":"c","key":"k"}}}]`, mention: "env[0].valueFrom.configMapKeyRef"},
+		{name: "env value and valueFrom", fragment: `"env":[{"name":"TOKEN","value":"x","valueFrom":{"secretKeyRef":{"name":"s","key":"k"}}}]`, mention: "both value and valueFrom"},
+		{name: "env secret without key", fragment: `"env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":{"name":"s"}}}]`, mention: "secretKeyRef.key is required"},
+		{name: "env invalid secret name", fragment: `"env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":{"name":"Bad_Name","key":"k"}}}]`, mention: "not a valid Secret name"},
+		{name: "env secret unknown field", fragment: `"env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":{"name":"s","key":"k","optional":true}}}]`, mention: `"optional"`},
+		{name: "secretRef namespace", fragment: `"secretRef":{"name":"s","namespace":"other-team"}`, mention: "secretRef.namespace"},
+		{name: "secretRef without name", fragment: `"secretRef":{}`, mention: "secretRef.name is required"},
 		{name: "env unknown field", fragment: `"env":[{"name":"A","value":"b","from":"c"}]`, mention: `"from"`},
 		{name: "env missing name", fragment: `"env":[{"value":"b"}]`, mention: "env[0].name is required"},
 		{name: "env invalid name", fragment: `"env":[{"name":"1BAD","value":"b"}]`, mention: "not a valid environment variable name"},
@@ -152,7 +168,7 @@ func TestCreateContainerTaskTool_RejectsInvalidSpecArgs(t *testing.T) {
 	for _, tt := range tests {
 		for _, path := range containerSpecArgsPaths() {
 			t.Run(tt.name+"/"+path.name, func(t *testing.T) {
-				result, fc := path.run(t, tt.allowed, `{`+containerSpecArgsBase+`,`+tt.fragment+`}`)
+				result, fc := path.run(t, allowRuntimeClasses(tt.allowed...), `{`+containerSpecArgsBase+`,`+tt.fragment+`}`)
 				r := parseContainerTaskToolResult(t, result)
 				if r.Success {
 					t.Fatalf("accepted %s", tt.fragment)
@@ -168,5 +184,65 @@ func TestCreateContainerTaskTool_RejectsInvalidSpecArgs(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCreateContainerTaskTool_AuthorizesSecretReferences(t *testing.T) {
+	args := `{` + containerSpecArgsBase + `,"secretRef":{"name":"browser-login"},` +
+		`"env":[{"name":"API_TOKEN","valueFrom":{"secretKeyRef":{"name":"api-token","key":"token"}}},` +
+		`{"name":"OTHER_TOKEN","valueFrom":{"secretKeyRef":{"name":"api-token","key":"other"}}}]}`
+	for _, path := range containerSpecArgsPaths() {
+		t.Run(path.name+"/authorized", func(t *testing.T) {
+			var checked []string
+			result, fc := path.run(t, func(tc *ToolContext) {
+				tc.RequireSecretReadAuthorization = true
+				tc.AuthorizeSecretRead = func(_ context.Context, namespace, name string) *ChatToolError {
+					checked = append(checked, namespace+"/"+name)
+					return nil
+				}
+			}, args)
+			expectContainerTaskSuccess(t, result)
+			if want := []string{defaultNamespace + "/api-token", defaultNamespace + "/browser-login"}; fmt.Sprint(checked) != fmt.Sprint(want) {
+				t.Fatalf("authorized Secrets = %v, want each name once: %v", checked, want)
+			}
+			created := createdContainerTasks(t, fc)
+			if len(created) != 1 {
+				t.Fatalf("created %d container tasks, want 1", len(created))
+			}
+			spec := created[0].Spec
+			if spec.SecretRef == nil || spec.SecretRef.Name != "browser-login" || spec.SecretRef.Namespace != "" {
+				t.Errorf("secretRef = %#v", spec.SecretRef)
+			}
+			if len(spec.Env) != 2 || spec.Env[0].ValueFrom == nil || spec.Env[0].ValueFrom.SecretKeyRef == nil ||
+				spec.Env[0].ValueFrom.SecretKeyRef.Name != "api-token" || spec.Env[0].ValueFrom.SecretKeyRef.Key != "token" || spec.Env[0].Value != "" {
+				t.Errorf("env = %#v", spec.Env)
+			}
+		})
+		t.Run(path.name+"/denied", func(t *testing.T) {
+			result, fc := path.run(t, func(tc *ToolContext) {
+				tc.AuthorizeSecretRead = func(_ context.Context, _, name string) *ChatToolError {
+					if name == "api-token" {
+						return &ChatToolError{Type: "authorization_failed", Message: "missing credential scope", Suggestion: "Use an authorized token"}
+					}
+					return nil
+				}
+			}, args)
+			r := parseContainerTaskToolResult(t, result)
+			if r.Success || r.ErrorType != "authorization_failed" || !strings.Contains(r.Error, defaultNamespace+"/api-token") {
+				t.Fatalf("result = %#v, want an authorization failure naming the Secret", r)
+			}
+			if created := createdContainerTasks(t, fc); len(created) != 0 {
+				t.Fatalf("created %d container tasks for an unauthorized Secret", len(created))
+			}
+		})
+		t.Run(path.name+"/fails closed without authorizer", func(t *testing.T) {
+			result, fc := path.run(t, func(tc *ToolContext) { tc.RequireSecretReadAuthorization = true }, args)
+			if r := parseContainerTaskToolResult(t, result); r.Success || r.ErrorType != "authorization_failed" {
+				t.Fatalf("result = %#v, want a fail-closed authorization error", r)
+			}
+			if created := createdContainerTasks(t, fc); len(created) != 0 {
+				t.Fatalf("created %d container tasks without Secret authorization", len(created))
+			}
+		})
 	}
 }
