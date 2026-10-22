@@ -136,6 +136,8 @@ func TestInviteRefusesSomeoneElseOrAnOutsider(t *testing.T) {
 		"the invited person is outside the org": {login: "bob", approved: map[string]any{"access_token": "ghu_bob", "refresh_token": "ghr_bob"},
 			revoked: "ghu_bob_refreshed"},
 		"GitHub cannot check the approved token": {login: "alice", approved: map[string]any{"access_token": "ghu_unknown"}, revoked: "ghu_unknown"},
+		"GitHub cannot answer the membership check": {login: "alice", approved: map[string]any{"access_token": "ghu_alice_unanswered"},
+			revoked: "ghu_alice_unanswered"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, gh := newInviteHarness(t, test.approved)

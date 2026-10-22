@@ -283,7 +283,11 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		}
 	}
 	if err := cfg.GitHub.RequireMember(ctx, tokens.AccessToken, user.Login, cfg.Allowed); err != nil {
-		refuse("the invited account is not an active member of a GitHub org or team allowed to sign in", tokens.AccessToken)
+		if errors.Is(err, githubauth.ErrNotMember) {
+			refuse("the invited account is not an active member of a GitHub org or team allowed to sign in", tokens.AccessToken)
+		} else {
+			refuse("GitHub could not confirm the invited account's membership; invite again shortly", tokens.AccessToken)
+		}
 		return
 	}
 	ui := &UserInfo{
