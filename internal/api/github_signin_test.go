@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/githubauth"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const signInTestUserID = "852750"
@@ -608,5 +610,33 @@ func TestSessionTokensAreNeverTriedElsewhere(t *testing.T) {
 	})
 	if err != nil || !called || ui.AuthType != AuthTypeGitHubSession {
 		t.Fatalf("ui = %+v, err = %v", ui, err)
+	}
+}
+
+// failingSessions is a session store that cannot answer.
+type failingSessions struct{ store.AuthSessionStore }
+
+func (failingSessions) GetAuthSessionByHash(context.Context, string) (store.AuthSession, error) {
+	return store.AuthSession{}, errors.New("database is locked")
+}
+
+// A session store that cannot answer is not a verdict on the token: the
+// request gets 503, so a client keeps the session, never 401.
+func TestSessionLookupFailureIsNotAnInvalidToken(t *testing.T) {
+	cfg := GitHubSignInConfig{Enabled: true, Sessions: failingSessions{}}
+	if _, err := cfg.authenticateSession(context.Background(), sessionTokenPrefix+"live"); !errors.Is(err, errSessionStoreUnavailable) {
+		t.Fatalf("err = %v, want the store-unavailable error", err)
+	}
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(nil, AuthConfig{Sessions: cfg.authenticateSession}))
+	app.Delete("/api/v1/auth/session", func(c fiber.Ctx) error { return c.SendStatus(http.StatusNoContent) })
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/session", nil)
+	request.Header.Set("Authorization", "Bearer "+sessionTokenPrefix+"live")
+	resp, err := app.Test(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
 	}
 }

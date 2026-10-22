@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 // fakeGitHubDeviceFlow approves the device code on the first poll.
@@ -599,5 +601,51 @@ func TestLoginWakesAnIdleHostAndReportsAnOperatorSuspension(t *testing.T) {
 				t.Fatalf("login with an idle host: %v %q, %d wakes", err, out, wakes.Load())
 			}
 		})
+	}
+}
+
+// A logout the server could not process keeps the saved session, so it can
+// be ended on a retry instead of left live.
+func TestLogoutKeepsTheSessionWhenTheServerCannotAnswer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer orka.Close()
+	later := time.Now().Add(10 * time.Hour)
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_live", TokenKind: tokenKindGitHubSession,
+		TokenExpiresAt: &later}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runLoginCLI(t, "logout"); err == nil {
+		t.Fatal("a logout the server could not process must fail")
+	}
+	if cfg := loadConfig(); cfg.Token != "orka_s_live" || cfg.TokenKind != tokenKindGitHubSession {
+		t.Fatalf("config = %+v, want the session kept", cfg)
+	}
+}
+
+// An operator's suspension wins over a Ready left from the host's last run.
+func TestWaitReportsAnOperatorSuspensionOverAStaleReady(t *testing.T) {
+	previousHost := agentHostReadyPollInterval
+	agentHostReadyPollInterval = time.Millisecond
+	t.Cleanup(func() { agentHostReadyPollInterval = previousHost })
+	var wakes atomic.Int32
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			wakes.Add(1)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true, //nolint:errcheck
+			"suspended": true, "operatorSuspended": true})
+	}))
+	defer orka.Close()
+	cmd := &cobra.Command{}
+	cmd.SetOut(new(bytes.Buffer))
+	hosts := client.NewWithNamespace(orka.URL, "orka_s_session", "orka-system")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := waitForAgentHost(ctx, cmd, hosts); err == nil || !strings.Contains(err.Error(), "an operator suspended") || wakes.Load() != 0 {
+		t.Fatalf("wait = %v, %d wakes", err, wakes.Load())
 	}
 }

@@ -192,6 +192,9 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			if cfg.ReportTokenReviewUnavailable && errors.Is(err, errTokenReviewUnavailable) {
 				return fiber.NewError(fiber.StatusServiceUnavailable, "token authentication is temporarily unavailable")
 			}
+			if errors.Is(err, errSessionStoreUnavailable) {
+				return fiber.NewError(fiber.StatusServiceUnavailable, "session authentication is temporarily unavailable; retry")
+			}
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
 		}
 
@@ -248,6 +251,10 @@ func authenticateContextToken(ctx context.Context, token string, profile Context
 }
 
 var errTokenReviewUnavailable = errors.New("TokenReview backend unavailable")
+
+// errSessionStoreUnavailable is a sign-in session lookup that failed without
+// an answer; it is reported as 503, never as an invalid token.
+var errSessionStoreUnavailable = errors.New("session store unavailable")
 
 // validateToken validates a ServiceAccount token using TokenReview with caching.
 func validateToken(ctx context.Context, c client.Client, token string, audiences ...string) (*UserInfo, error) {

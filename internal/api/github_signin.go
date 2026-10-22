@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -85,8 +86,13 @@ func (c GitHubSignInConfig) authenticateSession(ctx context.Context, token strin
 		return nil, errors.New("GitHub sign-in sessions are not enabled")
 	}
 	session, err := c.Sessions.GetAuthSessionByHash(ctx, getTokenHash(token))
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, errors.New("unknown session")
+	}
+	if err != nil {
+		// Not a verdict on the token: a client that took 401 for it would
+		// drop a session that is still live.
+		return nil, fmt.Errorf("%w: %v", errSessionStoreUnavailable, err)
 	}
 	if session.RevokedAt != nil || !c.now().Before(session.ExpiresAt) {
 		return nil, errors.New("session ended")
