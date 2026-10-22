@@ -948,6 +948,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
+		envVars = setControllerEnv(envVars, workerenv.TimeoutSeconds, containerWorkerTimeoutSeconds(task, opts))
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
 	frozenBindings := ""
@@ -1066,6 +1067,19 @@ func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task) er
 		)
 	}
 	return nil
+}
+
+// containerWorkerTimeoutSeconds tells a container worker its Job deadline, so
+// the worker can stop the command early enough to deliver partial output and
+// artifacts. Repository validation Jobs keep their frozen environment.
+func containerWorkerTimeoutSeconds(task *corev1alpha1.Task, opts JobBuildOptions) string {
+	if task.Spec.Timeout == nil || opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task) {
+		return ""
+	}
+	if seconds := int64(task.Spec.Timeout.Seconds()); seconds > 0 {
+		return strconv.FormatInt(seconds, 10)
+	}
+	return ""
 }
 
 func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {

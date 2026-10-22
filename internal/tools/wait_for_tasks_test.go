@@ -758,6 +758,7 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	// Create a structured result with diff (which should be stripped)
 	sr := common.StructuredResult{
 		Version:    1,
+		Outcome:    "completed",
 		Summary:    "Implemented auth middleware",
 		BaseSHA:    "abc123def",
 		HeadSHA:    "def456abc",
@@ -836,6 +837,12 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	}
 	if r.Verdict != "APPROVED" {
 		t.Errorf("expected verdict APPROVED, got %q", r.Verdict)
+	}
+	if r.Outcome != "completed" {
+		t.Errorf("expected outcome completed, got %q", r.Outcome)
+	}
+	if got := boundWaitTaskOutcome(strings.Repeat("x", maxWaitTaskOutcomeChars+1)); got != "" {
+		t.Errorf("an outcome longer than %d characters was kept: %q", maxWaitTaskOutcomeChars, got)
 	}
 	if r.Feedback != "Looks great!" {
 		t.Errorf("expected feedback, got %q", r.Feedback)

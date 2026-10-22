@@ -54,6 +54,7 @@ type TaskResultInfo struct {
 	Phase            string                                     `json:"phase"`
 	Result           string                                     `json:"result,omitempty"`
 	Summary          string                                     `json:"summary,omitempty"`
+	Outcome          string                                     `json:"outcome,omitempty"`
 	Verdict          string                                     `json:"verdict,omitempty"`
 	Feedback         string                                     `json:"feedback,omitempty"`
 	Files            []string                                   `json:"files,omitempty"`
@@ -283,6 +284,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 					}
 					summary := common.TruncateSummary(summaryText, maxWaitTaskSummaryChars)
 					results[taskName].Summary = summary
+					results[taskName].Outcome = boundWaitTaskOutcome(sr.Outcome)
 					results[taskName].Verdict = sr.Verdict
 					results[taskName].Feedback = sr.Feedback
 					results[taskName].Files = sr.Files
@@ -650,4 +652,15 @@ func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 	}
 
 	return result.Result, nil
+}
+
+// maxWaitTaskOutcomeChars bounds the outcome class a child reports. Classes are
+// short words; anything longer is not one and is dropped.
+const maxWaitTaskOutcomeChars = 64
+
+func boundWaitTaskOutcome(outcome string) string {
+	if len(outcome) > maxWaitTaskOutcomeChars {
+		return ""
+	}
+	return outcome
 }

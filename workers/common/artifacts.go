@@ -173,55 +173,67 @@ func UploadArtifactsContext(ctx context.Context) error {
 	return UploadArtifactsWithRequestAuthorizationContext(ctx, nil)
 }
 
+// UploadArtifactsReportContext uploads like UploadArtifactsContext and also
+// returns a reference for each file the controller accepted, even when other
+// files failed.
+func UploadArtifactsReportContext(ctx context.Context) ([]ArtifactRef, error) {
+	return uploadArtifacts(ctx, nil)
+}
+
 // UploadArtifactsWithRequestAuthorizationContext signs each request, including retries,
 // and stops uploads when the worker lifecycle ends. The callback stays in the wrapper.
 func UploadArtifactsWithRequestAuthorizationContext(
 	ctx context.Context,
 	authorize func(*http.Request, []byte) error,
 ) error {
+	_, err := uploadArtifacts(ctx, authorize)
+	return err
+}
+
+func uploadArtifacts(ctx context.Context, authorize func(*http.Request, []byte) error) ([]ArtifactRef, error) {
 	ctx = contextOrBackground(ctx)
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	artifactRoot := artifactsDir()
 	info, err := os.Lstat(artifactRoot)
 	if os.IsNotExist(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("failed to inspect artifacts directory: %w", err)
+		return nil, fmt.Errorf("failed to inspect artifacts directory: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("artifacts directory must not be a symlink")
+		return nil, fmt.Errorf("artifacts directory must not be a symlink")
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("artifacts path is not a directory")
+		return nil, fmt.Errorf("artifacts path is not a directory")
 	}
 
 	dirFile, err := openNoFollow(artifactRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("failed to open artifacts directory: %w", err)
+		return nil, fmt.Errorf("failed to open artifacts directory: %w", err)
 	}
 	defer dirFile.Close() //nolint:errcheck
 	entries, err := dirFile.ReadDir(-1)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("failed to read artifacts directory: %w", err)
+		return nil, fmt.Errorf("failed to read artifacts directory: %w", err)
 	}
 	if len(entries) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var totalSize int64
 
 	baseEndpoint, err := artifactEndpointBase()
 	if err != nil {
-		return fmt.Errorf("failed to construct artifact endpoint: %w", err)
+		return nil, fmt.Errorf("failed to construct artifact endpoint: %w", err)
 	}
 
 	saToken := workerServiceAccountToken()
@@ -230,7 +242,7 @@ func UploadArtifactsWithRequestAuthorizationContext(
 	var uploadErrors []string
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		if e.IsDir() {
 			continue
@@ -298,7 +310,7 @@ func UploadArtifactsWithRequestAuthorizationContext(
 		}
 		totalSize += int64(len(data))
 		if totalSize > maxTotalSize {
-			return fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, maxTotalSize)
+			return nil, fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, maxTotalSize)
 		}
 		pending = append(pending, pendingArtifact{
 			filename:    filename,
@@ -316,10 +328,11 @@ func uploadPendingArtifacts(
 	pending []pendingArtifact,
 	uploadErrors []string,
 	authorize func(*http.Request, []byte) error,
-) error {
+) ([]ArtifactRef, error) {
+	uploaded := make([]ArtifactRef, 0, len(pending))
 	for _, artifact := range pending {
 		if err := ctx.Err(); err != nil {
-			return err
+			return uploaded, err
 		}
 		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(artifact.filename))
 		if err := doPostWithRetry(
@@ -327,7 +340,7 @@ func uploadPendingArtifacts(
 			30*time.Second, retryWait, artifactMaxRetries, authorize,
 		); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return fmt.Errorf("artifact upload canceled: %w", ctxErr)
+				return uploaded, fmt.Errorf("artifact upload canceled: %w", ctxErr)
 			}
 			fmt.Fprintf(os.Stderr, "artifact: failed to upload %s: %v\n", artifact.filename, err)
 			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", artifact.filename, err))
@@ -337,12 +350,15 @@ func uploadPendingArtifacts(
 			"artifact: uploaded %s (%d bytes, %s)\n",
 			artifact.filename, len(artifact.data), artifact.contentType,
 		)
+		uploaded = append(uploaded, ArtifactRef{
+			Filename: artifact.filename, ContentType: artifact.contentType, Size: int64(len(artifact.data)),
+		})
 	}
 	if len(uploadErrors) > 0 {
-		return fmt.Errorf("some artifacts failed to upload: %s", strings.Join(uploadErrors, "; "))
+		return uploaded, fmt.Errorf("some artifacts failed to upload: %s", strings.Join(uploadErrors, "; "))
 	}
 	// Every upload succeeded; later cancellation cannot undo the completed batch.
-	return nil
+	return uploaded, nil
 }
 
 func artifactEndpointBase() (string, error) {

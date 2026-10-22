@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/orka-agents/orka/internal/security"
 	securityslices "github.com/orka-agents/orka/internal/security/slices"
@@ -45,6 +46,9 @@ func main() {
 func generalWorkerExitCode(err error) int {
 	if errors.Is(err, errValidationCommandUnavailable) {
 		return workerenv.RepositoryValidationUnavailableExitCode
+	}
+	if errors.Is(err, errSoftDeadline) {
+		return softDeadlineExitCode
 	}
 	return 1
 }
@@ -73,6 +77,7 @@ func run() (err error) {
 		return runSecurityMapper(ctx)
 	}
 
+	start := time.Now()
 	baseEnv := workerenv.ParseBaseEnv(os.Getenv)
 	taskName := baseEnv.TaskName
 	taskNamespace := baseEnv.TaskNamespace
@@ -116,10 +121,15 @@ func run() (err error) {
 	// The controller captures pod logs and writes them to a result ConfigMap.
 	var stdout, stderr bytes.Buffer
 
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	timeout := taskTimeout(os.Getenv)
+	runCtx, stopRun := startSoftDeadline(ctx, start, timeout)
+	defer stopRun()
+	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.Env = os.Environ()
+	cmd.WaitDelay = commandWaitDelay
+	stopCommandProcessGroup(cmd)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
@@ -134,6 +144,9 @@ func run() (err error) {
 	}
 
 	output := stdout.String() + stderr.String()
+	if err != nil && stoppedAtSoftDeadline(ctx, runCtx) {
+		return deliverAtSoftDeadline(ctx, start, timeout, output)
+	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if submitErr := submitResult(ctx, workDir, output); submitErr == nil {

@@ -300,7 +300,10 @@ func isRetryableHTTPStatus(statusCode int) bool {
 // Workers can use this to include diffs, verdicts, and metadata alongside
 // the human-readable summary. Plain-text results remain backward compatible.
 type StructuredResult struct {
-	Version    int      `json:"version"`
+	Version int `json:"version"`
+	// Outcome is an optional class a coordinator can branch on, such as
+	// completed, blocked, login_required, or ResultOutcomeUnknown.
+	Outcome    string   `json:"outcome,omitempty"`
 	Summary    string   `json:"summary"`
 	BaseSHA    string   `json:"baseSHA,omitempty"`
 	HeadSHA    string   `json:"headSHA,omitempty"`
@@ -315,6 +318,11 @@ type StructuredResult struct {
 	Data      map[string]any `json:"data,omitempty"`
 	Artifacts []ArtifactRef  `json:"artifacts,omitempty"`
 }
+
+// ResultOutcomeUnknown marks a result whose command was stopped before it
+// reported its own outcome, so whatever it was doing may or may not have taken
+// effect. Reconcile it with a follow-up Task rather than retrying it blindly.
+const ResultOutcomeUnknown = "unknown_outcome"
 
 // ArtifactRef is a safe structured reference to a task artifact. The artifact
 // bytes remain in Orka artifact storage; this envelope carries only metadata
