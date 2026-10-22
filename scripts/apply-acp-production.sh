@@ -294,6 +294,25 @@ validate_existing_controller_identity() {
   fi
 }
 
+# The controller Deployment uses the Recreate strategy, so its replacement Pod
+# starts only after the old Pod exits, and the old Pod's preStop upgrade drain
+# may use its whole termination grace period. Wait for the longer of the live
+# and applied grace periods plus a 3m startup margin, and never less than 5m.
+# Reads the live Deployment captured by validate_existing_controller_identity.
+controller_rollout_timeout() {
+  if ! jq -enr \
+    --slurpfile applied "${controller_manifest}" \
+    --slurpfile live "${existing_controller}" '
+      [$applied[0].items[0], $live[]]
+      | map(.spec.template.spec.terminationGracePeriodSeconds | if . == null then 30 else . end)
+      | select(all(type == "number" and . >= 0 and . == floor))
+      | "\([max + 180, 300] | max)s"
+    '; then
+    echo "controller Deployment terminationGracePeriodSeconds must be a non-negative integer" >&2
+    return 1
+  fi
+}
+
 validate_snapshot_secret() {
   if ! jq -er '.data["snapshot-key"] | select(type == "string" and length > 0)' "${snapshot_secret}" \
     | base64 -d >"${snapshot_key_data}" 2>/dev/null; then
@@ -606,6 +625,7 @@ EOF_ADMISSION_HANDLERS
 # desired generation without rotating an existing snapshot key.
 bash "${script_dir}/lib/ensure-static-mode-namespace.sh" "${kubectl}" orka-system harness-v2
 validate_existing_controller_identity
+controller_rollout_wait="$(controller_rollout_timeout)"
 # Preserve the immutable mode claim as an atomic precondition while converging
 # the remaining platform labels. This cannot relabel or adopt a namespace that
 # changes identity after the preflight.
@@ -624,4 +644,5 @@ render_admission_webhooks
 "${kubectl}" apply -f "${workload_prerequisite_manifest}"
 wait_for_workload_dependencies
 "${kubectl}" apply -f "${controller_manifest}"
-"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager --timeout=2m >/dev/null
+"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager \
+  --timeout="${controller_rollout_wait}" >/dev/null

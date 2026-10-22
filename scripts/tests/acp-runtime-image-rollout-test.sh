@@ -349,7 +349,8 @@ manifest_json() {
     cat "${source}"
     return
   fi
-  yaml_to_json <"${source}" | jq -sc --arg mode "${FAKE_STATIC_MODE:-valid}" '
+  yaml_to_json <"${source}" | jq -sc --arg mode "${FAKE_STATIC_MODE:-valid}" \
+    --arg grace "${FAKE_CONTROLLER_GRACE:-}" '
     def controller:
       .kind == "Deployment" and .metadata.name == "orka-controller-manager";
     def rewrite_args($f):
@@ -383,6 +384,12 @@ manifest_json() {
       rewrite_args(. + ["--harness-v1-endpoint=https://legacy.invalid"])
     else error("unknown FAKE_STATIC_MODE: " + $mode)
     end
+    | if $grace == "" then .
+      elif $grace == "unset" then
+        map(if controller then del(.spec.template.spec.terminationGracePeriodSeconds) else . end)
+      else
+        map(if controller then .spec.template.spec.terminationGracePeriodSeconds = ($grace | fromjson) else . end)
+      end
     | .[]
   '
 }
@@ -465,11 +472,12 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "deploym
       exit 2
       ;;
   esac
-  jq -n --argjson args "${controller_args}" '{
+  jq -n --argjson args "${controller_args}" --arg grace "${FAKE_EXISTING_CONTROLLER_GRACE:-}" '{
     apiVersion:"apps/v1",
     kind:"Deployment",
     metadata:{name:"orka-controller-manager",namespace:"orka-system"},
-    spec:{template:{spec:{containers:[{name:"manager",args:$args}]}}}
+    spec:{template:{spec:({containers:[{name:"manager",args:$args}]} +
+      (if $grace == "" then {} else {terminationGracePeriodSeconds:($grace | fromjson)} end))}}
   }'
   exit 0
 fi
@@ -658,6 +666,11 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "rollout" && "$4" == "sta
     printf 'fail-rollout:orka-controller-manager\n' >>"${FAKE_KUBE_LOG}"
     exit 49
   fi
+  [[ $# -eq 6 && "$6" == --timeout=* ]] || {
+    echo "controller rollout must pass exactly one timeout: $*" >&2
+    exit 2
+  }
+  printf '%s\n' "${6#--timeout=}" >"${FAKE_KUBE_STATE}/controller-rollout-timeout"
   : >"${FAKE_KUBE_STATE}/controller-ready"
   printf 'rollout:orka-controller-manager\n' >>"${FAKE_KUBE_LOG}"
   exit 0
@@ -963,6 +976,8 @@ export PATH="${fake_bin}:${PATH}"
 
 assert_converged() {
   local state_dir="$1"
+  # The shipped controller grace period is 360s; the rollout waits 3m longer.
+  local want_rollout_timeout="${2:-540s}"
   local admission_line admission_rollout_line smoke_line webhooks_line dependency_line
   local dependency_first_rollout_line dependency_last_rollout_line
   local dependency_first_endpoint_line dependency_last_endpoint_line
@@ -983,6 +998,10 @@ assert_converged() {
   done
   [[ -e "${state_dir}/controller-workload" ]]
   [[ -e "${state_dir}/controller-ready" ]]
+  [[ "$(<"${state_dir}/controller-rollout-timeout")" == "${want_rollout_timeout}" ]] || {
+    echo "controller rollout timeout was $(<"${state_dir}/controller-rollout-timeout"), want ${want_rollout_timeout}" >&2
+    return 1
+  }
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
@@ -1115,6 +1134,50 @@ FAKE_KUBE_STATE="${deleted_controller_state}" FAKE_KUBE_LOG="${deleted_controlle
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 assert_converged "${deleted_controller_state}"
 
+# The Recreate controller rollout waits for the old Pod's preStop drain, so the
+# wait covers the longer of the live and applied termination grace periods
+# plus a 3m startup margin, and is never less than 5m. An unset grace period
+# is the Kubernetes default of 30s.
+run_rollout_timeout_scenario() {
+  local name="$1" live_grace="$2" applied_grace="$3" want="$4"
+  local state_dir="${test_root}/state-rollout-timeout-${name}"
+  mkdir -p "${state_dir}"
+  : >"${state_dir}/apply.log"
+  FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${state_dir}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+    FAKE_EXISTING_NAMESPACE_MODE="harness-v2" FAKE_EXISTING_CONTROLLER_MODE="static-v2" \
+    FAKE_EXISTING_CONTROLLER_GRACE="${live_grace}" FAKE_CONTROLLER_GRACE="${applied_grace}" \
+    "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
+  assert_converged "${state_dir}" "${want}"
+}
+
+run_rollout_timeout_scenario applied-longer 60 "" 540s
+run_rollout_timeout_scenario live-longer 900 "" 1080s
+run_rollout_timeout_scenario applied-shortened 360 60 540s
+run_rollout_timeout_scenario above-floor "" 121 301s
+run_rollout_timeout_scenario floor "" 120 300s
+run_rollout_timeout_scenario default-grace "" unset 300s
+
+for invalid_grace in '"6m"' -1 1.5; do
+  invalid_grace_state="${test_root}/state-rollout-timeout-invalid"
+  rm -rf "${invalid_grace_state}"
+  mkdir -p "${invalid_grace_state}"
+  : >"${invalid_grace_state}/apply.log"
+  if invalid_grace_output="$(
+    FAKE_KUBE_STATE="${invalid_grace_state}" FAKE_KUBE_LOG="${invalid_grace_state}/apply.log" \
+      FAKE_KUBE_FAIL_MODE="" FAKE_EXISTING_NAMESPACE_MODE="harness-v2" \
+      FAKE_EXISTING_CONTROLLER_MODE="static-v2" FAKE_CONTROLLER_GRACE="${invalid_grace}" \
+      "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1
+  )"; then
+    echo "controller grace period ${invalid_grace} unexpectedly passed the rollout preflight" >&2
+    exit 1
+  fi
+  grep -F 'terminationGracePeriodSeconds must be a non-negative integer' <<<"${invalid_grace_output}" >/dev/null
+  if [[ -s "${invalid_grace_state}/apply.log" ]]; then
+    echo "controller grace period ${invalid_grace} caused writes before the rollout preflight failed" >&2
+    exit 1
+  fi
+done
+
 newline_key_state="${test_root}/state-base64-newline-key"
 mkdir -p "${newline_key_state}"
 printf '%s\n' "${expected_existing_key}" >"${newline_key_state}/snapshot-key"
@@ -1194,4 +1257,4 @@ done
 
 grep -F 'scripts/apply-acp-production.sh' "${root}/Makefile" >/dev/null
 
-printf '%s\n' 'ok - ACP deployment activates admission, waits for publisher/proxy readiness, and only then rolls one static harness-v2 controller'
+printf '%s\n' 'ok - ACP deployment activates admission, waits for publisher/proxy readiness, and only then rolls one static harness-v2 controller, allowing for its termination grace period'
