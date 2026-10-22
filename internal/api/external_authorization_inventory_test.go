@@ -180,6 +180,8 @@ DELETE /api/v1/auth/session | identity
 GET /api/v1/agent-hosts/me | identity
 POST /api/v1/agent-hosts/me/wake | identity
 DELETE /api/v1/agent-hosts/me | identity
+POST /api/v1/agent-hosts/invites | create core.orka.ai:agenthosts
+GET /api/v1/agent-hosts/invites/:id | create core.orka.ai:agenthosts
 POST /api/v1/ahp-tokens | identity
 GET /api/v1/ahp-tokens | identity
 DELETE /api/v1/ahp-tokens/:id | identity

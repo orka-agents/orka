@@ -228,6 +228,16 @@ without a host.
   host stops at its next token refresh, at most 8 hours later, with `GitHubMembershipEnded`, and
   keeps its volume.
 
+To give a host to someone who cannot reach Orka, an operator with Kubernetes credentials allowed
+to create agenthosts runs `orka host invite <github-login>`. Orka starts GitHub's device flow
+itself and prints the code to pass on. When that person approves it, Orka makes the same checks
+as a sign-in, plus one more: the approving account must be the invited login. If another
+account approves the code, Orka refuses it and revokes its token. Then it links the account,
+and the host starts. The invited person needs only a browser and the Copilot app. They cannot
+manage the host themselves, so keep idle suspension off for them, or wake their hosts. If they
+later run `orka login`, they reach the same link and host. An invite is single-use, lasts as
+long as its code (15 minutes), and does not survive a controller restart.
+
 - The provider needs no tools. A dedicated GitHub App with only the permissions the host
   needs is recommended: a host's token carries all of the app's permissions, and a tool
   call's refresh would replace the host's token.

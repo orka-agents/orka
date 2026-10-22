@@ -167,3 +167,35 @@ func TestConnectWaitsThroughARelinkWithAStdinToken(t *testing.T) {
 		t.Fatalf("%d requests went without the stdin transaction token", unauthenticated)
 	}
 }
+
+func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
+	previous := invitePollInterval
+	invitePollInterval = time.Millisecond
+	t.Cleanup(func() { invitePollInterval = previous })
+	polls := 0
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == agentHostInvitesAPIPath:
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"id": "abc", "login": body["login"], "state": "Pending", "userCode": "ABCD-1234", //nolint:errcheck
+				"verificationURI": "https://github.com/login/device", "expiresAt": time.Now().Add(15 * time.Minute)})
+		case r.Method == http.MethodGet && r.URL.Path == agentHostInvitesAPIPath+"/abc":
+			polls++
+			state := "Pending"
+			if polls >= 2 {
+				state = "Accepted"
+			}
+			json.NewEncoder(w).Encode(map[string]any{"id": "abc", "login": "carol", "state": state, "message": "linked; Orka is starting their Copilot environment"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	out, err := runHostCLI(t, handler, "host", "invite", "carol", "--timeout", "5s")
+	if err != nil || !strings.Contains(out, "Ask carol to open https://github.com/login/device and enter the code ABCD-1234") ||
+		!strings.Contains(out, "carol accepted") {
+		t.Fatalf("invite: %v %q", err, out)
+	}
+}
