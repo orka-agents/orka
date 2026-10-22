@@ -44,53 +44,9 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	if reviewFirst && item.LastReviewedHeadSHA != pr.HeadSHA {
 		return false, nil
 	}
-	intent := ""
-	if full && pr.MergeableState == repositoryMonitorMergeableStateDirty {
-		intent = repositoryMonitorCommandIntentUpdateBranch
-	} else {
-		if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
-			return false, nil
-		}
-		fixFindings := func() (bool, error) {
-			if !full || item.LastVerdict != repositoryMonitorReviewVerdictNeedsChanges || item.LastReviewedHeadSHA != pr.HeadSHA || item.LastReviewID == "" {
-				return false, nil
-			}
-			review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
-			if err != nil {
-				return false, err
-			}
-			return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
-		}
-		if reviewFirst {
-			fix, err := fixFindings()
-			if err != nil {
-				return false, err
-			}
-			if fix {
-				intent = repositoryMonitorCommandIntentFix
-			}
-		}
-		if intent == "" {
-			broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
-			if err != nil {
-				return false, err
-			}
-			if broke {
-				intent = repositoryMonitorCommandIntentFixCI
-			}
-		}
-		if intent == "" && !reviewFirst {
-			fix, err := fixFindings()
-			if err != nil {
-				return false, err
-			}
-			if fix {
-				intent = repositoryMonitorCommandIntentFix
-			}
-		}
-	}
-	if intent == "" {
-		return false, nil
+	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst)
+	if err != nil || intent == "" {
+		return false, err
 	}
 	// The policy helper counts durable attempts, including commands exhausted
 	// before Task creation, before another command identity can be created.
@@ -136,6 +92,56 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	}
 	item.RepairState = repositoryMonitorRepairPhaseQueued
 	return true, r.Store.UpsertMonitorItem(ctx, item)
+}
+
+// repositoryMonitorAutomaticRepairIntent picks the repair for the pull
+// request's head, or "" for none. A full repair of a dirty head updates the
+// branch. Otherwise a repair label fixes the review's findings before CI, and
+// automatic repair fixes CI first.
+func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full, reviewFirst bool) (string, error) {
+	if full && pr.MergeableState == repositoryMonitorMergeableStateDirty {
+		return repositoryMonitorCommandIntentUpdateBranch, nil
+	}
+	if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
+		return "", nil
+	}
+	if reviewFirst {
+		fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
+		if err != nil {
+			return "", err
+		}
+		if fix {
+			return repositoryMonitorCommandIntentFix, nil
+		}
+	}
+	broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
+	if err != nil {
+		return "", err
+	}
+	if broke {
+		return repositoryMonitorCommandIntentFixCI, nil
+	}
+	if reviewFirst {
+		return "", nil
+	}
+	fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
+	if err != nil || !fix {
+		return "", err
+	}
+	return repositoryMonitorCommandIntentFix, nil
+}
+
+// repositoryMonitorReviewFindingsRepairable reports whether a full repair can
+// fix the findings of the pull request head's latest review.
+func (r *RepositoryMonitorReconciler) repositoryMonitorReviewFindingsRepairable(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full bool) (bool, error) {
+	if !full || item.LastVerdict != repositoryMonitorReviewVerdictNeedsChanges || item.LastReviewedHeadSHA != pr.HeadSHA || item.LastReviewID == "" {
+		return false, nil
+	}
+	review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+	if err != nil {
+		return false, err
+	}
+	return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
 }
 
 // Polling advances CI and review/repair outcomes even when GitHub emits no new
