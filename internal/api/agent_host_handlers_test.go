@@ -282,3 +282,23 @@ func TestOwnAgentHostOutlivesItsProvidersOptIn(t *testing.T) {
 		t.Fatal("the host must be deleted")
 	}
 }
+
+// With a retired provider's host kept, the host of the provider serving hosts
+// now is the person's host.
+func TestOwnAgentHostPrefersTheCurrentProvidersHost(t *testing.T) {
+	retired := linkedHost("gh-alice-old", "alice")
+	retired.Spec.GitHubTokenFrom.ConnectionRef.Name = connectors.ConnectionName("github-old", connectorTestIssuer, "alice")
+	h := newAgentHostAPI(t, retired, linkedHost("gh-alice", "alice"), &corev1alpha1.ConnectorProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-old", Namespace: agentHostTestNamespace},
+	})
+	if status, host := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || host.Name != "gh-alice" {
+		t.Fatalf("get: %d %+v, want the current provider's host", status, host)
+	}
+	if status, _ := h.do(http.MethodDelete, "/api/v1/agent-hosts/me"); status != http.StatusAccepted {
+		t.Fatalf("delete: %d", status)
+	}
+	// Once that one is gone, the retained host is still the person's.
+	if status, host := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || host.Name != "gh-alice-old" {
+		t.Fatalf("get after delete: %d %+v, want the retained host", status, host)
+	}
+}

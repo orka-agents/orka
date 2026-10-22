@@ -127,19 +127,32 @@ func (h *Handlers) ownAgentHost(c fiber.Ctx, action connectorAction) (*corev1alp
 	}
 	// Every provider counts, not only those serving hosts now: a host kept
 	// after its provider stopped serving them is still its person's to see
-	// and delete.
+	// and delete. A provider holds its deletion while Connections reference
+	// it, so a retained link's provider is still listed. The host of a
+	// provider serving hosts now comes first.
 	links := map[string]bool{}
 	for i := range providers.Items {
-		links[connectors.ConnectionName(providers.Items[i].Name, ui.Issuer, ui.Subject)] = true
+		links[connectors.ConnectionName(providers.Items[i].Name, ui.Issuer, ui.Subject)] =
+			providers.Items[i].Spec.AgentHost != nil && providers.Items[i].DeletionTimestamp.IsZero()
 	}
 	hosts := &corev1alpha1.AgentHostList{}
 	if err := h.client.List(ctx, hosts, client.InNamespace(namespace)); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "could not read agent hosts")
 	}
+	var retained *corev1alpha1.AgentHost
 	for i := range hosts.Items {
-		if from := hosts.Items[i].Spec.GitHubTokenFrom; from != nil && links[from.ConnectionRef.Name] {
-			return &hosts.Items[i], nil
+		from := hosts.Items[i].Spec.GitHubTokenFrom
+		if from == nil {
+			continue
 		}
+		if current, mine := links[from.ConnectionRef.Name]; mine && current {
+			return &hosts.Items[i], nil
+		} else if mine && retained == nil {
+			retained = &hosts.Items[i]
+		}
+	}
+	if retained != nil {
+		return retained, nil
 	}
 	return nil, fiber.NewError(fiber.StatusNotFound, "you have no agent host yet; link GitHub first, or wait a moment after linking")
 }
