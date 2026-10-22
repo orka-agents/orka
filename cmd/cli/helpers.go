@@ -45,9 +45,11 @@ type orkaConfig struct {
 	Token     string `yaml:"token,omitempty"`
 	Namespace string `yaml:"namespace,omitempty"`
 	// TokenKind is github-session for a session from orka login, which
-	// renews itself and is sent only to Server.
+	// renews itself and is sent only to SessionServer, the server that
+	// issued it: changing Server never redirects it.
 	TokenKind      string     `yaml:"tokenKind,omitempty"`
 	TokenExpiresAt *time.Time `yaml:"tokenExpiresAt,omitempty"`
+	SessionServer  string     `yaml:"sessionServer,omitempty"`
 }
 
 // portForwardCache holds cached port-forward connection info to avoid re-creating on every command.

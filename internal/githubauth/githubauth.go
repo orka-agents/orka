@@ -239,7 +239,14 @@ func (c Client) active(ctx context.Context, token, path string) (bool, error) {
 	if status != http.StatusOK {
 		return false, fmt.Errorf("read a GitHub membership: HTTP %d", status)
 	}
-	return membership.State == "active", nil
+	// GitHub answers active or pending; anything else is no verdict.
+	switch membership.State {
+	case "active":
+		return true, nil
+	case "pending":
+		return false, nil
+	}
+	return false, errors.New("GitHub answered a membership without a known state")
 }
 
 // DeviceCode is a started device flow.

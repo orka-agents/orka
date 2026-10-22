@@ -229,7 +229,7 @@ func (h *Handlers) completeInvite(id, login, providerName string, code githubaut
 		AuthType: AuthTypeGitHubSession, Issuer: githubauth.Issuer, Subject: strconv.FormatInt(user.ID, 10),
 		Username: user.Login, Namespace: h.watchNamespace,
 	}
-	connection, err := h.linkGitHubSignIn(ctx, ui, provider, tokens, !cfg.CreateHosts)
+	connection, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, !cfg.CreateHosts)
 	if err != nil {
 		h.invites.finish(id, InviteRefused, "the GitHub account could not be linked; invite again", "")
 		return

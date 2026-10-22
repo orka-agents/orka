@@ -14,10 +14,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -28,9 +31,22 @@ import (
 
 const signInTestUserID = "852750"
 
+// revocations records the tokens fakeGitHub was asked to revoke.
+type revocations struct {
+	mu     sync.Mutex
+	tokens []string
+}
+
+func (r *revocations) list() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.tokens...)
+}
+
 // fakeGitHub knows the app client-id, the person alice (852750) with token
-// ghu_alice, a member of acme, and bob (1002) with ghu_bob, who is not.
-func fakeGitHub(t *testing.T) *httptest.Server {
+// ghu_alice, a member of acme, and bob (1002) with ghu_bob, who is not. It
+// records revoked tokens in revoked, when set.
+func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -44,6 +60,15 @@ func fakeGitHub(t *testing.T) *httptest.Server {
 				AccessToken string `json:"access_token"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			if r.Method == http.MethodDelete {
+				if revoked != nil {
+					revoked.mu.Lock()
+					revoked.tokens = append(revoked.tokens, body.AccessToken)
+					revoked.mu.Unlock()
+				}
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 			users := map[string]map[string]any{
 				"ghu_alice": {"id": 852750, "login": "alice"}, "ghu_alice_renewed": {"id": 852750, "login": "alice"},
 				"ghu_alice_refreshed": {"id": 852750, "login": "alice"}, "ghu_alice_left": {"id": 852750, "login": "alice"},
@@ -89,7 +114,7 @@ func newSignInHarness(t *testing.T) *connectorTestHarness {
 		Allowed:     githubauth.Allowed{Orgs: []string{"acme"}},
 		Sessions:    h.store,
 		Credentials: fakeSignInCredentials{token: "ghu_alice_renewed"},
-		GitHub:      githubauth.Client{APIURL: fakeGitHub(t).URL},
+		GitHub:      githubauth.Client{APIURL: fakeGitHub(t, nil).URL},
 	}
 	h.handlers.watchNamespace = connectorTestNamespace
 	h.app.Get("/api/v1/auth/config", h.handlers.GetAuthConfig)
@@ -177,6 +202,126 @@ func TestGitHubSignInLinksTheAccountAndIssuesASession(t *testing.T) {
 	}
 	if connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] != corev1alpha1.ConnectionAgentHostDeclined {
 		t.Fatalf("annotations = %v", connection.Annotations)
+	}
+}
+
+// Signing in again keeps a link that still holds the person's account, so
+// sign-ins never pile up the grants custody keeps until disconnect, and
+// revokes the tokens it did not need.
+func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
+	h := newSignInHarness(t)
+	revoked := &revocations{}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: fakeGitHub(t, revoked).URL}
+	h.identity = nil
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	var grant int64
+	for cycle := range 20 {
+		h.identity = nil
+		status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
+		if status != http.StatusCreated {
+			t.Fatalf("sign-in %d: %d", cycle+1, status)
+		}
+		connection := &corev1alpha1.Connection{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+			t.Fatal(err)
+		}
+		if grant == 0 {
+			grant = connection.Status.GrantSequence
+		}
+		if connection.Status.GrantSequence != grant {
+			t.Fatalf("sign-in %d replaced the grant: %d, want %d", cycle+1, connection.Status.GrantSequence, grant)
+		}
+		if err := h.asSession(session.Token); err != nil {
+			t.Fatal(err)
+		}
+		if resp, _ := h.do(http.MethodDelete, "/api/v1/auth/session", nil); resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("sign out %d = %d", cycle+1, resp.StatusCode)
+		}
+	}
+	if got := revoked.list(); len(got) != 19 || got[0] != "ghu_alice_refreshed" {
+		t.Fatalf("revoked = %v, want each later sign-in's unused token", got)
+	}
+
+	// A link whose custody no longer yields the person's token is linked
+	// again from the sign-in.
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_bob"}
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800}); status != http.StatusCreated {
+		t.Fatalf("relink: %d", status)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.Status.GrantSequence == grant {
+		t.Fatal("a sign-in over a link holding another account must replace its grant")
+	}
+}
+
+// Two sign-ins racing to create the person's Connection both finish: the
+// loser goes on with the winner's.
+func TestGitHubSignInRacingTheConnectionCreate(t *testing.T) {
+	h := newSignInHarness(t)
+	h.createConflict = &atomic.Bool{}
+	h.createConflict.Store(true)
+	h.identity = nil
+	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
+	if status != http.StatusCreated || session.Token == "" {
+		t.Fatalf("sign-in after losing the create: %d %+v", status, session)
+	}
+}
+
+// A token GitHub gave no lifetime still ends in custody, so a link that
+// cannot refresh stops, and membership is checked again on each refresh.
+func TestGitHubSignInBoundsATokenWithoutExpiry(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	before := time.Now()
+	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice"})
+	if status != http.StatusCreated {
+		t.Fatalf("sign-in: %d", status)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: session.Connection}, connection); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil || held.RefreshToken != "" || held.ExpiresAt.IsZero() || held.ExpiresAt.After(before.Add(maxGitHubAccessTokenLife+time.Minute)) {
+		t.Fatalf("custody expires at %v (%v), want within %s", held.ExpiresAt, err, maxGitHubAccessTokenLife)
+	}
+}
+
+// A Connection made elsewhere is linked only once it carries the custody
+// finalizer, which tombstones and revokes custody when it is deleted.
+func TestGitHubSignInWaitsForTheCustodyFinalizer(t *testing.T) {
+	h := newSignInHarness(t)
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	unprotected := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connectorTestNamespace},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject:     corev1alpha1.ConnectionSubject{Issuer: githubauth.Issuer, Subject: signInTestUserID},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+			Mode:        corev1alpha1.ConnectionModeReadOnly,
+		},
+	}
+	if err := h.client.Create(context.Background(), unprotected); err != nil {
+		t.Fatal(err)
+	}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800}); status != http.StatusConflict ||
+		session.Token != "" {
+		t.Fatalf("sign-in over an unprotected Connection: %d, want 409 and no session", status)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.Status.GrantSequence != 0 {
+		t.Fatalf("an unprotected Connection was linked: %+v", connection.Status)
 	}
 }
 

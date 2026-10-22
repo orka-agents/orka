@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -29,14 +28,14 @@ import (
 type inviteGitHub struct {
 	mu       sync.Mutex
 	approved map[string]any
-	revoked  []string
+	revoked  *revocations
 }
 
 func newInviteHarness(t *testing.T, approved map[string]any) (*connectorTestHarness, *inviteGitHub) {
 	t.Helper()
 	h := newSignInHarness(t)
-	gh := &inviteGitHub{approved: approved}
-	api := fakeGitHub(t)
+	gh := &inviteGitHub{approved: approved, revoked: &revocations{}}
+	api := fakeGitHub(t, gh.revoked)
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -49,32 +48,7 @@ func newInviteHarness(t *testing.T, approved map[string]any) (*connectorTestHarn
 		}
 	}))
 	t.Cleanup(web.Close)
-	revocations := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/applications/client-id/token" {
-			var body struct {
-				AccessToken string `json:"access_token"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			gh.mu.Lock()
-			gh.revoked = append(gh.revoked, body.AccessToken)
-			gh.mu.Unlock()
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		// Everything else is the ordinary fake GitHub API.
-		request, _ := http.NewRequestWithContext(r.Context(), r.Method, api.URL+r.URL.Path, r.Body)
-		request.Header = r.Header.Clone()
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		defer func() { _ = response.Body.Close() }()
-		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
-	}))
-	t.Cleanup(revocations.Close)
-	h.handlers.githubSignIn.GitHub = githubauth.Client{WebURL: web.URL, APIURL: revocations.URL, MinPollInterval: time.Millisecond}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{WebURL: web.URL, APIURL: api.URL, MinPollInterval: time.Millisecond}
 	h.app.Post("/api/v1/agent-hosts/invites", h.handlers.CreateInvite)
 	h.app.Get("/api/v1/agent-hosts/invites/:id", h.handlers.GetInvite)
 	h.identity = &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:orka-system:operator", Namespace: connectorTestNamespace}
@@ -128,8 +102,8 @@ func TestInviteLinksTheInvitedPerson(t *testing.T) {
 	if connection.Spec.Subject.Subject != signInTestUserID || connection.Status.GrantSequence == 0 {
 		t.Fatalf("connection = %+v", connection.Spec)
 	}
-	if len(gh.revoked) != 0 {
-		t.Fatalf("an accepted invite revokes nothing: %v", gh.revoked)
+	if len(gh.revoked.list()) != 0 {
+		t.Fatalf("an accepted invite revokes nothing: %v", gh.revoked.list())
 	}
 	// The outcome reads back through the API.
 	resp, raw := h.do(http.MethodGet, "/api/v1/agent-hosts/invites/"+invite.ID, nil)
@@ -157,8 +131,8 @@ func TestInviteRefusesSomeoneElseOrAnOutsider(t *testing.T) {
 			}
 			gh.mu.Lock()
 			defer gh.mu.Unlock()
-			if len(gh.revoked) != 1 || gh.revoked[0] != test.revoked {
-				t.Fatalf("revoked = %v, want [%s]", gh.revoked, test.revoked)
+			if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != test.revoked {
+				t.Fatalf("revoked = %v, want [%s]", revoked, test.revoked)
 			}
 			connections := &corev1alpha1.ConnectionList{}
 			if err := h.client.List(context.Background(), connections); err != nil {

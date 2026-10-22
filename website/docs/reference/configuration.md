@@ -484,7 +484,7 @@ Long-lived, single-user agent hosts on Orka-owned Pods. Off by default. See
 | `--enable-agent-hosts` | `ORKA_ENABLE_AGENT_HOSTS` | `false` | Serves `AgentHostTemplate` and `AgentHost`. Helm: `controller.agentHosts.enabled`. |
 | `--github-sign-in-enabled` / `--github-sign-in-provider` | none | `false` / `github` | Sign people in with GitHub through the named agent-host ConnectorProvider's GitHub App. Needs `--connectors-enabled`. Helm: `controller.githubSignIn.enabled`. |
 | `--github-sign-in-allowed-orgs` / `--github-sign-in-allowed-teams` | none | `""` | Comma-separated orgs, and `org/team` slugs, whose active members may sign in. At least one is required. |
-| `--github-sign-in-create-hosts` | none | `true` | Start an agent host for each sign-in; `false` links accounts only. |
+| `--github-sign-in-create-hosts` | none | `true` | Start an agent host for each sign-in; `false` links accounts only. `true` needs `--enable-agent-hosts`. |
 | `--agent-host-namespace` | `ORKA_AGENT_HOST_NAMESPACE` | `orka-agent-hosts` | Namespace for host Pods, volumes, NetworkPolicies and Secrets. Must differ from `--watch-namespace`. Helm: `controller.agentHosts.namespace`. |
 | `--agent-host-agent-image` | `ORKA_AGENT_HOST_AGENT_IMAGE` | — | Digest-pinned image with the `orka-host-agent` sidecar, normally the controller image. Required with `--enable-agent-hosts`. Helm: `controller.agentHosts.agentImage`. |
 | `--agent-host-controller-pod-labels` | `ORKA_AGENT_HOST_CONTROLLER_POD_LABELS` | `orka.ai/network-role=controller` | Labels of the controller Pods that may read host status through each host's NetworkPolicy. The default matches the shipped controller Pods. |

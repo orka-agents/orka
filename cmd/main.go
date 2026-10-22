@@ -1480,6 +1480,10 @@ func main() {
 		case strings.TrimSpace(githubSignInProvider) == "":
 			setupLog.Error(errors.New("no provider"), "GitHub sign-in needs --github-sign-in-provider")
 			os.Exit(1)
+		case githubSignInCreateHosts && !agentHostsEnabled:
+			setupLog.Error(errors.New("agent hosts are disabled"),
+				"GitHub sign-in creates agent hosts only with --enable-agent-hosts; pass --github-sign-in-create-hosts=false to sign in without them")
+			os.Exit(1)
 		}
 		githubSignIn = api.GitHubSignInConfig{
 			Enabled: true, Provider: strings.TrimSpace(githubSignInProvider), Allowed: allowed,

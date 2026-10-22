@@ -222,6 +222,9 @@ without a host.
   hours, refreshing the person's GitHub token and checking membership again; `orka logout`
   ends it. The CLI sends it only to the server that issued it, and never over plain HTTP except
   to localhost.
+- Signing in again keeps a link that still works, and Orka revokes the new GitHub token. A
+  token that GitHub gave no expiry is held for at most 8 hours; without user-token expiration
+  on the app, the link then ends and the person signs in again.
 - A session reaches only the person's own links, host and connection routes. Every other API
   route still needs OIDC or Kubernetes credentials, and sessions cannot mint AHP tokens yet.
 - Someone who leaves the allowed orgs cannot renew, so their access ends within 12 hours. Their

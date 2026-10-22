@@ -66,7 +66,8 @@ func newConfigSetTokenCmd() *cobra.Command {
 			}
 
 			cfg := loadConfig()
-			cfg.Token = value
+			// A token set here is not a session from orka login.
+			cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer = value, "", nil, ""
 			if err := saveConfig(cfg); err != nil {
 				return fmt.Errorf("save config: %w", err)
 			}
