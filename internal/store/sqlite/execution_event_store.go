@@ -366,9 +366,9 @@ func nextSQLiteSessionExecutionEventSeq(ctx context.Context, conn sqliteExecutio
 	return next, nil
 }
 
-func (s *Store) latestSQLiteSessionExecutionEventSeq(ctx context.Context, namespace, sessionName string) (int64, error) {
+func latestSQLiteSessionExecutionEventSeq(ctx context.Context, q taskDataExecutor, namespace, sessionName string) (int64, error) {
 	eventSeq := int64(0)
-	if err := s.db.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END), 0)
 		 FROM execution_events
 		 WHERE namespace = ? AND session_name = ?`,
@@ -376,7 +376,7 @@ func (s *Store) latestSQLiteSessionExecutionEventSeq(ctx context.Context, namesp
 	).Scan(&eventSeq); err != nil {
 		return 0, err
 	}
-	cursorSeq, err := sqliteSessionCursorSeq(ctx, s.db, namespace, sessionName)
+	cursorSeq, err := sqliteSessionCursorSeq(ctx, q, namespace, sessionName)
 	if err != nil {
 		return 0, err
 	}
@@ -488,10 +488,6 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	}
 
 	baseArgs := []any{filter.Namespace, filter.SessionName}
-	latestSeq, err := s.latestSQLiteSessionExecutionEventSeq(ctx, filter.Namespace, filter.SessionName)
-	if err != nil {
-		return nil, 0, err
-	}
 
 	outerWhere := []string{"effective_session_seq > ?"}
 	queryArgs := append([]any{}, baseArgs...)
@@ -519,22 +515,32 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	WHERE ` + strings.Join(outerWhere, " AND ") + `
 	ORDER BY effective_session_seq ASC
 	LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close() //nolint:errcheck
-
 	out := []store.SessionExecutionEvent{}
-	for rows.Next() {
-		event, err := scanSessionExecutionEvent(rows)
+	var latestSeq int64
+	// The watermark, the retained Session cursor and the page read one
+	// snapshot, so a concurrent append and stream deletion cannot produce a
+	// page and latest sequence that never existed together.
+	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var err error
+		latestSeq, err = latestSQLiteSessionExecutionEventSeq(ctx, q, filter.Namespace, filter.SessionName)
 		if err != nil {
-			return nil, 0, err
+			return err
 		}
-		out = append(out, event)
-		latestSeq = max(latestSeq, event.SessionSeq)
-	}
-	if err := rows.Err(); err != nil {
+		rows, err := q.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close() //nolint:errcheck
+		for rows.Next() {
+			event, err := scanSessionExecutionEvent(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, event)
+			latestSeq = max(latestSeq, event.SessionSeq)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, 0, err
 	}
 	success = true

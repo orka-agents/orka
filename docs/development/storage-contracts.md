@@ -134,15 +134,19 @@ the observable parts.
   A method that returns several records, such as a Session with its
   transcript, reads them from one snapshot; SQLite does this for `GetSession`,
   `LoadTranscriptThrough`, `ReadSessionSoul`, `GetGatewayQueueStats`,
-  `ListPatchProposals` and `GetLatestExecutionEventSeqs`, the read methods
-  found issuing more than one query. The
+  `ListPatchProposals`, `GetLatestExecutionEventSeqs`,
+  `ListSessionExecutionEvents` and `HasSessionCleanupFenceForUID`, the read
+  methods found issuing more than one query. The
   suite's concurrency cases release eight callers at once against Session
   creation, chat-turn reservation, deduplicated event appends, terminal
   approvals and gateway claims, and require exactly one winner (or one claim
-  per event). Two more cases read while writes run, and every write waits for
-  a read to start: one requires a Session's message count to match the
-  messages returned, and one requires stream heads read in several batches to
-  come from one snapshot.
+  per event). Four more cases read while writes run, and every write waits
+  for a read to start: one requires a Session's message count to match the
+  messages returned, one requires stream heads read in several batches to
+  come from one snapshot, one requires a Session events page and its latest
+  sequence to come from one snapshot while streams are appended to and
+  deleted, and one requires a Session UID to stay fenced while its cleanup
+  intent is replaced by a completion.
 - **Durability.** A nil error means the change survives a provider restart and
   any failover the provider declares automatic. `Describe` reports a
   `DurabilityClass` so Orka can refuse automatic continuation after a failover

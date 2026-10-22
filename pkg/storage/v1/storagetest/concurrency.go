@@ -165,6 +165,91 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 		})
 	})
 
+	t.Run("Session event pages are read from one snapshot during appends and deletes", func(t *testing.T) {
+		provider := newProvider(t)
+		const session = "snapshot-session"
+		filter := storagev1.SessionExecutionEventFilter{Namespace: eventsTenant, SessionName: session, Limit: 50}
+		// firstEventSeqs holds the Session sequence of each round's first event.
+		// A round appends two events to a new stream and then deletes the stream,
+		// so in any snapshot with an empty page the latest sequence is zero or a
+		// round's second event, never a first event that was still stored.
+		var firstEventSeqs sync.Map
+		appendToSession := func(stream, eventType string) error {
+			event := taskEvent(eventsTenant, stream, eventType)
+			event.SessionName = session
+			_, err := provider.AppendExecutionEvent(t.Context(), event)
+			return err
+		}
+		readDuringWrites(t, 25, func(i int) error {
+			stream := fmt.Sprintf("session-task-%d", i)
+			if err := appendToSession(stream, storagev1.ExecutionEventTypeTaskStarted); err != nil {
+				return err
+			}
+			_, latest, err := provider.ListSessionExecutionEvents(t.Context(), filter)
+			if err != nil {
+				return err
+			}
+			firstEventSeqs.Store(latest, struct{}{})
+			if err := appendToSession(stream, storagev1.ExecutionEventTypeTaskSucceeded); err != nil {
+				return err
+			}
+			return provider.DeleteExecutionEvents(t.Context(), eventsTenant, storagev1.ExecutionEventStreamTypeTask, stream)
+		}, func() error {
+			page, latest, err := provider.ListSessionExecutionEvents(t.Context(), filter)
+			if err != nil {
+				return err
+			}
+			if _, first := firstEventSeqs.Load(latest); first && len(page) == 0 {
+				return fmt.Errorf("empty page reports latest sequence %d, which belongs to an event that was still stored", latest)
+			}
+			return nil
+		})
+	})
+
+	t.Run("a Session UID stays fenced while its cleanup completes", func(t *testing.T) {
+		provider := newProvider(t)
+		// prepared holds one more than the last round whose cleanup intent was
+		// stored. From then on its Session UID is fenced, first by the intent and
+		// then by the completion that replaces it.
+		var prepared atomic.Int64
+		readDuringWrites(t, 25, func(i int) error {
+			name, uid := fmt.Sprintf("fenced-%d", i), fmt.Sprintf("fenced-uid-%d", i)
+			if err := provider.CreateSession(t.Context(), &storagev1.SessionRecord{
+				Namespace: "tenant", Name: name, SessionType: "task", CreatedAt: controlBaseTime, UpdatedAt: controlBaseTime,
+			}); err != nil {
+				return err
+			}
+			if err := provider.BindSessionCleanupIdentity(t.Context(), "tenant", name, uid); err != nil {
+				return err
+			}
+			intent := storagev1.SessionCleanupIntent{
+				Namespace: "tenant", SessionName: name, SessionUID: uid, OperationID: "delete-" + name,
+				OperationDigest: controlDigest("delete-" + name), PreparedAt: controlBaseTime,
+			}
+			if _, err := provider.PrepareSessionCleanup(t.Context(), intent); err != nil {
+				return err
+			}
+			prepared.Store(int64(i) + 1)
+			return provider.CompleteSessionCleanup(t.Context(), storagev1.CompleteSessionCleanupRequest{
+				Namespace: "tenant", SessionName: name, OperationID: intent.OperationID, OperationDigest: intent.OperationDigest,
+			})
+		}, func() error {
+			round := prepared.Load()
+			if round == 0 {
+				return nil
+			}
+			uid := fmt.Sprintf("fenced-uid-%d", round-1)
+			fenced, err := provider.HasSessionCleanupFenceForUID(t.Context(), uid)
+			if err != nil {
+				return err
+			}
+			if !fenced {
+				return fmt.Errorf("session UID %s lost its cleanup fence", uid)
+			}
+			return nil
+		})
+	})
+
 	t.Run("parallel chat turns admit one", func(t *testing.T) {
 		provider := newProvider(t)
 		expires := time.Now().UTC().Add(time.Hour)
