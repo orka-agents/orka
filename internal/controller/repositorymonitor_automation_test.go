@@ -313,6 +313,14 @@ func TestRepositoryMonitorRepairDoesNotStarveLaterPullRequests(t *testing.T) {
 			if err := db.CreateRepairJob(ctx, &store.RepairJob{ID: "first-pr-repair", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: 1, HeadSHA: "head1", TaskName: "active-repair", Phase: phase, CreatedAt: time.Now()}); err != nil {
 				t.Fatal(err)
 			}
+			// The first PR's head is already reviewed, so only its repair can
+			// compete for the run's single slot.
+			if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "first-pr-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "head1", Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "head1", BaseBranch: "main", LastReviewID: "first-pr-review", LastReviewedHeadSHA: "head1", LastVerdict: repositoryMonitorReviewVerdictPassed}); err != nil {
+				t.Fatal(err)
+			}
 			body := `[
 				{"number":1,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"first","sha":"head1","repo":{"full_name":"orka-agents/orka"}}},
 				{"number":2,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"second","sha":"head2","repo":{"full_name":"orka-agents/orka"}}}

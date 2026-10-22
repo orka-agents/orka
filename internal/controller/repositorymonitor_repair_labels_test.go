@@ -143,17 +143,13 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 
 //nolint:gocyclo // One table covers every label, review, and CI combination the policy distinguishes.
 func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
-	passedReview := func(item *store.MonitorItem) {
-		item.LastVerdict = repositoryMonitorReviewVerdictPassed
-		item.LastReviewedHeadSHA = "head31"
-	}
 	tests := []struct {
 		name        string
 		labels      []string
 		mergeable   string
 		github      *repositoryMonitorRepairLabelsGitHub
 		review      string // verdict of a stored review for the head, if any
-		item        func(*store.MonitorItem)
+		mutate      func(*corev1alpha1.RepositoryMonitor)
 		wantHandled bool
 		wantIntent  string
 		wantSkip    string
@@ -176,7 +172,7 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			name:        "fix label fixes CI the pull request broke once the review is clean",
 			labels:      []string{"orka:fix"},
 			github:      (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure", "lint": "success"}, "base31": {"tests": "success", "lint": "success"}}}).labeled("maintainer", "orka:fix"),
-			item:        passedReview,
+			review:      repositoryMonitorReviewVerdictPassed,
 			wantHandled: true,
 			wantIntent:  repositoryMonitorCommandIntentFixCI,
 		},
@@ -184,7 +180,7 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			name:   "CI already failing on the base commit is left alone",
 			labels: []string{"orka:fix"},
 			github: (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"Tests": "failure"}, "base31": {"tests": "failure"}}}).labeled("maintainer", "orka:fix"),
-			item:   passedReview,
+			review: repositoryMonitorReviewVerdictPassed,
 		},
 		{
 			name:      "fix label reviews a conflicted branch before updating it",
@@ -197,7 +193,7 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			labels:      []string{"orka:fix"},
 			mergeable:   repositoryMonitorMergeableStateDirty,
 			github:      (&repositoryMonitorRepairLabelsGitHub{}).labeled("maintainer", "orka:fix"),
-			item:        passedReview,
+			review:      repositoryMonitorReviewVerdictPassed,
 			wantHandled: true,
 			wantIntent:  repositoryMonitorCommandIntentUpdateBranch,
 		},
@@ -219,7 +215,7 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			name:   "review label alone never repairs",
 			labels: []string{"orka:review"},
 			github: &repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}},
-			item:   passedReview,
+			review: repositoryMonitorReviewVerdictPassed,
 		},
 		{
 			name:        "label added by a triage account is refused",
@@ -227,6 +223,29 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			github:      (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}}).labeled("maintainer", "orka:fix-ci").unlabeled("maintainer", "orka:fix-ci").labeled("triager", "orka:fix-ci"),
 			wantHandled: true,
 			wantSkip:    repositoryMonitorRepairSkipLabelActorNotPermitted,
+		},
+		{
+			name:   "fix label ignores a review from before validation was configured",
+			labels: []string{"orka:fix"},
+			github: (&repositoryMonitorRepairLabelsGitHub{}).labeled("maintainer", "orka:fix"),
+			review: repositoryMonitorReviewVerdictNeedsChanges,
+			mutate: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.Validation.Image = "registry.example/validation@sha256:" + strings.Repeat("a", 64)
+			},
+		},
+		{
+			name:     "spent budget leaves an unreviewed head to review selection",
+			github:   &repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}},
+			mutate:   withoutRepositoryMonitorRepairLabelsAndBudget,
+			wantSkip: repositoryMonitorRepairPRBudgetReason,
+		},
+		{
+			name:        "spent budget on a reviewed head handles the pull request",
+			github:      &repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}},
+			review:      repositoryMonitorReviewVerdictPassed,
+			mutate:      withoutRepositoryMonitorRepairLabelsAndBudget,
+			wantHandled: true,
+			wantSkip:    repositoryMonitorRepairPRBudgetReason,
 		},
 		{
 			name:        "label added by a non-collaborator is refused",
@@ -257,6 +276,9 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			monitor.Spec.Repair.Enabled = true
 			monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
 			configureRepositoryMonitorTestWriteCredentials(monitor)
+			if tt.mutate != nil {
+				tt.mutate(monitor)
+			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
 				WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
@@ -277,9 +299,6 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 					t.Fatal(err)
 				}
 				item.LastReviewID, item.LastVerdict, item.LastReviewedHeadSHA = record.ID, record.Verdict, record.HeadSHA
-			}
-			if tt.item != nil {
-				tt.item(item)
 			}
 			run := &store.MonitorRun{ID: "poll", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "workflow", StartedAt: time.Now()}
 			handled, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, run, "orka-agents", "orka", pr, item)
@@ -305,6 +324,15 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withoutRepositoryMonitorRepairLabelsAndBudget makes every pull request
+// repairable and leaves no repair budget.
+func withoutRepositoryMonitorRepairLabelsAndBudget(m *corev1alpha1.RepositoryMonitor) {
+	m.Spec.Targets.PullRequests.IncludeLabels = nil
+	m.Spec.Repair.IncludeLabels = nil
+	m.Spec.Repair.CIOnlyLabels = nil
+	m.Spec.Repair.MaxRepairsPerPR = new(int32(0))
 }
 
 func TestRepositoryMonitorInventorySkipsReviewForCIOnlyPullRequests(t *testing.T) {
@@ -347,5 +375,52 @@ func TestRepositoryMonitorInventorySkipsReviewForCIOnlyPullRequests(t *testing.T
 	ciOnly, err := monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorPullRequestKind, "1")
 	if err != nil || ciOnly.State != repositoryMonitorItemStateOpen || ciOnly.SkipReason != repositoryMonitorSkipReasonCIOnly {
 		t.Fatalf("ci-only item = %#v err=%v, want an open item skipped as ci_only", ciOnly, err)
+	}
+}
+
+func TestRepositoryMonitorInventoryReviewsHeadAfterRepairRefusal(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("refused-repair")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Repair.MaxRepairsPerPR = new(int32(0))
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
+		{"number":1,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"first","sha":"head1","repo":{"full_name":"orka-agents/orka"}}}
+	]`)
+	defer server.Close()
+	original := server.Config.Handler
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/check-runs"):
+			conclusion := "success"
+			if strings.Contains(req.URL.Path, "/head1/") {
+				conclusion = "failure"
+			}
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":%q}]}`, conclusion)
+		case strings.HasSuffix(req.URL.Path, "/status"):
+			_, _ = w.Write([]byte(`{"state":"success","statuses":[]}`))
+		default:
+			original.ServeHTTP(w, req)
+		}
+	})
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
+	// The head broke CI but the repair budget is spent. The refusal must not
+	// keep the head from ever being reviewed.
+	if _, created, _, err := r.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: "poll", TargetKind: repositoryMonitorPullRequestKind}, "orka-agents", "orka"); err != nil || created != 1 {
+		t.Fatalf("refused repair starved review: created=%d err=%v", created, err)
+	}
+	item, err := db.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil || item.LastVerdict != repositoryMonitorRunPhaseQueued || item.LastReviewID == "" || item.RepairState != repositoryMonitorRepairPhaseFailed {
+		t.Fatalf("item = %+v err=%v, want a queued review with the refused repair recorded", item, err)
 	}
 }

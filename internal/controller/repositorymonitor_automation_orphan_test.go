@@ -104,7 +104,9 @@ func TestRepositoryMonitorAutomaticRepairRecoversExhaustedPreTaskCommands(t *tes
 					t.Fatalf("exhausted pre-Task failure was lost: state=%q err=%v", item.RepairState, err)
 				}
 			}
-			if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{}, "orka-agents", "orka", pr, item); err != nil || !handled || item.SkipReason != wantReason {
+			// The head has no review yet, so the refusal leaves the pull
+			// request to review selection; the bound still allows no command.
+			if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{}, "orka-agents", "orka", pr, item); err != nil || handled || item.SkipReason != wantReason {
 				t.Fatalf("attempt bound not enforced: handled=%v reason=%q err=%v", handled, item.SkipReason, err)
 			}
 			commands, _, err := db.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name})

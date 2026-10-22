@@ -41,8 +41,13 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	// A repair label runs a review-fix loop: each head is reviewed, its
 	// findings are fixed first, and CI is fixed once the review has nothing to fix.
 	reviewFirst := full && len(monitor.Spec.Repair.IncludeLabels) > 0
-	if reviewFirst && item.LastReviewedHeadSHA != pr.HeadSHA {
-		return false, nil
+	if reviewFirst {
+		// The review must still be current: a stale or pre-validation review
+		// of this head is not a reason to change it.
+		fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, pr.HeadSHA)
+		if err != nil || !fresh {
+			return false, err
+		}
 	}
 	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst)
 	if err != nil || intent == "" {
@@ -55,9 +60,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 		return false, err
 	}
 	if reason != "" {
-		item.RepairState = repositoryMonitorRepairPhaseFailed
-		item.SkipReason = reason
-		return true, r.Store.UpsertMonitorItem(ctx, item)
+		return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, pr, item, reason)
 	}
 	id := "policy-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d|%s|%s|%d|%d", monitor.UID, monitor.Generation, pr.Number, pr.HeadSHA, intent, prCount, headCount))
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
@@ -68,9 +71,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 				return false, err
 			}
 			if !permitted {
-				item.RepairState = repositoryMonitorRepairPhaseFailed
-				item.SkipReason = repositoryMonitorRepairSkipLabelActorNotPermitted
-				return true, r.Store.UpsertMonitorItem(ctx, item)
+				return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, pr, item, repositoryMonitorRepairSkipLabelActorNotPermitted)
 			}
 		}
 		now := time.Now()
@@ -195,6 +196,22 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorWorkflowPoll(ctx con
 		return err
 	}
 	return nil
+}
+
+// refuseRepositoryMonitorAutomaticRepair records why no repair starts. A
+// refusal starts no work, so a reviewed pull request whose head has no current
+// review goes on to review selection instead of repeating the refusal every
+// poll; otherwise the refusal handles the pull request for this poll.
+func (r *RepositoryMonitorReconciler) refuseRepositoryMonitorAutomaticRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, reason string) (bool, error) {
+	item.RepairState = repositoryMonitorRepairPhaseFailed
+	item.SkipReason = reason
+	if repositoryMonitorPullRequestReviewed(monitor.Spec, pr) {
+		fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, pr.HeadSHA)
+		if err != nil || !fresh {
+			return false, err
+		}
+	}
+	return true, r.Store.UpsertMonitorItem(ctx, item)
 }
 
 func repositoryMonitorManagedWorkflow(monitor *corev1alpha1.RepositoryMonitor) bool {
