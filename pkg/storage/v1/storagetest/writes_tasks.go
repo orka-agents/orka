@@ -76,6 +76,9 @@ func init() {
 			},
 			args:    fixed("tenant", "task", []byte("new result")),
 			observe: observeResult,
+			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.SaveResult(t.Context(), "tenant", "task", []byte("newer result")))
+			},
 		},
 		writeCase[storagev1.StateProvider]{
 			method: "DeleteResult",
@@ -85,6 +88,9 @@ func init() {
 			},
 			args:    fixed("tenant", "task"),
 			observe: observeResult,
+			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.SaveResult(t.Context(), "tenant", "task", []byte("written again")))
+			},
 		},
 		writeCase[storagev1.StateProvider]{
 			method:  "SavePromptResultReceipt",
@@ -105,6 +111,9 @@ func init() {
 			},
 			args:    fixed("tenant", "coordinator"),
 			observe: observePlan,
+			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.SavePlan(t.Context(), "tenant", "coordinator", &storagev1.PlanState{Iteration: 3, Summary: "again"}))
+			},
 		},
 		writeCase[storagev1.StateProvider]{
 			method: "SendMessage",
@@ -120,10 +129,11 @@ func init() {
 			observe: observeMessages,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "DeleteTaskMessages",
-			setup:   sendFixtureMessages,
-			args:    fixed("tenant", "worker-a"),
-			observe: observeMessages,
+			method:      "DeleteTaskMessages",
+			setup:       sendFixtureMessages,
+			args:        fixed("tenant", "worker-a"),
+			observe:     observeMessages,
+			afterCommit: sendFixtureMessages,
 		},
 		writeCase[storagev1.StateProvider]{
 			method:  "DeleteParentMessages",

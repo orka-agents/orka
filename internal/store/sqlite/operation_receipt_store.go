@@ -7,6 +7,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
@@ -184,6 +185,16 @@ func writeOperationInto[T, R any](
 	}
 	*record = result.Second
 	return result.First, nil
+}
+
+// requireOwnTransaction refuses an administrative method called inside
+// another transaction. Its outcome is durable when it returns, which an
+// enclosing transaction that may still roll back cannot promise.
+func (s *Store) requireOwnTransaction(ctx context.Context, method string) error {
+	if s.taskDataTx(ctx) != nil || ctx.Value(writeOperationKey{}) != nil {
+		return store.ValidationErrorf("%s must not run inside another transaction", method)
+	}
+	return nil
 }
 
 // requireEnvelopeFence checks that a method's explicit fence equals the
@@ -409,6 +420,9 @@ func (s *Store) ResolveOperation(ctx context.Context, request storagev1.ResolveO
 	if err := request.Validate(); err != nil {
 		return storagev1.OperationOutcome{}, err
 	}
+	if err := s.requireOwnTransaction(ctx, "ResolveOperation"); err != nil {
+		return storagev1.OperationOutcome{}, err
+	}
 	var outcome storagev1.OperationOutcome
 	err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := requireDataset(tx, request.DatasetID); err != nil {
@@ -494,30 +508,46 @@ func (s *Store) pruneExpiredOperationReceipts(ctx context.Context) error {
 }
 
 // writeTx is the transaction a write method runs in. Inside a write
-// operation or a task-data transaction it is that transaction, and Commit and
-// Rollback leave it to its owner, which commits the change together with its
-// operation receipt.
+// operation or a task-data transaction it is a savepoint of that transaction:
+// Commit releases the savepoint and Rollback undoes the method's writes, so
+// the method behaves as it does on its own, and the owner commits the result
+// together with its operation receipt.
 type writeTx struct {
 	*sql.Tx
-	joined bool
+	savepoint string
+	done      bool
 }
 
-// Commit commits a transaction writeTx began, and does nothing for a joined
-// one.
+// writeSavepoints names the savepoints of joined write transactions, so
+// nested ones never share a name.
+var writeSavepoints atomic.Uint64
+
+// Commit commits a transaction writeTx began, or releases its savepoint.
 func (t *writeTx) Commit() error {
-	if t.joined {
-		return nil
+	if t.savepoint == "" {
+		return t.Tx.Commit()
 	}
-	return t.Tx.Commit()
+	if t.done {
+		return sql.ErrTxDone
+	}
+	t.done = true
+	_, err := t.ExecContext(context.Background(), `RELEASE `+t.savepoint)
+	return err
 }
 
-// Rollback rolls back a transaction writeTx began, and does nothing for a
-// joined one: the owner rolls it back when the write returns its error.
+// Rollback rolls back a transaction writeTx began, or undoes the writes made
+// since its savepoint. After Commit it does nothing.
 func (t *writeTx) Rollback() error {
-	if t.joined {
-		return nil
+	if t.savepoint == "" {
+		return t.Tx.Rollback()
 	}
-	return t.Tx.Rollback()
+	if t.done {
+		return sql.ErrTxDone
+	}
+	t.done = true
+	_, rollbackErr := t.ExecContext(context.Background(), `ROLLBACK TO `+t.savepoint)
+	_, releaseErr := t.ExecContext(context.Background(), `RELEASE `+t.savepoint)
+	return errors.Join(rollbackErr, releaseErr)
 }
 
 // securityWriteStore returns the store a security write runs on. Security
@@ -538,7 +568,11 @@ func (s *Store) securityWriteStore(ctx context.Context) *Store {
 // so a write method never opens a second transaction while ctx carries one.
 func (s *Store) beginTx(ctx context.Context) (*writeTx, error) {
 	if tx := s.taskDataTx(ctx); tx != nil {
-		return &writeTx{Tx: tx, joined: true}, nil
+		name := fmt.Sprintf("orka_write_%d", writeSavepoints.Add(1))
+		if _, err := tx.ExecContext(ctx, `SAVEPOINT `+name); err != nil {
+			return nil, err
+		}
+		return &writeTx{Tx: tx, savepoint: name}, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

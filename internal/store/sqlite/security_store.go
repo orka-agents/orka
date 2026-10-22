@@ -1325,7 +1325,7 @@ func (s *Store) bindPatchProposalPublicationEvidenceWrite(ctx context.Context, p
 		return fmt.Errorf("%w: patch proposal %s/%s publication evidence changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
 	}
 	if err := tx.Commit(); err != nil {
-		fresh, freshEvidenceJSON, getErr := getPatchProposalPublicationBinding(ctx, s.db, proposal.Namespace, proposal.ID)
+		fresh, freshEvidenceJSON, getErr := getPatchProposalPublicationBinding(ctx, s.securityDB(), proposal.Namespace, proposal.ID)
 		if getErr == nil && samePatchProposalPublicationBinding(fresh, proposal, freshEvidenceJSON, evidenceJSON) {
 			proposal.CreatedAt = fresh.CreatedAt
 			proposal.UpdatedAt = fresh.UpdatedAt
@@ -1509,7 +1509,7 @@ func (s *Store) updatePatchProposalWrite(ctx context.Context, proposal *store.Pa
 		return nil
 	}
 
-	existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, s.db, proposal.Namespace, proposal.ID)
+	existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, s.securityDB(), proposal.Namespace, proposal.ID)
 	if err != nil {
 		return err
 	}

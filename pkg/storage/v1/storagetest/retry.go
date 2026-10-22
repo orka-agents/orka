@@ -75,30 +75,36 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 	t.Run("a reused event dedupe key must belong to the same Task, Session and tool call", func(t *testing.T) {
 		provider, _ := prepare(t)
 		ctx := t.Context()
-		stored, appended, err := provider.AppendExecutionEventIfAbsent(ctx, caseEvent(), "event-1")
+		toolEvent := func() *storagev1.ExecutionEvent {
+			event := caseEvent()
+			event.SessionName = "session-a"
+			event.ToolCallID = "call-1"
+			return event
+		}
+		stored, appended, err := provider.AppendExecutionEventIfAbsent(ctx, toolEvent(), "event-1")
 		require.NoError(t, err)
 		require.True(t, appended)
 
-		rederived := caseEvent()
-		rederived.Summary = "re-derived after a restart"
-		again, appended, err := provider.AppendExecutionEventIfAbsent(ctx, rederived, "event-1")
-		require.NoError(t, err, "only the content differs, so the stored event is returned")
-		require.False(t, appended)
-		require.Equal(t, stored.ID, again.ID)
-		require.Equal(t, "planned", again.Summary)
-		competing := caseEvent()
-		competing.Type = storagev1.ExecutionEventTypeTaskSucceeded
-		again, appended, err = provider.AppendExecutionEventIfAbsent(ctx, competing, "event-1")
-		require.NoError(t, err, "a competing outcome of the same step loses to the first")
-		require.False(t, appended)
-		require.Equal(t, stored.ID, again.ID)
+		for name, change := range map[string]func(*storagev1.ExecutionEvent){
+			"content":                  func(e *storagev1.ExecutionEvent) { e.Summary = "re-derived after a restart" },
+			"type of a competing step": func(e *storagev1.ExecutionEvent) { e.Type = storagev1.ExecutionEventTypeTaskSucceeded },
+			"unknown Session":          func(e *storagev1.ExecutionEvent) { e.SessionName = "" },
+		} {
+			same := toolEvent()
+			change(same)
+			again, appended, err := provider.AppendExecutionEventIfAbsent(ctx, same, "event-1")
+			require.NoErrorf(t, err, "a request that differs only in its %s finds the stored event", name)
+			require.False(t, appended)
+			require.Equal(t, stored.ID, again.ID)
+			require.Equal(t, "planned", again.Summary, "the first durable event stays")
+		}
 
 		for name, change := range map[string]func(*storagev1.ExecutionEvent){
 			"Task":         func(e *storagev1.ExecutionEvent) { e.TaskName = "other-task" },
-			"Session":      func(e *storagev1.ExecutionEvent) { e.SessionName = "other-session" },
+			"Session":      func(e *storagev1.ExecutionEvent) { e.SessionName = "session-b" },
 			"tool call ID": func(e *storagev1.ExecutionEvent) { e.ToolCallID = "call-2" },
 		} {
-			other := caseEvent()
+			other := toolEvent()
 			change(other)
 			_, _, err := provider.AppendExecutionEventIfAbsent(ctx, other, "event-1")
 			require.ErrorIsf(t, err, storagev1.ErrDuplicateMismatch, "a different %s is a different event", name)

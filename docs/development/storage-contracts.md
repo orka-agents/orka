@@ -488,8 +488,8 @@ without one until the storage client does.
 - **Execution event dedupe keys.** A repeated dedupe key returns the stored
   event only for a request with the same Task, Session and tool call;
   anything else returns `ErrDuplicateMismatch`, so a reused key is not
-  dropped silently. The key is scoped to the stream, so the stream needs no
-  comparison. The type, content and summary may differ: competing outcomes
+  dropped silently. A field left empty on either side matches. The key is
+  scoped to the stream, so the stream needs no comparison. The type, content and summary may differ: competing outcomes
   of one step, such as a completion and a failure, share one key so the first
   durable outcome wins, and an event derived again after a restart may be
   redacted differently.

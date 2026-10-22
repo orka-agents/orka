@@ -31,6 +31,11 @@ type writeCase[P any] struct {
 	// that differs from the envelope's is checked too.
 	explicitFence bool
 	observe       func(t *testing.T, provider P) any
+	// afterCommit, when set, changes what the write changed, such as writing
+	// a deleted record again, after the first call commits. The receipt check
+	// then proves that a replay returns the original outcome without running
+	// the write again, which an idempotent write would otherwise hide.
+	afterCommit func(t *testing.T, provider P)
 }
 
 // writeOutcome is what one call of a write case produced: the values it
@@ -233,6 +238,9 @@ func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase
 	envelope := envelopeFor(t, dataset, c, suiteFence)
 	first := callWrite(ctx, t, provider, c, envelope, suiteFence)
 	require.NoError(t, first.err)
+	if c.afterCommit != nil {
+		c.afterCommit(t, provider)
+	}
 	after := c.observe(t, provider)
 
 	requireSameOutcome(t, first, callWrite(ctx, t, provider, c, envelope, suiteFence))

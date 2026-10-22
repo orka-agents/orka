@@ -293,14 +293,15 @@ func appendSQLiteExecutionEvent(
 }
 
 // sameExecutionEventIdentity reports whether a request with a stored event's
-// dedupe key belongs to that event's Task, Session and tool call. The type,
-// content and summary may differ: competing outcomes share one key so the
-// first durable outcome wins, and Orka can derive an event again under newer
-// redaction rules.
+// dedupe key belongs to that event's Task, Session and tool call. A field
+// left empty on either side matches. The type, content and summary may
+// differ: competing outcomes share one key so the first durable outcome wins,
+// and Orka can derive an event again under newer redaction rules.
 func sameExecutionEventIdentity(stored, requested store.ExecutionEvent) bool {
-	return stored.TaskName == requested.TaskName &&
-		stored.SessionName == requested.SessionName &&
-		stored.ToolCallID == requested.ToolCallID
+	same := func(a, b string) bool { return a == "" || b == "" || a == b }
+	return same(stored.TaskName, requested.TaskName) &&
+		same(stored.SessionName, requested.SessionName) &&
+		same(stored.ToolCallID, requested.ToolCallID)
 }
 
 func existingSQLiteExecutionEventByDedupeKey(

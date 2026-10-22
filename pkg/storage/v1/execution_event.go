@@ -184,8 +184,9 @@ type ExecutionEventStore interface {
 // supplied key scoped to its execution-event stream. A repeated key returns the
 // existing event with appended=false when the request belongs to the same
 // Task, Session and tool call as that event; otherwise it returns
-// ErrDuplicateMismatch. The stream needs no comparison, because the key is
-// scoped to it. The type, content and summary may differ: competing outcomes
+// ErrDuplicateMismatch. A field left empty on either side matches, so a
+// request that does not know an event's Session still finds it. The stream
+// needs no comparison, because the key is scoped to it. The type, content and summary may differ: competing outcomes
 // of one step, such as a completion and a failure, share a key so the first
 // durable outcome wins, and Orka may derive an event again after a restart
 // under newer redaction rules. An approval is identified by its tool call;

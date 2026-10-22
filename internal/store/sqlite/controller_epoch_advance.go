@@ -23,6 +23,9 @@ func (s *Store) AdvanceControllerEpoch(
 	if err := request.Validate(); err != nil {
 		return storagev1.ControllerEpochMirrorState{}, err
 	}
+	if err := s.requireOwnTransaction(ctx, "AdvanceControllerEpoch"); err != nil {
+		return storagev1.ControllerEpochMirrorState{}, err
+	}
 	name, err := store.NormalizeControllerEpochName(request.Epoch.Name)
 	if err != nil {
 		return storagev1.ControllerEpochMirrorState{}, err

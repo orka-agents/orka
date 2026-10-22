@@ -38,6 +38,9 @@ func init() {
 			},
 			args:    fixed(artifactOwner("tenant", "task")),
 			observe: observeArtifacts,
+			afterCommit: func(t *testing.T, p storagev1.ArtifactProvider) {
+				saveArtifact(t, p, artifactOwner("tenant", "task"), "report.txt", "text/plain", []byte("written again"))
+			},
 		},
 	)
 }

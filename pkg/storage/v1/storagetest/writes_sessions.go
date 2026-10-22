@@ -74,10 +74,11 @@ func init() {
 			observe: session,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "DeleteSession",
-			setup:   createTaskSession,
-			args:    fixed("tenant", "session"),
-			observe: session,
+			method:      "DeleteSession",
+			setup:       createTaskSession,
+			args:        fixed("tenant", "session"),
+			observe:     session,
+			afterCommit: createTaskSession,
 		},
 		writeCase[storagev1.StateProvider]{
 			method:  "AcquireLock",
@@ -90,6 +91,9 @@ func init() {
 			setup:   lockedTenantSession,
 			args:    fixed("tenant", "session", "task-a", "uid-a"),
 			observe: session,
+			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.AcquireLock(t.Context(), "tenant", "session", "task-a", "uid-a"))
+			},
 		},
 		writeCase[storagev1.StateProvider]{
 			method:  "IsLocked",

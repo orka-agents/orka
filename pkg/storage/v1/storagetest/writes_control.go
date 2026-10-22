@@ -164,6 +164,9 @@ func init() {
 			},
 			args:    fixed("tenant", "task", "task-uid"),
 			observe: observeJobAuthority,
+			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.RevokeTaskJob(t.Context(), caseJob))
+			},
 		},
 		writeCase[storagev1.StateProvider]{
 			method:  "AppendExecutionEvent",
@@ -189,6 +192,9 @@ func init() {
 			},
 			args:    fixed("tenant", storagev1.ExecutionEventStreamTypeTask, "task"),
 			observe: observeEvents,
+			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
+				appendEvent(t, p, caseEvent())
+			},
 		},
 	)
 }

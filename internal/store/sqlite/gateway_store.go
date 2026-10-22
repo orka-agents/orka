@@ -1454,8 +1454,14 @@ func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id,
 
 func (s *Store) markGatewayDeliveryDeliveredWrite(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error {
 	now = now.UTC()
-	s.executionEventMu.Lock()
-	defer s.executionEventMu.Unlock()
+	// A transaction ctx carries already holds SQLite's only connection, which
+	// serializes this delivery with event appends. Taking the append mutex
+	// then would deadlock with an ordinary append that holds it while waiting
+	// for the connection.
+	if s.taskDataTx(ctx) == nil {
+		s.executionEventMu.Lock()
+		defer s.executionEventMu.Unlock()
+	}
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
