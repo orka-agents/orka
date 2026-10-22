@@ -260,7 +260,7 @@ AgentKit and Foundry flow, bounded waiting, safe previews, and recovery.
 
 ## Redaction and truncation
 
-Workers redact before submitting events, and the store sanitizes again before persistence. Public APIs and SSE frames return sanitized payloads only. Fake values matching bearer tokens, JWT-like strings, API keys, cookies, GitHub tokens, Anthropic/OpenAI tokens, and transaction-token headers must be redacted before they appear in SQLite rows or public responses.
+Workers redact before submitting events, and Orka's storage client sanitizes every event again before it reaches the storage provider. Public APIs and SSE frames return sanitized payloads only. Fake values matching bearer tokens, JWT-like strings, API keys, cookies, GitHub tokens, Anthropic/OpenAI tokens, and transaction-token headers must be redacted before they reach the storage provider or appear in public responses.
 
 ## Metrics
 

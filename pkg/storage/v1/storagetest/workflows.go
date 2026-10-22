@@ -182,10 +182,13 @@ func runSecurity(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Len(t, next, 1)
 		require.NotEqual(t, page[0].ID, next[0].ID)
-		last, _, err := p.ListReviewSlices(ctx, storagev1.ReviewSliceFilter{Namespace: workflowNamespace,
-			RepositoryScan: workflowScan, Limit: 1, Cursor: cursor})
-		require.NoError(t, err)
-		require.Empty(t, last)
+		// A provider may end the list on a full page or with one more empty page.
+		if cursor != "" {
+			last, _, err := p.ListReviewSlices(ctx, storagev1.ReviewSliceFilter{Namespace: workflowNamespace,
+				RepositoryScan: workflowScan, Limit: 1, Cursor: cursor})
+			require.NoError(t, err)
+			require.Empty(t, last)
+		}
 	})
 
 	t.Run("threat model versions", func(t *testing.T) {

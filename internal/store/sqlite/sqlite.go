@@ -42,7 +42,8 @@ func NewDB(path string) (*sql.DB, error) {
 // sqliteDSN makes the driver write and read every time.Time in UTC. SQL
 // compares stored times as text, so one zone keeps those comparisons correct
 // and satisfies the storage contract's UTC rule whatever zone a caller used.
-// Rows written earlier in another zone are read back in UTC.
+// Rows written earlier in another zone are read back in UTC, but their stored
+// text keeps its offset, so SQL comparisons with them can still be wrong.
 func sqliteDSN(path string) string {
 	separator := "?"
 	if strings.Contains(path, "?") {
