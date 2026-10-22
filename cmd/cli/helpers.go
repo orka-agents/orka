@@ -123,10 +123,11 @@ func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Clien
 	if server == "" {
 		server = cfg.Server
 	}
+	session := false
 	if token == "" {
 		token = cfg.Token
 		if cfg.TokenKind == tokenKindGitHubSession {
-			token = configuredSession(cmd, server, cfg)
+			token, session = configuredSession(cmd, server, cfg), true
 		}
 	}
 	if ns == "" {
@@ -208,6 +209,10 @@ func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Clien
 	}
 
 	c := client.NewWithNamespace(server, token, ns)
+	if session && token != "" {
+		// A session goes only to its own server: never through a redirect.
+		c.HTTPClient = noRedirectClient
+	}
 	if txnToken == "" && txnTokenFile != "" {
 		data, err := readFileOrStdin(txnTokenFile)
 		if err != nil {

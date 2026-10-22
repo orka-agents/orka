@@ -170,3 +170,42 @@ func TestLogoutEndsTheSession(t *testing.T) {
 		t.Fatalf("config = %+v", cfg)
 	}
 }
+
+// A redirect from the server, or a proxy in front of it, never carries the
+// GitHub tokens or the session anywhere: credential requests do not follow
+// redirects.
+func TestCredentialsNeverFollowARedirect(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeGitHubDeviceFlow(t)
+	var leaked bool
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := new(bytes.Buffer)
+		body.ReadFrom(r.Body) //nolint:errcheck
+		if strings.Contains(r.Header.Get("Authorization"), "orka_s_") || strings.Contains(body.String(), "ghu_") {
+			leaked = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer elsewhere.Close()
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/config" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app"}}) //nolint:errcheck
+			return
+		}
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer orka.Close()
+
+	if _, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--no-host", "--timeout", "10s"); err == nil {
+		t.Fatal("a redirected sign-in must fail")
+	}
+	later := time.Now().Add(10 * time.Hour)
+	if err := saveConfig(orkaConfig{Server: orka.URL, Token: "orka_s_session", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &later}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = runLoginCLI(t, "host", "status")
+	if leaked {
+		t.Fatal("a redirect carried credentials to another origin")
+	}
+}

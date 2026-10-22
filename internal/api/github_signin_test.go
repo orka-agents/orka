@@ -46,7 +46,8 @@ func fakeGitHub(t *testing.T) *httptest.Server {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			users := map[string]map[string]any{
 				"ghu_alice": {"id": 852750, "login": "alice"}, "ghu_alice_renewed": {"id": 852750, "login": "alice"},
-				"ghu_bob": {"id": 1002, "login": "bob"},
+				"ghu_alice_refreshed": {"id": 852750, "login": "alice"}, "ghu_alice_left": {"id": 852750, "login": "alice"},
+				"ghu_bob": {"id": 1002, "login": "bob"}, "ghu_bob_refreshed": {"id": 1002, "login": "bob"},
 			}
 			user, known := users[body.AccessToken]
 			if !known {
@@ -58,7 +59,7 @@ func fakeGitHub(t *testing.T) *httptest.Server {
 		}
 		if r.URL.Path == "/user/memberships/orgs/acme" {
 			switch r.Header.Get("Authorization") {
-			case "Bearer ghu_alice", "Bearer ghu_alice_renewed":
+			case "Bearer ghu_alice", "Bearer ghu_alice_renewed", "Bearer ghu_alice_refreshed":
 				_ = json.NewEncoder(w).Encode(map[string]string{"state": "active"})
 				return
 			}
@@ -153,8 +154,10 @@ func TestGitHubSignInLinksTheAccountAndIssuesASession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The refresh token was used once to prove it is alice's: custody holds
+	// what GitHub issued from it.
 	held, err := h.store.GetConnectorCredential(context.Background(), ref)
-	if err != nil || held.AccessToken != "ghu_alice" || held.RefreshToken != "ghr_alice" || held.ExpiresAt.IsZero() {
+	if err != nil || held.AccessToken != "ghu_alice_refreshed" || held.RefreshToken != "ghr_alice_2" || held.ExpiresAt.IsZero() {
 		t.Fatalf("custody = %v", err)
 	}
 	if err := h.asSession(session.Token); err != nil || h.identity.Subject != signInTestUserID ||
@@ -189,6 +192,13 @@ func TestGitHubSignInRefusesOtherAppsAndOutsiders(t *testing.T) {
 	} {
 		if status, session := h.signIn(map[string]any{"accessToken": test.token}); status != test.want || session.Token != "" {
 			t.Fatalf("%s: %d %+v, want %d and no session", name, status, session, test.want)
+		}
+	}
+	// A member's access token with someone else's refresh token links no one.
+	for name, refresh := range map[string]string{"another person's": "ghr_bob", "an unknown": "ghr_unknown"} {
+		if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": refresh}); status != http.StatusUnauthorized ||
+			session.Token != "" {
+			t.Fatalf("%s refresh token: %d, want 401 and no session", name, status)
 		}
 	}
 	connections := &corev1alpha1.ConnectionList{}
@@ -243,11 +253,17 @@ func TestSessionRenewalChecksMembershipAgain(t *testing.T) {
 	if err := h.asSession(session.Token); err != nil {
 		t.Fatal(err)
 	}
-	// Custody now holds a token GitHub no longer places in the org.
-	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_bob"}
+	// alice's refreshed token, but GitHub no longer places her in the org.
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice_left"}
 	resp, _ := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("renew after leaving the org = %d, want 403", resp.StatusCode)
+	}
+	// A link that came to hold another account never renews this session,
+	// even for a member.
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_bob"}
+	if resp, _ := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("renew with another account's token = %d, want 401", resp.StatusCode)
 	}
 	if err := h.asSession(session.Token); err != nil {
 		t.Fatal("a refused renewal leaves the session to expire on its own")

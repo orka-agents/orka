@@ -28,6 +28,14 @@ const (
 	plainHTTPScheme = "http"
 )
 
+// noRedirectClient carries credentials: a redirect, from the server or a
+// proxy in front of it, would send them past the origin and transport checks,
+// so it is answered as it is instead of followed.
+var noRedirectClient = &http.Client{
+	Timeout:       time.Minute,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
 // githubWebURL is GitHub's device-flow host, and githubPollFloor the shortest
 // wait between polls (zero is GitHub's own); tests change both.
 var (
@@ -236,7 +244,7 @@ func plainJSON(ctx context.Context, method, target, token string, body []byte, i
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := noRedirectClient.Do(request)
 	if err != nil {
 		return err
 	}
