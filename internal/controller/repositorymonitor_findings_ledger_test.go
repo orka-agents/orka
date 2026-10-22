@@ -539,3 +539,53 @@ func TestRepositoryMonitorLegacyFindingsGetIDs(t *testing.T) {
 		t.Fatalf("merged = %+v, want only the named legacy finding fixed", merged)
 	}
 }
+
+func TestRepositoryMonitorCarriedSensitiveFindingsStayRestricted(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "sensitive", Namespace: "default", UID: types.UID("uid-sensitive")}, Spec: corev1alpha1.RepositoryMonitorSpec{RepoURL: repositoryMonitorTestRepoURL, Branch: "main", Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"}}}}
+	monitor.Spec.Review.Publish.Enabled = true
+	// The first pass was security-sensitive and was never published; a record
+	// written before findings carried the flag must still be treated that way.
+	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "pass-1", MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 5, HeadSHA: "h5", Verdict: repositoryMonitorReviewVerdictSecuritySensitive, SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive,
+		FindingsJSON: `[{"priority":"P1","file":"auth.go","line":9,"title":"Token logged","body":"secret detail"}]`}); err != nil {
+		t.Fatal(err)
+	}
+	task := repositoryMonitorReviewIngestTestTask("pass-2", monitor.Name, 5, "h5")
+	task.Annotations[repositoryMonitorAnnotationReviewMode] = repositoryMonitorReviewModeSameHead
+	task.Annotations[repositoryMonitorAnnotationReviewBase] = "pass-1"
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, ResultStore: db}
+	if err := db.SaveResult(ctx, "default", task.Name, repositoryMonitorReviewResultEnvelope(t, 5, "h5", repositoryMonitorReviewVerdictPassed)); err != nil {
+		t.Fatal(err)
+	}
+	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "5", Number: 5, State: repositoryMonitorItemStateOpen, HeadSHA: "h5", BaseBranch: "main", LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: task.Name}
+	if err := db.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := r.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, task); err != nil || !handled {
+		t.Fatalf("ingest = (%v, %v)", handled, err)
+	}
+	record, err := db.GetReviewRecord(ctx, "default", repositoryMonitorReviewRecordID(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Verdict != repositoryMonitorReviewVerdictSecuritySensitive || record.SecurityStatus != repositoryMonitorReviewVerdictSecuritySensitive {
+		t.Fatalf("combined record = verdict %q security %q, want both security_sensitive", record.Verdict, record.SecurityStatus)
+	}
+	publishes, _, err := db.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "default", MonitorName: monitor.Name, ReviewRecordID: record.ID, Limit: 5})
+	if err != nil || len(publishes) != 1 || publishes[0].SkipReason != repositoryMonitorPublishSkipSecuritySensitiveNotPublic {
+		t.Fatalf("publish records = %+v err=%v, want a security-sensitive skip", publishes, err)
+	}
+
+	// Once fixed, the finding is still never named in a published review.
+	body := renderRepositoryMonitorReviewBody(monitor, item, task, &store.ReviewRecord{ID: "later", HeadSHA: "h6", Verdict: repositoryMonitorReviewVerdictPassed},
+		"publish-2", []repositoryMonitorReviewFinding{{ID: "f-s", Priority: "P1", Title: "Token logged", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "h6", SecuritySensitive: true}})
+	if strings.Contains(body, "Token logged") {
+		t.Fatalf("published body names a security-sensitive finding:\n%s", body)
+	}
+}

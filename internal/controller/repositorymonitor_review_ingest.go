@@ -101,6 +101,10 @@ type repositoryMonitorReviewFinding struct {
 	// OutsideChanges marks a follow-up finding outside the changes the
 	// follow-up review covered.
 	OutsideChanges bool `json:"outsideChanges,omitempty"`
+	// SecuritySensitive marks a finding reported by a security-sensitive
+	// review. It keeps every later review that carries it open
+	// security-sensitive, so its details stay unpublished.
+	SecuritySensitive bool `json:"securitySensitive,omitempty"`
 }
 
 // repositoryMonitorReviewPreviousFinding is a follow-up review's status for
@@ -256,6 +260,10 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	}
 	reviewerVerdict := strings.TrimSpace(review.Verdict)
 	verdict := repositoryMonitorDerivedReviewVerdict(monitor.Spec, reviewerVerdict, ledger)
+	securityStatus := strings.TrimSpace(review.Security.Status)
+	if repositoryMonitorLedgerSecuritySensitive(ledger) {
+		securityStatus = repositoryMonitorReviewVerdictSecuritySensitive
+	}
 	summary := strings.TrimSpace(review.Summary)
 	repairable := review.Repairable
 	if verdict != reviewerVerdict {
@@ -302,7 +310,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		Verdict:                 verdict,
 		Confidence:              strings.TrimSpace(review.Confidence),
 		Repairable:              repairable,
-		SecurityStatus:          strings.TrimSpace(review.Security.Status),
+		SecurityStatus:          securityStatus,
 		FindingsJSON:            findingsJSON,
 		Summary:                 summary,
 		SuggestedComment:        strings.TrimSpace(review.SuggestedComment),

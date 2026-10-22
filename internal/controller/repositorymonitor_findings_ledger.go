@@ -193,6 +193,8 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 			}
 		}
 	}
+	sensitive := strings.TrimSpace(review.Verdict) == repositoryMonitorReviewVerdictSecuritySensitive ||
+		strings.TrimSpace(review.Security.Status) == repositoryMonitorReviewVerdictSecuritySensitive
 	ledger := make([]repositoryMonitorReviewFinding, 0, len(plan.Ledger)+len(review.Findings))
 	var open []repositoryMonitorReviewFinding
 	if plan.Mode != repositoryMonitorReviewModeFull {
@@ -213,6 +215,7 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 	// an earlier open finding is a repeat.
 	for i, finding := range review.Findings {
 		finding.ID, finding.Status, finding.FirstHead, finding.FirstReview, finding.ResolvedHead, finding.OutsideChanges = "", "", "", "", "", false
+		finding.SecuritySensitive = sensitive
 		if repositoryMonitorFindingRepeats(finding, open) {
 			continue
 		}
@@ -272,11 +275,17 @@ func repositoryMonitorLedgerFromRecord(record *store.ReviewRecord) ([]repository
 	if err != nil {
 		return nil, err
 	}
+	sensitive := strings.TrimSpace(record.Verdict) == repositoryMonitorReviewVerdictSecuritySensitive ||
+		strings.TrimSpace(record.SecurityStatus) == repositoryMonitorReviewVerdictSecuritySensitive
 	for i := range findings {
 		if findings[i].ID == "" {
 			findings[i].ID = repositoryMonitorFindingID(record.ID, i, findings[i])
 			findings[i].FirstHead = firstNonEmptyString(findings[i].FirstHead, record.HeadSHA)
 			findings[i].FirstReview = firstNonEmptyString(findings[i].FirstReview, record.ID)
+		}
+		// A security-sensitive review's own findings stay restricted.
+		if sensitive && findings[i].FirstReview == record.ID {
+			findings[i].SecuritySensitive = true
 		}
 	}
 	return findings, nil
@@ -305,9 +314,13 @@ func repositoryMonitorFindingBlocks(spec corev1alpha1.RepositoryMonitorSpec, fin
 }
 
 // repositoryMonitorDerivedReviewVerdict decides passed or needs_changes from
-// the open findings. The reviewer's needs_human, security_sensitive, and
-// skipped verdicts stand.
+// the open findings. An open security-sensitive finding keeps the review
+// security_sensitive; otherwise the reviewer's needs_human,
+// security_sensitive, and skipped verdicts stand.
 func repositoryMonitorDerivedReviewVerdict(spec corev1alpha1.RepositoryMonitorSpec, reviewerVerdict string, ledger []repositoryMonitorReviewFinding) string {
+	if reviewerVerdict != repositoryMonitorVerdictSkipped && repositoryMonitorLedgerSecuritySensitive(ledger) {
+		return repositoryMonitorReviewVerdictSecuritySensitive
+	}
 	switch reviewerVerdict {
 	case repositoryMonitorReviewVerdictPassed, repositoryMonitorReviewVerdictNeedsChanges:
 	default:
@@ -524,4 +537,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorExhaustivePassPending(ctx
 	}
 	mode := strings.TrimSpace(task.Annotations[repositoryMonitorAnnotationReviewMode])
 	return mode == "" || mode == repositoryMonitorReviewModeFull, nil
+}
+
+// repositoryMonitorLedgerSecuritySensitive reports whether an open finding
+// came from a security-sensitive review.
+func repositoryMonitorLedgerSecuritySensitive(ledger []repositoryMonitorReviewFinding) bool {
+	for _, finding := range ledger {
+		if finding.SecuritySensitive && repositoryMonitorFindingOpen(finding) {
+			return true
+		}
+	}
+	return false
 }

@@ -725,6 +725,9 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 	b.WriteString("\n\n")
 	var open, outside, fixed []repositoryMonitorReviewFinding
 	for _, finding := range findings {
+		if finding.SecuritySensitive && !monitor.Spec.Review.Publish.PostSecuritySensitive {
+			continue
+		}
 		switch {
 		case !repositoryMonitorFindingOpen(finding):
 			if finding.ResolvedHead == record.HeadSHA {
