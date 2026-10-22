@@ -124,17 +124,20 @@ func run() (err error) {
 	timeout := taskTimeout(os.Getenv)
 	runCtx, stopRun := startSoftDeadline(ctx, start, timeout)
 	defer stopRun()
-	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
+	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.Env = os.Environ()
 	cmd.WaitDelay = commandWaitDelay
-	stopCommandProcessGroup(cmd)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
 
-	err = cmd.Run()
+	err = runCommand(runCtx, cmd)
+	if errOutputHeldOpen(err) {
+		fmt.Fprintln(os.Stderr, "warning: the command exited but left processes holding its output open; they were stopped")
+		err = nil
+	}
 
 	if stdout.Len() > 0 {
 		fmt.Print(stdout.String())

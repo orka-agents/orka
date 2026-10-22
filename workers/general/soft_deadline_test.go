@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -244,5 +245,123 @@ func TestGeneralWorkerSoftDeadlineHelper(t *testing.T) {
 	defer func() { os.Args = originalArgs }()
 	if err := run(); errors.Is(err, errSoftDeadline) || err == nil {
 		t.Fatalf("run() error = %v, want the cancellation, not the soft deadline", err)
+	}
+}
+
+func TestStartSoftDeadlineEndsAtOnceWhenSetupUsedTheBudget(t *testing.T) {
+	ctx, cancel := startSoftDeadline(context.Background(), time.Now().Add(-10*time.Second), 2*time.Second)
+	defer cancel()
+	if ctx.Err() == nil || !errors.Is(context.Cause(ctx), errSoftDeadline) {
+		t.Fatalf("context err = %v, cause = %v; want it already ended by the soft deadline", ctx.Err(), context.Cause(ctx))
+	}
+}
+
+// runGeneralWorker runs the worker against a recording controller.
+func runGeneralWorker(
+	t *testing.T, taskName, timeoutSeconds string, args ...string,
+) (*softDeadlineController, time.Duration, error) {
+	t.Helper()
+	controller := &softDeadlineController{}
+	server := controller.serve(t, taskName)
+	artifacts := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.MkdirAll(artifacts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.ResultEndpoint, "")
+	t.Setenv(workerenv.TaskName, taskName)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TimeoutSeconds, timeoutSeconds)
+	t.Setenv("ORKA_ARTIFACTS_DIR", artifacts)
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = append([]string{"worker"}, args...)
+	started := time.Now()
+	err := run()
+	return controller, time.Since(started), err
+}
+
+func TestRun_LeftoverChildrenDoNotTurnSuccessIntoFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group cleanup is Unix-specific")
+	}
+	controller, elapsed, err := runGeneralWorker(t, "leftover-task", "",
+		"sh", "-c", `printf leader-done; sleep 60 &`)
+	if err != nil {
+		t.Fatalf("run() error = %v, want the leader's success", err)
+	}
+	if elapsed > commandWaitDelay+3*time.Second {
+		t.Fatalf("run() took %s, want the leftover child stopped after the wait delay", elapsed)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if len(controller.results) != 1 || !strings.Contains(string(controller.results[0]), "leader-done") {
+		t.Fatalf("results = %q, want the command's output", controller.results)
+	}
+}
+
+func TestRun_SoftDeadlineStopsChildrenAfterTheLeaderExits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group cleanup is Unix-specific")
+	}
+	// The leader succeeds at once, so the run completed; the deadline only
+	// stops the child that would otherwise hold the output for the wait delay.
+	_, elapsed, err := runGeneralWorker(t, "early-exit-task", "2",
+		"sh", "-c", `printf leader-done; sleep 60 &`)
+	if err != nil {
+		t.Fatalf("run() error = %v, want the leader's success", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("run() took %s, want the soft deadline at about 1s to stop the child", elapsed)
+	}
+}
+
+func TestRun_SoftDeadlineKeepsTimeForTheResultWhenUploadsStall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group cleanup is Unix-specific")
+	}
+	const taskName = "stalled-upload-task"
+	controller := &softDeadlineController{artifacts: map[string][]byte{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/artifacts/"):
+			<-r.Context().Done()
+		case r.URL.Path == "/internal/v1/results/default/"+taskName:
+			controller.mu.Lock()
+			controller.results = append(controller.results, body)
+			controller.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusCreated)
+		}
+	}))
+	t.Cleanup(server.Close)
+	artifacts := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.MkdirAll(artifacts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.ResultEndpoint, "")
+	t.Setenv(workerenv.TaskName, taskName)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TimeoutSeconds, "10")
+	t.Setenv("ORKA_ARTIFACTS_DIR", artifacts)
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"worker", "sh", "-c", `printf shot > "$ORKA_ARTIFACTS_DIR/shot.png"; sleep 60`}
+
+	if err := run(); !errors.Is(err, errSoftDeadline) || strings.Contains(err.Error(), "not delivered") {
+		t.Fatalf("run() error = %v, want the soft deadline with its result delivered", err)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if len(controller.results) != 1 {
+		t.Fatalf("posted %d results, want the result despite the stalled upload", len(controller.results))
+	}
+	var result common.StructuredResult
+	err := json.Unmarshal(controller.results[0], &result)
+	if err != nil || result.Data["artifactError"] == nil || len(result.Artifacts) != 0 {
+		t.Fatalf("result = %#v (%v), want the upload failure recorded and no artifacts", result, err)
 	}
 }

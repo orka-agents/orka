@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -53,21 +54,23 @@ func taskTimeout(getenv func(string) string) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// startSoftDeadline cancels the returned context with errSoftDeadline once the
-// command has used the timeout minus its margin, measured from start. Only the
-// worker's own timer does this; SIGTERM cancels ctx as before.
-func startSoftDeadline(ctx context.Context, start time.Time, timeout time.Duration) (context.Context, func()) {
-	runCtx, cancel := context.WithCancelCause(ctx)
+// startSoftDeadline ends the returned context with errSoftDeadline once the
+// command has used the timeout minus its margin, measured from start, or at
+// once when setup already used it. Only the worker's own deadline does this;
+// SIGTERM cancels ctx as before.
+func startSoftDeadline(
+	ctx context.Context, start time.Time, timeout time.Duration,
+) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
-		return runCtx, func() { cancel(nil) }
+		return context.WithCancel(ctx)
 	}
-	timer := time.AfterFunc(time.Until(start.Add(timeout-softDeadlineMargin(timeout))), func() {
-		cancel(errSoftDeadline)
-	})
-	return runCtx, func() {
-		timer.Stop()
-		cancel(nil)
-	}
+	return context.WithDeadlineCause(ctx, start.Add(timeout-softDeadlineMargin(timeout)), errSoftDeadline)
+}
+
+// errOutputHeldOpen reports a command that exited successfully while its
+// descendants kept its output pipes open past commandWaitDelay.
+func errOutputHeldOpen(err error) bool {
+	return errors.Is(err, exec.ErrWaitDelay)
 }
 
 func stoppedAtSoftDeadline(ctx, runCtx context.Context) bool {
@@ -81,8 +84,12 @@ func stoppedAtSoftDeadline(ctx, runCtx context.Context) bool {
 func deliverAtSoftDeadline(ctx context.Context, start time.Time, timeout time.Duration, output string) error {
 	elapsed := time.Since(start).Round(time.Second)
 	fmt.Fprintf(os.Stderr, "soft deadline: stopped the command after %s of the %s timeout\n", elapsed, timeout)
-	deliveryCtx, cancel := context.WithTimeout(ctx, max(softDeadlineMargin(timeout)-2*time.Second, time.Second))
+	budget := max(softDeadlineMargin(timeout)-2*time.Second, time.Second)
+	deliveryCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	// Artifact uploads must leave time for the result, which says what happened.
+	uploadCtx, cancelUpload := context.WithTimeout(deliveryCtx, budget*2/3)
+	defer cancelUpload()
 
 	data := map[string]any{
 		"reason":         "soft_deadline",
@@ -90,7 +97,7 @@ func deliverAtSoftDeadline(ctx context.Context, start time.Time, timeout time.Du
 		"elapsedSeconds": int64(elapsed / time.Second),
 		"outputBytes":    len(output),
 	}
-	artifacts, uploadErr := common.UploadArtifactsReportContext(deliveryCtx)
+	artifacts, uploadErr := common.UploadArtifactsReportContext(uploadCtx)
 	if uploadErr != nil {
 		fmt.Fprintf(os.Stderr, "soft deadline: %v\n", uploadErr)
 		data["artifactError"] = uploadErr.Error()
