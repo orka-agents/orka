@@ -616,7 +616,9 @@ func TestServeValidatesItsConfiguration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			config := f.bearerConfig(provider)
 			edit(&config)
-			config.Address, config.ProbeAddress = "127.0.0.1:0", "127.0.0.1:0"
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			config.Listener, config.ProbeAddress = listener, "127.0.0.1:0"
 			done := make(chan error, 1)
 			go func() { done <- adapterkit.Serve(t.Context(), config) }()
 			select {
@@ -626,6 +628,8 @@ func TestServeValidatesItsConfiguration(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("Serve started with an invalid configuration")
 			}
+			_, err = net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+			require.Error(t, err, "Serve closes the listener it was given")
 		})
 	}
 }

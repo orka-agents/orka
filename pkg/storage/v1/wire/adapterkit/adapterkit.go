@@ -216,6 +216,14 @@ func (c *Config) validate() error {
 // ctx requested, or the error that stopped serving. Invalid configuration
 // or credentials fail before anything listens.
 func Serve(ctx context.Context, config Config) error {
+	// Serve owns the listeners it is given, including when it fails before
+	// it serves.
+	serving := false
+	defer func() {
+		if !serving {
+			closeListeners(config.Listener, config.ProbeListener)
+		}
+	}()
 	config.applyDefaults()
 	if err := config.validate(); err != nil {
 		return fmt.Errorf("storage adapter configuration: %w", err)
@@ -252,6 +260,7 @@ func Serve(ctx context.Context, config Config) error {
 	if err != nil {
 		return err
 	}
+	serving = true
 	readiness := &readiness{config: &config, server: server, metrics: metrics, logger: logger}
 	probe := &http.Server{Handler: probeHandler(readiness, metrics), ReadHeaderTimeout: 5 * time.Second}
 
@@ -303,11 +312,22 @@ func listen(config *Config) (net.Listener, net.Listener, error) {
 	if probeListener == nil {
 		var err error
 		if probeListener, err = net.Listen("tcp", config.ProbeAddress); err != nil {
-			_ = listener.Close()
+			if config.Listener == nil {
+				_ = listener.Close()
+			}
 			return nil, nil, fmt.Errorf("listen for probes: %w", err)
 		}
 	}
 	return listener, probeListener, nil
+}
+
+// closeListeners closes the listeners Serve was given.
+func closeListeners(listeners ...net.Listener) {
+	for _, listener := range listeners {
+		if listener != nil {
+			_ = listener.Close()
+		}
+	}
 }
 
 // stopGracefully lets calls in progress finish for up to timeout, then
