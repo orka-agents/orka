@@ -240,6 +240,17 @@ func TestServerServesOnlyItsContractParts(t *testing.T) {
 	_, err = stateOnly.ListArtifacts(t.Context(), storagev1.ArtifactOwner{})
 	require.ErrorIs(t, err, wire.ErrIncompatible)
 	require.Empty(t, provider.callsTo("ListArtifacts"))
+
+	// The provider reports both parts, but each server describes only the
+	// part it serves.
+	info, err := artifactsOnly.Describe(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{storagev1.ArtifactsContract}, info.Contracts)
+	require.Equal(t, int64(storagev1.MaxArtifactBytes), info.Limits.MaxArtifactBytes)
+	info, err = stateOnly.Describe(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{storagev1.StateContract}, info.Contracts)
+	require.Zero(t, info.Limits.MaxArtifactBytes, "a state-only server advertises no artifact limit")
 }
 
 // A call over its class's concurrency limit is refused as overloaded before

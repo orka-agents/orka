@@ -70,9 +70,12 @@ func TestServerEndsStalledDownloadsAtTheDurationLimit(t *testing.T) {
 	_, err = stalled.Header()
 	require.NoError(t, err, "the download started")
 
-	client := wire.NewClient(conn, wire.ClientConfig{Dataset: recordingDataset, MaxBlobBytes: 32 * wire.MaxChunkBytes})
+	// A small download finishes well inside the limit, so it succeeds as
+	// soon as the stalled one has released the only bulk slot.
+	provider.set("GetArtifact", []any{[]byte("small"), "text/plain"}, nil)
+	client := wire.NewClient(conn, boundConfig)
 	require.Eventually(t, func() bool {
-		_, err := client.GetResult(t.Context(), "n", "t")
+		_, _, err := client.GetArtifact(t.Context(), storagev1.ArtifactKey{Filename: "f"})
 		return err == nil
 	}, 10*time.Second, 50*time.Millisecond, "the stalled download releases its slot at the limit")
 }
@@ -100,7 +103,7 @@ func TestServerBoundsTheFirstDescription(t *testing.T) {
 	provider := slowDescriber{recordingProvider: newRecordingProvider(), entered: make(chan struct{}, 1)}
 	client := wire.NewClient(wiretest.Dial(t, wire.ServerConfig{State: provider, Limits: wire.Limits{
 		MaxConcurrent: map[wire.Class]int{wire.ClassControl: 1},
-		MaxDuration:   map[wire.Class]time.Duration{wire.ClassControl: 500 * time.Millisecond},
+		MaxDuration:   map[wire.Class]time.Duration{wire.ClassControl: 2 * time.Second},
 	}}), boundConfig)
 
 	first := make(chan error, 1)
@@ -108,10 +111,13 @@ func TestServerBoundsTheFirstDescription(t *testing.T) {
 	go func() { first <- client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{}) }()
 	<-provider.entered
 
-	shedStarted := time.Now()
 	err := client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 	require.ErrorIs(t, err, storagev1.ErrUnavailable)
-	require.Less(t, time.Since(shedStarted), 400*time.Millisecond, "a second call is shed, not queued behind the description")
+	select {
+	case <-first:
+		t.Fatal("the second call waited for the first description to end")
+	default:
+	}
 
 	err = <-first
 	require.ErrorIs(t, err, storagev1.ErrUnavailable)

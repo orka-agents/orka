@@ -226,7 +226,7 @@ func (s *Server) describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		s.publish(ctx, seq, "", 0, "the storage provider reports no dataset ID")
 		return storagev1.ProviderInfo{}, errors.New("the storage provider reports no dataset ID")
 	}
-	limits := info.Limits
+	reported := info.Contracts
 	if s.state != nil && s.artifacts != nil {
 		artifacts, err := s.artifacts.Describe(ctx)
 		if err != nil {
@@ -237,19 +237,25 @@ func (s *Server) describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 			return storagev1.ProviderInfo{}, fmt.Errorf("the state provider serves dataset %q and the artifacts provider %q",
 				info.DatasetID, artifacts.DatasetID)
 		}
-		limits = artifacts.Limits
-		// Describe the server as a whole: both contract parts, and the
-		// artifact limit the server enforces.
 		info.Limits.MaxArtifactBytes = artifacts.Limits.MaxArtifactBytes
-		contracts := slices.Clone(info.Contracts)
-		for _, contract := range artifacts.Contracts {
-			if !slices.Contains(contracts, contract) {
-				contracts = append(contracts, contract)
-			}
-		}
-		info.Contracts = contracts
+		reported = append(slices.Clone(reported), artifacts.Contracts...)
 	}
-	s.publish(ctx, seq, info.DatasetID, max(limits.MaxArtifactBytes, storagev1.MaxArtifactBytes), "")
+	// Describe the server as a whole: the contract parts it registers that
+	// its providers report, and the artifact limit it enforces, so a client
+	// never accepts an endpoint whose methods are unimplemented.
+	var contracts []string
+	for _, contract := range reported {
+		served := (contract == storagev1.StateContract && s.state != nil) ||
+			(contract == storagev1.ArtifactsContract && s.artifacts != nil)
+		if served && !slices.Contains(contracts, contract) {
+			contracts = append(contracts, contract)
+		}
+	}
+	info.Contracts = contracts
+	if s.artifacts == nil {
+		info.Limits.MaxArtifactBytes = 0
+	}
+	s.publish(ctx, seq, info.DatasetID, max(info.Limits.MaxArtifactBytes, storagev1.MaxArtifactBytes), "")
 	return info, nil
 }
 
