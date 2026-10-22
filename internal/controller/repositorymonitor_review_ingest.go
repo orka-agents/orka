@@ -72,6 +72,9 @@ type repositoryMonitorReviewResult struct {
 	Security         repositoryMonitorReviewSecurity   `json:"security"`
 	Tests            repositoryMonitorReviewTestStatus `json:"tests"`
 	SuggestedComment string                            `json:"suggestedComment"`
+	// PreviousFindings reports, in a follow-up review, whether each open
+	// finding Orka listed in the prompt is fixed at this head.
+	PreviousFindings []repositoryMonitorReviewPreviousFinding `json:"previousFindings"`
 }
 
 type repositoryMonitorReviewFinding struct {
@@ -82,6 +85,29 @@ type repositoryMonitorReviewFinding struct {
 	Title          string `json:"title"`
 	Body           string `json:"body"`
 	Recommendation string `json:"recommendation"`
+
+	// The fields below form Orka's record of findings for a pull request.
+	// Orka sets them when it ingests a review and ignores any value the
+	// reviewer supplies.
+	ID string `json:"id,omitempty"`
+	// Status is empty or open while the finding is open.
+	Status string `json:"status,omitempty"`
+	// FirstHead is the head the finding was first reported at, and
+	// FirstReview the review record that reported it.
+	FirstHead   string `json:"firstHead,omitempty"`
+	FirstReview string `json:"firstReview,omitempty"`
+	// ResolvedHead is the head a follow-up review found the finding fixed at.
+	ResolvedHead string `json:"resolvedHead,omitempty"`
+	// OutsideChanges marks a follow-up finding outside the changes the
+	// follow-up review covered.
+	OutsideChanges bool `json:"outsideChanges,omitempty"`
+}
+
+// repositoryMonitorReviewPreviousFinding is a follow-up review's status for
+// one finding Orka listed as open.
+type repositoryMonitorReviewPreviousFinding struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
 }
 
 type repositoryMonitorReviewSecurity struct {
@@ -218,12 +244,26 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return false, nil
 	}
 
-	findingsJSON, err := repositoryMonitorReviewFindingsJSON(review.Findings)
+	plan, err := r.repositoryMonitorReviewPlanForTask(ctx, monitor, item, task)
 	if err != nil {
 		return false, err
 	}
-	verdict := strings.TrimSpace(review.Verdict)
+	reviewedHead := strings.TrimSpace(review.HeadSHA)
+	ledger := repositoryMonitorMergeFindingLedger(plan, review, reviewedHead, recordID, r.repositoryMonitorReviewChangedLines(ctx, monitor, plan, reviewedHead))
+	findingsJSON, err := repositoryMonitorReviewFindingsJSON(ledger)
+	if err != nil {
+		return false, err
+	}
+	reviewerVerdict := strings.TrimSpace(review.Verdict)
+	verdict := repositoryMonitorDerivedReviewVerdict(monitor.Spec, reviewerVerdict, ledger)
 	summary := strings.TrimSpace(review.Summary)
+	repairable := review.Repairable
+	if verdict != reviewerVerdict {
+		// The reviewer judged passed against findings Orka still counts as
+		// blocking; those are concrete code defects, so they are repairable.
+		repairable = repairable || verdict == repositoryMonitorReviewVerdictNeedsChanges
+		summary = strings.TrimSpace(repositoryMonitorDerivedVerdictNote(monitor.Spec, verdict) + " " + summary)
+	}
 	if verdict == repositoryMonitorReviewVerdictPassed && validation.Required && validation.Status != repositoryMonitorValidationStatusPassed {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 		if validation.Status == repositoryMonitorValidationStatusFailed {
@@ -261,7 +301,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		TaskNamespace:           task.Namespace,
 		Verdict:                 verdict,
 		Confidence:              strings.TrimSpace(review.Confidence),
-		Repairable:              review.Repairable,
+		Repairable:              repairable,
 		SecurityStatus:          strings.TrimSpace(review.Security.Status),
 		FindingsJSON:            findingsJSON,
 		Summary:                 summary,

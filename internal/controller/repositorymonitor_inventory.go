@@ -236,6 +236,15 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 				}
 			}
 		}
+		if skipReason == "" && !repositoryMonitorReviewsEveryPush(monitor.Spec, pr) {
+			earlier, err := r.latestRepositoryMonitorAcceptedReview(ctx, monitor, pr.Number)
+			if err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			if earlier != nil && earlier.HeadSHA != pr.HeadSHA {
+				skipReason = repositoryMonitorSkipReasonTriggerOpen
+			}
+		}
 		if skipReason != "" {
 			skipped++
 			switch skipReason {
@@ -407,6 +416,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 	if err != nil {
 		return "", false, err
 	}
+	plan, err := r.planRepositoryMonitorReview(ctx, monitor, owner, repository, token, pr, repositoryMonitorReviewContextPaths(reviewContext))
+	if err != nil {
+		return "", false, err
+	}
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
 	priority := repositoryMonitorReviewTaskPriority(run)
 	reviewer := *monitor.Spec.Agents.Reviewer
@@ -429,6 +442,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 	if image := strings.TrimSpace(monitor.Spec.Validation.Image); image != "" {
 		annotations[labels.AnnotationRepositoryValidationImage] = image
 	}
+	if plan.Mode != repositoryMonitorReviewModeFull {
+		annotations[repositoryMonitorAnnotationReviewMode] = plan.Mode
+		annotations[repositoryMonitorAnnotationReviewBase] = plan.baseID()
+	}
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -448,7 +465,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &reviewer,
-			Prompt:   buildRepositoryMonitorReviewPrompt(monitor, owner, repository, pr, reviewContext),
+			Prompt:   buildRepositoryMonitorReviewPrompt(monitor, owner, repository, pr, reviewContext, plan),
 			Timeout:  &timeout,
 			Priority: &priority,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
@@ -484,7 +501,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			if getErr := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &existing); getErr != nil {
 				return "", false, getErr
 			}
-			if bindingErr := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, task, monitor, run, owner, repository, pr); bindingErr != nil {
+			if bindingErr := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, task, monitor, run, owner, repository, pr, plan); bindingErr != nil {
 				return "", false, bindingErr
 			}
 			return taskName, false, r.retainMonitorUsageTask(ctx, &existing, usageWorkID, repositoryMonitorCommandIntentReview, pr.Number)
@@ -507,7 +524,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 // error class), which carries no untrusted content, so a Task created while
 // GitHub was down is still adopted once GitHub recovers. An existing Task
 // carrying diff context that cannot be reproduced now fails closed.
-func validateRepositoryMonitorReviewTaskMatchesExpected(existing, expected *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string, pr repositoryMonitorPullRequest) error {
+func validateRepositoryMonitorReviewTaskMatchesExpected(existing, expected *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string, pr repositoryMonitorPullRequest, plan repositoryMonitorReviewPlan) error {
 	if existing == nil || expected == nil {
 		return fmt.Errorf("repository monitor review task is required")
 	}
@@ -527,7 +544,7 @@ func validateRepositoryMonitorReviewTaskMatchesExpected(existing, expected *core
 	if !reflect.DeepEqual(existing.OwnerReferences, expected.OwnerReferences) {
 		return fmt.Errorf("existing review task %s/%s owner references do not match the expected repository monitor review task", existing.Namespace, existing.Name)
 	}
-	if !repositoryMonitorReviewPromptMatchesExpected(existing.Spec.Prompt, expected.Spec.Prompt, monitor, owner, repository, pr) {
+	if !repositoryMonitorReviewPromptMatchesExpected(existing.Spec.Prompt, expected.Spec.Prompt, monitor, owner, repository, pr, plan) {
 		return fmt.Errorf("existing review task %s/%s spec does not match the controller-rendered repository monitor review prompt for head %s", existing.Namespace, existing.Name, pr.HeadSHA)
 	}
 	if !reflect.DeepEqual(repositoryMonitorComparableReviewTaskSpec(existing.Spec), repositoryMonitorComparableReviewTaskSpec(expected.Spec)) {
@@ -540,7 +557,7 @@ func validateRepositoryMonitorReviewTaskMatchesExpected(existing, expected *core
 // only when it is exactly the freshly rendered prompt, or exactly the prompt
 // the controller renders for this head with a context-unavailable envelope.
 // A fabricated or unreproducible context block is rejected.
-func repositoryMonitorReviewPromptMatchesExpected(existingPrompt, expectedPrompt string, monitor *corev1alpha1.RepositoryMonitor, owner, repository string, pr repositoryMonitorPullRequest) bool {
+func repositoryMonitorReviewPromptMatchesExpected(existingPrompt, expectedPrompt string, monitor *corev1alpha1.RepositoryMonitor, owner, repository string, pr repositoryMonitorPullRequest, plan repositoryMonitorReviewPlan) bool {
 	if existingPrompt == expectedPrompt {
 		return true
 	}
@@ -553,7 +570,7 @@ func repositoryMonitorReviewPromptMatchesExpected(existingPrompt, expectedPrompt
 		return false
 	}
 	unavailable.ContextUnavailable = existingContext.ContextUnavailable
-	return existingPrompt == buildRepositoryMonitorReviewPrompt(monitor, owner, repository, pr, unavailable)
+	return existingPrompt == buildRepositoryMonitorReviewPrompt(monitor, owner, repository, pr, unavailable, plan)
 }
 
 func repositoryMonitorComparableReviewTaskSpec(spec corev1alpha1.TaskSpec) corev1alpha1.TaskSpec {
@@ -674,7 +691,7 @@ func repositoryMonitorReviewTaskName(monitor *corev1alpha1.RepositoryMonitor, ru
 	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monrev-%s-%d-%s-%s", monitor.Name, pr.Number, pr.HeadSHA, run.ID), 63)
 }
 
-func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor, owner, repository string, pr repositoryMonitorPullRequest, reviewContext repositoryMonitorReviewContext) string {
+func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor, owner, repository string, pr repositoryMonitorPullRequest, reviewContext repositoryMonitorReviewContext, plan repositoryMonitorReviewPlan) string {
 	payload := map[string]any{
 		schemaVersionField:                  "orka.prReview.input.v1",
 		"repoURL":                           monitor.Spec.RepoURL,
@@ -705,6 +722,18 @@ func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor,
 	if strings.TrimSpace(monitor.Spec.Validation.Image) != "" {
 		validationInstructions = fmt.Sprintf(`Validation is required for a passed verdict. Inspect the repository to choose the smallest relevant offline build, test, lint, or configuration checks, then call run_validation once with one shell command. run_validation executes in a separate container with the checkout at /workspace and starts in the configured checkout directory. Write the command relative to that starting directory, for example "npm test"; do not copy your reviewer session's absolute path into the command. Orka fixes the image and exact checkout; the checkout is read-only and the command has no network access, so choose a command whose tools and dependencies are already present. Call wait_for_tasks with only the returned child task name and set timeout to %q. If completed is false, call wait_for_tasks again for the same child until it reaches Succeeded, Failed, or Cancelled. A polling timeout means validation is still pending. Keep waiting for the original child instead of changing the command or calling run_validation again. Report the terminal result in tests. If validation cannot run or fails, the verdict must not be "passed".`, tools.RepositoryValidationWaitTimeout.String())
 	}
+	followUp, previousFindingsShape := "", ""
+	if plan.Mode == repositoryMonitorReviewModeIncremental && plan.Base != nil {
+		since := pr
+		since.BaseSHA = plan.Base.HeadSHA
+		delta := repositoryMonitorReviewContextBindChangedFileCount(repositoryMonitorReviewContextFromFiles(owner, repository, since, plan.Delta), len(plan.Delta), 0)
+		followUp = "\n" + renderRepositoryMonitorFollowUpInstructions(plan, renderRepositoryMonitorReviewContext(delta))
+	} else if plan.Mode == repositoryMonitorReviewModeSameHead && plan.Base != nil {
+		followUp = "\n" + renderRepositoryMonitorFollowUpInstructions(plan, "")
+	}
+	if followUp != "" {
+		previousFindingsShape = "\n  \"previousFindings\": [{\"id\": \"f-...\", \"status\": \"fixed|open\"}],"
+	}
 	return fmt.Sprintf(`Review this exact pull request head for correctness, tests, security, and maintainability.
 
 Do not post comments, push commits, merge, close, label, or otherwise mutate GitHub. Produce only the JSON review result described below.
@@ -720,7 +749,7 @@ Input:
 
 Pull request diff context:
 %s
-
+%s
 Return one JSON object with this shape:
 {
   "schemaVersion": "orka.prReview.v1",
@@ -749,12 +778,12 @@ Return one JSON object with this shape:
   "tests": {
     "status": "not_run|passed|failed",
     "evidence": ""
-  },
+  },%s
   "suggestedComment": "Draft prose. Orka may render or ignore this."
 }
 
 The headSHA in the output must be exactly %q. Reserve verdict "skipped" for a head you genuinely cannot evaluate (for example the checkout does not match this head SHA) and explain why in summary.
-`, validationInstructions, string(payloadJSON), renderRepositoryMonitorReviewContext(reviewContext), owner+"/"+repository, pr.Number, pr.HeadSHA, pr.HeadSHA)
+`, validationInstructions, string(payloadJSON), renderRepositoryMonitorReviewContext(reviewContext), followUp, owner+"/"+repository, pr.Number, pr.HeadSHA, previousFindingsShape, pr.HeadSHA)
 }
 
 func repositoryMonitorBoundedDNSName(value string, maxLength int) string {

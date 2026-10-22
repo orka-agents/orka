@@ -689,7 +689,7 @@ func (r *RepositoryMonitorReconciler) renderRepositoryMonitorGitHubReview(ctx co
 		if err != nil {
 			return "", nil, err
 		}
-		comments = repositoryMonitorInlineCommentsForFindings(record, findings, commentable, monitor.Spec.Review.Publish)
+		comments = repositoryMonitorInlineCommentsForFindings(record, repositoryMonitorNewInlineFindings(record, findings), commentable, monitor.Spec.Review.Publish)
 	}
 	body := renderRepositoryMonitorReviewBody(monitor, item, task, record, publishID, findings)
 	return body, comments, nil
@@ -718,11 +718,45 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 	}
 	b.WriteString(summary)
 	b.WriteString("\n\n")
+	var open, outside, fixed []repositoryMonitorReviewFinding
+	for _, finding := range findings {
+		switch {
+		case !repositoryMonitorFindingOpen(finding):
+			if finding.ResolvedHead == record.HeadSHA {
+				fixed = append(fixed, finding)
+			}
+		case finding.OutsideChanges && !repositoryMonitorFindingBlocks(monitor.Spec, finding):
+			outside = append(outside, finding)
+		default:
+			open = append(open, finding)
+		}
+	}
 	b.WriteString("### Findings\n\n")
-	if len(findings) == 0 {
+	if len(open) == 0 {
 		b.WriteString("No findings reported.\n\n")
 	} else {
-		for _, finding := range findings {
+		for _, finding := range open {
+			b.WriteString("- ")
+			b.WriteString(renderRepositoryMonitorFindingSummary(finding))
+			if finding.FirstHead != "" && finding.FirstHead != record.HeadSHA {
+				fmt.Fprintf(&b, " _(open since `%s`)_", shortRepositoryMonitorHead(finding.FirstHead))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(fixed) > 0 {
+		b.WriteString("### Fixed in this commit\n\n")
+		for _, finding := range fixed {
+			b.WriteString("- ")
+			b.WriteString(renderRepositoryMonitorFindingTitle(finding))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(outside) > 0 {
+		b.WriteString("### Outside the new changes (not blocking)\n\n")
+		for _, finding := range outside {
 			b.WriteString("- ")
 			b.WriteString(renderRepositoryMonitorFindingSummary(finding))
 			b.WriteString("\n")
@@ -748,6 +782,25 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 	b.WriteString("\n")
 	b.WriteString(repositoryMonitorReviewMarker(monitor, item.Number, record.HeadSHA, repositoryMonitorReviewRunID(task), record.ID, publishID))
 	return b.String()
+}
+
+// repositoryMonitorNewInlineFindings returns the open findings first
+// reported at record's head inside the reviewed changes. Earlier findings
+// already have their inline threads.
+func repositoryMonitorNewInlineFindings(record *store.ReviewRecord, findings []repositoryMonitorReviewFinding) []repositoryMonitorReviewFinding {
+	inline := make([]repositoryMonitorReviewFinding, 0, len(findings))
+	for _, finding := range findings {
+		if repositoryMonitorFindingOpen(finding) && !finding.OutsideChanges && (finding.FirstHead == "" || finding.FirstHead == record.HeadSHA) {
+			inline = append(inline, finding)
+		}
+	}
+	return inline
+}
+
+func renderRepositoryMonitorFindingTitle(finding repositoryMonitorReviewFinding) string {
+	priority := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(finding.Priority, "P?"), 16)
+	title := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(finding.Title, "Untitled finding"), 240)
+	return fmt.Sprintf("%s: **%s**", priority, title)
 }
 
 func renderRepositoryMonitorFindingSummary(finding repositoryMonitorReviewFinding) string {
@@ -812,7 +865,11 @@ func renderRepositoryMonitorInlineFinding(record *store.ReviewRecord, finding re
 		b.WriteString(recommendation)
 		b.WriteString("\n\n")
 	}
-	fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160))
+	if finding.ID != "" {
+		fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s finding=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160), sanitizeRepositoryMonitorReviewText(finding.ID, 40))
+	} else {
+		fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160))
+	}
 	return boundedString(b.String(), repositoryMonitorReviewInlineMaxRunes)
 }
 
@@ -1073,6 +1130,18 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorCompareFiles(ctx cont
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompareFilesPage(ctx context.Context, owner, repository, token, baseSHA, headSHA string, page int) ([]repositoryMonitorPullRequestFileResponse, error) {
+	compare, err := r.fetchRepositoryMonitorCompare(ctx, owner, repository, token, baseSHA, headSHA, page)
+	return compare.Files, err
+}
+
+// repositoryMonitorCompareResponse is GitHub's comparison of two commits.
+// Status is ahead when head builds on base.
+type repositoryMonitorCompareResponse struct {
+	Status string                                     `json:"status"`
+	Files  []repositoryMonitorPullRequestFileResponse `json:"files"`
+}
+
+func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompare(ctx context.Context, owner, repository, token, baseSHA, headSHA string, page int) (repositoryMonitorCompareResponse, error) {
 	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
@@ -1080,28 +1149,26 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompareFilesPage(ctx
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s?per_page=%d&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(baseSHA), url.PathEscape(headSHA), repositoryMonitorGitHubPerPage, page)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return repositoryMonitorCompareResponse{}, err
 	}
 	repositoryMonitorSetGitHubHeaders(req, token)
 	resp, err := repositoryMonitorHTTPClient(r).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub compare request failed: %w", err)
+		return repositoryMonitorCompareResponse{}, fmt.Errorf("GitHub compare request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	respBody, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
 	if err != nil {
-		return nil, err
+		return repositoryMonitorCompareResponse{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &repositoryMonitorGitHubAPIError{Operation: "compare request", StatusCode: resp.StatusCode, Body: string(respBody)}
+		return repositoryMonitorCompareResponse{}, &repositoryMonitorGitHubAPIError{Operation: "compare request", StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
-	var response struct {
-		Files []repositoryMonitorPullRequestFileResponse `json:"files"`
-	}
+	var response repositoryMonitorCompareResponse
 	if err := json.Unmarshal(respBody, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse GitHub compare response: %w", err)
+		return repositoryMonitorCompareResponse{}, fmt.Errorf("failed to parse GitHub compare response: %w", err)
 	}
-	return response.Files, nil
+	return response, nil
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestFilesPage(ctx context.Context, owner, repository, token string, number int64, page int) ([]repositoryMonitorPullRequestFileResponse, error) {

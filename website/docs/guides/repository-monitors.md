@@ -288,6 +288,21 @@ Valid review verdicts are:
 - `security_sensitive`
 - `skipped`
 
+Orka decides between `passed` and `needs_changes` itself, from the open findings: any open finding at `spec.review.blockingPriority` (default `P1`) or above means `needs_changes`, whatever the reviewer's own verdict. When the two differ, the summary says so. The reviewer's `needs_human`, `security_sensitive`, and `skipped` verdicts stand.
+
+### Follow-up reviews
+
+Each accepted review stores the pull request's record of findings: every finding Orka has tracked, with a stable ID and a status of open or fixed. With `spec.review.trigger: push` (the default), every new head is reviewed:
+
+- **The first review** of a pull request, or of a head that rewrote history (a rebase or force-push), is a full review.
+- **A follow-up review** covers a head that builds on the last reviewed head. The reviewer sees the whole pull request, the changes since the last review (only the pull request's own files, so changes merged in from the base branch are not reviewed again), and the open findings. It reports whether each open finding is fixed, in a `previousFindings` list of `{"id", "status"}` entries, and reports only new defects the changes introduce or expose. A new finding that restates an open one (same file and a nearby line, or the same title) is dropped.
+- **Findings outside the new changes** count only at `P1` or above; lower ones are listed under "Outside the new changes (not blocking)".
+- **A re-review of an unchanged head**, such as a `review` command, can add findings but cannot mark any fixed, so the verdict does not flip without a code change.
+
+The published review lists the open findings (marking those open since an earlier commit) and the findings fixed in this commit. Inline comments go only on findings first reported at this head, so earlier findings keep their original threads.
+
+With `spec.review.trigger: open`, Orka reviews each pull request once; later heads are reviewed only on a `review` command. Pull requests that automatic repair may fix are still reviewed on every push, because each pushed fix needs a review.
+
 For status summaries, open PRs with `needs_changes`, `needs_human`, `security_sensitive`, stale, failed, or skipped review state count as blocked items. Open PRs with queued review work count as pending reviews.
 
 If a review task fails, is cancelled, returns malformed JSON, or returns a stale head SHA, the controller records a rejected review result and leaves an audit event explaining why. If GitHub publishing is enabled, the controller performs publish-time safety checks immediately after ingestion: it refetches the PR, requires the PR to remain open on the monitor base branch and exact reviewed head SHA, rejects draft or protected-label PRs, skips duplicate same-head publications using Orka publish records and hidden GitHub markers, neutralizes mentions in rendered text, and never posts `security_sensitive` results unless explicitly configured.

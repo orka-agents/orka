@@ -345,6 +345,28 @@ type RepositoryMonitorReviewSpec struct {
 	// +optional
 	RequireGreenCI bool `json:"requireGreenCI,omitempty"`
 
+	// Trigger controls which pull request heads are reviewed automatically.
+	// push reviews every new head: after a pull request's first review, a head
+	// that builds on the last reviewed head gets a follow-up review of the new
+	// changes and the open findings, and any other head a full review. open
+	// reviews each pull request once and later heads only on a review command;
+	// pull requests that automatic repair may fix are still reviewed on every
+	// push. Defaults to push.
+	// +kubebuilder:validation:Enum=open;push
+	// +kubebuilder:default=push
+	// +optional
+	Trigger string `json:"trigger,omitempty"`
+
+	// BlockingPriority is the lowest finding priority that keeps a pull
+	// request at needs_changes while the finding is open. Orka derives the
+	// verdict from the open findings, so the reviewer's own passed or
+	// needs_changes verdict does not decide it. A follow-up finding outside the
+	// changes it reviewed blocks only at P1 or above. Defaults to P1.
+	// +kubebuilder:validation:Enum=P0;P1;P2;P3
+	// +kubebuilder:default=P1
+	// +optional
+	BlockingPriority string `json:"blockingPriority,omitempty"`
+
 	// StaleReviewTTL bounds how long an unchanged head review remains fresh.
 	// +optional
 	StaleReviewTTL *metav1.Duration `json:"staleReviewTTL,omitempty"`

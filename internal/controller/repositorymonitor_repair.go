@@ -1189,6 +1189,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx c
 		var findings []repositoryMonitorReviewFinding
 		if review != nil && review.MonitorName == monitor.Name && review.Number == pr.Number && review.HeadSHA == pr.HeadSHA &&
 			json.Unmarshal([]byte(review.FindingsJSON), &findings) == nil {
+			findings = repositoryMonitorOpenFindings(findings)
 			for i, finding := range findings {
 				if len(lines) == repositoryMonitorRepairCommitFindingLimit {
 					lines = append(lines, fmt.Sprintf("- and %d more", len(findings)-i))
@@ -1220,7 +1221,14 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx con
 			return "", err
 		}
 		if review != nil && review.MonitorNamespace == monitor.Namespace && review.MonitorName == monitor.Name && review.Kind == repositoryMonitorPullRequestKind && review.Number == pr.Number && review.HeadSHA == pr.HeadSHA {
-			payload["reviewEvidence"] = sanitizeRepositoryMonitorReviewText(review.Summary+"\n"+review.FindingsJSON, repositoryMonitorValidationEvidenceLimit)
+			// Only open findings need fixing; fixed ones stay in the record.
+			openJSON := review.FindingsJSON
+			if findings, err := repositoryMonitorReviewFindingsFromRecord(review); err == nil {
+				if encoded, err := repositoryMonitorReviewFindingsJSON(repositoryMonitorOpenFindings(findings)); err == nil {
+					openJSON = encoded
+				}
+			}
+			payload["reviewEvidence"] = sanitizeRepositoryMonitorReviewText(review.Summary+"\n"+openJSON, repositoryMonitorValidationEvidenceLimit)
 			if review.ValidationEvidence != "" {
 				payload["validationEvidence"] = boundRepositoryMonitorValidationEvidence(review.ValidationEvidence)
 			}

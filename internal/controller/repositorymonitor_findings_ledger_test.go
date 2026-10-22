@@ -1,0 +1,370 @@
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+func ledgerFinding(id, priority, file string, line int64, title string) repositoryMonitorReviewFinding {
+	return repositoryMonitorReviewFinding{ID: id, Priority: priority, File: file, Line: line, Title: title, Status: repositoryMonitorFindingStatusOpen, FirstHead: "old", FirstReview: "review-old"}
+}
+
+func TestRepositoryMonitorMergeFindingLedger(t *testing.T) {
+	base := &store.ReviewRecord{ID: "review-old", HeadSHA: "old"}
+	previous := []repositoryMonitorReviewFinding{
+		ledgerFinding("f-fixed", "P1", "a.go", 10, "Nil dereference"),
+		ledgerFinding("f-open", "P2", "b.go", 20, "Missing error check"),
+		{ID: "f-history", Priority: "P1", File: "c.go", Line: 5, Title: "Old bug", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "older"},
+	}
+	review := &repositoryMonitorReviewResult{
+		PreviousFindings: []repositoryMonitorReviewPreviousFinding{{ID: "f-fixed", Status: "fixed"}, {ID: "f-open", Status: "open"}, {ID: "f-unknown", Status: "fixed"}},
+		Findings: []repositoryMonitorReviewFinding{
+			// The reviewer cannot set Orka's record fields.
+			{Priority: "P2", File: "b.go", Line: 22, Title: "Error ignored", ID: "f-forged", Status: repositoryMonitorFindingStatusFixed},
+			{Priority: "P1", File: "d.go", Line: 7, Title: "Race", OutsideChanges: true},
+			{Priority: "P2", File: "e.go", Line: 99, Title: "Unrelated nit"},
+		},
+	}
+	changed := repositoryMonitorChangedLines{"d.go": {{1, 30}}, "e.go": {{1, 10}}}
+
+	t.Run("incremental", func(t *testing.T) {
+		ledger := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: previous}, review, "new", "review-new", changed)
+		byTitle := map[string]repositoryMonitorReviewFinding{}
+		for _, finding := range ledger {
+			byTitle[finding.Title] = finding
+		}
+		if len(ledger) != 5 {
+			t.Fatalf("ledger = %+v, want 3 earlier and 2 new findings (the repeat dropped)", ledger)
+		}
+		if got := byTitle["Nil dereference"]; got.Status != repositoryMonitorFindingStatusFixed || got.ResolvedHead != "new" {
+			t.Fatalf("fixed finding = %+v", got)
+		}
+		if got := byTitle["Missing error check"]; got.Status != repositoryMonitorFindingStatusOpen || got.ResolvedHead != "" {
+			t.Fatalf("still-open finding = %+v", got)
+		}
+		if got := byTitle["Old bug"]; got.ResolvedHead != "older" {
+			t.Fatalf("history changed: %+v", got)
+		}
+		if _, ok := byTitle["Error ignored"]; ok {
+			t.Fatal("a restatement of an open finding was recorded again")
+		}
+		race := byTitle["Race"]
+		if race.ID == "" || race.ID == "f-forged" || race.Status != repositoryMonitorFindingStatusOpen || race.FirstHead != "new" || race.FirstReview != "review-new" || race.OutsideChanges {
+			t.Fatalf("new finding = %+v, want Orka-assigned record fields inside the changes", race)
+		}
+		if nit := byTitle["Unrelated nit"]; !nit.OutsideChanges {
+			t.Fatalf("finding outside the changed lines = %+v, want outsideChanges", nit)
+		}
+	})
+
+	t.Run("same head fixes nothing", func(t *testing.T) {
+		ledger := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Base: base, Ledger: previous}, review, "old", "review-again", nil)
+		for _, finding := range ledger {
+			if finding.ID == "f-fixed" && finding.Status != repositoryMonitorFindingStatusOpen {
+				t.Fatalf("same-head review resolved %+v", finding)
+			}
+			if finding.OutsideChanges {
+				t.Fatalf("same-head finding marked outside: %+v", finding)
+			}
+		}
+	})
+
+	t.Run("full review starts over", func(t *testing.T) {
+		ledger := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeFull}, review, "rebased", "review-full", nil)
+		if len(ledger) != 3 {
+			t.Fatalf("full ledger = %+v, want only this review's findings", ledger)
+		}
+		for _, finding := range ledger {
+			if finding.FirstHead != "rebased" || finding.Status != repositoryMonitorFindingStatusOpen {
+				t.Fatalf("full finding = %+v", finding)
+			}
+		}
+	})
+}
+
+func TestRepositoryMonitorDerivedReviewVerdict(t *testing.T) {
+	open := func(priority string, outside bool) repositoryMonitorReviewFinding {
+		return repositoryMonitorReviewFinding{Priority: priority, Status: repositoryMonitorFindingStatusOpen, OutsideChanges: outside}
+	}
+	for _, tc := range []struct {
+		name     string
+		blocking string
+		reviewer string
+		ledger   []repositoryMonitorReviewFinding
+		want     string
+	}{
+		{name: "open P1 overrides passed", reviewer: repositoryMonitorReviewVerdictPassed, ledger: []repositoryMonitorReviewFinding{open("P1", false)}, want: repositoryMonitorReviewVerdictNeedsChanges},
+		{name: "only P2 passes at the default", reviewer: repositoryMonitorReviewVerdictNeedsChanges, ledger: []repositoryMonitorReviewFinding{open("P2", false)}, want: repositoryMonitorReviewVerdictPassed},
+		{name: "P2 blocks when configured", blocking: "P2", reviewer: repositoryMonitorReviewVerdictPassed, ledger: []repositoryMonitorReviewFinding{open("P2", false)}, want: repositoryMonitorReviewVerdictNeedsChanges},
+		{name: "P1 outside the changes still blocks", reviewer: repositoryMonitorReviewVerdictPassed, ledger: []repositoryMonitorReviewFinding{open("P1", true)}, want: repositoryMonitorReviewVerdictNeedsChanges},
+		{name: "P2 outside the changes never blocks", blocking: "P2", reviewer: repositoryMonitorReviewVerdictNeedsChanges, ledger: []repositoryMonitorReviewFinding{open("P2", true)}, want: repositoryMonitorReviewVerdictPassed},
+		{name: "fixed findings do not block", reviewer: repositoryMonitorReviewVerdictNeedsChanges, ledger: []repositoryMonitorReviewFinding{{Priority: "P0", Status: repositoryMonitorFindingStatusFixed}}, want: repositoryMonitorReviewVerdictPassed},
+		{name: "unknown priority counts as P1", reviewer: repositoryMonitorReviewVerdictPassed, ledger: []repositoryMonitorReviewFinding{open("urgent", false)}, want: repositoryMonitorReviewVerdictNeedsChanges},
+		{name: "needs_human stands", reviewer: repositoryMonitorReviewVerdictNeedsHuman, want: repositoryMonitorReviewVerdictNeedsHuman},
+		{name: "security_sensitive stands", reviewer: repositoryMonitorReviewVerdictSecuritySensitive, ledger: []repositoryMonitorReviewFinding{open("P3", false)}, want: repositoryMonitorReviewVerdictSecuritySensitive},
+		{name: "skipped stands", reviewer: repositoryMonitorVerdictSkipped, want: repositoryMonitorVerdictSkipped},
+	} {
+		spec := corev1alpha1.RepositoryMonitorSpec{}
+		spec.Review.BlockingPriority = tc.blocking
+		if got := repositoryMonitorDerivedReviewVerdict(spec, tc.reviewer, tc.ledger); got != tc.want {
+			t.Errorf("%s: verdict = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRepositoryMonitorChangedLinesFromFiles(t *testing.T) {
+	changed := repositoryMonitorChangedLinesFromFiles([]repositoryMonitorPullRequestFileResponse{
+		{Filename: "a.go", Patch: "@@ -1,3 +1,4 @@\n line\n+added\n@@ -40 +41 @@\n-old\n+new\n@@ -60,2 +62,0 @@\n-gone\n-gone"},
+		{Filename: "image.png"},
+	})
+	for _, tc := range []struct {
+		path string
+		line int64
+		want bool
+	}{
+		{"a.go", 1, true}, {"a.go", 4, true}, {"a.go", 5, false}, {"a.go", 41, true}, {"a.go", 62, false},
+		{"image.png", 500, true}, {"b.go", 1, false}, {"a.go", 0, true},
+	} {
+		if got := changed.covers(tc.path, tc.line); got != tc.want {
+			t.Errorf("covers(%s, %d) = %t, want %t", tc.path, tc.line, got, tc.want)
+		}
+	}
+}
+
+func TestRepositoryMonitorPlanReview(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, _ := repositoryMonitorInventoryTestObjects("plan")
+	compareStatus := "ahead"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if req.URL.Path != "/repos/orka-agents/orka/compare/reviewed...newer" {
+			http.NotFound(w, req)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": compareStatus, "files": []map[string]any{
+			{"filename": "pr.go", "patch": "@@ -1 +1 @@\n-a\n+b"},
+			{"filename": "from-main.go", "patch": "@@ -1 +1 @@\n-a\n+b"},
+		}})
+	}))
+	defer server.Close()
+	r := &RepositoryMonitorReconciler{Store: db, GitHubAPIBaseURL: server.URL}
+	pr := repositoryMonitorPullRequest{Number: 7, HeadSHA: "reviewed"}
+	plan := func(head string) repositoryMonitorReviewPlan {
+		t.Helper()
+		pr.HeadSHA = head
+		got, err := r.planRepositoryMonitorReview(ctx, monitor, "orka-agents", "orka", "token", pr, map[string]struct{}{"pr.go": {}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := plan("reviewed"); got.Mode != repositoryMonitorReviewModeFull {
+		t.Fatalf("plan without a review = %+v, want full", got)
+	}
+	record := func(id, head, verdict string) {
+		t.Helper()
+		if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 7, HeadSHA: head, Verdict: verdict, FindingsJSON: "[]"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record("accepted", "reviewed", repositoryMonitorReviewVerdictNeedsChanges)
+	record("rejected", "newer", repositoryMonitorReviewVerdictFailed)
+	if got := plan("reviewed"); got.Mode != repositoryMonitorReviewModeSameHead || got.baseID() != "accepted" {
+		t.Fatalf("same-head plan = %+v", got)
+	}
+	got := plan("newer")
+	if got.Mode != repositoryMonitorReviewModeIncremental || got.baseID() != "accepted" || len(got.Delta) != 1 || got.Delta[0].Filename != "pr.go" {
+		t.Fatalf("incremental plan = %+v, want the accepted base and only the pull request's own changes", got)
+	}
+	compareStatus = "diverged"
+	if got := plan("newer"); got.Mode != repositoryMonitorReviewModeFull {
+		t.Fatalf("rewritten history plan = %+v, want full", got)
+	}
+	if got := plan("unknown"); got.Mode != repositoryMonitorReviewModeFull {
+		t.Fatalf("compare failure plan = %+v, want full", got)
+	}
+}
+
+func TestRepositoryMonitorFollowUpReviewPrompt(t *testing.T) {
+	monitor := repositoryMonitorInventoryTestMonitor()
+	pr := repositoryMonitorPullRequest{Number: 7, BaseSHA: "base", HeadSHA: "newer"}
+	reviewContext := newRepositoryMonitorReviewContext("orka-agents", "orka", pr)
+	base := &store.ReviewRecord{ID: "accepted", HeadSHA: "reviewed"}
+	ledger := []repositoryMonitorReviewFinding{
+		ledgerFinding("f-open", "P1", "a.go", 3, "Open bug"),
+		{ID: "f-done", Priority: "P1", Title: "Already fixed", Status: repositoryMonitorFindingStatusFixed},
+	}
+	incremental := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{
+		Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: ledger,
+		Delta: []repositoryMonitorPullRequestFileResponse{{Filename: "a.go", Status: "modified", Patch: "@@ -1 +1 @@\n-a\n+b"}},
+	})
+	for _, want := range []string{"Orka last reviewed this pull request at commit reviewed", `"id": "f-open"`, `"baseSHA": "reviewed"`, `"path": "a.go"`, `"previousFindings": [{"id": "f-...", "status": "fixed|open"}],`} {
+		if !strings.Contains(incremental, want) {
+			t.Fatalf("incremental prompt missing %q:\n%s", want, incremental)
+		}
+	}
+	if strings.Contains(incremental, "f-done") {
+		t.Fatal("incremental prompt lists a fixed finding")
+	}
+	sameHead := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Base: base, Ledger: ledger})
+	if !strings.Contains(sameHead, "Orka already reviewed this exact head") || !strings.Contains(sameHead, `"id": "f-open"`) {
+		t.Fatalf("same-head prompt:\n%s", sameHead)
+	}
+	full := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeFull})
+	if strings.Contains(full, "previousFindings") || strings.Contains(full, "follow-up") {
+		t.Fatalf("full prompt mentions follow-up review:\n%s", full)
+	}
+}
+
+func TestRepositoryMonitorIngestsIncrementalReview(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "follow-up", Namespace: "default", UID: types.UID("uid-follow-up")}, Spec: corev1alpha1.RepositoryMonitorSpec{RepoURL: repositoryMonitorTestRepoURL, Branch: "main", Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"}}}}
+	baseLedger, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{ledgerFinding("f-bug", "P1", "internal/example.go", 42, "Bug")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "review-old", MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 91, HeadSHA: "old", Verdict: repositoryMonitorReviewVerdictNeedsChanges, FindingsJSON: baseLedger}); err != nil {
+		t.Fatal(err)
+	}
+	ingest := func(taskName, head, mode, reviewerVerdict string) *store.ReviewRecord {
+		t.Helper()
+		task := repositoryMonitorReviewIngestTestTask(taskName, monitor.Name, 91, head)
+		task.Annotations[repositoryMonitorAnnotationReviewMode] = mode
+		task.Annotations[repositoryMonitorAnnotationReviewBase] = "review-old"
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task).Build()
+		r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, ResultStore: db}
+		result := repositoryMonitorReviewResultEnvelopeWith(t, 91, head, reviewerVerdict, func(payload map[string]any) {
+			payload["findings"] = []map[string]any{}
+			payload["previousFindings"] = []map[string]any{{"id": "f-bug", "status": "fixed"}}
+		})
+		if err := db.SaveResult(ctx, "default", taskName, result); err != nil {
+			t.Fatal(err)
+		}
+		item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "91", Number: 91, State: repositoryMonitorItemStateOpen, HeadSHA: head, BaseBranch: "main", LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: taskName}
+		if err := db.UpsertMonitorItem(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+		if handled, err := r.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, task); err != nil || !handled {
+			t.Fatalf("ingest = (%v, %v)", handled, err)
+		}
+		record, err := db.GetReviewRecord(ctx, "default", repositoryMonitorReviewRecordID(task))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+
+	// Nothing changed on the same head, so the reviewer cannot close the
+	// finding there, and Orka keeps needs_changes despite a passed verdict.
+	again := ingest("review-same-head", "old", repositoryMonitorReviewModeSameHead, repositoryMonitorReviewVerdictPassed)
+	if again.Verdict != repositoryMonitorReviewVerdictNeedsChanges || !again.Repairable || !strings.HasPrefix(again.Summary, "Orka set the verdict to needs_changes") {
+		t.Fatalf("same-head record = verdict %q repairable %t summary %q", again.Verdict, again.Repairable, again.Summary)
+	}
+	followUp := ingest("review-follow-up", "new", repositoryMonitorReviewModeIncremental, repositoryMonitorReviewVerdictNeedsChanges)
+	findings, err := repositoryMonitorReviewFindingsFromRecord(followUp)
+	if err != nil || len(findings) != 1 || findings[0].Status != repositoryMonitorFindingStatusFixed || findings[0].ResolvedHead != "new" {
+		t.Fatalf("follow-up findings = %+v err=%v, want the finding fixed at new", findings, err)
+	}
+	if followUp.Verdict != repositoryMonitorReviewVerdictPassed {
+		t.Fatalf("follow-up verdict = %q, want passed once the only finding is fixed", followUp.Verdict)
+	}
+}
+
+func TestRepositoryMonitorRendersFindingRecord(t *testing.T) {
+	monitor := repositoryMonitorInventoryTestMonitor()
+	record := &store.ReviewRecord{ID: "review-new", HeadSHA: "new1234567", Verdict: repositoryMonitorReviewVerdictNeedsChanges}
+	findings := []repositoryMonitorReviewFinding{
+		{ID: "f-carried", Priority: "P1", File: "a.go", Line: 1, Title: "Carried bug", Status: repositoryMonitorFindingStatusOpen, FirstHead: "old1234567"},
+		{ID: "f-new", Priority: "P1", File: "a.go", Line: 2, Title: "New bug", Status: repositoryMonitorFindingStatusOpen, FirstHead: "new1234567"},
+		{ID: "f-outside", Priority: "P3", File: "b.go", Line: 3, Title: "Old nit", Status: repositoryMonitorFindingStatusOpen, FirstHead: "new1234567", OutsideChanges: true},
+		{ID: "f-fixed", Priority: "P1", File: "a.go", Line: 4, Title: "Fixed bug", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "new1234567"},
+		{ID: "f-history", Priority: "P1", Title: "Fixed long ago", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "older"},
+	}
+	task := repositoryMonitorReviewIngestTestTask("review-task", monitor.Name, 1, "new1234567")
+	item := &store.MonitorItem{Number: 1}
+	body := renderRepositoryMonitorReviewBody(monitor, item, task, record, "publish-1", findings)
+	for _, want := range []string{"Carried bug", "_(open since `old12345`)_", "New bug", "### Fixed in this commit\n\n- P1: **Fixed bug**", "### Outside the new changes (not blocking)", "Old nit"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Fixed long ago") {
+		t.Fatalf("body lists a finding fixed at an earlier head:\n%s", body)
+	}
+	inline := repositoryMonitorNewInlineFindings(record, findings)
+	if len(inline) != 1 || inline[0].ID != "f-new" {
+		t.Fatalf("inline findings = %+v, want only the new one inside the changes", inline)
+	}
+	comment := renderRepositoryMonitorInlineFinding(record, inline[0])
+	if !strings.Contains(comment, "finding=f-new -->") {
+		t.Fatalf("inline comment lacks its finding marker: %q", comment)
+	}
+}
+
+func TestRepositoryMonitorOpenTriggerReviewsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		repairable bool
+		wantTasks  int
+	}{
+		{name: "later head skipped"},
+		{name: "repair label keeps reviewing", repairable: true, wantTasks: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			labels := `[]`
+			monitor, secret := repositoryMonitorInventoryTestObjects("open-trigger")
+			monitor.Spec.Review.Trigger = repositoryMonitorReviewTriggerOpen
+			if tc.repairable {
+				labels = `[{"name":"orka:fix"}]`
+				monitor.Spec.Repair.Enabled = true
+				monitor.Spec.Repair.IncludeLabels = []string{"orka:fix"}
+			}
+			server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, fmt.Sprintf(`[
+				{"number":1,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"second","repo":{"full_name":"orka-agents/orka"}},"labels":%s}
+			]`, labels))
+			defer server.Close()
+			if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "first-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "first", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: "[]"}); err != nil {
+				t.Fatal(err)
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+			r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
+			if _, created, _, err := r.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: "poll", TargetKind: repositoryMonitorPullRequestKind}, "orka-agents", "orka"); err != nil || created != tc.wantTasks {
+				t.Fatalf("created = %d err=%v, want %d review tasks", created, err, tc.wantTasks)
+			}
+			if tc.wantTasks == 0 {
+				item, err := db.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+				if err != nil || item.SkipReason != repositoryMonitorSkipReasonTriggerOpen {
+					t.Fatalf("item = %+v err=%v, want skipped by the open trigger", item, err)
+				}
+			}
+		})
+	}
+}
