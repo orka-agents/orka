@@ -10,6 +10,7 @@ MIT License - see LICENSE file for details.
 package githubauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,7 +91,7 @@ func (c Client) CheckToken(ctx context.Context, clientID, clientSecret, token st
 		return User{}, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.apiURL()+"/applications/"+url.PathEscape(clientID)+"/token", strings.NewReader(string(body)))
+		c.apiURL()+"/applications/"+url.PathEscape(clientID)+"/token", bytes.NewReader(body))
 	if err != nil {
 		return User{}, err
 	}
@@ -126,7 +127,7 @@ func (c Client) DeleteToken(ctx context.Context, clientID, clientSecret, token s
 		return err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodDelete,
-		c.apiURL()+"/applications/"+url.PathEscape(clientID)+"/token", strings.NewReader(string(body)))
+		c.apiURL()+"/applications/"+url.PathEscape(clientID)+"/token", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

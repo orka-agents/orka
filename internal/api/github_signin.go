@@ -229,8 +229,14 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 			tokens.ExpiresIn = int(max(time.Until(refreshed.ExpiresAt), 0) / time.Second)
 		}
 	}
+	// Only GitHub's verdict refuses the person; an answer it could not give
+	// is retried. Either way the token this sign-in obtained goes unused.
 	if err := cfg.GitHub.RequireMember(ctx, tokens.AccessToken, user.Login, cfg.Allowed); err != nil {
-		return fiber.NewError(fiber.StatusForbidden, "you are not an active member of a GitHub org or team allowed to sign in")
+		h.revokeSignInToken(ctx, oauth, tokens.AccessToken)
+		if errors.Is(err, githubauth.ErrNotMember) {
+			return fiber.NewError(fiber.StatusForbidden, "you are not an active member of a GitHub org or team allowed to sign in")
+		}
+		return fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub membership; sign in again shortly")
 	}
 	ui := &UserInfo{
 		AuthType: AuthTypeGitHubSession, Issuer: githubauth.Issuer, Subject: strconv.FormatInt(user.ID, 10),
@@ -292,7 +298,10 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusUnauthorized, "your GitHub link holds another account; sign in again")
 	}
 	if err := cfg.GitHub.RequireMember(ctx, held.AccessToken, account.Login, cfg.Allowed); err != nil {
-		return fiber.NewError(fiber.StatusForbidden, "you are no longer an active member of a GitHub org or team allowed to sign in")
+		if errors.Is(err, githubauth.ErrNotMember) {
+			return fiber.NewError(fiber.StatusForbidden, "you are no longer an active member of a GitHub org or team allowed to sign in")
+		}
+		return fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub membership; retry")
 	}
 	ui.Username = account.Login
 	token, next, err := h.newSession(ui)
