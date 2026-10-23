@@ -13,6 +13,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -125,6 +126,12 @@ func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 	if err != nil {
 		return nil, ref, store.ConnectorCredential{}, err
 	}
+	// An edit the provider controller has not judged yet stops no host: the
+	// check is retried until the provider's status describes its spec, and no
+	// token is handed out meanwhile.
+	if provider.DeletionTimestamp.IsZero() && !providerStatusCurrent(provider) {
+		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("connector provider %q has not caught up with its latest change", provider.Name)
+	}
 	// The provider just read is judged, so only a provider that does not
 	// authorize the link stops a host; a failed read above is retried.
 	if err := checkProvider(connection, provider, credential, nil); err != nil {
@@ -146,6 +153,21 @@ func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*c
 		return nil, hostLinkUnavailable("the Connection is not linked")
 	}
 	return connection, nil
+}
+
+// providerStatusCurrent reports whether the provider controller has judged the
+// provider's current generation.
+func providerStatusCurrent(provider *corev1alpha1.ConnectorProvider) bool {
+	for _, conditionType := range []string{
+		corev1alpha1.ConnectorProviderConditionAccepted,
+		corev1alpha1.ConnectorProviderConditionResolvedRefs,
+	} {
+		condition := meta.FindStatusCondition(provider.Status.Conditions, conditionType)
+		if condition == nil || condition.ObservedGeneration != provider.Generation {
+			return false
+		}
+	}
+	return true
 }
 
 func hostLinkUnavailable(reason string) error {

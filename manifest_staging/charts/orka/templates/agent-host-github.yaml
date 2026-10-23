@@ -19,7 +19,7 @@ metadata:
     {{- include "orka.labels" . | nindent 4 }}
 type: Opaque
 stringData:
-  {{ $github.clientSecret.key }}: {{ $github.clientSecret.value | quote }}
+  {{ $github.clientSecret.key | toString | quote }}: {{ $github.clientSecret.value | quote }}
 ---
 {{- end }}
 apiVersion: core.orka.ai/v1alpha1
@@ -132,7 +132,7 @@ spec:
     clientID: {{ $github.clientID | quote }}
     clientSecretRef:
       name: {{ include "orka.agentHostGitHubSecretName" . }}
-      key: {{ $github.clientSecret.key }}
+      key: {{ $github.clientSecret.key | toString | quote }}
   agentHost:
     templateRef:
       name: {{ $template.name }}

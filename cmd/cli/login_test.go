@@ -59,6 +59,7 @@ func TestLoginSignsInLinksGitHubAndWaitsForTheHost(t *testing.T) {
 	t.Cleanup(func() { openBrowserFunc = origBrowser })
 
 	var signedIn map[string]any
+	hostPolls := 0
 	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -67,13 +68,22 @@ func TestLoginSignsInLinksGitHubAndWaitsForTheHost(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
 			json.NewDecoder(r.Body).Decode(&signedIn) //nolint:errcheck
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "namespace": "orka-system", "agentHost": true}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "namespace": "orka-system", "connection": "github-alice", "agentHost": true}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
 			if r.Header.Get("Authorization") != "Bearer orka_s_session" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
+			hostPolls++
+			if hostPolls == 1 {
+				// Until the new link's host exists, a ready host kept from
+				// another link is not the one to use.
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"name": "gh-alice-old", "environment": "orka-gh-alice-old", "connection": "github-old-alice", "phase": "Ready", "ready": true,
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "connection": "github-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -84,7 +94,7 @@ func TestLoginSignsInLinksGitHubAndWaitsForTheHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("login: %v %q", err, out)
 	}
-	for _, want := range []string{"Code running there can read your GitHub token", "enter the code ABCD-1234", "Signed in to", "as alice", "Host ready: orka-gh-alice"} {
+	for _, want := range []string{"Code running there can read your GitHub token", "enter the code ABCD-1234", "Signed in to", "as alice", "Host ready: orka-gh-alice."} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}
@@ -123,7 +133,7 @@ func TestSessionRenewsBeforeItEndsAndStaysWithItsServer(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "connection": "github-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -298,7 +308,7 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": true}}) //nolint:errcheck
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_new", "expiresAt": time.Now().Add(time.Hour), "login": "alice", "agentHost": true}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_new", "expiresAt": time.Now().Add(time.Hour), "login": "alice", "connection": "github-alice", "agentHost": true}) //nolint:errcheck
 		default:
 			http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
 		}
@@ -505,13 +515,13 @@ func TestLoginWaitsThroughAStaleMembershipFailure(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": true}}) //nolint:errcheck
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "agentHost": true}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "connection": "github-alice", "agentHost": true}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
 			if polls.Add(1) < 3 {
-				json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "phase": "Failed", "reason": "GitHubMembershipEnded", "message": "left"}) //nolint:errcheck
+				json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "connection": "github-alice", "phase": "Failed", "reason": "GitHubMembershipEnded", "message": "left"}) //nolint:errcheck
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "connection": "github-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -575,16 +585,18 @@ func TestLoginWakesAnIdleHostAndReportsAnOperatorSuspension(t *testing.T) {
 					json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": true}}) //nolint:errcheck
 				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
 					w.WriteHeader(http.StatusCreated)
-					json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "agentHost": true}) //nolint:errcheck
+					json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "connection": "github-alice", "agentHost": true}) //nolint:errcheck
 				case r.Method == http.MethodPost && r.URL.Path == agentHostAPIPath+"/wake":
 					wakes.Add(1)
 					json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "suspended": true}) //nolint:errcheck
 				case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
 					if operator || wakes.Load() == 0 {
-						json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "phase": "Suspended", "suspended": true, "operatorSuspended": operator}) //nolint:errcheck
+						json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+							"name": "gh-alice", "connection": "github-alice", "phase": "Suspended", "suspended": true, "operatorSuspended": operator,
+						})
 						return
 					}
-					json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
+					json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "connection": "github-alice", "phase": "Ready", "ready": true}) //nolint:errcheck
 				default:
 					w.WriteHeader(http.StatusNotFound)
 				}
@@ -636,7 +648,7 @@ func TestWaitReportsAnOperatorSuspensionOverAStaleReady(t *testing.T) {
 		if r.Method == http.MethodPost {
 			wakes.Add(1)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true, //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "connection": "github-alice", "phase": "Ready", "ready": true, //nolint:errcheck
 			"suspended": true, "operatorSuspended": true})
 	}))
 	defer orka.Close()
@@ -645,7 +657,7 @@ func TestWaitReportsAnOperatorSuspensionOverAStaleReady(t *testing.T) {
 	hosts := client.NewWithNamespace(orka.URL, "orka_s_session", "orka-system")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := waitForAgentHost(ctx, cmd, hosts); err == nil || !strings.Contains(err.Error(), "an operator suspended") || wakes.Load() != 0 {
+	if err := waitForAgentHost(ctx, cmd, hosts, "github-alice"); err == nil || !strings.Contains(err.Error(), "an operator suspended") || wakes.Load() != 0 {
 		t.Fatalf("wait = %v, %d wakes", err, wakes.Load())
 	}
 }

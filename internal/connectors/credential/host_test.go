@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -136,6 +137,43 @@ func TestHostCredentialFailsClosedWhenTheProviderOptsOutDuringARefresh(t *testin
 	}
 	if h.refresher.calls.Load() != 1 {
 		t.Fatalf("refreshes = %d, want the race to have run", h.refresher.calls.Load())
+	}
+}
+
+// An edit to the provider that its controller has not judged yet stops no
+// host and releases no token; once judged, a provider that no longer accepts
+// the link stops it.
+func TestHostLinkWaitsForTheProviderStatusToCatchUp(t *testing.T) {
+	h := newHarness(t)
+	h.serveHosts("copilotd")
+	h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(4 * time.Hour)})
+	setConditions := func(observed int64, status metav1.ConditionStatus) {
+		t.Helper()
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+			t.Fatal(err)
+		}
+		for i := range provider.Status.Conditions {
+			provider.Status.Conditions[i].ObservedGeneration = observed
+			provider.Status.Conditions[i].Status = status
+		}
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	setConditions(0, metav1.ConditionTrue)
+	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); err == nil || errors.Is(err, ErrHostLinkUnavailable) {
+		t.Fatalf("check = %v, want a retryable error", err)
+	}
+	if held, err := h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, 15*time.Minute); err == nil ||
+		errors.Is(err, ErrHostLinkUnavailable) || held.AccessToken != "" {
+		t.Fatalf("held = %q, err = %v; want no token and a retryable error", held.AccessToken, err)
+	}
+
+	setConditions(1, metav1.ConditionFalse)
+	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, ErrHostLinkUnavailable) {
+		t.Fatalf("check = %v, want ErrHostLinkUnavailable", err)
 	}
 }
 

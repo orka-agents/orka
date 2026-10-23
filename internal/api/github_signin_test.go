@@ -27,6 +27,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/connectors/credential"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/githubauth"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -77,6 +78,11 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			if body.AccessToken == "ghu_check_down" {
+				// GitHub cannot check this token.
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
 			users := map[string]map[string]any{
 				"ghu_alice": {"id": 852750, "login": "alice"}, "ghu_alice_renewed": {"id": 852750, "login": "alice"},
 				"ghu_alice_refreshed": {"id": 852750, "login": "alice"}, "ghu_alice_left": {"id": 852750, "login": "alice"},
@@ -108,9 +114,15 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 	return srv
 }
 
-type fakeSignInCredentials struct{ token string }
+type fakeSignInCredentials struct {
+	token string
+	err   error
+}
 
 func (f fakeSignInCredentials) HostCredential(context.Context, string, string, time.Duration) (credential.HostCredential, error) {
+	if f.err != nil {
+		return credential.HostCredential{}, f.err
+	}
 	if f.token == "" {
 		return credential.HostCredential{}, credential.ErrHostLinkUnavailable
 	}
@@ -268,6 +280,48 @@ func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
 	}
 	if connection.Status.GrantSequence == grant {
 		t.Fatal("a sign-in over a link holding another account must replace its grant")
+	}
+}
+
+// A sign-in that cannot tell whether the existing link still works, because
+// custody or GitHub cannot answer, replaces nothing: each replacement spends
+// one of the grants custody retains. It answers 503 and revokes its token.
+func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
+	h := newSignInHarness(t)
+	revoked := &revocations{}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: fakeGitHub(t, revoked).URL}
+	body := map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800}
+	h.identity = nil
+	if status, _ := h.signIn(body); status != http.StatusCreated {
+		t.Fatalf("first sign-in: %d", status)
+	}
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	grant := func() int64 {
+		t.Helper()
+		connection := &corev1alpha1.Connection{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+			t.Fatal(err)
+		}
+		return connection.Status.GrantSequence
+	}
+	first := grant()
+	for outage, credentials := range map[string]fakeSignInCredentials{
+		"custody": {err: errors.New("custody cannot answer")},
+		"github":  {token: "ghu_check_down"},
+	} {
+		h.handlers.githubSignIn.Credentials = credentials
+		h.identity = nil
+		before := len(revoked.list())
+		if status, session := h.signIn(body); status != http.StatusServiceUnavailable || session.Token != "" {
+			t.Fatalf("%s outage: %d, want 503 and no session", outage, status)
+		}
+		if got := grant(); got != first {
+			t.Fatalf("%s outage replaced the grant: %d, want %d", outage, got, first)
+		}
+		// The sign-in's token, as the refresh that opens each sign-in left it.
+		if got := revoked.list(); len(got) != before+1 || got[len(got)-1] != "ghu_alice_refreshed" {
+			t.Fatalf("%s outage: revoked = %v, want the sign-in's own token", outage, got)
+		}
 	}
 }
 
@@ -460,6 +514,43 @@ func TestGitHubSignInWaitsForTheCustodyFinalizer(t *testing.T) {
 	}
 	if connection.Status.GrantSequence != 0 {
 		t.Fatalf("an unprotected Connection was linked: %+v", connection.Status)
+	}
+}
+
+// A Connection made outside the API under the person's canonical name, but
+// for another provider, never takes the sign-in provider's grant.
+func TestGitHubSignInRefusesALinkBoundToAnotherProvider(t *testing.T) {
+	h := newSignInHarness(t)
+	revoked := &revocations{}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: fakeGitHub(t, revoked).URL}
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	other := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: connectorTestNamespace, Finalizers: []string{controller.ConnectionCustodyFinalizer},
+		},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject:     corev1alpha1.ConnectionSubject{Issuer: githubauth.Issuer, Subject: signInTestUserID},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github-other"},
+			Mode:        corev1alpha1.ConnectionModeReadOnly,
+		},
+	}
+	if err := h.client.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800}); status != http.StatusConflict ||
+		session.Token != "" {
+		t.Fatalf("sign-in over another provider's Connection: %d, want 409 and no session", status)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.Status.GrantSequence != 0 || connection.Spec.ProviderRef.Name != "github-other" {
+		t.Fatalf("the other provider's Connection was linked: %+v", connection)
+	}
+	if got := revoked.list(); len(got) != 1 {
+		t.Fatalf("revoked = %v, want the sign-in's token", got)
 	}
 }
 

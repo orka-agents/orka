@@ -90,11 +90,22 @@ func TestConnectWaitsForTheAgentHost(t *testing.T) {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			case 2:
-				// An earlier host still being deleted is not the one to use.
-				json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Deleting", "ready": true, "deleting": true}) //nolint:errcheck
+				// Until then, a ready host kept from another link is not
+				// the one to use.
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"name": "gh-alice-old", "environment": "orka-gh-alice-old", "phase": "Ready", "ready": true, "connection": "github-old-abc",
+				})
+				return
+			case 3:
+				// Neither is an earlier host still being deleted.
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Deleting", "ready": true, "deleting": true, "connection": "github-abc",
+				})
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": hostPolls >= 4}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": hostPolls >= 5, "connection": "github-abc",
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -103,7 +114,7 @@ func TestConnectWaitsForTheAgentHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v %q", err, out)
 	}
-	if !strings.Contains(out, "Linked github") || !strings.Contains(out, "Host ready: orka-gh-alice") || hostPolls < 4 {
+	if !strings.Contains(out, "Linked github") || !strings.Contains(out, "Host ready: orka-gh-alice.") || hostPolls < 5 {
 		t.Fatalf("output = %q, host polls = %d", out, hostPolls)
 	}
 }
@@ -147,9 +158,9 @@ func TestConnectWaitsThroughARelinkWithAStdinToken(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "grantSequence": 1}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
 			hostPolls++
-			host := map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Failed", "reason": "ConnectionUnavailable"}
+			host := map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Failed", "reason": "ConnectionUnavailable", "connection": "github-abc"}
 			if hostPolls >= 3 {
-				host = map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true}
+				host = map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true, "connection": "github-abc"}
 			}
 			json.NewEncoder(w).Encode(host) //nolint:errcheck
 		default:

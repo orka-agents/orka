@@ -53,7 +53,8 @@ signed-in person's host may do.
      (`GET /orgs/{org}/teams/{team_slug}/memberships/{username}`), with `state: active`.
      Org membership alone never satisfies a team allow-list. The app must be installed on
      those orgs with read access to members. Any error denies sign-in, and each later
-     membership check applies the same rule.
+     membership check applies the same rule. `{username}` is the login GitHub returns for
+     the token at that check, never a stored one.
    - issues an Orka session token: random, shown once, stored only as a hash with its
      owner and a twelve-hour expiry, as AHP tokens are.
 4. The CLI keeps the session token in the user's configuration directory, readable only
@@ -95,6 +96,8 @@ context-token subjects. A GitHub session also owns Connections, as issuer
   credential.
 - `orka login --no-host` links the account for renewal and connector use, and records
   that the person declined a host. ADR 0036 provisions none for such a Connection.
+  Signing in again without `--no-host` clears that, and ADR 0036 then provisions the
+  host for the same Connection.
 
 ### Reaching Orka
 
@@ -112,13 +115,15 @@ context-token subjects. A GitHub session also owns Connections, as issuer
 
 - `orka host invite <github-login>` asks Orka to start the device flow itself. The caller
   needs `create` on `agenthosts` in the watch namespace, which the API checks with a
-  SubjectAccessReview. Orka returns the code and the verification URL for the operator to
-  pass on, then polls GitHub outbound until the person approves or the code expires,
-  after 15 minutes.
+  SubjectAccessReview. Orka returns the code, the verification URL and ADR 0036's
+  disclosure, which the CLI prints for the operator to pass on before the person
+  approves. Orka then polls GitHub outbound until the person approves or the code
+  expires, after 15 minutes.
 - On approval Orka makes the sign-in checks: its own app, membership of an allowed org or
-  team. It also requires that the GitHub login is the invited one. If someone else
-  entered the code, Orka refuses, and deletes the tokens with GitHub's app-authenticated
-  token API.
+  team. It also requires that the GitHub login, as GitHub returns it at approval, is the
+  invited one; a login renamed in between is refused, and can be invited again. If
+  someone else entered the code, Orka refuses, and deletes the tokens with GitHub's
+  app-authenticated token API.
 - Orka then records the Connection as signing in does, and ADR 0036 provisions the host.
   It issues no session token: the invited person needs only a browser and the Copilot app.
 - An invite is single-use and lasts as long as its code. `orka host invite` waits for the
