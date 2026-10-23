@@ -14,6 +14,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -150,9 +151,41 @@ func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*c
 		return nil, fmt.Errorf("load connection: %w", err)
 	}
 	if !connectors.ConnectionLinked(connection) {
+		lagging, err := s.providerLag(ctx, connection)
+		if err != nil {
+			return nil, fmt.Errorf("load connector provider: %w", err)
+		}
+		if lagging {
+			return nil, fmt.Errorf("the Connection %q waits for its provider's latest change to be judged", name)
+		}
 		return nil, hostLinkUnavailable("the Connection is not linked")
 	}
 	return connection, nil
+}
+
+// providerLag reports whether a Connection is unlinked only because an edit
+// to its provider has not been judged yet: by the provider controller, or,
+// once it has accepted the edit, by the Connection controller. Either way a
+// host waits instead of stopping, and gets no token meanwhile.
+func (s *Source) providerLag(ctx context.Context, connection *corev1alpha1.Connection) (bool, error) {
+	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+	resolved := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionProviderResolved)
+	if ready == nil || ready.Status != metav1.ConditionTrue || resolved == nil ||
+		resolved.Status != metav1.ConditionFalse || resolved.Reason != corev1alpha1.ConnectionReasonProviderInvalid {
+		return false, nil
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	key := types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}
+	if err := s.reader().Get(ctx, key, provider); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !provider.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	return !providerStatusCurrent(provider) || connectors.ProviderAccepted(provider), nil
 }
 
 // providerStatusCurrent reports whether the provider controller has judged the

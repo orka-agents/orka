@@ -56,25 +56,27 @@ const (
 	// when the controller first saw the difference.
 	agentHostConditionAgentUpdatePending = "HostAgentUpdatePending"
 
-	agentHostReasonReady                   = "HostReady"
-	agentHostReasonProvisioning            = "Provisioning"
-	agentHostReasonRestarting              = "Restarting"
-	agentHostReasonSuspended               = "Suspended"
-	agentHostReasonIdle                    = "Idle"
-	agentHostReasonRequested               = "Requested"
-	agentHostReasonRunning                 = "Running"
-	agentHostReasonTemplateNotFound        = "TemplateNotFound"
-	agentHostReasonInvalidTemplate         = "InvalidTemplate"
-	agentHostReasonGitHubTokenRequired     = "GitHubTokenRequired"
-	agentHostReasonGitHubTokenUnavailable  = "GitHubTokenUnavailable"
-	agentHostReasonObjectCollision         = "ObjectCollision"
-	agentHostReasonObjectRejected          = "ObjectRejected"
-	agentHostReasonStateVolumeLost         = "StateVolumeLost"
-	agentHostReasonHostAgentUnavailable    = "HostAgentUnavailable"
-	agentHostReasonHostNamespaceChanged    = "HostNamespaceChanged"
-	agentHostReasonConnectionUnavailable   = "ConnectionUnavailable"
-	agentHostReasonGitHubIdentityChanged   = "GitHubIdentityChanged"
-	agentHostReasonGitHubMembershipEnded   = "GitHubMembershipEnded"
+	agentHostReasonReady                  = "HostReady"
+	agentHostReasonProvisioning           = "Provisioning"
+	agentHostReasonRestarting             = "Restarting"
+	agentHostReasonSuspended              = "Suspended"
+	agentHostReasonIdle                   = "Idle"
+	agentHostReasonRequested              = "Requested"
+	agentHostReasonRunning                = "Running"
+	agentHostReasonTemplateNotFound       = "TemplateNotFound"
+	agentHostReasonInvalidTemplate        = "InvalidTemplate"
+	agentHostReasonGitHubTokenRequired    = "GitHubTokenRequired"
+	agentHostReasonGitHubTokenUnavailable = "GitHubTokenUnavailable"
+	agentHostReasonObjectCollision        = "ObjectCollision"
+	agentHostReasonObjectRejected         = "ObjectRejected"
+	agentHostReasonStateVolumeLost        = "StateVolumeLost"
+	agentHostReasonHostAgentUnavailable   = "HostAgentUnavailable"
+	agentHostReasonHostNamespaceChanged   = "HostNamespaceChanged"
+	agentHostReasonConnectionUnavailable  = "ConnectionUnavailable"
+	agentHostReasonGitHubIdentityChanged  = "GitHubIdentityChanged"
+	agentHostReasonGitHubMembershipEnded  = "GitHubMembershipEnded"
+	// agentHostReasonGitHubTokenNeverExpires refuses a Connection token that
+	// never expires: code in the host can read it.
 	agentHostReasonGitHubTokenNeverExpires = "GitHubTokenNeverExpires"
 	agentHostReasonWaitingForIdle          = "WaitingForIdle"
 
@@ -443,12 +445,11 @@ func (r *AgentHostReconciler) connectionToken(
 	if err != nil {
 		return nil, "", fmt.Errorf("get the host's token from Connection %s: %w", name, err)
 	}
-	// Membership is checked again only when a refreshed token arrives, so
-	// under a sign-in allow-list a token that never expires is refused.
-	if r.Membership != nil && held.ExpiresAt.IsZero() {
+	// Code in the host can read its token, so it gets only one that expires:
+	// a leaked copy then stops working on its own.
+	if held.ExpiresAt.IsZero() {
 		return nil, "", agentHostFailed(agentHostReasonGitHubTokenNeverExpires,
-			"Connection %s holds a GitHub token that never expires, so membership would never be checked again; "+
-				"turn on user-token expiration in the GitHub App, then link again", name)
+			"Connection %s holds a GitHub token that never expires; turn on user-token expiration in the GitHub App, then link again", name)
 	}
 	token := []byte(held.AccessToken)
 	holds, err := r.tokenCopyHolds(ctx, names, token)

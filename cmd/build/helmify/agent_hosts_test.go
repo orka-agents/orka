@@ -282,6 +282,52 @@ func agentHostGitHubValues(extra ...string) []string {
 	), extra...)
 }
 
+// Names YAML would read as numbers stay strings, as Kubernetes requires. The
+// render is decoded untyped: decoding into the typed objects would convert
+// them by the field's type, while the API server receives the YAML's.
+func TestStaticChartAgentHostGitHubQuotesItsNames(t *testing.T) {
+	rendered := requireHelmRender(t, append(agentHostGitHubValues(
+		"--set", "controller.agentHosts.github.providerName=123",
+		"--set", "controller.agentHosts.template.name=456",
+		"--set", "controller.agentHosts.github.clientSecret.existingSecret=789"),
+		"--show-only", "templates/agent-host-github.yaml")...)
+	field := func(doc map[string]any, path ...string) any {
+		var current any = doc
+		for _, key := range path {
+			next, ok := current.(map[string]any)
+			if !ok {
+				return nil
+			}
+			current = next[key]
+		}
+		return current
+	}
+	decode := func(marker string) map[string]any {
+		t.Helper()
+		doc := map[string]any{}
+		if err := yaml.Unmarshal([]byte(requireRenderedDocument(t, rendered, marker)), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	provider, template := decode("kind: ConnectorProvider\n"), decode("kind: AgentHostTemplate\n")
+	for name, got := range map[string]any{
+		"provider name":                 field(provider, "metadata", "name"),
+		"provider namespace":            field(provider, "metadata", "namespace"),
+		"provider clientSecretRef name": field(provider, "spec", "oauth", "clientSecretRef", "name"),
+		"provider templateRef name":     field(provider, "spec", "agentHost", "templateRef", "name"),
+		"template name":                 field(template, "metadata", "name"),
+	} {
+		if _, ok := got.(string); !ok {
+			t.Errorf("%s = %#v, want a string", name, got)
+		}
+	}
+	if field(provider, "metadata", "name") != "123" || field(template, "metadata", "name") != "456" ||
+		field(provider, "spec", "oauth", "clientSecretRef", "name") != "789" {
+		t.Fatalf("names changed:\n%s", rendered)
+	}
+}
+
 // One helm install gives people hosts from GitHub: the chart renders the
 // provider and the copilotd template, which is the sample's, unchanged.
 func TestStaticChartAgentHostGitHubRendersTheProviderAndTemplate(t *testing.T) {
@@ -335,7 +381,7 @@ func TestStaticChartAgentHostGitHubRendersTheProviderAndTemplate(t *testing.T) {
 	existing := requireHelmRender(t, append(agentHostGitHubValues(
 		"--set", "controller.agentHosts.github.clientSecret.existingSecret=github-app"),
 		"--show-only", "templates/agent-host-github.yaml")...)
-	if strings.Contains(existing, "kind: Secret\n") || !strings.Contains(existing, "name: github-app") {
+	if strings.Contains(existing, "kind: Secret\n") || !strings.Contains(existing, `name: "github-app"`) {
 		t.Fatalf("existing Secret render:\n%s", existing)
 	}
 

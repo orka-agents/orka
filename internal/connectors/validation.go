@@ -38,6 +38,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
@@ -879,6 +880,11 @@ func ResolveProviderReferences(ctx context.Context, reader client.Reader, provid
 		}
 		if template.Spec.Access != corev1alpha1.AgentHostAccessRelay {
 			return unresolved(ReasonReferenceInvalid, "agentHost template must use access: Relay"), nil
+		}
+		// A template the AgentHost reconciler would refuse leaves every host
+		// it provisions failed, so the provider is not offered meanwhile.
+		if err := agenthost.ValidateTemplate(template); err != nil {
+			return unresolved(ReasonReferenceInvalid, fmt.Sprintf("agentHost template is invalid: %v", err)), nil
 		}
 	}
 	return nil, nil
