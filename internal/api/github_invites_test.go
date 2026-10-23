@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/githubauth"
 )
 
@@ -252,10 +253,10 @@ func TestInvitesNeedHostCreation(t *testing.T) {
 	}
 }
 
-// A link that fails before storing anything revokes the approved token,
-// since nothing else holds it.
+// A link that fails before storing anything revokes the token the invite
+// would have linked, since nothing else holds it.
 func TestInviteRevokesWhenLinkingStoresNothing(t *testing.T) {
-	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "expires_in": 28800})
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
 	leaving := &corev1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connectorTestNamespace, Finalizers: []string{"orka.ai/test-hold"}},
@@ -272,11 +273,12 @@ func TestInviteRevokesWhenLinkingStoresNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, invite := h.invite("alice")
-	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || !strings.Contains(outcome.Message, "was revoked") {
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused ||
+		!strings.Contains(outcome.Message, "could not be linked") || !strings.Contains(outcome.Message, "was revoked") {
 		t.Fatalf("outcome = %+v", outcome)
 	}
-	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
-		t.Fatalf("revoked = %v, want the approved token", revoked)
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice_refreshed" {
+		t.Fatalf("revoked = %v, want the refreshed token", revoked)
 	}
 }
 
@@ -414,18 +416,41 @@ func TestInvitesReserveCapacityBeforeStartingTheDeviceFlow(t *testing.T) {
 
 // Custody committed with a status write that failed is an accepted invite:
 // the Connection reconciler records the link from the committed completion.
+// The host it promises starts too: a decline the person's link carried is
+// lifted with the commit, since nothing repairs it later.
 func TestInviteAcceptsALinkCommittedButNotYetRecorded(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
+	wantName := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	declined := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: wantName, Namespace: connectorTestNamespace, Finalizers: []string{controller.ConnectionCustodyFinalizer},
+			Annotations: map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined},
+		},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject:     corev1alpha1.ConnectionSubject{Issuer: githubauth.Issuer, Subject: signInTestUserID},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+			Mode:        corev1alpha1.ConnectionModeReadOnly,
+		},
+	}
+	if err := h.client.Create(context.Background(), declined); err != nil {
+		t.Fatal(err)
+	}
 	h.statusFailure = &atomic.Bool{}
 	h.statusFailure.Store(true)
 	_, invite := h.invite("alice")
 	outcome := h.inviteOutcome(invite.ID)
-	wantName := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
-	if outcome.State != InviteAccepted || outcome.Connection != wantName || !strings.Contains(outcome.Message, "finishes recording") {
+	if outcome.State != InviteAccepted || outcome.Connection != wantName || !strings.Contains(outcome.Message, "finishes recording") || !outcome.AgentHost {
 		t.Fatalf("outcome = %+v", outcome)
 	}
 	if revoked := gh.revoked.list(); len(revoked) != 0 {
 		t.Fatalf("a committed link revokes nothing: %v", revoked)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: wantName}, connection); err != nil {
+		t.Fatal(err)
+	}
+	if got := connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost]; got != "" {
+		t.Fatalf("annotation = %q, want the decline lifted with the commit", got)
 	}
 }
 
