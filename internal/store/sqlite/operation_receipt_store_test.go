@@ -213,3 +213,25 @@ func TestWriteOperationRequiresACatalogWriteMethod(t *testing.T) {
 	})
 	require.ErrorIs(t, err, store.ErrValidation)
 }
+
+// A store that requires envelopes, as production does, refuses a contract
+// write without one and accepts it with one. Reads are unaffected.
+func TestRequireWriteEnvelopesRefusesWritesWithoutOne(t *testing.T) {
+	ctx := context.Background()
+	s := setupTestStore(t)
+	dataset := advanceTestEpoch(t, s, testWriteFence)
+	require.NoError(t, s.SaveResult(ctx, "ns", "lenient", []byte("ok")), "package tests may write without an envelope")
+
+	s.RequireWriteEnvelopes()
+	require.ErrorIs(t, s.SaveResult(ctx, "ns", "task", []byte("bare")), store.ErrValidation)
+	_, err := s.GetResult(ctx, "ns", "task")
+	require.ErrorIs(t, err, store.ErrNotFound, "a refused write commits nothing")
+	_, err = s.GetResult(ctx, "ns", "lenient")
+	require.NoError(t, err, "reads need no envelope")
+
+	enveloped, _ := testEnvelope(t, ctx, dataset, "SaveResult", time.Now().UTC(), "ns", "task", []byte("kept"))
+	require.NoError(t, s.SaveResult(enveloped, "ns", "task", []byte("kept")))
+	got, err := s.GetResult(ctx, "ns", "task")
+	require.NoError(t, err)
+	require.Equal(t, "kept", string(got))
+}

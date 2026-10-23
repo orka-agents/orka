@@ -58,9 +58,9 @@
 // operation receipt with the change, so a retry returns the original outcome
 // and a delayed write from a replaced controller cannot commit
 // ([OperationReceiptStore], [ControllerEpochAdvancer]). Both providers
-// implement those two interfaces and check every write that carries an
-// envelope. Orka does not attach envelopes yet, so until it does providers
-// must also accept writes without one.
+// implement those two interfaces. Orka's storage client attaches an envelope
+// to every write, and a provider refuses a write without one with
+// [ErrValidation].
 //
 // # Records and wire format
 //

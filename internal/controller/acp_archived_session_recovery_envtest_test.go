@@ -12,6 +12,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -162,11 +163,11 @@ func newArchivedSessionAPIClient(t *testing.T) client.Client {
 	return apiClient
 }
 
-func startArchivedRecoveryEpoch(t *testing.T, ctx context.Context, control store.ControllerEpochStore, mirror store.ControllerEpochMirror, holder string) (*ControllerEpochManager, func()) {
+func startArchivedRecoveryEpoch(t *testing.T, ctx context.Context, control store.ControllerEpochStore, mirror EpochDataset, holder string) (*ControllerEpochManager, func()) {
 	t.Helper()
 	epochs := NewControllerEpochManager(control, holder)
 	if mirror != nil {
-		epochs.WithMirror(mirror)
+		epochs.WithStorage(storagev1.StateContract, mirror)
 	}
 	epochCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)

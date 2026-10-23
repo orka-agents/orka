@@ -37,6 +37,9 @@ func openControllerSQLiteStore(
 	if err := s.SetAgentExecutionSnapshotCipher(cipher); err != nil {
 		return nil, nil, err
 	}
+	// Every contract write reaches the store through the storage client,
+	// which attaches a write envelope; a write without one is refused.
+	s.RequireWriteEnvelopes()
 	success = true
 	return s, key, nil
 }

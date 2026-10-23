@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 )
 
 // orkaClient wraps s in the storage client. Orka's redaction, payload
@@ -11,9 +12,6 @@ import (
 // those behaviors end to end write through it.
 func orkaClient(t *testing.T, s *Store) *storageclient.Client {
 	t.Helper()
-	client, err := storageclient.NewEmbedded(s)
-	if err != nil {
-		t.Fatalf("NewEmbedded: %v", err)
-	}
+	client := storageclienttest.NewEmbedded(t, s)
 	return client
 }

@@ -1412,8 +1412,17 @@ func main() {
 		setupLog.Error(err, "unable to configure Kubernetes ACP control store")
 		os.Exit(1)
 	}
-	controllerEpochManager := controller.NewControllerEpochManager(kubeControlStore, controllerHolderID).
-		WithMirror(appStorage)
+	controllerEpochManager := controller.NewControllerEpochManager(kubeControlStore, controllerHolderID)
+	// The epoch manager advances each storage dataset to the acquired epoch
+	// and opens its write fence; every storage client write waits for the
+	// fence of the dataset it targets.
+	for contract, dataset := range appStorage.Datasets() {
+		controllerEpochManager.WithStorage(contract, dataset)
+	}
+	if err := appStorage.BindFences(controllerEpochManager); err != nil {
+		setupLog.Error(err, "unable to bind the storage client to the controller epoch manager")
+		os.Exit(1)
+	}
 	sessionCleanupDispatcher.Store = kubeControlStore
 	sessionCleanupDispatcher.Epochs = controllerEpochManager
 	sessionManager.SetACPSessionCleanup(kubeControlStore, controllerEpochManager)

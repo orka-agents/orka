@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -73,6 +74,7 @@ var sqliteOnlyMethods = map[string]string{
 	"NeedLeaderElection":              "lifecycle",
 	"SetAgentExecutionSnapshotCipher": "startup key configuration",
 	"SetNativeSessionMaxBytes":        "startup configuration",
+	"RequireWriteEnvelopes":           "startup configuration",
 	"Start":                           "lifecycle",
 	"AcquireLockUntil":                "SQLite test helper",
 
@@ -230,10 +232,8 @@ func TestNewAcceptsComparableValueProviders(t *testing.T) {
 
 func TestClientRoutesCallsToTheEmbeddedStore(t *testing.T) {
 	backend := openSQLite(t)
-	client, err := storageclient.NewEmbedded(backend)
-	if err != nil {
-		t.Fatalf("NewEmbedded: %v", err)
-	}
+	backend.RequireWriteEnvelopes()
+	client := storageclienttest.NewEmbedded(t, backend)
 	ctx := context.Background()
 	if err := client.HealthCheck(ctx); err != nil {
 		t.Fatalf("HealthCheck: %v", err)

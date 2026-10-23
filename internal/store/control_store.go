@@ -8,6 +8,15 @@ type ControllerEpochStore interface {
 	CompareAndSwapControllerEpoch(ctx context.Context, change ControllerEpochCAS) (*ControllerEpoch, error)
 }
 
+// ControllerEpochInstallationReader identifies the installation that owns
+// the controller epoch: the ID Orka binds each storage dataset to when it
+// advances the dataset's epoch.
+type ControllerEpochInstallationReader interface {
+	// ControllerEpochInstallationID returns the installation ID of the epoch
+	// named name. It is stable for the life of the installation.
+	ControllerEpochInstallationID(ctx context.Context, name string) (string, error)
+}
+
 // PromptAttemptStore persists the full prompt execution and delivery state machines.
 type PromptAttemptStore interface {
 	CreatePromptAttempt(ctx context.Context, attempt *PromptAttempt, fence ControllerEpochFence) (*PromptAttempt, error)

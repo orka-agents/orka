@@ -70,10 +70,9 @@ type ControllerEpochMirrorState struct {
 }
 
 // ControllerEpochAdvancer is the forward-only, installation-bound form of the
-// controller epoch mirror. Both providers implement it, and it will replace
-// [ControllerEpochMirror.SyncControllerEpochMirror] on the state provider;
-// Orka does not call it yet. Once Orka advances a
-// dataset with AdvanceControllerEpoch, it no longer calls
+// controller epoch mirror. Both providers implement it, and Orka uses it in
+// place of [ControllerEpochMirror.SyncControllerEpochMirror]: once Orka
+// advances a dataset with AdvanceControllerEpoch, it no longer calls
 // SyncControllerEpochMirror on it, and a provider that implements both
 // refuses SyncControllerEpochMirror on a dataset bound to an installation
 // with a [FencedError], as rule 3 refuses an advance from another
@@ -109,9 +108,8 @@ type ControllerEpochMirrorState struct {
 //
 // The advance carries no [WriteEnvelope] and leaves no operation receipt: it
 // establishes the fence, and it is idempotent by epoch and request digest.
-// When Orka uses it, Orka advances every distinct dataset it is bound to and
-// opens each dataset's fence for writes once that dataset's own advance
-// succeeds.
+// At takeover, Orka advances every distinct dataset it is bound to and opens
+// each dataset's fence for writes once that dataset's own advance succeeds.
 type ControllerEpochAdvancer interface {
 	// AdvanceControllerEpoch stores a newer epoch for the dataset under the
 	// rules above and returns the state the dataset now holds.

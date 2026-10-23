@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -76,8 +76,7 @@ func TestProviderReceivesOnlySanitizedGatewayText(t *testing.T) {
 	secrets := protectedSecrets()
 	openAI, github, bearer := secrets["OpenAI key"], secrets["GitHub token"], secrets["bearer value"]
 	recorder := newRecordingStore(t)
-	client, err := storageclient.NewEmbedded(recorder)
-	require.NoError(t, err)
+	client := storageclienttest.NewEmbedded(t, recorder)
 	ctx := t.Context()
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 
@@ -89,7 +88,7 @@ func TestProviderReceivesOnlySanitizedGatewayText(t *testing.T) {
 		StateMessage: "Authorization: Bearer " + bearer, Metadata: map[string]string{"note": "api_key=" + openAI},
 		ExpiresAt: now.Add(time.Hour),
 	}
-	_, _, err = client.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: event, AppendUserMessage: true, PendingLimit: 10})
+	_, _, err := client.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: event, AppendUserMessage: true, PendingLimit: 10})
 	require.NoError(t, err)
 	_, err = client.GetGatewayEventDuplicate(ctx, &event, now)
 	require.NoError(t, err)

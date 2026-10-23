@@ -50,6 +50,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/usage"
@@ -342,8 +343,7 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 	var err error
 	f.db, err = sqlite.NewDB(f.dbPath)
 	require.NoError(t, err)
-	storage, err := storageclient.NewEmbedded(sqlite.NewStore(f.db, f.dbPath))
-	require.NoError(t, err)
+	storage := storageclienttest.NewEmbedded(t, sqlite.NewStore(f.db, f.dbPath))
 	f.backend = &usageWorkflowStore{Client: storage}
 	sessions := controller.NewSessionManager(f.backend)
 	f.reconciler = &controller.RepositoryMonitorReconciler{

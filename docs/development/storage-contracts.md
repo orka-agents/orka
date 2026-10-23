@@ -188,8 +188,9 @@ the observable parts.
   failures; no commit outcome can be lost in transit.
 - **Write envelope.** `WriteEnvelope{DatasetID, Fence, OperationID,
   RequestDigest, IssuedAt, Sequence}` travels in the context
-  (`WithWriteEnvelope`, `WriteEnvelopeFrom`). Orka does not attach it yet and
-  providers must accept writes without one. The checks it carries, operation
+  (`WithWriteEnvelope`, `WriteEnvelopeFrom`). The storage client attaches it
+  to every write, and a provider refuses a write without one with
+  `ErrValidation`. The checks it carries, operation
   receipts and forward-only controller ownership are described in "Write
   envelopes, operation receipts and controller ownership" below. Only the
   outbox family takes a `ControllerEpochFence` today, as an explicit parameter
@@ -255,12 +256,14 @@ writing (#512 step 3). The types are in `pkg/storage/v1`: `WriteEnvelope`,
 `ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted` and
 `ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
 `OperationReceiptStore` and `ControllerEpochAdvancer`, and check every write
-that carries an envelope when it commits. SQLite does, and the shared suite's
+when it commits. SQLite does, and the shared suite's
 write catalog (`storagetest`) runs the dataset, receipt, age, fence and
 resolution checks for every write method except `CompleteScanTaskIngestion`,
 which joins the catalog when scan ingestion becomes a conditional command.
-Orka does not attach envelopes yet, so providers must keep accepting writes
-without one until the storage client does.
+The storage client attaches an envelope to every write (see "Envelopes in the
+storage client" below), and a provider refuses a write without one with
+`ErrValidation`. Production SQLite does; SQLite's package tests may still
+write without one.
 
 - **Method catalog.** Every provider method is a read, a write or an
   administrative method. Reads carry no envelope and need no stored receipt.
@@ -402,18 +405,21 @@ without one until the storage client does.
   that holds an epoch but no installation binds the installation of its first
   successful advance, including a repeat of the stored epoch. The advance
   waits for fenced writes in progress, and once it returns, no write with an
-  older fence commits, however long it was delayed. Today the controller
-  epoch manager syncs each mirror it is given with `SyncControllerEpochMirror`
-  and then opens one fence.
-  Once providers implement the advance, at takeover Orka acquires the epoch in
-  Kubernetes, reads the epoch each dataset acknowledged earlier, and then,
-  for each distinct dataset it is bound to:
+  older fence commits, however long it was delayed. At takeover Orka
+  acquires the epoch in Kubernetes and then, for each distinct dataset it is
+  bound to:
   1. advances the dataset;
-  2. stops for recovery if the dataset's previous epoch is below its
-     acknowledgement, because the store lost an acknowledged advance;
+  2. stops for recovery if the dataset's previous epoch is below the epoch it
+     acknowledged earlier, because the store lost an acknowledged advance;
   3. records the new acknowledgement in Kubernetes, in the ControllerEpoch
      status until an installation record exists;
   4. opens that dataset's fence for writes.
+
+  The controller epoch manager does steps 1 and 4 today: it advances each
+  dataset with the exact record the compare-and-swap produced and the
+  ControllerEpoch UID, and refuses to open a dataset whose advance is
+  refused. Recording acknowledgements and the rollback check in steps 2 and 3
+  come with the recovery holds.
 
   Each dataset's fence opens independently, and a write waits only for the
   fence of the contract that serves it (`MethodInfo.Contract`), so an
@@ -422,7 +428,9 @@ without one until the storage client does.
   own fence at commit. Until a store's own advance, the replaced controller's
   delayed writes can still commit there, but the successor does not write
   that store until then, so each store has one writing controller at a time.
-  Kubernetes-only mutations keep using the Kubernetes fence.
+  `CurrentFence`, which Kubernetes mutations and the explicit-fence store
+  methods use, opens with the state dataset's fence. Kubernetes-only
+  mutations keep using the Kubernetes fence.
 - **Single writer and schema migration.** A store refuses writes under any
   fence but its current one, and a dataset bound to one installation refuses
   another installation's advance. A schema change moves the dataset to
@@ -630,6 +638,58 @@ recording SQLite provider and fail if the provider receives any of them:
 `TestProviderReceivesOnlySanitizedGatewayText` covers the gateway writes and
 `TestProviderReceivesOnlyRedactedContent` covers the others. Encryption of snapshots, native
 sessions and connector custody still happens inside SQLite.
+
+### Envelopes in the storage client
+
+Below the policy layer, so a digest covers exactly what the provider
+receives, the client runs every write through generated decorators of the two
+providers (`internal/storageclient/envelope_gen.go`, written by
+`go generate ./internal/storageclient` from the provider interfaces and the
+method catalog; `make generate` runs it and a test fails if it is stale).
+Reads and administrative methods reach the provider unchanged.
+
+- **Fence.** A write first waits for the fence of the dataset that serves its
+  contract. The controller epoch manager is the fence source: it opens a
+  contract's fence once that contract's dataset has advanced to the acquired
+  epoch. A write that waits longer than ten seconds, or that runs before a
+  fence source is bound, is refused with `ErrNotReady`. A task-data
+  transaction waits for the state fence before it opens, so the writes inside
+  it never wait while the transaction holds the store.
+- **Envelope.** The client creates one operation per write: the dataset ID
+  and fence the fence source gives, a new UUIDv7 operation ID, the digest of
+  the arguments as they are when the write is issued, the issue time and the
+  next sequence. A method that takes its own fence, such as the outbox
+  family, carries that fence in its envelope, so a caller holding a replaced
+  fence is still refused with `ErrFenced`. A context that already carries an
+  envelope belongs to a caller that owns the operation, such as the shared
+  suite, and the write runs once with it.
+- **Retries.** After `ErrUnavailable` (nothing committed) or
+  `ErrOutcomeUnknown` (it may have), the client retries the same envelope with
+  the same arguments, with backoff, until the call's deadline or thirty
+  seconds. A replay of a committed operation returns its original result.
+  `ErrClockSkew` is returned as `ErrNotReady`.
+- **Resolution.** When retrying cannot settle an unknown outcome, or a later
+  attempt is refused, the client calls `ResolveOperation` once. A committed
+  operation is attempted once more to read its result as a replay; an
+  aborted one returns `ErrOperationAborted`, joined with the refusal when
+  there was one. An operation the client cannot settle, because the store is
+  unreachable, returns `ErrOutcomeUnknown` and joins the dataset's unresolved
+  set: new writes to that dataset are refused with `ErrNotReady` while the
+  client keeps resolving the set in the background. An operation that
+  `ResolveOperation` finds too old to settle leaves the set with its outcome
+  permanently unknown; holding the affected work for recovery comes with the
+  recovery holds.
+- **Embedded families** pass through unchanged. They carry no envelope and
+  SQLite does not require one for them; the Session turn steps keep checking
+  the fence their requests carry.
+- **Callers.** `store.IsTemporaryStorageError` matches `ErrNotReady`,
+  `ErrUnavailable` and `ErrOutcomeUnknown`. The API answers them with 503 and
+  a `Retry-After` hint, in its shared error handler and in the gateway ingress,
+  gateway store and internal task-data paths. Task result collection
+  requeues the Task instead of completing it without its result, and gateway
+  admission no longer reads a fenced write as a Session ownership conflict.
+  The SQLite in-process store never returns `ErrUnavailable` or
+  `ErrOutcomeUnknown`; those paths matter once a provider runs out of process.
 
 ## Kubernetes control authority and retained SQL compatibility
 

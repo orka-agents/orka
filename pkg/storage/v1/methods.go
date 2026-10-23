@@ -9,9 +9,9 @@ const (
 	// MethodRead marks a method that changes nothing. It carries no write
 	// envelope and leaves no operation receipt.
 	MethodRead MethodKind = iota + 1
-	// MethodWrite marks a method that may change stored state. Once Orka
-	// attaches write envelopes, it carries a [WriteEnvelope], commits only
-	// under the current fence, and leaves an operation receipt with its change.
+	// MethodWrite marks a method that may change stored state. It carries a
+	// [WriteEnvelope], commits only under the current fence, and leaves an
+	// operation receipt with its change.
 	MethodWrite
 	// MethodAdmin marks an administrative write that establishes the fence or
 	// settles operations. It carries no envelope and is not checked against the
@@ -39,7 +39,7 @@ type MethodInfo struct {
 	Kind MethodKind
 	// Contract is the contract part whose provider serves the method,
 	// StateContract or ArtifactsContract, or empty for a method every part
-	// serves, such as Describe. Once Orka fences writes per dataset, a write
+	// serves, such as Describe. Orka fences writes per dataset, so a write
 	// waits only for the fence of the dataset that serves its own contract.
 	Contract string
 	// NaturalKey lists, separated by ", ", the request values by which the

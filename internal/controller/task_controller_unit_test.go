@@ -48,7 +48,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
-	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -56,6 +56,7 @@ import (
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -4121,10 +4122,7 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 	r := newUnitReconciler(scheme, task)
 	// Task token attribution runs in the storage client, as production wires
 	// the reconciler.
-	storage, err := storageclient.NewEmbedded(r.ExecutionEventStore.(*sqlite.Store))
-	if err != nil {
-		t.Fatal(err)
-	}
+	storage := storageclienttest.NewEmbedded(t, r.ExecutionEventStore.(*sqlite.Store))
 	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
 	now := time.Now().UTC()
@@ -8784,7 +8782,7 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

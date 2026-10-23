@@ -22,12 +22,10 @@ var ErrClockSkew = errors.New("clock skew")
 // the dataset it targets, the controller epoch fence it was issued under, and
 // the operation identity every retry of it reuses.
 //
-// Orka does not attach the envelope yet, and providers must accept writes
-// without one. When the storage client attaches it, every method that
-// [LookupMethod] classifies as [MethodWrite] carries one in its context, and
-// reads and [MethodAdmin] methods carry none. A provider runs these checks on
-// every write that carries an envelope, in this order, in the transaction
-// that commits the write:
+// Orka's storage client attaches it, in the method's context, to every
+// method that [LookupMethod] classifies as [MethodWrite]; reads and
+// [MethodAdmin] methods carry none. A provider runs these checks on every
+// write, in this order, in the transaction that commits the write:
 //
 //  1. DatasetID equals the provider's own dataset, or [ErrDatasetMismatch].
 //  2. A receipt for OperationID committed with the same method and
@@ -49,16 +47,16 @@ var ErrClockSkew = errors.New("clock skew")
 //  7. The change and its operation receipt are written together.
 //
 // A refusal at any step commits nothing and records no receipt, so a later
-// attempt is evaluated again. Once providers require envelopes, a request
-// whose envelope fails [WriteEnvelope.Validate], or a write without an
-// envelope, returns [ErrValidation].
+// attempt is evaluated again. A write whose envelope fails
+// [WriteEnvelope.Validate], or a write without an envelope, returns
+// [ErrValidation].
 //
 // Each dataset holds its own controller epoch, and Fence is the issuing
-// controller's fence for the dataset this write targets. When Orka attaches
-// envelopes, it advances each bound dataset separately and opens a dataset's
-// fence as soon as that dataset's own advance succeeds, so writes to one store
-// never wait for another store's advance. The contract that serves a method
-// is [MethodInfo.Contract].
+// controller's fence for the dataset this write targets. Orka advances each
+// bound dataset separately and opens a dataset's fence as soon as that
+// dataset's own advance succeeds, so writes to one store never wait for
+// another store's advance. The contract that serves a method is
+// [MethodInfo.Contract].
 //
 // Methods that already take an explicit [ControllerEpochFence], such as the
 // outbox family, keep it authoritative; it must equal Fence, or the provider

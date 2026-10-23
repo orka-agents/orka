@@ -54,6 +54,15 @@ func operationReceiptSchemaStatements() []string {
 	}
 }
 
+// RequireWriteEnvelopes makes the store refuse every contract write that
+// carries no write envelope, with ErrValidation, as the contract requires of
+// a provider. Production calls it once the store is open; package tests
+// leave it off so they can write without an envelope. Embedded families,
+// which are outside the method catalog, are not affected.
+func (s *Store) RequireWriteEnvelopes() {
+	s.requireWriteEnvelopes.Store(true)
+}
+
 // writeOperationKey marks a context inside a write operation's body, so a
 // store method the body calls runs as part of that operation.
 type writeOperationKey struct{}
@@ -69,10 +78,11 @@ type resultPair[A, B any] struct {
 
 // writeOperation runs body as one call of the contract write method.
 //
-// Without a write envelope in ctx, body runs unchanged: providers still
-// accept writes without one. With one, writeOperation runs the contract's
-// commit-time checks in the transaction that commits the write, in this
-// order: the dataset, the operation receipt, the operation's age and the
+// Without a write envelope in ctx, a store that requires envelopes, as
+// production does, refuses the write with ErrValidation, and any other store
+// runs body unchanged, as package tests do. With one, writeOperation runs the
+// contract's commit-time checks in the transaction that commits the write, in
+// this order: the dataset, the operation receipt, the operation's age and the
 // clock, the dataset state and the controller epoch fence. Body then runs in
 // the same transaction, which every store method it reaches joins, and its
 // result is recorded with the operation receipt before the transaction
@@ -99,6 +109,9 @@ func writeOperation[R any](
 	}
 	envelope, ok := storagev1.WriteEnvelopeFrom(ctx)
 	if !ok {
+		if s.requireWriteEnvelopes.Load() {
+			return zero, store.ValidationErrorf("%s requires a write envelope", method)
+		}
 		return body(ctx)
 	}
 	if info, known := storagev1.LookupMethod(method); !known || info.Kind != storagev1.MethodWrite {
