@@ -62,7 +62,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -374,8 +373,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		if err := r.patchTaskFinalizer(ctx, req.NamespacedName, true); err != nil {
 			log.Error(err, "failed to add finalizer")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -387,8 +385,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			t.Status.Phase = corev1alpha1.TaskPhasePending
 		}); err != nil {
 			log.Error(err, "failed to update initial status")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return ctrl.Result{}, err
 		}
 		_ = r.recordTaskLifecycleEvent(
