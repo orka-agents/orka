@@ -8,18 +8,21 @@ import (
 	"reflect"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // The receipt codec stores a write's result exactly as the write returned
 // it, so a replay returns an equal value. It walks Go values rather than
 // their JSON form, so fields Orka's API leaves out are kept, and it keeps
-// what gob and JSON lose: a non-nil pointer to a zero value, and a nil slice
-// or map apart from an empty one. Decoding is directed by the result type.
+// what gob and JSON lose: a non-nil pointer to a zero value, a nil slice or
+// map apart from an empty one, and the bytes of a string that is not valid
+// UTF-8. Decoding is directed by the result type.
 //
 // A value encodes as JSON: a nil pointer, slice or map as null; a non-nil
 // pointer as {"*": value}; a struct as an object of every exported field
 // under its Go name; a time.Time as {"t": its MarshalBinary bytes}; a []byte
-// as {"b": base64}; a map with string keys as an object; integers as JSON
+// as {"b": base64}; a string that is not valid UTF-8 as {"x": base64}; a map
+// with string keys as an array of [key, value] pairs; integers as JSON
 // numbers; and floats as strings, so NaN and infinities survive. A type the
 // codec cannot represent exactly, such as an interface or an unexported
 // field, fails the write rather than storing a result that replays wrongly.
@@ -96,20 +99,22 @@ func receiptNode(v reflect.Value) (any, error) {
 		if v.Type().Key().Kind() != reflect.String {
 			return nil, fmt.Errorf("map key type %s is not a string", v.Type().Key())
 		}
-		entries := make(map[string]any, v.Len())
+		// Entries are [key, value] pairs, so a key that is not valid UTF-8
+		// keeps its bytes as a value would.
+		entries := make([]any, 0, v.Len())
 		iter := v.MapRange()
 		for iter.Next() {
 			node, err := receiptNode(iter.Value())
 			if err != nil {
 				return nil, err
 			}
-			entries[iter.Key().String()] = node
+			entries = append(entries, []any{receiptStringNode(iter.Key().String()), node})
 		}
 		return entries, nil
 	case reflect.Bool:
 		return v.Bool(), nil
 	case reflect.String:
-		return v.String(), nil
+		return receiptStringNode(v.String()), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return v.Int(), nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
@@ -225,20 +230,50 @@ func setReceiptSequence(node any, v reflect.Value) error {
 }
 
 func setReceiptMap(node any, v reflect.Value) error {
-	entries, ok := node.(map[string]any)
+	entries, ok := node.([]any)
 	if !ok {
-		return fmt.Errorf("%s is not an object", v.Type())
+		return fmt.Errorf("%s is not an array of entries", v.Type())
 	}
 	m := reflect.MakeMapWithSize(v.Type(), len(entries))
-	for key, entry := range entries {
+	for _, entry := range entries {
+		pair, ok := entry.([]any)
+		if !ok || len(pair) != 2 {
+			return fmt.Errorf("%s entry is not a key and value", v.Type())
+		}
+		key, err := receiptString(pair[0])
+		if err != nil {
+			return err
+		}
 		value := reflect.New(v.Type().Elem()).Elem()
-		if err := setReceiptNode(entry, value); err != nil {
+		if err := setReceiptNode(pair[1], value); err != nil {
 			return err
 		}
 		m.SetMapIndex(reflect.ValueOf(key).Convert(v.Type().Key()), value)
 	}
 	v.Set(m)
 	return nil
+}
+
+// receiptStringNode encodes a string as itself when it is valid UTF-8, which
+// JSON keeps exactly, and otherwise as {"x": base64 of its bytes}, which JSON
+// would otherwise replace with U+FFFD.
+func receiptStringNode(s string) any {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return map[string]any{"x": base64.StdEncoding.EncodeToString([]byte(s))}
+}
+
+func receiptString(node any) (string, error) {
+	switch value := node.(type) {
+	case string:
+		return value, nil
+	case map[string]any:
+		decoded, err := receiptBytes(value["x"])
+		return string(decoded), err
+	default:
+		return "", fmt.Errorf("not a string")
+	}
 }
 
 func setReceiptScalar(node any, v reflect.Value) error {
@@ -250,9 +285,9 @@ func setReceiptScalar(node any, v reflect.Value) error {
 		}
 		v.SetBool(b)
 	case reflect.String:
-		s, ok := node.(string)
-		if !ok {
-			return fmt.Errorf("%s is not a string", v.Type())
+		s, err := receiptString(node)
+		if err != nil {
+			return fmt.Errorf("%s: %w", v.Type(), err)
 		}
 		v.SetString(s)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:

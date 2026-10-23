@@ -3,8 +3,10 @@ package sqlite
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -77,6 +79,16 @@ func TestReceiptCodecReplaysExactValues(t *testing.T) {
 	decoded = &receiptCodecSample{}
 	require.NoError(t, unmarshalReceiptValue(encoded, &decoded))
 	require.Nil(t, decoded)
+
+	// A string cut inside a multibyte character, as byte-bounded sanitizing
+	// can leave it, keeps its exact bytes, as a value and as a map key.
+	truncated := strings.Repeat("a", 255) + "\xf0\x9f"
+	encodedStrings, err := marshalReceiptValue(map[string]string{truncated: truncated, "ok": "\u00e9"})
+	require.NoError(t, err)
+	var decodedStrings map[string]string
+	require.NoError(t, unmarshalReceiptValue(encodedStrings, &decodedStrings))
+	require.Equal(t, map[string]string{truncated: truncated, "ok": "\u00e9"}, decodedStrings)
+	require.False(t, utf8.ValidString(decodedStrings[truncated]))
 
 	_, err = marshalReceiptValue(struct{ Value any }{Value: 1})
 	require.Error(t, err, "an interface cannot be replayed exactly")
