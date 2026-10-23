@@ -638,7 +638,8 @@ func watermarkHold(contract string, info storagev1.ProviderInfo, acknowledged, s
 	}
 }
 
-// setHold closes every fence for hold.
+// setHold closes every fence for hold at once, then returns once work
+// admitted before it has finished.
 func (m *ControllerEpochManager) setHold(hold store.StorageRecoveryHold) {
 	m.storageMu.Lock()
 	if m.hold == nil || m.hold.ID != hold.ID {
@@ -648,29 +649,41 @@ func (m *ControllerEpochManager) setHold(hold store.StorageRecoveryHold) {
 	m.storageMu.Unlock()
 	metrics.StorageRecoveryHold.Reset()
 	metrics.StorageRecoveryHold.WithLabelValues(string(hold.Reason)).Set(1)
+	m.drainAdmittedWork()
 }
 
-// closeFences closes every contract's write fence until it opens again.
+// closeFences closes every contract's write fence until it opens again, then
+// returns once work admitted before it has finished.
 func (m *ControllerEpochManager) closeFences() {
 	m.storageMu.Lock()
-	defer m.storageMu.Unlock()
 	for _, fence := range m.storage {
 		fence.opened = false
 	}
 	m.notifyStorageLocked()
+	m.storageMu.Unlock()
+	m.drainAdmittedWork()
 }
 
 // closeContractFences closes the write fences of contracts until they open
-// again.
+// again, then returns once work admitted before it has finished.
 func (m *ControllerEpochManager) closeContractFences(contracts []string) {
 	m.storageMu.Lock()
-	defer m.storageMu.Unlock()
 	for _, contract := range contracts {
 		if fence := m.storage[contract]; fence != nil {
 			fence.opened = false
 		}
 	}
 	m.notifyStorageLocked()
+	m.storageMu.Unlock()
+	m.drainAdmittedWork()
+}
+
+// drainAdmittedWork waits for work AdmitWork admitted before the caller
+// published a hold or closed a fence. Work admitted later sees the change
+// and is refused, because AdmitWork checks StorageHold under the read lock.
+func (m *ControllerEpochManager) drainAdmittedWork() {
+	m.admission.Lock()
+	m.admission.Unlock() //nolint:staticcheck // An empty critical section waits for every reader.
 }
 
 // clearHold lets every opened fence through again.

@@ -58,6 +58,11 @@ type ControllerEpochManager struct {
 	ready   chan struct{}
 	once    sync.Once
 
+	// admission is held for reading while an admitted side effect runs (see
+	// AdmitWork). Setting a hold or closing a fence publishes the change
+	// first and then takes it for writing, to wait for work admitted
+	// before the change; work admitted after it sees the change.
+	admission sync.RWMutex
 	// storageMu guards storage, hold and storageChanged.
 	storageMu sync.Mutex
 	storage   map[string]*contractFence
@@ -431,6 +436,24 @@ func (m *ControllerEpochManager) StorageHold() error {
 		}
 	}
 	return nil
+}
+
+// AdmitWork runs create, a side effect that no storage write or
+// control-store change guards, such as creating a Job, only while
+// StorageHold reports nothing. A hold that is set, or a fence that closes,
+// takes effect at once for everything else and then waits for an admitted
+// create to return, so create either started before the change or does not
+// run at all; it then returns StorageHold's error.
+func (m *ControllerEpochManager) AdmitWork(ctx context.Context, create func(context.Context) error) error {
+	if m == nil {
+		return create(ctx)
+	}
+	m.admission.RLock()
+	defer m.admission.RUnlock()
+	if err := m.StorageHold(); err != nil {
+		return err
+	}
+	return create(ctx)
 }
 
 // heldError returns a store.StorageHoldError while a hold is set.

@@ -61,7 +61,7 @@ marker on any other layout is refused rather than adopted.
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 2` records this metadata layout; the controller also checks
+`PRAGMA user_version = 3` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 

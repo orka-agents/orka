@@ -1705,7 +1705,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// deletion between the reads must not turn a skipped freshness check into
 	// a new execution from stale inputs.
 	if !existingGatewayJob {
-		err = r.Create(ctx, job)
+		// The hold is checked again at the creation itself: a hold raised
+		// while the Job was prepared either waits for this creation or
+		// refuses it.
+		err = r.ControllerEpochManager.AdmitWork(ctx, func(ctx context.Context) error {
+			return r.Create(ctx, job)
+		})
+		if errors.Is(err, store.ErrStorageRecoveryRequired) || errors.Is(err, store.ErrNotReady) {
+			log.Info("not creating the Task Job while storage is held for recovery", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+		}
 	}
 	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
 		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)

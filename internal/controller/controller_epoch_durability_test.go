@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const durabilityTestInterval = 20 * time.Millisecond
@@ -862,4 +863,88 @@ func (d *gatedMirrorEpochDataset) GetControllerEpochMirror(ctx context.Context, 
 		return storagev1.ControllerEpochMirrorState{}, ctx.Err()
 	}
 	return d.recordingEpochDataset.GetControllerEpochMirror(ctx, name)
+}
+
+// A hold raised while a Job is being prepared stops the Job at its creation:
+// the hold is checked again there, under the admission lock that setting a
+// hold takes.
+func TestHoldRaisedWhileAJobIsPreparedStopsItsCreation(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "prompt"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1}}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	manager := &ControllerEpochManager{ready: make(chan struct{})}
+	r.ControllerEpochManager = manager
+	withWatch, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("unit reconciler client does not implement client.WithWatch")
+	}
+	var raised sync.Once
+	r.APIReader = interceptor.NewClient(withWatch, interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			if _, isTask := object.(*corev1alpha1.Task); isTask {
+				raised.Do(func() {
+					manager.setHold(store.StorageRecoveryHold{ID: "hold-1", Reason: store.StorageRecoveryUnsafeSwitch})
+				})
+			}
+			return delegate.Get(ctx, key, object, options...)
+		},
+	})
+
+	result, err := r.createTaskJob(ctx, task.DeepCopy(), agent, nil)
+	if err != nil || result.RequeueAfter != storageHoldRequeue {
+		t.Fatalf("createTaskJob with a hold raised during preparation = %#v, %v; want a requeue", result, err)
+	}
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs); err != nil || len(jobs.Items) != 0 {
+		t.Fatalf("a Job was created after the hold was raised: %d, %v", len(jobs.Items), err)
+	}
+}
+
+// A hold takes effect at once, setting it returns only after an admitted
+// creation finished, and nothing is admitted once it is set.
+func TestSettingAHoldWaitsForAdmittedWork(t *testing.T) {
+	manager := &ControllerEpochManager{ready: make(chan struct{})}
+	entered, release := make(chan struct{}), make(chan struct{})
+	admitted := make(chan error, 1)
+	go func() {
+		admitted <- manager.AdmitWork(context.Background(), func(context.Context) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	held := make(chan struct{})
+	go func() {
+		manager.setHold(store.StorageRecoveryHold{ID: "hold-1", Reason: store.StorageRecoveryUnsafeSwitch})
+		close(held)
+	}()
+	// The hold takes effect at once for everything else, and setting it
+	// returns only after the admitted work finished.
+	eventually(t, "the hold to take effect", func() bool {
+		return errors.Is(manager.StorageHold(), store.ErrStorageRecoveryRequired)
+	})
+	select {
+	case <-held:
+		t.Fatal("setting the hold returned while admitted work was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-admitted; err != nil {
+		t.Fatalf("admitted work = %v", err)
+	}
+	<-held
+	ran := false
+	err := manager.AdmitWork(context.Background(), func(context.Context) error {
+		ran = true
+		return nil
+	})
+	if ran || !errors.Is(err, store.ErrStorageRecoveryRequired) {
+		t.Fatalf("work after the hold ran=%v err=%v; want it refused", ran, err)
+	}
 }
