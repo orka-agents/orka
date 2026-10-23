@@ -401,7 +401,7 @@ func TestSaveThreatModelRedactsContent(t *testing.T) {
 				Content: "Notes for `config/auth.go:12`.\n\n\t" + token[:2] + "\u200b" + token[2:] + "\n\nRotate keys.",
 			}
 			const want = "Notes for `config/auth.go:12`.\n\n\t[REDACTED]\n\nRotate keys."
-			if err := s.SaveThreatModel(ctx, model); err != nil {
+			if err := orkaClient(t, s).SaveThreatModel(ctx, model); err != nil {
 				t.Fatalf("SaveThreatModel() error = %v", err)
 			}
 			if model.Content != want {

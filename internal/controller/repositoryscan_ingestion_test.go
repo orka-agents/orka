@@ -154,7 +154,7 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 		task := &oldTasks.Items[i]
 		require.NoError(t, cl.Delete(ctx, task))
 		require.NoError(t, s.DeleteResult(ctx, task.Namespace, task.Name))
-		require.NoError(t, s.DeleteArtifacts(ctx, task.Namespace, task.Name))
+		require.NoError(t, s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}))
 	}
 	reconcile()
 	for id, before := range completedRuns {
@@ -401,7 +401,7 @@ var errScanIngestionFollowup = errors.New("injected scan follow-up failure")
 
 type failingScanArtifactStore struct{ store.ArtifactStore }
 
-func (s *failingScanArtifactStore) SaveArtifact(context.Context, string, string, string, string, []byte) error {
+func (s *failingScanArtifactStore) SaveArtifact(context.Context, store.SaveArtifactRequest) error {
 	return errScanIngestionFollowup
 }
 
@@ -514,7 +514,7 @@ func TestReviewIngestionResumesFollowupWithoutRecounting(t *testing.T) {
 			dropped, _, err := f.store.ListDroppedFindings(f.ctx, store.DroppedFindingFilter{Namespace: defaultNS, ScanRunID: f.run.ID})
 			require.NoError(t, err)
 			require.Len(t, dropped, 1)
-			data, _, err := f.store.GetArtifact(f.ctx, defaultNS, f.sourceTask.Name, security.ArtifactDroppedFindings)
+			data, _, err := f.store.GetArtifact(f.ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: defaultNS, TaskName: f.sourceTask.Name}, Filename: security.ArtifactDroppedFindings})
 			require.NoError(t, err)
 			require.JSONEq(t, receipt.DroppedFindingsJSON, string(data))
 			var tasks corev1alpha1.TaskList

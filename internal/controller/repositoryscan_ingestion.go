@@ -117,8 +117,7 @@ func (r *RepositoryScanReconciler) finishScanTaskIngestion(ctx context.Context, 
 		return nil
 	}
 	if ingestion.DroppedFindingsJSON != "" && r.ArtifactStore != nil {
-		if err := r.ArtifactStore.SaveArtifact(ctx, ingestion.Namespace, ingestion.TaskName,
-			security.ArtifactDroppedFindings, "application/json", []byte(ingestion.DroppedFindingsJSON)); err != nil {
+		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: ingestion.Namespace, TaskName: ingestion.TaskName}, Filename: security.ArtifactDroppedFindings, ContentType: artifactContentTypeJSON, Data: []byte(ingestion.DroppedFindingsJSON)}); err != nil {
 			return err
 		}
 	}
