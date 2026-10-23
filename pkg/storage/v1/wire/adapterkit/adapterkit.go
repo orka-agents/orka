@@ -397,13 +397,7 @@ func (r *readiness) watch(ctx context.Context) {
 func (r *readiness) check(ctx context.Context) {
 	checkCtx, cancel := context.WithTimeout(ctx, r.config.Limits.MaxDuration[wire.ClassHealth])
 	defer cancel()
-	err := r.server.Refresh(checkCtx)
-	if err == nil && r.config.State != nil {
-		err = r.config.State.HealthCheck(checkCtx)
-	}
-	if err == nil && r.config.Artifacts != nil {
-		err = r.config.Artifacts.HealthCheck(checkCtx)
-	}
+	err := r.probe(checkCtx)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ready := err == nil && !r.draining
@@ -416,6 +410,29 @@ func (r *readiness) check(ctx context.Context) {
 	}
 	r.ready = ready
 	r.metrics.setReady(ready)
+}
+
+// probe describes the providers and checks their health. A provider that
+// panics makes the adapter not ready rather than ending the process; the
+// next check runs as usual.
+func (r *readiness) probe(ctx context.Context) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("the storage provider panicked: %v", recovered)
+		}
+	}()
+	if err := r.server.Refresh(ctx); err != nil {
+		return err
+	}
+	if r.config.State != nil {
+		if err := r.config.State.HealthCheck(ctx); err != nil {
+			return err
+		}
+	}
+	if r.config.Artifacts != nil {
+		return r.config.Artifacts.HealthCheck(ctx)
+	}
+	return nil
 }
 
 // isReady reports the last readiness check's result.

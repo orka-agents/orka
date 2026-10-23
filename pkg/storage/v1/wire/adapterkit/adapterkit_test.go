@@ -46,6 +46,11 @@ type memoryArtifacts struct {
 	files   map[storagev1.ArtifactKey]storedArtifact
 	healthy atomic.Bool
 	hold    func(ctx context.Context)
+	// panicDescribe and panicHealth make Describe and HealthCheck panic;
+	// panics counts the panics.
+	panicDescribe atomic.Bool
+	panicHealth   atomic.Bool
+	panics        atomic.Int32
 }
 
 type storedArtifact struct {
@@ -61,6 +66,10 @@ func newMemoryArtifacts() *memoryArtifacts {
 }
 
 func (p *memoryArtifacts) HealthCheck(context.Context) error {
+	if p.panicHealth.Load() {
+		p.panics.Add(1)
+		panic("health check bug")
+	}
 	if !p.healthy.Load() {
 		return storagev1.ErrUnavailable
 	}
@@ -68,6 +77,10 @@ func (p *memoryArtifacts) HealthCheck(context.Context) error {
 }
 
 func (p *memoryArtifacts) Describe(context.Context) (storagev1.ProviderInfo, error) {
+	if p.panicDescribe.Load() {
+		p.panics.Add(1)
+		panic("describe bug")
+	}
 	return storagev1.ProviderInfo{
 		ContractVersion: storagev1.ContractVersion, Contracts: []string{storagev1.ArtifactsContract},
 		DatasetID: p.dataset, DatasetOrigin: storagev1.DatasetOriginNew, SchemaVersion: "1",
@@ -631,5 +644,33 @@ func TestServeValidatesItsConfiguration(t *testing.T) {
 			_, err = net.DialTimeout("tcp", listener.Addr().String(), time.Second)
 			require.Error(t, err, "Serve closes the listener it was given")
 		})
+	}
+}
+
+// A provider that panics while the adapter checks readiness makes it not
+// ready instead of ending the process, from the first check on, and it
+// becomes ready again once the provider recovers.
+func TestServeSurvivesProviderPanicsInReadinessChecks(t *testing.T) {
+	f := newFixture(t)
+	provider := newMemoryArtifacts()
+	provider.panicDescribe.Store(true)
+	running := start(t, f, f.bearerConfig(provider))
+	require.Eventually(t, func() bool { return provider.panics.Load() >= 2 }, 5*time.Second, 10*time.Millisecond,
+		"readiness checks keep running after a panic")
+	running.waitReady(t, false)
+	code, _ := running.get(t, "/healthz")
+	require.Equal(t, http.StatusOK, code, "the adapter is still running")
+
+	provider.panicDescribe.Store(false)
+	running.waitReady(t, true)
+
+	provider.panicHealth.Store(true)
+	running.waitReady(t, false)
+	provider.panicHealth.Store(false)
+	running.waitReady(t, true)
+	select {
+	case err := <-running.done:
+		t.Fatalf("Serve stopped: %v", err)
+	default:
 	}
 }
