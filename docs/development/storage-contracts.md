@@ -138,17 +138,27 @@ the observable parts.
   `LoadTranscriptThrough`, `ReadSessionSoul`, `GetGatewayQueueStats`,
   `ListPatchProposals`, `GetLatestExecutionEventSeqs`,
   `ListSessionExecutionEvents` and `HasSessionCleanupFenceForUID`, the read
-  methods found issuing more than one query. The
-  suite's concurrency cases release eight callers at once against Session
-  creation, chat-turn reservation, deduplicated event appends, terminal
-  approvals and gateway claims, and require exactly one winner (or one claim
-  per event). Four more cases read while writes run, and every write waits
-  for a read to start: one requires a Session's message count to match the
-  messages returned, one requires stream heads read in several batches to
-  come from one snapshot, one requires a Session events page and its latest
-  sequence to come from one snapshot while streams are appended to and
-  deleted, and one requires a Session UID to stay fenced while its cleanup
-  intent is replaced by a completion.
+  methods found issuing more than one query. A write method that returns the
+  record it changed reads it in the same transaction as the change; SQLite
+  does this for `RenewGatewayEventClaim`,
+  `FreezeGatewayEventTaskRuntimeAllowedTools`, `RetryGatewayDelivery` and
+  `SavePromptResultReceipt`. A write method that reads after a failed update
+  to tell a missing record from a conflict also reads in the update's
+  transaction; SQLite does this for `UpdateScanRun`,
+  `CompleteScanRunCancellation` and `BindSessionCleanupIdentity`. The suite's
+  concurrency cases release eight callers at once against Session creation,
+  chat-turn reservation, deduplicated event appends, terminal approvals and
+  gateway claims, and require exactly one winner (or one claim per event). Six
+  more cases read while writes run, and every write waits for a read to start:
+  one requires a Session's message count to match the messages returned, one
+  requires stream heads read in several batches to come from one snapshot, one
+  requires a Session events page and its latest sequence to come from one
+  snapshot while streams are appended to and deleted, one requires a Session
+  UID to stay fenced while its cleanup intent is replaced by a completion, one
+  requires a successful gateway claim renewal to return the event still
+  dispatching under its owner while claims are retried, and one requires
+  binding a cleanup identity to a Session created during the call to succeed
+  or report it missing, never a conflict.
 - **Durability.** A nil error means the change survives a provider restart and
   any failover the provider declares automatic. `Describe` reports a
   `DurabilityClass` so Orka can refuse automatic continuation after a failover
