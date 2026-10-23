@@ -419,7 +419,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	// changes, so no host takes what is linked next, and lifted only once
 	// custody holds a grant a host may take.
 	if declined {
-		if err := h.recordAgentHostDecline(ctx, connection, true); err != nil {
+		if err := h.recordAgentHostDecline(ctx, connection, ui, true); err != nil {
 			return nil, false, err
 		}
 	}
@@ -436,7 +436,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	}
 	if holds {
 		if !declined {
-			if err := h.recordAgentHostDecline(ctx, connection, false); err != nil {
+			if err := h.recordAgentHostDecline(ctx, connection, ui, false); err != nil {
 				return nil, tokens.AccessToken == custody, err
 			}
 		}
@@ -513,7 +513,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	// reconciler repairs from the completion if it fails; nothing repairs
 	// a decline.
 	if !declined {
-		if err := h.recordAgentHostDecline(ctx, connection, false); err != nil {
+		if err := h.recordAgentHostDecline(ctx, connection, ui, false); err != nil {
 			return nil, true, err
 		}
 	}
@@ -529,16 +529,29 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 // recordAgentHostDecline records whether connection's person declined an
 // agent host. It runs under the sign-in's completion lock: a decline before
 // the link changes, a lift only once custody holds a grant a host may take.
-func (h *Handlers) recordAgentHostDecline(ctx context.Context, connection *corev1alpha1.Connection, declined bool) error {
-	if (connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] == corev1alpha1.ConnectionAgentHostDeclined) == declined {
-		return nil
+// The lock is keyed by UID, so the write is fenced to the Connection read
+// under it: a change by another writer is read again and the write retried,
+// and a Connection replaced under the same name is never written.
+func (h *Handlers) recordAgentHostDecline(ctx context.Context, connection *corev1alpha1.Connection, ui *UserInfo, declined bool) error {
+	for attempt := 1; ; attempt++ {
+		if (connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] == corev1alpha1.ConnectionAgentHostDeclined) == declined {
+			return nil
+		}
+		base := connection.DeepCopy()
+		setAgentHostDeclined(connection, declined)
+		err := h.client.Patch(ctx, connection, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		if err == nil {
+			return nil
+		}
+		if (!apierrors.IsConflict(err) && !apierrors.IsNotFound(err)) || attempt == 3 {
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to update your GitHub link; sign in again")
+		}
+		fresh, err := h.reloadSignInConnection(ctx, base, ui)
+		if err != nil {
+			return err
+		}
+		*connection = *fresh
 	}
-	base := connection.DeepCopy()
-	setAgentHostDeclined(connection, declined)
-	if err := h.client.Patch(ctx, connection, client.MergeFrom(base)); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to update your GitHub link; sign in again")
-	}
-	return nil
 }
 
 // revokeSignInToken revokes a token a sign-in obtained and did not store.
