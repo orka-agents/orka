@@ -3925,7 +3925,7 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 	identity := scanTaskIngestionIdentity(scan, task)
 	ingestion, err := r.SecurityStore.GetScanTaskIngestion(ctx, identity)
 	if err == nil {
-		return r.finishScanTaskIngestion(ctx, scan, ingestion)
+		return r.finishScanTaskIngestion(ctx, scan, task, ingestion)
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		return err
