@@ -20,6 +20,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -59,7 +60,7 @@ func TestBrokeredDataSerializesWithPromptSettlement(t *testing.T) {
 			fixture := newBrokeredDataFixture(t, tool)
 			// A separate store instance proves this uses the durable Lease,
 			// rather than only the original store's in-process semaphore.
-			other, err := storekube.NewComposite(fixture.kube, "orka-system", fixture.data, storekube.WithAPIReader(fixture.kube))
+			other, err := storekube.NewComposite(fixture.kube, "orka-system", storageclienttest.Client(t, fixture.data), storekube.WithAPIReader(fixture.kube))
 			require.NoError(t, err)
 			attempts := 0
 			checkSettlementBlocked := func(ctx context.Context) error {
@@ -197,7 +198,7 @@ func newBrokeredDataFixture(t *testing.T, tool tools.Tool) *brokeredDataFixture 
 			return c.Create(ctx, object, opts...)
 		},
 	}).Build()
-	control, err := storekube.NewComposite(kube, "orka-system", data, storekube.WithAPIReader(kube))
+	control, err := storekube.NewComposite(kube, "orka-system", storageclienttest.Client(t, data), storekube.WithAPIReader(kube))
 	require.NoError(t, err)
 	epoch, err := control.CompareAndSwapControllerEpoch(t.Context(), store.ControllerEpochCAS{
 		NewEpoch: 1, HolderID: "controller", RequestDigest: store.CanonicalBytesDigest([]byte("epoch")),

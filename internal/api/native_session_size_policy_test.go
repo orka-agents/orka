@@ -15,8 +15,8 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
@@ -33,7 +33,7 @@ func nativePolicyData(t *testing.T, size int) []byte {
 	return append(bytes.Clone(snapshot.Data), bytes.Repeat([]byte{' '}, size-len(snapshot.Data))...)
 }
 
-func nativePolicyServer(t *testing.T, s *sqlite.Store, limit int) (*Server, string, *http.Client, string) {
+func nativePolicyServer(t *testing.T, s *storageclient.Client, limit int) (*Server, string, *http.Client, string) {
 	t.Helper()
 	kube := kubefake.NewClientset()
 	kube.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {

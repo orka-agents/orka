@@ -12,7 +12,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 // A Session that does not exist cannot appear by waiting when the Task asks
@@ -29,7 +28,7 @@ func TestACPDispatcherFailsCreateFalseTaskForMissingSession(t *testing.T) {
 			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "never-created", Create: false, Append: true}
 		})
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	fixture.dispatcher.EventStore = persistence
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,

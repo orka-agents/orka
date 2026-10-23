@@ -705,7 +705,7 @@ func TestValidateAgentExecutionSnapshotOptions(t *testing.T) {
 	}
 }
 
-func TestLoadAgentExecutionSnapshotCipherAcceptsDeploymentKeyFormats(t *testing.T) {
+func TestLoadAgentExecutionSnapshotKeyAcceptsDeploymentKeyFormats(t *testing.T) {
 	raw := []byte(strings.Repeat("k", 32))
 	rawWithWhitespaceEdges := append([]byte{' '}, []byte(strings.Repeat("r", 30))...)
 	rawWithWhitespaceEdges = append(rawWithWhitespaceEdges, '\n')
@@ -734,9 +734,9 @@ func TestLoadAgentExecutionSnapshotCipherAcceptsDeploymentKeyFormats(t *testing.
 			if err := os.WriteFile(path, tt.contents, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, err := loadAgentExecutionSnapshotCipher(path)
+			_, err := loadAgentExecutionSnapshotKey(path)
 			if (err != nil) != tt.wantError {
-				t.Fatalf("loadAgentExecutionSnapshotCipher() error = %v, wantError = %t", err, tt.wantError)
+				t.Fatalf("loadAgentExecutionSnapshotKey() error = %v, wantError = %t", err, tt.wantError)
 			}
 		})
 	}

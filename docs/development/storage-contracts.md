@@ -1,9 +1,11 @@
 # Storage ownership and bootstrap
 
-This inventory describes the production wiring in `cmd/main.go`. It prepares the
-boundary for [#512](https://github.com/orka-agents/orka/issues/512); it does not
-introduce a provider API. SQLite remains the only application database and
-artifact store, with one active controller.
+This inventory describes the production wiring in `cmd/main.go` for
+[#512](https://github.com/orka-agents/orka/issues/512). Application consumers
+reach storage through one storage client over the public provider contract
+described below. SQLite remains the only application database and artifact
+store, with one active controller; there is no network adapter or backend
+selection.
 
 ## Dataset metadata
 
@@ -32,8 +34,9 @@ database, completed bootstrap, or any retained application/artifact/control row
 requires an existing key. Operator key-file mode always requires a supplied key.
 
 Key activation authenticates retained execution snapshots, native sessions and
-connector custody before recording bootstrap completion and exposing the store
-to consumers. Failure closes SQLite and releases the lock. An interrupted fresh
+every connector custody family before recording bootstrap completion and
+exposing the store to consumers. The storage client performs it (see "Key
+custody and sealing"). Failure closes SQLite and releases the lock. An interrupted fresh
 start can resume with the same identity; an API-committed Secret key is reused
 after a lost response or an update conflict. Clearing ordinary records does not
 reopen permission to mint a key after completion. Existing key-rotation rules
@@ -48,21 +51,23 @@ additional protocols.
 
 ## Application persistence
 
-The proposed `state.v1` ownership below means all database-owned application
-state other than public artifacts. `artifacts.v1` owns artifact bytes and their
-metadata together. These are planning boundaries, not enabled configuration or
-versioned interfaces. The current SQLite database contains both. Kubernetes
-authority remains separate from either boundary.
+The `state.v1` ownership below means all database-owned application state
+other than public artifacts. `artifacts.v1` owns artifact bytes and their
+metadata together. Both are interfaces of the `orka.storage.v1` contract in
+`pkg/storage/v1` (see "Storage client and provider contract"), which stays
+unstable until a release advertises storage extension support. Backend
+selection is not enabled. The current SQLite database contains both.
+Kubernetes authority remains separate from either boundary.
 
 | Production interfaces | Records and ownership | Main consumers and constraints |
 | --- | --- | --- |
 | `ResultStore`, `PromptResultReceiptStore` | Results and immutable attempt-bound result receipts; state. | Task reconciler, ACP dispatch/recovery, worker API and result API. A result receipt precedes prompt settling. |
 | `SessionStore`, `SessionTurnCommitter`, `FencedSessionWriteStore` | Sessions, transcript messages, token counters and Task/chat ownership locks; state. | Session manager, chat, compatibility APIs and transcript tools. Turn commit groups messages with usage; fenced writes require the exact owner. `GetSessionType` is also consumed through a narrow local reader. |
-| `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Encrypted immutable snapshots keyed by Task UID/digest, metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
+| `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Immutable snapshots keyed by Task UID/digest, sealed by the storage client, with metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
 | `SessionLineageStore` | Payload projection of Kubernetes-authoritative Session lineage; state. | Session continuity and dispatch. Projection failure may block dispatch but never changes Kubernetes lineage authority. |
-| `NativeSessionStore`, `NativeSessionImportStore` | Encrypted private native session bytes, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
-| `ConnectorCredentialStore`, `ConnectorConsentStore` | Sealed credentials/consents, grants, retired custody, completion receipts, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. |
-| `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable native capture) atomically; projection activates after Kubernetes finalization. |
+| `NativeSessionStore`, `NativeSessionImportStore` | Private native session records sealed by the storage client, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
+| `ConnectorCredentialStore`, `ConnectorConsentStore` | Credentials, consents and parked completions sealed by the storage client, grants, retired custody, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. |
+| `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable sealed native state) atomically; projection activates after Kubernetes finalization. |
 | `OutboxPersistenceStore` | Projection payloads, claims and completion receipts; state. | Kubernetes composite control store and projection reconciler. Database persistence does not choose controller ownership. |
 | `SessionCleanupPersistenceStore`, `SessionTurnCleanupReceiptStore` | Cleanup identity, durable intents, completion tombstones and retained turn receipts; state. | Kubernetes composite and cleanup recovery. These close crash windows across Kubernetes deletion and transcript deletion. |
 | `GatewayEventStore`, `GatewayDeliveryStore` | Ingress deduplication/claims, canonical transcript projection, deliveries, budgets, retries and event tombstones; state. | Gateway service, adapters, task reconciliation and conversation reply tools. Existing grouped admission/projection and delivery idempotency must survive a future adapter. |
@@ -95,6 +100,409 @@ than assuming every durable byte lives in the database.
 Kubernetes workspaces/checkpoints and publication resources are also separate.
 Keeping artifact bytes and metadata together does not make deletion across
 those resources a database transaction.
+
+## Storage client and provider contract
+
+`pkg/storage/v1` is the public storage extension contract, version
+`orka.storage.v1`. It defines the provider-facing records, errors, execution
+event vocabulary and two provider interfaces:
+
+- `StateProvider` serves `state.v1`: results and prompt result receipts, plans,
+  messages, Sessions and transcripts (including turn commits, owner-fenced
+  writes, soul pinning and lineage), Session cleanup persistence, the
+  controller epoch mirror, outbox persistence, Task Job revocations, execution
+  events, gateway records, security records, repository monitors, usage,
+  memories with their proposals (creation, review and archiving; applying a
+  proposal is still an embedded family), SessionTurn records with their
+  finalization, and sealed execution snapshots, native session records and
+  connector custody (see "Key custody and sealing").
+- `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
+
+`internal/store` keeps aliases for the moved names, so Orka callers keep their
+existing types. The contract and its test suite do not import Orka's internal
+packages.
+
+### Provider obligations
+
+These rules are part of the contract. The package documentation in
+`pkg/storage/v1` states them for provider authors, and the shared suite checks
+the observable parts.
+
+- **Execution.** Each provider method is atomic, so a write commits all of its
+  changes or none, and is linearizable with respect to every other call on the
+  same dataset, as if calls ran one at a time. SQLite's single writer gives
+  this for free, so a serial suite cannot
+  tell a correct provider from one running at a weaker isolation level. A
+  PostgreSQL provider at the default `READ COMMITTED` isolation could pass a
+  serial suite and still let two dispatchers claim one gateway event, because
+  claims, chat-turn reservations and terminal approvals read and then write.
+  A method that returns several records, such as a Session with its
+  transcript, reads them from one snapshot; SQLite does this for `GetSession`,
+  `LoadTranscriptThrough`, `ReadSessionSoul`, `GetGatewayQueueStats`,
+  `ListPatchProposals`, `GetLatestExecutionEventSeqs`,
+  `ListSessionExecutionEvents` and `HasSessionCleanupFenceForUID`, the read
+  methods found issuing more than one query. The
+  suite's concurrency cases release eight callers at once against Session
+  creation, chat-turn reservation, deduplicated event appends, terminal
+  approvals and gateway claims, and require exactly one winner (or one claim
+  per event). Four more cases read while writes run, and every write waits
+  for a read to start: one requires a Session's message count to match the
+  messages returned, one requires stream heads read in several batches to
+  come from one snapshot, one requires a Session events page and its latest
+  sequence to come from one snapshot while streams are appended to and
+  deleted, and one requires a Session UID to stay fenced while its cleanup
+  intent is replaced by a completion.
+- **Durability.** A nil error means the change survives a provider restart and
+  any failover the provider declares automatic. `Describe` reports a
+  `DurabilityClass` so Orka can refuse automatic continuation after a failover
+  that may lose acknowledged writes. The embedded SQLite store reports
+  `local-buffered`: it runs in WAL mode with `synchronous=NORMAL`, so a commit
+  survives a process restart, but the most recent commits can be lost if the
+  host fails before the WAL is synced.
+- **No cross-contract transactions.** No operation or transaction spans
+  `state.v1` and `artifacts.v1`. Today the embedded store's task-data
+  transaction also covers `SaveArtifact`; that is an embedded-family behavior,
+  and the 2.3 redesign keeps the cleanup-generation and Job-revocation checks
+  at the artifact provider on their own.
+- **Errors.** A provider reports each refusal with its sentinel error:
+  `ErrNotFound`, `ErrConflict` (including a reused identifier or a duplicate
+  dedupe key), `ErrFenced`, `ErrValidation` (including an invalid cursor),
+  `ErrTooLarge`, `ErrCapacity`, `ErrNotReady`, or a family error such as
+  `ErrDuplicateMismatch` or `ErrGatewaySessionCleanupPending` (gateway
+  admission deferred while the target Session is being cleaned up; the
+  gateway answers 503 and the event is retried, unlike `ErrConflict`, which
+  rejects it). A provider that could not run an operation returns
+  `ErrUnavailable` only when nothing was committed; when a write may have
+  committed, it returns `ErrOutcomeUnknown` and never success. `ErrFenced`
+  marks a stale controller epoch or owner: the caller must stop rather than
+  retry. Providers build it with `FencedErrorf`, which also matches
+  `ErrConflict` so Orka callers written before `ErrFenced` existed keep their
+  behavior. The embedded SQLite store reports controller epoch fence failures
+  and owner-fenced Session writes this way; gateway claim and outbox lease
+  owner mismatches still report `ErrConflict` or `ErrNotFound`. As an
+  in-process store, SQLite returns its driver's errors for infrastructure
+  failures; no commit outcome can be lost in transit.
+- **Write envelope.** `WriteEnvelope{DatasetID, Fence, OperationID,
+  RequestDigest}` is reserved and travels in the context
+  (`WithWriteEnvelope`, `WriteEnvelopeFrom`). Orka does not attach it yet and
+  providers must accept writes without one. Operation receipts (step 3) will
+  check the dataset, the controller epoch fence and the operation identity at
+  commit time. Only the outbox family takes a `ControllerEpochFence` today, as
+  an explicit parameter that stays authoritative for it; the envelope reaches
+  every other write family without another change to each of the contract's
+  roughly 190 context-taking methods. Operation-specific preconditions, such
+  as an expected version or message count, stay explicit parameters.
+- **Provider description.** `Describe(ctx)` on both providers returns
+  `ProviderInfo`: the contract version and parts served, the dataset ID and
+  its origin (`new`, `adopted` or `migrated`), the provider's schema version,
+  optional capabilities beyond the contract parts (none in v1), size limits
+  and the durability class. It is there for startup validation (step 4),
+  installation binding (step 5) and migration; nothing in Orka calls it yet.
+- **Times.** A provider preserves every caller-supplied time exactly, to the
+  nanosecond, and returns stored times in UTC. Connector consent and
+  completion encryption bind `ExpiresAt.UTC().UnixNano()` into associated
+  data, and usage pull-request observations key on a nanosecond time, so a
+  provider that rounds to microseconds (PostgreSQL `timestamptz`, for example)
+  must store the nanoseconds separately. The suite round-trips nanosecond
+  times given in a non-UTC zone through Sessions, transcripts, gateway events,
+  outbox projections, usage records, monitor runs, scan runs and the workflow
+  families. SQLite opens its database with the driver's `_timezone=UTC`
+  option, so every time column is written and read in UTC. Its queries compare
+  times as text, which is correct only while every row uses one zone. The
+  option does not rewrite stored rows: a database written by an earlier
+  release on a host whose local zone was not UTC keeps those rows' offsets,
+  and they can sort or pass a cutoff incorrectly against newer rows. Orka's
+  container images run in UTC unless `TZ` is set, so this affects such
+  databases only, such as local development files. Usage records are stored
+  as JSON, so SQLite converts their times to UTC when it writes and reads them.
+- **Records are not the wire format.** Records carry JSON tags for Orka's API.
+  Persisted fields such as gateway claim ownership, lease expiry, the frozen
+  Task tool policy, usage phase history, scan-run cancellation state and
+  finding decision times are tagged `json:"-"`, so a provider that sends these
+  structs as JSON loses them. The
+  network protocol (step 6) defines its own wire records with a round-trip
+  test over every record type. `ExecutionEvent.Usage` is also tagged
+  `json:"-"`: it carries the usage observation Orka derived from the event
+  (see "Orka policy above the client").
+- **Artifacts.** Requests carry an `ArtifactOwner` (namespace, Task name and
+  Task UID) so the identity can grow with a Job and cleanup generation without
+  another signature change. The Task UID is reserved: Orka passes it where it
+  has the Task, and providers may ignore it until artifact identity is
+  enforced, when an old retry must not overwrite or delete a newer Task's
+  artifacts. Every provider accepts artifacts up to `MaxArtifactBytes`
+  (10 MiB) and rejects larger ones with `ErrTooLarge`. `ListArtifacts`
+  returns filenames in byte order. `ArtifactMetadata.CreatedAt` and
+  `Message.CreatedAt` are `time.Time`; the API's JSON output keeps the format
+  it had when they were strings.
+
+### Rules reserved for later steps
+
+The contract states these now so later slices build on them; code follows in
+the named step.
+
+- **Cursors and order.** Cursors are opaque, provider-issued keyset tokens.
+  Each list method states its sort key, pages have no duplicates or gaps under
+  concurrent inserts, and an invalid cursor returns `ErrValidation`. SQLite's
+  monitor and security cursors are still numeric offsets, and their sort keys
+  live in SQL (one is `rowid`). Keyset paging comes with startup validation
+  (step 4) or earlier if SQLite moves first.
+- **Provider-assigned sequences.** `Message.ID`, transcript message order,
+  `TranscriptSearchResult.MessageID`, `ExecutionEvent.Seq`,
+  `SessionExecutionEvent.SessionSeq` and the accounting order of usage
+  observations are assigned by the provider, monotonic within their scope,
+  and become visible in commit order: a poller reading after a sequence must
+  never later see a lower one commit. Database sequences alone do not give
+  that, so a provider serializes allocation per stream. Migration preserves
+  these values.
+- **Clock ownership.** Callers supply lease times (`now` and lease durations)
+  and most record times. The provider assigns some: artifact and message
+  creation times, Task result timestamps, and in SQLite the repository monitor
+  times it fills when a caller leaves them zero or always sets, such as in
+  `UpsertRepositoryMonitor` and `CancelWorkActions`. Those two clocks diverge
+  once the store is a separate service; operation receipts (step 3) decide
+  which side owns each time.
+- **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents`,
+  `ListActiveScanRuns` and `GetMessages` return
+  every match. They gain limits and cursors in the same signature sweep as the
+  write envelope.
+- **`state.v1` is a relational contract.** Several methods push joins and
+  reports into the provider: `LoadUsage` (an as-of multi-CTE report),
+  `SearchTranscript` (case-insensitive substring search with history bounds),
+  `CountImplementationJobs` with excluded statuses, the gateway
+  `MissingDelivery` and `SessionHeadOnly` filters, and `ReasonContains`.
+  `state.v1` targets a transactional database with secondary indexes; a
+  key-value provider is not a goal. Moving these methods above the client onto
+  primitive reads is needed only if that changes.
+- **Migration export and import.** Behavioral methods cannot copy a dataset:
+  they assign sequences, IDs and times, apply quotas and deduplication, and
+  some records have no public writer. Migration (step 3 or 5) uses a reserved
+  per-family raw record surface, `Export(family, cursor)` and
+  `Import(family, records)` into an empty dataset, with the wire encoding
+  above. Backup can reuse it.
+- **Suite isolation.** A suite factory may return a fresh isolated dataset on
+  a shared provider (a schema or key prefix) instead of a new provider per
+  case, so the suite stays practical against a managed database.
+
+`cmd/main.go` builds one `internal/storageclient.Client` over the SQLite store,
+activates the snapshot key on it, and passes it to every application consumer.
+Outside the client, it uses the SQLite store directly only for its process lock,
+bootstrap history, configuration and manager lifecycle. The client composes the state and artifact providers and serves the
+remaining families through `storageclient.Embedded`, which only the SQLite
+store implements:
+
+| Embedded family | Why it is outside the provider contract |
+| --- | --- |
+| `MemoryProposalStore.ApplyMemoryProposal` | Proposal application calls `AuthorizeExistingMemory` inside the database transaction. |
+| `TaskDataTransactionStore` transaction methods | Go callbacks run inside a database transaction. |
+| `SecurityStore.ApplyScanTaskIngestion` | Go callbacks run inside a database transaction. |
+
+Embedded families share transactions with state and artifact records (a
+task-data transaction context also covers `SaveArtifact`, for example), so the
+client refuses a configuration that would place them on different stores. That
+sharing is an embedded-store behavior, not a provider obligation; see "No
+cross-contract transactions" above.
+
+`pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
+`RunArtifacts` exercise each provider family through the public interfaces.
+The SQLite provider runs it directly, and the storage client runs it over
+SQLite.
+
+SQLite also implements the duplicate SQL control-record methods described in
+the next section. They are not part of the provider contract or the client. A
+client test fails if any other SQLite method is missing from the client, so a
+consumer's type assertion cannot silently lose a capability.
+
+### Orka policy above the client
+
+The storage client applies Orka's redaction, sanitization and usage
+attribution before a provider sees the data, so a provider, including the
+embedded SQLite store, stores only content Orka has already made safe to
+persist:
+
+- **Execution events.** The client redacts and bounds each event's summary,
+  text and JSON content, records the redaction and truncation metrics once
+  for each newly appended event, counts an event it refuses before calling
+  the provider as an append failure, and stamps the creation time when the
+  caller left it unset. A provider only requires structured content to be valid
+  JSON, and stores content that is only whitespace as no content.
+- **Usage from execution events.** The client derives the usage observation
+  that a worker usage report or the controller's ACP journal carries and
+  sends it as `ExecutionEvent.Usage`, unless Orka code attached an
+  observation itself. The provider records it in the event's
+  transaction, as `RecordUsage` would, and records nothing when a
+  deduplication key returns an existing event. A worker report keeps the
+  time it was first received (`KeepFirstObservedAt`). Attribution travels in
+  the context (`store.WithUsageAttribution`): the authenticated Task for a
+  worker report and the frozen profile model for the journal. It never
+  reaches a provider. Invalid journal accounting is dropped without failing
+  the append; an invalid worker report fails it, as before.
+- **Usage names.** The client redacts and bounds provider and model names in
+  `RecordUsage` and in derived observations.
+- **Token attribution.** A provider returns the observations of every counter
+  a Task observed (`ListTaskCounterObservations`), in accounting order. The
+  client applies the usage report's attribution rules for `TaskTokenUsage`
+  and for the prompt attempt a Session turn finalizes, and passes that
+  attempt's totals in `CommitSessionTurnFinalizationRequest`. The client reads
+  the observations just before the finalization commits rather than inside
+  its transaction, so usage recorded for the attempt in that interval is not
+  added to the Session's counters, as usage recorded after finalization never
+  was.
+- **Threat models.** The client sanitizes threat model content before
+  `SaveThreatModel` and `SaveThreatModelIfVersion`, including writes that a
+  scan ingestion callback makes through its transaction-scoped store.
+- **Gateway text.** The client redacts, trims and bounds the text Orka and
+  adapters attach to gateway records: an event's state message, sender
+  display name and metadata (also when it looks up a duplicate), expiry, retry
+  and dead-letter reasons, a delivery's last error, provider message ID and
+  metadata, and the metadata of a terminal transcript message. Gateway
+  identifiers that the protocol already bounds are stored as received, now
+  including the copies in a gateway user message's transcript metadata.
+- **Memory.** The client redacts memory content, every free-text proposal
+  field, review fields and the applier. Proposal application still
+  re-applies the redaction rule when it copies a stored proposal into a
+  memory, because it runs inside the embedded transaction.
+
+Two tests in `internal/storageclient` send secrets through these paths over a
+recording SQLite provider and fail if the provider receives any of them:
+`TestProviderReceivesOnlySanitizedGatewayText` covers the gateway writes and
+`TestProviderReceivesOnlyRedactedContent` covers the others.
+
+### Key custody and sealing
+
+The storage client owns the 32-byte snapshot key. Startup loads the key,
+calls `Client.ActivateSnapshotKey`, and only then records bootstrap completion
+and hands the client to consumers. Activation pages through every retained
+sealed snapshot and native session record
+(`ListSealedAgentExecutionSnapshots`, `ListSealedNativeSessions`) and
+authenticates each one with the candidate key (native records one at a time,
+since each can hold a large bundle). It then pages through connector custody
+(`ListSealedConnectorCredentials`, `ListSealedRetiredConnectorCredentials`,
+`ListSealedConnectorConsents`, `ListSealedConnectorCompletions`) and
+authenticates the data keys of current and retired custody, the verifiers of
+unexpired pending consents and the payloads of parked completions, so linked
+accounts stay usable and revocable. An expired consent holds no token and does
+not block a key. A key that cannot open retained data is rejected and not
+installed, so one dataset never holds records sealed under different keys.
+Until activation succeeds, every sealed operation fails closed with
+`ErrSnapshotKeyNotActive`.
+
+The sealing formats live in `internal/storageclient` and are the formats the
+embedded store wrote before, so existing datasets open unchanged:
+
+- An execution snapshot body is sealed with AES-256-GCM under a fresh random
+  nonce, with associated data
+  `orka.agent-execution-snapshot\x00<task UID>\x00<digest>\x00<schema version>`.
+  On read the client also checks the body against the digest in its key.
+- A native session record is sealed as its whole JSON encoding, with
+  associated data
+  `orka.native-session.v1\x00<namespace>\x00<Session name>\x00<owner UID>\x00<record digest>`,
+  where the record digest is the canonical digest of that encoding. The
+  provider stores the owner UID, record and bundle digests, source operation,
+  runtime generation and transcript boundary in plain fields so it can enforce
+  ownership, boundaries and monotonic history without opening the record. The
+  client checks each of those fields against the plaintext when it opens a
+  record.
+- Connector custody (current and retired) is sealed as JSON under a fresh
+  32-byte data key per record, with associated data
+  `orka.connector-credential\x00<Connection UID>\x00<namespace>\x00<name>\x00<subject digest>\x00<provider>`.
+  The data key is sealed under the snapshot key with associated data
+  `orka.connector-data-key\x00<Connection UID>`. The provider stores the grant
+  sequence beside the sealed bytes; the client checks it against the sealed
+  grant.
+- A pending consent seals its PKCE verifier with associated data binding
+  every plain field: `orka.connector-consent`, nonce, Connection UID,
+  namespace, name, subject digest, provider, mode, authority and revocation
+  digests, space-joined scopes, expiry in Unix nanoseconds and consent
+  sequence.
+- A parked completion seals its tokens, the consent authority and the
+  committed marker as JSON, with associated data binding every plain field:
+  `orka.connector-completion`, nonce, Connection UID, subject digest,
+  namespace, name, provider, mode, expiry in Unix nanoseconds and consent
+  sequence.
+
+Providers see only sealed records and the conditional commands of
+`state.v1`: `CreateSealedAgentExecutionSnapshot` returns `ErrConflict` for an
+existing key and the client then compares the stored snapshot, so a repeated
+persist succeeds and different content returns `ErrDuplicateMismatch`.
+`SaveSealedNativeSession` and `StageSealedNativeSessionImport` carry the
+request digest the client computed from the plaintext.
+
+A turn finalization that carries native state is read, decided and sealed in
+the client, then committed conditionally. The embedded store used to append
+the terminal messages with IDs it generated and seal the native record against
+the boundary it derived, which needs the key inside the transaction. Now the
+client reads the turn, the Session's transcript boundary and its stored native
+record (`ReadSessionTurnFinalizationBasis`), assigns the IDs of the messages
+the finalization appends, and seals the record against the boundary after
+them; a carried checkpoint is opened and compared with the stored one first.
+`CommitSealedSessionTurnFinalization` commits only if the transcript still has
+the boundary the client read and, for a carried checkpoint, the stored record
+is the one it opened; otherwise it returns `ErrConflict` and changes nothing.
+A finalization without native state appends at the current end of the
+transcript, as before. When the turn is already finalized, the client sends no
+native state and the provider only compares the recorded finalization.
+
+Connector writes are read, decided and sealed in the client, then committed
+conditionally, as turn finalization is. The embedded store used to decide
+several of them inside its transaction from plaintext: it opened a parked
+completion to read its sealed committed marker, opened the custody a commit
+or refresh replaced to compare tokens before retiring it, and assigned grant
+and consent sequences that it then sealed into the record. Now the client
+reads the Connection's custody (`ReadConnectorCustody`: tombstone, current
+and retired custody, parked completions and the grant and consent counters
+from one snapshot), opens what it needs, decides and seals, and sends a
+command that names what it read:
+
+- `PutSealedConnectorCredential` and `CommitSealedConnectorCompletion` carry
+  the next grant sequence, and `CreateSealedConnectorConsent` the next
+  consent sequence; another grant or consent since the read returns
+  `ErrConflict`.
+- `ReplaceSealedConnectorCredential` and `CommitSealedConnectorCompletion`
+  carry the custody version the client opened, and say whether that custody
+  is retired and until when. The provider copies the stored sealed bytes into
+  retirement; it never compares tokens.
+- `CreateSealedConnectorCompletion` and `CommitSealedConnectorCompletion`
+  carry every parked completion of the Connection as read, each with the
+  `SealedValueDigest` of its payload, and the uncommitted ones the client
+  chose to replace or drop. The provider commits only if the Connection's
+  completions are still exactly those.
+
+A refused command changes nothing. For a grant, a consent or a completion the
+client reads again, up to eight times, before it returns `ErrConflict`; a
+replacement returns `ErrConflict` at once, because its caller chose the
+version it replaces. The provider still enforces the rules
+it can decide from plain fields: tombstones, consent order against the
+committed consent, expiry at the request's time, pruning of retired material
+with nothing left to revoke, and the bounds on retained consent and refresh
+grants. Its commit refusals come in a fixed order (`ErrConflict`,
+`ErrNotFound` for an expired completion, `ErrConnectorConsentSuperseded`,
+`ErrConnectorRetiredLimit`, `ErrConnectorCustodyTombstoned`), so callers keep
+the errors they branched on before. SQLite still truncates its write-ahead
+log after deleting custody, so a deleted record's sealed bytes do not outlive
+it in the log.
+
+SQLite's duplicate SQL control implementation, which tests use in place of
+the Kubernetes control store, finalizes turns itself and seals native state through the client's
+`store.NativeSessionFinalizationSealer`; production never installs it.
+
+`TestProviderReceivesOnlySealedSnapshotsAndNativeSessions` records every
+provider call while snapshots, imports, captures and turn finalizations with
+captured and carried native state go through the client, and fails if the
+provider receives a snapshot body, a native bundle in raw or base64 form, or
+the key. `TestProviderReceivesOnlySealedConnectorCustody` does the same for
+every connector path, including key activation, and fails if the provider
+receives a token, a PKCE verifier, a per-record data key or the snapshot key
+in raw, hex or base64 form. `TestSealedFormatsMatchStoredRecords` seals
+records with an independent implementation of the stored formats and reads
+them through the client, and the reverse; `TestSealedConnectorFormatsMatchStoredRecords`
+does the same for every connector format, and
+`TestConnectorCustodySealedByEarlierReleaseOpensUnchanged` opens connector
+custody that the embedded store sealed before this change
+(`internal/store/sqlite/testdata/connector-custody.sql`). The suite's
+`sealed-snapshots`, `sealed-native-sessions`, `session-turn-records` and
+`sealed-connector-*` families check that a provider stores opaque bytes
+exactly and decides each conditional commit from the plain fields and the
+expectations Orka sends.
 
 ## Kubernetes control authority and retained SQL compatibility
 
@@ -148,5 +556,6 @@ deduplicated event/plan append, native-session finalization and cleanup intents
 already express grouped workflows. Future work should preserve these guarantees
 before introducing new protocol names, lost-response receipts, transport or
 backend selection. Encryption/sealing and memory protections must remain owned
-by Orka above an eventual external adapter; this contribution leaves the current
-implementations and formats intact.
+by Orka above an eventual external adapter; the storage client already owns
+snapshot, native session and connector custody sealing, and their stored
+formats are unchanged.

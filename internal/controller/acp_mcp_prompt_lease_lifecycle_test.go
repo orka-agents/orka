@@ -29,6 +29,7 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
@@ -46,7 +47,7 @@ func newKubernetesMCPApprovalLeaseFixture(t *testing.T) (*mcpApprovalFixture, *s
 	}
 	kube := withControllerEpochLeaseUIDs(t, fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).
 		WithStatusSubresource(&corev1alpha1.ControllerEpoch{}, &corev1alpha1.PromptAttempt{}, &corev1alpha1.ExternalEffect{}).Build())
-	control, err := storekube.NewComposite(kube, "orka-system", f.events, storekube.WithAPIReader(kube))
+	control, err := storekube.NewComposite(kube, "orka-system", storageclienttest.Client(t, f.events), storekube.WithAPIReader(kube))
 	require.NoError(t, err)
 	epoch, err := control.CompareAndSwapControllerEpoch(t.Context(), store.ControllerEpochCAS{
 		NewEpoch: 1, HolderID: "controller-a", RequestDigest: testControllerMCPDigest("epoch"),
