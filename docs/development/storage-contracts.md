@@ -651,10 +651,11 @@ Reads and administrative methods reach the provider unchanged.
 - **Fence.** A write first waits for the fence of the dataset that serves its
   contract. The controller epoch manager is the fence source: it opens a
   contract's fence once that contract's dataset has advanced to the acquired
-  epoch. A write that waits longer than ten seconds, or that runs before a
-  fence source is bound, is refused with `ErrNotReady`. A task-data
-  transaction waits for the state fence before it opens, so the writes inside
-  it never wait while the transaction holds the store.
+  epoch. A write waits up to ten seconds for a fence source to be bound and
+  for that fence to open, and is then refused with `ErrNotReady`. A task-data
+  transaction waits for the fences of both contracts, which the embedded
+  store serves together, before it opens, and the writes inside it reuse
+  them, so they never wait for a fence while the transaction holds the store.
 - **Envelope.** The client creates one operation per write: the dataset ID
   and fence the fence source gives, a new UUIDv7 operation ID, the digest of
   the arguments as they are when the write is issued, the issue time and the

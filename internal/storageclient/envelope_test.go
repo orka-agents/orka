@@ -686,3 +686,62 @@ func TestUnsettledOutcomeHidesTheRefusalBehindIt(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// Embedded families run through the client unchanged against a store that,
+// as in production, refuses contract writes without an envelope: scan
+// ingestion writes through its transaction-scoped store, a task-data
+// transaction writes through the client, and memory proposal application
+// runs inside SQLite.
+func TestEmbeddedFamiliesRunAgainstAStrictStore(t *testing.T) {
+	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	backend.RequireWriteEnvelopes()
+	client, err := New(Options{
+		State: backend, Artifacts: backend, Embedded: backend,
+		Fences: staticFences{datasetID: advanceTestDataset(t, backend, testFence), fence: testFence},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+
+	identity := store.ScanTaskIdentity{Namespace: "ns", RepositoryScan: "repo", ScanRunID: "run", TaskName: "review", TaskUID: "task-uid", Stage: "review", SliceID: "slice"}
+	if err := client.CreateScanRun(ctx, &store.ScanRun{ID: "run", Namespace: "ns", RepositoryScan: "repo", Phase: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := client.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil,
+		func(tx store.SecurityStore, current *store.ScanRun) error {
+			if err := tx.UpsertObservedFinding(ctx, &store.Finding{ID: "finding", Namespace: "ns", RepositoryScan: "repo", ScanRunID: "run", Fingerprint: "finding"}); err != nil {
+				return err
+			}
+			current.AcceptedFindings++
+			return nil
+		})
+	if err != nil || !applied {
+		t.Fatalf("scan ingestion = %v, %v", applied, err)
+	}
+	if _, err := client.GetFinding(ctx, "ns", "finding"); err != nil {
+		t.Fatalf("finding written by the ingestion: %v", err)
+	}
+
+	err = client.WithTaskDataTransaction(ctx, func(ctx context.Context) error {
+		return client.SaveResult(ctx, "ns", "task", []byte("result"))
+	})
+	if err != nil {
+		t.Fatalf("task-data transaction: %v", err)
+	}
+
+	proposal := &store.MemoryProposal{Namespace: "ns", Type: "memory", Title: "title", Content: "remember this"}
+	if err := client.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: "ns", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: "ns", ID: proposal.ID, AppliedBy: "applier"}); err != nil {
+		t.Fatalf("memory proposal application: %v", err)
+	}
+}
