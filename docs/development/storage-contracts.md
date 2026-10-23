@@ -566,7 +566,8 @@ later.
 - **SQLite.** The binding lives in the `store_dataset` row (schema version 3).
   Every binding method runs in one transaction that reserves the writer, and a
   successful call checkpoints the WAL before it returns, as dataset identity
-  does. A row whose binding columns contradict one another is refused when the
+  does. A checkpoint that fails after the commit returns `ErrOutcomeUnknown`,
+  and repeating the identical request synchronizes again. A row whose binding columns contradict one another is refused when the
   store opens, never repaired.
 
 ### Rules reserved for later steps

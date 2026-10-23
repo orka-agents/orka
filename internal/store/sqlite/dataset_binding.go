@@ -303,7 +303,9 @@ func (s *Store) UpdateBindingKeyFingerprint(
 
 // CompleteDatasetBootstrap implements storagev1.DatasetBindingStore. Like the
 // completion the snapshot key activation records, it synchronizes the WAL
-// before returning, so the flag survives a host failure.
+// before returning, so the flag survives a host failure. A synchronization
+// that fails after the commit returns ErrOutcomeUnknown; repeating the call
+// synchronizes again.
 func (s *Store) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
 	if err := storagev1.ValidateControlIdentifier("complete dataset bootstrap dataset ID", datasetID); err != nil {
 		return err
@@ -321,7 +323,20 @@ func (s *Store) CompleteDatasetBootstrap(ctx context.Context, datasetID string) 
 	if err != nil {
 		return err
 	}
-	return synchronizeDatasetMetadata(s.db)
+	return synchronizeCommittedDataset(s.db, "CompleteDatasetBootstrap")
+}
+
+// synchronizeCommittedDataset checkpoints the WAL after a dataset metadata
+// change committed. A failure leaves the change committed but not yet synced
+// to the main database file, so it is reported as ErrOutcomeUnknown: the caller
+// repeats the identical request, which replays the change and synchronizes
+// again, rather than treating it as refused.
+func synchronizeCommittedDataset(db *sql.DB, method string) error {
+	if err := synchronizeDatasetMetadata(db); err != nil {
+		return fmt.Errorf("%w: %s committed, but its durable synchronization failed: %w",
+			storagev1.ErrOutcomeUnknown, method, err)
+	}
+	return nil
 }
 
 // changeDatasetBinding runs change against the stored binding in one write
@@ -371,7 +386,7 @@ func (s *Store) changeDatasetBinding(
 	if err != nil {
 		return storagev1.DatasetBinding{}, err
 	}
-	if err := synchronizeDatasetMetadata(s.db); err != nil {
+	if err := synchronizeCommittedDataset(s.db, method); err != nil {
 		return storagev1.DatasetBinding{}, err
 	}
 	return *result.public(), nil

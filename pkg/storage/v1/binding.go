@@ -250,7 +250,10 @@ func (e BindingConflictError) Is(target error) bool {
 // dataset's identity before any fence exists. Each method is atomic and
 // linearizable with every other call on the dataset, a refusal commits
 // nothing, and a request for another dataset returns [ErrDatasetMismatch].
-// Every change is durable when the method returns.
+// Every change is durable when the method returns. A provider that cannot tell
+// whether a change committed, or committed it but could not make it durable,
+// returns [ErrOutcomeUnknown]; repeating the identical request is safe,
+// because each method returns the stored result unchanged for a repeat.
 //
 // BindDataset follows these rules, in order:
 //

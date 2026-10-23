@@ -188,3 +188,73 @@ func TestDatasetBindingCompleteBootstrapEndsKeyMinting(t *testing.T) {
 	require.False(t, info.CanBootstrapSnapshotKey)
 	requireCheckpointedDataset(t, path, dataset, true)
 }
+
+// readCheckpointedBinding reads the binding columns from the main database
+// file only (immutable=1 skips the WAL), so it shows what has been synchronized.
+func readCheckpointedBinding(t *testing.T, path string) (string, string) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+path+"?immutable=1")
+	require.NoError(t, err)
+	defer func() { _ = raw.Close() }()
+	var installation, state string
+	require.NoError(t, raw.QueryRow(`SELECT installation_id, binding_state FROM store_dataset`).Scan(&installation, &state))
+	return installation, state
+}
+
+// A WAL checkpoint that fails after a binding change committed is reported as
+// an unknown outcome, not a refusal: the change is committed but not yet in
+// the main database file. Repeating the identical request replays it and
+// synchronizes it.
+func TestDatasetBindingSynchronizationFailureIsAnUnknownOutcome(t *testing.T) {
+	s := setupDiskStore(t)
+	s.ownsProcessLock = true
+	dataset := describeDataset(t, s)
+	reader, err := sql.Open("sqlite", s.dbPath)
+	require.NoError(t, err)
+	defer func() { _ = reader.Close() }()
+	hold := func() *sql.Tx {
+		t.Helper()
+		tx, err := reader.Begin()
+		require.NoError(t, err)
+		var installation string
+		require.NoError(t, tx.QueryRow(`SELECT installation_id FROM store_dataset`).Scan(&installation))
+		return tx
+	}
+	_, err = s.db.Exec(`PRAGMA busy_timeout=20`)
+	require.NoError(t, err)
+
+	// An open read snapshot keeps the checkpoint from finishing.
+	snapshot := hold()
+	_, err = s.BindDataset(t.Context(), embeddedBindRequest(dataset))
+	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
+	require.NotErrorIs(t, err, storagev1.ErrConflict)
+	stored, err := s.GetDatasetBinding(t.Context(), dataset)
+	require.NoError(t, err, "the binding committed")
+	require.Equal(t, "installation-a", stored.InstallationID)
+	installation, _ := readCheckpointedBinding(t, s.dbPath)
+	require.Empty(t, installation, "the binding has not reached the main database file")
+	require.NoError(t, snapshot.Rollback())
+
+	repeat, err := s.BindDataset(t.Context(), embeddedBindRequest(dataset))
+	require.NoError(t, err, "the identical request replays the binding")
+	require.Equal(t, stored, repeat)
+	installation, state := readCheckpointedBinding(t, s.dbPath)
+	require.Equal(t, "installation-a", installation)
+	require.Equal(t, "bound", state)
+
+	snapshot = hold()
+	_, err = s.DetachDatasetBinding(t.Context(), storagev1.DetachDatasetRequest{
+		DatasetID: dataset, InstallationID: "installation-a", RecordUID: "record-a", SwitchGeneration: 2,
+	})
+	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
+	require.NoError(t, snapshot.Rollback())
+
+	snapshot = hold()
+	require.ErrorIs(t, s.CompleteDatasetBootstrap(t.Context(), dataset), storagev1.ErrOutcomeUnknown)
+	requireCheckpointedDataset(t, s.dbPath, dataset, false)
+	require.NoError(t, snapshot.Rollback())
+	require.NoError(t, s.CompleteDatasetBootstrap(t.Context(), dataset))
+	requireCheckpointedDataset(t, s.dbPath, dataset, true)
+	_, state = readCheckpointedBinding(t, s.dbPath)
+	require.Equal(t, "detached", state, "the later synchronization also carried the earlier detach")
+}
