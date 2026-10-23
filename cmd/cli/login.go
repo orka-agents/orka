@@ -125,7 +125,7 @@ func newLoginCmd() *cobra.Command {
 			if err := updateConfig(func(cfg *orkaConfig) error {
 				cfg.Server, cfg.Token, cfg.TokenKind, cfg.Namespace = server, session.Token, tokenKindGitHubSession, session.Namespace
 				expires := session.ExpiresAt
-				cfg.SessionServer, cfg.TokenExpiresAt = server, &expires
+				cfg.SessionServer, cfg.TokenExpiresAt, cfg.SessionLogin = server, &expires, session.Login
 				return nil
 			}); err != nil {
 				return fmt.Errorf("save the session: %w", err)
@@ -179,7 +179,7 @@ func newLogoutCmd() *cobra.Command {
 				!strings.Contains(err.Error(), "HTTP 401") {
 				return fmt.Errorf("end the session: %w", err)
 			}
-			cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer = "", "", nil, ""
+			cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer, cfg.SessionLogin = "", "", nil, "", ""
 			if err := saveConfig(cfg); err != nil {
 				return err
 			}
@@ -247,8 +247,10 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 	}
 	defer unlock()
 	saved := loadConfig()
-	if !holdsSession(saved, cfg.SessionServer) {
+	if !holdsSession(saved, cfg) {
 		// The session was replaced or ended meanwhile: nothing to renew.
+		// Another person's session saved meanwhile is theirs, never this
+		// command's.
 		return cfg.Token
 	}
 	cfg = saved
@@ -275,9 +277,11 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 	return session.Token
 }
 
-// holdsSession reports whether cfg holds a session from server.
-func holdsSession(cfg orkaConfig, server string) bool {
-	return cfg.TokenKind == tokenKindGitHubSession && cfg.SessionServer == server && cfg.Token != ""
+// holdsSession reports whether saved holds a session of the same person from
+// the same server as read: read's own, or its successor from a renewal.
+func holdsSession(saved, read orkaConfig) bool {
+	return saved.TokenKind == tokenKindGitHubSession && saved.Token != "" &&
+		saved.SessionServer == read.SessionServer && saved.SessionLogin == read.SessionLogin
 }
 
 // sessionEndsSoon reports a session in its renewal window. One that already

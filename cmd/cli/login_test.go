@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -104,7 +105,7 @@ func TestLoginSignsInLinksGitHubAndWaitsForTheHost(t *testing.T) {
 	}
 	cfg := loadConfig()
 	if cfg.Server != orka.URL || cfg.SessionServer != orka.URL || cfg.Token != "orka_s_session" || cfg.TokenKind != tokenKindGitHubSession ||
-		cfg.TokenExpiresAt == nil || cfg.Namespace != "orka-system" {
+		cfg.TokenExpiresAt == nil || cfg.Namespace != "orka-system" || cfg.SessionLogin != "alice" {
 		t.Fatalf("config = %+v", cfg)
 	}
 }
@@ -187,6 +188,42 @@ current-context: x
 	}
 }
 
+// A command that read one person's session in its renewal window does not
+// renew or use another person's session saved before it took the config
+// lock. A successor of its own session, renewed by another process, is used.
+func TestSessionRenewalLeavesAnotherPersonsSessionAlone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	renewals := 0
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/session/renew" {
+			renewals++
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer orka.Close()
+	soon := time.Now().Add(time.Hour)
+	alice := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_alice", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon, SessionLogin: "alice"}
+	bob := alice
+	bob.Token, bob.SessionLogin = "orka_s_bob", "bob"
+	if err := saveConfig(bob); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &cobra.Command{}
+	cmd.SetErr(io.Discard)
+	if got := configuredSession(cmd, orka.URL, alice); got != "orka_s_alice" || renewals != 0 {
+		t.Fatalf("token = %q after %d renewals, want alice's own session and no renewal", got, renewals)
+	}
+	successor := alice
+	later := time.Now().Add(12 * time.Hour)
+	successor.Token, successor.TokenExpiresAt = "orka_s_alice_2", &later
+	if err := saveConfig(successor); err != nil {
+		t.Fatal(err)
+	}
+	if got := configuredSession(cmd, orka.URL, alice); got != "orka_s_alice_2" || renewals != 0 {
+		t.Fatalf("token = %q after %d renewals, want the successor", got, renewals)
+	}
+}
+
 // Two orka processes in a session's renewal window renew it once and both
 // use the successor: the server renews a session only once.
 func TestConcurrentCommandsRenewASessionOnce(t *testing.T) {
@@ -252,7 +289,7 @@ func TestLogoutEndsTheSession(t *testing.T) {
 	if err != nil || ended != "Bearer orka_s_session" || !strings.Contains(out, "Signed out") {
 		t.Fatalf("logout: %v %q, ended with %q", err, out, ended)
 	}
-	if cfg := loadConfig(); cfg.Token != "" || cfg.TokenKind != "" || cfg.SessionServer != "" {
+	if cfg := loadConfig(); cfg.Token != "" || cfg.TokenKind != "" || cfg.SessionServer != "" || cfg.SessionLogin != "" {
 		t.Fatalf("config = %+v", cfg)
 	}
 
