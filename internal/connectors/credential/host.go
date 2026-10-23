@@ -35,6 +35,11 @@ type HostCredential struct {
 	// Version changes whenever custody holds new material.
 	Version       int64
 	GrantSequence int64
+	// Refreshable reports whether custody holds a refresh token for the
+	// grant. GitHub issues one only beside a token that expires, so it tells
+	// an expiry GitHub set from a deadline Orka chose for a token it was
+	// handed without one.
+	Refreshable bool
 }
 
 // HostCredential returns the access token for the agent host fed by the named
@@ -80,6 +85,7 @@ func (s *Source) HostCredential(ctx context.Context, namespace, name string, hor
 		ExpiresAt:     credential.ExpiresAt,
 		Version:       credential.Version,
 		GrantSequence: credential.GrantSequence,
+		Refreshable:   credential.RefreshToken != "",
 	}, nil
 }
 
@@ -127,21 +133,31 @@ func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 	if err != nil {
 		return nil, ref, store.ConnectorCredential{}, err
 	}
-	// An edit the provider controller has not judged yet stops no host: the
-	// check is retried until the provider's status describes its spec, and no
-	// token is handed out meanwhile.
-	if provider.DeletionTimestamp.IsZero() && !providerStatusCurrent(provider) {
-		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("connector provider %q has not caught up with its latest change", provider.Name)
+	// Only a verdict stops a host. A provider status that does not describe
+	// the provider's current spec, or that records a check it could not
+	// complete, is retried, and no token is handed out meanwhile.
+	switch judged, accepted := providerVerdict(provider); {
+	case !judged:
+		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("connector provider %q has not judged its latest change", provider.Name)
+	case !accepted:
+		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider is not accepted")
 	}
-	// The provider just read is judged, so only a provider that does not
-	// authorize the link stops a host; a failed read above is retried.
+	// The provider just read is accepted, so a mismatch with it is a
+	// verdict too; a failed read above is retried.
 	if err := checkProvider(connection, provider, credential, nil); err != nil {
 		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable(err.Error())
+	}
+	// Everything the Connection's status summarizes has now been checked
+	// against the provider and custody directly, so a status that has not
+	// caught up with an edit, or that records a failed read, stops no host.
+	if !connectors.ConnectionLinked(connection) {
+		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("the Connection %q has not caught up with its latest change", name)
 	}
 	return connection, ref, credential, nil
 }
 
-// hostConnection reads a host's Connection fresh and requires it linked.
+// hostConnection reads a host's Connection fresh and requires that its person
+// still holds a link: it exists, is not being deleted, and is Ready.
 func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*corev1alpha1.Connection, error) {
 	connection := &corev1alpha1.Connection{}
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, connection); err != nil {
@@ -150,62 +166,45 @@ func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*c
 		}
 		return nil, fmt.Errorf("load connection: %w", err)
 	}
-	// A Connection being deleted is a disconnect, whatever its provider's
-	// state, even while its finalizer holds it.
+	// A Connection being deleted is a disconnect, even while its finalizer
+	// holds it.
 	if !connection.DeletionTimestamp.IsZero() {
 		return nil, hostLinkUnavailable("the Connection is being deleted")
 	}
-	if !connectors.ConnectionLinked(connection) {
-		lagging, err := s.providerLag(ctx, connection)
-		if err != nil {
-			return nil, fmt.Errorf("load connector provider: %w", err)
-		}
-		if lagging {
-			return nil, fmt.Errorf("the Connection %q waits for its provider's latest change to be judged", name)
-		}
+	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
 		return nil, hostLinkUnavailable("the Connection is not linked")
 	}
 	return connection, nil
 }
 
-// providerLag reports whether a Connection is unlinked only because an edit
-// to its provider has not been judged yet: by the provider controller, or,
-// once it has accepted the edit, by the Connection controller. Either way a
-// host waits instead of stopping, and gets no token meanwhile.
-func (s *Source) providerLag(ctx context.Context, connection *corev1alpha1.Connection) (bool, error) {
-	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
-	resolved := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionProviderResolved)
-	if ready == nil || ready.Status != metav1.ConditionTrue || resolved == nil ||
-		resolved.Status != metav1.ConditionFalse || resolved.Reason != corev1alpha1.ConnectionReasonProviderInvalid {
-		return false, nil
-	}
-	provider := &corev1alpha1.ConnectorProvider{}
-	key := types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}
-	if err := s.reader().Get(ctx, key, provider); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
+// providerVerdict reports whether the provider controller has judged the
+// provider's current generation, and if so whether it accepted it. A current
+// False condition is a refusal; a missing, older or Unknown one awaits
+// judgment. A provider being deleted is refused.
+func providerVerdict(provider *corev1alpha1.ConnectorProvider) (judged, accepted bool) {
 	if !provider.DeletionTimestamp.IsZero() {
-		return false, nil
+		return true, false
 	}
-	return !providerStatusCurrent(provider) || connectors.ProviderAccepted(provider), nil
-}
-
-// providerStatusCurrent reports whether the provider controller has judged the
-// provider's current generation.
-func providerStatusCurrent(provider *corev1alpha1.ConnectorProvider) bool {
+	judged = true
 	for _, conditionType := range []string{
 		corev1alpha1.ConnectorProviderConditionAccepted,
 		corev1alpha1.ConnectorProviderConditionResolvedRefs,
 	} {
 		condition := meta.FindStatusCondition(provider.Status.Conditions, conditionType)
 		if condition == nil || condition.ObservedGeneration != provider.Generation {
-			return false
+			judged = false
+			continue
+		}
+		switch condition.Status {
+		case metav1.ConditionFalse:
+			return true, false
+		case metav1.ConditionTrue:
+		default:
+			judged = false
 		}
 	}
-	return true
+	return judged, judged
 }
 
 func hostLinkUnavailable(reason string) error {

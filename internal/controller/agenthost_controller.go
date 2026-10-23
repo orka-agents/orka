@@ -458,10 +458,12 @@ func (r *AgentHostReconciler) connectionToken(
 		return nil, "", fmt.Errorf("get the host's token from Connection %s: %w", name, err)
 	}
 	// Code in the host can read its token, so it gets only one that expires:
-	// a leaked copy then stops working on its own.
-	if held.ExpiresAt.IsZero() {
+	// a leaked copy then stops working on its own. Only a grant custody can
+	// refresh carries an expiry GitHub set; a token Orka was handed without
+	// one holds only Orka's own deadline.
+	if held.ExpiresAt.IsZero() || !held.Refreshable {
 		return nil, "", agentHostFailed(agentHostReasonGitHubTokenNeverExpires,
-			"Connection %s holds a GitHub token that never expires; turn on user-token expiration in the GitHub App, then link again", name)
+			"Connection %s holds a GitHub token with no expiry GitHub confirmed; turn on user-token expiration in the GitHub App, then link again", name)
 	}
 	token := []byte(held.AccessToken)
 	holds, err := r.tokenCopyHolds(ctx, names, token)
@@ -1335,7 +1337,28 @@ func (r *AgentHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// A refresh, re-link or disconnect of a host's Connection reaches the
 		// host at once.
 		Watches(&corev1alpha1.Connection{}, handler.EnqueueRequestsFromMapFunc(r.hostsUsing(agentHostConnectionIndex))).
+		// A provider that stops serving hosts, or no longer authorizes their
+		// links, leaves the Connections' status as it was, so the change
+		// reaches the hosts its links feed directly.
+		Watches(&corev1alpha1.ConnectorProvider{}, handler.EnqueueRequestsFromMapFunc(r.connectionFedHosts)).
 		Complete(r)
+}
+
+// connectionFedHosts maps a provider to every host in its namespace that a
+// Connection feeds. At most one provider there serves hosts, so no finer
+// index is kept.
+func (r *AgentHostReconciler) connectionFedHosts(ctx context.Context, object client.Object) []reconcile.Request {
+	hosts := &corev1alpha1.AgentHostList{}
+	if err := r.List(ctx, hosts, client.InNamespace(object.GetNamespace())); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range hosts.Items {
+		if hosts.Items[i].Spec.GitHubTokenFrom != nil {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&hosts.Items[i])})
+		}
+	}
+	return requests
 }
 
 func agentHostFromAnnotation(_ context.Context, object client.Object) []reconcile.Request {

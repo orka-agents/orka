@@ -122,6 +122,8 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 type fakeSignInCredentials struct {
 	token string
 	err   error
+	// unrefreshable holds a grant whose expiry Orka chose.
+	unrefreshable bool
 }
 
 func (f fakeSignInCredentials) HostCredential(context.Context, string, string, time.Duration) (credential.HostCredential, error) {
@@ -131,7 +133,7 @@ func (f fakeSignInCredentials) HostCredential(context.Context, string, string, t
 	if f.token == "" {
 		return credential.HostCredential{}, credential.ErrHostLinkUnavailable
 	}
-	return credential.HostCredential{AccessToken: f.token, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	return credential.HostCredential{AccessToken: f.token, ExpiresAt: time.Now().Add(time.Hour), Refreshable: !f.unrefreshable}, nil
 }
 
 func newSignInHarness(t *testing.T) *connectorTestHarness {
@@ -258,12 +260,62 @@ func TestGitHubSignInStartsAHostOnlyForAConfirmedExpiry(t *testing.T) {
 	if got := annotation(); got != corev1alpha1.ConnectionAgentHostDeclined {
 		t.Fatalf("annotation = %q, want the link to get no host", got)
 	}
+	// Custody, as a host reads it, holds the submitted token under a
+	// deadline Orka chose.
+	source := &credential.Source{Client: h.client, APIReader: h.client, Credentials: h.store, OAuth: h.handlers.connectors.OAuth}
+	hostGets := func() credential.HostCredential {
+		t.Helper()
+		held, err := source.HostCredential(context.Background(), connectorTestNamespace, name, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return held
+	}
+	if held := hostGets(); held.AccessToken != "ghu_alice" || held.Refreshable {
+		t.Fatalf("custody holds %q (refreshable %v), want the submitted token", held.AccessToken, held.Refreshable)
+	}
+
+	// A sign-in that cannot finish its link leaves the decline in place.
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{err: errors.New("custody unavailable")}
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusServiceUnavailable {
+		t.Fatalf("sign-in over unreadable custody: %d, want 503", status)
+	}
+	if got := annotation(); got != corev1alpha1.ConnectionAgentHostDeclined {
+		t.Fatalf("annotation = %q, want the decline kept until the link is replaced", got)
+	}
+
+	// One with a refresh token replaces that grant with its own before the
+	// decline is lifted, so the host gets the token whose expiry GitHub set.
+	h.handlers.githubSignIn.Credentials = source
 	h.identity = nil
 	if status, session = h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusCreated || !session.AgentHost {
 		t.Fatalf("sign-in with a refresh token: %d %+v, want a host", status, session)
 	}
 	if got := annotation(); got != "" {
 		t.Fatalf("annotation = %q, want the decline lifted", got)
+	}
+	if held := hostGets(); held.AccessToken != "ghu_alice_refreshed" || !held.Refreshable {
+		t.Fatalf("a host gets %q (refreshable %v), want the refreshed token", held.AccessToken, held.Refreshable)
+	}
+}
+
+// A refresh that names an expiry but leaves no refresh token gives a token
+// custody cannot refresh, which a host does not take; the sign-in starts none.
+func TestGitHubSignInStartsNoHostForATokenItCannotRefresh(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice_final"})
+	if status != http.StatusCreated || session.AgentHost {
+		t.Fatalf("sign-in: %d %+v, want a session without a host", status, session)
+	}
+	connection := &corev1alpha1.Connection{}
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	if got := connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost]; got != corev1alpha1.ConnectionAgentHostDeclined {
+		t.Fatalf("annotation = %q, want the link to get no host", got)
 	}
 }
 

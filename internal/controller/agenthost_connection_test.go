@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agenthost"
@@ -29,9 +31,11 @@ const testHostConnection = "github-alice"
 
 type fakeHostCredentials struct {
 	token string
-	// neverExpires hands out a token without an expiry.
-	neverExpires bool
-	unavailable  bool
+	// neverExpires hands out a token without an expiry; unrefreshable, one
+	// whose expiry is Orka's own deadline.
+	neverExpires  bool
+	unrefreshable bool
+	unavailable   bool
 	// broken makes every call fail as a store outage would.
 	broken bool
 	// connection is the Connection that feeds hosts; empty means testHostConnection.
@@ -42,7 +46,7 @@ func (f *fakeHostCredentials) HostCredential(_ context.Context, namespace, name 
 	if err := f.CheckHostLink(context.Background(), namespace, name); err != nil {
 		return credential.HostCredential{}, err
 	}
-	held := credential.HostCredential{AccessToken: f.token}
+	held := credential.HostCredential{AccessToken: f.token, Refreshable: !f.unrefreshable}
 	if !f.neverExpires {
 		held.ExpiresAt = time.Now().Add(8 * time.Hour)
 	}
@@ -171,8 +175,17 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("ready = %+v", ready)
 	}
+	// Nor on one whose expiry only Orka set: custody cannot refresh it.
+	credentials.neverExpires, credentials.unrefreshable = false, true
+	h.settle()
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("a token without an expiry GitHub set must not be copied into the host")
+	}
+	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
+		t.Fatalf("unrefreshable: ready = %+v", ready)
+	}
 	// Once the link holds an expiring token, the host runs.
-	credentials.neverExpires = false
+	credentials.unrefreshable = false
 	h.settle()
 	if _, ok := h.pod(); !ok {
 		t.Fatal("an expiring token must start the host")
@@ -477,5 +490,22 @@ func TestAgentHostRefusesANeverExpiringTokenUnderAnAllowList(t *testing.T) {
 	}
 	if got := agentHostReady(h.host()); got.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("ready = %+v", got)
+	}
+}
+
+// A provider edit reaches every host its links feed, and no other.
+func TestAgentHostProviderChangeReachesTheHostsItsLinksFeed(t *testing.T) {
+	fed := connectionHost()
+	secretFed := testHost()
+	secretFed.Name = "bob"
+	elsewhere := connectionHost()
+	elsewhere.Namespace = "other"
+	h := newAgentHostHarness(t, fed, secretFed, elsewhere)
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: testUserNamespace}}
+
+	requests := h.reconciler.connectionFedHosts(context.Background(), provider)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: testUserNamespace, Name: "alice"}}}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
 	}
 }

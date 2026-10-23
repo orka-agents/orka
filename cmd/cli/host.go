@@ -31,13 +31,17 @@ const agentHostPhaseFailed = "Failed"
 // gone; linking again clears it.
 const agentHostReasonConnectionUnavailable = "ConnectionUnavailable"
 
-// A sign-in that just succeeded supersedes these reasons on a host kept from
-// before: its account is a member again, and its link holds a token that
-// expires. The host recovers at its next reconcile.
+// Failures a new link can clear: the host's link was gone, gave another
+// GitHub account, or gave a token that never expires.
 const (
-	agentHostReasonGitHubMembershipEnded   = "GitHubMembershipEnded"
+	agentHostReasonGitHubIdentityChanged   = "GitHubIdentityChanged"
 	agentHostReasonGitHubTokenNeverExpires = "GitHubTokenNeverExpires"
 )
+
+// A sign-in that just succeeded also supersedes this reason on a host kept
+// from before: its account is a member again. The host recovers at its next
+// reconcile.
+const agentHostReasonGitHubMembershipEnded = "GitHubMembershipEnded"
 
 // agentHostReadyPollInterval paces waiting for a host after linking.
 var agentHostReadyPollInterval = 2 * time.Second
@@ -187,14 +191,20 @@ func printAgentHost(out io.Writer, host agentHostView) {
 
 // waitForAgentHost waits until the host fed by connection, the link just made
 // to a provider that serves agent hosts, is ready, and says how the Copilot
-// app lists it. A Failed host is waited on only for ConnectionUnavailable or
-// one of the stale reasons.
+// app lists it. A Failed host is waited on only for a reason the new link
+// clears or one of the stale reasons.
 func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, connection string, stale ...string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "Waiting for your agent host...") //nolint:errcheck
 	woken := false
+	// The last failure seen that the new link or sign-in may clear: it is
+	// waited out, and reported if the wait ends on it.
+	var failed *agentHostView
 	for {
 		host, err := getOwnAgentHost(ctx, c)
+		if err == nil {
+			failed = nil
+		}
 		switch {
 		// Until the new link's host exists, the API can answer with a host
 		// kept from another link, ready or failed; it is not the one to use.
@@ -215,22 +225,35 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client,
 			}
 			woken = true
 			fmt.Fprintln(out, "Your agent host idled out; waking it.") //nolint:errcheck
-		// A host kept from an earlier link still says its Connection was
-		// unavailable until the controller sees the new link.
-		case err == nil && host.Phase == agentHostPhaseFailed && host.Reason != agentHostReasonConnectionUnavailable &&
-			!slices.Contains(stale, host.Reason):
+		// A host kept from an earlier link still shows the failure that link
+		// left until the controller sees the new one.
+		case err == nil && host.Phase == agentHostPhaseFailed && (linkMayClear(host.Reason) || slices.Contains(stale, host.Reason)):
+			failed = &host
+		case err == nil && host.Phase == agentHostPhaseFailed:
 			return fmt.Errorf("your agent host %s failed: %s: %s", host.Name, host.Reason, host.Message)
-		case err != nil && !strings.Contains(err.Error(), "HTTP 404"):
-			// The host is created moments after the link; until then the
-			// API answers 404.
+		// The host is created moments after the link; until then the API
+		// answers 404. A request cut short by the deadline ends the wait
+		// below.
+		case err != nil && ctx.Err() == nil && !strings.Contains(err.Error(), "HTTP 404"):
 			return err
 		}
 		select {
 		case <-ctx.Done():
+			if failed != nil {
+				return fmt.Errorf("your agent host %s is not ready: %s: %s; check with 'orka host status'", failed.Name, failed.Reason, failed.Message)
+			}
 			return errors.New("your agent host is not ready yet; check with 'orka host status'")
 		case <-time.After(agentHostReadyPollInterval):
 		}
 	}
+}
+
+func linkMayClear(reason string) bool {
+	switch reason {
+	case agentHostReasonConnectionUnavailable, agentHostReasonGitHubIdentityChanged, agentHostReasonGitHubTokenNeverExpires:
+		return true
+	}
+	return false
 }
 
 func agentHostError(err error) error {
