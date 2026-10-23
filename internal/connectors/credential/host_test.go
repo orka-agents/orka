@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -174,6 +175,63 @@ func TestHostLinkWaitsForTheProviderStatusToCatchUp(t *testing.T) {
 	setConditions(1, metav1.ConditionFalse)
 	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, ErrHostLinkUnavailable) {
 		t.Fatalf("check = %v, want ErrHostLinkUnavailable", err)
+	}
+}
+
+// The Connection controller can judge a provider edit before the provider
+// controller does, marking the link's provider invalid. That stops no host
+// either, until the provider's current status refuses the link.
+func TestHostLinkWaitsForTheConnectionToSeeItsProvider(t *testing.T) {
+	h := newHarness(t)
+	h.serveHosts("copilotd")
+	h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(4 * time.Hour)})
+	connection := h.reload()
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionFalse,
+		Reason: corev1alpha1.ConnectionReasonProviderInvalid, ObservedGeneration: connection.Generation,
+	})
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionUnknown,
+		Reason: "ProviderUnresolved", ObservedGeneration: connection.Generation,
+	})
+	if err := h.client.Status().Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	setProvider := func(observed int64, status metav1.ConditionStatus) {
+		t.Helper()
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+			t.Fatal(err)
+		}
+		for i := range provider.Status.Conditions {
+			provider.Status.Conditions[i].ObservedGeneration = observed
+			provider.Status.Conditions[i].Status = status
+		}
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retryable := func(stage string) {
+		t.Helper()
+		if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); err == nil || errors.Is(err, ErrHostLinkUnavailable) {
+			t.Fatalf("%s: check = %v, want a retryable error", stage, err)
+		}
+		if held, err := h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, 15*time.Minute); err == nil ||
+			errors.Is(err, ErrHostLinkUnavailable) || held.AccessToken != "" {
+			t.Fatalf("%s: held = %q, err = %v; want no token and a retryable error", stage, held.AccessToken, err)
+		}
+	}
+
+	// The provider controller has not judged the edit.
+	setProvider(0, metav1.ConditionTrue)
+	retryable("provider status behind")
+	// It has accepted it, and the Connection controller has not caught up.
+	setProvider(1, metav1.ConditionTrue)
+	retryable("connection status behind")
+	// It has refused it: the link no longer feeds the host.
+	setProvider(1, metav1.ConditionFalse)
+	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, ErrHostLinkUnavailable) {
+		t.Fatalf("refused provider: check = %v, want ErrHostLinkUnavailable", err)
 	}
 }
 

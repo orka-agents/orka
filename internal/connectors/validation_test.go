@@ -9,6 +9,8 @@ package connectors
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -807,19 +810,32 @@ func TestResolveProviderReferencesNeedsARelayAgentHostTemplate(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "oauth", Namespace: "tenant"},
 		Data:       map[string][]byte{"clientSecret": []byte("s3cret")},
 	}
-	template := func(access corev1alpha1.AgentHostAccess) *corev1alpha1.AgentHostTemplate {
-		return &corev1alpha1.AgentHostTemplate{
-			ObjectMeta: metav1.ObjectMeta{Name: "copilotd", Namespace: "tenant"},
-			Spec:       corev1alpha1.AgentHostTemplateSpec{Access: access},
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "samples", "core_v1alpha1_agenthosttemplate.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := func(change func(*corev1alpha1.AgentHostTemplateSpec)) *corev1alpha1.AgentHostTemplate {
+		sample := &corev1alpha1.AgentHostTemplate{}
+		if err := yaml.Unmarshal(raw, sample); err != nil {
+			t.Fatal(err)
 		}
+		sample.ObjectMeta = metav1.ObjectMeta{Name: "copilotd", Namespace: "tenant"}
+		change(&sample.Spec)
+		return sample
 	}
 	for name, test := range map[string]struct {
 		objects []runtime.Object
 		want    string
 	}{
-		"no template":           {objects: []runtime.Object{secret}, want: ReasonReferenceNotFound},
-		"a Standalone template": {objects: []runtime.Object{secret, template(corev1alpha1.AgentHostAccessStandalone)}, want: ReasonReferenceInvalid},
-		"a Relay template":      {objects: []runtime.Object{secret, template(corev1alpha1.AgentHostAccessRelay)}},
+		"no template": {objects: []runtime.Object{secret}, want: ReasonReferenceNotFound},
+		"a Standalone template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
+			spec.Access = corev1alpha1.AgentHostAccessStandalone
+		})}, want: ReasonReferenceInvalid},
+		// A template the AgentHost reconciler would refuse.
+		"an invalid template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
+			spec.RuntimeClassName = new("Bad_Name")
+		})}, want: ReasonReferenceInvalid},
+		"a Relay template": {objects: []runtime.Object{secret, template(func(*corev1alpha1.AgentHostTemplateSpec) {})}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(test.objects...).Build()

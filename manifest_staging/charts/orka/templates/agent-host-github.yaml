@@ -13,8 +13,8 @@ hosts move to the new template on their volumes.
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ include "orka.agentHostGitHubSecretName" . }}
-  namespace: {{ $namespace }}
+  name: {{ include "orka.agentHostGitHubSecretName" . | quote }}
+  namespace: {{ $namespace | quote }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 type: Opaque
@@ -25,8 +25,8 @@ stringData:
 apiVersion: core.orka.ai/v1alpha1
 kind: AgentHostTemplate
 metadata:
-  name: {{ $template.name }}
-  namespace: {{ $namespace }}
+  name: {{ $template.name | toString | quote }}
+  namespace: {{ $namespace | quote }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 spec:
@@ -120,8 +120,8 @@ spec:
 apiVersion: core.orka.ai/v1alpha1
 kind: ConnectorProvider
 metadata:
-  name: {{ $github.providerName }}
-  namespace: {{ $namespace }}
+  name: {{ $github.providerName | toString | quote }}
+  namespace: {{ $namespace | quote }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 spec:
@@ -131,9 +131,9 @@ spec:
     tokenURL: https://github.com/login/oauth/access_token
     clientID: {{ $github.clientID | quote }}
     clientSecretRef:
-      name: {{ include "orka.agentHostGitHubSecretName" . }}
+      name: {{ include "orka.agentHostGitHubSecretName" . | quote }}
       key: {{ $github.clientSecret.key | toString | quote }}
   agentHost:
     templateRef:
-      name: {{ $template.name }}
+      name: {{ $template.name | toString | quote }}
 {{- end }}
