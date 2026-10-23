@@ -222,8 +222,8 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	// may be the very token custody holds for the person's working link.
 	minted := false
 	// A host takes only a token that expires. Only a token this sign-in
-	// minted carries an expiry GitHub confirmed; a submitted expiresIn is the
-	// client's word.
+	// minted carries an expiry GitHub confirmed, by the refresh token GitHub
+	// issues only beside one; a submitted expiresIn is the client's word.
 	expiryConfirmed := false
 	revokeUnused := func(token string) {
 		if minted {
@@ -239,7 +239,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusUnauthorized, "GitHub did not accept the refresh token")
 		}
 		minted = true
-		expiryConfirmed = !refreshed.ExpiresAt.IsZero()
+		expiryConfirmed = !refreshed.ExpiresAt.IsZero() && refreshed.RefreshToken != ""
 		again, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, refreshed.AccessToken)
 		if err != nil || again.ID != user.ID {
 			revokeUnused(refreshed.AccessToken)
@@ -418,7 +418,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	// each commit retains the grant it replaces until disconnect, so linking
 	// every sign-in would soon refuse new ones. The caller revokes the
 	// unused token, unless custody holds that very token.
-	custody, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui)
+	custody, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui, !declined)
 	if err != nil {
 		// Replacing a link that may still work would spend one of the grants
 		// custody retains; the person retries instead.
@@ -426,6 +426,11 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 			fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub link; retry")
 	}
 	if holds {
+		if !declined {
+			if err := h.liftAgentHostDecline(ctx, connection); err != nil {
+				return nil, tokens.AccessToken == custody, err
+			}
+		}
 		return connection, tokens.AccessToken == custody, nil
 	}
 	mode, err := normalizeConnectionMode(connection.Spec.Mode)
@@ -500,7 +505,27 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, completionNonce); err != nil {
 		log.Error(err, "consumed sign-in completion could not be removed", "connection", connection.Name)
 	}
+	if !declined {
+		if err := h.liftAgentHostDecline(ctx, connection); err != nil {
+			return nil, true, err
+		}
+	}
 	return connection, true, nil
+}
+
+// liftAgentHostDecline lets connection's link feed an agent host again. It
+// runs only once custody holds a grant a host may take, so no host ever
+// takes the grant a lifted decline still covered.
+func (h *Handlers) liftAgentHostDecline(ctx context.Context, connection *corev1alpha1.Connection) error {
+	if connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] != corev1alpha1.ConnectionAgentHostDeclined {
+		return nil
+	}
+	base := connection.DeepCopy()
+	setAgentHostDeclined(connection, false)
+	if err := h.client.Patch(ctx, connection, client.MergeFrom(base)); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to update your GitHub link; sign in again")
+	}
+	return nil
 }
 
 // revokeSignInToken revokes a token a sign-in obtained and did not store.
@@ -513,12 +538,14 @@ func (h *Handlers) revokeSignInToken(ctx context.Context, oauth connectors.OAuth
 // signInLinkHolds reports whether connection's link still holds ui's GitHub
 // account, and the token custody holds for it. A token that never expires is
 // not kept: membership is checked again only at refreshes, so the sign-in
-// replaces it with one that ends. It returns an error when it cannot tell,
+// replaces it with one that ends. Nor, for a sign-in that starts a host, is
+// one custody cannot refresh: its expiry is a deadline Orka chose, which a
+// host does not take. It returns an error when it cannot tell,
 // such as when custody or GitHub cannot answer: only a link shown not to
 // work is replaced. With an error, the token is custody's when custody gave
 // one, or empty when custody could not be read.
 func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1.Connection,
-	oauth connectors.OAuthProviderConfig, ui *UserInfo) (string, bool, error) {
+	oauth connectors.OAuthProviderConfig, ui *UserInfo, startsHost bool) (string, bool, error) {
 	cfg := h.githubSignIn
 	if cfg.Credentials == nil || !connectors.ConnectionLinked(connection) {
 		return "", false, nil
@@ -530,7 +557,7 @@ func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1
 	if err != nil {
 		return "", false, err
 	}
-	if held.ExpiresAt.IsZero() {
+	if held.ExpiresAt.IsZero() || (startsHost && !held.Refreshable) {
 		return "", false, nil
 	}
 	account, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, held.AccessToken)
@@ -567,8 +594,8 @@ func (h *Handlers) reloadSignInConnection(ctx context.Context, connection *corev
 }
 
 // ensureSignInConnection returns the person's canonical Connection to
-// provider, creating it as CreateConnection does, and records whether they
-// declined an agent host.
+// provider, creating it as CreateConnection does, and records a decline of
+// an agent host.
 func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
 	declined bool) (*corev1alpha1.Connection, error) {
 	name := connectors.ConnectionName(provider.Name, ui.Issuer, ui.Subject)
@@ -624,10 +651,15 @@ func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, pro
 	if !connectionCustodyProtected(connection) {
 		return nil, fiber.NewError(fiber.StatusConflict, "your GitHub link is still being set up; sign in again in a moment")
 	}
-	base := connection.DeepCopy()
-	setAgentHostDeclined(connection, declined)
-	if err := h.client.Patch(ctx, connection, client.MergeFrom(base)); err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to update your GitHub link")
+	// A decline is recorded before the link changes, so no host takes what is
+	// linked next. Lifting one waits until custody holds a grant a host may
+	// take; see liftAgentHostDecline.
+	if declined {
+		base := connection.DeepCopy()
+		setAgentHostDeclined(connection, true)
+		if err := h.client.Patch(ctx, connection, client.MergeFrom(base)); err != nil {
+			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to update your GitHub link")
+		}
 	}
 	return connection, nil
 }

@@ -29,9 +29,11 @@ const testHostConnection = "github-alice"
 
 type fakeHostCredentials struct {
 	token string
-	// neverExpires hands out a token without an expiry.
-	neverExpires bool
-	unavailable  bool
+	// neverExpires hands out a token without an expiry; unrefreshable, one
+	// whose expiry is Orka's own deadline.
+	neverExpires  bool
+	unrefreshable bool
+	unavailable   bool
 	// broken makes every call fail as a store outage would.
 	broken bool
 	// connection is the Connection that feeds hosts; empty means testHostConnection.
@@ -42,7 +44,7 @@ func (f *fakeHostCredentials) HostCredential(_ context.Context, namespace, name 
 	if err := f.CheckHostLink(context.Background(), namespace, name); err != nil {
 		return credential.HostCredential{}, err
 	}
-	held := credential.HostCredential{AccessToken: f.token}
+	held := credential.HostCredential{AccessToken: f.token, Refreshable: !f.unrefreshable}
 	if !f.neverExpires {
 		held.ExpiresAt = time.Now().Add(8 * time.Hour)
 	}
@@ -171,8 +173,17 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("ready = %+v", ready)
 	}
+	// Nor on one whose expiry only Orka set: custody cannot refresh it.
+	credentials.neverExpires, credentials.unrefreshable = false, true
+	h.settle()
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("a token without an expiry GitHub set must not be copied into the host")
+	}
+	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
+		t.Fatalf("unrefreshable: ready = %+v", ready)
+	}
 	// Once the link holds an expiring token, the host runs.
-	credentials.neverExpires = false
+	credentials.unrefreshable = false
 	h.settle()
 	if _, ok := h.pod(); !ok {
 		t.Fatal("an expiring token must start the host")

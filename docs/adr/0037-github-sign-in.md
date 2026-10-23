@@ -105,8 +105,10 @@ context-token subjects. A GitHub session also owns Connections, as issuer
   Signing in again without `--no-host` clears that, and ADR 0036 then provisions the
   host for the same Connection.
 - A host takes only a token that expires, so a sign-in starts one only when GitHub
-  confirmed its token's expiry through the refresh above. A sign-in without a refresh
-  token links the account without a host.
+  confirmed its token's expiry through the refresh above, by issuing a refresh token
+  beside it. A sign-in without a refresh token links the account without a host, under
+  a deadline Orka chooses. A host never takes such a link: a later sign-in that starts
+  one replaces it first, and lifts the decline only once its own grant is linked.
 
 ### Reaching Orka
 
