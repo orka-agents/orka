@@ -663,3 +663,26 @@ func TestTaskDataTransactionWritesUseTheFencesItCaptured(t *testing.T) {
 		t.Fatalf("result = %q, %v", got, err)
 	}
 }
+
+// When a retry after an unknown outcome is refused and the outcome cannot be
+// resolved, the write's error matches only ErrOutcomeUnknown: the refusal
+// settled only that attempt, so it must not read as a definite failure.
+func TestUnsettledOutcomeHidesTheRefusalBehindIt(t *testing.T) {
+	f := newLossyFixture(t)
+	f.lossy.plan("SaveResult", stepUnknown, stepRefuse)
+	f.lossy.fail("ResolveOperation", fmt.Errorf("%w: connection refused", storagev1.ErrUnavailable))
+	err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result"))
+	if !errors.Is(err, storagev1.ErrOutcomeUnknown) || errors.Is(err, store.ErrConflict) || errors.Is(err, storagev1.ErrUnavailable) {
+		t.Fatalf("SaveResult error = %v, want only ErrOutcomeUnknown", err)
+	}
+	if f.client.UnresolvedOperations() != 1 {
+		t.Fatalf("unresolved operations = %d, want 1", f.client.UnresolvedOperations())
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for f.client.UnresolvedOperations() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the operation was never resolved")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

@@ -95,12 +95,20 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	before := captureArchivedSessionEvidence(t, restarted, control, tasks)
 	_, stopInitial := startArchivedRecoveryEpoch(t, fixture.ctx, control, nil, "archive-api-initial")
 	stopInitial()
+	// The real API server stands in for the same installation restored with
+	// its identity: its ControllerEpoch object has a new UID, so the storage
+	// dataset's installation binding is carried over explicitly.
+	bound, err := fixture.persistence.GetControllerEpochMirror(fixture.ctx, store.DefaultControllerEpochName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredAuthority := installationEpochStore{ControllerEpochStore: control, installationID: bound.InstallationID}
 	blockedID, err := promptAttemptIDFromTask(tasks[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, epoch := range []int64{2, 3, 4, 5} {
-		epochs, stop := startArchivedRecoveryEpoch(t, fixture.ctx, control, fixture.persistence, fmt.Sprintf("archive-api-%d", epoch))
+		epochs, stop := startArchivedRecoveryEpoch(t, fixture.ctx, restoredAuthority, fixture.persistence, fmt.Sprintf("archive-api-%d", epoch))
 		var recovering store.DurableControlStore = control
 		if epoch == 3 || epoch == 4 {
 			var missingOrCorrupt = store.ErrNotFound

@@ -313,6 +313,9 @@ func (o *operations) drive(
 // operation is attempted once more with the same envelope, which reads its
 // original result as a replay. An operation that cannot be settled now joins
 // the unresolved set of its dataset, and the write returns ErrOutcomeUnknown.
+// An error that leaves the outcome unknown matches only ErrOutcomeUnknown,
+// never the refusal or resolution error behind it, so no caller reads it as
+// a definite failure.
 func (o *operations) resolve(
 	ctx context.Context, call writeCall, envelope storagev1.WriteEnvelope, attempt func(context.Context) error, cause error,
 ) error {
@@ -327,7 +330,7 @@ func (o *operations) resolve(
 	}
 	resolver := o.resolvers[call.contract]
 	if resolver == nil {
-		return fmt.Errorf("%w: operation %s: no resolver for %s: %w", storagev1.ErrOutcomeUnknown, envelope.OperationID, call.contract, cause)
+		return fmt.Errorf("%w: operation %s: no resolver for %s (after %v)", storagev1.ErrOutcomeUnknown, envelope.OperationID, call.contract, cause)
 	}
 	outcome, err := resolver.ResolveOperation(resolveCtx, request)
 	switch {
@@ -345,10 +348,10 @@ func (o *operations) resolve(
 	case errors.Is(err, storagev1.ErrOperationExpired), unsettleable(err):
 		// Retrying cannot settle the operation, so it does not block the
 		// dataset. Whether it committed stays unknown.
-		return fmt.Errorf("%w: operation %s cannot be settled: %w (after %w)", storagev1.ErrOutcomeUnknown, envelope.OperationID, err, cause)
+		return fmt.Errorf("%w: operation %s cannot be settled: %v (after %v)", storagev1.ErrOutcomeUnknown, envelope.OperationID, err, cause)
 	}
 	o.addUnresolved(envelope.DatasetID, envelope.OperationID, pendingOperation{contract: call.contract, request: request})
-	return fmt.Errorf("%w: operation %s is not settled yet: %w (after %w)", storagev1.ErrOutcomeUnknown, envelope.OperationID, err, cause)
+	return fmt.Errorf("%w: operation %s is not settled yet: %v (after %v)", storagev1.ErrOutcomeUnknown, envelope.OperationID, err, cause)
 }
 
 // replay reads the result of a committed operation by attempting it again
@@ -367,7 +370,7 @@ func (o *operations) replay(ctx context.Context, envelope storagev1.WriteEnvelop
 			break
 		}
 	}
-	return fmt.Errorf("%w: operation %s committed, but its result could not be read: %w",
+	return fmt.Errorf("%w: operation %s committed, but its result could not be read: %v",
 		storagev1.ErrOutcomeUnknown, envelope.OperationID, err)
 }
 
