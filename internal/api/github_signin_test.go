@@ -14,6 +14,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -285,7 +288,8 @@ func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
 
 // A sign-in that cannot tell whether the existing link still works, because
 // custody or GitHub cannot answer, replaces nothing: each replacement spends
-// one of the grants custody retains. It answers 503 and revokes its token.
+// one of the grants custody retains. It answers 503, and revokes its token
+// only when custody is known to hold another.
 func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -305,11 +309,16 @@ func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 		return connection.Status.GrantSequence
 	}
 	first := grant()
-	for outage, credentials := range map[string]fakeSignInCredentials{
-		"custody": {err: errors.New("custody cannot answer")},
-		"github":  {token: "ghu_check_down"},
+	for outage, test := range map[string]struct {
+		credentials fakeSignInCredentials
+		// The sign-in's token, as the refresh that opens each sign-in left it,
+		// is revoked only when custody holds another.
+		revoked []string
+	}{
+		"custody": {credentials: fakeSignInCredentials{err: errors.New("custody cannot answer")}},
+		"github":  {credentials: fakeSignInCredentials{token: "ghu_check_down"}, revoked: []string{"ghu_alice_refreshed"}},
 	} {
-		h.handlers.githubSignIn.Credentials = credentials
+		h.handlers.githubSignIn.Credentials = test.credentials
 		h.identity = nil
 		before := len(revoked.list())
 		if status, session := h.signIn(body); status != http.StatusServiceUnavailable || session.Token != "" {
@@ -318,10 +327,54 @@ func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 		if got := grant(); got != first {
 			t.Fatalf("%s outage replaced the grant: %d, want %d", outage, got, first)
 		}
-		// The sign-in's token, as the refresh that opens each sign-in left it.
-		if got := revoked.list(); len(got) != before+1 || got[len(got)-1] != "ghu_alice_refreshed" {
-			t.Fatalf("%s outage: revoked = %v, want the sign-in's own token", outage, got)
+		if got := revoked.list()[before:]; !slices.Equal(got, test.revoked) {
+			t.Fatalf("%s outage: revoked = %v, want %v", outage, got, test.revoked)
 		}
+	}
+}
+
+// A sign-in may bring the very token custody holds. When GitHub then cannot
+// check it, the sign-in answers 503 but must not revoke it: that would break
+// the link it is retrying for.
+func TestGitHubSignInKeepsCustodysTokenWhenItCannotCheckIt(t *testing.T) {
+	h := newSignInHarness(t)
+	revoked := &revocations{}
+	upstream, err := url.Parse(fakeGitHub(t, revoked).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: upstream.String()}
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800}); status != http.StatusCreated {
+		t.Fatalf("first sign-in: %d", status)
+	}
+
+	// Custody holds ghu_alice; the second check of it, the reuse check, fails.
+	checks := 0
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/applications/client-id/token" {
+			if checks++; checks > 1 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(flaky.Close)
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: flaky.URL}
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice"}
+	h.identity = nil
+	before := len(revoked.list())
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "expiresIn": 28800}); status != http.StatusServiceUnavailable ||
+		session.Token != "" {
+		t.Fatalf("sign-in with custody's token while GitHub cannot check it: %d, want 503 and no session", status)
+	}
+	if checks != 2 {
+		t.Fatalf("check-token calls = %d, want the sign-in's and the reuse check's", checks)
+	}
+	if got := revoked.list()[before:]; len(got) != 0 {
+		t.Fatalf("revoked %v, which custody holds", got)
 	}
 }
 
