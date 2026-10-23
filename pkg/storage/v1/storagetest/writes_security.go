@@ -197,7 +197,13 @@ func init() {
 		}),
 		security(writeCase[storagev1.StateProvider]{
 			method: "CreatePatchProposal",
-			args:   func(storagev1.ControllerEpochFence) []any { return []any{securityWriteProposal()} },
+			// A pointer to a zero value is part of the record the write
+			// returns, and a replay must keep it apart from nil.
+			args: func(storagev1.ControllerEpochFence) []any {
+				proposal := securityWriteProposal()
+				proposal.PRNumber = new(int)
+				return []any{proposal}
+			},
 		}),
 		security(writeCase[storagev1.StateProvider]{
 			method: "UpdatePatchProposal",
