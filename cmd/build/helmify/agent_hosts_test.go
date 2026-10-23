@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -280,6 +281,23 @@ func agentHostGitHubValues(extra ...string) []string {
 		"--set", "controller.agentHosts.github.enabled=true",
 		"--set", "controller.agentHosts.github.clientID=Iv23example",
 	), extra...)
+}
+
+// People's Connections outlive an uninstall and hold the provider, so Helm
+// keeps the provider, its template and the client Secret the chart created.
+func TestStaticChartAgentHostGitHubOutlivesAnUninstall(t *testing.T) {
+	rendered := requireHelmRender(t, append(agentHostGitHubValues(
+		"--set", "controller.agentHosts.github.clientSecret.value=not-a-real-secret"),
+		"--show-only", "templates/agent-host-github.yaml")...)
+	for _, marker := range []string{"kind: Secret\n", "kind: AgentHostTemplate\n", "kind: ConnectorProvider\n"} {
+		var object metav1.PartialObjectMetadata
+		if err := yaml.Unmarshal([]byte(requireRenderedDocument(t, rendered, marker)), &object); err != nil {
+			t.Fatal(err)
+		}
+		if got := object.Annotations["helm.sh/resource-policy"]; got != "keep" {
+			t.Fatalf("%s: resource-policy = %q, want keep", strings.TrimSpace(marker), got)
+		}
+	}
 }
 
 // Names YAML would read as numbers stay strings, as Kubernetes requires. The
