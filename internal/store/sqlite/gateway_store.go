@@ -671,21 +671,30 @@ func (s *Store) RenewGatewayEventClaim(
 		return nil, store.ValidationErrorf("claim owner and positive lease are required")
 	}
 	now = now.UTC()
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_events SET claim_until = ?, updated_at = ?
+	var event *store.GatewayEvent
+	// The renewal and the returned event share one transaction, so a retry
+	// committed in between cannot be returned as the renewed claim.
+	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx, `UPDATE gateway_events SET claim_until = ?, updated_at = ?
 		WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?
 		  AND claim_until > ? AND expires_at > ?`,
-		now.Add(lease), now, namespace, id, store.GatewayEventDispatching, owner, now, now)
-	if err != nil {
+			now.Add(lease), now, namespace, id, store.GatewayEventDispatching, owner, now, now)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 0 {
+			return store.ErrConflict
+		}
+		event, err = getGatewayEventQuery(ctx, q, namespace, id)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if updated == 0 {
-		return nil, store.ErrConflict
-	}
-	return s.GetGatewayEvent(ctx, namespace, id)
+	return event, nil
 }
 
 // FreezeGatewayEventTaskRuntimeAllowedTools records the external runtime policy
@@ -708,30 +717,36 @@ func (s *Store) FreezeGatewayEventTaskRuntimeAllowedTools(
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_events
+	var event *store.GatewayEvent
+	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx, `UPDATE gateway_events
 		SET task_runtime_allowed_tools_json = ?, updated_at = ?
 		WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?
 		  AND claim_until > ? AND expires_at > ?
 		  AND (task_runtime_allowed_tools_json IS NULL OR task_runtime_allowed_tools_json = ?)`,
-		string(encoded), now, namespace, id, store.GatewayEventDispatching, owner,
-		now, now, string(encoded),
-	)
-	if err != nil {
+			string(encoded), now, namespace, id, store.GatewayEventDispatching, owner,
+			now, now, string(encoded),
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 0 {
+			return store.ErrConflict
+		}
+		event, err = getGatewayEventQuery(ctx, q, namespace, id)
+		if err != nil {
+			return err
+		}
+		if !event.TaskPolicyFrozen || !slices.Equal(event.TaskAllowedTools, allowedTools) {
+			return store.ErrConflict
+		}
+		return nil
+	}); err != nil {
 		return nil, err
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if updated == 0 {
-		return nil, store.ErrConflict
-	}
-	event, err := s.GetGatewayEvent(ctx, namespace, id)
-	if err != nil {
-		return nil, err
-	}
-	if !event.TaskPolicyFrozen || !slices.Equal(event.TaskAllowedTools, allowedTools) {
-		return nil, store.ErrConflict
 	}
 	return event, nil
 }
@@ -1533,34 +1548,41 @@ func (s *Store) RetryGatewayDelivery(ctx context.Context, namespace, id string, 
 	// Starting any successor closes the interim retry window permanently.
 	// A terminal abandoned without a send also closes it: subsequent Session
 	// turns can then proceed and their rows may be retained independently.
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_deliveries AS delivery SET state = ?, attempt_count = 0,
-		manual_retry_count = manual_retry_count + 1, next_attempt_at = ?, expires_at = ?, last_error = '',
-		claim_owner = '', claim_until = NULL, updated_at = ?
-		WHERE namespace = ? AND id = ? AND state IN (?, ?)
-		AND (kind <> ? OR NOT EXISTS (
-			SELECT 1 FROM gateway_deliveries later
-			WHERE later.namespace = delivery.namespace AND later.event_id = delivery.event_id
-			  AND (later.created_at > delivery.created_at OR (later.created_at = delivery.created_at AND later.id > delivery.id))
-			  AND (later.attempt_count > 0 OR later.manual_retry_count > 0 OR
-			    (later.kind IN ('final', 'error') AND later.state IN ('Delivered', 'Failed', 'DeadLettered', 'Expired')))
-		))`,
-		store.GatewayDeliveryPending, now.UTC(), expiresAt.UTC(), now.UTC(), namespace, id,
-		store.GatewayDeliveryDeadLettered, store.GatewayDeliveryFailed, gatewayDeliveryKindMessage,
-	)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if rows == 0 {
-		if _, err := s.GetGatewayDelivery(ctx, namespace, id); err != nil {
-			return nil, err
+	var delivery *store.GatewayDelivery
+	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx, `UPDATE gateway_deliveries AS delivery SET state = ?, attempt_count = 0,
+			manual_retry_count = manual_retry_count + 1, next_attempt_at = ?, expires_at = ?, last_error = '',
+			claim_owner = '', claim_until = NULL, updated_at = ?
+			WHERE namespace = ? AND id = ? AND state IN (?, ?)
+			AND (kind <> ? OR NOT EXISTS (
+				SELECT 1 FROM gateway_deliveries later
+				WHERE later.namespace = delivery.namespace AND later.event_id = delivery.event_id
+				  AND (later.created_at > delivery.created_at OR (later.created_at = delivery.created_at AND later.id > delivery.id))
+				  AND (later.attempt_count > 0 OR later.manual_retry_count > 0 OR
+				    (later.kind IN ('final', 'error') AND later.state IN ('Delivered', 'Failed', 'DeadLettered', 'Expired')))
+			))`,
+			store.GatewayDeliveryPending, now.UTC(), expiresAt.UTC(), now.UTC(), namespace, id,
+			store.GatewayDeliveryDeadLettered, store.GatewayDeliveryFailed, gatewayDeliveryKindMessage,
+		)
+		if err != nil {
+			return err
 		}
-		return nil, store.ErrConflict
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			if _, err := getGatewayDeliveryQuery(ctx, q, namespace, id); err != nil {
+				return err
+			}
+			return store.ErrConflict
+		}
+		delivery, err = getGatewayDeliveryQuery(ctx, q, namespace, id)
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	return s.GetGatewayDelivery(ctx, namespace, id)
+	return delivery, nil
 }
 
 // GetGatewayQueueStats returns exact queue depth and oldest-age inputs without identity labels.
