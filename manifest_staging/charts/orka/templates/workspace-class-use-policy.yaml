@@ -125,6 +125,12 @@ metadata:
 spec:
   failurePolicy: Fail
   matchConstraints:
+    # The controller check below names this release's controller, so the
+    # policy covers only this release's namespace; another release's hosts
+    # are its own policy's to admit.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
     resourceRules:
       - apiGroups: ["core.orka.ai"]
         apiVersions: ["v1alpha1"]

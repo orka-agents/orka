@@ -301,6 +301,10 @@ connections. It never keeps the host from being idle.
 - A template's spec cannot change. To change a template, delete it and create it again
   under the same name: each host on it gets a new Pod from the new template, on its
   existing volume. A running turn is lost, and storage changes apply only to new hosts.
+- When the host agent image changes, such as after an upgrade of the controller, each
+  running host gets a new Pod with it on its volume once the host reports idle, and at
+  the latest 24 hours later. Until then the host has the condition
+  `HostAgentUpdatePending`. A host replaced at the deadline loses a running turn.
 - A template's `idleSuspend.after` suspends hosts that report idle for that long. A
   client cannot wake a suspended relay host; set `spec.wakeRequestedAt` to the current
   time to start it:

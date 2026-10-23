@@ -283,6 +283,28 @@ func TestOwnAgentHostOutlivesItsProvidersOptIn(t *testing.T) {
 	}
 }
 
+// A host kept after its person disconnected stays theirs to see and delete
+// after an operator deletes its provider, and stays no one else's.
+func TestOwnAgentHostOutlivesItsProvider(t *testing.T) {
+	retired := linkedHost("gh-alice-old", "alice")
+	retired.Spec.GitHubTokenFrom.ConnectionRef.Name = connectors.ConnectionName("github-retired", connectorTestIssuer, "alice")
+	h := newAgentHostAPI(t, retired)
+	h.identity = person("bob")
+	if status, _ := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusNotFound {
+		t.Fatalf("bob: %d, want 404", status)
+	}
+	h.identity = person("alice")
+	if status, host := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || host.Name != "gh-alice-old" {
+		t.Fatalf("get: %d %+v, want the kept host", status, host)
+	}
+	if status, _ := h.do(http.MethodDelete, "/api/v1/agent-hosts/me"); status != http.StatusAccepted {
+		t.Fatalf("delete: %d", status)
+	}
+	if _, ok := h.host("gh-alice-old"); ok {
+		t.Fatal("the kept host must be deleted")
+	}
+}
+
 // With a retired provider's host kept, the host of the provider serving hosts
 // now is the person's host.
 func TestOwnAgentHostPrefersTheCurrentProvidersHost(t *testing.T) {

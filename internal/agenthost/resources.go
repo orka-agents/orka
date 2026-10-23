@@ -457,6 +457,17 @@ func stageContainer(spec *corev1alpha1.AgentHostTemplateSpec, image string) core
 	}
 }
 
+// PodAgentImage is the host agent image a host's Pod runs, or "" when it has
+// no host agent.
+func PodAgentImage(pod *corev1.Pod) string {
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == hostAgentContainer {
+			return pod.Spec.InitContainers[i].Image
+		}
+	}
+	return ""
+}
+
 func hostAgentSidecar(spec *corev1alpha1.AgentHostTemplateSpec, image string) corev1.Container {
 	args := []string{
 		fmt.Sprintf("--address=:%d", corev1alpha1.AgentHostStatusPort),
