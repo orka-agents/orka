@@ -183,7 +183,7 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 // and token copy go and its volume stays, and it runs again once they take
 // the decline back.
 func TestAgentHostStopsWhenItsPersonDeclinesIt(t *testing.T) {
-	h, _, _ := newConnectionHostHarness(t)
+	h, credentials, _ := newConnectionHostHarness(t)
 	connection := &corev1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: testHostConnection, Namespace: testUserNamespace}}
 	if err := h.client.Create(context.Background(), connection); err != nil {
 		t.Fatal(err)
@@ -217,6 +217,22 @@ func TestAgentHostStopsWhenItsPersonDeclinesIt(t *testing.T) {
 	h.settle()
 	if _, ok := h.pod(); !ok {
 		t.Fatal("taking the decline back must restart the host")
+	}
+
+	// A decline stops the host even while the link check can only be
+	// retried, as when its provider's status lags.
+	credentials.broken = true
+	connection.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: testUserNamespace, Name: "alice"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.pod(); ok {
+		t.Fatal("a decline must stop the host while its link check is retried")
 	}
 }
 
