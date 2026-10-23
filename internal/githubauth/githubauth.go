@@ -330,10 +330,10 @@ func (c Client) PollDeviceFlow(ctx context.Context, clientID string, code Device
 			Interval int    `json:"interval"`
 		}
 		status, _, err := c.do(request, &answer)
-		if err != nil {
-			return Tokens{}, err
-		}
 		switch {
+		// A call that failed, or a server error, is no verdict on the code:
+		// polling goes on until GitHub gives one or the code expires.
+		case err != nil || status >= http.StatusInternalServerError || status == http.StatusTooManyRequests:
 		case status == http.StatusOK && answer.AccessToken != "":
 			return answer.Tokens, nil
 		case answer.Error == "authorization_pending":

@@ -169,6 +169,55 @@ func TestDeviceFlowWaitsForApproval(t *testing.T) {
 	}
 }
 
+// A server error or a dropped connection while the code is pending is no
+// verdict: polling goes on, and the approval that follows is taken.
+func TestDeviceFlowOutlastsTransientFailures(t *testing.T) {
+	polls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		polls++
+		switch polls {
+		case 1:
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html>bad gateway</html>"))
+		case 2:
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("the test server cannot drop a connection")
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		case 3:
+			w.WriteHeader(http.StatusTooManyRequests)
+		case 4:
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "authorization_pending"})
+		default:
+			_ = json.NewEncoder(w).Encode(Tokens{AccessToken: "ghu_new", RefreshToken: "ghr_new", ExpiresIn: 28800})
+		}
+	}))
+	defer srv.Close()
+	c := Client{WebURL: srv.URL, MinPollInterval: 10 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tokens, err := c.PollDeviceFlow(ctx, "Iv23app", DeviceCode{DeviceCode: "dev", ExpiresIn: 900})
+	if err != nil || tokens.AccessToken != "ghu_new" || polls != 5 {
+		t.Fatalf("tokens = %q, err = %v, polls = %d", tokens.AccessToken, err, polls)
+	}
+
+	// An answer GitHub gives about the request itself still ends it.
+	refused := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "incorrect_client_credentials"})
+	}))
+	defer refused.Close()
+	c.WebURL = refused.URL
+	if _, err := c.PollDeviceFlow(ctx, "Iv23app", DeviceCode{DeviceCode: "dev", ExpiresIn: 900}); err == nil || errors.Is(err, ErrDeviceFlowDenied) {
+		t.Fatalf("err = %v, want the request refused", err)
+	}
+}
+
 func TestDeviceFlowStopsWhenRefused(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "access_denied"})
