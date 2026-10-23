@@ -364,6 +364,99 @@ func TestGitHubSignInKeepsTheDeclineOfAnOverlappingSignIn(t *testing.T) {
 	}
 }
 
+// hookedSignInCredentials runs before when the sign-in checks the link it
+// holds, as a slow GitHub answer would let other writers act meanwhile.
+type hookedSignInCredentials struct {
+	fakeSignInCredentials
+	before func()
+}
+
+func (f hookedSignInCredentials) HostCredential(ctx context.Context, namespace, name string, horizon time.Duration) (credential.HostCredential, error) {
+	f.before()
+	return f.fakeSignInCredentials.HostCredential(ctx, namespace, name, horizon)
+}
+
+// A sign-in writes its decline only to the Connection it read under the
+// lock: one deleted and recreated under the same name meanwhile keeps its
+// own --no-host decline.
+func TestGitHubSignInLeavesAReplacedConnectionsDeclineAlone(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "noHost": true}); status != http.StatusCreated {
+		t.Fatalf("--no-host sign-in: %d", status)
+	}
+	key := types.NamespacedName{Namespace: connectorTestNamespace, Name: connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)}
+	replace := func() {
+		old := &corev1alpha1.Connection{}
+		if err := h.client.Get(context.Background(), key, old); err != nil {
+			t.Error(err)
+			return
+		}
+		old.Finalizers = nil
+		if err := h.client.Update(context.Background(), old); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := h.client.Delete(context.Background(), old); err != nil {
+			t.Error(err)
+			return
+		}
+		replacement := old.DeepCopy()
+		replacement.ResourceVersion, replacement.UID, replacement.DeletionTimestamp = "", "uid-replacement", nil
+		replacement.Finalizers = []string{controller.ConnectionCustodyFinalizer}
+		replacement.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
+		if err := h.client.Create(context.Background(), replacement); err != nil {
+			t.Error(err)
+		}
+	}
+	h.handlers.githubSignIn.Credentials = hookedSignInCredentials{fakeSignInCredentials: fakeSignInCredentials{token: "ghu_alice_renewed"}, before: replace}
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status == http.StatusCreated {
+		t.Fatal("a sign-in whose link was replaced under it must not succeed on the replacement")
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), key, connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.UID != "uid-replacement" || connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] != corev1alpha1.ConnectionAgentHostDeclined {
+		t.Fatalf("replacement = %s %v, want its decline kept", connection.UID, connection.Annotations)
+	}
+}
+
+// A write to the same Connection by another writer meanwhile, such as its
+// reconciler's, is read again and the decline lifted all the same.
+func TestGitHubSignInLiftsTheDeclineAfterAnotherWriterChangedTheLink(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "noHost": true}); status != http.StatusCreated {
+		t.Fatalf("--no-host sign-in: %d", status)
+	}
+	key := types.NamespacedName{Namespace: connectorTestNamespace, Name: connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)}
+	touch := func() {
+		connection := &corev1alpha1.Connection{}
+		if err := h.client.Get(context.Background(), key, connection); err != nil {
+			t.Error(err)
+			return
+		}
+		connection.Labels["test.orka.ai/touched"] = "true"
+		if err := h.client.Update(context.Background(), connection); err != nil {
+			t.Error(err)
+		}
+	}
+	h.handlers.githubSignIn.Credentials = hookedSignInCredentials{fakeSignInCredentials: fakeSignInCredentials{token: "ghu_alice_renewed"}, before: touch}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusCreated || !session.AgentHost {
+		t.Fatalf("sign-in: %d, agentHost %v", status, session.AgentHost)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), key, connection); err != nil {
+		t.Fatal(err)
+	}
+	if got := connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost]; got != "" || connection.Labels["test.orka.ai/touched"] != "true" {
+		t.Fatalf("annotation = %q, labels = %v; want the decline lifted and the other write kept", got, connection.Labels)
+	}
+}
+
 // Signing in again keeps a link that still holds the person's account, so
 // sign-ins never pile up the grants custody keeps until disconnect, and
 // revokes the tokens it did not need.
