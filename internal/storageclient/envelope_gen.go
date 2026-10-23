@@ -9,19 +9,19 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-func (p envelopedState) AcquireChatTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 time.Time) (bool, error) {
+func (p envelopedState) AcquireChatTurn(ctx context.Context, a1 storagev1.AcquireChatTurnRequest) (bool, error) {
 	var r0 bool
-	err := p.ops.run(ctx, writeCall{method: "AcquireChatTurn", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+	err := p.ops.run(ctx, writeCall{method: "AcquireChatTurn", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		var err error
-		r0, err = p.StateProvider.AcquireChatTurn(ctx, a1, a2, a3)
+		r0, err = p.StateProvider.AcquireChatTurn(ctx, a1)
 		return err
 	})
 	return r0, err
 }
 
-func (p envelopedState) AcquireLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
-	return p.ops.run(ctx, writeCall{method: "AcquireLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
-		return p.StateProvider.AcquireLock(ctx, a1, a2, a3, a4)
+func (p envelopedState) AcquireLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 time.Time) error {
+	return p.ops.run(ctx, writeCall{method: "AcquireLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
+		return p.StateProvider.AcquireLock(ctx, a1, a2, a3, a4, a5)
 	})
 }
 
@@ -74,9 +74,9 @@ func (p envelopedState) AppendMessages(ctx context.Context, a1 string, a2 string
 	})
 }
 
-func (p envelopedState) AppendMessagesWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 []storagev1.SessionMessage) error {
-	return p.ops.run(ctx, writeCall{method: "AppendMessagesWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
-		return p.StateProvider.AppendMessagesWithLock(ctx, a1, a2, a3, a4, a5)
+func (p envelopedState) AppendMessagesWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 []storagev1.SessionMessage) error {
+	return p.ops.run(ctx, writeCall{method: "AppendMessagesWithLock", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.AppendMessagesWithLock(ctx, a1, a2)
 	})
 }
 
@@ -138,9 +138,9 @@ func (p envelopedState) ClaimOutboxProjectionRecords(ctx context.Context, a1 sto
 	return r0, err
 }
 
-func (p envelopedState) CommitSessionTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 int, a4 []storagev1.SessionMessage, a5 int, a6 int) error {
-	return p.ops.run(ctx, writeCall{method: "CommitSessionTurn", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
-		return p.StateProvider.CommitSessionTurn(ctx, a1, a2, a3, a4, a5, a6)
+func (p envelopedState) CommitSessionTurn(ctx context.Context, a1 storagev1.CommitSessionTurnRequest) error {
+	return p.ops.run(ctx, writeCall{method: "CommitSessionTurn", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CommitSessionTurn(ctx, a1)
 	})
 }
 
@@ -170,6 +170,16 @@ func (p envelopedState) CompleteSessionCleanup(ctx context.Context, a1 storagev1
 	return p.ops.run(ctx, writeCall{method: "CompleteSessionCleanup", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.CompleteSessionCleanup(ctx, a1)
 	})
+}
+
+func (p envelopedState) ConsumeMessages(ctx context.Context, a1 storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {
+	var r0 []storagev1.Message
+	err := p.ops.run(ctx, writeCall{method: "ConsumeMessages", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.ConsumeMessages(ctx, a1)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) CreateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
@@ -327,9 +337,9 @@ func (p envelopedState) DeleteResult(ctx context.Context, a1 string, a2 string) 
 	})
 }
 
-func (p envelopedState) DeleteSession(ctx context.Context, a1 string, a2 string) error {
-	return p.ops.run(ctx, writeCall{method: "DeleteSession", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
-		return p.StateProvider.DeleteSession(ctx, a1, a2)
+func (p envelopedState) DeleteSession(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteSession", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteSession(ctx, a1, a2, a3)
 	})
 }
 
@@ -366,9 +376,9 @@ func (p envelopedState) EnqueueOutboxProjectionRecord(ctx context.Context, a1 *s
 	return r0, err
 }
 
-func (p envelopedState) EnsureSessionSoulWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) error {
-	return p.ops.run(ctx, writeCall{method: "EnsureSessionSoulWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
-		return p.StateProvider.EnsureSessionSoulWithLock(ctx, a1, a2, a3, a4, a5)
+func (p envelopedState) EnsureSessionSoulWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 string) error {
+	return p.ops.run(ctx, writeCall{method: "EnsureSessionSoulWithLock", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.EnsureSessionSoulWithLock(ctx, a1, a2)
 	})
 }
 
@@ -399,21 +409,11 @@ func (p envelopedState) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Co
 	return r0, err
 }
 
-func (p envelopedState) GetMessages(ctx context.Context, a1 string, a2 string, a3 string, a4 bool) ([]storagev1.Message, error) {
-	var r0 []storagev1.Message
-	err := p.ops.run(ctx, writeCall{method: "GetMessages", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
-		var err error
-		r0, err = p.StateProvider.GetMessages(ctx, a1, a2, a3, a4)
-		return err
-	})
-	return r0, err
-}
-
-func (p envelopedState) IsLocked(ctx context.Context, a1 string, a2 string, a3 string, a4 string) (bool, error) {
+func (p envelopedState) IsLocked(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 time.Time) (bool, error) {
 	var r0 bool
-	err := p.ops.run(ctx, writeCall{method: "IsLocked", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
+	err := p.ops.run(ctx, writeCall{method: "IsLocked", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
 		var err error
-		r0, err = p.StateProvider.IsLocked(ctx, a1, a2, a3, a4)
+		r0, err = p.StateProvider.IsLocked(ctx, a1, a2, a3, a4, a5)
 		return err
 	})
 	return r0, err
@@ -538,9 +538,9 @@ func (p envelopedState) ReleaseLock(ctx context.Context, a1 string, a2 string, a
 	})
 }
 
-func (p envelopedState) ReleaseLockWithTokenUsage(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 int, a6 int) error {
-	return p.ops.run(ctx, writeCall{method: "ReleaseLockWithTokenUsage", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
-		return p.StateProvider.ReleaseLockWithTokenUsage(ctx, a1, a2, a3, a4, a5, a6)
+func (p envelopedState) ReleaseLockWithTokenUsage(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 int, a3 int) error {
+	return p.ops.run(ctx, writeCall{method: "ReleaseLockWithTokenUsage", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.ReleaseLockWithTokenUsage(ctx, a1, a2, a3)
 	})
 }
 
@@ -724,9 +724,9 @@ func (p envelopedState) UpdateTokenCounts(ctx context.Context, a1 string, a2 str
 	})
 }
 
-func (p envelopedState) UpdateTokenCountsWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 int, a6 int) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateTokenCountsWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateTokenCountsWithLock(ctx, a1, a2, a3, a4, a5, a6)
+func (p envelopedState) UpdateTokenCountsWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 int, a3 int) error {
+	return p.ops.run(ctx, writeCall{method: "UpdateTokenCountsWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.UpdateTokenCountsWithLock(ctx, a1, a2, a3)
 	})
 }
 

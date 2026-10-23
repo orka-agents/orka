@@ -588,8 +588,10 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 	} else if intent.Gateway != nil {
 		return store.ConflictErrorf("Gateway cleanup cannot reclaim a different Session type")
 	}
+	// The plan's preparation time is the time of the request; a provider never
+	// judges a lease on its own clock.
 	if err := ensureSessionLockQuiescentTx(
-		ctx, tx, intent.Namespace, intent.SessionName, activeTask, activeTaskUID, activeTaskExpiresAt,
+		ctx, tx, intent.Namespace, intent.SessionName, activeTask, activeTaskUID, activeTaskExpiresAt, intent.PreparedAt,
 	); err != nil {
 		return err
 	}

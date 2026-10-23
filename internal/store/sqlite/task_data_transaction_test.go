@@ -86,7 +86,9 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 		{"messages", func(ctx context.Context, s *Store) error { return s.DeleteTaskMessages(ctx, "ns", "task") }},
 		{"parent messages", func(ctx context.Context, s *Store) error { return s.DeleteParentMessages(ctx, "ns", "parent") }},
 		{"events", func(ctx context.Context, s *Store) error { return s.DeleteExecutionEvents(ctx, "ns", "task", "task") }},
-		{"session", func(ctx context.Context, s *Store) error { return s.DeleteSession(ctx, "ns", "session") }},
+		{"session", func(ctx context.Context, s *Store) error {
+			return s.DeleteSession(ctx, "ns", "session", time.Now().UTC())
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "authorization.db")

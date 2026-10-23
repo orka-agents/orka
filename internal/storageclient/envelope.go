@@ -104,6 +104,10 @@ type operations struct {
 	// refused.
 	unresolved map[string]map[string]pendingOperation
 	resolving  map[string]bool
+	// clockSkews holds, for each dataset whose clock the last check found
+	// too far from Orka's, how far. While a dataset has one, its new writes
+	// are refused.
+	clockSkews map[string]clockSkew
 }
 
 // pendingOperation is an operation whose outcome is not settled yet.
@@ -125,6 +129,7 @@ func newOperations(resolvers map[string]storagev1.OperationReceiptStore) *operat
 		newOperationID:    newOperationID,
 		unresolved:        map[string]map[string]pendingOperation{},
 		resolving:         map[string]bool{},
+		clockSkews:        map[string]clockSkew{},
 	}
 }
 
@@ -221,8 +226,10 @@ func (o *operations) withTransactionFences(ctx context.Context) (context.Context
 // the operation, such as a provider test; the write runs once with it.
 // Otherwise run waits for the fence of the dataset that serves the write,
 // refuses the write while an earlier write to that dataset has an unknown
-// outcome, and creates one operation: a new operation ID, the request digest
-// over the arguments as they are now, the issue time and the next sequence.
+// outcome or while the dataset's clock is out of bounds (see CheckClocks),
+// and creates one operation: a new operation ID, the request digest over the
+// arguments as they are now, the issue time (the one the client filled into
+// the write's records, when it did) and the next sequence.
 // Every retry of that operation reuses the whole envelope and the same
 // arguments.
 func (o *operations) run(ctx context.Context, call writeCall, attempt func(context.Context) error) error {
@@ -242,6 +249,9 @@ func (o *operations) run(ctx context.Context, call writeCall, attempt func(conte
 	if err := o.requireSettled(datasetID); err != nil {
 		return err
 	}
+	if err := o.requireClockAgreement(datasetID); err != nil {
+		return err
+	}
 	digest, err := storagev1.RequestDigest(call.method, call.args...)
 	if err != nil {
 		return err
@@ -255,10 +265,30 @@ func (o *operations) run(ctx context.Context, call writeCall, attempt func(conte
 		Fence:         fence,
 		OperationID:   operationID,
 		RequestDigest: digest,
-		IssuedAt:      o.now().UTC(),
+		IssuedAt:      issuedAt(ctx, o.now),
 		Sequence:      o.sequence.Add(1),
 	}
 	return o.drive(ctx, call, envelope, attempt)
+}
+
+// issueTimeKey carries the time the client filled into a write's records, so
+// the write's envelope is issued at that same time.
+type issueTimeKey struct{}
+
+// withIssueTime returns the time the next write issued with the returned
+// context carries as its IssuedAt, for the client to fill into that write's
+// records before computing its digest.
+func (o *operations) withIssueTime(ctx context.Context) (context.Context, time.Time) {
+	now := o.now().UTC()
+	return context.WithValue(ctx, issueTimeKey{}, now), now
+}
+
+// issuedAt returns the issue time ctx carries, or now.
+func issuedAt(ctx context.Context, now func() time.Time) time.Time {
+	if at, ok := ctx.Value(issueTimeKey{}).(time.Time); ok {
+		return at
+	}
+	return now().UTC()
 }
 
 // drive makes the attempts of one operation.

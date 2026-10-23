@@ -172,7 +172,7 @@ func TestBrokeredTranscriptSearchReauthorizesAfterNamespaceCleanup(t *testing.T)
 						return err
 					}
 					// Cleanup of a different Task's session must invalidate the old list.
-					if err := data.DeleteSession(storeCtx, task.Namespace, "peer-session"); err != nil {
+					if err := data.DeleteSession(storeCtx, task.Namespace, "peer-session", time.Now().UTC()); err != nil {
 						return err
 					}
 					if err := data.CreateSession(storeCtx, &store.SessionRecord{Namespace: task.Namespace, Name: "peer-session", SessionType: "task"}); err != nil {
@@ -220,7 +220,7 @@ func TestBrokeredTranscriptSearchSerializesReadWithCleanup(t *testing.T) {
 	attempted := false
 	racing := &taskReadRaceStore{Store: data, beforeRead: func(ctx context.Context) error {
 		attempted = true
-		cleanupErr = cleanup.DeleteSession(ctx, task.Namespace, "own-session")
+		cleanupErr = cleanup.DeleteSession(ctx, task.Namespace, "own-session", time.Now().UTC())
 		return nil
 	}}
 	ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, racing, data, client.ObjectKeyFromObject(task), string(task.UID), true, allowBrokeredTaskData))
@@ -229,7 +229,7 @@ func TestBrokeredTranscriptSearchSerializesReadWithCleanup(t *testing.T) {
 	require.Contains(t, result, "original history")
 	require.True(t, attempted)
 	require.ErrorContains(t, cleanupErr, "locked")
-	require.NoError(t, cleanup.DeleteSession(t.Context(), task.Namespace, "own-session"))
+	require.NoError(t, cleanup.DeleteSession(t.Context(), task.Namespace, "own-session", time.Now().UTC()))
 }
 
 func brokeredTranscriptSearchContext(t *testing.T, task *corev1alpha1.Task, searcher tools.TranscriptSearcher) context.Context {

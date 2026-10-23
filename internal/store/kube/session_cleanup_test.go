@@ -67,7 +67,7 @@ func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
 		Namespace: "tenant-a", Name: name, SessionType: controlstore.SessionTypeChat,
 	}
 	expiresAt := time.Now().UTC().Add(time.Minute)
-	created, err := sqliteStore.AcquireChatTurn(ctx, session, "failed-turn", expiresAt)
+	created, err := sqliteStore.AcquireChatTurn(ctx, controlstore.AcquireChatTurnRequest{Session: session, TurnID: "failed-turn", Now: time.Now().UTC(), ExpiresAt: expiresAt})
 	if err != nil || !created {
 		t.Fatalf("AcquireChatTurn(first turn): created=%v, err=%v", created, err)
 	}
@@ -86,7 +86,7 @@ func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
 	if err != nil || identity != control.SessionUID {
 		t.Fatalf("cleanup identity after failed turn = %q, err=%v, want %q", identity, err, control.SessionUID)
 	}
-	created, err = sqliteStore.AcquireChatTurn(ctx, session, "next-turn", expiresAt)
+	created, err = sqliteStore.AcquireChatTurn(ctx, controlstore.AcquireChatTurnRequest{Session: session, TurnID: "next-turn", Now: time.Now().UTC(), ExpiresAt: expiresAt})
 	if err != nil || created {
 		t.Fatalf("AcquireChatTurn(next turn): created=%v, err=%v, want the preserved session with a released lease", created, err)
 	}
@@ -116,7 +116,7 @@ func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
 	if completion.SessionUID != control.SessionUID || completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
 		t.Fatalf("completion receipt = %#v", completion)
 	}
-	if _, err := sqliteStore.AcquireChatTurn(ctx, session, "late-turn", expiresAt); !errors.Is(err, controlstore.ErrConflict) {
+	if _, err := sqliteStore.AcquireChatTurn(ctx, controlstore.AcquireChatTurnRequest{Session: session, TurnID: "late-turn", Now: time.Now().UTC(), ExpiresAt: expiresAt}); !errors.Is(err, controlstore.ErrConflict) {
 		t.Fatalf("AcquireChatTurn(after coordinated deletion) error = %v, want ErrConflict", err)
 	}
 }
@@ -294,7 +294,7 @@ func TestReclaimSessionRecoversLegacyKubernetesOrphanAfterTranscriptDeletion(t *
 	ctx := context.Background()
 	kubeStore, _, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
 	control, claim := seedSessionCleanupState(t, ctx, kubeStore, sqliteStore, fence, "session-legacy-orphan")
-	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName); err != nil {
+	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName, time.Now().UTC()); err != nil {
 		t.Fatalf("legacy SQLite-only DeleteSession(): %v", err)
 	}
 	request := controlstore.ReclaimSessionRequest{
@@ -320,7 +320,7 @@ func TestReclaimSessionRejectsPreCutoverReplacementWithOldKubernetesIdentity(t *
 	ctx := context.Background()
 	kubeStore, _, sqliteStore, db, fence := newSessionCleanupTestStore(t, nil)
 	control, _ := seedSessionCleanupState(t, ctx, kubeStore, sqliteStore, fence, "session-precutover-replacement")
-	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName); err != nil {
+	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName, time.Now().UTC()); err != nil {
 		t.Fatalf("legacy SQLite-only DeleteSession(): %v", err)
 	}
 	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{

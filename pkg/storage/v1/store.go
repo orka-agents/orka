@@ -151,6 +151,15 @@ type PromptResultReceiptStore interface {
 }
 
 // SessionStore handles session transcript persistence.
+//
+// Session locks and chat turn reservations are leases. A provider decides
+// whether one has expired only by comparing its stored expiry, which came from
+// an earlier request, with the time the current request carries (now, or the
+// Now field of a request), never with its own clock. Orka passes its own
+// clock, so every lease is judged on the controller clock, and the
+// commit-time fence makes an early reclaim after a takeover harmless. A
+// request's time is covered by its request digest, so a retry is judged at the
+// original time. A zero request time returns ErrValidation.
 type SessionStore interface {
 	CreateSession(ctx context.Context, session *SessionRecord) error
 	GetSession(ctx context.Context, namespace, name string) (*SessionRecord, error)
@@ -160,12 +169,22 @@ type SessionStore interface {
 	// the after cursor (nil = first page) and skipping excludeType (empty =
 	// no exclusion). more reports whether further rows exist.
 	ListSessionsPage(ctx context.Context, namespace string, after *SessionPageCursor, limit int, excludeType string) (items []SessionMetadata, more bool, err error)
-	DeleteSession(ctx context.Context, namespace, name string) error
+	// DeleteSession removes a Session and its transcript. A chat turn
+	// reservation or a transient Task lock that has not expired at now keeps
+	// the Session, with ErrConflict; an expired one does not.
+	DeleteSession(ctx context.Context, namespace, name string, now time.Time) error
 
 	// Locking
-	AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error
+
+	// AcquireLock gives the Session a durable lock for one Task incarnation.
+	// A transient lock or chat turn reservation that has expired at now is
+	// reclaimed; a live one returns ErrConflict.
+	AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string, now time.Time) error
 	ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error
-	IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error)
+	// IsLocked reports whether another Task incarnation, or a chat turn
+	// reservation, holds the Session at now. It clears a transient Task lock
+	// that has expired at now.
+	IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string, now time.Time) (bool, error)
 
 	// Transcript
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
@@ -179,31 +198,76 @@ type SessionStore interface {
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }
 
+// AcquireChatTurnRequest reserves a chat Session's current transcript revision
+// for one turn.
+type AcquireChatTurnRequest struct {
+	// Session names the chat Session. When the reservation creates it, the
+	// Session gets this type and cancellation state, and CreatedAt, or Now
+	// when CreatedAt is zero.
+	Session *SessionRecord
+	// TurnID identifies the turn that holds the reservation.
+	TurnID string
+	// Now is the controller clock when the request was made. An earlier
+	// reservation or transient Task lock is reclaimable once it has expired
+	// at Now.
+	Now time.Time
+	// ExpiresAt is when the reservation lapses. It must be after Now.
+	ExpiresAt time.Time
+}
+
+// CommitSessionTurnRequest commits one chat turn's transcript messages and
+// token usage.
+type CommitSessionTurnRequest struct {
+	// Session names the chat Session.
+	Session *SessionRecord
+	// TurnID is the turn whose reservation the commit requires.
+	TurnID string
+	// ExpectedMessageCount fences the transcript revision the turn observed
+	// after its reservation.
+	ExpectedMessageCount int
+	// Messages are the turn's transcript messages.
+	Messages []SessionMessage
+	// InputTokens and OutputTokens are added to the Session's counters.
+	InputTokens  int
+	OutputTokens int
+	// Now is the controller clock when the request was made. The commit
+	// requires the turn's reservation to expire after Now.
+	Now time.Time
+}
+
 // SessionTurnCommitter reserves chat turns and atomically commits their
 // transcript messages with token usage. The expected message count fences the
-// session revision observed after acquiring the turn lease.
+// session revision observed after acquiring the turn lease. Leases follow the
+// rules of [SessionStore].
 type SessionTurnCommitter interface {
-	AcquireChatTurn(ctx context.Context, session *SessionRecord, turnID string, expiresAt time.Time) (created bool, err error)
+	AcquireChatTurn(ctx context.Context, request AcquireChatTurnRequest) (created bool, err error)
 	ReleaseChatTurn(ctx context.Context, namespace, name, turnID string, deleteEmptyCreatedSession bool) error
-	CommitSessionTurn(
-		ctx context.Context,
-		session *SessionRecord,
-		turnID string,
-		expectedMessageCount int,
-		messages []SessionMessage,
-		inputTokens, outputTokens int,
-	) error
+	CommitSessionTurn(ctx context.Context, request CommitSessionTurnRequest) error
+}
+
+// SessionOwnerWrite names the Session lock owner a write requires, the exact
+// Task or transient owner that holds the lock, and the controller clock when
+// the request was made. A transient lock that has expired at Now no longer
+// authorizes the write.
+type SessionOwnerWrite struct {
+	Namespace string
+	Name      string
+	OwnerName string
+	OwnerUID  string
+	Now       time.Time
 }
 
 // FencedSessionWriteStore binds transcript and token writes to the exact active
 // Task or transient lock owner so a stale owner cannot write after takeover.
+// A write whose owner no longer holds the lock at owner.Now returns a
+// FencedError.
 type FencedSessionWriteStore interface {
-	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
-	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
+	AppendMessagesWithLock(ctx context.Context, owner SessionOwnerWrite, messages []SessionMessage) error
+	UpdateTokenCountsWithLock(ctx context.Context, owner SessionOwnerWrite, inputTokens, outputTokens int) error
 	// ReleaseLockWithTokenUsage adds a finished owner's token usage and
 	// releases its lock in one write, so a replayed completion cannot count the
 	// usage twice: either nothing was written or the lock is already gone.
-	ReleaseLockWithTokenUsage(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
+	ReleaseLockWithTokenUsage(ctx context.Context, owner SessionOwnerWrite, inputTokens, outputTokens int) error
 }
 
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.
@@ -326,8 +390,17 @@ type RepositoryMonitorStore interface {
 	ListMonitorEvents(ctx context.Context, filter MonitorEventFilter) ([]MonitorEvent, string, error)
 }
 
+// MaxMessageBatch is the most messages one ListUnreadMessages or
+// ConsumeMessages call returns. A reader with a longer backlog reads it over
+// several calls.
+const MaxMessageBatch = 500
+
 // Message represents an inter-agent message.
 type Message struct {
+	// ID is assigned by the provider when it stores the message. IDs increase
+	// in the order a provider stores messages and are never reused, so a
+	// replayed ConsumeMessages that reads its messages again by ID cannot
+	// return a later one.
 	ID         int64  `json:"id"`
 	Namespace  string `json:"namespace"`
 	FromTask   string `json:"fromTask"`
@@ -335,21 +408,63 @@ type Message struct {
 	ParentTask string `json:"parentTask"`
 	Content    string `json:"content"`
 	Read       bool   `json:"read"`
-	// CreatedAt is when the provider stored the message, in UTC.
+	// CreatedAt is when the message was sent, in UTC. A provider keeps the
+	// time the caller set and uses its own clock only when it is zero.
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// ConsumeMessagesRequest names the inbox ConsumeMessages reads.
+type ConsumeMessagesRequest struct {
+	Namespace  string
+	TaskName   string
+	ParentTask string
+	// Limit is the most messages to return, from 1 to MaxMessageBatch. Zero
+	// selects MaxMessageBatch.
+	Limit int
+}
+
 // MessageStore handles inter-agent message persistence.
+//
+// A Task's inbox holds the unread messages of its namespace and parent Task
+// that are addressed to it or broadcast ("*"), except those it sent itself.
+// A broadcast has one read flag: the first sibling to consume it marks it read
+// for all of them.
 type MessageStore interface {
-	// SendMessage stores a new message. Use toTask="*" for broadcast.
+	// SendMessage stores a new message. Use toTask="*" for broadcast. The
+	// provider writes the assigned ID and creation time back into msg; a
+	// replay writes back the same ones and stores nothing.
 	SendMessage(ctx context.Context, msg *Message) error
 
-	// GetMessages returns unread messages for a task, optionally marking them as read.
-	GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]Message, error)
+	// ListUnreadMessages returns up to limit of the oldest unread messages in
+	// a Task's inbox, ordered by ID, and changes nothing. A limit of zero
+	// selects MaxMessageBatch; a negative limit or one above MaxMessageBatch
+	// returns ErrValidation.
+	ListUnreadMessages(ctx context.Context, namespace, taskName, parentTask string, limit int) ([]Message, error)
+
+	// ConsumeMessages returns up to request.Limit of the oldest unread
+	// messages in a Task's inbox, ordered by ID, and marks exactly those
+	// messages read. A replay returns the same messages and marks nothing
+	// more; it leaves out a message that DeleteTaskMessages or
+	// DeleteParentMessages removed in between, which happens only while the
+	// reader itself is being deleted. An invalid limit returns ErrValidation.
+	ConsumeMessages(ctx context.Context, request ConsumeMessagesRequest) ([]Message, error)
 
 	// DeleteTaskMessages deletes all messages involving a task (sent or received).
 	DeleteTaskMessages(ctx context.Context, namespace, taskName string) error
 
 	// DeleteParentMessages deletes all messages for children of a parent task.
 	DeleteParentMessages(ctx context.Context, namespace, parentTask string) error
+}
+
+// MessageBatchLimit returns the batch size limit selects: MaxMessageBatch for
+// zero, limit itself from 1 to MaxMessageBatch, and ErrValidation otherwise.
+func MessageBatchLimit(limit int) (int, error) {
+	switch {
+	case limit == 0:
+		return MaxMessageBatch, nil
+	case limit < 0 || limit > MaxMessageBatch:
+		return 0, ValidationErrorf("message batch limit must be between 1 and %d", MaxMessageBatch)
+	default:
+		return limit, nil
+	}
 }

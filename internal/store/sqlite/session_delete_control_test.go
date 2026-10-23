@@ -12,7 +12,7 @@ import (
 func TestDeleteSessionRejectsOpenDurableTurn(t *testing.T) {
 	s, control, fence := seedSessionForDurableDeleteTest(t, store.SessionTurnOpen, "")
 
-	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName); !errors.Is(err, store.ErrConflict) {
+	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName, time.Now().UTC()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession() error = %v, want ErrConflict", err)
 	}
 	if _, err := s.GetSession(context.Background(), control.Namespace, control.SessionName); err != nil {
@@ -33,7 +33,7 @@ func TestDeleteSessionRejectsOpenDurableTurn(t *testing.T) {
 func TestDeleteSessionRejectsUndeliveredTurnProjection(t *testing.T) {
 	s, control, _ := seedSessionForDurableDeleteTest(t, store.SessionTurnFinalized, store.OutboxProjectionPending)
 
-	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName); !errors.Is(err, store.ErrConflict) {
+	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName, time.Now().UTC()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession() error = %v, want ErrConflict", err)
 	}
 	if _, err := s.GetOutboxProjection(context.Background(), "outbox-session-delete"); err != nil {
@@ -64,7 +64,7 @@ func TestDeleteSessionRejectsActiveMutationLease(t *testing.T) {
 		t.Fatal("AcquireSessionMutationLease() did not persist a lease")
 	}
 
-	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName); !errors.Is(err, store.ErrConflict) {
+	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName, time.Now().UTC()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession() error = %v, want ErrConflict", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestDeleteSessionRejectsPublicationBackedSessionClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName); !errors.Is(err, store.ErrConflict) {
+	if err := s.DeleteSession(context.Background(), control.Namespace, control.SessionName, time.Now().UTC()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession() error = %v, want ErrConflict", err)
 	}
 	if _, err := s.GetSession(context.Background(), control.Namespace, control.SessionName); err != nil {
@@ -90,7 +90,7 @@ func TestDeleteSessionReclaimsSettledDurableTurnState(t *testing.T) {
 	s, control, _ := seedSessionForDurableDeleteTest(t, store.SessionTurnFinalized, store.OutboxProjectionDelivered)
 	ctx := context.Background()
 
-	if err := s.DeleteSession(ctx, control.Namespace, control.SessionName); err != nil {
+	if err := s.DeleteSession(ctx, control.Namespace, control.SessionName, time.Now().UTC()); err != nil {
 		t.Fatalf("DeleteSession() error = %v", err)
 	}
 	if _, err := s.GetSession(ctx, control.Namespace, control.SessionName); !errors.Is(err, store.ErrNotFound) {

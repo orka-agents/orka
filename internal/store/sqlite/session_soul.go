@@ -93,13 +93,17 @@ func readSessionSoul(ctx context.Context, q taskDataExecutor, namespace, name, t
 // The existing hidden anchor survives empty turns and failed transcript writes;
 // no transcript content or visible message count is created by this operation.
 // An empty digest explicitly pins absence of a soul, not an unused Session.
-func (s *Store) EnsureSessionSoulWithLock(ctx context.Context, namespace, name, taskName, taskUID, digest string) error {
+func (s *Store) EnsureSessionSoulWithLock(ctx context.Context, owner store.SessionOwnerWrite, digest string) error {
 	return writeOperationErr(ctx, s, "EnsureSessionSoulWithLock", func(ctx context.Context) error {
-		return s.ensureSessionSoulWithLockWrite(ctx, namespace, name, taskName, taskUID, digest)
+		return s.ensureSessionSoulWithLockWrite(ctx, owner, digest)
 	})
 }
 
-func (s *Store) ensureSessionSoulWithLockWrite(ctx context.Context, namespace, name, taskName, taskUID, digest string) error {
+func (s *Store) ensureSessionSoulWithLockWrite(ctx context.Context, owner store.SessionOwnerWrite, digest string) error {
+	namespace, name, taskName, taskUID := owner.Namespace, owner.Name, owner.OwnerName, owner.OwnerUID
+	if err := requireRequestTime("session owner write", owner.Now); err != nil {
+		return err
+	}
 	if digest != "" {
 		if err := store.ValidateCanonicalDigest("Session soul digest", digest); err != nil {
 			return err
@@ -124,7 +128,7 @@ func (s *Store) ensureSessionSoulWithLockWrite(ctx context.Context, namespace, n
 		return store.ConflictErrorf("Gateway owns its canonical Session soul context")
 	}
 	// This also checks expiry and the cross-store cleanup fence.
-	if err := verifySessionWriteLockTx(ctx, tx.Tx, namespace, name, taskName, taskUID); err != nil {
+	if err := verifySessionWriteLockTx(ctx, tx.Tx, owner); err != nil {
 		return err
 	}
 	var existing sql.NullString

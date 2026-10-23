@@ -56,13 +56,13 @@ func (m *SessionManager) IsLocked(ctx context.Context, task *corev1alpha1.Task) 
 		if err := validateGatewayTaskSessionPolicy(task, event); err != nil {
 			return false, err
 		}
-		return m.store.IsLocked(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
+		return m.store.IsLocked(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID), time.Now().UTC())
 	}
 	if task.Spec.SessionRef == nil {
 		return false, nil
 	}
 
-	locked, err := m.store.IsLocked(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	locked, err := m.store.IsLocked(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), time.Now().UTC())
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Session doesn't exist yet, not locked
@@ -82,7 +82,7 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 		if err := validateGatewayTaskSessionPolicy(task, event); err != nil {
 			return err
 		}
-		return m.store.AcquireLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
+		return m.store.AcquireLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID), time.Now().UTC())
 	}
 	if task.Spec.SessionRef == nil {
 		return nil
@@ -101,7 +101,7 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 		return fmt.Errorf("session %s not found and create=false: %w", task.Spec.SessionRef.Name, store.ErrNotFound)
 	}
 
-	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), time.Now().UTC())
 }
 
 // ReleaseLock releases the session lock for a task.
@@ -129,7 +129,7 @@ func (m *SessionManager) ReleaseLockWithTokenUsage(ctx context.Context, task *co
 	if task.UID != "" {
 		session, getErr := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
 		if getErr == nil && session.ActiveTask == task.Name && session.ActiveTaskUID == "" {
-			if acquireErr := m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID)); acquireErr != nil {
+			if acquireErr := m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), time.Now().UTC()); acquireErr != nil {
 				return acquireErr
 			}
 		} else if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
@@ -138,8 +138,7 @@ func (m *SessionManager) ReleaseLockWithTokenUsage(ctx context.Context, task *co
 	}
 	var err error
 	if fenced, ok := m.store.(store.FencedSessionWriteStore); ok && (inputTokens != 0 || outputTokens != 0) {
-		err = fenced.ReleaseLockWithTokenUsage(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID),
-			int(inputTokens), int(outputTokens))
+		err = fenced.ReleaseLockWithTokenUsage(ctx, taskSessionOwner(task), int(inputTokens), int(outputTokens))
 	} else {
 		err = m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
 	}
@@ -277,7 +276,16 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 	if !ok {
 		return fmt.Errorf("session store does not support fenced transcript writes")
 	}
-	return fenced.AppendMessagesWithLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), messages)
+	return fenced.AppendMessagesWithLock(ctx, taskSessionOwner(task), messages)
+}
+
+// taskSessionOwner names task as the owner of its Session's lock, at the
+// controller clock.
+func taskSessionOwner(task *corev1alpha1.Task) store.SessionOwnerWrite {
+	return store.SessionOwnerWrite{
+		Namespace: task.Namespace, Name: task.Spec.SessionRef.Name,
+		OwnerName: task.Name, OwnerUID: string(task.UID), Now: time.Now().UTC(),
+	}
 }
 
 // LoadTranscript loads the session transcript for a task.
@@ -337,7 +345,7 @@ func (m *SessionManager) GetSession(ctx context.Context, namespace, name string)
 // Kubernetes-authoritative controls before removing the SQLite transcript.
 func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name string) error {
 	if m.cleanupStore == nil {
-		return m.store.DeleteSession(ctx, namespace, name)
+		return m.store.DeleteSession(ctx, namespace, name, time.Now().UTC())
 	}
 	if m.epochs == nil {
 		return fmt.Errorf("ACP session cleanup requires a controller epoch manager")

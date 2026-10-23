@@ -41,6 +41,7 @@ var stateFamilies = []stateFamily{
 	{"sessions", runSessions},
 	{"session-locks", runSessionLocks},
 	{"chat-turns", runChatTurns},
+	{"lease-clocks", runLeaseClocks},
 	{"session-soul", runSessionSoul},
 	{"session-lineage", runSessionLineage},
 	{"session-cleanup-persistence", runSessionCleanupPersistence},

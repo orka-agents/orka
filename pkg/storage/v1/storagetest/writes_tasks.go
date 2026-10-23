@@ -41,7 +41,7 @@ func observeMessages(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	all := make([][]storagev1.Message, 0, 2)
 	for _, reader := range []string{"worker-a", "worker-b"} {
-		messages, err := p.GetMessages(t.Context(), "tenant", reader, "parent", false)
+		messages, err := p.ListUnreadMessages(t.Context(), "tenant", reader, "parent", 0)
 		require.NoError(t, err)
 		all = append(all, messages)
 	}
@@ -123,9 +123,11 @@ func init() {
 			observe: observeMessages,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "GetMessages",
-			setup:   sendFixtureMessages,
-			args:    fixed("tenant", "worker-b", "parent", true),
+			method: "ConsumeMessages",
+			setup:  sendFixtureMessages,
+			args: fixed(storagev1.ConsumeMessagesRequest{
+				Namespace: "tenant", TaskName: "worker-b", ParentTask: "parent", Limit: storagev1.MaxMessageBatch,
+			}),
 			observe: observeMessages,
 		},
 		writeCase[storagev1.StateProvider]{

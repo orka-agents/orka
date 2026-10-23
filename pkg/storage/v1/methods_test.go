@@ -26,7 +26,7 @@ var catalogInterfaces = map[string]reflect.Type{
 var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck"}
 
 // writesNamedLikeReads are writes whose names start with a read prefix.
-var writesNamedLikeReads = []string{"GetMessages", "IsLocked"}
+var writesNamedLikeReads = []string{"IsLocked"}
 
 func providerMethod(t *testing.T, name string) reflect.Type {
 	t.Helper()
@@ -91,7 +91,8 @@ func TestMethodCatalogKinds(t *testing.T) {
 		"ResolveOperation":          storagev1.MethodAdmin,
 		"PruneOperationReceipts":    storagev1.MethodAdmin,
 		"GetControllerEpochMirror":  storagev1.MethodRead,
-		"GetMessages":               storagev1.MethodWrite,
+		"ConsumeMessages":           storagev1.MethodWrite,
+		"ListUnreadMessages":        storagev1.MethodRead,
 		"IsLocked":                  storagev1.MethodWrite,
 		"Describe":                  storagev1.MethodRead,
 		"SaveArtifact":              storagev1.MethodWrite,

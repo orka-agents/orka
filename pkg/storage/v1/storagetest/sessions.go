@@ -120,7 +120,7 @@ func runMessages(t *testing.T, newProvider StateFactory) {
 			Namespace: "tenant-b", FromTask: "worker-a", ToTask: "worker-b", ParentTask: "parent", Content: "other namespace",
 		}))
 
-		peek, err := provider.GetMessages(ctx, "tenant-a", "worker-b", "parent", false)
+		peek, err := provider.ListUnreadMessages(ctx, "tenant-a", "worker-b", "parent", 0)
 		require.NoError(t, err)
 		require.Equal(t, []string{"direct", "broadcast"}, messageContents(peek))
 		for _, message := range peek {
@@ -131,21 +131,21 @@ func runMessages(t *testing.T, newProvider StateFactory) {
 			require.Equal(t, time.UTC, message.CreatedAt.Location(), "creation times are UTC")
 		}
 
-		own, err := provider.GetMessages(ctx, "tenant-a", "worker-a", "parent", false)
+		own, err := provider.ListUnreadMessages(ctx, "tenant-a", "worker-a", "parent", 0)
 		require.NoError(t, err)
 		require.Empty(t, own, "a sender does not receive its own broadcast")
 
-		read, err := provider.GetMessages(ctx, "tenant-a", "worker-b", "parent", true)
+		read, err := provider.ConsumeMessages(ctx, storagev1.ConsumeMessagesRequest{Namespace: "tenant-a", TaskName: "worker-b", ParentTask: "parent"})
 		require.NoError(t, err)
 		require.Equal(t, []string{"direct", "broadcast"}, messageContents(read))
-		again, err := provider.GetMessages(ctx, "tenant-a", "worker-b", "parent", true)
+		again, err := provider.ConsumeMessages(ctx, storagev1.ConsumeMessagesRequest{Namespace: "tenant-a", TaskName: "worker-b", ParentTask: "parent"})
 		require.NoError(t, err)
 		require.Empty(t, again, "marked messages are not returned again")
 
-		other, err := provider.GetMessages(ctx, "tenant-a", "worker-b", "other-parent", false)
+		other, err := provider.ListUnreadMessages(ctx, "tenant-a", "worker-b", "other-parent", 0)
 		require.NoError(t, err)
 		require.Equal(t, []string{"other family"}, messageContents(other))
-		otherNamespace, err := provider.GetMessages(ctx, "tenant-b", "worker-b", "parent", false)
+		otherNamespace, err := provider.ListUnreadMessages(ctx, "tenant-b", "worker-b", "parent", 0)
 		require.NoError(t, err)
 		require.Equal(t, []string{"other namespace"}, messageContents(otherNamespace))
 	})
@@ -163,18 +163,18 @@ func runMessages(t *testing.T, newProvider StateFactory) {
 		}
 
 		require.NoError(t, provider.DeleteTaskMessages(ctx, "tenant-a", "worker-a"))
-		toB, err := provider.GetMessages(ctx, "tenant-a", "worker-b", "parent", false)
+		toB, err := provider.ListUnreadMessages(ctx, "tenant-a", "worker-b", "parent", 0)
 		require.NoError(t, err)
 		require.Equal(t, []string{"c to b"}, messageContents(toB), "messages sent by the Task are removed")
-		toA, err := provider.GetMessages(ctx, "tenant-a", "worker-a", "parent", false)
+		toA, err := provider.ListUnreadMessages(ctx, "tenant-a", "worker-a", "parent", 0)
 		require.NoError(t, err)
 		require.Empty(t, toA, "messages received by the Task are removed")
 
 		require.NoError(t, provider.DeleteParentMessages(ctx, "tenant-a", "parent"))
-		toB, err = provider.GetMessages(ctx, "tenant-a", "worker-b", "parent", false)
+		toB, err = provider.ListUnreadMessages(ctx, "tenant-a", "worker-b", "parent", 0)
 		require.NoError(t, err)
 		require.Empty(t, toB)
-		toY, err := provider.GetMessages(ctx, "tenant-a", "worker-y", "second", false)
+		toY, err := provider.ListUnreadMessages(ctx, "tenant-a", "worker-y", "second", 0)
 		require.NoError(t, err)
 		require.Equal(t, []string{"to y"}, messageContents(toY), "other parents keep their messages")
 	})
@@ -219,10 +219,10 @@ func runSessions(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, 4, got.InputTokens)
 		require.Equal(t, 6, got.OutputTokens)
 
-		require.NoError(t, provider.DeleteSession(ctx, "tenant-a", "alpha"))
+		require.NoError(t, provider.DeleteSession(ctx, "tenant-a", "alpha", leaseNow))
 		_, err = provider.GetSession(ctx, "tenant-a", "alpha")
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
-		require.NoError(t, provider.DeleteSession(ctx, "tenant-a", "alpha"), "deletion is idempotent")
+		require.NoError(t, provider.DeleteSession(ctx, "tenant-a", "alpha", leaseNow), "deletion is idempotent")
 		_, err = provider.GetSession(ctx, "tenant-b", "alpha")
 		require.NoError(t, err, "other namespaces keep their session")
 	})
@@ -323,54 +323,54 @@ func runSessionLocks(t *testing.T, newProvider StateFactory) {
 	t.Run("exact Task incarnations own locks", func(t *testing.T) {
 		provider := newProvider(t)
 		ctx := t.Context()
-		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "missing", "task-a", "uid-a"), storagev1.ErrNotFound)
+		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "missing", "task-a", "uid-a", leaseNow), storagev1.ErrNotFound)
 		createSessionFixture(t, provider, "tenant-a", "locked", sessionsTypeTask, time.Now().UTC())
 
-		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-a", "uid-a"))
-		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-a", "uid-a"), "the owner may reacquire")
-		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-b", "uid-b"), storagev1.ErrConflict)
-		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-a", "uid-other"), storagev1.ErrConflict,
+		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-a", "uid-a", leaseNow))
+		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-a", "uid-a", leaseNow), "the owner may reacquire")
+		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-b", "uid-b", leaseNow), storagev1.ErrConflict)
+		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-a", "uid-other", leaseNow), storagev1.ErrConflict,
 			"a recreated Task with the same name is a different owner")
 
-		locked, err := provider.IsLocked(ctx, "tenant-a", "locked", "task-a", "uid-a")
+		locked, err := provider.IsLocked(ctx, "tenant-a", "locked", "task-a", "uid-a", leaseNow)
 		require.NoError(t, err)
 		require.False(t, locked, "the owner is not locked out")
-		locked, err = provider.IsLocked(ctx, "tenant-a", "locked", "task-b", "uid-b")
+		locked, err = provider.IsLocked(ctx, "tenant-a", "locked", "task-b", "uid-b", leaseNow)
 		require.NoError(t, err)
 		require.True(t, locked)
-		_, err = provider.IsLocked(ctx, "tenant-a", "missing", "task-a", "uid-a")
+		_, err = provider.IsLocked(ctx, "tenant-a", "missing", "task-a", "uid-a", leaseNow)
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 
-		require.ErrorIs(t, provider.DeleteSession(ctx, "tenant-a", "locked"), storagev1.ErrConflict,
+		require.ErrorIs(t, provider.DeleteSession(ctx, "tenant-a", "locked", leaseNow), storagev1.ErrConflict,
 			"a locked session is not deleted")
 
 		require.NoError(t, provider.ReleaseLock(ctx, "tenant-a", "locked", "task-a", "uid-other"))
-		locked, err = provider.IsLocked(ctx, "tenant-a", "locked", "task-b", "uid-b")
+		locked, err = provider.IsLocked(ctx, "tenant-a", "locked", "task-b", "uid-b", leaseNow)
 		require.NoError(t, err)
 		require.True(t, locked, "release by another incarnation is ignored")
 
 		require.NoError(t, provider.ReleaseLock(ctx, "tenant-a", "locked", "task-a", "uid-a"))
-		locked, err = provider.IsLocked(ctx, "tenant-a", "locked", "task-b", "uid-b")
+		locked, err = provider.IsLocked(ctx, "tenant-a", "locked", "task-b", "uid-b", leaseNow)
 		require.NoError(t, err)
 		require.False(t, locked)
-		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-b", "uid-b"))
+		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "locked", "task-b", "uid-b", leaseNow))
 	})
 
 	t.Run("fenced writes require the current owner", func(t *testing.T) {
 		provider := newProvider(t)
 		ctx := t.Context()
 		createSessionFixture(t, provider, "tenant-a", "fenced", sessionsTypeTask, time.Now().UTC())
-		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "fenced", "task-a", "uid-a"))
+		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "fenced", "task-a", "uid-a", leaseNow))
 
-		require.NoError(t, provider.AppendMessagesWithLock(ctx, "tenant-a", "fenced", "task-a", "uid-a",
+		require.NoError(t, provider.AppendMessagesWithLock(ctx, lockOwner("tenant-a", "fenced", "task-a", "uid-a"),
 			[]storagev1.SessionMessage{{ID: "owned", Role: "user", Content: "from owner"}}))
-		requireFenced(t, provider.AppendMessagesWithLock(ctx, "tenant-a", "fenced", "task-a", "uid-stale",
+		requireFenced(t, provider.AppendMessagesWithLock(ctx, lockOwner("tenant-a", "fenced", "task-a", "uid-stale"),
 			[]storagev1.SessionMessage{{ID: "stale", Role: "user", Content: "from stale owner"}}))
-		require.NoError(t, provider.UpdateTokenCountsWithLock(ctx, "tenant-a", "fenced", "task-a", "uid-a", 2, 3))
-		requireFenced(t, provider.UpdateTokenCountsWithLock(ctx, "tenant-a", "fenced", "task-b", "uid-b", 50, 50))
+		require.NoError(t, provider.UpdateTokenCountsWithLock(ctx, lockOwner("tenant-a", "fenced", "task-a", "uid-a"), 2, 3))
+		requireFenced(t, provider.UpdateTokenCountsWithLock(ctx, lockOwner("tenant-a", "fenced", "task-b", "uid-b"), 50, 50))
 
-		require.NoError(t, provider.ReleaseLockWithTokenUsage(ctx, "tenant-a", "fenced", "task-a", "uid-a", 5, 7))
-		require.NoError(t, provider.ReleaseLockWithTokenUsage(ctx, "tenant-a", "fenced", "task-a", "uid-a", 5, 7),
+		require.NoError(t, provider.ReleaseLockWithTokenUsage(ctx, lockOwner("tenant-a", "fenced", "task-a", "uid-a"), 5, 7))
+		require.NoError(t, provider.ReleaseLockWithTokenUsage(ctx, lockOwner("tenant-a", "fenced", "task-a", "uid-a"), 5, 7),
 			"a replayed completion succeeds without counting again")
 
 		session, err := provider.GetSession(ctx, "tenant-a", "fenced")
@@ -388,19 +388,23 @@ func runChatTurns(t *testing.T, newProvider StateFactory) {
 		provider := newProvider(t)
 		ctx := t.Context()
 		session := &storagev1.SessionRecord{Namespace: "tenant-a", Name: "chat", SessionType: sessionsTypeChat}
-		expires := time.Now().UTC().Add(time.Hour)
+		reserve := func(turnID string) storagev1.AcquireChatTurnRequest {
+			return storagev1.AcquireChatTurnRequest{Session: session, TurnID: turnID, Now: leaseNow, ExpiresAt: leaseExpiry}
+		}
 
-		_, err := provider.AcquireChatTurn(ctx, session, "turn-0", time.Now().UTC().Add(-time.Minute))
-		require.ErrorIs(t, err, storagev1.ErrValidation, "a reservation must expire in the future")
+		past := reserve("turn-0")
+		past.ExpiresAt = leaseNow
+		_, err := provider.AcquireChatTurn(ctx, past)
+		require.ErrorIs(t, err, storagev1.ErrValidation, "a reservation must expire after its request time")
 
-		created, err := provider.AcquireChatTurn(ctx, session, "turn-1", expires)
+		created, err := provider.AcquireChatTurn(ctx, reserve("turn-1"))
 		require.NoError(t, err)
 		require.True(t, created)
-		_, err = provider.AcquireChatTurn(ctx, session, "turn-2", expires)
+		_, err = provider.AcquireChatTurn(ctx, reserve("turn-2"))
 		require.ErrorIs(t, err, storagev1.ErrConflict, "one live turn at a time")
-		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "chat", "task-a", "uid-a"), storagev1.ErrConflict,
+		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "chat", "task-a", "uid-a", leaseNow), storagev1.ErrConflict,
 			"a live chat turn excludes Task locks")
-		locked, err := provider.IsLocked(ctx, "tenant-a", "chat", "task-a", "uid-a")
+		locked, err := provider.IsLocked(ctx, "tenant-a", "chat", "task-a", "uid-a", leaseNow)
 		require.NoError(t, err)
 		require.True(t, locked)
 
@@ -408,11 +412,11 @@ func runChatTurns(t *testing.T, newProvider StateFactory) {
 			{ID: "chat-1", Role: "user", Content: "hello"},
 			{ID: "chat-2", Role: "assistant", Content: "hi"},
 		}
-		require.ErrorIs(t, provider.CommitSessionTurn(ctx, session, "turn-2", 0, turn, 1, 1), storagev1.ErrConflict,
+		require.ErrorIs(t, provider.CommitSessionTurn(ctx, turnCommit(session, "turn-2", 0, turn, 1, 1)), storagev1.ErrConflict,
 			"only the reservation owner commits")
-		require.ErrorIs(t, provider.CommitSessionTurn(ctx, session, "turn-1", 5, turn, 1, 1), storagev1.ErrConflict,
+		require.ErrorIs(t, provider.CommitSessionTurn(ctx, turnCommit(session, "turn-1", 5, turn, 1, 1)), storagev1.ErrConflict,
 			"the expected message count fences the commit")
-		require.NoError(t, provider.CommitSessionTurn(ctx, session, "turn-1", 0, turn, 11, 13))
+		require.NoError(t, provider.CommitSessionTurn(ctx, turnCommit(session, "turn-1", 0, turn, 11, 13)))
 
 		got, err := provider.GetSession(ctx, "tenant-a", "chat")
 		require.NoError(t, err)
@@ -424,21 +428,23 @@ func runChatTurns(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, provider.ReleaseChatTurn(ctx, "tenant-a", "chat", "turn-1", true))
 		_, err = provider.GetSession(ctx, "tenant-a", "chat")
 		require.NoError(t, err, "a session with history is not removed on release")
-		created, err = provider.AcquireChatTurn(ctx, session, "turn-3", expires)
+		created, err = provider.AcquireChatTurn(ctx, reserve("turn-3"))
 		require.NoError(t, err)
 		require.False(t, created)
-		require.ErrorIs(t, provider.CommitSessionTurn(ctx, session, "turn-3", 0,
-			[]storagev1.SessionMessage{{ID: "chat-3", Role: "user", Content: "stale"}}, 0, 0), storagev1.ErrConflict,
+		require.ErrorIs(t, provider.CommitSessionTurn(ctx, turnCommit(session, "turn-3", 0,
+			[]storagev1.SessionMessage{{ID: "chat-3", Role: "user", Content: "stale"}}, 0, 0)), storagev1.ErrConflict,
 			"a stale revision cannot commit")
-		require.NoError(t, provider.CommitSessionTurn(ctx, session, "turn-3", 2,
-			[]storagev1.SessionMessage{{ID: "chat-3", Role: "user", Content: "again"}}, 0, 0))
+		require.NoError(t, provider.CommitSessionTurn(ctx, turnCommit(session, "turn-3", 2,
+			[]storagev1.SessionMessage{{ID: "chat-3", Role: "user", Content: "again"}}, 0, 0)))
 	})
 
 	t.Run("an empty created session is removed when its turn fails", func(t *testing.T) {
 		provider := newProvider(t)
 		ctx := t.Context()
 		session := &storagev1.SessionRecord{Namespace: "tenant-a", Name: "abandoned", SessionType: sessionsTypeChat}
-		created, err := provider.AcquireChatTurn(ctx, session, "turn-1", time.Now().UTC().Add(time.Hour))
+		created, err := provider.AcquireChatTurn(ctx, storagev1.AcquireChatTurnRequest{
+			Session: session, TurnID: "turn-1", Now: leaseNow, ExpiresAt: leaseExpiry,
+		})
 		require.NoError(t, err)
 		require.True(t, created)
 		require.NoError(t, provider.ReleaseChatTurn(ctx, "tenant-a", "abandoned", "turn-other", true),
@@ -452,24 +458,126 @@ func runChatTurns(t *testing.T, newProvider StateFactory) {
 	})
 }
 
+// runLeaseClocks checks that a provider decides chat turn reservations and
+// Session locks on the time each request carries, never on its own clock. The
+// request times are months from the wall clock, so a provider that consults
+// its own clock fails these cases.
+func runLeaseClocks(t *testing.T, newProvider StateFactory) {
+	t.Run("a chat turn reservation lapses at its expiry on the request clock", func(t *testing.T) {
+		provider := newProvider(t)
+		ctx := t.Context()
+		session := &storagev1.SessionRecord{Namespace: "tenant-a", Name: "chat", SessionType: sessionsTypeChat}
+		created, err := provider.AcquireChatTurn(ctx, storagev1.AcquireChatTurnRequest{
+			Session: session, TurnID: "turn-1", Now: leaseNow, ExpiresAt: leaseExpiry,
+		})
+		require.NoError(t, err)
+		require.True(t, created)
+
+		justBefore := leaseExpiry.Add(-time.Nanosecond)
+		_, err = provider.AcquireChatTurn(ctx, storagev1.AcquireChatTurnRequest{
+			Session: session, TurnID: "turn-2", Now: justBefore, ExpiresAt: justBefore.Add(time.Hour),
+		})
+		require.ErrorIs(t, err, storagev1.ErrConflict, "the reservation holds until its expiry")
+		locked, err := provider.IsLocked(ctx, "tenant-a", "chat", "task-a", "uid-a", justBefore)
+		require.NoError(t, err)
+		require.True(t, locked)
+		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "chat", "task-a", "uid-a", justBefore), storagev1.ErrConflict)
+		require.ErrorIs(t, provider.DeleteSession(ctx, "tenant-a", "chat", justBefore), storagev1.ErrConflict)
+
+		turn := []storagev1.SessionMessage{{ID: "late", Role: "user", Content: "too late"}}
+		late := turnCommit(session, "turn-1", 0, turn, 1, 1)
+		late.Now = leaseExpiry
+		require.ErrorIs(t, provider.CommitSessionTurn(ctx, late), storagev1.ErrConflict,
+			"a commit at or after the expiry is refused")
+		inTime := turnCommit(session, "turn-1", 0, turn, 1, 1)
+		inTime.Now = justBefore
+		require.NoError(t, provider.CommitSessionTurn(ctx, inTime), "a commit before the expiry succeeds")
+
+		locked, err = provider.IsLocked(ctx, "tenant-a", "chat", "task-a", "uid-a", leaseExpiry)
+		require.NoError(t, err)
+		require.False(t, locked, "an expired reservation does not lock the Session")
+		created, err = provider.AcquireChatTurn(ctx, storagev1.AcquireChatTurnRequest{
+			Session: session, TurnID: "turn-2", Now: leaseExpiry, ExpiresAt: leaseExpiry.Add(time.Hour),
+		})
+		require.NoError(t, err, "an expired reservation is reclaimable")
+		require.False(t, created)
+
+		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "chat", "task-a", "uid-a", leaseExpiry.Add(time.Hour)),
+			"a Task lock reclaims the second reservation once it has expired")
+		locked, err = provider.IsLocked(ctx, "tenant-a", "chat", "task-b", "uid-b", leaseExpiry.Add(time.Hour))
+		require.NoError(t, err)
+		require.True(t, locked)
+	})
+
+	t.Run("an expired reservation does not keep a Session from deletion", func(t *testing.T) {
+		provider := newProvider(t)
+		ctx := t.Context()
+		session := &storagev1.SessionRecord{Namespace: "tenant-a", Name: "chat", SessionType: sessionsTypeChat}
+		_, err := provider.AcquireChatTurn(ctx, storagev1.AcquireChatTurnRequest{
+			Session: session, TurnID: "turn-1", Now: leaseNow, ExpiresAt: leaseExpiry,
+		})
+		require.NoError(t, err)
+		require.NoError(t, provider.CommitSessionTurn(ctx, turnCommit(session, "turn-1", 0,
+			[]storagev1.SessionMessage{{ID: "kept", Role: "user", Content: "hello"}}, 0, 0)))
+		require.ErrorIs(t, provider.DeleteSession(ctx, "tenant-a", "chat", leaseNow), storagev1.ErrConflict)
+		require.NoError(t, provider.DeleteSession(ctx, "tenant-a", "chat", leaseExpiry))
+		_, err = provider.GetSession(ctx, "tenant-a", "chat")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
+	})
+
+	t.Run("lease decisions require the request time", func(t *testing.T) {
+		provider := newProvider(t)
+		ctx := t.Context()
+		createSessionFixture(t, provider, "tenant-a", "session", sessionsTypeTask, writeCaseCreated)
+		var zero time.Time
+		owner := storagev1.SessionOwnerWrite{Namespace: "tenant-a", Name: "session", OwnerName: "task-a", OwnerUID: "uid-a"}
+
+		require.ErrorIs(t, provider.AcquireLock(ctx, "tenant-a", "session", "task-a", "uid-a", zero), storagev1.ErrValidation)
+		_, err := provider.IsLocked(ctx, "tenant-a", "session", "task-a", "uid-a", zero)
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "session", "task-a", "uid-a", leaseNow))
+		require.ErrorIs(t, provider.AppendMessagesWithLock(ctx, owner,
+			[]storagev1.SessionMessage{{ID: "m1", Role: "user", Content: "hello"}}), storagev1.ErrValidation)
+		require.ErrorIs(t, provider.UpdateTokenCountsWithLock(ctx, owner, 1, 1), storagev1.ErrValidation)
+		require.ErrorIs(t, provider.ReleaseLockWithTokenUsage(ctx, owner, 1, 1), storagev1.ErrValidation)
+		require.ErrorIs(t, provider.EnsureSessionSoulWithLock(ctx, owner, ""), storagev1.ErrValidation)
+		require.ErrorIs(t, provider.DeleteSession(ctx, "tenant-a", "session", zero), storagev1.ErrValidation)
+		_, err = provider.AcquireChatTurn(ctx, storagev1.AcquireChatTurnRequest{
+			Session:   &storagev1.SessionRecord{Namespace: "tenant-a", Name: "chat", SessionType: sessionsTypeChat},
+			TurnID:    "turn-1",
+			ExpiresAt: leaseExpiry,
+		})
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		require.ErrorIs(t, provider.CommitSessionTurn(ctx, storagev1.CommitSessionTurnRequest{
+			Session: &storagev1.SessionRecord{Namespace: "tenant-a", Name: "chat"}, TurnID: "turn-1",
+		}), storagev1.ErrValidation)
+
+		session, err := provider.GetSession(ctx, "tenant-a", "session")
+		require.NoError(t, err)
+		require.Equal(t, "task-a", session.ActiveTask, "the refused writes changed nothing")
+		require.Zero(t, session.MessageCount)
+		require.Zero(t, session.InputTokens)
+	})
+}
+
 func runSessionSoul(t *testing.T, newProvider StateFactory) {
 	provider := newProvider(t)
 	ctx := t.Context()
 	digest := storagev1.CanonicalBytesDigest([]byte("soul revision"))
 	createSessionFixture(t, provider, "tenant-a", "soul", sessionsTypeTask, time.Now().UTC())
 
-	require.ErrorIs(t, provider.EnsureSessionSoulWithLock(ctx, "tenant-a", "soul", "task-a", "uid-a", digest),
+	require.ErrorIs(t, provider.EnsureSessionSoulWithLock(ctx, lockOwner("tenant-a", "soul", "task-a", "uid-a"), digest),
 		storagev1.ErrConflict, "pinning requires the Task lock")
-	require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "soul", "task-a", "uid-a"))
+	require.NoError(t, provider.AcquireLock(ctx, "tenant-a", "soul", "task-a", "uid-a", leaseNow))
 
 	state, err := provider.ReadSessionSoul(ctx, "tenant-a", "soul", "task-a", "uid-a")
 	require.NoError(t, err)
 	require.False(t, state.Established)
 
-	require.NoError(t, provider.EnsureSessionSoulWithLock(ctx, "tenant-a", "soul", "task-a", "uid-a", digest))
-	require.NoError(t, provider.EnsureSessionSoulWithLock(ctx, "tenant-a", "soul", "task-a", "uid-a", digest),
+	require.NoError(t, provider.EnsureSessionSoulWithLock(ctx, lockOwner("tenant-a", "soul", "task-a", "uid-a"), digest))
+	require.NoError(t, provider.EnsureSessionSoulWithLock(ctx, lockOwner("tenant-a", "soul", "task-a", "uid-a"), digest),
 		"pinning the same revision is idempotent")
-	require.ErrorIs(t, provider.EnsureSessionSoulWithLock(ctx, "tenant-a", "soul", "task-a", "uid-a",
+	require.ErrorIs(t, provider.EnsureSessionSoulWithLock(ctx, lockOwner("tenant-a", "soul", "task-a", "uid-a"),
 		storagev1.CanonicalBytesDigest([]byte("other revision"))), storagev1.ErrSessionConfigurationMismatch)
 
 	state, err = provider.ReadSessionSoul(ctx, "tenant-a", "soul", "task-a", "uid-a")

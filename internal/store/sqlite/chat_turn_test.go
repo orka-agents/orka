@@ -85,25 +85,25 @@ func TestAcquireChatTurnFencesConcurrentAndRecoveredTurns(t *testing.T) {
 	session := &store.SessionRecord{
 		Namespace: "default", Name: "chat-session", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
 	}
-	created, err := s.AcquireChatTurn(ctx, session, "turn-a", now.Add(time.Minute))
+	created, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-a", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !created {
 		t.Fatal("AcquireChatTurn() did not report a newly created session")
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-b", now.Add(time.Minute)); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-b", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("concurrent AcquireChatTurn() error = %v, want ErrConflict", err)
 	}
 
-	locked, err := s.IsLocked(ctx, "default", "chat-session", "task-a", "task-uid")
+	locked, err := s.IsLocked(ctx, "default", "chat-session", "task-a", "task-uid", time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !locked {
 		t.Fatal("IsLocked() did not report the active chat turn")
 	}
-	if err := s.AcquireLock(ctx, "default", "chat-session", "task-a", "task-uid"); err == nil {
+	if err := s.AcquireLock(ctx, "default", "chat-session", "task-a", "task-uid", time.Now().UTC()); err == nil {
 		t.Fatal("AcquireLock() acquired the same session during an active chat turn")
 	}
 	if err := s.CreateSession(ctx, &store.SessionRecord{
@@ -111,7 +111,7 @@ func TestAcquireChatTurnFencesConcurrentAndRecoveredTurns(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, "default", "child-session", "child-task", "child-task-uid"); err != nil {
+	if err := s.AcquireLock(ctx, "default", "child-session", "child-task", "child-task-uid", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock() rejected a Task using a different session: %v", err)
 	}
 
@@ -119,31 +119,35 @@ func TestAcquireChatTurnFencesConcurrentAndRecoveredTurns(t *testing.T) {
 		WHERE namespace = ? AND name = ?`, now.Add(-time.Second), "default", "chat-session"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, "default", "chat-session", "task-a", "task-uid"); err != nil {
+	if err := s.AcquireLock(ctx, "default", "chat-session", "task-a", "task-uid", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock() did not reclaim an expired chat turn: %v", err)
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-b", now.Add(time.Minute)); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-b", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("AcquireChatTurn() stole an active Task lock: %v", err)
 	}
 	if err := s.ReleaseLock(ctx, "default", "chat-session", "task-a", "task-uid"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-b", now.Add(time.Minute)); err != nil {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-b", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatalf("AcquireChatTurn() did not recover expired reservation: %v", err)
 	}
-	if err := s.CommitSessionTurn(ctx, session, "turn-a", 0, []store.SessionMessage{{
-		Role: "user", Content: "stale",
-	}}, 1, 1); !errors.Is(err, store.ErrConflict) {
+	if err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "turn-a", ExpectedMessageCount: 0,
+		Messages: []store.SessionMessage{{
+			Role: "user", Content: "stale",
+		}},
+		InputTokens: 1, OutputTokens: 1, Now: time.Now().UTC(),
+	}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("recovered owner accepted stale commit: %v", err)
 	}
 
 	if err := s.ReleaseChatTurn(ctx, "default", "chat-session", "turn-b", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, "default", "chat-session", "task-b", "task-b-uid"); err != nil {
+	if err := s.AcquireLock(ctx, "default", "chat-session", "task-b", "task-b-uid", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-c", now.Add(time.Minute)); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-c", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("AcquireChatTurn() stole active Task lock: %v", err)
 	}
 
@@ -154,7 +158,7 @@ func TestAcquireChatTurnFencesConcurrentAndRecoveredTurns(t *testing.T) {
 	if err := s.CreateSession(ctx, gateway); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireChatTurn(ctx, gateway, "turn-gateway", now.Add(time.Minute)); !errors.Is(err, store.ErrGatewayOwnedSession) {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: gateway, TurnID: "turn-gateway", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); !errors.Is(err, store.ErrGatewayOwnedSession) {
 		t.Fatalf("AcquireChatTurn() gateway error = %v, want ErrGatewayOwnedSession", err)
 	}
 }
@@ -167,7 +171,7 @@ func TestCommitSessionTurnRejectsActiveTaskFence(t *testing.T) {
 		Namespace: "default", Name: "task-fenced-chat", SessionType: store.SessionTypeChat,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-fenced", now.Add(time.Minute)); err != nil {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-fenced", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET active_task = ?, active_task_uid = ?
@@ -175,10 +179,14 @@ func TestCommitSessionTurnRejectsActiveTaskFence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := s.CommitSessionTurn(ctx, session, "turn-fenced", 0, []store.SessionMessage{
-		{Role: "user", Content: "must not commit"},
-		{Role: "assistant", Content: "also fenced"},
-	}, 8, 5)
+	err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "turn-fenced", ExpectedMessageCount: 0,
+		Messages: []store.SessionMessage{
+			{Role: "user", Content: "must not commit"},
+			{Role: "assistant", Content: "also fenced"},
+		},
+		InputTokens: 8, OutputTokens: 5, Now: time.Now().UTC(),
+	})
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("CommitSessionTurn() active Task error = %v, want ErrConflict", err)
 	}
@@ -201,7 +209,7 @@ func TestReleaseChatTurnDeletesOnlyCreatedEmptySession(t *testing.T) {
 			Namespace: "default", Name: "new-empty-chat", SessionType: store.SessionTypeChat,
 			CreatedAt: now, UpdatedAt: now,
 		}
-		created, err := s.AcquireChatTurn(ctx, session, "turn-new-empty", now.Add(time.Minute))
+		created, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-new-empty", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,7 +232,7 @@ func TestReleaseChatTurnDeletesOnlyCreatedEmptySession(t *testing.T) {
 		if err := s.CreateSession(ctx, session); err != nil {
 			t.Fatal(err)
 		}
-		created, err := s.AcquireChatTurn(ctx, session, "turn-existing-empty", now.Add(time.Minute))
+		created, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-existing-empty", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -244,14 +252,18 @@ func TestReleaseChatTurnDeletesOnlyCreatedEmptySession(t *testing.T) {
 			Namespace: "default", Name: "new-committed-chat", SessionType: store.SessionTypeChat,
 			CreatedAt: now, UpdatedAt: now,
 		}
-		created, err := s.AcquireChatTurn(ctx, session, "turn-new-committed", now.Add(time.Minute))
+		created, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-new-committed", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.CommitSessionTurn(ctx, session, "turn-new-committed", 0, []store.SessionMessage{
-			{Role: "user", Content: "hello"},
-			{Role: "assistant", Content: "hi"},
-		}, 4, 2); err != nil {
+		if err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+			Session: session, TurnID: "turn-new-committed", ExpectedMessageCount: 0,
+			Messages: []store.SessionMessage{
+				{Role: "user", Content: "hello"},
+				{Role: "assistant", Content: "hi"},
+			},
+			InputTokens: 4, OutputTokens: 2, Now: time.Now().UTC(),
+		}); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.ReleaseChatTurn(ctx, "default", "new-committed-chat", "turn-new-committed", created); err != nil {
@@ -274,13 +286,17 @@ func TestCommitSessionTurnPreservesStableMessageOrderingAndUsage(t *testing.T) {
 	session := &store.SessionRecord{
 		Namespace: "default", Name: "atomic-chat", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-one", now.Add(time.Minute)); err != nil {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-one", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CommitSessionTurn(ctx, session, "turn-one", 0, []store.SessionMessage{
-		{Role: "user", Content: "hello", Timestamp: now},
-		{Role: "assistant", Content: "hi", Timestamp: now},
-	}, 13, 8); err != nil {
+	if err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "turn-one", ExpectedMessageCount: 0,
+		Messages: []store.SessionMessage{
+			{Role: "user", Content: "hello", Timestamp: now},
+			{Role: "assistant", Content: "hi", Timestamp: now},
+		},
+		InputTokens: 13, OutputTokens: 8, Now: time.Now().UTC(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReleaseChatTurn(ctx, "default", "atomic-chat", "turn-one", false); err != nil {
@@ -301,12 +317,16 @@ func TestCommitSessionTurnPreservesStableMessageOrderingAndUsage(t *testing.T) {
 		t.Fatalf("logical message orders = (%d, %d), want (2, 4)", got.Messages[0].Order, got.Messages[1].Order)
 	}
 
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-two", now.Add(time.Minute)); err != nil {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-two", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CommitSessionTurn(ctx, session, "turn-two", 2, []store.SessionMessage{{
-		Role: "user", Content: "again", Timestamp: now.Add(time.Second),
-	}}, 5, 3); err != nil {
+	if err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "turn-two", ExpectedMessageCount: 2,
+		Messages: []store.SessionMessage{{
+			Role: "user", Content: "again", Timestamp: now.Add(time.Second),
+		}},
+		InputTokens: 5, OutputTokens: 3, Now: time.Now().UTC(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.GetSession(ctx, "default", "atomic-chat")
@@ -325,13 +345,17 @@ func TestCommitSessionTurnRollsBackMessagesAndUsageTogether(t *testing.T) {
 	session := &store.SessionRecord{
 		Namespace: "default", Name: "rollback-chat", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-rollback", now.Add(time.Minute)); err != nil {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-rollback", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	err := s.CommitSessionTurn(ctx, session, "turn-rollback", 0, []store.SessionMessage{
-		{Role: "user", Content: "first"},
-		{Role: "assistant", Content: "invalid", Input: map[string]any{"bad": make(chan int)}},
-	}, 21, 34)
+	err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "turn-rollback", ExpectedMessageCount: 0,
+		Messages: []store.SessionMessage{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: "invalid", Input: map[string]any{"bad": make(chan int)}},
+		},
+		InputTokens: 21, OutputTokens: 34, Now: time.Now().UTC(),
+	})
 	if err == nil {
 		t.Fatal("CommitSessionTurn() succeeded with an unencodable message")
 	}
@@ -351,7 +375,7 @@ func TestCommitSessionTurnRejectsInterleavedTranscriptRevision(t *testing.T) {
 	session := &store.SessionRecord{
 		Namespace: "default", Name: "interleaved-chat", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "turn-interleaved", now.Add(time.Minute)); err != nil {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "turn-interleaved", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.AppendMessages(ctx, "default", "interleaved-chat", []store.SessionMessage{{
@@ -359,9 +383,13 @@ func TestCommitSessionTurnRejectsInterleavedTranscriptRevision(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CommitSessionTurn(ctx, session, "turn-interleaved", 0, []store.SessionMessage{{
-		Role: "user", Content: "chat message", Timestamp: now,
-	}}, 9, 4); !errors.Is(err, store.ErrConflict) {
+	if err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "turn-interleaved", ExpectedMessageCount: 0,
+		Messages: []store.SessionMessage{{
+			Role: "user", Content: "chat message", Timestamp: now,
+		}},
+		InputTokens: 9, OutputTokens: 4, Now: time.Now().UTC(),
+	}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("CommitSessionTurn() interleaved error = %v, want ErrConflict", err)
 	}
 	got, err := s.GetSession(ctx, "default", "interleaved-chat")

@@ -28,8 +28,9 @@ type SessionSoulReader interface {
 // SessionSoulWriter durably pins ordinary AI Session identity under its exact
 // Task lock before execution. It writes only digest metadata, never persona text.
 // An empty digest pins absence of a soul so an empty turn cannot permit later opt-in.
+// The owner must hold the Session's lock at owner.Now (see [SessionOwnerWrite]).
 type SessionSoulWriter interface {
-	EnsureSessionSoulWithLock(context.Context, string, string, string, string, string) error
+	EnsureSessionSoulWithLock(ctx context.Context, owner SessionOwnerWrite, digest string) error
 }
 
 // SessionSoulDigestMetadata is controller-authored prompt revision metadata, not

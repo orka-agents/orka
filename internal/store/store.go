@@ -31,3 +31,34 @@ type SecurityStore interface {
 	// The callback must use the supplied store and must not perform external mutations.
 	ApplyScanTaskIngestion(ctx context.Context, ingestion *ScanTaskIngestion, validate func(*ScanRun) error, apply func(SecurityStore, *ScanRun) error) (bool, error)
 }
+
+// MessageStore is the inter-agent message store Orka's consumers use. Its
+// GetMessages reads or consumes a Task's inbox in one call; the storage client
+// maps it onto the provider contract's ListUnreadMessages and ConsumeMessages.
+type MessageStore interface {
+	// SendMessage stores a new message. Use toTask="*" for broadcast.
+	SendMessage(ctx context.Context, msg *Message) error
+	// GetMessages returns up to MaxMessageBatch of the oldest unread messages
+	// in a Task's inbox, including broadcasts to its siblings, and marks
+	// exactly those read when markRead is set. A longer backlog is read over
+	// several calls.
+	GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]Message, error)
+	// DeleteTaskMessages deletes all messages involving a task (sent or received).
+	DeleteTaskMessages(ctx context.Context, namespace, taskName string) error
+	// DeleteParentMessages deletes all messages for children of a parent task.
+	DeleteParentMessages(ctx context.Context, namespace, parentTask string) error
+}
+
+// ReadMessages implements MessageStore.GetMessages over a provider: it
+// consumes the oldest batch of the inbox when markRead is set and lists it
+// otherwise.
+func ReadMessages(
+	ctx context.Context, provider storagev1.MessageStore, namespace, taskName, parentTask string, markRead bool,
+) ([]Message, error) {
+	if markRead {
+		return provider.ConsumeMessages(ctx, ConsumeMessagesRequest{
+			Namespace: namespace, TaskName: taskName, ParentTask: parentTask, Limit: MaxMessageBatch,
+		})
+	}
+	return provider.ListUnreadMessages(ctx, namespace, taskName, parentTask, MaxMessageBatch)
+}

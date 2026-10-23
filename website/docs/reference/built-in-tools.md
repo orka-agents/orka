@@ -167,8 +167,9 @@ phase when it has already finished.
 
 Siblings — children of the same coordinator — can message each other through the
 controller. `to_task: "*"` broadcasts to every sibling except the sender. `check_messages`
-returns unread messages addressed to the Task or broadcast to its siblings, and marks them
-read unless `mark_read` is false. Messages are deleted with the Tasks that own them.
+returns the oldest unread messages addressed to the Task or broadcast to its siblings, up to
+500 per call, and marks them read unless `mark_read` is false. A longer backlog is read over
+several calls. Messages are deleted with the Tasks that own them.
 
 ## GitHub tools
 

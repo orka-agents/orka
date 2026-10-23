@@ -150,11 +150,13 @@ func TestIsLockedClearsAnExpiredLockInsideAnOperation(t *testing.T) {
 	s := setupTestStore(t)
 	dataset := advanceTestEpoch(t, s, testWriteFence)
 	require.NoError(t, s.CreateSession(ctx, &store.SessionRecord{Namespace: "ns", Name: "session", SessionType: "task"}))
-	require.NoError(t, s.AcquireLockUntil(ctx, "ns", "session", "task-a", "uid-a", time.Now().UTC().Add(50*time.Millisecond)))
-	time.Sleep(100 * time.Millisecond)
+	acquiredAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, s.AcquireLockUntil(ctx, "ns", "session", "task-a", "uid-a", acquiredAt, acquiredAt.Add(time.Minute)))
 
-	lockedCtx, _ := testEnvelope(t, ctx, dataset, "IsLocked", time.Now().UTC(), "ns", "session", "task-b", "uid-b")
-	locked, err := s.IsLocked(lockedCtx, "ns", "session", "task-b", "uid-b")
+	// The lock is judged at the request time, when it has expired.
+	checkedAt := acquiredAt.Add(time.Minute)
+	lockedCtx, _ := testEnvelope(t, ctx, dataset, "IsLocked", time.Now().UTC(), "ns", "session", "task-b", "uid-b", checkedAt)
+	locked, err := s.IsLocked(lockedCtx, "ns", "session", "task-b", "uid-b", checkedAt)
 	require.NoError(t, err)
 	require.False(t, locked, "an expired lock is cleared")
 	sessions, err := s.ListSessions(ctx, "ns")
@@ -162,8 +164,8 @@ func TestIsLockedClearsAnExpiredLockInsideAnOperation(t *testing.T) {
 	require.Len(t, sessions, 1)
 	require.Empty(t, sessions[0].ActiveTaskUID)
 
-	require.NoError(t, s.AcquireLock(ctx, "ns", "session", "task-c", "uid-c"))
-	locked, err = s.IsLocked(lockedCtx, "ns", "session", "task-b", "uid-b")
+	require.NoError(t, s.AcquireLock(ctx, "ns", "session", "task-c", "uid-c", checkedAt))
+	locked, err = s.IsLocked(lockedCtx, "ns", "session", "task-b", "uid-b", checkedAt)
 	require.NoError(t, err)
 	require.False(t, locked, "a replay returns the original answer and changes nothing")
 	sessions, err = s.ListSessions(ctx, "ns")

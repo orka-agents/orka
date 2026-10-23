@@ -724,7 +724,8 @@ func (s *Store) freezeGatewayEventTaskRuntimeAllowedToolsWrite(
 	}
 	now = now.UTC()
 	if now.IsZero() {
-		now = time.Now().UTC()
+		// The claim is a lease, which is judged only at the request's time.
+		return nil, store.ValidationErrorf("the request time is required to check the claim")
 	}
 	result, err := s.taskDataExecutor(ctx).ExecContext(ctx, `UPDATE gateway_events
 		SET task_runtime_allowed_tools_json = ?, updated_at = ?

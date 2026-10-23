@@ -116,11 +116,11 @@ func (s *lossyStore) SendMessage(ctx context.Context, msg *store.Message) error 
 	return s.intercept(ctx, "SendMessage", func(ctx context.Context) error { return s.Store.SendMessage(ctx, msg) })
 }
 
-func (s *lossyStore) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
+func (s *lossyStore) ConsumeMessages(ctx context.Context, request store.ConsumeMessagesRequest) ([]store.Message, error) {
 	var messages []store.Message
-	err := s.intercept(ctx, "GetMessages", func(ctx context.Context) error {
+	err := s.intercept(ctx, "ConsumeMessages", func(ctx context.Context) error {
 		var err error
-		messages, err = s.Store.GetMessages(ctx, namespace, taskName, parentTask, markRead)
+		messages, err = s.Store.ConsumeMessages(ctx, request)
 		return err
 	})
 	if err != nil {
@@ -135,15 +135,15 @@ func (s *lossyStore) UpdateTokenCounts(ctx context.Context, namespace, name stri
 	})
 }
 
-func (s *lossyStore) UpdateTokenCountsWithLock(ctx context.Context, namespace, name, owner, ownerUID string, input, output int) error {
+func (s *lossyStore) UpdateTokenCountsWithLock(ctx context.Context, owner store.SessionOwnerWrite, input, output int) error {
 	return s.intercept(ctx, "UpdateTokenCountsWithLock", func(ctx context.Context) error {
-		return s.Store.UpdateTokenCountsWithLock(ctx, namespace, name, owner, ownerUID, input, output)
+		return s.Store.UpdateTokenCountsWithLock(ctx, owner, input, output)
 	})
 }
 
-func (s *lossyStore) ReleaseLockWithTokenUsage(ctx context.Context, namespace, name, owner, ownerUID string, input, output int) error {
+func (s *lossyStore) ReleaseLockWithTokenUsage(ctx context.Context, owner store.SessionOwnerWrite, input, output int) error {
 	return s.intercept(ctx, "ReleaseLockWithTokenUsage", func(ctx context.Context) error {
-		return s.Store.ReleaseLockWithTokenUsage(ctx, namespace, name, owner, ownerUID, input, output)
+		return s.Store.ReleaseLockWithTokenUsage(ctx, owner, input, output)
 	})
 }
 
@@ -237,7 +237,7 @@ func newLossyFixture(t *testing.T) *lossyFixture {
 
 func (f *lossyFixture) inbox(t *testing.T) []store.Message {
 	t.Helper()
-	messages, err := f.client.GetMessages(t.Context(), "tenant", "reader", "parent", false)
+	messages, err := f.client.ListUnreadMessages(t.Context(), "tenant", "reader", "parent", 0)
 	if err != nil {
 		t.Fatalf("read the inbox: %v", err)
 	}
@@ -286,19 +286,19 @@ func TestLostResponseReturnsTheOriginalOutcome(t *testing.T) {
 			t.Fatalf("inbox = %#v, want the one message", inbox)
 		}
 	})
-	t.Run("GetMessages consumes once", func(t *testing.T) {
+	t.Run("a consuming GetMessages consumes once", func(t *testing.T) {
 		f := newLossyFixture(t)
 		for _, content := range []string{"one", "two", "three"} {
 			if err := f.client.SendMessage(t.Context(), message(content)); err != nil {
 				t.Fatal(err)
 			}
 		}
-		f.lossy.plan("GetMessages", stepLose)
-		consumed, err := f.client.GetMessages(t.Context(), "tenant", "reader", "parent", true)
+		f.lossy.plan("ConsumeMessages", stepLose)
+		consumed, err := f.client.ConsumeMessages(t.Context(), store.ConsumeMessagesRequest{Namespace: "tenant", TaskName: "reader", ParentTask: "parent"})
 		if err != nil || len(consumed) != 3 {
 			t.Fatalf("consuming read = %d messages, %v; want the batch of 3", len(consumed), err)
 		}
-		if again, err := f.client.GetMessages(t.Context(), "tenant", "reader", "parent", true); err != nil || len(again) != 0 {
+		if again, err := f.client.ConsumeMessages(t.Context(), store.ConsumeMessagesRequest{Namespace: "tenant", TaskName: "reader", ParentTask: "parent"}); err != nil || len(again) != 0 {
 			t.Fatalf("second consuming read = %d messages, %v; want none", len(again), err)
 		}
 	})
@@ -321,15 +321,15 @@ func TestLostResponseReturnsTheOriginalOutcome(t *testing.T) {
 		if err := f.client.CreateSession(ctx, &store.SessionRecord{Namespace: "tenant", Name: "session", SessionType: "task"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := f.client.AcquireLock(ctx, "tenant", "session", "task", "uid-1"); err != nil {
+		if err := f.client.AcquireLock(ctx, "tenant", "session", "task", "uid-1", time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		f.lossy.plan("UpdateTokenCountsWithLock", stepLose)
-		if err := f.client.UpdateTokenCountsWithLock(ctx, "tenant", "session", "task", "uid-1", 2, 3); err != nil {
+		if err := f.client.UpdateTokenCountsWithLock(ctx, store.SessionOwnerWrite{Namespace: "tenant", Name: "session", OwnerName: "task", OwnerUID: "uid-1", Now: time.Now().UTC()}, 2, 3); err != nil {
 			t.Fatalf("UpdateTokenCountsWithLock: %v", err)
 		}
 		f.lossy.plan("ReleaseLockWithTokenUsage", stepLose)
-		if err := f.client.ReleaseLockWithTokenUsage(ctx, "tenant", "session", "task", "uid-1", 10, 20); err != nil {
+		if err := f.client.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "tenant", Name: "session", OwnerName: "task", OwnerUID: "uid-1", Now: time.Now().UTC()}, 10, 20); err != nil {
 			t.Fatalf("ReleaseLockWithTokenUsage: %v", err)
 		}
 		session := f.session(t)

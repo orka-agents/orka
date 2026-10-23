@@ -271,9 +271,10 @@ write without one.
   `AdvanceControllerEpoch`, `ResolveOperation`, `PruneOperationReceipts` and,
   until it is replaced, `SyncControllerEpochMirror` are administrative: they
   carry no envelope and are not checked against the current fence.
-  `GetMessages` counts as a write because it can mark messages read, until it
-  is split into a plain read and a consuming write, and so does `IsLocked`,
-  because SQLite clears an expired Task lock when it finds one. A contract
+  Reading an inbox is two methods, the plain read `ListUnreadMessages` and
+  the consuming write `ConsumeMessages`, so each is classified once.
+  `IsLocked` counts as a write, because SQLite clears an expired Task lock
+  when it finds one. A contract
   test fails when a provider interface method is missing from the catalog, so
   no new method can ship unclassified. A write may also name its natural key:
   request values, such as a dedupe key or a cleanup operation ID, by which the
@@ -378,13 +379,32 @@ write without one.
   with neither, such as a send or a counter update, must not be run again
   unless the caller can observe whether the first one committed.
 - **Messages, counters and chat turns.** Receipts make these retries safe: a
-  replayed `SendMessage` returns the assigned ID without a second message, a
-  replayed counter update adds nothing, a replayed chat-turn reservation or
-  commit returns its original outcome, and a replayed consuming message read
-  returns the same messages, which are marked read by ID. Consuming reads are
-  bounded per call. Before computing the digest, the client assigns transcript
-  message, memory and finding IDs and fills zero record times from
-  `IssuedAt`, so every retry sends the same request.
+  replayed `SendMessage` writes back the assigned ID and creation time
+  without a second message, a replayed counter update adds nothing, and a
+  replayed chat-turn reservation or commit returns its original outcome.
+  `ListUnreadMessages` returns the oldest unread messages of a Task's inbox,
+  ordered by ID, and changes nothing. `ConsumeMessages` returns them and
+  marks exactly those messages read, by ID, so a message the selection did
+  not return is never marked at any isolation level; its replay returns the
+  same messages, without any that Task cleanup deleted in between. Both
+  return at most `MaxMessageBatch` (500) messages per call, so a longer
+  backlog is read over several calls. Orka's own message store keeps one
+  `GetMessages(markRead)`, which the client maps onto the two. SQLite keeps
+  the consumed IDs with the receipt and reads the messages again on replay,
+  which is why a provider never reuses a message ID.
+- **Client-assigned identities and times.** Before computing a write's
+  digest, the storage client gives a transcript message without an ID a
+  UUIDv7 (in `AppendMessages`, `AppendMessagesWithLock` and
+  `CommitSessionTurn`), a memory or memory proposal without an ID one in the
+  `mem-` or `mprop-` form, and a dropped finding without an ID a `drop_`
+  hash, and fills their zero creation times, and a message's, with the
+  operation's `IssuedAt`. Every retry therefore sends the same request, and
+  no provider clock or ID generator decides what Orka stores. A transcript
+  message that already has an ID is the caller's natural key and keeps a zero
+  timestamp, because a provider matches a repeat of it without comparing a
+  zero timestamp. Finding IDs are already derived from fingerprints. A
+  provider still fills a value that a caller bypassing the client leaves
+  empty.
 - **Artifact and result identity.** Artifact writes and deletes are bound to
   the Task UID. A delete leaves a tombstone for that UID, which refuses a
   delayed save for the deleted Task. A replacement carries the envelope's
@@ -448,15 +468,48 @@ write without one.
   in the same request with stored times that came from requests. It never
   compares a caller's time with its own clock. Leases are therefore decided on
   the controller clock, and the commit-time fence makes an early reclaim after
-  a takeover harmless. A request's times are fixed for the operation and
-  covered by its digest, so a retry is judged at the original request time.
-  The provider clock is used only for operation age and the clock-skew check,
-  receipt and tombstone retention, `ObservedAt`, and informational times the
-  provider assigns when a caller leaves them zero. Orka estimates the clock
-  offset from `ObservedAt` and refuses writes while it exceeds
-  `MaxClockSkew`. Gateway claims, outbox claims and gateway message admission
-  already carry the request time and lease they need; chat turns, Session
-  locks and `IsLocked` gain them.
+  a takeover harmless: a new controller whose clock is ahead may reclaim a
+  lease early, but the old holder can no longer commit, and one whose clock
+  is behind resumes the work up to twice `MaxClockSkew` later. A request's
+  times are fixed for the operation and covered by its digest, so a retry is
+  judged at the original request time, which owner identity, not expiry,
+  makes harmless. Gateway claims, outbox claims and gateway message
+  admission carry the request time and lease they need. Chat turns and
+  Session locks carry them too: `AcquireChatTurnRequest` and
+  `CommitSessionTurnRequest` have `Now` (and the reservation's `ExpiresAt`);
+  `AppendMessagesWithLock`, `UpdateTokenCountsWithLock`,
+  `ReleaseLockWithTokenUsage` and `EnsureSessionSoulWithLock` take a
+  `SessionOwnerWrite` with the lock owner and `Now`; and `AcquireLock`,
+  `IsLocked` and `DeleteSession`, which reclaim or respect an expired chat
+  turn or transient lock, take `now`. A zero request time returns
+  `ErrValidation`. `PrepareSessionCleanup` judges the locks at the intent's
+  `PreparedAt`. Session mutation leases and prompt attempts are Kubernetes
+  resources and keep the controller clock there. The shared suite decides
+  every lease at request times months away from the wall clock, so a provider
+  that consults its own clock fails it.
+- **Provider clock and skew.** The provider clock is used only for operation
+  age and the future-skew check, receipt and tombstone retention,
+  `ObservedAt`, and informational times the provider assigns when a caller
+  leaves them zero. In SQLite the provider clock is the controller's, so the
+  two never differ. For a separate store, the storage client estimates the
+  offset from `ObservedAt` as `ObservedAt - (sent + received) / 2`, uncertain
+  by half the round trip, when the leader starts and every minute after
+  (`ClockMonitor`). While the offset exceeds `MaxClockSkew` (30 seconds) even
+  at the edge of that uncertainty, it refuses new writes to that dataset with
+  `ErrNotReady` and logs it, and it resumes them when a later check finds the
+  clocks back within bounds; it never restarts the controller over skew. A
+  provider that does not report `ObservedAt` is not checked. A provider also
+  refuses an `IssuedAt` more than `MaxClockSkew` in its future with
+  `ErrClockSkew`, which catches a fast controller clock without the check.
+  Which clock owns each time:
+
+  | Time | Clock |
+  | --- | --- |
+  | Chat turn reservations, Session locks, gateway and outbox claims, gateway message expiry | Controller, in the request |
+  | Session mutation leases and prompt attempts | Controller, in Kubernetes |
+  | Operation age, future skew, receipt and tombstone retention, `ObservedAt` | Provider |
+  | Creation times of messages, transcript messages, memories, proposals and dropped findings; execution event times | Controller, filled by the storage client |
+  | Other record times a caller leaves zero, such as artifact, result, monitor and security times | Provider, informational only |
 - **Durability and lost writes.** A nil error means the change and its
   receipt survive what the provider's `DurabilityClass` promises: an
   automatic switch loses no acknowledged write under `synchronous-replicated`;
@@ -522,15 +575,16 @@ the named step.
   that, so a provider serializes allocation per stream. Migration preserves
   these values.
 - **Clock ownership.** Callers supply lease times (`now` and lease durations)
-  and most record times. The provider assigns some: artifact and message
-  creation times, Task result timestamps, and in SQLite the repository monitor
-  times it fills when a caller leaves them zero or always sets, such as in
-  `UpsertRepositoryMonitor` and `CancelWorkActions`. Those two clocks diverge
-  once the store is a separate service. The lease-clock rule in "Write
-  envelopes, operation receipts and controller ownership" decides which side
-  owns each time; the request changes that carry lease times follow it.
-- **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents`,
-  `ListActiveScanRuns` and `GetMessages` return
+  and most record times; the storage client fills the creation times of
+  messages, transcript messages, memories, memory proposals and dropped
+  findings. The provider still assigns some informational times: artifact
+  creation times, Task result timestamps, and in SQLite the repository
+  monitor, security and usage times it fills when a caller leaves them zero
+  or always sets, such as in `UpsertRepositoryMonitor` and
+  `CancelWorkActions`. None of them decides a lease (see "Lease clocks"
+  above); moving them to the client follows the same pattern.
+- **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents` and
+  `ListActiveScanRuns` return
   every match. They gain limits and cursors in the same signature sweep as the
   write envelope.
 - **`state.v1` is a relational contract.** Several methods push joins and
@@ -683,6 +737,11 @@ Reads and administrative methods reach the provider unchanged.
   `ResolveOperation` finds too old to settle leaves the set with its outcome
   permanently unknown; holding the affected work for recovery comes with the
   recovery holds.
+- **Identities and clocks.** Above the decorators, the client fills the IDs
+  and creation times described in "Client-assigned identities and times",
+  and the write's envelope is issued at that same time. While the last clock
+  check found a dataset's clock more than `MaxClockSkew` away (see "Provider
+  clock and skew"), new writes to it are refused with `ErrNotReady`.
 - **Embedded families** pass through unchanged. They carry no envelope and
   SQLite does not require one for them; the Session turn steps keep checking
   the fence their requests carry.

@@ -1292,6 +1292,10 @@ func main() {
 		setupLog.Error(err, "unable to create the application storage client")
 		os.Exit(1)
 	}
+	if err := mgr.Add(&storageclient.ClockMonitor{Client: appStorage}); err != nil {
+		setupLog.Error(err, "unable to add the storage clock monitor")
+		os.Exit(1)
+	}
 	if usageRetention < 0 {
 		setupLog.Error(fmt.Errorf("usage retention must not be negative"), "invalid usage retention")
 		os.Exit(1)

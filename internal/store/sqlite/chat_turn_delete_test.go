@@ -15,7 +15,7 @@ func TestReleaseChatTurnPreservesPendingCleanup(t *testing.T) {
 	session := &store.SessionRecord{
 		Namespace: "default", Name: "pending-cleanup-chat", SessionType: store.SessionTypeChat,
 	}
-	created, err := s.AcquireChatTurn(ctx, session, "old-turn", time.Now().UTC().Add(time.Minute))
+	created, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "old-turn", Now: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestReleaseChatTurnPreservesPendingCleanup(t *testing.T) {
 	if _, err := s.GetSession(ctx, session.Namespace, session.Name); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("cleaned session remains: %v", err)
 	}
-	if _, err := s.AcquireChatTurn(ctx, session, "new-turn", time.Now().UTC().Add(time.Minute)); err != nil {
+	if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "new-turn", Now: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Minute)}); err != nil {
 		t.Fatalf("completed transcript cleanup blocked name reuse: %v", err)
 	}
 }
@@ -71,13 +71,17 @@ func TestDeleteSessionChatTurnLease(t *testing.T) {
 			session := &store.SessionRecord{
 				Namespace: "default", Name: "abandoned-chat", SessionType: store.SessionTypeChat,
 			}
-			if _, err := s.AcquireChatTurn(ctx, session, "abandoned-turn", time.Now().UTC().Add(time.Minute)); err != nil {
+			if _, err := s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "abandoned-turn", Now: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Minute)}); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.CommitSessionTurn(ctx, session, "abandoned-turn", 0, []store.SessionMessage{
-				{Role: "user", Content: "hello"},
-				{Role: "assistant", Content: "hi"},
-			}, 3, 2); err != nil {
+			if err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+				Session: session, TurnID: "abandoned-turn", ExpectedMessageCount: 0,
+				Messages: []store.SessionMessage{
+					{Role: "user", Content: "hello"},
+					{Role: "assistant", Content: "hi"},
+				},
+				InputTokens: 3, OutputTokens: 2, Now: time.Now().UTC(),
+			}); err != nil {
 				t.Fatal(err)
 			}
 			if tt.expired {
@@ -87,7 +91,7 @@ func TestDeleteSessionChatTurnLease(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := s.DeleteSession(ctx, session.Namespace, session.Name); !errors.Is(err, tt.wantError) {
+			if err := s.DeleteSession(ctx, session.Namespace, session.Name, time.Now().UTC()); !errors.Is(err, tt.wantError) {
 				t.Fatalf("DeleteSession() error = %v, want %v", err, tt.wantError)
 			}
 			if tt.wantError != nil {
@@ -110,9 +114,13 @@ func TestDeleteSessionChatTurnLease(t *testing.T) {
 			if messages != 0 {
 				t.Fatalf("deleted session left %d messages", messages)
 			}
-			if err := s.CommitSessionTurn(ctx, session, "abandoned-turn", 2, []store.SessionMessage{
-				{Role: "assistant", Content: "late response"},
-			}, 0, 1); !errors.Is(err, store.ErrNotFound) {
+			if err := s.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+				Session: session, TurnID: "abandoned-turn", ExpectedMessageCount: 2,
+				Messages: []store.SessionMessage{
+					{Role: "assistant", Content: "late response"},
+				},
+				InputTokens: 0, OutputTokens: 1, Now: time.Now().UTC(),
+			}); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("stale CommitSessionTurn() error = %v, want ErrNotFound", err)
 			}
 		})

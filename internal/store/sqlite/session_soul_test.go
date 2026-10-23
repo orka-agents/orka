@@ -29,7 +29,7 @@ func TestSessionSoulMetadataSurvivesTaskAndSourceChanges(t *testing.T) {
 	if err := s.ReleaseLock(ctx, "team", "s", "first", "first-uid"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, "team", "s", "second", "second-uid"); err != nil {
+	if err := s.AcquireLock(ctx, "team", "s", "second", "second-uid", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	state, err = s.ReadSessionSoul(ctx, "team", "s", "second", "second-uid")
