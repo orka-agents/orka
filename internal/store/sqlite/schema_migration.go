@@ -24,6 +24,7 @@ const (
 	schema167 = "01af383a41304d65579d5221976bf479c7e8561a4ec363ba41dcb5f4d571af6c" // #574, harness v1 tables removed
 	schema168 = "b7af032523fa2f524c19ceb897fc1807e6850a8c43fa6e0779d059f11fe2c133" // dataset identity
 	schema169 = "92dc2aed42f7ab139601f8a872e5f63eca6d37f0a22670dd2609cb7ba78f987d" // schema version 2: operation receipts and epoch advance
+	schema170 = "5d45c7c7be0ef77895e27fcb5a968bac9c08acbb0680c666d9277d48a57330dc" // schema version 3: write watermark
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -48,6 +49,9 @@ var migration167To168 string
 //go:embed migrations/168-to-169.sql
 var migration168To169 string
 
+//go:embed migrations/169-to-170.sql
+var migration169To170 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
@@ -63,6 +67,7 @@ func schemaMigrations() []schemaMigration {
 		{schema166, schema167, migration166To167, requireNoHarnessV1Records},
 		{schema167, schema168, migration167To168, nil},
 		{schema168, schema169, migration168To169, nil},
+		{schema169, schema170, migration169To170, nil},
 	}
 }
 
@@ -80,6 +85,7 @@ type versionUpgrade struct {
 func versionUpgrades() []versionUpgrade {
 	return []versionUpgrade{
 		{from: 1, to: 2, fromLayout: schema168, sql: migration168To169, toLayout: schema169},
+		{from: 2, to: 3, fromLayout: schema169, sql: migration169To170, toLayout: schema170},
 	}
 }
 

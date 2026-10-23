@@ -119,6 +119,7 @@ type StateProvider interface {
 	ControllerEpochMirror
 	ControllerEpochAdvancer
 	OperationReceiptStore
+	WriteWatermarkStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -147,5 +148,6 @@ type ArtifactProvider interface {
 	ProviderDescriber
 	ControllerEpochAdvancer
 	OperationReceiptStore
+	WriteWatermarkStore
 	ArtifactStore
 }

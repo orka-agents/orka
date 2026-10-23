@@ -1495,6 +1495,14 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// While storage is held for recovery, Orka starts no work. No storage
+	// write or control-store change guards a Job's creation, so the hold is
+	// checked before anything is prepared for it.
+	if holdErr := r.ControllerEpochManager.StorageHold(); holdErr != nil {
+		log.Info("not creating the Task Job while storage is held for recovery", "reason", holdErr.Error())
+		return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+	}
+
 	latest := &corev1alpha1.Task{}
 	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {

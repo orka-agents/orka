@@ -102,7 +102,9 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restoredAuthority := installationEpochStore{ControllerEpochStore: control, installationID: bound.InstallationID}
+	restoredAuthority := installationEpochStore{
+		ControllerEpochStore: control, memoryStorageRecords: newMemoryStorageRecords(), installationID: bound.InstallationID,
+	}
 	blockedID, err := promptAttemptIDFromTask(tasks[0])
 	if err != nil {
 		t.Fatal(err)

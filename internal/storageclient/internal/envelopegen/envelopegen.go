@@ -170,7 +170,9 @@ func (g *generator) decorator(out *bytes.Buffer, d decorator) error {
 		if info.Kind != storagev1.MethodWrite {
 			continue
 		}
-		if info.Contract != d.contract {
+		// A write every contract part serves, such as AdvanceWriteWatermark,
+		// runs under the fence of the decorated provider's own dataset.
+		if info.Contract != "" && info.Contract != d.contract {
 			return fmt.Errorf("%s.%s is a %s write, not a %s write", d.iface, method.Name, info.Contract, d.contract)
 		}
 		methods = append(methods, method)

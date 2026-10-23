@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
 	sqliteDriver "modernc.org/sqlite"
 )
@@ -176,7 +177,7 @@ func TestNewestHistoricalMigrationReproducesCurrentSchema(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 	steps := schemaMigrations()
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, steps[len(steps)-3:]))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, stepsFrom(t, steps, schema166)))
 	schema, err := readSchema(conn)
 	require.NoError(t, err)
 	require.NoError(t, validateSchema(schema, currentSchemaStatements()))
@@ -428,7 +429,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 				require.NoError(t, err)
 				after := readVersion1StoreState(t, s.db, path)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema169,
+					fingerprint:  schema170,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -486,7 +487,171 @@ func TestSchemaVersion1UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema169, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema170, readVersion1StoreState(t, s.db, path).fingerprint)
+	assertMigrationRecords(t, s.db, path)
+}
+
+// version2StoreStates lists the schema version 2 dataset states production
+// can leave on disk: each version 1 state as the version 1 to 2 step leaves
+// it, and finished stores that a controller epoch advance bound to an
+// installation and that hold an operation receipt.
+var version2StoreStates = []struct {
+	name         string
+	origin       string
+	complete     bool
+	advanced     bool
+	canBootstrap bool
+}{
+	{"new incomplete", datasetOriginNew, false, false, true},
+	{"new complete", datasetOriginNew, true, false, false},
+	{"adopted incomplete", datasetOriginAdopted, false, false, false},
+	{"adopted complete", datasetOriginAdopted, true, false, false},
+	{"new complete advanced", datasetOriginNew, true, true, false},
+	{"adopted complete advanced", datasetOriginAdopted, true, true, false},
+}
+
+// schemaVersion2StoreDB returns a schema version 2 store built only from frozen
+// inputs: a version 1 store from schemaVersion1StoreDB, the immutable
+// 168-to-169.sql step and user_version = 2. An advanced store also holds a
+// controller epoch that an advance stored, with the epoch it replaced, the
+// installation the advance bound, and one committed operation receipt. Upgrade
+// tests for the next layout start from this, not from a layout rebuilt from
+// historical DDL.
+func schemaVersion2StoreDB(t *testing.T, origin string, complete, advanced bool) (string, *sql.DB) {
+	t.Helper()
+	require.False(t, advanced && !complete, "an advanced store has finished its key bootstrap")
+	path, db := schemaVersion1StoreDB(t, origin, complete)
+	_, err := db.Exec(migration168To169)
+	require.NoError(t, err)
+	if advanced {
+		_, err = db.Exec(`INSERT INTO controller_epochs(name, epoch, holder_id, request_digest, version, acquired_at, updated_at,
+			previous_epoch, previous_holder_id, advanced_at)
+			VALUES('orka-controller', 2, 'controller-b', 'sha256:' || hex(zeroblob(32)), 2, '2026-10-01 00:00:00+00:00',
+			'2026-10-01 00:00:00+00:00', 1, 'controller-a', '2026-10-01 00:00:01+00:00')`)
+		require.NoError(t, err)
+		_, err = db.Exec(`UPDATE store_dataset SET installation_id = 'installation-a'`)
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO operation_receipts(operation_id, method, request_digest, state, fence_name, fence_epoch,
+			fence_holder, issued_at_ns, recorded_at_ns, result)
+			VALUES('op-1', 'SaveResult', 'sha256:' || hex(zeroblob(32)), 'committed', 'orka-controller', 2, 'controller-b', 1, 2, NULL)`)
+		require.NoError(t, err)
+	}
+	_, err = db.Exec(`PRAGMA user_version = 2`)
+	require.NoError(t, err)
+
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	// A literal digest, independent of schema169, as in schemaVersion1StoreDB.
+	require.Equal(t, "92dc2aed42f7ab139601f8a872e5f63eca6d37f0a22670dd2609cb7ba78f987d", schemaFingerprint(schema))
+	record, err := readDataset(db)
+	require.NoError(t, err)
+	require.Equal(t, origin, record.origin)
+	require.Equal(t, complete, record.complete)
+	return path, db
+}
+
+// A version 2 store that the previous release wrote upgrades in place: it
+// keeps its identity row, installation, records, receipts, controller epoch
+// and key bootstrap state, gains a write watermark of zero, and only its
+// layout and version change. A second open is current and does not back up
+// again.
+func TestSchemaVersion2StoreUpgradesInPlace(t *testing.T) {
+	for _, state := range version2StoreStates {
+		t.Run(state.name, func(t *testing.T) {
+			path, db := schemaVersion2StoreDB(t, state.origin, state.complete, state.advanced)
+			identity, err := readDataset(db)
+			require.NoError(t, err)
+			installation, err := readDatasetInstallation(t.Context(), db)
+			require.NoError(t, err)
+			rows := applicationRows(t, db)
+			if state.advanced {
+				require.Len(t, rows["controller_epochs"], 1)
+				require.Len(t, rows["operation_receipts"], 1)
+			}
+			require.NoError(t, db.Close())
+
+			for attempt := range 2 {
+				s, err := OpenLockedStore(path)
+				require.NoError(t, err)
+				after := readVersion1StoreState(t, s.db, path)
+				require.Equal(t, version1StoreState{
+					fingerprint:  schema170,
+					version:      SchemaVersion,
+					origin:       state.origin,
+					complete:     state.complete,
+					canBootstrap: state.canBootstrap,
+				}, after)
+				upgraded, err := readDataset(s.db)
+				require.NoError(t, err)
+				require.Equal(t, identity, upgraded)
+				upgradedInstallation, err := readDatasetInstallation(t.Context(), s.db)
+				require.NoError(t, err)
+				require.Equal(t, installation, upgradedInstallation)
+				require.Equal(t, rows, applicationRows(t, s.db))
+				watermark, err := s.GetWriteWatermark(t.Context())
+				require.NoError(t, err)
+				require.Equal(t, storagev1.WriteWatermark{DatasetID: identity.id}, watermark)
+				if state.advanced {
+					mirror, err := s.GetControllerEpochMirror(t.Context(), storagev1.DefaultControllerEpochName)
+					require.NoError(t, err)
+					require.Equal(t, int64(2), mirror.Epoch.Epoch)
+					require.Equal(t, "installation-a", mirror.InstallationID)
+					require.Equal(t, &storagev1.ControllerEpochFence{
+						Name: storagev1.DefaultControllerEpochName, Epoch: 1, HolderID: "controller-a",
+					}, mirror.Previous)
+				}
+				if state.origin == datasetOriginAdopted || state.complete {
+					assertMigrationRecords(t, s.db, path)
+				}
+				checkSQLiteIntegrity(t, s.db)
+				require.NoError(t, s.close())
+				backups := migrationBackups(t, path)
+				require.Len(t, backups, 1, "attempt %d", attempt)
+				backup := rawMigrationDB(t, backups[0])
+				backupSchema, err := readSchema(backup)
+				require.NoError(t, err)
+				require.Equal(t, schema169, schemaFingerprint(backupSchema))
+				backupVersion, err := readSchemaVersion(backup)
+				require.NoError(t, err)
+				require.Equal(t, 2, backupVersion)
+				backupIdentity, err := readDataset(backup)
+				require.NoError(t, err)
+				require.Equal(t, identity, backupIdentity)
+				require.NoError(t, backup.Close())
+			}
+		})
+	}
+}
+
+// A failed version 2 to 3 step leaves the version 2 store unchanged, and the
+// next open upgrades it.
+func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
+	path, db := schemaVersion2StoreDB(t, datasetOriginNew, true, true)
+	before, err := readDataset(db)
+	require.NoError(t, err)
+	beforeSchema := storedSchemaSQL(t, db)
+	beforeRows := applicationRows(t, db)
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	steps := versionUpgrades()
+	require.Equal(t, 2, steps[len(steps)-1].from)
+	steps[len(steps)-1].sql += `; SELECT no_such_function()`
+	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, steps[len(steps)-1:]))
+	require.NoError(t, conn.Close())
+	after, err := readDataset(db)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	version, err := readSchemaVersion(db)
+	require.NoError(t, err)
+	require.Equal(t, 2, version)
+	require.Equal(t, beforeSchema, storedSchemaSQL(t, db))
+	require.Equal(t, beforeRows, applicationRows(t, db))
+	require.NoError(t, db.Close())
+
+	s, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, s.close()) }()
+	require.Equal(t, schema170, readVersion1StoreState(t, s.db, path).fingerprint)
 	assertMigrationRecords(t, s.db, path)
 }
 
@@ -510,7 +675,7 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	conn, err := fixture.Conn(t.Context())
 	require.NoError(t, err)
 	steps := schemaMigrations()
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema168, steps[len(steps)-1:]))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema168, stepsFrom(t, steps, schema168)))
 	require.NoError(t, conn.Close())
 
 	for _, state := range version1StoreStates {
@@ -523,7 +688,7 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 
 			conn, err := db.Conn(t.Context())
 			require.NoError(t, err)
-			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema168, steps[len(steps)-1:]),
+			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema168, stepsFrom(t, steps, schema168)),
 				"unsupported SQLite schema version 1 before upgrade")
 			require.NoError(t, conn.Close())
 
@@ -534,6 +699,18 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 			require.Equal(t, beforeRows, applicationRows(t, db))
 		})
 	}
+}
+
+// stepsFrom returns the historical migration steps that start at layout from.
+func stepsFrom(t *testing.T, steps []schemaMigration, from string) []schemaMigration {
+	t.Helper()
+	for i, step := range steps {
+		if step.from == from {
+			return steps[i:]
+		}
+	}
+	t.Fatalf("no migration step starts at layout %s", from)
+	return nil
 }
 
 func rawMigrationDB(t *testing.T, path string) *sql.DB {

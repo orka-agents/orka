@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -115,7 +116,8 @@ func TestControllerSQLiteBootstrapRejectsSchemaBeforeKeyLoader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "newer.db")
 	db, err := sqlite.NewDB(path)
 	require.NoError(t, err)
-	_, err = db.Exec(`PRAGMA user_version=3`)
+	// A version newer than this release writes.
+	_, err = db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, sqlite.SchemaVersion+1))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	called := false

@@ -278,6 +278,7 @@ func main() {
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
+	var storeSQLiteSynchronous string
 	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
@@ -500,6 +501,9 @@ func main() {
 		"Maximum gateway events, deliveries, Session cleanup candidates, or Task cleanup receipts processed per iteration (capped at 100).")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
+	flag.StringVar(&storeSQLiteSynchronous, "store-sqlite-synchronous", string(sqlite.SynchronousNormal),
+		"SQLite synchronous mode: normal syncs the write-ahead log at checkpoints, so the latest commits can be lost "+
+			"if the node or its disk fails; full syncs every commit.")
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
 			"When set, executable agent Tasks freeze a write-once binding and encrypted snapshot before dispatch.")
@@ -1266,13 +1270,18 @@ func main() {
 
 	// Acquire SQLite exclusivity and validate durable dataset history before
 	// deciding whether an absent snapshot key may be created.
+	sqliteSynchronous, err := sqlite.ParseSynchronous(storeSQLiteSynchronous)
+	if err != nil {
+		setupLog.Error(err, "invalid --store-sqlite-synchronous")
+		os.Exit(1)
+	}
 	sqliteStore, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
 		if agentExecutionSnapshotSecretOpts.enabled() {
 			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
 		}
 		return loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
-	})
+	}, sqlite.WithSynchronous(sqliteSynchronous))
 	if err != nil {
 		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)

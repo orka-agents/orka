@@ -64,25 +64,83 @@ var stateFamilies = []stateFamily{
 	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
 		runWriteCatalog(t, newProvider, stateWriteCases)
 	}},
+	{"write-watermark", func(t *testing.T, newProvider StateFactory) {
+		runWriteWatermark(t, newProvider)
+	}},
+	{"installations", func(t *testing.T, newProvider StateFactory) {
+		runInstallations(t, newProvider)
+	}},
 }
 
-// RunState runs every state.v1 case against providers from newProvider.
-func RunState(t *testing.T, newProvider StateFactory) {
+// RunState runs every state.v1 case against providers from newProvider, and
+// the optional cases that options enable.
+func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	t.Helper()
+	selected := collectOptions(options)
 	for _, family := range stateFamilies {
 		t.Run(family.name, func(t *testing.T) {
 			family.run(t, newProvider)
 		})
 	}
+	runOptionalFamilies(t, newProvider, stateWriteCases, selected)
 }
 
-// RunArtifacts runs every artifacts.v1 case against providers from newProvider.
-func RunArtifacts(t *testing.T, newProvider ArtifactFactory) {
+// RunArtifacts runs every artifacts.v1 case against providers from
+// newProvider, and the optional cases that options enable.
+func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) {
 	t.Helper()
+	selected := collectOptions(options)
 	t.Run("artifacts", func(t *testing.T) {
 		runArtifacts(t, newProvider)
 	})
 	t.Run("write-envelopes", func(t *testing.T) {
 		runWriteCatalog(t, newProvider, artifactWriteCases)
 	})
+	t.Run("write-watermark", func(t *testing.T) {
+		runWriteWatermark(t, newProvider)
+	})
+	t.Run("installations", func(t *testing.T) {
+		runInstallations(t, newProvider)
+	})
+	runOptionalFamilies(t, newProvider, artifactWriteCases, selected)
+}
+
+// Option enables optional cases of RunState and RunArtifacts that need a
+// harness only the provider's own tests can supply.
+type Option func(*suiteOptions)
+
+type suiteOptions struct {
+	maintenance *MaintenanceHarness
+	durability  *DurabilityHarness
+}
+
+func collectOptions(options []Option) suiteOptions {
+	var selected suiteOptions
+	for _, option := range options {
+		option(&selected)
+	}
+	return selected
+}
+
+// runOptionalFamilies runs the cases the options enable over every write
+// case of a contract.
+func runOptionalFamilies[P suiteProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], selected suiteOptions) {
+	t.Helper()
+	if selected.maintenance != nil {
+		t.Run("maintenance", func(t *testing.T) {
+			runMaintenance(t, newProvider, cases, *selected.maintenance)
+		})
+	}
+	if selected.durability != nil {
+		t.Run("durability", func(t *testing.T) {
+			runDurability(t, newProvider, cases, *selected.durability)
+		})
+	}
+}
+
+// suiteProvider is what the cases that every contract shares need from a
+// provider.
+type suiteProvider interface {
+	writeCaseProvider
+	storagev1.WriteWatermarkStore
 }

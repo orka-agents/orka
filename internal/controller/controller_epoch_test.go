@@ -77,7 +77,10 @@ func TestControllerEpochManagerAdvancesStorageBeforeReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = mirrorDB.Close() })
-	authority := installationEpochStore{ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), installationID: "installation-a"}
+	authority := installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: newMemoryStorageRecords(),
+		installationID: "installation-a",
+	}
 	mirror := sqlite.NewStore(mirrorDB, "mirror")
 	manager := NewControllerEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, mirror)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -477,6 +480,8 @@ const (
 )
 
 type retainedIntentEpochStore struct {
+	memoryStorageRecords
+
 	current  *store.ControllerEpoch
 	changes  []store.ControllerEpochCAS
 	conflict retainedIntentEpochConflict
@@ -572,6 +577,9 @@ type recordingEpochDataset struct {
 	advanceErrs []error
 	// describeErrs, when non-empty, fail the next descriptions in order.
 	describeErrs []error
+	// watermark is the fake dataset's write watermark.
+	watermark   int64
+	watermarkAt time.Time
 }
 
 func newRecordingEpochDataset(datasetID string) *recordingEpochDataset {
@@ -633,9 +641,10 @@ func (d *recordingEpochDataset) advanceRequests() []storagev1.AdvanceControllerE
 }
 
 // installationEpochStore gives an epoch store without its own installation
-// record a fixed installation ID.
+// record a fixed installation ID, and keeps its storage record in memory.
 type installationEpochStore struct {
 	store.ControllerEpochStore
+	*memoryStorageRecords
 	installationID string
 }
 

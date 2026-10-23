@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,7 +38,44 @@ func init() {
 // busy timeout, synchronous mode, and foreign keys. It creates or validates the
 // current schema; upgrades require OpenLockedStore's exclusive controller lock.
 func NewDB(path string) (*sql.DB, error) {
-	return newDB(path, false)
+	return newDB(path, false, SynchronousNormal)
+}
+
+// Synchronous is the SQLite synchronous mode a store commits under, which
+// decides the durability class it reports.
+type Synchronous string
+
+const (
+	// SynchronousNormal syncs the write-ahead log only at checkpoints. A
+	// commit survives a process restart, but the most recent commits can be
+	// lost if the host or its storage fails first. Describe reports
+	// local-buffered. It is the default.
+	SynchronousNormal Synchronous = "normal"
+	// SynchronousFull syncs the write-ahead log on every commit, so a commit
+	// also survives a host failure. Describe reports local-fsync. Each commit
+	// waits for the sync, which limits the single writer on slow storage.
+	SynchronousFull Synchronous = "full"
+)
+
+// ParseSynchronous parses a synchronous mode name, normal or full.
+func ParseSynchronous(value string) (Synchronous, error) {
+	switch mode := Synchronous(strings.ToLower(strings.TrimSpace(value))); mode {
+	case SynchronousNormal, SynchronousFull:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unknown SQLite synchronous mode %q; use normal or full", value)
+	}
+}
+
+func (mode Synchronous) pragma() (string, error) {
+	switch mode {
+	case "", SynchronousNormal:
+		return "PRAGMA synchronous=NORMAL", nil
+	case SynchronousFull:
+		return "PRAGMA synchronous=FULL", nil
+	default:
+		return "", fmt.Errorf("unknown SQLite synchronous mode %q", mode)
+	}
 }
 
 // sqliteDSN makes the driver write and read every time.Time in UTC. SQL
@@ -53,7 +91,11 @@ func sqliteDSN(path string) string {
 	return path + separator + "_timezone=UTC"
 }
 
-func newDB(path string, allowMigration bool) (*sql.DB, error) {
+func newDB(path string, allowMigration bool, synchronous Synchronous) (*sql.DB, error) {
+	synchronousPragma, err := synchronous.pragma()
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
@@ -70,7 +112,7 @@ func newDB(path string, allowMigration bool) (*sql.DB, error) {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA synchronous=NORMAL",
+		synchronousPragma,
 		"PRAGMA foreign_keys=ON",
 		// Deleted content is overwritten with zeros rather than left in free
 		// pages: connector custody rows are crypto-shredded on disconnect,
@@ -1015,32 +1057,59 @@ type Store struct {
 	// writeState, when set by a test, replaces the dataset write state, which
 	// is always ready for an open SQLite store.
 	writeState func() storagev1.DatasetState
+
+	// incarnation identifies this open of the database. Describe reports it,
+	// so a new value tells Orka the store restarted.
+	incarnation string
 }
 
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	s := &Store{db: db, dbPath: dbPath, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
+	s := &Store{
+		db: db, dbPath: dbPath, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes,
+		incarnation: uuid.NewString(),
+	}
 	s.pendingWALTruncate.Store(true)
 	return s
+}
+
+// OpenOption configures OpenLockedStore.
+type OpenOption func(*openOptions)
+
+type openOptions struct {
+	synchronous Synchronous
+}
+
+// WithSynchronous selects the synchronous mode the store commits under.
+// Without it, a store uses SynchronousNormal.
+func WithSynchronous(mode Synchronous) OpenOption {
+	return func(options *openOptions) { options.synchronous = mode }
 }
 
 // OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
 // path before SQLite is opened. Production controller wiring must use this
 // constructor so overlapping Pods or releases cannot initialize or write
 // the same database even if Kubernetes ownership fencing is misconfigured.
-func OpenLockedStore(path string) (*Store, error) {
+func OpenLockedStore(path string, options ...OpenOption) (*Store, error) {
+	selected := openOptions{synchronous: SynchronousNormal}
+	for _, option := range options {
+		option(&selected)
+	}
+	if _, err := selected.synchronous.pragma(); err != nil {
+		return nil, err
+	}
 	lock, err := lockDatabaseFile(path)
 	if err != nil {
 		return nil, err
 	}
-	db, err := newDB(path, true)
+	db, err := newDB(path, true, selected.synchronous)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
-	store := &Store{db: db, dbPath: path, processLock: lock, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
-	store.pendingWALTruncate.Store(true)
+	store := NewStore(db, path)
+	store.processLock = lock
 	return store, nil
 }
 

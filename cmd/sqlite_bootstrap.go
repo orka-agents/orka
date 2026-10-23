@@ -10,9 +10,9 @@ import (
 // schema/identity validation, key loading, authentication of retained encrypted
 // records and durable bootstrap completion all precede controller consumers.
 func openControllerSQLiteStore(
-	path string, loadKey func(sqlite.DatasetInfo) ([]byte, error),
+	path string, loadKey func(sqlite.DatasetInfo) ([]byte, error), options ...sqlite.OpenOption,
 ) (*sqlite.Store, []byte, error) {
-	s, err := sqlite.OpenLockedStore(path)
+	s, err := sqlite.OpenLockedStore(path, options...)
 	if err != nil {
 		return nil, nil, err
 	}

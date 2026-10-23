@@ -308,6 +308,12 @@ func runConcurrentReplays[P writeCaseProvider](t *testing.T, provider P, c write
 	return outcomes
 }
 
+// servesContract reports whether contract's provider serves a method: a
+// method of that part, or one every part serves.
+func servesContract(info storagev1.MethodInfo, contract string) bool {
+	return info.Contract == "" || info.Contract == contract
+}
+
 // uncoveredWrites checks cases against the method catalog and returns, sorted,
 // the write methods of contract that no case covers. A case for an unknown
 // method, for a method that is not a write of contract, or for a method that
@@ -319,7 +325,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 		switch {
 		case !ok:
 			return nil, fmt.Errorf("write case %q names no contract method", c.method)
-		case info.Kind != storagev1.MethodWrite || info.Contract != contract:
+		case info.Kind != storagev1.MethodWrite || !servesContract(info, contract):
 			return nil, fmt.Errorf("write case %q is not a %s write", c.method, contract)
 		case covered[c.method]:
 			return nil, fmt.Errorf("write case %q is listed twice", c.method)
@@ -328,7 +334,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 	}
 	var uncovered []string
 	for name, info := range storagev1.Methods() {
-		if info.Kind == storagev1.MethodWrite && info.Contract == contract && !covered[name] {
+		if info.Kind == storagev1.MethodWrite && servesContract(info, contract) && !covered[name] {
 			uncovered = append(uncovered, name)
 		}
 	}

@@ -865,6 +865,9 @@ func (s *Store) syncControllerEpochStatus(
 			return err
 		}
 		if decision.writeStatus {
+			// The storage acknowledgements, any storage recovery hold and the
+			// conditions belong to the installation, not to one epoch, so
+			// they carry across every epoch the mirror records.
 			object.Status = corev1alpha1.ControllerEpochStatus{
 				Epoch:                epoch.Epoch,
 				HolderID:             epoch.HolderID,
@@ -874,6 +877,9 @@ func (s *Store) syncControllerEpochStatus(
 				UpdatedAt:            metaTime(epoch.UpdatedAt),
 				LeaseName:            lease.Name,
 				LeaseResourceVersion: lease.ResourceVersion,
+				StorageEpochs:        object.Status.StorageEpochs,
+				StorageRecovery:      object.Status.StorageRecovery,
+				Conditions:           object.Status.Conditions,
 			}
 			if err := s.client.Status().Update(ctx, object); err != nil {
 				return err

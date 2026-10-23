@@ -39,8 +39,10 @@ type MethodInfo struct {
 	Kind MethodKind
 	// Contract is the contract part whose provider serves the method,
 	// StateContract or ArtifactsContract, or empty for a method every part
-	// serves, such as Describe. Orka fences writes per dataset, so a write
-	// waits only for the fence of the dataset that serves its own contract.
+	// serves, such as Describe or AdvanceWriteWatermark. Orka fences writes
+	// per dataset, so a write waits only for the fence of the dataset that
+	// serves its own contract; a write every part serves waits for the
+	// dataset of the provider it is called on.
 	Contract string
 	// NaturalKey lists, separated by ", ", the request values by which the
 	// provider recognizes a repeat of a write's effect. While the record or
@@ -63,9 +65,10 @@ func LookupMethod(name string) (MethodInfo, bool) {
 }
 
 // Methods returns a copy of the method catalog, keyed by method name. It lists
-// every method of [StateProvider], [ArtifactProvider], [OperationReceiptStore]
-// and [ControllerEpochAdvancer], so a storage client, a transport or the
-// shared suite can tell reads from writes without guessing from names.
+// every method of [StateProvider], [ArtifactProvider], [OperationReceiptStore],
+// [ControllerEpochAdvancer] and [WriteWatermarkStore], so a storage client, a
+// transport or the shared suite can tell reads from writes without guessing
+// from names.
 func Methods() map[string]MethodInfo {
 	return maps.Clone(methodCatalog)
 }
@@ -83,6 +86,7 @@ var methodCatalog = map[string]MethodInfo{
 	"AcquireLock":                               stateWrite(""),
 	"AdmitGatewayEvent":                         stateWrite("$1.Event.Namespace, $1.Event.GatewayUID, $1.Event.ExternalEventID"),
 	"AdvanceControllerEpoch":                    {Kind: MethodAdmin},
+	"AdvanceWriteWatermark":                     {Kind: MethodWrite},
 	"AppendExecutionEvent":                      stateWrite(""),
 	"AppendExecutionEventIfAbsent":              stateWrite("$1.Namespace, $1.StreamType, $1.StreamID, $2"),
 	"AppendExecutionEventWithPlanIfAbsent":      stateWrite("$1.Namespace, $1.StreamType, $1.StreamID, $2"),
@@ -182,6 +186,7 @@ var methodCatalog = map[string]MethodInfo{
 	"GetSessionTurnCleanupReceipt": stateRead(),
 	"GetSessionType":               stateRead(),
 	"GetWorkAction":                stateRead(),
+	"GetWriteWatermark":            {Kind: MethodRead},
 	"HasGatewayTaskTombstone":      stateRead(),
 	"HasSessionCleanupFenceForUID": stateRead(),
 	"HasSessionCleanupIntent":      stateRead(),

@@ -20,6 +20,7 @@ var catalogInterfaces = map[string]reflect.Type{
 	"ArtifactProvider":        reflect.TypeFor[storagev1.ArtifactProvider](),
 	"OperationReceiptStore":   reflect.TypeFor[storagev1.OperationReceiptStore](),
 	"ControllerEpochAdvancer": reflect.TypeFor[storagev1.ControllerEpochAdvancer](),
+	"WriteWatermarkStore":     reflect.TypeFor[storagev1.WriteWatermarkStore](),
 }
 
 // readPrefixes are the name prefixes of methods that change nothing.
@@ -95,6 +96,8 @@ func TestMethodCatalogKinds(t *testing.T) {
 		"IsLocked":                  storagev1.MethodWrite,
 		"Describe":                  storagev1.MethodRead,
 		"SaveArtifact":              storagev1.MethodWrite,
+		"AdvanceWriteWatermark":     storagev1.MethodWrite,
+		"GetWriteWatermark":         storagev1.MethodRead,
 	} {
 		info, ok := storagev1.LookupMethod(name)
 		require.True(t, ok, name)

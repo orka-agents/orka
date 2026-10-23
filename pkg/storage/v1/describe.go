@@ -28,8 +28,22 @@ func IsValidDatasetOrigin(origin DatasetOrigin) bool {
 	}
 }
 
-// DurabilityClass states what a successful write survives. Orka uses it to
-// decide whether automatic continuation after a provider failover is safe.
+// DurabilityClass states what a successful write survives. A nil error from
+// a write means that the change and its operation receipt, which commit
+// together, survive every failure the class promises to survive. Orka uses it
+// to decide whether to continue automatically after it detects that the
+// serving database restarted or switched (see [ProviderInfo.Incarnation]):
+//
+//   - synchronous-replicated: continue once the dataset validates again.
+//   - local-fsync and local-buffered: there is no automatic switch; a
+//     restart is validated again and work continues.
+//   - async-replicated: stop all work until an operator acknowledges the
+//     recovery, because the switch may have lost acknowledged writes.
+//
+// In every class, a dataset that holds a lower controller epoch or write
+// watermark than Kubernetes recorded for it has lost acknowledged writes, and
+// Orka stops all work until an operator acknowledges the recovery (see
+// [WriteWatermarkStore]).
 type DurabilityClass string
 
 const (
@@ -45,6 +59,8 @@ const (
 	// storage without a sync on every commit. It survives a process restart,
 	// but the most recent acknowledged writes can be lost if the host or its
 	// storage fails before they are synced. There is no automatic failover.
+	// A host failure looks like a restart, so Orka detects such a loss only
+	// through the controller epoch and write watermark it recorded.
 	DurabilityLocalBuffered DurabilityClass = "local-buffered"
 	// DurabilityAsyncReplicated acknowledges a write before every replica has
 	// it, so an automatic failover may lose acknowledged writes.
@@ -91,7 +107,11 @@ const (
 	// DatasetMigrating marks a dataset whose schema is changing. New writes
 	// return ErrNotReady and commit nothing until the migration finishes; a
 	// replay of a committed operation is still served, and reads keep
-	// working.
+	// working. A provider enters it in a transaction that takes the same lock
+	// as AdvanceControllerEpoch, so writes in progress finish first, records
+	// the new schema version, and returns to DatasetReady. A dataset left
+	// migrating by a crash refuses new writes until the migration runs again,
+	// and concurrent migrations serialize.
 	DatasetMigrating DatasetState = "migrating"
 	// DatasetImporting marks a dataset receiving a migration import. New
 	// writes return ErrNotReady and commit nothing until the import finishes.
@@ -108,9 +128,11 @@ func IsValidDatasetState(state DatasetState) bool {
 	}
 }
 
-// ProviderInfo describes a provider and the dataset it serves. It exists for
-// startup validation of a storage binding, installation binding and
-// migration; Orka does not read it yet.
+// ProviderInfo describes a provider and the dataset it serves, for startup
+// validation of a storage binding, installation binding and migration. Orka
+// reads the dataset ID, state, incarnation and durability class when it
+// takes over a dataset and while it runs, to detect lost writes and database
+// switches.
 type ProviderInfo struct {
 	// ContractVersion is the contract the provider implements, ContractVersion
 	// for this package.
@@ -139,7 +161,11 @@ type ProviderInfo struct {
 	State DatasetState
 	// Incarnation changes whenever the serving database may have restarted or
 	// switched to another node, so Orka can validate the dataset again before
-	// trusting it. It is empty when the provider does not report it yet.
+	// trusting it. It stays the same while the serving database has neither
+	// restarted nor switched. When it changes, Orka checks the dataset's
+	// identity, state, controller epoch and write watermark again, and acts on
+	// Durability as [DurabilityClass] describes. It is empty when the
+	// provider does not report it yet.
 	Incarnation string
 	// ObservedAt is the provider clock when Describe ran, so Orka can estimate
 	// the clock difference between itself and the provider. It is zero when

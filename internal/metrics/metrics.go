@@ -138,6 +138,16 @@ var (
 		[]string{"action", labelReason},
 	)
 
+	// StorageRecoveryHold is 1 while the installation is held for storage
+	// recovery, labeled by the reason the hold records, and 0 otherwise.
+	StorageRecoveryHold = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_storage_recovery_hold",
+			Help: "1 while the installation is held for storage recovery, by the reason the hold records",
+		},
+		[]string{labelReason},
+	)
+
 	ACPRuntimePoolDesiredReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "orka_acp_runtime_pool_desired_replicas",
@@ -315,6 +325,7 @@ func init() {
 	metrics.Registry.MustRegister(
 		ApprovalDecisionDuration,
 		ACPWorkspaceRetentionActionsTotal,
+		StorageRecoveryHold,
 		APIRequestsTotal,
 		APIRequestDuration,
 		SkillsLoaded,

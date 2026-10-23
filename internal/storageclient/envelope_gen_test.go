@@ -69,7 +69,7 @@ func TestDecoratorsDeclareExactlyTheWrites(t *testing.T) {
 			isWrite := info.Kind == storagev1.MethodWrite
 			if isWrite {
 				writes++
-				if info.Contract != tc.contract {
+				if info.Contract != "" && info.Contract != tc.contract {
 					t.Errorf("%s is a %s write served by the %s provider", name, info.Contract, tc.contract)
 				}
 			}

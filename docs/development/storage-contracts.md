@@ -156,13 +156,18 @@ the observable parts.
   sequence to come from one snapshot while streams are appended to and
   deleted, and one requires a Session UID to stay fenced while its cleanup
   intent is replaced by a completion.
-- **Durability.** A nil error means the change survives a provider restart and
-  any failover the provider declares automatic. `Describe` reports a
-  `DurabilityClass` so Orka can refuse automatic continuation after a failover
-  that may lose acknowledged writes. The embedded SQLite store reports
-  `local-buffered`: it runs in WAL mode with `synchronous=NORMAL`, so a commit
-  survives a process restart, but the most recent commits can be lost if the
-  host fails before the WAL is synced.
+- **Durability.** A nil error means the change and its operation receipt,
+  which commit together, survive what the provider's `DurabilityClass`
+  promises: a provider restart, and any failover the provider declares
+  automatic. `Describe` reports the class so Orka can refuse automatic
+  continuation after a failover that may lose acknowledged writes (see
+  "Durability, switch detection and recovery holds" below). The embedded
+  SQLite store runs in WAL mode. By default it uses `synchronous=NORMAL` and
+  reports `local-buffered`: a commit survives a process restart, but the most
+  recent commits can be lost if the host fails before the WAL is synced. With
+  `--store-sqlite-synchronous=full` (chart value `store.sqliteSynchronous`) it
+  syncs every commit and reports `local-fsync`; `Describe` reads the mode the
+  connection actually uses.
 - **No cross-contract transactions.** No operation or transaction spans
   `state.v1` and `artifacts.v1`. Today the embedded store's task-data
   transaction also covers `SaveArtifact`; that is an embedded-family behavior,
@@ -203,13 +208,17 @@ the observable parts.
   `ProviderInfo`: the contract version and parts served, the dataset ID and
   its origin (`new`, `adopted` or `migrated`), the provider's schema version,
   optional capabilities beyond the contract parts (none in v1), size limits
-  and the durability class. It is there for startup validation (step 4),
-  installation binding (step 5) and migration; nothing in Orka calls it yet.
-  It also has fields for the dataset's write state (`ready`, `migrating` or
-  `importing`), an `Incarnation` that changes when the serving database may
-  have restarted or switched, the provider clock when `Describe` ran
-  (`ObservedAt`), and the operation receipt retention and result limit. They
-  stay empty until providers report them.
+  and the durability class. It also reports the dataset's write state
+  (`ready`, `migrating` or `importing`), an `Incarnation` that changes when
+  the serving database may have restarted or switched and stays the same
+  otherwise, the provider clock when `Describe` ran (`ObservedAt`), and the
+  operation receipt retention and result limit. The controller epoch manager
+  reads the dataset ID, state, incarnation and durability class at takeover
+  and once a minute; startup validation (step 4), installation binding (step
+  5) and migration build on it. SQLite reports `ready` (it upgrades its
+  schema while it opens, under its process lock) and an incarnation that is
+  new each time the store opens; `ObservedAt` stays empty until providers
+  report it.
 - **Times.** A provider preserves every caller-supplied time exactly, to the
   nanosecond, and returns stored times in UTC. Connector consent and
   completion encryption bind `ExpiresAt.UTC().UnixNano()` into associated
@@ -252,11 +261,11 @@ the observable parts.
 These rules make retried writes safe and keep a replaced controller from
 writing (#512 step 3). The types are in `pkg/storage/v1`: `WriteEnvelope`,
 `RequestDigest`, the method catalog (`LookupMethod`, `Methods`),
-`OperationReceiptStore`, `ControllerEpochAdvancer`, the errors
-`ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted` and
-`ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
-`OperationReceiptStore` and `ControllerEpochAdvancer`, and check every write
-when it commits. SQLite does, and the shared suite's
+`OperationReceiptStore`, `ControllerEpochAdvancer`, `WriteWatermarkStore`,
+the errors `ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted`
+and `ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
+`OperationReceiptStore`, `ControllerEpochAdvancer` and `WriteWatermarkStore`,
+and check every write when it commits. SQLite does, and the shared suite's
 write catalog (`storagetest`) runs the dataset, receipt, age, fence and
 resolution checks for every write method except `CompleteScanTaskIngestion`,
 which joins the catalog when scan ingestion becomes a conditional command.
@@ -273,7 +282,10 @@ write without one.
   carry no envelope and are not checked against the current fence.
   `GetMessages` counts as a write because it can mark messages read, until it
   is split into a plain read and a consuming write, and so does `IsLocked`,
-  because SQLite clears an expired Task lock when it finds one. A contract
+  because SQLite clears an expired Task lock when it finds one.
+  `AdvanceWriteWatermark` is a write that both contract parts serve, so its
+  catalog entry names no contract; it carries the envelope of the dataset
+  that serves the provider it is called on. A contract
   test fails when a provider interface method is missing from the catalog, so
   no new method can ship unclassified. A write may also name its natural key:
   request values, such as a dedupe key or a cleanup operation ID, by which the
@@ -406,20 +418,24 @@ write without one.
   successful advance, including a repeat of the stored epoch. The advance
   waits for fenced writes in progress, and once it returns, no write with an
   older fence commits, however long it was delayed. At takeover Orka
-  acquires the epoch in Kubernetes and then, for each distinct dataset it is
-  bound to:
-  1. advances the dataset;
-  2. stops for recovery if the dataset's previous epoch is below the epoch it
-     acknowledged earlier, because the store lost an acknowledged advance;
-  3. records the new acknowledgement in Kubernetes, in the ControllerEpoch
-     status until an installation record exists;
-  4. opens that dataset's fence for writes.
+  acquires the epoch in Kubernetes and then, for each storage contract:
+  1. stops for recovery if the contract is served by another dataset than the
+     one that acknowledged it before, because that is a storage switch;
+  2. reads the epoch and write watermark the dataset holds, once per distinct
+     dataset;
+  3. stops for recovery if it holds a lower epoch or watermark than any
+     contract acknowledged on it, because the store lost acknowledged writes
+     or was restored from an older copy. The dataset is advanced, to fence
+     out the replaced controller, only after the hold that keeps this
+     evidence is recorded;
+  4. advances the dataset, once, with the exact record the compare-and-swap
+     produced and the ControllerEpoch UID;
+  5. records the acknowledgement in Kubernetes, in the ControllerEpoch status
+     until an installation record exists;
+  6. opens that contract's fence for writes.
 
-  The controller epoch manager does steps 1 and 4 today: it advances each
-  dataset with the exact record the compare-and-swap produced and the
-  ControllerEpoch UID, and refuses to open a dataset whose advance is
-  refused. Recording acknowledgements and the rollback check in steps 2 and 3
-  come with the recovery holds.
+  A dataset whose advance is refused stops the manager. "Durability, switch
+  detection and recovery holds" below describes the record and the holds.
 
   Each dataset's fence opens independently, and a write waits only for the
   fence of the contract that serves it (`MethodInfo.Contract`), so an
@@ -443,7 +459,8 @@ write without one.
   either carries its operation receipts and aborted records with it or gives
   the imported dataset a new dataset ID, so a resolution can never report a
   committed operation as aborted. `Describe` reports the state. SQLite keeps
-  its process lock as well.
+  its process lock as well. "Writer exclusivity and schema migration for
+  adapters" below lists what a network provider does instead.
 - **Lease clocks.** A provider decides a lease only by comparing times passed
   in the same request with stored times that came from requests. It never
   compares a caller's time with its own clock. Leases are therefore decided on
@@ -458,27 +475,26 @@ write without one.
   already carry the request time and lease they need; chat turns, Session
   locks and `IsLocked` gain them.
 - **Durability and lost writes.** A nil error means the change and its
-  receipt survive what the provider's `DurabilityClass` promises: an
-  automatic switch loses no acknowledged write under `synchronous-replicated`;
-  `local-fsync` survives a host crash; `local-buffered`, the SQLite default,
-  may lose the latest writes in a host crash; and `async-replicated` may lose
-  acknowledged writes in a switch. `Describe` reports an `Incarnation` that
-  changes when the database may have restarted or switched. After a change,
-  Orka validates the dataset again and checks that the store still holds the
-  current epoch. After a switch of an `async-replicated` provider, it stops
-  all work until an operator acknowledges the switch.
+  receipt survive what the provider's `DurabilityClass` promises, and a
+  provider reports an `Incarnation` that changes when its database may have
+  restarted or switched. Orka checks a dataset again after every change and
+  holds the installation when the dataset lost acknowledged writes, or when
+  an `async-replicated` dataset switched. See "Durability, switch detection
+  and recovery holds" below.
 - **Detection and recovery holds.** Orka detects missing or conflicting
   records at three levels. At the dataset level, a store's epoch is below its
-  Kubernetes acknowledgement, or a periodic write watermark is below the value
+  Kubernetes acknowledgement, or its write watermark is below the value
   Kubernetes recorded, which also catches a restore from an older copy with
-  the same identity. At the record level, a Kubernetes record requires a
-  store record that is missing or different, such as a settling prompt
-  attempt without its result receipt. At the operation level, an outcome
-  cannot be settled. A dataset-level signal places a recovery hold on the
-  whole installation; a record-level signal holds the affected Task or Session
-  with a `StorageRecoveryRequired` condition. Held work makes no side effects,
-  is never retried as a new operation and never reports success. An operator
-  releases a hold explicitly after recovery.
+  the same identity; such a signal places a recovery hold on the whole
+  installation. At the operation level, an outcome cannot be settled, and the
+  storage client refuses new writes to that dataset until it is. At the
+  record level, a Kubernetes record requires a store record that is missing
+  or different, such as a settling prompt attempt without its result receipt;
+  such a signal will hold only the affected Task or Session, with a
+  `StorageRecoveryRequired` condition, together with the Kubernetes protocol
+  checks. Held work makes no side effects, is never retried as a new
+  operation and never reports success. An operator releases a hold
+  explicitly after recovery.
 - **Store halves of the Kubernetes control protocols.** Session turn
   creation, finalization and projection activation, outbox enqueue, claim and
   completion, Session cleanup preparation and completion, prompt result
@@ -501,6 +517,172 @@ write without one.
   of one step, such as a completion and a failure, share one key so the first
   durable outcome wins, and an event derived again after a restart may be
   redacted differently.
+
+### Durability, switch detection and recovery holds
+
+A nil error means the change and its operation receipt survive the failures
+the provider's `DurabilityClass` promises. What Orka does after it sees the
+serving database restart or switch depends on the class:
+
+| Class | Provider or controller restart | Database restart | Host or disk loss | Automatic database switch | After a detected restart or switch, Orka |
+| --- | --- | --- | --- | --- | --- |
+| `synchronous-replicated` | Survives | Survives | Survives on the replica | Loses no acknowledged write | Checks the dataset again and continues |
+| `local-fsync` | Survives | Survives | Survives a host crash, not a disk loss | None | Checks the dataset again and continues |
+| `local-buffered` | Survives | Survives | A host crash may lose the latest acknowledged writes | None | Checks the dataset again and continues |
+| `async-replicated` | Survives | Survives | May lose recent acknowledged writes | May lose acknowledged writes | Holds the installation until an operator acknowledges it |
+
+**Settings behind each class.**
+
+- SQLite: WAL with `synchronous=NORMAL`, the default, is `local-buffered`;
+  `synchronous=FULL` is `local-fsync`. A sync on every commit can slow the
+  single writer on network-attached volumes, so the default is unchanged.
+- PostgreSQL: `synchronous-replicated` needs `fsync = on`,
+  `full_page_writes = on`, `synchronous_commit = on` (or `remote_apply`) for
+  every adapter transaction, which the adapter sets per transaction, and a
+  synchronous standby (`synchronous_standby_names`, or a managed service's
+  documented synchronous high availability). An adapter checks the settings
+  it can see at startup (`SHOW synchronous_commit`, `fsync`,
+  `full_page_writes`, `synchronous_standby_names`) and never declares
+  `synchronous-replicated` when one of them fails. High availability its role
+  cannot observe is operator-declared configuration.
+- Azure Database for PostgreSQL flexible server with zone-redundant or
+  same-zone high availability acknowledges a commit once the standby has
+  persisted its log, which matches `synchronous_commit = on`, so it is
+  `synchronous-replicated`. Its server admin is not a superuser and cannot see
+  replication details, so the class follows the server's documented
+  high-availability setting. A server without high availability (including
+  Burstable) has no automatic switch and is `local-fsync`.
+- CloudNativePG is `synchronous-replicated` with
+  `.spec.postgresql.synchronous` and `dataDurability: required`, and
+  `async-replicated` otherwise.
+- Read replicas never serve `state.v1` reads. Point-in-time restore and
+  geo-restore create a server with older content and the same dataset
+  identity, so they are never an automatic path; the checks below hold the
+  installation after one.
+- Under synchronous replication, a commit can be visible to other sessions
+  before the standby confirms it. An adapter therefore answers a replay or a
+  `ResolveOperation` call from a transaction that writes, so its answer is
+  never an outcome a failover could still lose.
+
+**Write watermark.** `WriteWatermarkStore` gives every dataset a counter that
+only fenced writes increase: `AdvanceWriteWatermark` adds one and returns the
+new value, and `GetWriteWatermark` reads it. SQLite keeps it in the dataset's
+identity row, so a copy of the file keeps the value it had when it was taken.
+
+**What Kubernetes records.** The ControllerEpoch status holds, for each
+storage contract, the dataset that serves it, the controller epoch that
+dataset acknowledged and the highest write watermark it acknowledged
+(`status.storageEpochs`). Orka writes an entry only after the dataset returned
+success, never lowers an epoch or watermark for the same dataset, and refuses
+every write to the record under a fence other than the epoch the object
+holds. The status sync of a later epoch carries the record across. It moves
+into the installation record once that exists.
+
+**Checks.** At takeover, the epoch manager compares each dataset with the
+record before it advances the dataset or opens the contract's fence (see
+"Controller ownership" above). From then on, about once a minute, it
+describes each dataset that has passed, without waiting for datasets that
+are still unreachable. When the
+dataset's incarnation changed, the manager closes the fences of the
+contracts it serves until it has been checked again; once it is ready, the
+manager checks that the dataset still holds this controller's epoch and at
+least its acknowledged watermark, and holds the installation for an `async-replicated`
+dataset whatever it holds. It then advances the watermark with a fenced
+write through the storage client and records the new value once the dataset
+returned it. A value that is not above the recorded one also means the
+dataset lost writes. SQLite runs in the controller process, so its
+incarnation changes only when the controller restarts, and a host crash
+looks like a restart; the takeover checks against the recorded epoch and
+watermark are what detect such a loss, and a restore from an older copy.
+
+**Installation hold.** A check that fails closes every fence at once and
+then records a hold in `status.storageRecovery`, with its ID, reason (`EpochRegressed`,
+`WatermarkRegressed`, `DatasetChanged` or `UnsafeSwitch`), contract, dataset
+and the acknowledged and stored values, and sets the `StorageRecoveryRequired`
+condition. While it is recorded, every contract's write fence and
+`CurrentFence` refuse with an error that matches `ErrNotReady` (and
+`store.ErrStorageRecoveryRequired`), so the storage client refuses every
+write, control-store changes stop, no Task Job is created and no Task reports
+success; reads continue. Task Jobs also wait while any contract's fence is
+closed, so a restarted controller starts no work before every dataset passed
+its takeover checks, and `CurrentFence` waits whenever the state fence is
+closed. The `orka_storage_recovery_hold` metric is 1 with the reason.
+A restarted controller reads the hold and stays held: it checks and opens
+nothing, and only advances each dataset that still serves the contract it
+acknowledged, so a replaced controller cannot write to it. A check after a
+restart or switch that cannot read the dataset is not a pass: the fences of
+the contracts the dataset serves stay closed until a later check finishes. An operator releases the hold,
+after the recovery procedure, by setting the
+`storage.orka.ai/recovery-acknowledged` annotation of the ControllerEpoch to
+the hold's ID. The controller then advances every dataset, records what each
+holds now as acknowledged and clears the hold in the same update; each
+contract's fence opens again once its dataset passes the takeover checks
+against the new record. An annotation naming another hold releases
+nothing. A dataset that passed its own checks opens its fence without
+waiting for the others, so another dataset's hold can close a fence that was
+already open.
+
+**Not yet covered.** Holding only the affected Task or Session for a missing
+or conflicting record comes with the Kubernetes protocol checks: a settling
+prompt attempt without its result receipt (today's recovery records the
+outcome as unknown and never re-runs the prompt or reports success), a
+finalized turn without its store record, and reclamation without the turn
+cleanup receipt. Detecting a restart or switch of an `async-replicated`
+dataset that happened while no controller ran needs the incarnation recorded
+with the acknowledgement.
+
+**Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
+Failovers})` checks, for every write in the write catalog, that after a
+restart and after each declared failover the change, its receipt, the
+dataset's identity, controller epoch, installation and watermark survive, and
+a replay changes nothing. Each failover must change the incarnation, and
+watermark writes that run during a failover either survive or settle as
+aborted through `ResolveOperation`. A `local-fsync` or `local-buffered`
+provider declares no failover, and a `synchronous-replicated` one declares at
+least one. SQLite supplies `Restart` by closing and reopening its file.
+
+### Writer exclusivity and schema migration for adapters
+
+| Property | Embedded SQLite | Network provider |
+| --- | --- | --- |
+| One active writer | Process file lock, leader election and one replica | Leader election and the epoch compare-and-swap pick the controller; the store refuses writes under any other fence, and a dataset bound to one installation refuses another installation's advance. |
+| A second controller opening the dataset | Cannot take the file lock | May read (`Describe`, validation); cannot write until it wins the compare-and-swap and advances the store. |
+| Schema migration | At open, under the file lock and `BEGIN IMMEDIATE` | Adapter-owned, under a dataset-wide lock, with the dataset `migrating` so writes are refused. |
+
+A network adapter migrates its schema in three steps: it enters `migrating`
+in a transaction that takes the same lock as an epoch advance, so writes in
+progress finish first and later new writes return `ErrNotReady`; applies the
+change and records the new schema version; and returns to `ready`. A crash
+leaves the dataset `migrating`, refusing writes, until the migration runs
+again. Concurrent migrators serialize, and the second finds the target
+version and does nothing. For PostgreSQL:
+
+- Run migrations on a direct connection (port 5432 on Azure), never through a
+  transaction-pooling PgBouncer (port 6432), and never with session-level
+  advisory locks.
+- Serialize adapter replicas with `SELECT pg_advisory_xact_lock(<constant>)`
+  inside the migration transaction, then check the schema version again.
+- Enter `migrating` in one transaction that locks the controller epoch row
+  (`SELECT ... FROM orka_controller_epoch FOR UPDATE`) and then sets
+  `orka_dataset.state` to `migrating`.
+- Use transactional DDL where possible. Steps that cannot run in a
+  transaction, such as `CREATE INDEX CONCURRENTLY`, run only while the state
+  is `migrating`.
+- Set `lock_timeout` on DDL, so a migration cannot stall behind a long reader.
+
+Orka treats `migrating` as a temporary storage outage: writes answer 503 and
+reconcilers retry, and nothing restarts the controller. The shared suite's
+`storagetest.WithMaintenance(MaintenanceHarness{Enter, Exit})` checks, for
+every write in the write catalog, that while the dataset is migrating the
+write is refused with `ErrNotReady` and changes nothing, a replay and reads
+are still served, `Describe` reports `migrating`, and `ResolveOperation`
+records nothing new; and that the refused operation commits once the dataset
+is ready. SQLite migrates only while it opens, so its harness holds the
+dataset in `migrating` through a test hook. The `installations` cases check,
+for both contracts, that a second installation can neither advance nor write
+to a dataset bound to the first, and that the first keeps writing; the
+SQLite package also checks that a second `OpenLockedStore` on the same file
+is refused.
 
 ### Rules reserved for later steps
 
@@ -574,9 +756,10 @@ sharing is an embedded-store behavior, not a provider obligation; see "No
 cross-contract transactions" above.
 
 `pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
-`RunArtifacts` exercise each provider family through the public interfaces.
-The SQLite provider runs it directly, and the storage client runs it over
-SQLite.
+`RunArtifacts` exercise each provider family through the public interfaces;
+the options `WithMaintenance` and `WithDurability` add the cases that need a
+harness only the provider's own tests can supply. The SQLite provider runs it
+directly with both options, and the storage client runs it over SQLite.
 
 SQLite also implements the duplicate SQL control-record methods described in
 the next section. They are not part of the provider contract or the client. A
@@ -682,7 +865,7 @@ Reads and administrative methods reach the provider unchanged.
   client keeps resolving the set in the background. An operation that
   `ResolveOperation` finds too old to settle leaves the set with its outcome
   permanently unknown; holding the affected work for recovery comes with the
-  recovery holds.
+  record-level recovery holds.
 - **Embedded families** pass through unchanged. They carry no envelope and
   SQLite does not require one for them; the Session turn steps keep checking
   the fence their requests carry.

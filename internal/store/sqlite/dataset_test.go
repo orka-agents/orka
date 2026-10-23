@@ -250,8 +250,9 @@ func TestDatasetUnbootstrappedDataRequiresExistingKey(t *testing.T) {
 
 func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 	for name, statement := range map[string]string{
-		"newer":               `PRAGMA user_version=3`,
+		"newer":               `PRAGMA user_version=4`,
 		"older":               `PRAGMA user_version=1`,
+		"previous":            `PRAGMA user_version=2`,
 		"unknown":             `PRAGMA user_version=2147483647`,
 		"negative":            `PRAGMA user_version=-1`,
 		"version reset":       `PRAGMA user_version=0`,
