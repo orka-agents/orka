@@ -172,10 +172,109 @@ func TestHostLinkWaitsForTheProviderStatusToCatchUp(t *testing.T) {
 		t.Fatalf("held = %q, err = %v; want no token and a retryable error", held.AccessToken, err)
 	}
 
+	// A reference check that could not complete is no verdict either.
+	setConditions(1, metav1.ConditionTrue)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	meta.SetStatusCondition(&provider.Status.Conditions, metav1.Condition{
+		Type: corev1alpha1.ConnectorProviderConditionResolvedRefs, Status: metav1.ConditionUnknown,
+		Reason: connectors.ReasonResolutionFailed, ObservedGeneration: 1,
+	})
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); err == nil || errors.Is(err, ErrHostLinkUnavailable) {
+		t.Fatalf("unresolved references: check = %v, want a retryable error", err)
+	}
+
 	setConditions(1, metav1.ConditionFalse)
 	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, ErrHostLinkUnavailable) {
 		t.Fatalf("check = %v, want ErrHostLinkUnavailable", err)
 	}
+}
+
+// A Connection status that has not caught up with an edit, or that records a
+// provider read that failed, stops no host and releases no token. What the
+// status would judge is checked directly instead: a mode the grant does not
+// cover, or a provider that is gone, still stops the host.
+func TestHostLinkWaitsForTheConnectionStatusToCatchUp(t *testing.T) {
+	retryable := func(h *harness, stage string) {
+		t.Helper()
+		if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); err == nil || errors.Is(err, ErrHostLinkUnavailable) {
+			t.Fatalf("%s: check = %v, want a retryable error", stage, err)
+		}
+		if held, err := h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, 15*time.Minute); err == nil ||
+			errors.Is(err, ErrHostLinkUnavailable) || held.AccessToken != "" {
+			t.Fatalf("%s: held = %q, err = %v; want no token and a retryable error", stage, held.AccessToken, err)
+		}
+	}
+	unavailable := func(h *harness, stage string) {
+		t.Helper()
+		if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, ErrHostLinkUnavailable) {
+			t.Fatalf("%s: check = %v, want ErrHostLinkUnavailable", stage, err)
+		}
+	}
+
+	t.Run("mode edit", func(t *testing.T) {
+		h := newHarness(t)
+		h.serveHosts("copilotd")
+		h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(4 * time.Hour)})
+		// The mode changes and the Connection controller has not judged it:
+		// the status still describes the previous generation.
+		connection := h.reload()
+		connection.Spec.Mode = corev1alpha1.ConnectionModeReadWrite
+		connection.Generation++
+		if err := h.client.Update(context.Background(), connection); err != nil {
+			t.Fatal(err)
+		}
+		if h.reload().Generation == h.connection.Generation {
+			t.Fatal("the edit must move the Connection to a new generation")
+		}
+		retryable(h, "status behind a covered mode")
+
+		// A mode the grant does not cover is a verdict of its own.
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+			t.Fatal(err)
+		}
+		provider.Spec.OAuth.Scopes.Write = []string{"repo"}
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+		unavailable(h, "status behind an uncovered mode")
+	})
+
+	t.Run("provider read failed", func(t *testing.T) {
+		h := newHarness(t)
+		h.serveHosts("copilotd")
+		h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(4 * time.Hour)})
+		// What the Connection controller records when it cannot read the
+		// provider; Ready stays True.
+		connection := h.reload()
+		meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+			Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionUnknown,
+			Reason: corev1alpha1.ConnectionReasonProviderReadFailed, ObservedGeneration: connection.Generation,
+		})
+		meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+			Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionUnknown,
+			Reason: "ProviderUnresolved", ObservedGeneration: connection.Generation,
+		})
+		if err := h.client.Status().Update(context.Background(), connection); err != nil {
+			t.Fatal(err)
+		}
+		retryable(h, "recorded read failure")
+
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.client.Delete(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+		unavailable(h, "provider gone")
+	})
 }
 
 // The Connection controller can judge a provider edit before the provider

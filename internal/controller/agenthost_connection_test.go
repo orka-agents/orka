@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agenthost"
@@ -488,5 +490,22 @@ func TestAgentHostRefusesANeverExpiringTokenUnderAnAllowList(t *testing.T) {
 	}
 	if got := agentHostReady(h.host()); got.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("ready = %+v", got)
+	}
+}
+
+// A provider edit reaches every host its links feed, and no other.
+func TestAgentHostProviderChangeReachesTheHostsItsLinksFeed(t *testing.T) {
+	fed := connectionHost()
+	secretFed := testHost()
+	secretFed.Name = "bob"
+	elsewhere := connectionHost()
+	elsewhere.Namespace = "other"
+	h := newAgentHostHarness(t, fed, secretFed, elsewhere)
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: testUserNamespace}}
+
+	requests := h.reconciler.connectionFedHosts(context.Background(), provider)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: testUserNamespace, Name: "alice"}}}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
 	}
 }

@@ -178,3 +178,72 @@ func TestConnectWaitsThroughARelinkWithAStdinToken(t *testing.T) {
 		t.Fatalf("%d requests went without the stdin transaction token", unauthenticated)
 	}
 }
+
+// A relink finds the host still showing a failure the new link clears, such
+// as the other GitHub account the earlier link gave, and waits for it. A
+// failure that outlasts the wait is reported, and so is a wait the deadline
+// cuts short mid-request.
+func TestConnectWaitsOutAFailureTheLinkMayClear(t *testing.T) {
+	previous, previousHost := connectionReadyPollInterval, agentHostReadyPollInterval
+	connectionReadyPollInterval, agentHostReadyPollInterval = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { connectionReadyPollInterval, agentHostReadyPollInterval = previous, previousHost })
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+	failed := map[string]any{
+		"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Failed", "reason": "GitHubIdentityChanged",
+		"message": "reconnect with alice", "connection": "github-abc",
+	}
+	ready := map[string]any{"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Ready", "ready": true, "connection": "github-abc"}
+	connect := func(t *testing.T, host func(w http.ResponseWriter, r *http.Request, poll int)) (string, error) {
+		t.Helper()
+		polls := 0
+		return runHostCLI(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections":
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"connection":   map[string]any{"name": "github-abc", "namespace": "team-a", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "grantSequence": 1},
+					"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
+					"agentHost":    true,
+				})
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
+				json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "grantSequence": 2}) //nolint:errcheck
+			case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
+				polls++
+				host(w, r, polls)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}, "connect", "github", "--timeout", "500ms")
+	}
+
+	t.Run("cleared", func(t *testing.T) {
+		out, err := connect(t, func(w http.ResponseWriter, _ *http.Request, poll int) {
+			if poll < 3 {
+				json.NewEncoder(w).Encode(failed) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(ready) //nolint:errcheck
+		})
+		if err != nil || !strings.Contains(out, "Host ready: orka-gh-alice") {
+			t.Fatalf("connect: %v %q", err, out)
+		}
+	})
+	t.Run("outlasts the wait", func(t *testing.T) {
+		_, err := connect(t, func(w http.ResponseWriter, _ *http.Request, _ int) {
+			json.NewEncoder(w).Encode(failed) //nolint:errcheck
+		})
+		if err == nil || !strings.Contains(err.Error(), "GitHubIdentityChanged: reconnect with alice") || !strings.Contains(err.Error(), "orka host status") {
+			t.Fatalf("err = %v, want the failure and the status hint", err)
+		}
+	})
+	t.Run("deadline mid-request", func(t *testing.T) {
+		_, err := connect(t, func(_ http.ResponseWriter, r *http.Request, _ int) {
+			<-r.Context().Done()
+		})
+		if err == nil || err.Error() != "your agent host is not ready yet; check with 'orka host status'" {
+			t.Fatalf("err = %v, want the status hint", err)
+		}
+	})
+}

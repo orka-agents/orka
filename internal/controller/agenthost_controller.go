@@ -1337,7 +1337,28 @@ func (r *AgentHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// A refresh, re-link or disconnect of a host's Connection reaches the
 		// host at once.
 		Watches(&corev1alpha1.Connection{}, handler.EnqueueRequestsFromMapFunc(r.hostsUsing(agentHostConnectionIndex))).
+		// A provider that stops serving hosts, or no longer authorizes their
+		// links, leaves the Connections' status as it was, so the change
+		// reaches the hosts its links feed directly.
+		Watches(&corev1alpha1.ConnectorProvider{}, handler.EnqueueRequestsFromMapFunc(r.connectionFedHosts)).
 		Complete(r)
+}
+
+// connectionFedHosts maps a provider to every host in its namespace that a
+// Connection feeds. At most one provider there serves hosts, so no finer
+// index is kept.
+func (r *AgentHostReconciler) connectionFedHosts(ctx context.Context, object client.Object) []reconcile.Request {
+	hosts := &corev1alpha1.AgentHostList{}
+	if err := r.List(ctx, hosts, client.InNamespace(object.GetNamespace())); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range hosts.Items {
+		if hosts.Items[i].Spec.GitHubTokenFrom != nil {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&hosts.Items[i])})
+		}
+	}
+	return requests
 }
 
 func agentHostFromAnnotation(_ context.Context, object client.Object) []reconcile.Request {

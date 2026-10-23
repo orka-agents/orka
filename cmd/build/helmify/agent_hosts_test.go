@@ -450,6 +450,18 @@ func TestStaticChartIngressForTailscale(t *testing.T) {
 	if _, err := helmTemplateStaticChart(t, "--show-only", "templates/ingress.yaml"); err == nil {
 		t.Fatal("the default render must not create an Ingress")
 	}
+	// A class name YAML would read as a number or a boolean stays a string.
+	for _, className := range []string{"123", "true"} {
+		rendered := requireHelmRender(t, "--set", "ingress.enabled=true", "--set", "ingress.className="+className,
+			"--show-only", "templates/ingress.yaml")
+		doc := map[string]any{}
+		if err := yaml.Unmarshal([]byte(rendered), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if spec, _ := doc["spec"].(map[string]any); spec["ingressClassName"] != className {
+			t.Fatalf("ingressClassName = %#v, want the string %q", spec["ingressClassName"], className)
+		}
+	}
 }
 
 // An upgrade that reuses an older release's values has no ingress map and no
