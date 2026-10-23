@@ -402,8 +402,11 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	custody, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui)
 	if err != nil {
 		// Replacing a link that may still work would spend one of the grants
-		// custody retains; the person retries instead.
-		return nil, false, fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub link; retry")
+		// custody retains; the person retries instead. The sign-in's token is
+		// revoked only when custody is known to hold another: it may be the
+		// very token custody holds, and an unused one only expires.
+		return nil, custody == "" || tokens.AccessToken == custody,
+			fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub link; retry")
 	}
 	if holds {
 		return connection, tokens.AccessToken == custody, nil
@@ -495,7 +498,8 @@ func (h *Handlers) revokeSignInToken(ctx context.Context, oauth connectors.OAuth
 // not kept: membership is checked again only at refreshes, so the sign-in
 // replaces it with one that ends. It returns an error when it cannot tell,
 // such as when custody or GitHub cannot answer: only a link shown not to
-// work is replaced.
+// work is replaced. With an error, the token is custody's when custody gave
+// one, or empty when custody could not be read.
 func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1.Connection,
 	oauth connectors.OAuthProviderConfig, ui *UserInfo) (string, bool, error) {
 	cfg := h.githubSignIn
@@ -517,7 +521,8 @@ func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, err
+		// Custody's token is still named, so the caller never revokes it.
+		return held.AccessToken, false, err
 	}
 	if strconv.FormatInt(account.ID, 10) != ui.Subject {
 		return "", false, nil
