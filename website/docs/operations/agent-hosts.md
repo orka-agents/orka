@@ -159,6 +159,11 @@ Add the host as `ws://127.0.0.1:8788/?tkn=<token>`. Port-forward needs
 
 ### Hosts from GitHub Connections
 
+:::tip[Setting this up for the first time?]
+[Copilot app on Orka](../guides/copilot-app.md) walks through it step by step, from the GitHub
+App to your team's first sign-in. This section is the reference behind it.
+:::
+
 With [connectors](../guides/connectors.md), people get a host by linking GitHub: no Secret,
 no YAML and no Kubernetes access. Create a GitHub App with expiring user tokens and the
 callback URL `<callbackBaseUrl>/api/v1/connections/callback`, then install with:
