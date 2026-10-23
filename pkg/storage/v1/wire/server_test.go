@@ -48,9 +48,11 @@ func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 				if described, isInfo := results[0].(storagev1.ProviderInfo); isInfo {
 					// A Describe notes the serving dataset, which every later
 					// call must name, and the server describes only the
-					// contract parts it serves.
+					// contract parts it serves and the artifact limit it
+					// enforces.
 					described.DatasetID = recordingDataset
 					described.Contracts = []string{storagev1.StateContract, storagev1.ArtifactsContract}
+					described.Limits.MaxArtifactBytes = storagev1.MaxArtifactBytes
 					results[0] = described
 				}
 			}

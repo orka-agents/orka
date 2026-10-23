@@ -398,10 +398,12 @@ suites that way.
   `bulk` for streaming calls) and how long each class may run. A call over its
   class's limit is refused with `OVERLOADED` before the provider runs, which
   the client returns as `ErrUnavailable`. The duration limit covers the whole
-  call, including the first description of the providers and the reading and
-  sending of a blob, so an upload or download whose peer stalls is ended as
-  `UNAVAILABLE` and frees its slot. A client checks a download's declared
-  size from the response headers before it receives any of the blob.
+  call, including the first description of the providers and every message a
+  streaming call receives or sends, so an upload or download whose peer stalls,
+  or never sends its request, is ended as `UNAVAILABLE` and frees its slot.
+  A client checks a download's declared size from the response headers before
+  it receives any of the blob, and a server describes the artifact limit it
+  enforces, which its own blob limit can lower.
 - **Errors.** Every status the server library produces carries a
   `google.rpc.ErrorInfo` in domain `storage.orka.ai` whose reason names the
   contract error. The client rebuilds the typed error, so `errors.Is` and

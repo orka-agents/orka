@@ -38,8 +38,8 @@ type Limits struct {
 	// provider runs, and before an upload's blob is read.
 	MaxConcurrent map[Class]int
 	// MaxDuration caps how long a call of each class may run: describing the
-	// providers for its dataset check, reading an upload, the provider's work
-	// and sending a download. The caller's deadline still applies when it is
+	// providers for its dataset check, every message a streaming call
+	// receives or sends, and the provider's work. The caller's deadline still applies when it is
 	// shorter. An upload or download that does not finish in time is ended
 	// as unavailable.
 	MaxDuration map[Class]time.Duration
@@ -254,8 +254,11 @@ func (s *Server) describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 	info.Contracts = contracts
 	if s.artifacts == nil {
 		info.Limits.MaxArtifactBytes = 0
+	} else {
+		// The server refuses an artifact over its own blob limit too.
+		info.Limits.MaxArtifactBytes = min(max(info.Limits.MaxArtifactBytes, storagev1.MaxArtifactBytes), s.maxBlobBytes)
 	}
-	s.publish(ctx, seq, info.DatasetID, max(info.Limits.MaxArtifactBytes, storagev1.MaxArtifactBytes), "")
+	s.publish(ctx, seq, info.DatasetID, info.Limits.MaxArtifactBytes, "")
 	return info, nil
 }
 
@@ -434,8 +437,10 @@ func (s *Server) interceptStream(srv any, stream grpc.ServerStream, info *grpc.S
 	return err
 }
 
-// checkedStream gives a streaming handler the call's checked context and
-// refuses any request message with a field the server does not know.
+// checkedStream gives a streaming handler the call's checked context,
+// bounds every receive and send by it, including the receive of a download's
+// request that gRPC makes before the handler runs, and refuses any request
+// message with a field the server does not know.
 type checkedStream struct {
 	grpc.ServerStream
 	ctx context.Context
@@ -444,11 +449,18 @@ type checkedStream struct {
 func (s *checkedStream) Context() context.Context { return s.ctx }
 
 func (s *checkedStream) RecvMsg(message any) error {
-	if err := s.ServerStream.RecvMsg(message); err != nil {
-		return err
+	if err := withinCall(s.ctx, func() error { return s.ServerStream.RecvMsg(message) }); err != nil {
+		return streamError(s.ctx, err)
 	}
 	if decoded, ok := message.(proto.Message); ok && hasUnknownFields(decoded.ProtoReflect()) {
 		return unsupportedFieldStatus()
+	}
+	return nil
+}
+
+func (s *checkedStream) SendMsg(message any) error {
+	if err := withinCall(s.ctx, func() error { return s.ServerStream.SendMsg(message) }); err != nil {
+		return streamError(s.ctx, err)
 	}
 	return nil
 }
@@ -619,15 +631,17 @@ func (s *Server) receiveUpload(stream grpc.ServerStream, m *method, request prot
 		encoded, _ := contractStatus(storagev1.TooLargeError{What: m.name + " blob", Size: declared.size, Limit: limit})
 		return encoded
 	}
-	if err := withinCall(ctx, func() error { return stream.RecvMsg(request) }); err != nil {
+	// stream is the call's checkedStream, which bounds each receive by the
+	// call's duration limit.
+	if err := stream.RecvMsg(request); err != nil {
 		if errors.Is(err, io.EOF) {
 			return blobValidationStatus(fmt.Errorf("%w: the stream carries no request", errBlobFraming))
 		}
-		return streamError(ctx, err)
+		return err
 	}
 	err = reassemble(request, func() (proto.Message, error) {
 		part := request.ProtoReflect().New().Interface()
-		return part, withinCall(ctx, func() error { return stream.RecvMsg(part) })
+		return part, stream.RecvMsg(part)
 	}, declared)
 	switch {
 	case err == nil:
@@ -637,7 +651,7 @@ func (s *Server) receiveUpload(stream grpc.ServerStream, m *method, request prot
 	case errors.Is(err, errBlobShort), errors.Is(err, errBlobDigest):
 		return errorStatus(codes.Unavailable, ReasonUnavailable, err.Error(), nil)
 	default:
-		return streamError(ctx, err)
+		return err
 	}
 }
 
@@ -687,13 +701,9 @@ func (s *Server) sendDownload(stream grpc.ServerStream, m *method, response prot
 	if err := stream.SetHeader(metadata.Pairs(describeBlob(data).pairs()...)); err != nil {
 		return status.Error(codes.Internal, "cannot set storage response headers")
 	}
-	err := sendBlob(func(message any) error {
-		return withinCall(ctx, func() error { return stream.SendMsg(message) })
-	}, response, path, data)
-	if err != nil {
-		return streamError(ctx, err)
-	}
-	return nil
+	// stream is the call's checkedStream, which bounds each send by the
+	// call's duration limit.
+	return sendBlob(stream.SendMsg, response, path, data)
 }
 
 // requestStatus reports a request the server cannot decode into Go values.
