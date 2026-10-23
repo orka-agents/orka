@@ -217,6 +217,15 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadGateway, "could not check the GitHub token")
 	}
 	tokens := githubauth.Tokens{AccessToken: req.AccessToken, ExpiresIn: req.ExpiresIn}
+	// A token this sign-in minted is held by nothing else, so one it does not
+	// store is revoked. A submitted one is not: the client keeps it, and it
+	// may be the very token custody holds for the person's working link.
+	minted := false
+	revokeUnused := func(token string) {
+		if minted {
+			h.revokeSignInToken(ctx, oauth, token)
+		}
+	}
 	if strings.TrimSpace(req.RefreshToken) != "" {
 		// The refresh token arrives unchecked beside the access token. Using
 		// it once proves it is the same person's, and custody then holds only
@@ -225,8 +234,13 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		if err != nil {
 			return fiber.NewError(fiber.StatusUnauthorized, "GitHub did not accept the refresh token")
 		}
+		minted = true
 		again, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, refreshed.AccessToken)
 		if err != nil || again.ID != user.ID {
+			revokeUnused(refreshed.AccessToken)
+			if err != nil && !errors.Is(err, githubauth.ErrInvalidToken) {
+				return fiber.NewError(fiber.StatusBadGateway, "could not check the GitHub token")
+			}
 			return fiber.NewError(fiber.StatusUnauthorized, "the GitHub access and refresh tokens belong to different accounts")
 		}
 		user = again
@@ -238,7 +252,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	// Only GitHub's verdict refuses the person; an answer it could not give
 	// is retried. Either way the token this sign-in obtained goes unused.
 	if err := cfg.GitHub.RequireMember(ctx, tokens.AccessToken, user.Login, cfg.Allowed); err != nil {
-		h.revokeSignInToken(ctx, oauth, tokens.AccessToken)
+		revokeUnused(tokens.AccessToken)
 		if errors.Is(err, githubauth.ErrNotMember) {
 			return fiber.NewError(fiber.StatusForbidden, "you are not an active member of a GitHub org or team allowed to sign in")
 		}
@@ -251,7 +265,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	declined := req.NoHost || !cfg.CreateHosts
 	connection, held, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, declined)
 	if !held {
-		h.revokeSignInToken(ctx, oauth, tokens.AccessToken)
+		revokeUnused(tokens.AccessToken)
 	}
 	if err != nil {
 		return err
@@ -380,7 +394,7 @@ func (h *Handlers) newSession(ui *UserInfo) (string, store.AuthSession, error) {
 // consent, a completion and its commit, so custody's fences hold as they do
 // for any link. held reports whether Orka may hold the tokens: when it is
 // false nothing stored them, after a failure or when an existing link was
-// kept, and the caller revokes them.
+// kept, and the caller revokes them if it minted them.
 func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
 	oauth connectors.OAuthProviderConfig, tokens githubauth.Tokens, declined bool) (connection *corev1alpha1.Connection, held bool, err error) {
 	connection, err = h.ensureSignInConnection(ctx, ui, provider, declined)
@@ -402,10 +416,8 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	custody, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui)
 	if err != nil {
 		// Replacing a link that may still work would spend one of the grants
-		// custody retains; the person retries instead. The sign-in's token is
-		// revoked only when custody is known to hold another: it may be the
-		// very token custody holds, and an unused one only expires.
-		return nil, custody == "" || tokens.AccessToken == custody,
+		// custody retains; the person retries instead.
+		return nil, custody != "" && tokens.AccessToken == custody,
 			fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub link; retry")
 	}
 	if holds {

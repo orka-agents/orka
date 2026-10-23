@@ -282,8 +282,8 @@ func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
 
 // A sign-in that cannot tell whether the existing link still works, because
 // custody or GitHub cannot answer, replaces nothing: each replacement spends
-// one of the grants custody retains. It answers 503, and revokes its token
-// only when custody is known to hold another.
+// one of the grants custody retains. It answers 503, and revokes the token
+// its refresh minted, which nothing stored.
 func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -305,11 +305,10 @@ func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 	first := grant()
 	for outage, test := range map[string]struct {
 		credentials fakeSignInCredentials
-		// The sign-in's token, as the refresh that opens each sign-in left it,
-		// is revoked only when custody holds another.
+		// The token the sign-in's refresh minted, which nothing stored.
 		revoked []string
 	}{
-		"custody": {credentials: fakeSignInCredentials{err: errors.New("custody cannot answer")}},
+		"custody": {credentials: fakeSignInCredentials{err: errors.New("custody cannot answer")}, revoked: []string{"ghu_alice_refreshed"}},
 		"github":  {credentials: fakeSignInCredentials{token: "ghu_check_down"}, revoked: []string{"ghu_alice_refreshed"}},
 	} {
 		h.handlers.githubSignIn.Credentials = test.credentials
@@ -324,6 +323,49 @@ func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 		if got := revoked.list()[before:]; !slices.Equal(got, test.revoked) {
 			t.Fatalf("%s outage: revoked = %v, want %v", outage, got, test.revoked)
 		}
+	}
+}
+
+// A token the sign-in's refresh minted, which nothing else holds, is revoked
+// when the sign-in refuses it: for another account, or when GitHub cannot
+// check it.
+func TestGitHubSignInRevokesARefreshedTokenItRefuses(t *testing.T) {
+	h := newSignInHarness(t)
+	revoked := &revocations{}
+	upstream, err := url.Parse(fakeGitHub(t, revoked).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: upstream.String()}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_bob"}); status != http.StatusUnauthorized ||
+		session.Token != "" {
+		t.Fatalf("access and refresh tokens of different accounts: %d, want 401 and no session", status)
+	}
+	if got := revoked.list(); !slices.Equal(got, []string{"ghu_bob_refreshed"}) {
+		t.Fatalf("revoked = %v, want the refreshed token", got)
+	}
+
+	checks := 0
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/applications/client-id/token" {
+			if checks++; checks > 1 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(flaky.Close)
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: flaky.URL}
+	h.identity = nil
+	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusBadGateway ||
+		session.Token != "" {
+		t.Fatalf("a refreshed token GitHub cannot check: %d, want 502 and no session", status)
+	}
+	if got := revoked.list(); !slices.Equal(got, []string{"ghu_bob_refreshed", "ghu_alice_refreshed"}) {
+		t.Fatalf("revoked = %v, want the second refreshed token too", got)
 	}
 }
 
@@ -677,8 +719,10 @@ func TestMembershipThatCannotBeCheckedIsRetryable(t *testing.T) {
 	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice_unanswered"}); status != http.StatusServiceUnavailable || session.Token != "" {
 		t.Fatalf("sign-in GitHub could not check = %d, want 503 and no session", status)
 	}
-	if got := revoked.list(); len(got) != 1 || got[0] != "ghu_alice_unanswered" {
-		t.Fatalf("revoked = %v, want the unused token", got)
+	// A submitted token, which the client keeps and custody may hold, is
+	// never revoked.
+	if got := revoked.list(); len(got) != 0 {
+		t.Fatalf("revoked = %v, want the submitted token kept", got)
 	}
 	_, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
 	if err := h.asSession(session.Token); err != nil {
