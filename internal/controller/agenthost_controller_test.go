@@ -864,6 +864,239 @@ func TestAgentHostReplacesItsPodForAnotherTokenSecretOrKey(t *testing.T) {
 	}
 }
 
+// A token from another Secret reaches the host's copy only once the Pod
+// started with the old one is gone: the copy is mounted into that Pod, whose
+// processes could otherwise read the new token while they stop.
+func TestAgentHostCopiesAnotherTokenOnlyAfterTheOldPodIsGone(t *testing.T) {
+	bob := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "bob-github", Namespace: testUserNamespace},
+		Data:       map[string][]byte{"token": []byte("ghs_bob")},
+	}
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_alice"), bob)
+	h.settle()
+	h.markPodReady()
+	h.settle()
+	old, _ := h.pod()
+	// The kubelet keeps a deleted Pod until its processes have stopped.
+	old.Finalizers = []string{"test.orka.ai/stopping"}
+	if err := h.client.Update(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	host := h.host()
+	host.Spec.GitHubTokenSecretRef = &corev1alpha1.AgentHostSecretKeyReference{Name: "bob-github", Key: "token"}
+	if err := h.client.Update(context.Background(), host); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	copied := func() string {
+		t.Helper()
+		secret := &corev1.Secret{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testHostNamespace, Name: h.names().GitHubTokenSecret}, secret); err != nil {
+			t.Fatal(err)
+		}
+		return string(secret.Data["token"])
+	}
+	if got := copied(); got != "ghs_alice" {
+		t.Fatalf("the copy holds %q while the old Pod is still stopping", got)
+	}
+	stopping, ok := h.pod()
+	if !ok || stopping.UID != old.UID || stopping.DeletionTimestamp.IsZero() {
+		t.Fatalf("the old Pod must be stopping (ok=%v)", ok)
+	}
+
+	stopping.Finalizers = nil
+	if err := h.client.Update(context.Background(), stopping); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if got := copied(); got != "ghs_bob" {
+		t.Fatalf("the copy holds %q after the old Pod stopped", got)
+	}
+	pod, ok := h.pod()
+	if !ok || pod.UID == old.UID || pod.Annotations[agenthost.AnnotationGitHubToken] != "bob-github/token" {
+		t.Fatalf("no new Pod on the new token (ok=%v)", ok)
+	}
+}
+
+// A Pod whose UID was never recorded, which the cache has not seen yet, still
+// keeps a token from another source out of the copy until it is gone.
+func TestAgentHostConfirmsTheOldPodIsGoneWithoutTheCache(t *testing.T) {
+	bob := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "bob-github", Namespace: testUserNamespace},
+		Data:       map[string][]byte{"token": []byte("ghs_bob")},
+	}
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_alice"), bob)
+	h.settle()
+	old, _ := h.pod()
+	old.Finalizers = []string{"test.orka.ai/stopping"}
+	if err := h.client.Update(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	// The controller stopped between creating the Pod and recording its UID.
+	host := h.host()
+	findAgentHostReceipt(host, agentHostKindPod, "", h.names().Pod).UID = ""
+	if err := h.client.Status().Update(context.Background(), host); err != nil {
+		t.Fatal(err)
+	}
+	host = h.host()
+	host.Spec.GitHubTokenSecretRef = &corev1alpha1.AgentHostSecretKeyReference{Name: "bob-github", Key: "token"}
+	if err := h.client.Update(context.Background(), host); err != nil {
+		t.Fatal(err)
+	}
+	h.reconciler.APIReader = h.client
+	h.reconciler.Client = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod {
+				return apierrors.NewNotFound(corev1.Resource("pods"), key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	if _, err := h.reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: testUserNamespace, Name: "alice"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	copied := &corev1.Secret{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testHostNamespace, Name: h.names().GitHubTokenSecret}, copied); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(copied.Data["token"]); got != "ghs_alice" {
+		t.Fatalf("the copy holds %q while the old Pod is still stopping", got)
+	}
+	if stopping, ok := h.pod(); !ok || stopping.DeletionTimestamp.IsZero() {
+		t.Fatalf("the old Pod must be stopping (ok=%v)", ok)
+	}
+}
+
+const testNewAgentImage = "registry.example/orka/controller@sha256:" + "3333333333333333333333333333333333333333333333333333333333333333"
+
+func agentUpdatePending(host *corev1alpha1.AgentHost) *metav1.Condition {
+	return meta.FindStatusCondition(host.Status.Conditions, agentHostConditionAgentUpdatePending)
+}
+
+// A new host agent, such as after an upgrade, reaches a running host when it
+// reports idle, so no running turn is lost to the update.
+func TestAgentHostMovesToANewHostAgentWhenIdle(t *testing.T) {
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_user_token"))
+	h.settle()
+	h.markPodReady()
+	h.settle()
+	old, _ := h.pod()
+	if agentUpdatePending(h.host()) != nil {
+		t.Fatal("a host on the current agent has no update pending")
+	}
+
+	h.reconciler.AgentImage = testNewAgentImage
+	h.idle.status = agenthost.IdleStatus{Idle: false}
+	h.settle()
+	if pod, _ := h.pod(); pod.UID != old.UID {
+		t.Fatal("a busy host must keep its Pod")
+	}
+	pending := agentUpdatePending(h.host())
+	if pending == nil || pending.Status != metav1.ConditionTrue || !pending.LastTransitionTime.Time.Equal(h.now) {
+		t.Fatalf("update pending = %+v", pending)
+	}
+
+	since := h.now.Add(-time.Hour)
+	h.idle.status = agenthost.IdleStatus{Idle: true, IdleSince: &since, Stale: true}
+	h.settle()
+	if pod, _ := h.pod(); pod.UID != old.UID {
+		t.Fatal("a stale idle report must not replace the Pod")
+	}
+
+	h.idle.status = agenthost.IdleStatus{Idle: true, IdleSince: &since}
+	h.settle()
+	pod, ok := h.pod()
+	if !ok || pod.UID == old.UID || agenthost.PodAgentImage(pod) != testNewAgentImage {
+		t.Fatalf("an idle host must move to the new agent (ok=%v)", ok)
+	}
+	h.markPodReady()
+	h.settle()
+	if agentUpdatePending(h.host()) != nil {
+		t.Fatal("the update is done")
+	}
+	if got := h.host().Status.Restarts; got != 0 {
+		t.Fatalf("an agent update counted as %d restarts", got)
+	}
+}
+
+// A host that never reports idle, or has no idle status, still moves to a new
+// host agent within a day.
+func TestAgentHostMovesToANewHostAgentWithinADay(t *testing.T) {
+	template := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
+	template.Spec.IdleStatusFile = ""
+	h := newAgentHostHarness(t, template, testHost(), userToken("ghs_user_token"))
+	h.settle()
+	h.markPodReady()
+	h.settle()
+	old, _ := h.pod()
+
+	h.reconciler.AgentImage = testNewAgentImage
+	h.settle()
+	h.now = h.now.Add(23 * time.Hour)
+	h.settle()
+	if pod, _ := h.pod(); pod.UID != old.UID {
+		t.Fatal("the host moved before its deadline")
+	}
+	h.now = h.now.Add(2 * time.Hour)
+	h.settle()
+	pod, ok := h.pod()
+	if !ok || pod.UID == old.UID || agenthost.PodAgentImage(pod) != testNewAgentImage {
+		t.Fatalf("a host past its deadline must move to the new agent (ok=%v)", ok)
+	}
+}
+
+// The update deadline counts from when the controller first saw the new
+// agent, through readiness changes, and also moves a Pod that is not ready.
+func TestAgentHostAgentUpdateDeadlineSurvivesReadinessChanges(t *testing.T) {
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_user_token"))
+	h.settle()
+	h.markPodReady()
+	h.settle()
+	old, _ := h.pod()
+
+	h.reconciler.AgentImage = testNewAgentImage
+	h.idle.status = agenthost.IdleStatus{Idle: false}
+	h.settle()
+	first := agentUpdatePending(h.host()).LastTransitionTime
+
+	h.now = h.now.Add(23 * time.Hour)
+	pod, _ := h.pod()
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	if err := h.client.Status().Update(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if pending := agentUpdatePending(h.host()); pending == nil || !pending.LastTransitionTime.Equal(&first) {
+		t.Fatalf("the deadline restarted while the Pod was not ready: %+v", pending)
+	}
+	if pod, _ := h.pod(); pod.UID != old.UID {
+		t.Fatal("the host moved before its deadline")
+	}
+	h.markPodReady()
+	h.settle()
+	if pending := agentUpdatePending(h.host()); pending == nil || !pending.LastTransitionTime.Equal(&first) {
+		t.Fatalf("the deadline restarted when the Pod was ready again: %+v", pending)
+	}
+
+	pod, _ = h.pod()
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	if err := h.client.Status().Update(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(2 * time.Hour)
+	h.settle()
+	moved, ok := h.pod()
+	if !ok || moved.UID == old.UID || agenthost.PodAgentImage(moved) != testNewAgentImage {
+		t.Fatalf("a Pod that is not ready past the deadline must move to the new agent (ok=%v)", ok)
+	}
+}
+
 // Recreating a template under its name moves its hosts to the new template on
 // the volumes they already have.
 func TestAgentHostMovesToARecreatedTemplate(t *testing.T) {

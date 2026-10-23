@@ -127,9 +127,7 @@ func (h *Handlers) ownAgentHost(c fiber.Ctx, action connectorAction) (*corev1alp
 	}
 	// Every provider counts, not only those serving hosts now: a host kept
 	// after its provider stopped serving them is still its person's to see
-	// and delete. A provider holds its deletion while Connections reference
-	// it, so a retained link's provider is still listed. The host of a
-	// provider serving hosts now comes first.
+	// and delete. The host of a provider serving hosts now comes first.
 	links := map[string]bool{}
 	for i := range providers.Items {
 		links[connectors.ConnectionName(providers.Items[i].Name, ui.Issuer, ui.Subject)] =
@@ -145,7 +143,14 @@ func (h *Handlers) ownAgentHost(c fiber.Ctx, action connectorAction) (*corev1alp
 		if from == nil {
 			continue
 		}
-		if current, mine := links[from.ConnectionRef.Name]; mine && current {
+		current, mine := links[from.ConnectionRef.Name]
+		if !mine {
+			// A host kept after its person disconnected outlives its provider,
+			// which nothing holds once the link is gone. Its link's name still
+			// says whose it is.
+			mine = connectionNameOf(from.ConnectionRef.Name, ui.Issuer, ui.Subject)
+		}
+		if mine && current {
 			return &hosts.Items[i], nil
 		} else if mine && retained == nil {
 			retained = &hosts.Items[i]
@@ -155,6 +160,14 @@ func (h *Handlers) ownAgentHost(c fiber.Ctx, action connectorAction) (*corev1alp
 		return retained, nil
 	}
 	return nil, fiber.NewError(fiber.StatusNotFound, "you have no agent host yet; link GitHub first, or wait a moment after linking")
+}
+
+// connectionNameOf reports whether name is this person's link to the provider
+// its prefix names. The name's digest covers the provider and the person's
+// verified identity, so it matches no one else's.
+func connectionNameOf(name, issuer, subject string) bool {
+	cut := strings.LastIndex(name, "-")
+	return cut > 0 && connectors.ConnectionName(name[:cut], issuer, subject) == name
 }
 
 func agentHostResponse(host *corev1alpha1.AgentHost) AgentHostResponse {

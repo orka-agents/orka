@@ -51,6 +51,10 @@ const (
 
 	agentHostConditionReady     = "Ready"
 	agentHostConditionSuspended = "Suspended"
+	// agentHostConditionAgentUpdatePending is True while a running host waits to
+	// move to the controller's current host agent. Its lastTransitionTime is
+	// when the controller first saw the difference.
+	agentHostConditionAgentUpdatePending = "HostAgentUpdatePending"
 
 	agentHostReasonReady                   = "HostReady"
 	agentHostReasonProvisioning            = "Provisioning"
@@ -72,6 +76,7 @@ const (
 	agentHostReasonGitHubIdentityChanged   = "GitHubIdentityChanged"
 	agentHostReasonGitHubMembershipEnded   = "GitHubMembershipEnded"
 	agentHostReasonGitHubTokenNeverExpires = "GitHubTokenNeverExpires"
+	agentHostReasonWaitingForIdle          = "WaitingForIdle"
 
 	agentHostKindSecret           = "Secret"
 	agentHostKindConnectionSecret = "ConnectionSecret"
@@ -91,6 +96,9 @@ const (
 	// agentHostTokenHorizon is how long before its expiry a host's token from
 	// a Connection is refreshed.
 	agentHostTokenHorizon = 15 * time.Minute
+	// agentHostAgentUpdateDeadline bounds how long a host that never reports
+	// idle keeps an earlier host agent.
+	agentHostAgentUpdateDeadline = 24 * time.Hour
 
 	// Kubelet reasons for a container that is starting normally.
 	agentHostWaitingInitializing = "PodInitializing"
@@ -296,6 +304,13 @@ func (r *AgentHostReconciler) reconcileHost(
 		return ctrl.Result{}, err
 	}
 	if githubToken != nil {
+		stopping, err := r.retirePodOfAnotherToken(ctx, host, names, tokenSource)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if stopping {
+			return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
+		}
 		if err := r.ensureGitHubToken(ctx, host, names, githubToken); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -525,6 +540,46 @@ func (r *AgentHostReconciler) ensureConnectionToken(
 		return nil, fmt.Errorf("connection token Secret %s has no token", names.ConnectionTokenSecret)
 	}
 	return value, nil
+}
+
+// retirePodOfAnotherToken stops a Pod started with a GitHub token from another
+// Secret or key, and reports whether one is still stopping. The copy is
+// mounted into the running Pod and follows its Secret, so a token from a new
+// source is written only once no Pod of the old one remains: otherwise the
+// old Pod's processes could read it before they stop.
+func (r *AgentHostReconciler) retirePodOfAnotherToken(
+	ctx context.Context,
+	host *corev1alpha1.AgentHost,
+	names agenthost.Names,
+	tokenSource string,
+) (bool, error) {
+	receipt := findAgentHostReceipt(host, agentHostKindPod, "", names.Pod)
+	if receipt == nil {
+		return false, nil
+	}
+	pod := &corev1.Pod{}
+	key := types.NamespacedName{Namespace: host.Status.HostNamespace, Name: names.Pod}
+	err := r.Get(ctx, key, pod)
+	if apierrors.IsNotFound(err) {
+		// The cache may lag behind a recent create, including one whose UID
+		// was never recorded; only the API server can say the Pod is gone.
+		err = r.reader().Get(ctx, key, pod)
+	}
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !agentHostOwns(host, receipt, pod) || pod.Annotations[agenthost.AnnotationGitHubToken] == tokenSource {
+		return false, nil
+	}
+	if err := r.deletePod(ctx, host, names); err != nil {
+		return false, err
+	}
+	setAgentHostState(host, corev1alpha1.AgentHostPhaseProvisioning, "", metav1.ConditionFalse,
+		agentHostReasonProvisioning, "replacing the host's Pod to change its credentials", "")
+	return true, nil
 }
 
 func (r *AgentHostReconciler) ensureGitHubToken(
@@ -786,6 +841,8 @@ func (r *AgentHostReconciler) suspend(
 	if !host.Spec.Suspended {
 		reason = agentHostReasonIdle
 	}
+	// The next Pod starts on the current host agent.
+	meta.RemoveStatusCondition(&host.Status.Conditions, agentHostConditionAgentUpdatePending)
 	if err := r.deletePod(ctx, host, names); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -903,16 +960,84 @@ func (r *AgentHostReconciler) reconcilePod(
 			agentHostReasonProvisioning, message, "")
 		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
 	}
+	replaced, updateWait, err := r.reconcileAgentUpdate(ctx, host, names, template, pod)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if replaced {
+		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
+	}
 	if !agentHostPodReady(pod) {
 		setAgentHostState(host, corev1alpha1.AgentHostPhaseProvisioning, pod.Name, metav1.ConditionFalse,
 			agentHostReasonProvisioning, agentHostPodWaitingMessage(pod), "")
-		return ctrl.Result{RequeueAfter: agentHostResync}, nil
+		return ctrl.Result{RequeueAfter: sooner(agentHostResync, updateWait)}, nil
 	}
 	host.Status.Restarts = 0
 	host.Status.LastRestartTime = nil
 	setAgentHostState(host, corev1alpha1.AgentHostPhaseReady, pod.Name, metav1.ConditionTrue,
 		agentHostReasonReady, "the host answers the Agent Host Protocol", "")
-	return r.reconcileIdle(ctx, host, names, template, pod)
+	result, err := r.reconcileIdle(ctx, host, names, template, pod)
+	if err == nil && host.Status.IdleSuspendedAt == nil {
+		result.RequeueAfter = sooner(result.RequeueAfter, updateWait)
+	}
+	return result, err
+}
+
+// sooner is the earlier of two requeue delays, where zero means none.
+func sooner(a, b time.Duration) time.Duration {
+	if a == 0 || (b > 0 && b < a) {
+		return b
+	}
+	return a
+}
+
+// reconcileAgentUpdate moves a live host to the controller's current host
+// agent, such as after an upgrade, and reports whether it replaced the Pod or
+// when to look again. The agent is copied into the Pod when it starts, so
+// moving means a new Pod, which loses a running turn: it waits until the host
+// reports idle, but no longer than agentHostAgentUpdateDeadline, so a host
+// that never reports idle, or never becomes ready, still moves.
+func (r *AgentHostReconciler) reconcileAgentUpdate(
+	ctx context.Context,
+	host *corev1alpha1.AgentHost,
+	names agenthost.Names,
+	template *corev1alpha1.AgentHostTemplate,
+	pod *corev1.Pod,
+) (bool, time.Duration, error) {
+	if agenthost.PodAgentImage(pod) == r.AgentImage {
+		meta.RemoveStatusCondition(&host.Status.Conditions, agentHostConditionAgentUpdatePending)
+		return false, 0, nil
+	}
+	now := r.now()
+	meta.SetStatusCondition(&host.Status.Conditions, metav1.Condition{
+		Type: agentHostConditionAgentUpdatePending, Status: metav1.ConditionTrue, Reason: agentHostReasonWaitingForIdle,
+		Message: fmt.Sprintf("the host's Pod is replaced to update its host agent once the host reports idle, or within %d hours",
+			int(agentHostAgentUpdateDeadline.Hours())),
+		ObservedGeneration: host.Generation,
+		// Kept while the condition stays True, so the deadline counts from
+		// when the update was first seen.
+		LastTransitionTime: metav1.NewTime(now.UTC().Truncate(time.Second)),
+	})
+	since := meta.FindStatusCondition(host.Status.Conditions, agentHostConditionAgentUpdatePending).LastTransitionTime.Time
+	remaining := agentHostAgentUpdateDeadline - now.Sub(since)
+	replace := remaining <= 0
+	if !replace && agentHostPodReady(pod) && template.Spec.IdleStatusFile != "" && r.IdleStatus != nil {
+		status, err := r.IdleStatus.ReadIdleStatus(ctx, pod.Status.PodIP)
+		if err != nil {
+			logf.FromContext(ctx).Info("could not read agent host idle status", "agentHost", host.Name, "error", err.Error())
+		} else {
+			replace = status.Idle && !status.Stale
+		}
+	}
+	if !replace {
+		return false, min(remaining, agentHostIdlePoll), nil
+	}
+	if err := r.deletePod(ctx, host, names); err != nil {
+		return false, 0, err
+	}
+	setAgentHostState(host, corev1alpha1.AgentHostPhaseProvisioning, "", metav1.ConditionFalse,
+		agentHostReasonProvisioning, "replacing the host's Pod to update its host agent", "")
+	return true, 0, nil
 }
 
 // restartWait is how long a failed host still has to wait before its next Pod.
@@ -1132,6 +1257,7 @@ func setAgentHostState(
 func setAgentHostFailed(host *corev1alpha1.AgentHost, failure *agentHostFailure) {
 	host.Status.Phase = corev1alpha1.AgentHostPhaseFailed
 	host.Status.PodName = ""
+	meta.RemoveStatusCondition(&host.Status.Conditions, agentHostConditionAgentUpdatePending)
 	meta.SetStatusCondition(&host.Status.Conditions, metav1.Condition{
 		Type: agentHostConditionReady, Status: metav1.ConditionFalse, Reason: failure.reason, Message: failure.message,
 		ObservedGeneration: host.Generation,
