@@ -218,6 +218,13 @@ template's spec is immutable: to change it on an existing install, delete the
 AgentHostTemplate, then upgrade, and hosts move to the new one on their volumes. Without the
 chart, add `spec.agentHost.templateRef` to a GitHub provider yourself.
 
+People's Connections outlive an uninstall, and a provider is deleted only once no Connection
+references it. So Helm keeps the provider, the template and a client Secret the chart created
+when you uninstall or turn `github` off, and reinstalling the same release adopts them. To
+remove them, do it while the controller runs, since it finishes their deletion: delete the
+Connections that reference the provider, wait until they are gone, then delete the three.
+After an uninstall, reinstall first.
+
 To reach Orka with no domain, set `ingress.enabled: true`, `ingress.className: tailscale`
 and `ingress.tls: [{hosts: [orka]}]` with the Tailscale Kubernetes operator installed: the
 API and dashboard are then served at `https://orka.<tailnet>.ts.net` on your tailnet.
@@ -298,8 +305,8 @@ restart. Running the command again starts another invite with a new code. Invite
   account fails it with `GitHubIdentityChanged` and keeps the volume.
 - Disconnecting stops the host, deletes its token copy and keeps the AgentHost and its
   volume. Linking the same account again restarts the host on its volume.
-- Only a settled verdict stops a host: a disconnect, a refused provider, or a grant that no
-  longer covers the link. While a controller catches up with an edit, or a read fails, the
+- Only a settled verdict stops a host: a disconnect, a decline, a refused provider, or a
+  grant that no longer covers the link. While a controller catches up with an edit, or a read fails, the
   host keeps running on the token it has and gets no new one.
 - A suspended host keeps no token copy. Waking it writes a fresh one, after checking the
   account.

@@ -4,6 +4,10 @@ each person who links GitHub gets their own host, and nothing is applied by
 hand. The template's body is the copilotd sample's, which a test keeps in
 step. Template specs are immutable; to change one, delete it and upgrade, and
 hosts move to the new template on their volumes.
+
+People's Connections outlive an uninstall, as CRDs do, and a provider is
+deleted only once no Connection references it. So Helm keeps the provider, its
+template and the client Secret it created; reinstalling adopts them.
 */ -}}
 {{- if include "orka.agentHostGitHubEnabled" . }}
 {{- $github := include "orka.agentHostGitHub" . | fromYaml }}
@@ -17,6 +21,8 @@ metadata:
   namespace: {{ $namespace | quote }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 type: Opaque
 stringData:
   {{ $github.clientSecret.key | toString | quote }}: {{ $github.clientSecret.value | quote }}
@@ -29,6 +35,8 @@ metadata:
   namespace: {{ $namespace | quote }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   securityContext:
     runAsUser: 1000
@@ -124,6 +132,8 @@ metadata:
   namespace: {{ $namespace | quote }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   displayName: {{ $github.displayName | quote }}
   oauth:

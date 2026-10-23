@@ -66,8 +66,10 @@ signed-in person's host may do.
 The API's authentication accepts session tokens beside OIDC. A session's identity is a
 verified person in the sign-in namespace, which is the watch namespace. Session tokens are
 never logged, and neither are GitHub tokens, device codes or GitHub's answers that carry
-them: requests and errors are logged by route and status, never by body. A device code is
-shown only to the person signing in, or returned to the operator who started an invite.
+them: requests and errors are logged by route and status, never by body. GitHub's user
+code and verification URL are shown only to the person signing in, or returned to the
+operator who started an invite. The device code that polls for the token stays with
+whoever polls: the CLI, or Orka for an invite.
 Unlike an OIDC sign-in, a session reaches only the routes that act on the
 person's own links, agent host and connection routes; every other API route still needs OIDC
 or Kubernetes credentials. Membership of an org grants a Copilot environment, not the whole
@@ -109,6 +111,9 @@ context-token subjects. A GitHub session also owns Connections, as issuer
   beside it. A sign-in without a refresh token links the account without a host, under
   a deadline Orka chooses. A host never takes such a link: a later sign-in that starts
   one replaces it first, and lifts the decline only once its own grant is linked.
+- A link made another way, such as `orka connect`, with a token that never expires still
+  gets a host, which fails with `GitHubTokenNeverExpires` and names the fix, rather than
+  no host and no reason.
 
 ### Reaching Orka
 
