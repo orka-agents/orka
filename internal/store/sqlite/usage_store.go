@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/usage"
 )
@@ -36,6 +35,7 @@ func (s *Store) RegisterUsageWork(ctx context.Context, work store.UsageWorkReque
 	if work.StartedAt.IsZero() {
 		work.StartedAt = time.Now().UTC()
 	}
+	utcUsageTimes(&work)
 	data, err := json.Marshal(work)
 	if err != nil {
 		return err
@@ -47,6 +47,7 @@ func (s *Store) RegisterUsageWork(ctx context.Context, work store.UsageWorkReque
 }
 
 func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) error {
+	utcUsageTimes(&task)
 	task.Repository = strings.ToLower(task.Repository)
 	if task.Namespace == "" || task.TaskUID == "" || task.TaskName == "" {
 		return store.ValidationErrorf("usage task requires namespace, name and UID")
@@ -84,6 +85,9 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 		if task.WorkID != "" {
 			var work store.UsageWorkRequest
 			if err := readUsageJSON(ctx, db, &work, `SELECT data FROM usage_work_requests WHERE namespace = ? AND id = ?`, task.Namespace, task.WorkID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("%w: usage work %q in namespace %q", store.ErrNotFound, task.WorkID, task.Namespace)
+				}
 				return fmt.Errorf("load usage task work: %w", err)
 			}
 			if task.Repository != "" && !strings.EqualFold(task.Repository, work.Repository) {
@@ -209,8 +213,8 @@ func (s *Store) RecordUsage(ctx context.Context, observation store.UsageObservat
 }
 
 func recordUsage(ctx context.Context, db taskDataExecutor, observation store.UsageObservation) error {
-	if observation.ID == "" || observation.Namespace == "" || observation.CounterID == "" || observation.ObservedAt.IsZero() {
-		return store.ValidationErrorf("usage observation requires identity, namespace, counter and timestamp")
+	if err := store.ValidateUsageObservation(observation); err != nil {
+		return err
 	}
 	if observation.TaskUID != "" {
 		var namespaceUID string
@@ -226,35 +230,6 @@ func recordUsage(ctx context.Context, db taskDataExecutor, observation store.Usa
 			observation.NamespaceUID = namespaceUID
 		}
 	}
-	switch observation.Scope {
-	case store.UsageScopeCall, store.UsageScopeAttempt, store.UsageScopeSession:
-	default:
-		return store.ValidationErrorf("unsupported usage counter scope")
-	}
-	switch observation.Source {
-	case store.UsageSourceProvider, store.UsageSourceAgent, store.UsageSourceEstimate:
-	default:
-		return store.ValidationErrorf("unsupported usage source")
-	}
-	for _, count := range []*int64{observation.InputTokens, observation.OutputTokens, observation.CachedInputTokens, observation.CacheWriteInputTokens} {
-		if count != nil && (*count < 0 || *count > store.MaxUsageTokenCount) {
-			return store.ValidationErrorf("invalid usage count")
-		}
-	}
-	if observation.InputTokens != nil {
-		remainingInput := *observation.InputTokens
-		for _, count := range []*int64{observation.CachedInputTokens, observation.CacheWriteInputTokens} {
-			if count == nil {
-				continue
-			}
-			if *count > remainingInput {
-				return store.ValidationErrorf("cache usage exceeds inclusive input count")
-			}
-			remainingInput -= *count
-		}
-	}
-	observation.Provider, _, _ = events.RedactAndTruncateExecutionEventText(observation.Provider, 256)
-	observation.Model, _, _ = events.RedactAndTruncateExecutionEventText(observation.Model, 256)
 	observation.ObservedAt = observation.ObservedAt.UTC()
 	data, err := json.Marshal(observation)
 	if err != nil {
@@ -282,6 +257,7 @@ func recordUsage(ctx context.Context, db taskDataExecutor, observation store.Usa
 }
 
 func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink) error {
+	utcUsageTimes(&link)
 	link.Repository = strings.ToLower(link.Repository)
 	if link.Namespace == "" || link.WorkID == "" || link.Repository == "" || link.Number <= 0 || link.EvidenceID == "" {
 		return store.ValidationErrorf("usage PR link requires work, repository, PR and publication evidence")
@@ -324,6 +300,7 @@ func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink
 }
 
 func (s *Store) RecordUsagePullRequest(ctx context.Context, pr store.UsagePullRequest) error {
+	utcUsageTimes(&pr)
 	pr.Repository = strings.ToLower(pr.Repository)
 	if pr.Namespace == "" || pr.Repository == "" || pr.Number <= 0 || pr.ObservedAt.IsZero() {
 		return store.ValidationErrorf("usage PR observation requires a namespace, repository, number and timestamp")
@@ -372,64 +349,37 @@ func (s *Store) LoadUsage(ctx context.Context, filter store.UsageFilter) (store.
 	return result, err
 }
 
-// TaskTokenUsage returns the input and output tokens a Task consumed, exactly
-// as the usage report attributes them: each cumulative counter contributes its
-// final value once, and a counter shared across a runtime session's turns
-// contributes only this Task's increase.
-func (s *Store) TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error) {
-	var inputTokens, outputTokens int64
-	err := s.usageTransaction(ctx, func(ctx context.Context) error {
-		var err error
-		inputTokens, outputTokens, err = taskTokenUsage(ctx, s.taskDataExecutor(ctx), namespace, taskUID, "")
-		return err
-	})
-	return inputTokens, outputTokens, err
+// ListTaskCounterObservations implements store.TaskUsageObservationReader.
+func (s *Store) ListTaskCounterObservations(ctx context.Context, namespace, taskUID string) ([]store.UsageObservation, error) {
+	return taskCounterObservations(ctx, s.taskDataExecutor(ctx), namespace, taskUID)
 }
 
-// taskTokenUsage sums a Task's attributed usage, limited to one prompt
-// attempt's measurements when attemptID is set.
-func taskTokenUsage(ctx context.Context, db taskDataExecutor, namespace, taskUID, attemptID string) (int64, int64, error) {
-	// Other Tasks' observations of the same counters are the baselines that
-	// keep their usage out of this Task's share.
-	observations, err := readUsageRows[store.UsageObservation](ctx, db,
+// taskCounterObservations reads, in one statement, every observation of the
+// counters a Task has observed, in accounting order.
+func taskCounterObservations(ctx context.Context, db taskDataExecutor, namespace, taskUID string) ([]store.UsageObservation, error) {
+	return readUsageRows[store.UsageObservation](ctx, db,
 		`SELECT data FROM usage_observations INDEXED BY idx_usage_observations_counter
 		 WHERE namespace = ? AND counter_id IN (
 		   SELECT counter_id FROM usage_observations INDEXED BY idx_usage_observations_task
 		   WHERE namespace = ? AND task_uid = ?)
 		 ORDER BY observed_at, recorded_seq`,
 		namespace, namespace, taskUID)
-	if err != nil || len(observations) == 0 {
-		return 0, 0, err
-	}
-	asOf := time.Now().UTC().Add(time.Hour)
-	report, err := usage.Build(store.UsageData{Observations: observations}, store.UsageFilter{Until: asOf, AsOf: asOf})
+}
+
+// sqlControlAttemptTokens attributes one prompt attempt's usage for the
+// duplicate SQL control implementation, which finalizes turns without the
+// storage client. Totals beyond the exact reporting range stay out of the
+// Session counters rather than block finalization.
+func sqlControlAttemptTokens(ctx context.Context, db taskDataExecutor, namespace string, key store.SessionTurnKey) (int64, int64, error) {
+	observations, err := taskCounterObservations(ctx, db, namespace, key.TaskUID)
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, group := range report.OtherWork {
-		for _, task := range group.Tasks {
-			if task.Namespace != namespace || task.TaskUID != taskUID {
-				continue
-			}
-			if attemptID == "" {
-				return task.Totals.InputTokens, task.Totals.OutputTokens, nil
-			}
-			var inputTokens, outputTokens int64
-			for _, measurement := range task.Measurements {
-				if measurement.AttemptID != attemptID {
-					continue
-				}
-				if measurement.InputTokens != nil {
-					inputTokens += *measurement.InputTokens
-				}
-				if measurement.OutputTokens != nil {
-					outputTokens += *measurement.OutputTokens
-				}
-			}
-			return inputTokens, outputTokens, nil
-		}
+	input, output, err := usage.TaskTokens(observations, namespace, key.TaskUID, fmt.Sprintf("%d/%s", key.Attempt, key.PromptID), time.Now())
+	if errors.Is(err, usage.ErrTotalsOutOfRange) {
+		return 0, 0, nil
 	}
-	return 0, 0, nil
+	return input, output, err
 }
 
 func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilter) (store.UsageData, error) {
@@ -468,7 +418,37 @@ func readUsageJSON(ctx context.Context, db taskDataExecutor, target any, query s
 	if err := db.QueryRowContext(ctx, query, args...).Scan(&data); err != nil {
 		return err
 	}
-	return json.Unmarshal([]byte(data), target)
+	if err := json.Unmarshal([]byte(data), target); err != nil {
+		return err
+	}
+	utcUsageTimes(target)
+	return nil
+}
+
+// utcUsageTimes converts the times in a usage record to UTC. Usage records are
+// stored as JSON, which keeps the zone a time was written in, so they are
+// normalized before they are stored and again when they are read, which also
+// covers rows written before this rule.
+func utcUsageTimes(record any) {
+	switch r := record.(type) {
+	case *store.UsageWorkRequest:
+		r.StartedAt = r.StartedAt.UTC()
+	case *store.UsageTask:
+		r.StartedAt, r.PhaseObservedAt = r.StartedAt.UTC(), r.PhaseObservedAt.UTC()
+		// The history may share its backing array with the caller's record.
+		r.PhaseHistory = slices.Clone(r.PhaseHistory)
+		for i := range r.PhaseHistory {
+			r.PhaseHistory[i].ObservedAt = r.PhaseHistory[i].ObservedAt.UTC()
+			r.PhaseHistory[i].RecordedAt = r.PhaseHistory[i].RecordedAt.UTC()
+		}
+	case *store.UsageObservation:
+		r.ObservedAt = r.ObservedAt.UTC()
+	case *store.UsagePRLink:
+		r.LinkedAt = r.LinkedAt.UTC()
+	case *store.UsagePullRequest:
+		r.CreatedAt, r.MergedAt, r.ClosedAt = utcTimePtr(r.CreatedAt), utcTimePtr(r.MergedAt), utcTimePtr(r.ClosedAt)
+		r.ObservedAt = r.ObservedAt.UTC()
+	}
 }
 
 func readUsageRows[T any](ctx context.Context, db taskDataExecutor, query string, args ...any) ([]T, error) {
@@ -487,6 +467,7 @@ func readUsageRows[T any](ctx context.Context, db taskDataExecutor, query string
 		if err := json.Unmarshal([]byte(data), &value); err != nil {
 			return nil, err
 		}
+		utcUsageTimes(&value)
 		result = append(result, value)
 	}
 	return result, rows.Err()

@@ -794,8 +794,15 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 			return nil, err
 		}
 	}
+	// This duplicate SQL control path is not production storage, so it still
+	// attributes the attempt's usage itself; production finalization receives
+	// the attributed totals from the storage client.
+	inputTokens, outputTokens, err := sqlControlAttemptTokens(ctx, tx, control.Namespace, request.Key)
+	if err != nil {
+		return nil, err
+	}
 	if err := finalizeSessionTranscriptTx(ctx, tx, control.Namespace, control.SessionName,
-		request.Key, messageCountDelta, request.FinalizedAt); err != nil {
+		request.Key, messageCountDelta, inputTokens, outputTokens, request.FinalizedAt); err != nil {
 		return nil, err
 	}
 	if err := validateNativeFinalization(request.NativeSession, request.NativeSessionCarried, request.TerminalKind, request.SkipTranscriptAppend); err != nil {

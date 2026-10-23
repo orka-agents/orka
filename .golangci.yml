@@ -58,6 +58,17 @@ linters:
       - linters:
           - goconst
         path: _test\.go$
+      # The public provider suite is test code shipped as a library so
+      # separately built providers can run it; its fixtures follow the same
+      # rules as test files.
+      - linters:
+          - goconst
+        path: pkg/storage/v1/storagetest/
+      # The storage contract was moved verbatim from internal/store, which is
+      # exempt from line length.
+      - linters:
+          - lll
+        path: pkg/storage/v1/
     paths:
       - third_party$
       - builtin$

@@ -5,6 +5,7 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 COPY internal/transactiontoken/profile.go ./internal/transactiontoken/profile.go
 COPY test/fixtures/aimockauthority ./test/fixtures/aimockauthority
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
