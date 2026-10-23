@@ -318,10 +318,14 @@ func (o *operations) drive(
 		case errors.Is(err, storagev1.ErrOperationAborted):
 			return err
 		case errors.Is(err, storagev1.ErrClockSkew):
+			// The store refuses writes from this controller until the clocks
+			// agree again: not ready, also when it ends an attempt after an
+			// unknown outcome and resolution finds the operation aborted.
+			skew := fmt.Errorf("%w: %w", storagev1.ErrNotReady, err)
 			if unknown {
-				return o.resolve(ctx, call, envelope, attempt, err)
+				return o.resolve(ctx, call, envelope, attempt, skew)
 			}
-			return fmt.Errorf("%w: %w", storagev1.ErrNotReady, err)
+			return skew
 		case unknown:
 			return o.resolve(ctx, call, envelope, attempt, err)
 		default:

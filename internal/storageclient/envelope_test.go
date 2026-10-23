@@ -35,6 +35,8 @@ const (
 	// stepRefuse reports ErrConflict without reaching the store, as a
 	// refused precondition would.
 	stepRefuse
+	// stepClockSkew reports ErrClockSkew without reaching the store.
+	stepClockSkew
 )
 
 // lossyStore wraps the SQLite store with scripted provider failures for the
@@ -74,6 +76,8 @@ func (s *lossyStore) intercept(ctx context.Context, method string, call func(con
 		return fmt.Errorf("%w: connection refused", storagev1.ErrUnavailable)
 	case stepRefuse:
 		return store.ConflictErrorf("a precondition no longer holds")
+	case stepClockSkew:
+		return fmt.Errorf("%w: issued ahead of the store clock", storagev1.ErrClockSkew)
 	}
 	if err := call(ctx); err != nil {
 		return err
@@ -768,5 +772,19 @@ func TestWriteWhoseCallEndsBeforeItsFenceOpensIsNotReady(t *testing.T) {
 	err = client.SaveResult(ctx, "tenant", "task", []byte("result"))
 	if !errors.Is(err, storagev1.ErrNotReady) || !errors.Is(err, context.DeadlineExceeded) || !store.IsTemporaryStorageError(err) {
 		t.Fatalf("write whose call ended before its fence opened = %v, want ErrNotReady wrapping the deadline", err)
+	}
+}
+
+// Clock skew that ends the attempts after an unknown outcome still reads as
+// not ready once resolution finds the operation aborted, so callers retry it.
+func TestClockSkewAfterAnUnknownOutcomeStaysNotReady(t *testing.T) {
+	f := newLossyFixture(t)
+	f.lossy.plan("SaveResult", stepUnknown, stepClockSkew)
+	err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result"))
+	if !errors.Is(err, storagev1.ErrOperationAborted) || !errors.Is(err, storagev1.ErrNotReady) || !store.IsTemporaryStorageError(err) {
+		t.Fatalf("SaveResult error = %v, want an abort that still reads as not ready", err)
+	}
+	if resolutions := len(f.lossy.seen("ResolveOperation")); resolutions != 1 {
+		t.Fatalf("resolutions = %d, want 1", resolutions)
 	}
 }
