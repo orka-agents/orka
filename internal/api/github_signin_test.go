@@ -26,6 +26,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -316,6 +318,49 @@ func TestGitHubSignInStartsNoHostForATokenItCannotRefresh(t *testing.T) {
 	}
 	if got := connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost]; got != corev1alpha1.ConnectionAgentHostDeclined {
 		t.Fatalf("annotation = %q, want the link to get no host", got)
+	}
+}
+
+// A host-enabled sign-in that lifts the decline while a --no-host one waits
+// its turn does not cost that one its decline: each records its own under
+// the completion lock.
+func TestGitHubSignInKeepsTheDeclineOfAnOverlappingSignIn(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusCreated {
+		t.Fatalf("first sign-in: %d", status)
+	}
+	key := types.NamespacedName{Namespace: connectorTestNamespace, Name: connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)}
+	// The host-enabled sign-in runs while the --no-host one waits for the
+	// lock, so the waiting one finds the decline lifted at its first read
+	// under the lock.
+	h.handlers.apiReader = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1alpha1.Connection); ok && k == key {
+				stored := &corev1alpha1.Connection{}
+				if err := c.Get(ctx, k, stored); err != nil {
+					return err
+				}
+				base := stored.DeepCopy()
+				delete(stored.Annotations, corev1alpha1.ConnectionAnnotationAgentHost)
+				if err := c.Patch(ctx, stored, client.MergeFrom(base)); err != nil {
+					return err
+				}
+			}
+			return c.Get(ctx, k, obj, opts...)
+		},
+	})
+	h.identity = nil
+	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "noHost": true})
+	if status != http.StatusCreated || session.AgentHost {
+		t.Fatalf("--no-host sign-in: %d, agentHost %v", status, session.AgentHost)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), key, connection); err != nil {
+		t.Fatal(err)
+	}
+	if got := connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost]; got != corev1alpha1.ConnectionAgentHostDeclined {
+		t.Fatalf("annotation = %q, want the --no-host sign-in's decline kept", got)
 	}
 }
 
