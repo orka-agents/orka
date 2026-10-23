@@ -414,6 +414,15 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if connection, err = h.reloadSignInConnection(ctx, connection, ui); err != nil {
 		return nil, false, err
 	}
+	// A decline is recorded and lifted only under the lock, so overlapping
+	// sign-ins never undo each other's. It is recorded before the link
+	// changes, so no host takes what is linked next, and lifted only once
+	// custody holds a grant a host may take.
+	if declined {
+		if err := h.recordAgentHostDecline(ctx, connection, true); err != nil {
+			return nil, false, err
+		}
+	}
 	// Signing in again keeps a link that still holds the person's account:
 	// each commit retains the grant it replaces until disconnect, so linking
 	// every sign-in would soon refuse new ones. The caller revokes the
@@ -427,7 +436,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	}
 	if holds {
 		if !declined {
-			if err := h.liftAgentHostDecline(ctx, connection); err != nil {
+			if err := h.recordAgentHostDecline(ctx, connection, false); err != nil {
 				return nil, tokens.AccessToken == custody, err
 			}
 		}
@@ -499,29 +508,33 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if err != nil {
 		return nil, true, h.completionCommitError(ctx, err, completion, completionNonce, connection.Name)
 	}
+	// Custody now holds this sign-in's grant, so a host may take it. The
+	// decline is lifted before the status write, which the Connection
+	// reconciler repairs from the completion if it fails; nothing repairs
+	// a decline.
+	if !declined {
+		if err := h.recordAgentHostDecline(ctx, connection, false); err != nil {
+			return nil, true, err
+		}
+	}
 	if err := h.markConnectionLinked(ctx, connection, provider, committed); err != nil {
 		return nil, true, fiber.NewError(fiber.StatusInternalServerError, "failed to record your GitHub link; sign in again")
 	}
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, completionNonce); err != nil {
 		log.Error(err, "consumed sign-in completion could not be removed", "connection", connection.Name)
 	}
-	if !declined {
-		if err := h.liftAgentHostDecline(ctx, connection); err != nil {
-			return nil, true, err
-		}
-	}
 	return connection, true, nil
 }
 
-// liftAgentHostDecline lets connection's link feed an agent host again. It
-// runs only once custody holds a grant a host may take, so no host ever
-// takes the grant a lifted decline still covered.
-func (h *Handlers) liftAgentHostDecline(ctx context.Context, connection *corev1alpha1.Connection) error {
-	if connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] != corev1alpha1.ConnectionAgentHostDeclined {
+// recordAgentHostDecline records whether connection's person declined an
+// agent host. It runs under the sign-in's completion lock: a decline before
+// the link changes, a lift only once custody holds a grant a host may take.
+func (h *Handlers) recordAgentHostDecline(ctx context.Context, connection *corev1alpha1.Connection, declined bool) error {
+	if (connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] == corev1alpha1.ConnectionAgentHostDeclined) == declined {
 		return nil
 	}
 	base := connection.DeepCopy()
-	setAgentHostDeclined(connection, false)
+	setAgentHostDeclined(connection, declined)
 	if err := h.client.Patch(ctx, connection, client.MergeFrom(base)); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to update your GitHub link; sign in again")
 	}
@@ -595,7 +608,7 @@ func (h *Handlers) reloadSignInConnection(ctx context.Context, connection *corev
 
 // ensureSignInConnection returns the person's canonical Connection to
 // provider, creating it as CreateConnection does, and records a decline of
-// an agent host.
+// an agent host on a link it creates.
 func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
 	declined bool) (*corev1alpha1.Connection, error) {
 	name := connectors.ConnectionName(provider.Name, ui.Issuer, ui.Subject)
@@ -651,16 +664,8 @@ func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, pro
 	if !connectionCustodyProtected(connection) {
 		return nil, fiber.NewError(fiber.StatusConflict, "your GitHub link is still being set up; sign in again in a moment")
 	}
-	// A decline is recorded before the link changes, so no host takes what is
-	// linked next. Lifting one waits until custody holds a grant a host may
-	// take; see liftAgentHostDecline.
-	if declined {
-		base := connection.DeepCopy()
-		setAgentHostDeclined(connection, true)
-		if err := h.client.Patch(ctx, connection, client.MergeFrom(base)); err != nil {
-			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to update your GitHub link")
-		}
-	}
+	// An existing link's decline is recorded under the sign-in's completion
+	// lock; see recordAgentHostDecline.
 	return connection, nil
 }
 
