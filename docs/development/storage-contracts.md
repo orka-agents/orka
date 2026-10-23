@@ -136,9 +136,9 @@ the observable parts.
   `LoadTranscriptThrough`, `ReadSessionSoul`, `GetGatewayQueueStats`,
   `ListPatchProposals`, `GetLatestExecutionEventSeqs`,
   `ListSessionExecutionEvents` and `HasSessionCleanupFenceForUID`, the read
-  methods found issuing more than one query. A write method that returns the
-  record it changed reads it in the same transaction as the change; SQLite
-  does this for `RenewGatewayEventClaim`,
+  methods found issuing more than one query. A write method that returns or
+  compares the record it changed reads it in the same transaction as the
+  change; SQLite does this for `RenewGatewayEventClaim`,
   `FreezeGatewayEventTaskRuntimeAllowedTools`, `RetryGatewayDelivery` and
   `SavePromptResultReceipt`. A write method that reads after a failed update
   to tell a missing record from a conflict also reads in the update's
