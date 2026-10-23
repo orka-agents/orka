@@ -2506,6 +2506,14 @@ func parseExactLabels(raw string) (map[string]string, error) {
 		if !ok || key == "" || value == "" {
 			return nil, fmt.Errorf("label %q must be key=value", entry)
 		}
+		// Selectors built from these labels are refused by the API server
+		// when either part is malformed; refuse them at startup instead.
+		if problems := validation.IsQualifiedName(key); len(problems) > 0 {
+			return nil, fmt.Errorf("label key %q: %s", key, strings.Join(problems, "; "))
+		}
+		if problems := validation.IsValidLabelValue(value); len(problems) > 0 {
+			return nil, fmt.Errorf("label %q value %q: %s", key, value, strings.Join(problems, "; "))
+		}
 		if _, exists := result[key]; exists {
 			return nil, fmt.Errorf("label %q is duplicated", key)
 		}

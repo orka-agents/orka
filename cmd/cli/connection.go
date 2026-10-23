@@ -142,7 +142,7 @@ func newConnectCmd() *cobra.Command {
 				if current.Ready && (!started.Connection.Ready || current.GrantSequence > started.Connection.GrantSequence) {
 					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
 					if started.AgentHost {
-						return waitForAgentHost(ctx, cmd, c)
+						return waitForAgentHost(ctx, cmd, c, started.Connection.Name)
 					}
 					return nil
 				}

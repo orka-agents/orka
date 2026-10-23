@@ -76,7 +76,8 @@ check under **Acceptance**.
 - A Connection to that provider gets a host once it is linked:
   - it is Ready and its consent matches the provider's current digest;
   - its grant is committed;
-  - it is the only link its subject has to that provider;
+  - it is its subject's canonical link to that provider, the one named from the provider
+    and the subject's issuer and subject, so a duplicate link never gets a host;
   - its owner has not declined a host (`orka login --no-host`).
 - The controller then creates one AgentHost in the Connection's namespace, named `gh-` plus
   the lowercased GitHub login, with a managed user's underscore as `--`, which no login

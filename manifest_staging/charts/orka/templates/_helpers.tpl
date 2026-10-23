@@ -662,6 +662,9 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- if not $namespace -}}
 {{- fail "controller.agentHosts.namespace is required when controller.agentHosts.enabled=true" -}}
 {{- end -}}
+{{- if or (gt (len $namespace) 63) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` $namespace)) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must be a DNS-1123 label, as a namespace name is" $namespace) -}}
+{{- end -}}
 {{- if or (eq $namespace .Release.Namespace) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
 {{- fail (printf "controller.agentHosts.namespace %q must differ from the Helm release namespace and controller.acpRuntime.namespace" $namespace) -}}
 {{- end -}}

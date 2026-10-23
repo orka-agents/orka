@@ -767,6 +767,23 @@ func TestValidateAgentHostConfig(t *testing.T) {
 	}
 }
 
+// Labels that become selectors, such as the controller Pods a host's
+// NetworkPolicy admits, must be valid Kubernetes labels.
+func TestParseExactLabels(t *testing.T) {
+	labels, err := parseExactLabels(" orka.ai/network-role=controller , app=orka ")
+	if err != nil || len(labels) != 2 || labels["orka.ai/network-role"] != "controller" || labels["app"] != "orka" {
+		t.Fatalf("labels = %v, %v", labels, err)
+	}
+	for _, raw := range []string{
+		"", "role", "=controller", "role=", "role=a,role=b",
+		"role=not/a-label", "role=-leading", "bad key=value", "a/b/c=value", strings.Repeat("k", 64) + "=v",
+	} {
+		if labels, err := parseExactLabels(raw); err == nil {
+			t.Errorf("parseExactLabels(%q) = %v, want an error", raw, labels)
+		}
+	}
+}
+
 func TestAgentHostCacheOptionsAddsTheHostNamespace(t *testing.T) {
 	base := managerCacheOptions("orka-system", "orka-runtimes", "orka-system")
 	options := agentHostCacheOptions(base, "orka-agent-hosts")

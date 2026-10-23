@@ -41,8 +41,9 @@ controller's Role in it, the controller flags and the AgentHost admission webhoo
 `controller.agentHosts.agentImage` to another digest-pinned image that carries it. Agent
 hosts need `controller.mode: harness-v2`, and the host namespace must differ from the
 release namespace and `controller.acpRuntime.namespace`. Helm keeps the host namespace,
-with the hosts' volumes, when you disable agent hosts, roll back or uninstall; delete it
-yourself once no AgentHost needs it.
+with the hosts' volumes and the controller's Role in it, when you disable agent hosts,
+change `controller.agentHosts.namespace`, roll back or uninstall, so hosts left there can
+still be deleted; delete the namespace yourself once no AgentHost needs it.
 
 With the Kustomize install:
 
@@ -154,8 +155,31 @@ port=$(kubectl get secret alice-connection -o jsonpath='{.data.port}' | base64 -
 kubectl -n "$ns" port-forward "pod/$pod" "8788:$port"
 ```
 
-Add the host as `ws://127.0.0.1:8788/?tkn=<token>`. Port-forward needs
-`pods/portforward` on that Pod.
+Add the host as `ws://127.0.0.1:8788/?tkn=<token>`.
+
+The per-user Role above does not cover these commands. Add the connection Secret, here
+`alice-connection`, to its Secret rule, and grant `get` on the host's Pod and `create` on
+its `pods/portforward` in the host namespace. The Pod keeps its name for the host's life,
+so grant them once the host exists, using the `pod` value above:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-host-alice-standalone
+  namespace: orka-agent-hosts
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames: ["<pod>"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    resourceNames: ["<pod>"]
+    verbs: ["create"]
+```
+
+Bind it to the same person, in the host namespace.
 
 ### Hosts from GitHub Connections
 

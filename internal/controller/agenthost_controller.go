@@ -1312,6 +1312,10 @@ func (r *AgentHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("agenthost").
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(agentHostFromAnnotation),
 			builder.WithPredicates(componentLabel)).
+		// A host's NetworkPolicy is its confinement, so a deleted or edited one
+		// is repaired at once rather than at the next resync.
+		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(agentHostFromAnnotation),
+			builder.WithPredicates(componentLabel)).
 		Watches(&corev1alpha1.AgentHostTemplate{}, handler.EnqueueRequestsFromMapFunc(
 			r.hostsUsing(agentHostTemplateIndex))).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.hostsUsing(agentHostSecretIndex))).

@@ -235,6 +235,10 @@ metadata:
   namespace: {{ include "orka.agentHostNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    # Kept with the namespace: after controller.agentHosts.namespace changes,
+    # the controller still needs it to stop and delete the hosts left there.
+    helm.sh/resource-policy: keep
 rules:
   - apiGroups: [""]
     resources: ["pods", "persistentvolumeclaims"]
@@ -253,6 +257,8 @@ metadata:
   namespace: {{ include "orka.agentHostNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

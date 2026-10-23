@@ -108,6 +108,13 @@ func TestStaticChartAgentHostRoleMatchesKustomize(t *testing.T) {
 	if role == nil || binding == nil {
 		t.Fatalf("render has no Role and RoleBinding in %s", agentHostTestNamespace)
 	}
+	// Like the namespace, they outlive a change of host namespace, so the
+	// controller can still clean up the hosts left in the old one.
+	for _, doc := range []*workerRBACDocument{role, binding} {
+		if got := doc.Metadata.Annotations["helm.sh/resource-policy"]; got != "keep" {
+			t.Errorf("%s helm.sh/resource-policy = %q, want keep", doc.Kind, got)
+		}
+	}
 	kustomize, err := os.ReadFile("../../../config/agent-hosts/rbac.yaml")
 	if err != nil {
 		t.Fatalf("read Kustomize agent-host RBAC: %v", err)
@@ -194,6 +201,16 @@ func TestStaticChartRejectsInvalidAgentHostValues(t *testing.T) {
 			name: "empty namespace",
 			args: []string{"--set-string", "controller.agentHosts.namespace="},
 			want: "controller.agentHosts.namespace is required",
+		},
+		{
+			name: "namespace that is no DNS label",
+			args: []string{"--set-string", "controller.agentHosts.namespace=host_ns"},
+			want: "must be a DNS-1123 label",
+		},
+		{
+			name: "namespace too long",
+			args: []string{"--set-string", "controller.agentHosts.namespace=" + strings.Repeat("a", 64)},
+			want: "must be a DNS-1123 label",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,6 +337,23 @@ func TestStaticChartAgentHostGitHubRendersTheProviderAndTemplate(t *testing.T) {
 		"--show-only", "templates/agent-host-github.yaml")...)
 	if strings.Contains(existing, "kind: Secret\n") || !strings.Contains(existing, "name: github-app") {
 		t.Fatalf("existing Secret render:\n%s", existing)
+	}
+
+	// A Secret key YAML would read as another type stays a string. Decoding
+	// into the typed objects would hide this: it converts by the field's type,
+	// while the API server receives the YAML's.
+	for _, source := range []string{"existingSecret=github-app", "value=not-a-real-secret"} {
+		rendered := requireHelmRender(t, append(agentHostGitHubValues(
+			"--set", "controller.agentHosts.github.clientSecret."+source,
+			"--set", "controller.agentHosts.github.clientSecret.key=true"),
+			"--show-only", "templates/agent-host-github.yaml")...)
+		if !strings.Contains(requireRenderedDocument(t, rendered, "kind: ConnectorProvider\n"), `key: "true"`) {
+			t.Fatalf("%s: the provider's clientSecretRef key is not a string:\n%s", source, rendered)
+		}
+		if source == "value=not-a-real-secret" &&
+			!strings.Contains(requireRenderedDocument(t, rendered, "kind: Secret\n"), `"true": "not-a-real-secret"`) {
+			t.Fatalf("the rendered Secret's key is not a string:\n%s", rendered)
+		}
 	}
 }
 

@@ -645,7 +645,7 @@ func TestWaitReportsAnOperatorSuspensionOverAStaleReady(t *testing.T) {
 	hosts := client.NewWithNamespace(orka.URL, "orka_s_session", "orka-system")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := waitForAgentHost(ctx, cmd, hosts); err == nil || !strings.Contains(err.Error(), "an operator suspended") || wakes.Load() != 0 {
+	if err := waitForAgentHost(ctx, cmd, hosts, ""); err == nil || !strings.Contains(err.Error(), "an operator suspended") || wakes.Load() != 0 {
 		t.Fatalf("wait = %v, %d wakes", err, wakes.Load())
 	}
 }
