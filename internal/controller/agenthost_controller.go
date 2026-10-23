@@ -303,19 +303,12 @@ func (r *AgentHostReconciler) reconcileHost(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if githubToken != nil {
-		stopping, err := r.retirePodOfAnotherToken(ctx, host, names, tokenSource)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if stopping {
-			return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
-		}
-		if err := r.ensureGitHubToken(ctx, host, names, githubToken); err != nil {
-			return ctrl.Result{}, err
-		}
-	} else if err := r.deleteOwned(ctx, host, agentHostKindSecret, "", names.GitHubTokenSecret); err != nil {
+	stopping, err := r.reconcileGitHubTokenCopy(ctx, host, names, githubToken, tokenSource)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if stopping {
+		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
 	}
 	if err := r.ensureObject(ctx, host, agentHostKindPVC, "", names.PVC, &corev1.PersistentVolumeClaim{},
 		func(nonce string) client.Object { return agenthost.StateVolumeClaim(host, names, nonce, template) },
@@ -540,6 +533,26 @@ func (r *AgentHostReconciler) ensureConnectionToken(
 		return nil, fmt.Errorf("connection token Secret %s has no token", names.ConnectionTokenSecret)
 	}
 	return value, nil
+}
+
+// reconcileGitHubTokenCopy keeps the host's copy of its GitHub token, or
+// deletes it when the host has none, and reports whether a Pod started with a
+// token from another source is still stopping.
+func (r *AgentHostReconciler) reconcileGitHubTokenCopy(
+	ctx context.Context,
+	host *corev1alpha1.AgentHost,
+	names agenthost.Names,
+	token []byte,
+	tokenSource string,
+) (bool, error) {
+	if token == nil {
+		return false, r.deleteOwned(ctx, host, agentHostKindSecret, "", names.GitHubTokenSecret)
+	}
+	stopping, err := r.retirePodOfAnotherToken(ctx, host, names, tokenSource)
+	if err != nil || stopping {
+		return stopping, err
+	}
+	return false, r.ensureGitHubToken(ctx, host, names, token)
 }
 
 // retirePodOfAnotherToken stops a Pod started with a GitHub token from another

@@ -99,7 +99,10 @@ func (r *AgentHostProvisioner) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 	host := &corev1alpha1.AgentHost{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connection.Namespace},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: connection.Namespace,
+			Annotations: map[string]string{connectors.AgentHostProviderAnnotation: connection.Spec.ProviderRef.Name},
+		},
 		Spec: corev1alpha1.AgentHostSpec{
 			TemplateRef: corev1alpha1.AgentHostTemplateReference{Name: template},
 			GitHubTokenFrom: &corev1alpha1.AgentHostTokenSource{
