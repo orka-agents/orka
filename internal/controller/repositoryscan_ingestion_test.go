@@ -22,6 +22,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -35,7 +36,8 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 	db, err := sqlitestore.NewDB(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	s := sqlitestore.NewStore(db, path)
+	s, err := storageclient.NewEmbedded(sqlitestore.NewStore(db, path))
+	require.NoError(t, err)
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	scan := &corev1alpha1.RepositoryScan{
@@ -124,7 +126,8 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 		require.NoError(t, db.Close())
 		db, err = sqlitestore.NewDB(path)
 		require.NoError(t, err)
-		s = sqlitestore.NewStore(db, path)
+		s, err = storageclient.NewEmbedded(sqlitestore.NewStore(db, path))
+		require.NoError(t, err)
 		r = &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: s, ArtifactStore: s, ResultStore: s}
 		reconcile()
 		got, err := s.GetScanRun(ctx, defaultNS, runID)
@@ -154,7 +157,7 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 		task := &oldTasks.Items[i]
 		require.NoError(t, cl.Delete(ctx, task))
 		require.NoError(t, s.DeleteResult(ctx, task.Namespace, task.Name))
-		require.NoError(t, s.DeleteArtifacts(ctx, task.Namespace, task.Name))
+		require.NoError(t, s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}))
 	}
 	reconcile()
 	for id, before := range completedRuns {
@@ -191,7 +194,7 @@ func TestRepositoryScanIngestsTerminalPipelineOnRestart(t *testing.T) {
 	require.Equal(t, 2, run.DroppedFindings)
 }
 
-func seedRetainedScanPipeline(t *testing.T, s *sqlitestore.Store, cl client.Client, scan *corev1alpha1.RepositoryScan, runID string, started time.Time, sliceCount int) []*corev1alpha1.Task {
+func seedRetainedScanPipeline(t *testing.T, s *storageclient.Client, cl client.Client, scan *corev1alpha1.RepositoryScan, runID string, started time.Time, sliceCount int) []*corev1alpha1.Task {
 	t.Helper()
 	ctx := context.Background()
 	policyDigest := security.ScannerPolicyDigest(security.ScannerPolicy{})
@@ -401,7 +404,7 @@ var errScanIngestionFollowup = errors.New("injected scan follow-up failure")
 
 type failingScanArtifactStore struct{ store.ArtifactStore }
 
-func (s *failingScanArtifactStore) SaveArtifact(context.Context, string, string, string, string, []byte) error {
+func (s *failingScanArtifactStore) SaveArtifact(context.Context, store.SaveArtifactRequest) error {
 	return errScanIngestionFollowup
 }
 
@@ -514,7 +517,7 @@ func TestReviewIngestionResumesFollowupWithoutRecounting(t *testing.T) {
 			dropped, _, err := f.store.ListDroppedFindings(f.ctx, store.DroppedFindingFilter{Namespace: defaultNS, ScanRunID: f.run.ID})
 			require.NoError(t, err)
 			require.Len(t, dropped, 1)
-			data, _, err := f.store.GetArtifact(f.ctx, defaultNS, f.sourceTask.Name, security.ArtifactDroppedFindings)
+			data, _, err := f.store.GetArtifact(f.ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: defaultNS, TaskName: f.sourceTask.Name}, Filename: security.ArtifactDroppedFindings})
 			require.NoError(t, err)
 			require.JSONEq(t, receipt.DroppedFindingsJSON, string(data))
 			var tasks corev1alpha1.TaskList

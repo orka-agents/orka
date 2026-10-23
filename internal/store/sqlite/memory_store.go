@@ -12,7 +12,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 	moderncsqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -28,14 +27,14 @@ const (
 	defaultTranscriptSnippetLen = 360
 	maxTranscriptSnippetLen     = 1000
 
-	memorySourceProposal = "memory_proposal"
-	proposalTypeMemory   = "memory"
+	memorySourceProposal = store.MemorySourceProposal
+	proposalTypeMemory   = store.MemoryProposalTypeMemory
 
-	proposalStatusPending  = "pending"
-	proposalStatusAccepted = "accepted"
-	proposalStatusRejected = "rejected"
-	proposalStatusArchived = "archived"
-	proposalStatusApplied  = "applied"
+	proposalStatusPending  = store.MemoryProposalStatusPending
+	proposalStatusAccepted = store.MemoryProposalStatusAccepted
+	proposalStatusRejected = store.MemoryProposalStatusRejected
+	proposalStatusArchived = store.MemoryProposalStatusArchived
+	proposalStatusApplied  = store.MemoryProposalStatusApplied
 )
 
 type rowScanner interface {
@@ -50,7 +49,6 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	if strings.TrimSpace(memory.Namespace) == "" {
 		return store.ValidationErrorf("namespace is required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
 		return store.ValidationErrorf("content is required")
 	}
@@ -58,7 +56,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.ID = "mem-" + uuid.NewString()
 	}
 	if memory.Source == "" {
-		memory.Source = "manual"
+		memory.Source = store.MemorySourceManual
 	}
 	now := time.Now()
 	if memory.CreatedAt.IsZero() {
@@ -82,7 +80,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
 		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // GetMemory fetches a memory by ID within a namespace.
@@ -135,7 +133,6 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory.Namespace == "" || memory.ID == "" {
 		return store.ValidationErrorf("namespace and id are required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
 		return store.ValidationErrorf("content is required")
 	}
@@ -153,7 +150,7 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.Namespace, memory.ID,
 	)
 	if err != nil {
-		return err
+		return uniqueConflict(err)
 	}
 	return ensureRowsAffected(res)
 }
@@ -184,6 +181,16 @@ func (s *Store) SetMemoryDisabled(ctx context.Context, namespace, id string, dis
 
 // SearchTranscript searches transcript content and returns compact snippets.
 func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
+	var results []store.TranscriptSearchResult
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		results, err = s.searchTranscriptUnfenced(ctx, filter)
+		return err
+	})
+	return results, err
+}
+
+func (s *Store) searchTranscriptUnfenced(ctx context.Context, filter store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
 	if strings.TrimSpace(filter.Namespace) == "" {
 		return nil, store.ValidationErrorf("namespace is required")
 	}
@@ -307,15 +314,8 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	}
 	proposal.Type = strings.ToLower(strings.TrimSpace(proposal.Type))
 	if proposal.Type == "" {
-		proposal.Type = "skill"
+		proposal.Type = store.MemoryProposalTypeSkill
 	}
-	proposal.Title = redact.SensitiveText(proposal.Title)
-	proposal.Description = redact.SensitiveText(proposal.Description)
-	proposal.Content = redact.SensitiveText(proposal.Content)
-	proposal.Patch = redact.SensitiveText(proposal.Patch)
-	proposal.Reviewer = redact.SensitiveText(proposal.Reviewer)
-	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
-	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
 	if strings.TrimSpace(proposal.Title) == "" {
 		return store.ValidationErrorf("title is required")
 	}
@@ -326,11 +326,11 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	if proposal.Status == "" {
 		proposal.Status = proposalStatusPending
 	}
-	if !isKnownProposalStatus(proposal.Status) {
-		return store.ValidationErrorf("invalid proposal status %q", proposal.Status)
+	if proposal.Status != proposalStatusPending {
+		return store.ValidationErrorf("a new proposal starts pending; status %q is recorded by review or apply", proposal.Status)
 	}
-	if proposal.Status == proposalStatusApplied && proposal.AppliedMemoryID == "" {
-		return store.ValidationErrorf("invalid applied proposal without applied memory id")
+	if field := proposalDecisionField(proposal); field != "" {
+		return store.ValidationErrorf("a new proposal cannot carry %s; review and apply record it", field)
 	}
 	now := time.Now()
 	if proposal.CreatedAt.IsZero() {
@@ -350,7 +350,7 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 		proposal.ReviewNote, proposal.AppliedMemoryID, proposal.AppliedBy, proposal.CreatedAt, proposal.UpdatedAt,
 		proposal.ReviewedAt, proposal.AppliedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // GetMemoryProposal fetches a proposal by ID within a namespace.
@@ -437,8 +437,6 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 		return store.ValidationErrorf("applied proposal cannot be reviewed")
 	}
 
-	review.Reviewer = redact.SensitiveText(review.Reviewer)
-	review.ReviewNote = redact.SensitiveText(review.ReviewNote)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE memory_proposals
 		 SET status = ?, reviewer = ?, review_note = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -490,146 +488,192 @@ func (s *Store) ArchiveMemoryProposal(ctx context.Context, namespace, id string)
 	return nil
 }
 
-// ApplyMemoryProposal applies an accepted memory proposal into durable memories.
-func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
-	apply.Namespace = strings.TrimSpace(apply.Namespace)
-	apply.ID = strings.TrimSpace(apply.ID)
-	if apply.Namespace == "" || apply.ID == "" {
+// ResolveMemoryProposalApplication returns the memory that applying a
+// proposal would return, by ID only, so Orka can authorize it before any
+// memory content is read.
+func (s *Store) ResolveMemoryProposalApplication(ctx context.Context, namespace, id string) (store.MemoryProposalApplyTarget, error) {
+	namespace = strings.TrimSpace(namespace)
+	id = strings.TrimSpace(id)
+	if namespace == "" || id == "" {
+		return store.MemoryProposalApplyTarget{}, store.ValidationErrorf("namespace and id are required")
+	}
+	var target store.MemoryProposalApplyTarget
+	err := retrySQLiteBusy(ctx, func() error {
+		return readInTransaction(ctx, s.db, func(tx *sql.Tx) error {
+			var err error
+			target, _, err = resolveMemoryProposalTarget(ctx, tx, namespace, id)
+			return err
+		})
+	})
+	if err != nil {
+		return store.MemoryProposalApplyTarget{}, err
+	}
+	return target, nil
+}
+
+// CommitMemoryProposalApplication applies a proposal only while it still
+// resolves to the caller's target.
+func (s *Store) CommitMemoryProposalApplication(ctx context.Context, application store.MemoryProposalApplication) (*store.Memory, error) {
+	application.Target.Namespace = strings.TrimSpace(application.Target.Namespace)
+	application.Target.ProposalID = strings.TrimSpace(application.Target.ProposalID)
+	if application.Target.Namespace == "" || application.Target.ProposalID == "" {
 		return nil, store.ValidationErrorf("namespace and id are required")
 	}
-	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
+	if (application.Target.MemoryID == "") != (application.Memory != nil) {
+		return nil, store.ValidationErrorf("a memory to create is required exactly when the target names no memory")
+	}
+	application.AppliedBy = strings.TrimSpace(application.AppliedBy)
+	if application.AppliedAt.IsZero() {
+		application.AppliedAt = time.Now()
+	}
+	application.AppliedAt = application.AppliedAt.UTC()
+	var memory *store.Memory
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		memory, err = s.commitMemoryProposalApplicationOnce(ctx, application)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return memory, nil
+}
 
-	const maxAttempts = 5
+// retrySQLiteBusy repeats an operation that failed only because another
+// connection held the database, with a short bounded backoff.
+func retrySQLiteBusy(ctx context.Context, operation func() error) error {
 	retryBackoffs := [...]time.Duration{
 		50 * time.Millisecond,
 		150 * time.Millisecond,
 		400 * time.Millisecond,
 		800 * time.Millisecond,
 	}
-	var lastErr error
-	for attempt := range maxAttempts {
-		memory, err := s.applyMemoryProposalOnce(ctx, apply)
+	for attempt := 0; ; attempt++ {
+		err := operation()
 		if err == nil {
-			return memory, nil
+			return nil
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
-		if !isSQLiteRetryableError(err) {
-			return nil, err
+		if !isSQLiteRetryableError(err) || attempt == len(retryBackoffs) {
+			return err
 		}
-		lastErr = err
-		if attempt == maxAttempts-1 {
-			break
-		}
-		backoff := retryBackoffs[attempt]
-		timer := time.NewTimer(backoff)
+		timer := time.NewTimer(retryBackoffs[attempt])
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return nil, lastErr
 }
 
-//nolint:gocyclo // Proposal validation and memory application share one transaction.
-func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
+type memoryProposalQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// resolveMemoryProposalTarget derives the application target from the stored
+// proposal and any memory already created from it. It reads memory IDs only.
+func resolveMemoryProposalTarget(ctx context.Context, q memoryProposalQueryer, namespace, id string) (store.MemoryProposalApplyTarget, *store.MemoryProposal, error) {
+	proposal, err := scanMemoryProposal(q.QueryRowContext(ctx, selectMemoryProposalSQL()+` WHERE namespace = ? AND id = ?`, namespace, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.MemoryProposalApplyTarget{}, nil, store.ErrNotFound
+	}
+	if err != nil {
+		return store.MemoryProposalApplyTarget{}, nil, err
+	}
+	target := store.MemoryProposalApplyTarget{
+		Namespace:       proposal.Namespace,
+		ProposalID:      proposal.ID,
+		ProposalStatus:  proposal.Status,
+		AppliedMemoryID: proposal.AppliedMemoryID,
+	}
+	status := normalizeProposalStatus(proposal.Status)
+	if status == proposalStatusApplied || proposal.AppliedMemoryID != "" {
+		if proposal.AppliedMemoryID == "" {
+			return store.MemoryProposalApplyTarget{}, nil, fmt.Errorf("applied proposal is missing applied memory id")
+		}
+		target.MemoryID = proposal.AppliedMemoryID
+		return target, proposal, nil
+	}
+	if strings.ToLower(strings.TrimSpace(proposal.Type)) != proposalTypeMemory {
+		return store.MemoryProposalApplyTarget{}, nil, store.ValidationErrorf("proposal type %q cannot be applied as memory", proposal.Type)
+	}
+	if status != proposalStatusAccepted {
+		return store.MemoryProposalApplyTarget{}, nil, store.ValidationErrorf("proposal status %q cannot be applied", proposal.Status)
+	}
+	var linked string
+	err = q.QueryRowContext(ctx, `SELECT id FROM memories WHERE namespace = ? AND source_proposal_id = ?`, namespace, id).Scan(&linked)
+	switch {
+	case err == nil:
+		target.MemoryID = linked
+	case !errors.Is(err, sql.ErrNoRows):
+		return store.MemoryProposalApplyTarget{}, nil, err
+	}
+	return target, proposal, nil
+}
+
+func (s *Store) commitMemoryProposalApplicationOnce(ctx context.Context, application store.MemoryProposalApplication) (*store.Memory, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
+	defer func() { _ = tx.Rollback() }()
 
-	proposal, err := scanMemoryProposal(tx.QueryRowContext(ctx, selectMemoryProposalSQL()+` WHERE namespace = ? AND id = ?`, apply.Namespace, apply.ID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
+	expected := application.Target
+	current, proposal, err := resolveMemoryProposalTarget(ctx, tx, expected.Namespace, expected.ProposalID)
+	if errors.Is(err, store.ErrNotFound) || isSQLiteRetryableError(err) {
 		return nil, err
 	}
-
-	status := normalizeProposalStatus(proposal.Status)
-	if status == proposalStatusApplied || proposal.AppliedMemoryID != "" {
-		if proposal.AppliedMemoryID == "" {
-			return nil, fmt.Errorf("applied proposal is missing applied memory id")
-		}
-		if err := authorizeExistingProposalMemory(ctx, apply, proposal.Namespace, proposal.AppliedMemoryID); err != nil {
-			return nil, err
-		}
-		memory, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND id = ?`, proposal.Namespace, proposal.AppliedMemoryID))
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("applied proposal references missing memory")
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		committed = true
-		return memory, nil
-	}
-
-	if strings.ToLower(strings.TrimSpace(proposal.Type)) != proposalTypeMemory {
-		return nil, store.ValidationErrorf("proposal type %q cannot be applied as memory", proposal.Type)
-	}
-	if status != proposalStatusAccepted {
-		return nil, store.ValidationErrorf("proposal status %q cannot be applied", proposal.Status)
+	if err != nil || current != expected {
+		// The proposal no longer resolves to the target Orka authorized.
+		// Return nothing from it; the caller resolves and authorizes again.
+		return nil, store.PreconditionFailedErrorf("memory proposal %q changed after it was resolved", expected.ProposalID)
 	}
 	if hook := s.applyMemoryProposalAfterAcceptedRead; hook != nil {
 		hook()
 	}
 
-	existing, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
-	if err == nil {
-		if err := authorizeExistingProposalMemory(ctx, apply, existing.Namespace, existing.ID); err != nil {
-			return nil, err
+	if expected.MemoryID != "" {
+		memory, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND id = ?`, expected.Namespace, expected.MemoryID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("memory proposal references missing memory")
 		}
-		now := time.Now()
-		res, err := tx.ExecContext(ctx,
-			`UPDATE memory_proposals
-			 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = COALESCE(applied_at, ?), updated_at = ?
-			 WHERE namespace = ? AND id = ? AND status = ? AND (applied_memory_id = '' OR applied_memory_id = ?)`,
-			proposalStatusApplied, existing.ID, apply.AppliedBy, now, now, apply.Namespace, apply.ID, proposalStatusAccepted, existing.ID,
-		)
 		if err != nil {
 			return nil, err
 		}
-		if err := ensureRowsAffectedConflict(res); err != nil {
-			return nil, err
+		if expected.AppliedMemoryID == "" {
+			// Record the application of a memory already created from this
+			// proposal, keeping any earlier application time.
+			if err := markMemoryProposalApplied(ctx, tx, application, memory.ID, true); err != nil {
+				return nil, err
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
-		committed = true
-		return existing, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
+		return memory, nil
 	}
 
-	now := time.Now()
-	memory := &store.Memory{
-		ID:               "mem-" + uuid.NewString(),
-		Namespace:        proposal.Namespace,
-		AgentName:        proposal.AgentName,
-		TaskName:         proposal.TaskName,
-		Source:           memorySourceProposal,
-		SourceProposalID: proposal.ID,
-		Content:          redact.SensitiveText(proposal.Content),
-		Tags:             tagsFromProposalDescription(proposal.Description),
-		CreatedAt:        now,
-		UpdatedAt:        now,
+	memory := *application.Memory
+	if memory.Tags != nil {
+		memory.Tags = normalizeTags(memory.Tags)
 	}
+	memory.Namespace = proposal.Namespace
+	memory.Source = memorySourceProposal
+	memory.SourceProposalID = proposal.ID
 	if strings.TrimSpace(memory.Content) == "" {
 		return nil, store.ValidationErrorf("content is required")
+	}
+	if memory.ID == "" {
+		memory.ID = "mem-" + uuid.NewString()
+	}
+	if memory.CreatedAt.IsZero() {
+		memory.CreatedAt = application.AppliedAt
+	}
+	if memory.UpdatedAt.IsZero() {
+		memory.UpdatedAt = application.AppliedAt
 	}
 	tagsJSON, err := marshalTags(memory.Tags)
 	if err != nil {
@@ -644,48 +688,27 @@ func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryP
 		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
 		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
 	); err != nil {
-		if !isSQLiteConstraintError(err) {
-			return nil, err
+		if isSQLiteConstraintError(err) {
+			return nil, store.PreconditionFailedErrorf("memory proposal %q was applied concurrently", expected.ProposalID)
 		}
-		existing, lookupErr := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
-		if lookupErr != nil {
-			return nil, err
-		}
-		if err := authorizeExistingProposalMemory(ctx, apply, existing.Namespace, existing.ID); err != nil {
-			return nil, err
-		}
-		if err := markMemoryProposalApplied(ctx, tx, apply, existing.ID, true); err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		committed = true
-		return existing, nil
+		return nil, err
 	}
-	if err := markMemoryProposalApplied(ctx, tx, apply, memory.ID, false); err != nil {
+	if err := markMemoryProposalApplied(ctx, tx, application, memory.ID, false); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	committed = true
-	return memory, nil
+	return &memory, nil
 }
 
-func authorizeExistingProposalMemory(ctx context.Context, apply store.MemoryProposalApply, namespace, id string) error {
-	if apply.AuthorizeExistingMemory == nil {
-		return nil
-	}
-	return apply.AuthorizeExistingMemory(ctx, namespace, id)
-}
-
-func markMemoryProposalApplied(ctx context.Context, tx *sql.Tx, apply store.MemoryProposalApply, memoryID string, allowExistingAppliedID bool) error {
-	now := time.Now()
+func markMemoryProposalApplied(ctx context.Context, tx *sql.Tx, application store.MemoryProposalApplication, memoryID string, allowExistingAppliedID bool) error {
+	target := application.Target
+	now := application.AppliedAt
 	query := `UPDATE memory_proposals
 		 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = ?, updated_at = ?
 		 WHERE namespace = ? AND id = ? AND status = ? AND applied_memory_id = ''`
-	args := []any{proposalStatusApplied, memoryID, apply.AppliedBy, now, now, apply.Namespace, apply.ID, proposalStatusAccepted}
+	args := []any{proposalStatusApplied, memoryID, application.AppliedBy, now, now, target.Namespace, target.ProposalID, target.ProposalStatus}
 	if allowExistingAppliedID {
 		query = `UPDATE memory_proposals
 		 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = COALESCE(applied_at, ?), updated_at = ?
@@ -857,12 +880,25 @@ func normalizeProposalStatus(status string) string {
 	return strings.ToLower(strings.TrimSpace(status))
 }
 
-func isKnownProposalStatus(status string) bool {
-	switch normalizeProposalStatus(status) {
-	case proposalStatusPending, proposalStatusAccepted, proposalStatusRejected, proposalStatusArchived, proposalStatusApplied:
-		return true
+// proposalDecisionField names the first review or apply outcome a proposal
+// carries, or returns "" when it carries none.
+func proposalDecisionField(proposal *store.MemoryProposal) string {
+	switch {
+	case strings.TrimSpace(proposal.Reviewer) != "":
+		return "reviewer"
+	case strings.TrimSpace(proposal.ReviewNote) != "":
+		return "reviewNote"
+	case proposal.ReviewedAt != nil:
+		return "reviewedAt"
+	case proposal.AppliedMemoryID != "":
+		// Review and archive treat any nonempty ID, even whitespace, as applied.
+		return "appliedMemoryId"
+	case strings.TrimSpace(proposal.AppliedBy) != "":
+		return "appliedBy"
+	case proposal.AppliedAt != nil:
+		return "appliedAt"
 	default:
-		return false
+		return ""
 	}
 }
 
@@ -873,22 +909,6 @@ func isReviewDecisionStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func tagsFromProposalDescription(description string) []string {
-	for line := range strings.SplitSeq(description, "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok || !strings.EqualFold(strings.TrimSpace(key), "tags") {
-			continue
-		}
-
-		var tags []string
-		for tag := range strings.SplitSeq(value, ",") {
-			tags = append(tags, strings.TrimSpace(tag))
-		}
-		return normalizeTags(tags)
-	}
-	return nil
 }
 
 func marshalTags(tags []string) (string, error) {

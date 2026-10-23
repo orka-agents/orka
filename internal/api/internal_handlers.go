@@ -129,7 +129,7 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "empty request body")
 	}
 
-	if err := withInternalTaskDataTransaction(c, h.resultStore, taskName, func(context.Context) error {
+	if err := withInternalTaskData(c, h.resultStore, taskName, func(context.Context) error {
 		return authorizer.revalidateTaskCaller(c, authorizedTask)
 	}, func(ctx context.Context) error {
 		return h.resultStore.SaveResult(ctx, namespace, taskName, data)
@@ -237,7 +237,7 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 	if len(data) == 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "empty request body")
 	}
-	if len(data) > maxResultSize {
+	if len(data) > store.MaxArtifactBytes {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "artifact exceeds 10MB limit")
 	}
 
@@ -246,10 +246,11 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		contentType = "application/octet-stream"
 	}
 
-	if err := withInternalTaskDataTransaction(c, h.artifactStore, taskName, func(context.Context) error {
+	if err := withInternalTaskData(c, h.artifactStore, taskName, func(context.Context) error {
 		return h.internalCallerAuthorizer().revalidateTaskCaller(c, authorizedWorker)
 	}, func(ctx context.Context) error {
-		return h.artifactStore.SaveArtifact(ctx, namespace, taskName, filename, contentType, data)
+		owner := store.ArtifactOwner{Namespace: namespace, TaskName: taskName, TaskUID: string(authorizedWorker.UID)}
+		return h.artifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: owner, Filename: filename, ContentType: contentType, Data: data})
 	}); err != nil {
 		return err
 	}
@@ -275,7 +276,7 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 
 	var messages []store.SessionMessage
 	var callerTask *corev1alpha1.Task
-	if err := withInternalTaskDataTransaction(c, h.sessionStore, "", func(context.Context) error {
+	if err := withInternalTaskData(c, h.sessionStore, "", func(context.Context) error {
 		var err error
 		callerTask, err = h.internalCallerAuthorizer().resolveActiveTaskCaller(c, namespace)
 		return err
@@ -391,7 +392,7 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 	var results []store.TranscriptSearchResult
 	var callerTask *corev1alpha1.Task
 	var allowedSessions map[string][]corev1alpha1.SessionReference
-	if err := withInternalTaskDataTransaction(c, h.sessionStore, "", func(ctx context.Context) error {
+	if err := withInternalTaskData(c, h.sessionStore, "", func(ctx context.Context) error {
 		authorizer := h.internalCallerAuthorizer()
 		var err error
 		callerTask, err = authorizer.resolveActiveTaskCaller(c, namespace)
@@ -543,7 +544,7 @@ func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 		PlanDocument: plan.PlanDocument,
 	}
 
-	if err := withInternalTaskDataTransaction(c, h.planStore, taskName, func(context.Context) error {
+	if err := withInternalTaskData(c, h.planStore, taskName, func(context.Context) error {
 		return authorizer.revalidateTaskCaller(c, authorizedTask)
 	}, func(ctx context.Context) error {
 		return h.planStore.SavePlan(ctx, namespace, taskName, planState)
@@ -569,7 +570,7 @@ func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
 	}
 
 	var plan *store.PlanState
-	if err := withInternalTaskDataTransaction(c, h.planStore, taskName, func(context.Context) error {
+	if err := withInternalTaskData(c, h.planStore, taskName, func(context.Context) error {
 		_, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName)
 		return err
 	}, func(ctx context.Context) error {
@@ -622,7 +623,7 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 		Content:    req.Content,
 	}
 
-	if err := withInternalTaskDataTransaction(c, h.messageStore, "", func(context.Context) error {
+	if err := withInternalTaskData(c, h.messageStore, "", func(context.Context) error {
 		return h.internalCallerAuthorizer().verifyMessageSender(c, namespace, req.FromTask, req.ToTask, req.ParentTask)
 	}, func(ctx context.Context) error {
 		return h.messageStore.SendMessage(ctx, msg)
@@ -653,7 +654,7 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 	}
 	markRead := c.Query("markRead", queryTrue) == queryTrue
 	var messages []store.Message
-	if err := withInternalTaskDataTransaction(c, h.messageStore, "", func(context.Context) error {
+	if err := withInternalTaskData(c, h.messageStore, "", func(context.Context) error {
 		return h.internalCallerAuthorizer().verifyMessageInbox(c, namespace, taskName, parentTask)
 	}, func(ctx context.Context) error {
 		var err error

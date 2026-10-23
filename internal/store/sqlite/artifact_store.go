@@ -15,28 +15,38 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const maxArtifactSize = 10 << 20 // 10MB
+// SaveArtifact inserts or replaces a task artifact. Data larger than
+// store.MaxArtifactBytes is rejected with store.ErrTooLarge. The Task UID is
+// not stored yet; artifacts are keyed by namespace, Task name and filename.
+func (s *Store) SaveArtifact(ctx context.Context, request store.SaveArtifactRequest) error {
+	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		return s.saveArtifactUnfenced(ctx, request)
+	})
+}
 
-// SaveArtifact inserts or replaces a task artifact. Returns an error if data exceeds 10MB.
-func (s *Store) SaveArtifact(ctx context.Context, namespace, taskName, filename, contentType string, data []byte) error {
-	if len(data) > maxArtifactSize {
-		return fmt.Errorf("artifact %q exceeds maximum size of 10MB", filename)
+func (s *Store) saveArtifactUnfenced(ctx context.Context, request store.SaveArtifactRequest) error {
+	if len(request.Data) > store.MaxArtifactBytes {
+		return store.TooLargeError{
+			What:  fmt.Sprintf("artifact %q", request.Filename),
+			Size:  int64(len(request.Data)),
+			Limit: store.MaxArtifactBytes,
+		}
 	}
 	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT OR REPLACE INTO artifacts (namespace, task_name, filename, content_type, size, data, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		namespace, taskName, filename, contentType, len(data), data,
+		request.Owner.Namespace, request.Owner.TaskName, request.Filename, request.ContentType, len(request.Data), request.Data,
 	)
 	return err
 }
 
 // GetArtifact retrieves artifact data and content type. Returns store.ErrNotFound if not found.
-func (s *Store) GetArtifact(ctx context.Context, namespace, taskName, filename string) ([]byte, string, error) {
+func (s *Store) GetArtifact(ctx context.Context, key store.ArtifactKey) ([]byte, string, error) {
 	var data []byte
 	var contentType string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT data, content_type FROM artifacts WHERE namespace = ? AND task_name = ? AND filename = ?`,
-		namespace, taskName, filename,
+		key.Owner.Namespace, key.Owner.TaskName, key.Filename,
 	).Scan(&data, &contentType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", store.ErrNotFound
@@ -44,11 +54,12 @@ func (s *Store) GetArtifact(ctx context.Context, namespace, taskName, filename s
 	return data, contentType, err
 }
 
-// ListArtifacts returns metadata for all artifacts belonging to a task.
-func (s *Store) ListArtifacts(ctx context.Context, namespace, taskName string) ([]store.ArtifactMetadata, error) {
+// ListArtifacts returns metadata for all artifacts belonging to a task, ordered
+// by filename in byte order (SQLite's default BINARY collation).
+func (s *Store) ListArtifacts(ctx context.Context, owner store.ArtifactOwner) ([]store.ArtifactMetadata, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT filename, content_type, size, created_at FROM artifacts WHERE namespace = ? AND task_name = ?`,
-		namespace, taskName,
+		`SELECT filename, content_type, size, created_at FROM artifacts WHERE namespace = ? AND task_name = ? ORDER BY filename`,
+		owner.Namespace, owner.TaskName,
 	)
 	if err != nil {
 		return nil, err
@@ -61,15 +72,16 @@ func (s *Store) ListArtifacts(ctx context.Context, namespace, taskName string) (
 		if err := rows.Scan(&m.Filename, &m.ContentType, &m.Size, &m.CreatedAt); err != nil {
 			return nil, err
 		}
+		m.CreatedAt = m.CreatedAt.UTC()
 		artifacts = append(artifacts, m)
 	}
 	return artifacts, rows.Err()
 }
 
 // DeleteArtifacts removes all artifacts for a task.
-func (s *Store) DeleteArtifacts(ctx context.Context, namespace, taskName string) error {
-	return s.deleteTaskData(ctx, namespace, taskName,
+func (s *Store) DeleteArtifacts(ctx context.Context, owner store.ArtifactOwner) error {
+	return s.deleteTaskData(ctx, owner.Namespace, owner.TaskName,
 		`DELETE FROM artifacts WHERE namespace = ? AND task_name = ?`,
-		namespace, taskName,
+		owner.Namespace, owner.TaskName,
 	)
 }

@@ -83,7 +83,7 @@ func TestACPMCPBrokerHTTPDelegationPreservesTraceContext(t *testing.T) {
 			wantBody, err := json.Marshal(request)
 			require.NoError(t, err)
 
-			effects := newSQLiteExecutionEventStoreForTest(t)
+			effects := newRawSQLiteStoreForTest(t)
 			epoch, err := effects.CompareAndSwapControllerEpoch(t.Context(), store.ControllerEpochCAS{
 				NewEpoch: 1, HolderID: "controller", RequestDigest: store.CanonicalBytesDigest([]byte("trace-epoch")),
 			})

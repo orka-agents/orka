@@ -42,6 +42,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -52,7 +53,8 @@ import (
 type v2ApprovalAPIFixture struct {
 	server       *Server
 	kube         client.Client
-	store        *sqlite.Store
+	store        *storageclient.Client
+	effects      *sqlite.Store
 	task         *corev1alpha1.Task
 	broker       *controller.ACPMCPBroker
 	call         harnessv2.MCPBrokerCallRequest
@@ -80,7 +82,8 @@ func newV2ApprovalAPIFixture(t *testing.T, configure ...func(*harnessv2.MCPBroke
 	db, err := sqlite.NewDB(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	f := &v2ApprovalAPIFixture{store: sqlite.NewStore(db, path), tokens: map[string]string{}}
+	effects := sqlite.NewStore(db, path)
+	f := &v2ApprovalAPIFixture{store: testStorageClient(effects), effects: effects, tokens: map[string]string{}}
 	f.call, err = newV2ApprovalAPICall()
 	require.NoError(t, err)
 	for _, change := range configure {
@@ -88,7 +91,7 @@ func newV2ApprovalAPIFixture(t *testing.T, configure ...func(*harnessv2.MCPBroke
 	}
 	f.call.Metadata.RequestDigest, err = harnessv2.CanonicalRequestDigest(f.call)
 	require.NoError(t, err)
-	epoch, err := f.store.CompareAndSwapControllerEpoch(t.Context(), store.ControllerEpochCAS{
+	epoch, err := f.effects.CompareAndSwapControllerEpoch(t.Context(), store.ControllerEpochCAS{
 		ExpectedVersion: 0, ExpectedEpoch: 0, NewEpoch: 1, HolderID: "approval-api-controller",
 		RequestDigest: store.CanonicalBytesDigest([]byte("approval-api-epoch")), UpdatedAt: time.Now().UTC(),
 	})
@@ -188,7 +191,7 @@ func newV2ApprovalAPIFixture(t *testing.T, configure ...func(*harnessv2.MCPBroke
 			}
 			return json.RawMessage(`{"workOrder":"fixture-order-1","created":true}`), nil
 		}),
-		Effects: f.store, EpochMutations: &v2ApprovalAPIEpochGuard{}, ApprovalEvents: f.store,
+		Effects: f.effects, EpochMutations: &v2ApprovalAPIEpochGuard{}, ApprovalEvents: f.store,
 		ApprovalSecrets: clientset, ApprovalWaitTimeout: 10 * time.Second, ApprovalPollInterval: 5 * time.Millisecond,
 	}
 	return f

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -30,7 +29,7 @@ func parseOffsetCursor(cursor string) (int, error) {
 	}
 	offset, err := strconv.Atoi(cursor)
 	if err != nil || offset < 0 {
-		return 0, fmt.Errorf("invalid cursor")
+		return 0, store.ValidationErrorf("invalid cursor")
 	}
 	return offset, nil
 }
@@ -369,7 +368,7 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 
 	slice.CreatedAt = utcTime(slice.CreatedAt)
 	slice.LastReviewedAt = utcTimePtr(slice.LastReviewedAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if slice.CreatedAt.IsZero() {
 		slice.CreatedAt = now
 	}
@@ -534,7 +533,7 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 
 // UpdateReviewSliceStatus updates slice status and review timestamp.
 func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
-	now := time.Now().UTC()
+	now := s.securityNow()
 	res, err := s.securityDB().ExecContext(ctx,
 		`UPDATE security_review_slices
 		 SET status = ?, last_reviewed_at = CASE WHEN ? IN ('reviewed', 'completed') THEN ? ELSE last_reviewed_at END,
@@ -581,8 +580,6 @@ func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryS
 // SaveThreatModel stores the current threat model, replacing any older copies for the repository.
 // When Version is zero, the revision number is incremented from the latest stored model.
 func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
-	model.Content = security.SanitizeThreatModel(model.Content)
-
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, nil)
 	})
@@ -592,8 +589,6 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 // the latest stored version equals expectedVersion. Otherwise it returns
 // store.ErrConflict and leaves the stored model unchanged.
 func (s *Store) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
-	model.Content = security.SanitizeThreatModel(model.Content)
-
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, &expectedVersion)
 	})
@@ -620,7 +615,7 @@ func (s *Store) saveThreatModel(ctx context.Context, model *store.ThreatModel, e
 	}
 
 	model.CreatedAt = utcTime(model.CreatedAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if model.CreatedAt.IsZero() {
 		model.CreatedAt = now
 	}
@@ -692,7 +687,7 @@ func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, obser
 	finding.CreatedAt = utcTime(finding.CreatedAt)
 	decisionAtProvided := findingUserFinalState(finding.State) && !finding.DecisionAt.IsZero()
 	finding.DecisionAt = utcTime(finding.DecisionAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if finding.CreatedAt.IsZero() {
 		finding.CreatedAt = now
 	}
@@ -1135,7 +1130,7 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 	if findingUserFinalState(sourceState) && (!findingUserFinalState(canonicalState) || newerSourceDecision) {
 		if _, err := s.securityDB().ExecContext(ctx,
 			`UPDATE security_findings SET state = ?, decision_at = ?, updated_at = ? WHERE namespace = ? AND id = ?`,
-			sourceState, sourceDecision, time.Now().UTC(), namespace, canonicalID,
+			sourceState, sourceDecision, s.securityNow(), namespace, canonicalID,
 		); err != nil {
 			return err
 		}
@@ -1149,12 +1144,12 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 		 WHERE finding.namespace = ? AND finding.repository_scan = ?
 	)
 	UPDATE security_findings
-	 SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP
+	 SET duplicate_of = ?, updated_at = ?
 	 WHERE namespace = ? AND repository_scan = ? AND id IN (SELECT id FROM descendants)`,
-		namespace, sourceRepo, id, namespace, sourceRepo, canonicalID, namespace, sourceRepo); err != nil {
+		namespace, sourceRepo, id, namespace, sourceRepo, canonicalID, s.securityNow(), namespace, sourceRepo); err != nil {
 		return err
 	}
-	if _, err := s.securityDB().ExecContext(ctx, `UPDATE security_findings SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`, canonicalID, namespace, id); err != nil {
+	if _, err := s.securityDB().ExecContext(ctx, `UPDATE security_findings SET duplicate_of = ?, updated_at = ? WHERE namespace = ? AND id = ?`, canonicalID, s.securityNow(), namespace, id); err != nil {
 		return err
 	}
 	return nil
@@ -1179,7 +1174,7 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 		proposal.ID, proposal.Namespace, proposal.RepositoryScan, proposal.FindingID, proposal.TaskName, proposal.Branch,
 		proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber, proposal.PRURL, proposal.CreatedAt, proposal.UpdatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // BindPatchProposalPublicationEvidence atomically finalizes a proposal with one
@@ -1426,16 +1421,26 @@ func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchPr
 
 // ListPatchProposals lists patch proposals for a finding, newest first.
 func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
+	var proposals []store.PatchProposal
+	err := s.securityReadSnapshot(ctx, func(q securityDB) error {
+		var err error
+		proposals, err = listPatchProposals(ctx, q, namespace, findingID)
+		return err
+	})
+	return proposals, err
+}
+
+func listPatchProposals(ctx context.Context, q securityDB, namespace, findingID string) ([]store.PatchProposal, error) {
 	canonicalID := findingID
 	var duplicateOf string
-	if err := s.securityDB().QueryRowContext(ctx, `SELECT duplicate_of FROM security_findings WHERE namespace = ? AND id = ?`, namespace, findingID).Scan(&duplicateOf); err == nil {
+	if err := q.QueryRowContext(ctx, `SELECT duplicate_of FROM security_findings WHERE namespace = ? AND id = ?`, namespace, findingID).Scan(&duplicateOf); err == nil {
 		if strings.TrimSpace(duplicateOf) != "" {
 			canonicalID = duplicateOf
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	rows, err := s.securityDB().QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact,
 		        status, reason, pr_number, pr_url, publication_evidence_json, created_at, updated_at
 		 FROM security_patch_proposals
@@ -1486,12 +1491,12 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 			dropped.SliceID,
 			dropped.Reason,
 			dropped.SampleJSON,
-			time.Now().UTC().Format(time.RFC3339Nano),
+			s.securityNow().Format(time.RFC3339Nano),
 		}, "|"))
 	}
 	dropped.CreatedAt = utcTime(dropped.CreatedAt)
 	if dropped.CreatedAt.IsZero() {
-		dropped.CreatedAt = time.Now().UTC()
+		dropped.CreatedAt = s.securityNow()
 	}
 	_, err := s.securityDB().ExecContext(ctx,
 		`INSERT OR IGNORE INTO security_dropped_findings
@@ -1500,7 +1505,7 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 		dropped.ID, dropped.Namespace, dropped.RepositoryScan, dropped.ScanRunID, dropped.TaskName,
 		dropped.SliceID, dropped.Reason, dropped.Layer, dropped.SampleJSON, dropped.CreatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // ListDroppedFindings lists rejected finding diagnostics.

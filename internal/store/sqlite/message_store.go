@@ -18,6 +18,12 @@ const initialMessageBatchCapacity = 32
 
 // SendMessage stores a new inter-agent message.
 func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
+	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		return s.sendMessageUnfenced(ctx, msg)
+	})
+}
+
+func (s *Store) sendMessageUnfenced(ctx context.Context, msg *store.Message) error {
 	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO messages (namespace, from_task, to_task, parent_task, content, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -30,6 +36,16 @@ func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
 // parentTask scopes both direct and broadcast delivery to one coordinator family.
 // If markRead is true, messages are marked as read atomically.
 func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
+	var messages []store.Message
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		messages, err = s.getMessagesUnfenced(ctx, namespace, taskName, parentTask, markRead)
+		return err
+	})
+	return messages, err
+}
+
+func (s *Store) getMessagesUnfenced(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
 	if !markRead || s.taskDataTx(ctx) != nil {
 		return getTaskMessages(ctx, s.taskDataExecutor(ctx), namespace, taskName, parentTask, markRead)
 	}
@@ -101,6 +117,7 @@ func scanUnreadMessages(rows *sql.Rows, namespace string) ([]store.Message, erro
 		if err := rows.Scan(&m.ID, &m.FromTask, &m.ToTask, &m.ParentTask, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
+		m.CreatedAt = m.CreatedAt.UTC()
 		messages = append(messages, m)
 	}
 	if err := rows.Err(); err != nil {

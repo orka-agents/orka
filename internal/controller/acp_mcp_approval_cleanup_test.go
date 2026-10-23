@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,15 +14,15 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
-	storesqlite "github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// Intercept real SQLite boundaries, never replace its reads, writes, or locks.
-// The append fallback exposes the pre-fix writer boundary as well, so the
+// Intercept the real fenced access boundary and SQLite reads and writes, never
+// replace them. The append fallback pauses unfenced appends as well, so the
 // cleanup-wins regression fails on resurrected rows rather than a missing hook.
 type approvalCleanupEventStore struct {
-	*storesqlite.Store
+	*storageclient.Client
 	beforeTransaction func(context.Context) error
 	afterRead         func(context.Context) error
 	beforeAppend      func(*store.ExecutionEvent) error
@@ -30,14 +31,14 @@ type approvalCleanupEventStore struct {
 
 type approvalCleanupTransactionKey struct{}
 
-func (s *approvalCleanupEventStore) WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error {
+func (s *approvalCleanupEventStore) WithTaskDataAccess(ctx context.Context, namespace, taskName string, access func(context.Context) error) error {
 	if s.beforeTransaction != nil {
 		if err := s.beforeTransaction(ctx); err != nil {
 			return err
 		}
 	}
-	return s.Store.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
-		return fn(context.WithValue(txCtx, approvalCleanupTransactionKey{}, true))
+	return s.Client.WithTaskDataAccess(ctx, namespace, taskName, func(fencedCtx context.Context) error {
+		return access(context.WithValue(fencedCtx, approvalCleanupTransactionKey{}, true))
 	})
 }
 
@@ -45,7 +46,7 @@ func (s *approvalCleanupEventStore) ListExecutionEvents(ctx context.Context, fil
 	if ctx.Value(approvalCleanupTransactionKey{}) != nil && s.readError != nil {
 		return nil, s.readError
 	}
-	listed, err := s.Store.ListExecutionEvents(ctx, filter)
+	listed, err := s.Client.ListExecutionEvents(ctx, filter)
 	if err == nil && ctx.Value(approvalCleanupTransactionKey{}) != nil && s.afterRead != nil {
 		err = s.afterRead(ctx)
 	}
@@ -63,7 +64,25 @@ func (s *approvalCleanupEventStore) AppendExecutionEventIfAbsent(ctx context.Con
 			return nil, false, err
 		}
 	}
-	return s.Store.AppendExecutionEventIfAbsent(ctx, event, key)
+	return s.Client.AppendExecutionEventIfAbsent(ctx, event, key)
+}
+
+// AppendExecutionEventsIfAbsent applies the same hooks to each entry of a
+// grouped append before handing the whole group to the store.
+func (s *approvalCleanupEventStore) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	for _, entry := range appends {
+		if entry.Event.Type != events.ExecutionEventTypeApprovalRequested && ctx.Value(approvalCleanupTransactionKey{}) == nil && s.beforeTransaction != nil {
+			if err := s.beforeTransaction(ctx); err != nil {
+				return nil, err
+			}
+		}
+		if s.beforeAppend != nil {
+			if err := s.beforeAppend(entry.Event); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return s.Client.AppendExecutionEventsIfAbsent(ctx, appends)
 }
 
 func approvalCleanupBarrier(t *testing.T) (func(context.Context) error, <-chan struct{}, func()) {
@@ -154,7 +173,7 @@ func TestMCPApprovalCleanupWinsBrokerProjection(t *testing.T) {
 				saved = effect
 			}
 			pause, entered, release := approvalCleanupBarrier(t)
-			f.broker.ApprovalEvents = &approvalCleanupEventStore{Store: f.events, beforeTransaction: pause}
+			f.broker.ApprovalEvents = &approvalCleanupEventStore{Client: f.storage, beforeTransaction: pause}
 			done := make(chan error, 1)
 			go func() {
 				var err error
@@ -194,7 +213,7 @@ func TestMCPApprovalCleanupWinsRecoveryPair(t *testing.T) {
 	f.task.Status.Phase = corev1alpha1.TaskPhaseCancelled
 	require.NoError(t, f.kube.Update(f.ctx, f.task))
 	pause, entered, release := approvalCleanupBarrier(t)
-	f.dispatcher.EventStore = &approvalCleanupEventStore{Store: f.events, beforeTransaction: pause}
+	f.dispatcher.EventStore = &approvalCleanupEventStore{Client: f.storage, beforeTransaction: pause}
 	done := make(chan error, 1)
 	go func() { done <- f.reconcile(t) }()
 	awaitApprovalCleanupSignal(t, f.ctx, entered)
@@ -208,7 +227,12 @@ func TestMCPApprovalCleanupWinsRecoveryPair(t *testing.T) {
 	requireApprovalHistoryEmpty(t, f)
 }
 
-func TestMCPApprovalProjectionWinsCleanup(t *testing.T) {
+// TestMCPApprovalCleanupAfterRetainedReadRefusesProjection covers cleanup
+// that commits between a projection's fenced read of the retained request and
+// its append. No store transaction is open in between, so cleanup completes;
+// the append is refused because cleanup moved the projection's fence, and
+// the repeated projection finds no request, so nothing is resurrected.
+func TestMCPApprovalCleanupAfterRetainedReadRefusesProjection(t *testing.T) {
 	for _, recovery := range []bool{false, true} {
 		name := "broker"
 		if recovery {
@@ -223,7 +247,11 @@ func TestMCPApprovalProjectionWinsCleanup(t *testing.T) {
 			require.NoError(t, err)
 			saved := requireCancelledApprovalReceipt(t, f, call, effect)
 			pause, entered, release := approvalCleanupBarrier(t)
-			wrapped := &approvalCleanupEventStore{Store: f.events, afterRead: pause}
+			var appends atomic.Int32
+			wrapped := &approvalCleanupEventStore{Client: f.storage, afterRead: pause, beforeAppend: func(*store.ExecutionEvent) error {
+				appends.Add(1)
+				return nil
+			}}
 			f.broker.ApprovalEvents, f.dispatcher.EventStore = wrapped, wrapped
 			done := make(chan error, 1)
 			go func() {
@@ -236,21 +264,90 @@ func TestMCPApprovalProjectionWinsCleanup(t *testing.T) {
 			ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
 			defer cancel()
 			awaitApprovalCleanupSignal(t, ctx, entered)
-			// With the retained request already read, cleanup cannot acquire the
-			// SQLite writer. A bounded cancellation proves blocking without sleeps.
-			blockedCtx, stop := context.WithTimeout(f.ctx, 100*time.Millisecond)
-			err = deleteApprovalHistory(blockedCtx, f)
-			stop()
-			require.ErrorIs(t, err, context.DeadlineExceeded)
-			cleaned := make(chan error, 1)
-			go func() { cleaned <- deleteApprovalHistory(f.ctx, f) }()
+			require.NoError(t, deleteApprovalHistory(f.ctx, f), "cleanup must not wait for a projection's read")
 			release()
 			require.NoError(t, awaitApprovalCleanupResult(t, f.ctx, done))
-			require.NoError(t, awaitApprovalCleanupResult(t, f.ctx, cleaned))
 			requireApprovalHistoryEmpty(t, f)
 			require.Equal(t, saved, requireCancelledApprovalReceipt(t, f, call, effect))
+			require.Positive(t, appends.Load(), "the projection must reach its append and have it refused")
 		})
 	}
+}
+
+// Recovery copies the Session association it read from the request. Session
+// cleanup between that read and the append must refuse the append, so the
+// retry reads the cleared association instead of restoring the Session.
+func TestMCPApprovalSessionCleanupAfterRecoveryReadRefusesProjection(t *testing.T) {
+	const session = "approval-session"
+	f := newMCPApprovalRecoveryFixture(t)
+	call, effect := seedMCPApprovalPendingInSession(t, f, true, session)
+	credentials, err := f.broker.Credentials.ResolveACPMCPBrokerCredentials(f.ctx, f.request)
+	require.NoError(t, err)
+	_, _, err = f.broker.blockApproval(f.ctx, call, credentials, acpApprovalCodeCancelled)
+	require.NoError(t, err)
+	saved := requireCancelledApprovalReceipt(t, f, call, effect)
+	_, listed := f.approval(t)
+	require.NotEmpty(t, listed)
+	for _, event := range listed {
+		require.Equal(t, session, event.SessionName, "%s must start in the Session", event.Type)
+	}
+	pause, entered, release := approvalCleanupBarrier(t)
+	var appends atomic.Int32
+	wrapped := &approvalCleanupEventStore{Client: f.storage, afterRead: pause, beforeAppend: func(*store.ExecutionEvent) error {
+		appends.Add(1)
+		return nil
+	}}
+	f.dispatcher.EventStore = wrapped
+	done := make(chan error, 1)
+	go func() { done <- f.reconcile(t) }()
+	ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
+	defer cancel()
+	awaitApprovalCleanupSignal(t, ctx, entered)
+	require.NoError(t, f.events.DeleteSession(f.ctx, f.task.Namespace, session), "Session cleanup must not wait for a projection's read")
+	release()
+	require.NoError(t, awaitApprovalCleanupResult(t, f.ctx, done))
+	require.Equal(t, saved, requireCancelledApprovalReceipt(t, f, call, effect))
+	require.EqualValues(t, 4, appends.Load(), "the first decision/outcome group must be refused and the second read appended")
+
+	approval, listed := f.approval(t)
+	require.Equal(t, approvals.StatusCancelled, approval.Status, "recovery reads again and completes")
+	for _, event := range listed {
+		require.Empty(t, event.SessionName, "%s must not restore the cleaned Session association", event.Type)
+	}
+	sessionEvents, latest, err := f.events.ListSessionExecutionEvents(f.ctx, store.SessionExecutionEventFilter{
+		Namespace: f.task.Namespace, SessionName: session,
+	})
+	require.NoError(t, err)
+	require.Empty(t, sessionEvents, "the cleaned Session's event stream must stay empty")
+	require.Zero(t, latest)
+}
+
+// The broker writes the Session association from the call's credentials, so
+// its projection follows only the Task's own cleanup: cleanup of another Task
+// in the namespace between its read and its append must not refuse it.
+func TestMCPApprovalBrokerProjectionIgnoresOtherTaskCleanup(t *testing.T) {
+	f := newMCPApprovalRecoveryFixture(t)
+	call, _ := seedMCPApprovalPending(t, f, true)
+	pause, entered, release := approvalCleanupBarrier(t)
+	var appends atomic.Int32
+	wrapped := &approvalCleanupEventStore{Client: f.storage, afterRead: pause, beforeAppend: func(*store.ExecutionEvent) error {
+		appends.Add(1)
+		return nil
+	}}
+	f.broker.ApprovalEvents = wrapped
+	done := make(chan error, 1)
+	go func() {
+		done <- f.broker.approvalDecision(f.ctx, call, events.ExecutionEventTypeApprovalCancelled, "approval_cancelled")
+	}()
+	ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
+	defer cancel()
+	awaitApprovalCleanupSignal(t, ctx, entered)
+	require.NoError(t, f.events.DeleteExecutionEvents(f.ctx, f.task.Namespace, events.ExecutionEventStreamTypeTask, "other-task"))
+	release()
+	require.NoError(t, awaitApprovalCleanupResult(t, f.ctx, done))
+	require.EqualValues(t, 1, appends.Load(), "unrelated cleanup must not refuse and repeat the broker's append")
+	approval, _ := f.approval(t)
+	require.Equal(t, approvals.StatusCancelled, approval.Status)
 }
 
 func TestMCPApprovalMissingStartRequestBlocksExecution(t *testing.T) {
@@ -260,7 +357,7 @@ func TestMCPApprovalMissingStartRequestBlocksExecution(t *testing.T) {
 	authorizer := f.broker.Prompts.(DurableACPMCPPromptAuthorizer)
 	registerApprovalLease(t, authorizer.PromptLeases, f.ctx, f.request)
 	pause, entered, release := approvalCleanupBarrier(t)
-	f.broker.ApprovalEvents = &approvalCleanupEventStore{Store: f.events, beforeTransaction: pause}
+	f.broker.ApprovalEvents = &approvalCleanupEventStore{Client: f.storage, beforeTransaction: pause}
 	done := f.startContext(f.ctx, f.request)
 	awaitApprovalCleanupSignal(t, f.ctx, entered)
 	require.NoError(t, deleteApprovalHistory(f.ctx, f))
@@ -349,7 +446,7 @@ func TestMCPApprovalProjectionReadErrorsRemainRetryable(t *testing.T) {
 			// Even a conflict-shaped read failure is not evidence of absence
 			// or of a reviewer winning a terminal decision append.
 			outage := store.ConflictErrorf("injected retained-request read failure")
-			wrapped := &approvalCleanupEventStore{Store: f.events, readError: outage}
+			wrapped := &approvalCleanupEventStore{Client: f.storage, readError: outage}
 			f.broker.ApprovalEvents, f.dispatcher.EventStore = wrapped, wrapped
 			project := func() error {
 				switch path {
@@ -385,7 +482,7 @@ func TestMCPApprovalRecoveryPairRollsBackOnOutcomeWriteError(t *testing.T) {
 	f.task.Status.Phase = corev1alpha1.TaskPhaseCancelled
 	require.NoError(t, f.kube.Update(f.ctx, f.task))
 	outage := errors.New("injected outcome write failure")
-	f.dispatcher.EventStore = &approvalCleanupEventStore{Store: f.events, beforeAppend: func(event *store.ExecutionEvent) error {
+	f.dispatcher.EventStore = &approvalCleanupEventStore{Client: f.storage, beforeAppend: func(event *store.ExecutionEvent) error {
 		if event.Type == events.ExecutionEventTypeApprovalExecutionUpdated {
 			return outage
 		}
@@ -396,7 +493,7 @@ func TestMCPApprovalRecoveryPairRollsBackOnOutcomeWriteError(t *testing.T) {
 	require.Equal(t, approvals.StatusPending, current.Status, "decision and outcome must roll back together")
 	require.Len(t, listed, 1)
 	saved := requireCancelledApprovalReceipt(t, f, call, effect)
-	f.dispatcher.EventStore = f.events
+	f.dispatcher.EventStore = f.storage
 	require.NoError(t, f.reconcile(t))
 	current, listed = f.approval(t)
 	require.Equal(t, approvals.StatusCancelled, current.Status)

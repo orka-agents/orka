@@ -342,7 +342,7 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 	if err != nil {
 		return err
 	}
-	retained, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
+	retained, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name, mcpApprovalTaskFence,
 		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
 		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) (*store.ExecutionEvent, error) {
 			return b.appendApprovalEvent(txCtx, call, events.ExecutionEventTypeApprovalExecutionUpdated, "execution:"+outcome,
@@ -357,7 +357,7 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 }
 
 func (b *ACPMCPBroker) approvalDecision(ctx context.Context, call *acpMCPApprovalCall, eventType, reason string) error {
-	_, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
+	_, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name, mcpApprovalTaskFence,
 		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
 		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) (*store.ExecutionEvent, error) {
 			appended, err := b.appendApprovalEvent(txCtx, call, eventType, eventType, reason,

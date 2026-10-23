@@ -1,6 +1,9 @@
-package store
+package v1
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // ScanTaskIdentity binds ingestion to one Kubernetes Task incarnation and run.
 type ScanTaskIdentity struct {
@@ -280,4 +283,53 @@ type DroppedFindingFilter struct {
 	ReasonContains string
 	Limit          int
 	Cursor         string
+}
+
+// SecurityStore handles repository security scanning persistence. Scan Task
+// ingestion is a conditional command (see ScanIngestionStore); its
+// validation and application logic stays in Orka.
+type SecurityStore interface {
+	ScanIngestionStore
+
+	GetScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) (*ScanTaskIngestion, error)
+	CompleteScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) error
+
+	CreateScanRun(ctx context.Context, run *ScanRun) error
+	UpdateScanRun(ctx context.Context, run *ScanRun) error
+	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
+	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
+	ListActiveScanRuns(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
+	ListScanRunsPendingCancellation(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
+	// RequestScanRunCancellation persists intent before external cleanup and
+	// updates run.CancellationVersion. Completion must match that version.
+	RequestScanRunCancellation(ctx context.Context, run *ScanRun, reason string) error
+	CompleteScanRunCancellation(ctx context.Context, run *ScanRun) error
+
+	UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
+	ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)
+	GetReviewSlice(ctx context.Context, namespace, repositoryScan, id string) (*ReviewSlice, error)
+	UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error
+
+	GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
+	SaveThreatModel(ctx context.Context, model *ThreatModel) error
+	// SaveThreatModelIfVersion saves model only while the latest stored
+	// version equals expectedVersion, and returns ErrConflict otherwise.
+	SaveThreatModelIfVersion(ctx context.Context, model *ThreatModel, expectedVersion int64) error
+
+	UpsertFinding(ctx context.Context, finding *Finding) error
+	UpsertObservedFinding(ctx context.Context, finding *Finding) error
+	GetFinding(ctx context.Context, namespace, id string) (*Finding, error)
+	ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, string, error)
+	GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (FindingCounts, error)
+	UpdateFindingState(ctx context.Context, namespace, id, state string) error
+	ResolveFindingIfCurrent(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error)
+	MarkFindingDuplicate(ctx context.Context, namespace, id, canonicalID string) error
+
+	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
+	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error
+	BindPatchProposalPublicationEvidence(ctx context.Context, proposal *PatchProposal) error
+	ListPatchProposals(ctx context.Context, namespace, findingID string) ([]PatchProposal, error)
+
+	CreateDroppedFinding(ctx context.Context, dropped *DroppedFinding) error
+	ListDroppedFindings(ctx context.Context, filter DroppedFindingFilter) ([]DroppedFinding, string, error)
 }
