@@ -87,6 +87,9 @@ func TestProvisionerGivesALinkItsHostOnce(t *testing.T) {
 		host.Spec.GitHubTokenFrom == nil || host.Spec.GitHubTokenFrom.ConnectionRef.Name != connection.Name {
 		t.Fatalf("host = %s %+v", host.Name, host.Spec)
 	}
+	if got := host.Annotations[connectors.AgentHostProviderAnnotation]; got != "github" {
+		t.Fatalf("the host records provider %q, want github", got)
+	}
 	if len(host.OwnerReferences) != 0 {
 		t.Fatal("deleting a Connection must never delete its host")
 	}

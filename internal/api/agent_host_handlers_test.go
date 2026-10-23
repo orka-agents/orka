@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,6 +303,28 @@ func TestOwnAgentHostOutlivesItsProvider(t *testing.T) {
 	}
 	if _, ok := h.host("gh-alice-old"); ok {
 		t.Fatal("the kept host must be deleted")
+	}
+}
+
+// A link's name keeps only a prefix of a long provider name, so after such a
+// provider is deleted the kept host's own record says which provider it was.
+func TestOwnAgentHostOutlivesALongNamedProvider(t *testing.T) {
+	provider := "github-enterprise-cloud-agent-hosts-for-the-platform-team"
+	link := connectors.ConnectionName(provider, connectorTestIssuer, "alice")
+	if strings.HasPrefix(link, provider+"-") {
+		t.Fatalf("link %q keeps the whole provider name; the test needs a truncated one", link)
+	}
+	kept := linkedHost("gh-alice-old", "alice")
+	kept.Spec.GitHubTokenFrom.ConnectionRef.Name = link
+	kept.Annotations = map[string]string{connectors.AgentHostProviderAnnotation: provider}
+	h := newAgentHostAPI(t, kept)
+	h.identity = person("bob")
+	if status, _ := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusNotFound {
+		t.Fatalf("bob: %d, want 404", status)
+	}
+	h.identity = person("alice")
+	if status, host := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || host.Name != "gh-alice-old" {
+		t.Fatalf("get: %d %+v, want the kept host", status, host)
 	}
 }
 

@@ -148,7 +148,7 @@ func (h *Handlers) ownAgentHost(c fiber.Ctx, action connectorAction) (*corev1alp
 			// A host kept after its person disconnected outlives its provider,
 			// which nothing holds once the link is gone. Its link's name still
 			// says whose it is.
-			mine = connectionNameOf(from.ConnectionRef.Name, ui.Issuer, ui.Subject)
+			mine = linksTo(&hosts.Items[i], ui.Issuer, ui.Subject)
 		}
 		if mine && current {
 			return &hosts.Items[i], nil
@@ -162,12 +162,23 @@ func (h *Handlers) ownAgentHost(c fiber.Ctx, action connectorAction) (*corev1alp
 	return nil, fiber.NewError(fiber.StatusNotFound, "you have no agent host yet; link GitHub first, or wait a moment after linking")
 }
 
-// connectionNameOf reports whether name is this person's link to the provider
-// its prefix names. The name's digest covers the provider and the person's
-// verified identity, so it matches no one else's.
-func connectionNameOf(name, issuer, subject string) bool {
-	cut := strings.LastIndex(name, "-")
-	return cut > 0 && connectors.ConnectionName(name[:cut], issuer, subject) == name
+// linksTo reports whether a host is fed by this person's link to the provider
+// the host records, or, for a host that records none, to the provider its
+// link's name begins with. A link's name ends in a digest of the provider and
+// the person's verified identity, so a recorded name only says where to look:
+// it can never make another person's link match.
+func linksTo(host *corev1alpha1.AgentHost, issuer, subject string) bool {
+	name := host.Spec.GitHubTokenFrom.ConnectionRef.Name
+	providers := []string{host.Annotations[connectors.AgentHostProviderAnnotation]}
+	if cut := strings.LastIndex(name, "-"); cut > 0 {
+		providers = append(providers, name[:cut])
+	}
+	for _, provider := range providers {
+		if provider != "" && connectors.ConnectionName(provider, issuer, subject) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func agentHostResponse(host *corev1alpha1.AgentHost) AgentHostResponse {

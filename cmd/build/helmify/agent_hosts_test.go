@@ -246,8 +246,8 @@ func TestStaticChartAgentHostPolicyMatchesSharedAdmission(t *testing.T) {
 	// policy covers only that release's namespace; with Kustomize there is
 	// one controller, whose watch namespace can change.
 	selector := chartPolicy.Spec.MatchConstraints.NamespaceSelector
-	if selector == nil || !reflect.DeepEqual(selector.MatchLabels, map[string]string{"kubernetes.io/metadata.name": "orka-test"}) ||
-		len(selector.MatchExpressions) != 0 {
+	releaseOnly := map[string]string{"kubernetes.io/metadata.name": "orka-test"}
+	if selector == nil || !reflect.DeepEqual(selector.MatchLabels, releaseOnly) || len(selector.MatchExpressions) != 0 {
 		t.Fatalf("the chart's AgentHost policy must cover only the release namespace: %+v", selector)
 	}
 	chartPolicy.Spec.MatchConstraints.NamespaceSelector = nil
