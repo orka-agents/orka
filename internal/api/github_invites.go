@@ -264,30 +264,10 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		refuse("the GitHub provider changed while the invite was pending", tokens.AccessToken)
 		return
 	}
-	user, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, tokens.AccessToken)
-	if err != nil {
-		refuse("the approved GitHub token could not be checked", tokens.AccessToken)
+	user, tokens, refusal, unused := h.inviteIdentity(ctx, oauth, login, tokens)
+	if refusal != "" {
+		refuse(refusal, unused)
 		return
-	}
-	if !strings.EqualFold(user.Login, login) {
-		refuse("the code was approved by another GitHub account", tokens.AccessToken)
-		return
-	}
-	if strings.TrimSpace(tokens.RefreshToken) != "" {
-		refreshed, err := h.connectors.OAuth.Refresh(ctx, oauth, tokens.RefreshToken)
-		if err != nil {
-			refuse("GitHub did not accept the refresh token", tokens.AccessToken)
-			return
-		}
-		again, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, refreshed.AccessToken)
-		if err != nil || again.ID != user.ID {
-			refuse("GitHub issued tokens for another account", refreshed.AccessToken)
-			return
-		}
-		tokens = githubauth.Tokens{AccessToken: refreshed.AccessToken, RefreshToken: refreshed.RefreshToken}
-		if !refreshed.ExpiresAt.IsZero() {
-			tokens.ExpiresIn = int(max(time.Until(refreshed.ExpiresAt), 0) / time.Second)
-		}
 	}
 	if err := cfg.GitHub.RequireMember(ctx, tokens.AccessToken, user.Login, cfg.Allowed); err != nil {
 		if errors.Is(err, githubauth.ErrNotMember) {
@@ -295,6 +275,12 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		} else {
 			refuse("GitHub could not confirm the invited account's membership; invite again shortly", tokens.AccessToken)
 		}
+		return
+	}
+	// An invite gives a host, and a host takes only a token that expires.
+	// Orka ran this device flow itself, so the expiry is GitHub's word.
+	if tokens.ExpiresIn <= 0 {
+		refuse("GitHub gave the approved token no expiry; turn on user-token expiration in the GitHub App, then invite again", tokens.AccessToken)
 		return
 	}
 	ui := &UserInfo{
@@ -325,6 +311,43 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		}
 	}
 	h.invites.finish(id, InviteAccepted, message, connection.Name)
+}
+
+// inviteIdentity checks that the approved tokens are the invited login's and,
+// given a refresh token, redeems it once, so custody holds what GitHub issued
+// from it. It returns the account and tokens to link, or why it refuses and
+// the token to revoke.
+func (h *Handlers) inviteIdentity(ctx context.Context, oauth connectors.OAuthProviderConfig, login string,
+	tokens githubauth.Tokens) (user githubauth.User, linked githubauth.Tokens, refusal, unused string) {
+	github := h.githubSignIn.GitHub
+	user, err := github.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, tokens.AccessToken)
+	if err != nil {
+		return user, tokens, "the approved GitHub token could not be checked", tokens.AccessToken
+	}
+	if !strings.EqualFold(user.Login, login) {
+		return user, tokens, "the code was approved by another GitHub account", tokens.AccessToken
+	}
+	if strings.TrimSpace(tokens.RefreshToken) == "" {
+		return user, tokens, "", ""
+	}
+	refreshed, err := h.connectors.OAuth.Refresh(ctx, oauth, tokens.RefreshToken)
+	if err != nil {
+		return user, tokens, "GitHub did not accept the refresh token", tokens.AccessToken
+	}
+	again, err := github.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, refreshed.AccessToken)
+	if err != nil || again.ID != user.ID {
+		return user, tokens, "GitHub issued tokens for another account", refreshed.AccessToken
+	}
+	// An account renamed between the checks is no longer the invited login,
+	// and membership is read for the login GitHub gives now.
+	if !strings.EqualFold(again.Login, login) {
+		return user, tokens, "the code was approved by another GitHub account", refreshed.AccessToken
+	}
+	linked = githubauth.Tokens{AccessToken: refreshed.AccessToken, RefreshToken: refreshed.RefreshToken}
+	if !refreshed.ExpiresAt.IsZero() {
+		linked.ExpiresIn = int(max(time.Until(refreshed.ExpiresAt), 0) / time.Second)
+	}
+	return again, linked, "", ""
 }
 
 func inviteAcceptedMessage(provider *corev1alpha1.ConnectorProvider, createHosts bool) string {

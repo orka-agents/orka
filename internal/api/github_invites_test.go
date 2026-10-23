@@ -280,6 +280,40 @@ func TestInviteRevokesWhenLinkingStoresNothing(t *testing.T) {
 	}
 }
 
+// An account renamed between the approval's check and the refreshed token's
+// is no longer the invited login, and its membership would be read for the
+// old one: the invite is refused and the refreshed token revoked.
+func TestInviteRefusesAnAccountRenamedDuringItsChecks(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice_renamed", "expires_in": 28800})
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || outcome.Connection != "" {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice_renamed_refreshed" {
+		t.Fatalf("revoked = %v, want the refreshed token", revoked)
+	}
+}
+
+// An invite gives a host, and a host takes only a token that expires: a token
+// GitHub issued without an expiry is refused and revoked.
+func TestInviteRefusesATokenWithoutAnExpiry(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || !strings.Contains(outcome.Message, "no expiry") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+		t.Fatalf("revoked = %v, want the approved token", revoked)
+	}
+	connections := &corev1alpha1.ConnectionList{}
+	if err := h.client.List(context.Background(), connections); err != nil {
+		t.Fatal(err)
+	}
+	if len(connections.Items) != 0 {
+		t.Fatal("a refused invite links no one")
+	}
+}
+
 // A revocation GitHub did not confirm is reported as such, never as done.
 func TestInviteReportsARevocationThatFailed(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})

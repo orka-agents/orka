@@ -91,6 +91,8 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				"ghu_alice_refreshed": {"id": 852750, "login": "alice"}, "ghu_alice_left": {"id": 852750, "login": "alice"},
 				"ghu_bob": {"id": 1002, "login": "bob"}, "ghu_bob_refreshed": {"id": 1002, "login": "bob"},
 				"ghu_alice_unanswered": {"id": 852750, "login": "alice"},
+				// Alice's account, renamed after an earlier check.
+				"ghu_alice_renamed_refreshed": {"id": 852750, "login": "alice-renamed"},
 			}
 			user, known := users[body.AccessToken]
 			if !known {
@@ -106,7 +108,7 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				// GitHub cannot answer for this token.
 				w.WriteHeader(http.StatusBadGateway)
 				return
-			case "Bearer ghu_alice", "Bearer ghu_alice_renewed", "Bearer ghu_alice_refreshed":
+			case "Bearer ghu_alice", "Bearer ghu_alice_renewed", "Bearer ghu_alice_refreshed", "Bearer ghu_alice_renamed_refreshed":
 				_ = json.NewEncoder(w).Encode(map[string]string{"state": "active"})
 				return
 			}

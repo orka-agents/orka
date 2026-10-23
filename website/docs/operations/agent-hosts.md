@@ -274,7 +274,8 @@ allowed to create agenthosts runs `orka host invite <github-login>`. Orka starts
 device flow itself and prints the code to pass on, with the disclosure to pass on before they
 approve it: code running in their host can read their GitHub token. When that person approves
 it, Orka makes the same checks as a sign-in, plus one more: the approving account must be the
-invited login. If another account approves the code, Orka refuses it and revokes its token.
+invited login. If another account approves the code, Orka refuses it and revokes its token. So does a token GitHub
+issued without an expiry, since a host takes only one that expires.
 Then it links the account, and the host starts. The invited person needs only a browser and the
 Copilot app. They cannot manage the host themselves, so keep idle suspension off for them, or
 wake their hosts. If they later run `orka login`, they reach the same link and host. An invite

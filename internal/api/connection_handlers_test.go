@@ -214,7 +214,7 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 		// GitHub sign-in uses the refresh token it is given once: each
 		// fixture person's refresh token yields their own new tokens.
 		if r.PostForm.Get("grant_type") == "refresh_token" {
-			person := map[string]string{"ghr_alice": "alice", "ghr_bob": "bob"}[r.PostForm.Get("refresh_token")]
+			person := map[string]string{"ghr_alice": "alice", "ghr_bob": "bob", "ghr_alice_renamed": "alice_renamed"}[r.PostForm.Get("refresh_token")]
 			if person == "" {
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_refresh_token"})
 				return
