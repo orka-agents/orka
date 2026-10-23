@@ -277,10 +277,11 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		}
 		return
 	}
-	// An invite gives a host, and a host takes only a token that expires.
-	// Orka ran this device flow itself, so the expiry is GitHub's word.
-	if tokens.ExpiresIn <= 0 {
-		refuse("GitHub gave the approved token no expiry; turn on user-token expiration in the GitHub App, then invite again", tokens.AccessToken)
+	// An invite gives a host, and a host takes only a token that expires:
+	// one GitHub issued a refresh token beside, which it does only for a
+	// token that expires.
+	if tokens.ExpiresIn <= 0 || strings.TrimSpace(tokens.RefreshToken) == "" {
+		refuse("GitHub gave the approved token no expiry or refresh token; turn on user-token expiration in the GitHub App, then invite again", tokens.AccessToken)
 		return
 	}
 	ui := &UserInfo{

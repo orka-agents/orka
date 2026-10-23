@@ -297,20 +297,29 @@ func TestInviteRefusesAnAccountRenamedDuringItsChecks(t *testing.T) {
 // An invite gives a host, and a host takes only a token that expires: a token
 // GitHub issued without an expiry is refused and revoked.
 func TestInviteRefusesATokenWithoutAnExpiry(t *testing.T) {
-	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
-	_, invite := h.invite("alice")
-	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || !strings.Contains(outcome.Message, "no expiry") {
-		t.Fatalf("outcome = %+v", outcome)
-	}
-	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
-		t.Fatalf("revoked = %v, want the approved token", revoked)
-	}
-	connections := &corev1alpha1.ConnectionList{}
-	if err := h.client.List(context.Background(), connections); err != nil {
-		t.Fatal(err)
-	}
-	if len(connections.Items) != 0 {
-		t.Fatal("a refused invite links no one")
+	for name, response := range map[string]map[string]any{
+		"no expiry": {"access_token": "ghu_alice"},
+		// An expiry with no refresh token beside it is one Orka cannot
+		// refresh, which a host does not take.
+		"no refresh token": {"access_token": "ghu_alice", "expires_in": 28800},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, gh := newInviteHarness(t, response)
+			_, invite := h.invite("alice")
+			if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || !strings.Contains(outcome.Message, "no expiry or refresh token") {
+				t.Fatalf("outcome = %+v", outcome)
+			}
+			if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+				t.Fatalf("revoked = %v, want the approved token", revoked)
+			}
+			connections := &corev1alpha1.ConnectionList{}
+			if err := h.client.List(context.Background(), connections); err != nil {
+				t.Fatal(err)
+			}
+			if len(connections.Items) != 0 {
+				t.Fatal("a refused invite links no one")
+			}
+		})
 	}
 }
 
