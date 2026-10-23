@@ -399,7 +399,13 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	// each commit retains the grant it replaces until disconnect, so linking
 	// every sign-in would soon refuse new ones. The caller revokes the
 	// unused token, unless custody holds that very token.
-	if custody, ok := h.signInLinkHolds(ctx, connection, oauth, ui); ok {
+	custody, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui)
+	if err != nil {
+		// Replacing a link that may still work would spend one of the grants
+		// custody retains; the person retries instead.
+		return nil, false, fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub link; retry")
+	}
+	if holds {
 		return connection, tokens.AccessToken == custody, nil
 	}
 	mode, err := normalizeConnectionMode(connection.Spec.Mode)
@@ -484,25 +490,39 @@ func (h *Handlers) revokeSignInToken(ctx context.Context, oauth connectors.OAuth
 	}
 }
 
-// signInLinkHolds returns the token custody holds for connection when it is
-// linked and the token is still ui's GitHub account's. A token that never
-// expires is not kept: membership is checked again only at refreshes, so the
-// sign-in replaces it with one that ends.
+// signInLinkHolds reports whether connection's link still holds ui's GitHub
+// account, and the token custody holds for it. A token that never expires is
+// not kept: membership is checked again only at refreshes, so the sign-in
+// replaces it with one that ends. It returns an error when it cannot tell,
+// such as when custody or GitHub cannot answer: only a link shown not to
+// work is replaced.
 func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1.Connection,
-	oauth connectors.OAuthProviderConfig, ui *UserInfo) (string, bool) {
+	oauth connectors.OAuthProviderConfig, ui *UserInfo) (string, bool, error) {
 	cfg := h.githubSignIn
 	if cfg.Credentials == nil || !connectors.ConnectionLinked(connection) {
-		return "", false
+		return "", false, nil
 	}
 	held, err := cfg.Credentials.HostCredential(ctx, connection.Namespace, connection.Name, sessionRenewHorizon)
-	if err != nil || held.ExpiresAt.IsZero() {
-		return "", false
+	if errors.Is(err, credential.ErrHostLinkUnavailable) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if held.ExpiresAt.IsZero() {
+		return "", false, nil
 	}
 	account, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, held.AccessToken)
-	if err != nil || strconv.FormatInt(account.ID, 10) != ui.Subject {
-		return "", false
+	if errors.Is(err, githubauth.ErrInvalidToken) {
+		return "", false, nil
 	}
-	return held.AccessToken, true
+	if err != nil {
+		return "", false, err
+	}
+	if strconv.FormatInt(account.ID, 10) != ui.Subject {
+		return "", false, nil
+	}
+	return held.AccessToken, true, nil
 }
 
 // reloadSignInConnection reads connection again, uncached, and requires it
@@ -569,6 +589,12 @@ func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, pro
 	}
 	if !connectionOwnedBy(connection, ui) {
 		return nil, fiber.NewError(fiber.StatusConflict, "a link with your name belongs to someone else")
+	}
+	// The provider reference is immutable, as CreateConnection holds: a
+	// Connection made outside the API under this name for another provider
+	// must never take this provider's grant.
+	if connection.Spec.ProviderRef.Name != provider.Name {
+		return nil, fiber.NewError(fiber.StatusConflict, "a link with your name is bound to another provider")
 	}
 	// Custody is written only under the finalizer that tombstones and
 	// revokes it on delete; a Connection made elsewhere gets it when first
