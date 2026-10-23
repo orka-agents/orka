@@ -150,6 +150,11 @@ func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*c
 		}
 		return nil, fmt.Errorf("load connection: %w", err)
 	}
+	// A Connection being deleted is a disconnect, whatever its provider's
+	// state, even while its finalizer holds it.
+	if !connection.DeletionTimestamp.IsZero() {
+		return nil, hostLinkUnavailable("the Connection is being deleted")
+	}
 	if !connectors.ConnectionLinked(connection) {
 		lagging, err := s.providerLag(ctx, connection)
 		if err != nil {

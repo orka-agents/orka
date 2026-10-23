@@ -280,7 +280,8 @@ operator suspended is reported and left suspended. `orka login --no-host` links 
   account.
 - Only the controller may create a host fed by a Connection, and only from the template its
   provider names. A host keeps that template when the provider later names another one. A
-  link annotated `orka.ai/agent-host: declined` gets no host.
+  link annotated `orka.ai/agent-host: declined` gets no host, and declining stops a host it
+  already has, keeping its volume.
 - The provider must be on github.com: Orka reads the token's account from api.github.com.
 - The template must use `access: Relay`. A Standalone host's connection Secret sits in the
   namespace every person's host shares, so these hosts fail with `InvalidTemplate` instead.

@@ -421,11 +421,25 @@ func (r *AgentHostReconciler) checkHostLink(ctx context.Context, host *corev1alp
 	if r.HostCredentials == nil || r.GitHubAccounts == nil {
 		return agentHostFailed(agentHostReasonConnectionUnavailable, "connectors are not enabled on this controller")
 	}
-	err := r.HostCredentials.CheckHostLink(ctx, host.Namespace, host.Spec.GitHubTokenFrom.ConnectionRef.Name)
+	name := host.Spec.GitHubTokenFrom.ConnectionRef.Name
+	err := r.HostCredentials.CheckHostLink(ctx, host.Namespace, name)
 	if errors.Is(err, credential.ErrHostLinkUnavailable) {
 		return agentHostFailed(agentHostReasonConnectionUnavailable, "%v", err)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// A person who declines a host after it was provisioned stops it, as the
+	// provisioner never starts one for such a link. The link itself still
+	// serves their other uses, so the check is the host's own.
+	connection := &corev1alpha1.Connection{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: host.Namespace, Name: name}, connection); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] == corev1alpha1.ConnectionAgentHostDeclined {
+		return agentHostFailed(agentHostReasonConnectionUnavailable, "the person behind Connection %s declined an agent host", name)
+	}
+	return nil
 }
 
 // connectionToken returns the access token of the host's Connection,

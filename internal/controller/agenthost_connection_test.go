@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -175,6 +176,47 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	h.settle()
 	if _, ok := h.pod(); !ok {
 		t.Fatal("an expiring token must start the host")
+	}
+}
+
+// A person who declines a host after it was provisioned stops it: its Pod
+// and token copy go and its volume stays, and it runs again once they take
+// the decline back.
+func TestAgentHostStopsWhenItsPersonDeclinesIt(t *testing.T) {
+	h, _, _ := newConnectionHostHarness(t)
+	connection := &corev1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: testHostConnection, Namespace: testUserNamespace}}
+	if err := h.client.Create(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatal("no Pod before the decline")
+	}
+	volume := h.volumeUID()
+	connection.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("a declined host must stop")
+	}
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("a declined host must lose its token copy")
+	}
+	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonConnectionUnavailable {
+		t.Fatalf("ready = %+v", ready)
+	}
+	if h.volumeUID() != volume {
+		t.Fatal("a declined host must keep its volume")
+	}
+	connection.Annotations = nil
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatal("taking the decline back must restart the host")
 	}
 }
 
