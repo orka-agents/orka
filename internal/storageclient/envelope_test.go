@@ -748,3 +748,25 @@ func TestEmbeddedFamiliesRunAgainstAStrictStore(t *testing.T) {
 		t.Fatalf("memory proposal application: %v", err)
 	}
 }
+
+// A write whose call ends before its dataset's fence opens is only not
+// ready: it matches ErrNotReady, so callers retry it, and still matches the
+// context error.
+func TestWriteWhoseCallEndsBeforeItsFenceOpensIsNotReady(t *testing.T) {
+	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	gate := gatedFences{open: make(chan struct{}), datasetID: advanceTestDataset(t, backend, testFence), fence: testFence}
+	client, err := New(Options{State: backend, Artifacts: backend, Embedded: backend, Fences: gate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	err = client.SaveResult(ctx, "tenant", "task", []byte("result"))
+	if !errors.Is(err, storagev1.ErrNotReady) || !errors.Is(err, context.DeadlineExceeded) || !store.IsTemporaryStorageError(err) {
+		t.Fatalf("write whose call ended before its fence opened = %v, want ErrNotReady wrapping the deadline", err)
+	}
+}
