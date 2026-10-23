@@ -144,9 +144,41 @@ func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
 				require.Equal(t, memorySourceProposal, stored.Source)
 				require.Equal(t, "protected", stored.SourceProposalID)
 			}
+
+			// Its source cannot be changed away from memory_proposal either.
+			for _, body := range []string{
+				`{"content":"relabeled","source":"user"}`,
+				`{"source":" "}`,
+			} {
+				before := f.changes(t)
+				status, response := f.request(t, http.MethodPut, route+applied.ID, body)
+				require.Equal(t, http.StatusBadRequest, status, response)
+				require.Contains(t, response, "source of a memory applied from a proposal cannot be changed by clients")
+				require.Equal(t, before, f.changes(t))
+			}
+
 			stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
 			require.NoError(t, err)
 			require.Equal(t, "edited with another link", stored.Content)
+			require.Equal(t, memorySourceProposal, stored.Source)
+		})
+	}
+}
+
+// A memory_proposal source with no proposal link was not written by apply, so
+// an update can still correct it.
+func TestMemoryUpdateRelabelsUnlinkedProposalSource(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		t.Run(route, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "unlinked", Namespace: "default", Source: memorySourceProposal, Content: "unlinked"}))
+			f.allowOnly(t, memoryPermission("update", "memories", "unlinked"))
+			status, body := f.request(t, http.MethodPut, route+"unlinked", `{"source":"user"}`)
+			require.Equal(t, http.StatusOK, status, body)
+			stored, err := f.store.GetMemory(t.Context(), "default", "unlinked")
+			require.NoError(t, err)
+			require.Equal(t, "user", stored.Source)
+			require.Empty(t, stored.SourceProposalID)
 		})
 	}
 }
