@@ -182,6 +182,10 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 		cleanupIdentityBinding(t, newProvider(t))
 	})
 
+	t.Run("a lock acquired while its Session is deleted is held or not found", func(t *testing.T) {
+		lockDuringDelete(t, newProvider(t))
+	})
+
 	t.Run("parallel chat turns admit one", func(t *testing.T) {
 		provider := newProvider(t)
 		expires := time.Now().UTC().Add(time.Hour)
@@ -427,4 +431,57 @@ func cleanupIdentityBinding(t *testing.T, provider storagev1.StateProvider) {
 		}
 		return fmt.Errorf("binding Session binding-%d: %w", next, err)
 	})
+}
+
+// lockDuringDelete races lock acquisition against deletion of the same
+// Session. Readers lock the newest Session, all as the same owner, while the
+// writer creates a Session and then deletes it. Acquisition must succeed or
+// report the Session missing, and a deletion must not succeed once a lock on
+// the Session was granted. Any other result matches no serial order.
+func lockDuringDelete(t *testing.T, provider storagev1.StateProvider) {
+	const rounds = 50
+	// current holds one more than the newest round whose Session was created.
+	var current atomic.Int64
+	var granted [rounds]atomic.Int64
+	var deleted [rounds]bool
+	readDuringWrites(t, rounds, func(i int) error {
+		name := fmt.Sprintf("locked-%d", i)
+		if err := provider.CreateSession(t.Context(), &storagev1.SessionRecord{
+			Namespace: "tenant", Name: name, SessionType: "task", CreatedAt: controlBaseTime, UpdatedAt: controlBaseTime,
+		}); err != nil {
+			return err
+		}
+		current.Store(int64(i) + 1)
+		err := provider.DeleteSession(t.Context(), "tenant", name)
+		switch {
+		case err == nil:
+			deleted[i] = true
+		case errors.Is(err, storagev1.ErrConflict):
+			// A reader locked the Session first.
+		default:
+			return err
+		}
+		return nil
+	}, func() error {
+		round := current.Load()
+		if round == 0 {
+			return nil
+		}
+		name := fmt.Sprintf("locked-%d", round-1)
+		err := provider.AcquireLock(t.Context(), "tenant", name, "task-"+name, "uid-"+name)
+		switch {
+		case err == nil:
+			granted[round-1].Add(1)
+			return nil
+		case errors.Is(err, storagev1.ErrNotFound):
+			return nil
+		default:
+			return fmt.Errorf("locking Session %s during its deletion: %w", name, err)
+		}
+	})
+	for i := range rounds {
+		if deleted[i] && granted[i].Load() > 0 {
+			t.Fatalf("Session locked-%d was deleted although a lock on it was granted", i)
+		}
+	}
 }

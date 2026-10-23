@@ -208,10 +208,14 @@ func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessi
 // HasSessionCleanupIntent reports whether new work must be refused for a
 // Session whose deletion has crossed the durable intent boundary.
 func (s *Store) HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error) {
+	return sessionCleanupIntentExists(ctx, s.db, strings.TrimSpace(namespace), strings.TrimSpace(sessionName))
+}
+
+func sessionCleanupIntentExists(ctx context.Context, q controlQueryRower, namespace, sessionName string) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
-		strings.TrimSpace(namespace), strings.TrimSpace(sessionName),
+		namespace, sessionName,
 	).Scan(&count); err != nil {
 		return false, err
 	}
