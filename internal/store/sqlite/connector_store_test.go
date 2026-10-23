@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -30,13 +31,7 @@ func newConnectorTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	s := NewStore(db, dbPath)
-	cipher, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	activateTestKey(t, s)
 	return s
 }
 
@@ -161,12 +156,8 @@ func TestConnectorCredentialKeyRotationBlocksOpen(t *testing.T) {
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho"}); err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x43}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
 	other := NewStore(s.db, "rotated")
-	other.snapshotCipher = rotated
+	other.connectorSealer = newTestConnectorSealer(t, bytes.Repeat([]byte{0x43}, storageclient.SnapshotKeyBytes))
 	if _, err := other.GetConnectorCredential(ctx, ref); err == nil {
 		t.Fatal("a different controller key must not unwrap the data key")
 	}
@@ -929,18 +920,11 @@ func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_1"}); err != nil {
 		t.Fatal(err)
 	}
-	other, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(other); err == nil || !strings.Contains(err.Error(), "connector custody") {
+	other := bytes.Repeat([]byte{0x24}, storageclient.SnapshotKeyBytes)
+	if err := orkaClient(t, s).ActivateSnapshotKey(ctx, other); err == nil || !strings.Contains(err.Error(), "connector custody") {
 		t.Fatalf("rotation over linked custody err = %v, want refusal", err)
 	}
-	same, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(same); err != nil {
+	if err := orkaClient(t, s).ActivateSnapshotKey(ctx, testSnapshotKey); err != nil {
 		t.Fatalf("the current key must activate: %v", err)
 	}
 	// Pending rows are sealed under the key too.
@@ -950,7 +934,7 @@ func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
 	if err := s.CreateConnectorConsent(ctx, testConnectorConsent()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAgentExecutionSnapshotCipher(other); err == nil || !strings.Contains(err.Error(), "consent") {
+	if err := orkaClient(t, s).ActivateSnapshotKey(ctx, other); err == nil || !strings.Contains(err.Error(), "consent") {
 		t.Fatalf("rotation over a pending consent err = %v, want refusal", err)
 	}
 }
@@ -1301,11 +1285,8 @@ func TestConnectorKeyActivationSkipsExpiredConsents(t *testing.T) {
 	if err := s.CreateConnectorConsent(ctx, expired); err != nil {
 		t.Fatal(err)
 	}
-	other, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(other); err != nil {
+	other := bytes.Repeat([]byte{0x24}, storageclient.SnapshotKeyBytes)
+	if err := orkaClient(t, s).ActivateSnapshotKey(ctx, other); err != nil {
 		t.Fatalf("an expired consent must not block key activation: %v", err)
 	}
 }

@@ -13,12 +13,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 const agentExecutionSnapshotSecretWriteAttempts = 3
@@ -48,13 +47,13 @@ func validateAgentExecutionSnapshotSecretOptions(o agentExecutionSnapshotSecretO
 // decodeAgentExecutionSnapshotKey accepts exactly 32 raw bytes or their
 // whitespace-padded base64 encoding.
 func decodeAgentExecutionSnapshotKey(raw []byte) ([]byte, error) {
-	if len(raw) == sqlite.AgentExecutionSnapshotKeyBytes {
+	if len(raw) == storageclient.SnapshotKeyBytes {
 		return raw, nil
 	}
 	decoded, err := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(raw)))
-	if err != nil || len(decoded) != sqlite.AgentExecutionSnapshotKeyBytes {
+	if err != nil || len(decoded) != storageclient.SnapshotKeyBytes {
 		return nil, fmt.Errorf("snapshot key must be %d raw bytes or their base64 encoding",
-			sqlite.AgentExecutionSnapshotKeyBytes)
+			storageclient.SnapshotKeyBytes)
 	}
 	return decoded, nil
 }
@@ -107,7 +106,7 @@ func ensureAgentExecutionSnapshotKey(
 				"restore the Secret from backup rather than minting a new key, which would make every retained "+
 				"execution snapshot unreadable", ref, item)
 		}
-		key := make([]byte, sqlite.AgentExecutionSnapshotKeyBytes)
+		key := make([]byte, storageclient.SnapshotKeyBytes)
 		if _, err := rand.Read(key); err != nil {
 			return nil, fmt.Errorf("generate snapshot key: %w", err)
 		}

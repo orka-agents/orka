@@ -8,213 +8,142 @@ package sqlite
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// AgentExecutionSnapshotCipher encrypts immutable execution snapshot bodies at
-// rest. Snapshot bodies are sensitive (resolved prompts, Skill content,
-// repository identities, endpoint metadata, policy configuration) and are
-// never stored or returned in plaintext outside this seam.
-type AgentExecutionSnapshotCipher struct {
-	aead cipher.AEAD
-}
+// Execution snapshots arrive sealed by the storage client. SQLite stores the
+// nonce and ciphertext as opaque bytes and never holds the snapshot key.
 
-// AgentExecutionSnapshotKeyBytes is the required AES-256 key length.
-const AgentExecutionSnapshotKeyBytes = 32
+var _ storagev1.SealedAgentExecutionSnapshotStore = (*Store)(nil)
 
-// NewAgentExecutionSnapshotCipher builds an AES-256-GCM snapshot cipher.
-func NewAgentExecutionSnapshotCipher(key []byte) (*AgentExecutionSnapshotCipher, error) {
-	if len(key) != AgentExecutionSnapshotKeyBytes {
-		return nil, fmt.Errorf("agent execution snapshot key must be exactly %d bytes", AgentExecutionSnapshotKeyBytes)
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("initialize snapshot cipher: %w", err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("initialize snapshot AEAD: %w", err)
-	}
-	return &AgentExecutionSnapshotCipher{aead: aead}, nil
-}
-
-func snapshotAdditionalData(taskUID, digest string, schemaVersion int32) []byte {
-	return fmt.Appendf(nil, "orka.agent-execution-snapshot\x00%s\x00%s\x00%d", taskUID, digest, schemaVersion)
-}
-
-func (c *AgentExecutionSnapshotCipher) seal(taskUID, digest string, schemaVersion int32, body []byte) (nonce, ciphertext []byte, err error) {
-	nonce = make([]byte, c.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, nil, fmt.Errorf("generate snapshot nonce: %w", err)
-	}
-	ciphertext = c.aead.Seal(nil, nonce, body, snapshotAdditionalData(taskUID, digest, schemaVersion))
-	return nonce, ciphertext, nil
-}
-
-func (c *AgentExecutionSnapshotCipher) open(taskUID, digest string, schemaVersion int32, nonce, ciphertext []byte) ([]byte, error) {
-	body, err := c.aead.Open(nil, nonce, ciphertext, snapshotAdditionalData(taskUID, digest, schemaVersion))
-	if err != nil {
-		return nil, fmt.Errorf("decrypt agent execution snapshot %s/%s: %w", taskUID, digest, err)
-	}
-	return body, nil
-}
-
-// SetAgentExecutionSnapshotCipher installs the required at-rest encryption
-// cipher after proving that it can authenticate every retained snapshot.
-// Callers must configure the cipher before snapshot readers or writers start.
-// This rejects key rotation while any snapshot encrypted by the previous key
-// remains, preventing one database from silently accumulating mixed-key rows.
-func (s *Store) SetAgentExecutionSnapshotCipher(snapshotCipher *AgentExecutionSnapshotCipher) error {
-	if snapshotCipher == nil {
-		return errors.New("agent execution snapshot cipher is required")
-	}
-	rows, err := s.db.Query(`SELECT task_uid, digest, schema_version, nonce, ciphertext
-		FROM agent_execution_snapshots ORDER BY task_uid ASC, digest ASC`)
-	if err != nil {
-		return fmt.Errorf("verify agent execution snapshot key: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var (
-			taskUID       string
-			digest        string
-			schemaVersion int32
-			nonce         []byte
-			ciphertext    []byte
-		)
-		if err := rows.Scan(&taskUID, &digest, &schemaVersion, &nonce, &ciphertext); err != nil {
-			return fmt.Errorf("scan retained agent execution snapshot while verifying key: %w", err)
-		}
-		body, err := snapshotCipher.open(taskUID, digest, schemaVersion, nonce, ciphertext)
-		if err != nil {
-			return fmt.Errorf(
-				"candidate agent execution snapshot key cannot authenticate retained snapshot %s/%s; restore the previous key or wait for reference-aware retention before rotating: %w",
-				taskUID, digest, err,
-			)
-		}
-		if computed := store.CanonicalAgentExecutionSnapshotDigest(body); computed != digest {
-			return fmt.Errorf("retained agent execution snapshot %s/%s failed integrity verification while activating key", taskUID, digest)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate retained agent execution snapshots while verifying key: %w", err)
-	}
-	if err := rows.Close(); err != nil {
+// CreateSealedAgentExecutionSnapshot implements
+// storagev1.SealedAgentExecutionSnapshotStore.
+func (s *Store) CreateSealedAgentExecutionSnapshot(ctx context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
+	if err := snapshot.Validate(); err != nil {
 		return err
 	}
-	if err := s.verifyNativeSessionCipher(snapshotCipher); err != nil {
-		return err
-	}
-	// Connector custody is sealed under the same key. Verify every retained
-	// row before replacing it so linked accounts remain usable and revocable.
-	if err := s.verifyConnectorRowsWithCipher(snapshotCipher); err != nil {
-		return err
-	}
-	if err := s.completeDatasetBootstrap(); err != nil {
-		return fmt.Errorf("complete SQLite dataset bootstrap: %w", err)
-	}
-	s.snapshotCipher = snapshotCipher
-	return nil
-}
-
-var errSnapshotCipherRequired = errors.New("agent execution snapshot encryption is not configured; snapshot persistence fails closed")
-
-// PersistAgentExecutionSnapshot implements store.AgentExecutionSnapshotStore.
-func (s *Store) PersistAgentExecutionSnapshot(ctx context.Context, snapshot store.AgentExecutionSnapshot) error {
-	if s.snapshotCipher == nil {
-		return errSnapshotCipherRequired
-	}
-	key := store.AgentExecutionSnapshotKey{TaskUID: snapshot.TaskUID, Digest: snapshot.Digest}
-	if err := key.Validate(); err != nil {
-		return err
-	}
-	if snapshot.SchemaVersion < 1 {
-		return store.ValidationErrorf("snapshot schema version must be positive")
-	}
-	if len(snapshot.Body) == 0 {
-		return store.ValidationErrorf("snapshot body is required")
-	}
-	if computed := store.CanonicalAgentExecutionSnapshotDigest(snapshot.Body); computed != snapshot.Digest {
-		return store.ValidationErrorf("snapshot digest %s does not match body digest %s", snapshot.Digest, computed)
-	}
-
-	existing, err := s.GetAgentExecutionSnapshot(ctx, key)
-	switch {
-	case err == nil:
-		if existing.SchemaVersion == snapshot.SchemaVersion && subtle.ConstantTimeCompare(existing.Body, snapshot.Body) == 1 {
-			return nil
-		}
-		return fmt.Errorf("%w: agent execution snapshot %s already exists with different content", store.ErrDuplicateMismatch, key.ID())
-	case errors.Is(err, store.ErrNotFound):
-	default:
-		return err
-	}
-
-	nonce, ciphertext, err := s.snapshotCipher.seal(snapshot.TaskUID, snapshot.Digest, snapshot.SchemaVersion, snapshot.Body)
-	if err != nil {
-		return err
-	}
-	createdAt := snapshot.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
-	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO agent_execution_snapshots
+	result, err := s.db.ExecContext(ctx, `INSERT INTO agent_execution_snapshots
 		(task_uid, digest, schema_version, nonce, ciphertext, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(task_uid, digest) DO NOTHING`,
-		snapshot.TaskUID, snapshot.Digest, snapshot.SchemaVersion, nonce, ciphertext, createdAt)
+		snapshot.Key.TaskUID, snapshot.Key.Digest, snapshot.SchemaVersion, snapshot.Nonce, snapshot.Ciphertext, snapshot.CreatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("persist agent execution snapshot: %w", err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("persist agent execution snapshot: %w", err)
+	}
+	if inserted == 0 {
+		return store.ConflictErrorf("agent execution snapshot %s already exists", snapshot.Key.ID())
 	}
 	return nil
 }
 
-// GetAgentExecutionSnapshot implements store.AgentExecutionSnapshotStore.
-func (s *Store) GetAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) (*store.AgentExecutionSnapshot, error) {
-	if s.snapshotCipher == nil {
-		return nil, errSnapshotCipherRequired
-	}
+// GetSealedAgentExecutionSnapshot implements
+// storagev1.SealedAgentExecutionSnapshotStore.
+func (s *Store) GetSealedAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) (*storagev1.SealedAgentExecutionSnapshot, error) {
 	if err := key.Validate(); err != nil {
 		return nil, err
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT schema_version, nonce, ciphertext, created_at
-		FROM agent_execution_snapshots WHERE task_uid = ? AND digest = ?`, key.TaskUID, key.Digest)
-	var (
-		schemaVersion int32
-		nonce         []byte
-		ciphertext    []byte
-		createdAt     time.Time
-	)
-	if err := row.Scan(&schemaVersion, &nonce, &ciphertext, &createdAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, store.ErrNotFound
-		}
+	snapshot := storagev1.SealedAgentExecutionSnapshot{Key: key}
+	err := s.db.QueryRowContext(ctx, `SELECT schema_version, nonce, ciphertext, created_at
+		FROM agent_execution_snapshots WHERE task_uid = ? AND digest = ?`, key.TaskUID, key.Digest).
+		Scan(&snapshot.SchemaVersion, &snapshot.Nonce, &snapshot.Ciphertext, &snapshot.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
 		return nil, fmt.Errorf("get agent execution snapshot: %w", err)
 	}
-	body, err := s.snapshotCipher.open(key.TaskUID, key.Digest, schemaVersion, nonce, ciphertext)
+	snapshot.CreatedAt = snapshot.CreatedAt.UTC()
+	return &snapshot, nil
+}
+
+// ListSealedAgentExecutionSnapshots implements
+// storagev1.SealedAgentExecutionSnapshotStore.
+func (s *Store) ListSealedAgentExecutionSnapshots(ctx context.Context, cursor string, limit int) (*storagev1.SealedAgentExecutionSnapshotPage, error) {
+	if err := validateSealedPageLimit(limit); err != nil {
+		return nil, err
+	}
+	afterTaskUID, afterDigest, err := decodeKeysetCursor(cursor)
 	if err != nil {
 		return nil, err
 	}
-	if computed := store.CanonicalAgentExecutionSnapshotDigest(body); computed != key.Digest {
-		return nil, fmt.Errorf("agent execution snapshot %s failed integrity verification", key.ID())
+	rows, err := s.db.QueryContext(ctx, `SELECT task_uid, digest, schema_version, nonce, ciphertext, created_at
+		FROM agent_execution_snapshots
+		WHERE ? = '' OR task_uid > ? OR (task_uid = ? AND digest > ?)
+		ORDER BY task_uid ASC, digest ASC
+		LIMIT ?`, cursor, afterTaskUID, afterTaskUID, afterDigest, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list sealed agent execution snapshots: %w", err)
 	}
-	return &store.AgentExecutionSnapshot{
-		TaskUID:       key.TaskUID,
-		Digest:        key.Digest,
-		SchemaVersion: schemaVersion,
-		Body:          body,
-		CreatedAt:     createdAt.UTC(),
-	}, nil
+	defer func() { _ = rows.Close() }()
+	page := &storagev1.SealedAgentExecutionSnapshotPage{Snapshots: make([]storagev1.SealedAgentExecutionSnapshot, 0)}
+	for rows.Next() {
+		var snapshot storagev1.SealedAgentExecutionSnapshot
+		if err := rows.Scan(&snapshot.Key.TaskUID, &snapshot.Key.Digest, &snapshot.SchemaVersion,
+			&snapshot.Nonce, &snapshot.Ciphertext, &snapshot.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan sealed agent execution snapshot: %w", err)
+		}
+		snapshot.CreatedAt = snapshot.CreatedAt.UTC()
+		page.Snapshots = append(page.Snapshots, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sealed agent execution snapshots: %w", err)
+	}
+	if len(page.Snapshots) == limit {
+		// Probe for a following record by key only, so a full page never
+		// reads one more record's sealed bytes.
+		last := page.Snapshots[limit-1].Key
+		var more bool
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_execution_snapshots
+			WHERE task_uid > ? OR (task_uid = ? AND digest > ?))`, last.TaskUID, last.TaskUID, last.Digest).Scan(&more); err != nil {
+			return nil, fmt.Errorf("list sealed agent execution snapshots: %w", err)
+		}
+		if more {
+			page.NextCursor = encodeKeysetCursor(last.TaskUID, last.Digest)
+		}
+	}
+	return page, nil
+}
+
+func validateSealedPageLimit(limit int) error {
+	if limit < 1 || limit > storagev1.MaxSealedRecordPageSize {
+		return store.ValidationErrorf("page limit must be between 1 and %d", storagev1.MaxSealedRecordPageSize)
+	}
+	return nil
+}
+
+// encodeKeysetCursor and decodeKeysetCursor carry the last two-part key of a
+// page. The encoding is opaque to callers.
+func encodeKeysetCursor(first, second string) string {
+	encoded, _ := json.Marshal([2]string{first, second})
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeKeysetCursor(cursor string) (string, string, error) {
+	if cursor == "" {
+		return "", "", nil
+	}
+	encoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", "", store.ValidationErrorf("invalid cursor")
+	}
+	var key [2]string
+	if err := json.Unmarshal(encoded, &key); err != nil || key[0] == "" {
+		return "", "", store.ValidationErrorf("invalid cursor")
+	}
+	return key[0], key[1], nil
 }
 
 // ListAgentExecutionSnapshotMetadataBefore implements
@@ -285,7 +214,7 @@ func (s *Store) CountAgentExecutionSnapshotReferences(
 
 // DeleteAgentExecutionSnapshot implements
 // store.AgentExecutionSnapshotLifecycleStore. It deliberately does not alter
-// the Task-scoped broad deletion method above or perform lifecycle policy.
+// the Task-scoped broad deletion method below or perform lifecycle policy.
 func (s *Store) DeleteAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) error {
 	if err := key.Validate(); err != nil {
 		return err
@@ -297,7 +226,8 @@ func (s *Store) DeleteAgentExecutionSnapshot(ctx context.Context, key store.Agen
 	return nil
 }
 
-// DeleteAgentExecutionSnapshots implements store.AgentExecutionSnapshotStore.
+// DeleteAgentExecutionSnapshots implements
+// storagev1.SealedAgentExecutionSnapshotStore.
 func (s *Store) DeleteAgentExecutionSnapshots(ctx context.Context, taskUID string) error {
 	if strings.TrimSpace(taskUID) == "" {
 		return store.ValidationErrorf("snapshot task UID is required")

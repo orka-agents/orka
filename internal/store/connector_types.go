@@ -230,3 +230,13 @@ type ConnectorConsentStore interface {
 	// completion for a Connection, for example on disconnect.
 	DeleteConnectorConsentsForConnection(ctx context.Context, connectionUID string) error
 }
+
+// ConnectorCustodySealer seals and opens connector custody under Orka's
+// snapshot key. The storage client implements it from the key it holds and
+// hands it to the embedded connector families when the key is activated, so
+// those families seal with the key without holding it. Each sealed value binds
+// its row identity through additionalData.
+type ConnectorCustodySealer interface {
+	SealConnectorCustody(additionalData, plaintext []byte) (nonce, ciphertext []byte, err error)
+	OpenConnectorCustody(nonce, ciphertext, additionalData []byte) ([]byte, error)
+}

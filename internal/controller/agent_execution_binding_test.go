@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -117,7 +116,7 @@ func bindingTestNamespace() *corev1.Namespace {
 	}}
 }
 
-func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sqlite.Store) {
+func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sealedTestStore) {
 	t.Helper()
 	scheme := bindingTestScheme(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
@@ -129,14 +128,7 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	snapshotStore := sqlite.NewStore(db, "test")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	snapshotStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	return &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
 		AgentExecutionSnapshots: snapshotStore,
