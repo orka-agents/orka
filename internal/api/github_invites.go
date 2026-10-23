@@ -231,7 +231,14 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 				continue
 			}
 			attempted = true
-			if err := cfg.GitHub.DeleteToken(context.Background(), oauth.ClientID, oauth.ClientSecret, token); err != nil {
+			err := cfg.GitHub.DeleteToken(context.Background(), oauth.ClientID, oauth.ClientSecret, token)
+			// A secret changed while the invite was pending need not be the
+			// one that issued the token; the one read at creation is tried
+			// too.
+			if err != nil && (created.ClientID != oauth.ClientID || created.ClientSecret != oauth.ClientSecret) {
+				err = cfg.GitHub.DeleteToken(context.Background(), created.ClientID, created.ClientSecret, token)
+			}
+			if err != nil {
 				log.Error(err, "could not revoke an invite's GitHub token", "invite", id)
 				failed = true
 			}

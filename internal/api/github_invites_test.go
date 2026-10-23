@@ -374,6 +374,31 @@ func TestInviteRevokesWithTheIssuingAppAfterAnAppChange(t *testing.T) {
 	}
 }
 
+// An app secret changed to a wrong value while the code was pending fails
+// the invite's checks, and the approved token is revoked with the secret
+// read when the invite was created.
+func TestInviteRevokesWithTheCreationSecretAfterASecretChange(t *testing.T) {
+	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
+	gh.onApprove = func() {
+		secret := &corev1.Secret{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github-oauth"}, secret); err != nil {
+			t.Error(err)
+			return
+		}
+		secret.Data["clientSecret"] = []byte("not-the-app-secret")
+		if err := h.client.Update(context.Background(), secret); err != nil {
+			t.Error(err)
+		}
+	}
+	_, invite := h.invite("alice")
+	if outcome := h.inviteOutcome(invite.ID); outcome.State != InviteRefused || !strings.Contains(outcome.Message, "was revoked") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if revoked := gh.revoked.list(); len(revoked) != 1 || revoked[0] != "ghu_alice" {
+		t.Fatalf("revoked = %v, want the approved token revoked", revoked)
+	}
+}
+
 // Inviting someone whose link already works keeps it and revokes the
 // approved token; a revocation GitHub refused is reported on the outcome.
 func TestInviteForAWorkingLinkRevokesTheUnusedToken(t *testing.T) {
