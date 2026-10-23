@@ -120,6 +120,19 @@ func TestLoginRefusesAPlainHTTPServer(t *testing.T) {
 // to the server it came from.
 func TestSessionRenewsBeforeItEndsAndStaysWithItsServer(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// A kubeconfig with a bearer token, which must not stand in for a session
+	// withheld from another server.
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
+kind: Config
+clusters: [{name: c, cluster: {server: "https://127.0.0.1:1"}}]
+users: [{name: u, user: {token: kube-bearer-token}}]
+contexts: [{name: x, context: {cluster: c, user: u, namespace: team}}]
+current-context: x
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", kubeconfig)
 	var renewedWith string
 	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -154,7 +167,7 @@ func TestSessionRenewsBeforeItEndsAndStaysWithItsServer(t *testing.T) {
 	// Another server never receives the session.
 	var leaked bool
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.Header.Get("Authorization"), "orka_s_") {
+		if auth := r.Header.Get("Authorization"); strings.Contains(auth, "orka_s_") || strings.Contains(auth, "kube-bearer-token") {
 			leaked = true
 		}
 		w.WriteHeader(http.StatusUnauthorized)
@@ -162,7 +175,7 @@ func TestSessionRenewsBeforeItEndsAndStaysWithItsServer(t *testing.T) {
 	defer other.Close()
 	_, _ = runLoginCLI(t, "host", "status", "--server", other.URL)
 	if leaked {
-		t.Fatal("a session must be sent only to the server it came from")
+		t.Fatal("a session, or a Kubernetes credential in its place, must be sent only to the session's server")
 	}
 	// Nor after the configured server changes.
 	if _, err := runLoginCLI(t, "config", "set-server", other.URL); err != nil {
