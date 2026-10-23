@@ -41,7 +41,8 @@ type Limits struct {
 	// providers for its dataset check, every message a streaming call
 	// receives or sends, and the provider's work. The caller's deadline still applies when it is
 	// shorter. An upload or download that does not finish in time is ended
-	// as unavailable.
+	// as unavailable, except that a write whose response cannot be sent in
+	// time after the provider ran is an unknown outcome.
 	MaxDuration map[Class]time.Duration
 }
 
@@ -430,7 +431,7 @@ func (s *Server) interceptStream(srv any, stream grpc.ServerStream, info *grpc.S
 	}
 	defer release()
 	ctx = callCtx
-	err = handler(srv, &checkedStream{ServerStream: stream, ctx: ctx})
+	err = handler(srv, &checkedStream{ServerStream: stream, ctx: ctx, kind: m.kind})
 	if _, isStatus := status.FromError(err); err != nil && !isStatus {
 		return s.providerError(ctx, m, err)
 	}
@@ -443,7 +444,8 @@ func (s *Server) interceptStream(srv any, stream grpc.ServerStream, info *grpc.S
 // message with a field the server does not know.
 type checkedStream struct {
 	grpc.ServerStream
-	ctx context.Context
+	ctx  context.Context
+	kind Kind
 }
 
 func (s *checkedStream) Context() context.Context { return s.ctx }
@@ -459,10 +461,17 @@ func (s *checkedStream) RecvMsg(message any) error {
 }
 
 func (s *checkedStream) SendMsg(message any) error {
-	if err := withinCall(s.ctx, func() error { return s.ServerStream.SendMsg(message) }); err != nil {
-		return streamError(s.ctx, err)
+	err := withinCall(s.ctx, func() error { return s.ServerStream.SendMsg(message) })
+	if err == nil {
+		return nil
 	}
-	return nil
+	if s.kind == KindWrite && s.ctx.Err() != nil && errors.Is(err, s.ctx.Err()) {
+		// A write sends its response only after the provider ran, so a
+		// response that could not be sent in time may follow a commit.
+		return errorStatus(codes.Unknown, ReasonOutcomeUnknown,
+			"the write's response could not be sent within the storage server's time limit", nil)
+	}
+	return streamError(s.ctx, err)
 }
 
 func unsupportedFieldStatus() error {

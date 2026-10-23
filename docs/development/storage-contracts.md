@@ -400,7 +400,9 @@ suites that way.
   the client returns as `ErrUnavailable`. The duration limit covers the whole
   call, including the first description of the providers and every message a
   streaming call receives or sends, so an upload or download whose peer stalls,
-  or never sends its request, is ended as `UNAVAILABLE` and frees its slot.
+  or never sends its request, is ended as `UNAVAILABLE` and frees its slot. A
+  write whose response cannot be sent in time after its provider ran is
+  `OUTCOME_UNKNOWN`, since the provider may have committed.
   A client checks a download's declared size from the response headers before
   it receives any of the blob, and a server describes the artifact limit it
   enforces, which its own blob limit can lower.
