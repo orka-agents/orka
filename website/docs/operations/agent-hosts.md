@@ -258,9 +258,11 @@ operator suspended is reported and left suspended. `orka login --no-host` links 
   ends it. The CLI sends it only to the server that issued it, and never over plain HTTP except
   to localhost.
 - Signing in again keeps a link that still works, and Orka revokes the new GitHub token. A
-  token that GitHub gave no expiry is held for at most 8 hours; without user-token expiration
-  on the app, the link then ends and the person signs in again. A person keeps at most 10
-  sessions; signing in beyond that ends their oldest.
+  person keeps at most 10 sessions; signing in beyond that ends their oldest.
+- A host takes only a token that expires. Without user-token expiration on the app, GitHub
+  issues no refresh token and no expiry, so sign-in links the account without a host and
+  `orka login` says why; the link is held for at most 8 hours, and the person then signs in
+  again.
 - A session reaches only the person's own links, host and connection routes. Every other API
   route still needs OIDC or Kubernetes credentials, and sessions cannot mint AHP tokens yet.
 - Someone who leaves the allowed orgs cannot renew, so their access ends within 12 hours. Their
@@ -298,7 +300,8 @@ restart. Running the command again starts another invite with a new code. Invite
   account.
 - Only the controller may create a host fed by a Connection, and only from the template its
   provider names. A host keeps that template when the provider later names another one. A
-  link annotated `orka.ai/agent-host: declined` gets no host.
+  link annotated `orka.ai/agent-host: declined` gets no host, and declining stops a host it
+  already has, keeping its volume.
 - The provider must be on github.com: Orka reads the token's account from api.github.com.
 - The template must use `access: Relay`. A Standalone host's connection Secret sits in the
   namespace every person's host shares, so these hosts fail with `InvalidTemplate` instead.

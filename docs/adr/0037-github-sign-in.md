@@ -46,6 +46,9 @@ signed-in person's host may do.
    Orka then:
    - checks with the check-token API that the token was issued to its own app, so a
      token another app obtained cannot sign in;
+   - redeems the refresh token once, requires the access token GitHub returns to be its
+     own app's and the same numeric account's, and keeps only that rotated pair; GitHub
+     invalidates the refresh token it redeemed;
    - takes the identity from GitHub: issuer `https://github.com`, subject the numeric
      user ID (logins can change), username the login;
    - requires active membership of a configured org
@@ -61,8 +64,11 @@ signed-in person's host may do.
    by them. `orka logout` revokes it.
 
 The API's authentication accepts session tokens beside OIDC. A session's identity is a
-verified person in the sign-in namespace, which is the watch namespace, and session tokens
-are never logged. Unlike an OIDC sign-in, a session reaches only the routes that act on the
+verified person in the sign-in namespace, which is the watch namespace. Session tokens are
+never logged, and neither are GitHub tokens, device codes or GitHub's answers that carry
+them: requests and errors are logged by route and status, never by body. A device code is
+shown only to the person signing in, or returned to the operator who started an invite.
+Unlike an OIDC sign-in, a session reaches only the routes that act on the
 person's own links, agent host and connection routes; every other API route still needs OIDC
 or Kubernetes credentials. Membership of an org grants a Copilot environment, not the whole
 API.
@@ -98,6 +104,9 @@ context-token subjects. A GitHub session also owns Connections, as issuer
   that the person declined a host. ADR 0036 provisions none for such a Connection.
   Signing in again without `--no-host` clears that, and ADR 0036 then provisions the
   host for the same Connection.
+- A host takes only a token that expires, so a sign-in starts one only when GitHub
+  confirmed its token's expiry through the refresh above. A sign-in without a refresh
+  token links the account without a host.
 
 ### Reaching Orka
 
@@ -117,8 +126,10 @@ context-token subjects. A GitHub session also owns Connections, as issuer
   needs `create` on `agenthosts` in the watch namespace, which the API checks with a
   SubjectAccessReview. Orka returns the code, the verification URL and ADR 0036's
   disclosure, which the CLI prints for the operator to pass on before the person
-  approves. Orka then polls GitHub outbound until the person approves or the code
-  expires, after 15 minutes.
+  approves. Orka then polls GitHub outbound as the device flow requires: at the interval
+  GitHub returns, waiting through `authorization_pending`, slowing down on `slow_down`,
+  and stopping when the person approves, when GitHub answers `expired_token` or
+  `access_denied`, or when the code's `expires_in` passes, after 15 minutes.
 - On approval Orka makes the sign-in checks: its own app, membership of an allowed org or
   team. It also requires that the GitHub login, as GitHub returns it at approval, is the
   invited one; a login renamed in between is refused, and can be invited again. If

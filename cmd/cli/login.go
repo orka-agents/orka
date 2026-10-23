@@ -132,6 +132,12 @@ func newLoginCmd() *cobra.Command {
 			}
 			fmt.Fprintf(out, "Signed in to %s as %s.\n", server, session.Login) //nolint:errcheck
 			if !session.AgentHost {
+				if options.GitHub.AgentHost && !noHost {
+					// The server starts a host only for a token whose expiry
+					// GitHub confirmed through its refresh token.
+					fmt.Fprintln(out, "Orka started no Copilot environment: GitHub gave this sign-in no refresh token, so its token does not expire. "+ //nolint:errcheck
+						"Turn on user-token expiration in the GitHub App, then sign in again.")
+				}
 				return nil
 			}
 			// The new session goes only to its own server: never through a

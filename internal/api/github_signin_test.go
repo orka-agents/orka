@@ -233,6 +233,38 @@ func TestGitHubSignInLinksTheAccountAndIssuesASession(t *testing.T) {
 	}
 }
 
+// A host takes only a token that expires, and only a token the sign-in minted
+// by its refresh carries an expiry GitHub confirmed. A sign-in without a
+// refresh token, whatever expiresIn it claims, links the account without a
+// host; one with a refresh token starts it again.
+func TestGitHubSignInStartsAHostOnlyForAConfirmedExpiry(t *testing.T) {
+	h := newSignInHarness(t)
+	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
+	annotation := func() string {
+		t.Helper()
+		connection := &corev1alpha1.Connection{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, connection); err != nil {
+			t.Fatal(err)
+		}
+		return connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost]
+	}
+	h.identity = nil
+	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "expiresIn": 28800})
+	if status != http.StatusCreated || session.AgentHost {
+		t.Fatalf("sign-in without a refresh token: %d %+v, want a session without a host", status, session)
+	}
+	if got := annotation(); got != corev1alpha1.ConnectionAgentHostDeclined {
+		t.Fatalf("annotation = %q, want the link to get no host", got)
+	}
+	h.identity = nil
+	if status, session = h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusCreated || !session.AgentHost {
+		t.Fatalf("sign-in with a refresh token: %d %+v, want a host", status, session)
+	}
+	if got := annotation(); got != "" {
+		t.Fatalf("annotation = %q, want the decline lifted", got)
+	}
+}
+
 // Signing in again keeps a link that still holds the person's account, so
 // sign-ins never pile up the grants custody keeps until disconnect, and
 // revokes the tokens it did not need.

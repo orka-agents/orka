@@ -235,6 +235,50 @@ func TestHostLinkWaitsForTheConnectionToSeeItsProvider(t *testing.T) {
 	}
 }
 
+// A Connection being deleted is a disconnect, even while its finalizer holds
+// it and its provider's status lags, which would otherwise be retried.
+func TestHostLinkEndsWhenItsConnectionIsBeingDeleted(t *testing.T) {
+	h := newHarness(t)
+	h.serveHosts("copilotd")
+	h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(4 * time.Hour)})
+	connection := h.reload()
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionFalse,
+		Reason: corev1alpha1.ConnectionReasonProviderInvalid, ObservedGeneration: connection.Generation,
+	})
+	if err := h.client.Status().Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	for i := range provider.Status.Conditions {
+		provider.Status.Conditions[i].ObservedGeneration = 0
+	}
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); err == nil || errors.Is(err, ErrHostLinkUnavailable) {
+		t.Fatalf("before deletion: check = %v, want the lag retried", err)
+	}
+
+	connection = h.reload()
+	connection.Finalizers = append(connection.Finalizers, "test.orka.ai/held")
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), h.reload()); err != nil {
+		t.Fatal(err)
+	}
+	if h.reload().DeletionTimestamp.IsZero() {
+		t.Fatal("the finalizer must hold the Connection")
+	}
+	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, ErrHostLinkUnavailable) {
+		t.Fatalf("while deleting: check = %v, want ErrHostLinkUnavailable", err)
+	}
+}
+
 // A provider read that fails is retried, never taken for a link that stopped
 // authorizing the host: a host is stopped only for a provider it has read.
 func TestHostLinkReadFailuresAreRetried(t *testing.T) {

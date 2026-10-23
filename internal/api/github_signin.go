@@ -221,6 +221,10 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	// store is revoked. A submitted one is not: the client keeps it, and it
 	// may be the very token custody holds for the person's working link.
 	minted := false
+	// A host takes only a token that expires. Only a token this sign-in
+	// minted carries an expiry GitHub confirmed; a submitted expiresIn is the
+	// client's word.
+	expiryConfirmed := false
 	revokeUnused := func(token string) {
 		if minted {
 			h.revokeSignInToken(ctx, oauth, token)
@@ -235,6 +239,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusUnauthorized, "GitHub did not accept the refresh token")
 		}
 		minted = true
+		expiryConfirmed = !refreshed.ExpiresAt.IsZero()
 		again, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, refreshed.AccessToken)
 		if err != nil || again.ID != user.ID {
 			revokeUnused(refreshed.AccessToken)
@@ -262,7 +267,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		AuthType: AuthTypeGitHubSession, Issuer: githubauth.Issuer, Subject: strconv.FormatInt(user.ID, 10),
 		Username: user.Login, Namespace: h.watchNamespace,
 	}
-	declined := req.NoHost || !cfg.CreateHosts
+	declined := req.NoHost || !cfg.CreateHosts || !expiryConfirmed
 	connection, held, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, declined)
 	if !held {
 		revokeUnused(tokens.AccessToken)

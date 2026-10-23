@@ -140,7 +140,9 @@ func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Clien
 	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
 	if token == "" || ns == "" {
 		kc := extractKubeContext(kubeconfigPath)
-		if token == "" {
+		// A session withheld from this server is not replaced by a
+		// Kubernetes credential, which would reach that server instead.
+		if token == "" && !session {
 			token = kc.token
 		}
 		if ns == "" {
