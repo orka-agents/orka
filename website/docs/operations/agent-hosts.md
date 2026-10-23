@@ -216,7 +216,9 @@ chart, add `spec.agentHost.templateRef` to a GitHub provider yourself.
 People's Connections outlive an uninstall, and a provider is deleted only once no Connection
 references it. So Helm keeps the provider, the template and a client Secret the chart created
 when you uninstall or turn `github` off, and reinstalling the same release adopts them. To
-remove them, delete the Connections that reference the provider, then delete the three.
+remove them, do it while the controller runs, since it finishes their deletion: delete the
+Connections that reference the provider, wait until they are gone, then delete the three.
+After an uninstall, reinstall first.
 
 To reach Orka with no domain, set `ingress.enabled: true`, `ingress.className: tailscale`
 and `ingress.tls: [{hosts: [orka]}]` with the Tailscale Kubernetes operator installed: the
