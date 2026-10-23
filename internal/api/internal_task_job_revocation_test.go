@@ -31,7 +31,7 @@ func TestInternalDataRejectsJobRevokedDuringAuthorization(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			h, _, data := setupTestInternalHandlers()
 			require.NoError(t, data.SavePlan(t.Context(), "default", "my-task", &store.PlanState{Summary: "current plan"}))
-			require.NoError(t, data.SaveResult(t.Context(), "default", "my-task", []byte("current result")))
+			require.NoError(t, data.SaveResult(t.Context(), store.ResultKey{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"}, []byte("current result")))
 			app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
 			if test.registered {
 				response, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/plans/default/my-task", nil))
@@ -73,7 +73,7 @@ func TestInternalDataRejectsJobRevokedDuringAuthorization(t *testing.T) {
 			t.Cleanup(func() { _ = response.Body.Close() })
 			require.Equal(t, test.taskReads, reads)
 			require.Equal(t, http.StatusForbidden, response.StatusCode)
-			result, err := data.GetResult(t.Context(), "default", "my-task")
+			result, err := data.GetResult(t.Context(), store.ResultKey{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"})
 			require.NoError(t, err)
 			require.Equal(t, "current result", string(result))
 		})
@@ -93,7 +93,7 @@ func TestInternalPlanReadAllowsOtherTaskCleanupDuringAuthorization(t *testing.T)
 				return nil
 			}
 			reads++
-			return data.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "default", TaskName: "other-task"})
+			return data.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "default", TaskName: "other-task", TaskUID: "other-task-uid"})
 		},
 	})
 	app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))

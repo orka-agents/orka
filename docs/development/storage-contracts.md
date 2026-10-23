@@ -12,7 +12,7 @@ selection.
 `store_dataset` contains exactly one canonical, nonzero UUID, an origin (`new` or
 `adopted`), a bootstrap-completion flag and the installation the dataset is
 bound to, empty until the first controller epoch advance.
-`PRAGMA user_version = 2` identifies this metadata layout. Opening a database
+`PRAGMA user_version = 3` identifies this metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -20,11 +20,15 @@ Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
 process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
 adds the metadata table, the 168-to-169 transition adds operation receipts and
-the epoch advance columns, and the upgrade records an adopted identity. A store
+the epoch advance columns, the 169-to-170 transition binds results and
+artifacts to the Task UID, and the upgrade records an adopted identity. A store
 at an earlier schema version upgrades through numbered version steps under the
 same lock, backup and transaction: a version-1 store (the 159-object layout)
-gains the 168-to-169 objects and keeps its identity row, records and bootstrap
-state unchanged. Missing or malformed
+gains the 168-to-169 and 169-to-170 objects, and a version-2 store the
+169-to-170 objects, and each keeps its identity row, records and bootstrap
+state unchanged. The 169-to-170 step rebuilds the `results` and `artifacts`
+tables with the Task UID in their keys and copies every stored result and
+artifact, so it takes time in proportion to the stored bytes. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -236,13 +240,13 @@ the observable parts.
   test over every record type. `ExecutionEvent.Usage` is also tagged
   `json:"-"`: it carries the usage observation Orka derived from the event
   (see "Orka policy above the client").
-- **Artifacts.** Requests carry an `ArtifactOwner` (namespace, Task name and
-  Task UID) so the identity can grow with a Job and cleanup generation without
-  another signature change. The Task UID is reserved: Orka passes it where it
-  has the Task, and providers may ignore it until artifact identity is
-  enforced, when an old retry must not overwrite or delete a newer Task's
-  artifacts. Every provider accepts artifacts up to `MaxArtifactBytes`
-  (10 MiB) and rejects larger ones with `ErrTooLarge`. `ListArtifacts`
+- **Artifacts and results.** Artifact requests carry an `ArtifactOwner`
+  (namespace, Task name and Task UID), and result requests a `ResultKey` with
+  the same three fields. The Task UID is required; a request without it
+  returns `ErrValidation`. Every provider accepts artifacts up to
+  `MaxArtifactBytes` (10 MiB), and results and prompt result receipt data up
+  to `MaxResultBytes` (10 MiB, the worker result API's limit), and rejects
+  larger ones with `ErrTooLarge`. `Describe` reports both limits. `ListArtifacts`
   returns filenames in byte order. `ArtifactMetadata.CreatedAt` and
   `Message.CreatedAt` are `time.Time`; the API's JSON output keeps the format
   it had when they were strings.
@@ -385,14 +389,29 @@ write without one.
   bounded per call. Before computing the digest, the client assigns transcript
   message, memory and finding IDs and fills zero record times from
   `IssuedAt`, so every retry sends the same request.
-- **Artifact and result identity.** Artifact writes and deletes are bound to
-  the Task UID. A delete leaves a tombstone for that UID, which refuses a
-  delayed save for the deleted Task. A replacement carries the envelope's
-  epoch and sequence, so an older write cannot overwrite a newer one or reach
-  a later Task with the same name. Results follow the same rules and gain a
-  `MaxResultBytes` limit equal to the API's 10 MiB. Files stored before UIDs
-  were recorded belong to the current holder of the Task name until its first
-  delete.
+- **Artifact and result identity.** Artifacts and results are bound to the
+  UID of the Task that wrote them, so a Task never reads, replaces or deletes
+  those of another Task with the same name. A whole result or artifact file is
+  replaced in issue order, not commit order: a write's order stamp is the
+  `(Fence.Epoch, Sequence)` of its envelope, and a write replaces the stored
+  object only when its stamp is greater. An older write still succeeds and
+  leaves its receipt but changes nothing, so a delayed retry never restores
+  older bytes, such as an unsanitized patch over its sanitized replacement.
+  `DeleteResult` (with the Task's prompt result receipts) and
+  `DeleteArtifacts` leave a tombstone for the UID, kept at least the receipt
+  retention after the last delete; while it is kept, a save for that UID
+  returns `ErrFenced` and commits nothing, and reads find nothing. A replay of
+  a save that committed before the delete still returns its outcome without
+  a change. Results and artifacts stored before UIDs were recorded have an
+  empty UID and belong to whichever Task holds their name: any UID of that
+  name reads them until a write for the name replaces them, and the first
+  delete for the name removes them. A Task that a restore recreated with a
+  new UID keeps its source execution's records: once Orka settles it on that
+  execution, its result and artifacts stay keyed by the source UID frozen in
+  its execution binding, as its other durable records are. Repository monitor
+  implementation jobs record the UID of the Task that stored their patch
+  artifact; for a job recorded before that, the patch preview uses the Task
+  that holds the name now.
 - **Controller ownership.** Kubernetes decides which controller may act. Each
   dataset holds its own controller epoch, which `AdvanceControllerEpoch`
   moves to the exact record the Kubernetes compare-and-swap produced. The

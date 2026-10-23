@@ -22,11 +22,11 @@ func TestSaveAndGetArtifact(t *testing.T) {
 	data := []byte("hello artifact")
 	contentType := "text/plain"
 
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "output.txt", ContentType: contentType, Data: data}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: "output.txt", ContentType: contentType, Data: data}); err != nil {
 		t.Fatalf("SaveArtifact: %v", err)
 	}
 
-	got, gotCT, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "output.txt"})
+	got, gotCT, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task1"), Filename: "output.txt"})
 	if err != nil {
 		t.Fatalf("GetArtifact: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestGetArtifactNotFound(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	_, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "nonexistent.txt"})
+	_, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task1"), Filename: "nonexistent.txt"})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected store.ErrNotFound, got %v", err)
 	}
@@ -63,12 +63,12 @@ func TestListArtifacts(t *testing.T) {
 	}
 
 	for _, f := range files {
-		if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: f.name, ContentType: f.contentType, Data: f.data}); err != nil {
+		if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: f.name, ContentType: f.contentType, Data: f.data}); err != nil {
 			t.Fatalf("SaveArtifact(%s): %v", f.name, err)
 		}
 	}
 
-	list, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"})
+	list, err := s.ListArtifacts(ctx, testArtifactOwner("ns1", "task1"))
 	if err != nil {
 		t.Fatalf("ListArtifacts: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestListArtifactsEmpty(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	list, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "no-artifacts-task"})
+	list, err := s.ListArtifacts(ctx, testArtifactOwner("ns1", "no-artifacts-task"))
 	if err != nil {
 		t.Fatalf("ListArtifacts: %v", err)
 	}
@@ -116,25 +116,25 @@ func TestDeleteArtifacts(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "a.txt", ContentType: "text/plain", Data: []byte("aaa")}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: "a.txt", ContentType: "text/plain", Data: []byte("aaa")}); err != nil {
 		t.Fatalf("SaveArtifact: %v", err)
 	}
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "b.txt", ContentType: "text/plain", Data: []byte("bbb")}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: "b.txt", ContentType: "text/plain", Data: []byte("bbb")}); err != nil {
 		t.Fatalf("SaveArtifact: %v", err)
 	}
 
-	if err := s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}); err != nil {
+	if err := s.DeleteArtifacts(ctx, testArtifactOwner("ns1", "task1")); err != nil {
 		t.Fatalf("DeleteArtifacts: %v", err)
 	}
 
 	// Get should return ErrNotFound
-	_, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "a.txt"})
+	_, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task1"), Filename: "a.txt"})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("GetArtifact after delete: expected ErrNotFound, got %v", err)
 	}
 
 	// List should return empty
-	list, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"})
+	list, err := s.ListArtifacts(ctx, testArtifactOwner("ns1", "task1"))
 	if err != nil {
 		t.Fatalf("ListArtifacts after delete: %v", err)
 	}
@@ -147,17 +147,17 @@ func TestSaveArtifactOverwrite(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "data.bin", ContentType: "application/octet-stream", Data: []byte("original")}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: "data.bin", ContentType: "application/octet-stream", Data: []byte("original")}); err != nil {
 		t.Fatalf("SaveArtifact (original): %v", err)
 	}
 
 	newData := []byte("updated content")
 	newCT := "text/plain"
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "data.bin", ContentType: newCT, Data: newData}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: "data.bin", ContentType: newCT, Data: newData}); err != nil {
 		t.Fatalf("SaveArtifact (overwrite): %v", err)
 	}
 
-	got, gotCT, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "data.bin"})
+	got, gotCT, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task1"), Filename: "data.bin"})
 	if err != nil {
 		t.Fatalf("GetArtifact: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestSaveArtifactOverwrite(t *testing.T) {
 	}
 
 	// Should still be only one artifact in the list
-	list, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"})
+	list, err := s.ListArtifacts(ctx, testArtifactOwner("ns1", "task1"))
 	if err != nil {
 		t.Fatalf("ListArtifacts: %v", err)
 	}
@@ -184,19 +184,19 @@ func TestSaveArtifactSizeLimit(t *testing.T) {
 
 	// Exactly at the limit (10MB) should succeed
 	atLimit := make([]byte, 10<<20)
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "big.bin", ContentType: "application/octet-stream", Data: atLimit}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: "big.bin", ContentType: "application/octet-stream", Data: atLimit}); err != nil {
 		t.Fatalf("SaveArtifact at 10MB limit: %v", err)
 	}
 
 	// Over the limit (10MB + 1) should fail
 	overLimit := make([]byte, 10<<20+1)
-	err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "toobig.bin", ContentType: "application/octet-stream", Data: overLimit})
+	err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task1"), Filename: "toobig.bin", ContentType: "application/octet-stream", Data: overLimit})
 	if err == nil {
 		t.Fatal("expected error for artifact exceeding 10MB, got nil")
 	}
 
 	// The over-limit artifact should not be stored
-	_, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "toobig.bin"})
+	_, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task1"), Filename: "toobig.bin"})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("over-limit artifact should not exist, got err: %v", err)
 	}
@@ -206,15 +206,15 @@ func TestArtifactIsolation(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task-a"}, Filename: "shared.txt", ContentType: "text/plain", Data: []byte("from task-a")}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task-a"), Filename: "shared.txt", ContentType: "text/plain", Data: []byte("from task-a")}); err != nil {
 		t.Fatalf("SaveArtifact task-a: %v", err)
 	}
-	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task-b"}, Filename: "shared.txt", ContentType: "text/plain", Data: []byte("from task-b")}); err != nil {
+	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns1", "task-b"), Filename: "shared.txt", ContentType: "text/plain", Data: []byte("from task-b")}); err != nil {
 		t.Fatalf("SaveArtifact task-b: %v", err)
 	}
 
 	// task-a should see its own data
-	data, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task-a"}, Filename: "shared.txt"})
+	data, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task-a"), Filename: "shared.txt"})
 	if err != nil {
 		t.Fatalf("GetArtifact task-a: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestArtifactIsolation(t *testing.T) {
 	}
 
 	// task-b should see its own data
-	data, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task-b"}, Filename: "shared.txt"})
+	data, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task-b"), Filename: "shared.txt"})
 	if err != nil {
 		t.Fatalf("GetArtifact task-b: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestArtifactIsolation(t *testing.T) {
 	}
 
 	// List for task-a should only have 1 artifact
-	listA, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task-a"})
+	listA, err := s.ListArtifacts(ctx, testArtifactOwner("ns1", "task-a"))
 	if err != nil {
 		t.Fatalf("ListArtifacts task-a: %v", err)
 	}
@@ -241,10 +241,10 @@ func TestArtifactIsolation(t *testing.T) {
 	}
 
 	// Deleting task-a's artifacts should not affect task-b
-	if err := s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task-a"}); err != nil {
+	if err := s.DeleteArtifacts(ctx, testArtifactOwner("ns1", "task-a")); err != nil {
 		t.Fatalf("DeleteArtifacts task-a: %v", err)
 	}
-	data, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task-b"}, Filename: "shared.txt"})
+	data, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: testArtifactOwner("ns1", "task-b"), Filename: "shared.txt"})
 	if err != nil {
 		t.Fatalf("GetArtifact task-b after deleting task-a: %v", err)
 	}

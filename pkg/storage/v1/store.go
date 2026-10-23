@@ -123,11 +123,41 @@ type HealthChecker interface {
 	HealthCheck(ctx context.Context) error
 }
 
-// ResultStore handles task result persistence.
+// ResultStore handles Task result persistence.
+//
+// A result is bound to the UID of the Task that produced it, so an operation
+// for an older Task never reads, replaces or deletes the result of a newer
+// Task with the same name. Every method needs the UID (see
+// [ResultKey.Validate]).
+//
+// Whole results are replaced in issue order, not commit order. A write's
+// order stamp is the (Fence.Epoch, Sequence) pair of its [WriteEnvelope]:
+// within one controller, Sequence follows the order in which operations were
+// issued, and a later controller has a higher epoch. SaveResult replaces a
+// stored result only when its stamp is greater than the stored result's. A
+// write with a smaller or equal stamp still succeeds and leaves its operation
+// receipt, but changes nothing: a write issued after it has already replaced
+// the result, so it is ordered before that write. An older retry therefore
+// never overwrites a newer result, whichever commits last.
+//
+// DeleteResult removes the result and the Task's prompt result receipts, and
+// leaves a tombstone for the UID. A provider keeps the tombstone at least its
+// ReceiptRetention (see [ProviderLimits]) after the last delete, so it
+// outlives every write issued before the delete that the provider can still
+// accept. While it is kept, SaveResult and SavePromptResultReceipt for that
+// UID return a [FencedError] and commit nothing, and GetResult returns
+// ErrNotFound. Deleting again succeeds.
+//
+// A result stored without a UID, written before results were bound to UIDs,
+// belongs to whichever Task holds its name: GetResult returns it for any UID
+// of that name that has no result of its own, a SaveResult for that name
+// replaces it, and the first DeleteResult for that name removes it.
+//
+// Data larger than [MaxResultBytes] returns ErrTooLarge.
 type ResultStore interface {
-	SaveResult(ctx context.Context, namespace, taskName string, data []byte) error
-	GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
-	DeleteResult(ctx context.Context, namespace, taskName string) error
+	SaveResult(ctx context.Context, key ResultKey, data []byte) error
+	GetResult(ctx context.Context, key ResultKey) ([]byte, error)
+	DeleteResult(ctx context.Context, key ResultKey) error
 }
 
 // PromptResultReceipt preserves the exact result bytes behind a fenced prompt
@@ -135,12 +165,19 @@ type ResultStore interface {
 // controller takeover can repair a result write interrupted after the durable
 // control-plane transition.
 type PromptResultReceipt struct {
-	AttemptID       string
-	Namespace       string
-	TaskName        string
+	AttemptID string
+	Namespace string
+	TaskName  string
+	// TaskUID is the UID of the Task the attempt belongs to, required when
+	// the receipt is saved. DeleteResult for that Task removes the receipt. A
+	// receipt read back without a UID was saved before receipts recorded one
+	// and belongs to whichever Task holds its name, as a result does.
+	TaskUID         string
 	OperationID     string
 	OperationDigest string
-	Data            []byte
+	// Data is the result. Data larger than MaxResultBytes returns
+	// ErrTooLarge.
+	Data []byte
 }
 
 // PromptResultReceiptStore persists attempt-bound result receipts before the
@@ -251,6 +288,29 @@ type PlanStore interface {
 
 // ArtifactStore handles task artifact persistence. Artifact operations never
 // share a transaction with state.v1 records.
+//
+// Artifacts are bound to the UID of the Task that owns them. A file is
+// identified by its owner's namespace, Task name and Task UID and by its
+// filename; a UID always has exactly one Task name. Every method needs the
+// UID (see [ArtifactOwner.Validate]), and a Task never sees, replaces or
+// deletes the files of another UID, even one with the same Task name.
+//
+// Artifacts follow the rules of [ResultStore] for order, deletion and files
+// stored without a UID:
+//   - SaveArtifact replaces a stored file only when the write's order stamp,
+//     the (Fence.Epoch, Sequence) of its [WriteEnvelope], is greater than the
+//     stored file's. An older write succeeds without changing anything.
+//   - DeleteArtifacts removes every file of the UID and leaves a tombstone
+//     for it, kept at least the provider's ReceiptRetention after the last
+//     delete. While it is kept, SaveArtifact for the UID returns a
+//     [FencedError] and commits nothing, GetArtifact returns ErrNotFound and
+//     ListArtifacts returns nothing.
+//   - A file stored without a UID, written before artifacts were bound to
+//     UIDs, belongs to whichever Task holds its name: GetArtifact and
+//     ListArtifacts return it for any UID of that name that has no file of
+//     its own with that filename, a SaveArtifact of that filename for that
+//     name replaces it, and the first DeleteArtifacts for that name removes
+//     every such file.
 type ArtifactStore interface {
 	// SaveArtifact stores an artifact, replacing an earlier file with the same
 	// filename for the same Task. Data larger than MaxArtifactBytes is rejected

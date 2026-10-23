@@ -40,8 +40,10 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { _ = s.Close() }()
 			after := applicationRows(t, s.db)
-			for table, rows := range before {
-				require.Equal(t, rows, after[table], table)
+			for table, rows := range upgradedApplicationRows(t, before) {
+				if _, ok := before[table]; ok {
+					require.Equal(t, rows, after[table], table)
+				}
 			}
 			info, err := s.DatasetInfo()
 			require.NoError(t, err)
@@ -69,7 +71,7 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 				require.NoError(t, err)
 				require.NotEmpty(t, got.Snapshot.Data)
 			}
-			require.NoError(t, s.SaveResult(t.Context(), "ns", "after-upgrade", []byte("new result")))
+			require.NoError(t, s.SaveResult(t.Context(), testResultKey("ns", "after-upgrade"), []byte("new result")))
 			require.NoError(t, s.Close())
 			s, err = OpenLockedStore(path)
 			require.NoError(t, err)

@@ -36,7 +36,7 @@ func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fib
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(withTestUIDs(objs...)...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, ArtifactStore: ss})
@@ -63,7 +63,7 @@ func TestUploadArtifact(t *testing.T) {
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 
 		// Verify data was stored
-		data, ct, err := ss.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt"})
+		data, ct, err := ss.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"}, Filename: "output.txt"})
 		require.NoError(t, err)
 		require.Equal(t, body, data)
 		require.Equal(t, "text/plain", ct)
@@ -80,7 +80,7 @@ func TestUploadArtifact(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 
-		_, ct, err := ss.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "data.bin"})
+		_, ct, err := ss.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"}, Filename: "data.bin"})
 		require.NoError(t, err)
 		require.Equal(t, "application/octet-stream", ct)
 	})
@@ -184,8 +184,8 @@ func TestListTaskArtifacts(t *testing.T) {
 
 	// Pre-populate artifacts
 	ctx := context.Background()
-	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt", ContentType: "text/plain", Data: []byte("hello")}))
-	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "report.json", ContentType: "application/json", Data: []byte(`{"ok":true}`)}))
+	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"}, Filename: "output.txt", ContentType: "text/plain", Data: []byte("hello")}))
+	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"}, Filename: "report.json", ContentType: "application/json", Data: []byte(`{"ok":true}`)}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/my-task/artifacts", nil)
 	resp, err := app.Test(req)
@@ -215,7 +215,7 @@ func TestListTaskArtifactsKeepsCreatedAtFormat(t *testing.T) {
 	}
 	h, app, ss := setupTestHandlersWithArtifactStore(task)
 	app.Get("/api/v1/tasks/:id/artifacts", h.ListTaskArtifacts)
-	owner := store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}
+	owner := store.ArtifactOwner{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"}
 	require.NoError(t, ss.SaveArtifact(context.Background(), store.SaveArtifactRequest{
 		Owner: owner, Filename: "b.txt", ContentType: "text/plain", Data: []byte("b"),
 	}))
@@ -281,7 +281,7 @@ func TestDownloadTaskArtifact(t *testing.T) {
 
 	ctx := context.Background()
 	data := []byte("artifact content here")
-	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt", ContentType: "text/plain", Data: data}))
+	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task", TaskUID: "my-task-uid"}, Filename: "output.txt", ContentType: "text/plain", Data: data}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/my-task/artifacts/output.txt", nil)
 	resp, err := app.Test(req)

@@ -166,13 +166,13 @@ type heldWriteStore struct {
 	enteredOnce sync.Once
 }
 
-func (s *heldWriteStore) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
+func (s *heldWriteStore) SaveResult(ctx context.Context, key store.ResultKey, data []byte) error {
 	if _, ok := storagev1.WriteEnvelopeFrom(ctx); !ok {
 		return errors.New("the storage client sent a write without an envelope")
 	}
 	s.enteredOnce.Do(func() { close(s.entered) })
 	<-s.release
-	return s.Store.SaveResult(ctx, namespace, taskName, data)
+	return s.Store.SaveResult(ctx, key, data)
 }
 
 func newFencedStorageClient(t *testing.T, backend storageclient.EmbeddedStore, manager *ControllerEpochManager) *storageclient.Client {
@@ -210,7 +210,9 @@ func TestReplacedControllerDelayedWriteIsFencedAfterTakeover(t *testing.T) {
 		t.Fatal(err)
 	}
 	delayed := make(chan error, 1)
-	go func() { delayed <- replacedClient.SaveResult(ctx, "tenant", "task", []byte("stale")) }()
+	go func() {
+		delayed <- replacedClient.SaveResult(ctx, store.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("stale"))
+	}()
 	select {
 	case <-held.entered:
 	case <-time.After(10 * time.Second):
@@ -229,13 +231,13 @@ func TestReplacedControllerDelayedWriteIsFencedAfterTakeover(t *testing.T) {
 	if err := <-delayed; !errors.Is(err, store.ErrFenced) {
 		t.Fatalf("delayed write error = %v, want ErrFenced", err)
 	}
-	if _, err := backend.GetResult(ctx, "tenant", "task"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := backend.GetResult(ctx, store.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("result after the fenced write = %v, want none", err)
 	}
-	if err := successorClient.SaveResult(ctx, "tenant", "task", []byte("current")); err != nil {
+	if err := successorClient.SaveResult(ctx, store.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("current")); err != nil {
 		t.Fatalf("successor write: %v", err)
 	}
-	if got, err := backend.GetResult(ctx, "tenant", "task"); err != nil || string(got) != "current" {
+	if got, err := backend.GetResult(ctx, store.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}); err != nil || string(got) != "current" {
 		t.Fatalf("result = %q, %v; want the successor's", got, err)
 	}
 }

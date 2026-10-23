@@ -238,17 +238,17 @@ func TestClientRoutesCallsToTheEmbeddedStore(t *testing.T) {
 	if err := client.HealthCheck(ctx); err != nil {
 		t.Fatalf("HealthCheck: %v", err)
 	}
-	if err := client.SaveResult(ctx, "tenant", "task", []byte("result")); err != nil {
+	if err := client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result")); err != nil {
 		t.Fatalf("SaveResult: %v", err)
 	}
-	got, err := backend.GetResult(ctx, "tenant", "task")
+	got, err := backend.GetResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"})
 	if err != nil || string(got) != "result" {
 		t.Fatalf("backend result = %q, %v", got, err)
 	}
-	if err := client.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task"}, Filename: "a.txt", ContentType: "text/plain", Data: []byte("artifact")}); err != nil {
+	if err := client.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, Filename: "a.txt", ContentType: "text/plain", Data: []byte("artifact")}); err != nil {
 		t.Fatalf("SaveArtifact: %v", err)
 	}
-	data, contentType, err := backend.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task"}, Filename: "a.txt"})
+	data, contentType, err := backend.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, Filename: "a.txt"})
 	if err != nil || string(data) != "artifact" || contentType != "text/plain" {
 		t.Fatalf("backend artifact = %q, %q, %v", data, contentType, err)
 	}

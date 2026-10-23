@@ -24,11 +24,16 @@ func fixed(args ...any) func(storagev1.ControllerEpochFence) []any {
 	return func(storagev1.ControllerEpochFence) []any { return args }
 }
 
+// laterResultKey is the result key of a later Task created with the same
+// name as taskResultKey("tenant").
+var laterResultKey = storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-later-uid"}
+
 func observeResult(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
-	data, err := p.GetResult(t.Context(), "tenant", "task")
+	data, err := p.GetResult(t.Context(), taskResultKey("tenant"))
+	later, laterErr := p.GetResult(t.Context(), laterResultKey)
 	receipt, receiptErr := p.GetPromptResultReceipt(t.Context(), "attempt-1")
-	return []any{observed(t, data, err), observed(t, receipt, receiptErr)}
+	return []any{observed(t, data, err), observed(t, later, laterErr), observed(t, receipt, receiptErr)}
 }
 
 func observePlan(t *testing.T, p storagev1.StateProvider) any {
@@ -61,7 +66,7 @@ func sendFixtureMessages(t *testing.T, p storagev1.StateProvider) {
 
 func promptReceipt() storagev1.PromptResultReceipt {
 	return storagev1.PromptResultReceipt{
-		AttemptID: "attempt-1", Namespace: "tenant", TaskName: "task",
+		AttemptID: "attempt-1", Namespace: "tenant", TaskName: "task", TaskUID: taskResultKey("tenant").TaskUID,
 		OperationID: "operation-1", OperationDigest: storagev1.CanonicalBytesDigest([]byte("operation-1")),
 		Data: []byte("result bytes"),
 	}
@@ -72,24 +77,29 @@ func init() {
 		writeCase[storagev1.StateProvider]{
 			method: "SaveResult",
 			setup: func(t *testing.T, p storagev1.StateProvider) {
-				require.NoError(t, p.SaveResult(t.Context(), "tenant", "task", []byte("old")))
+				require.NoError(t, p.SaveResult(t.Context(), taskResultKey("tenant"), []byte("old")))
 			},
-			args:    fixed("tenant", "task", []byte("new result")),
+			args:    fixed(taskResultKey("tenant"), []byte("new result")),
 			observe: observeResult,
 			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
-				require.NoError(t, p.SaveResult(t.Context(), "tenant", "task", []byte("newer result")))
+				// Issued after the case's write, so it replaces the result,
+				// and a replay of the older write must not restore it.
+				newer := EnvelopeContext(t.Context(), t, p, suiteFence, "SaveResult", taskResultKey("tenant"), []byte("newer result"))
+				require.NoError(t, p.SaveResult(newer, taskResultKey("tenant"), []byte("newer result")))
 			},
 		},
 		writeCase[storagev1.StateProvider]{
 			method: "DeleteResult",
 			setup: func(t *testing.T, p storagev1.StateProvider) {
-				require.NoError(t, p.SaveResult(t.Context(), "tenant", "task", []byte("result")))
+				require.NoError(t, p.SaveResult(t.Context(), taskResultKey("tenant"), []byte("result")))
 				require.NoError(t, p.SavePromptResultReceipt(t.Context(), promptReceipt()))
 			},
-			args:    fixed("tenant", "task"),
+			args:    fixed(taskResultKey("tenant")),
 			observe: observeResult,
 			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
-				require.NoError(t, p.SaveResult(t.Context(), "tenant", "task", []byte("written again")))
+				// The deleted Task's UID is refused from now on, so a later
+				// Task with the same name writes again.
+				require.NoError(t, p.SaveResult(t.Context(), laterResultKey, []byte("written again")))
 			},
 		},
 		writeCase[storagev1.StateProvider]{

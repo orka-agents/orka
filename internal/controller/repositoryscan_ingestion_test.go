@@ -48,7 +48,7 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}, &corev1alpha1.Task{}).
-		WithObjects(scan).Build()
+		WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: s, ArtifactStore: s, ResultStore: s}
 	reconcile := func() {
 		t.Helper()
@@ -153,8 +153,8 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 	for i := range oldTasks.Items {
 		task := &oldTasks.Items[i]
 		require.NoError(t, cl.Delete(ctx, task))
-		require.NoError(t, s.DeleteResult(ctx, task.Namespace, task.Name))
-		require.NoError(t, s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}))
+		require.NoError(t, s.DeleteResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}))
+		require.NoError(t, s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}))
 	}
 	reconcile()
 	for id, before := range completedRuns {
@@ -175,7 +175,7 @@ func TestRepositoryScanIngestsTerminalPipelineOnRestart(t *testing.T) {
 		Status:     corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning},
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}, &corev1alpha1.Task{}).WithObjects(scan).Build()
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}, &corev1alpha1.Task{}).WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	tasks := seedRetainedScanPipeline(t, s, cl, scan, "scan_restart", time.Now().UTC(), 2)
 	for _, task := range tasks {
 		finishScanTask(t, cl, task)
@@ -222,7 +222,7 @@ func seedRetainedScanPipeline(t *testing.T, s *sqlitestore.Store, cl client.Clie
 		RepositoryScan: scan.Name, ScanID: runID, PolicyDigest: policyDigest, ThreatModel: "# Threat model for " + runID,
 	})
 	require.NoError(t, err)
-	require.NoError(t, s.SaveResult(ctx, scan.Namespace, threatTask.Name, threatResult))
+	require.NoError(t, s.SaveResult(ctx, store.ResultKey{Namespace: scan.Namespace, TaskName: threatTask.Name, TaskUID: string(threatTask.UID)}, threatResult))
 	tasks := make([]*corev1alpha1.Task, 0, 2+sliceCount)
 	tasks = append(tasks, threatTask, mapperTask)
 	mapperArtifact := security.ReviewSlicesArtifact{SchemaVersion: security.SchemaVersionReviewSlices, HeadCommit: run.HeadCommit}
@@ -357,7 +357,7 @@ func TestRepositoryScanIngestionRejectsLiveIdentityChange(t *testing.T) {
 						ThreatModel: "# Result from the obsolete generation",
 					})
 					require.NoError(t, err)
-					require.NoError(t, f.store.SaveResult(f.ctx, f.scan.Namespace, f.sourceTask.Name, result))
+					require.NoError(t, f.store.SaveResult(f.ctx, store.ResultKey{Namespace: f.scan.Namespace, TaskName: f.sourceTask.Name, TaskUID: string(f.sourceTask.UID)}, result))
 				}
 				before, err := f.store.GetLatestThreatModel(f.ctx, f.scan.Namespace, f.scan.Name)
 				require.NoError(t, err)
@@ -492,7 +492,7 @@ func TestReviewIngestionResumesFollowupWithoutRecounting(t *testing.T) {
 			require.Equal(t, 1, before.DroppedFindings)
 			// Recovery must use the receipt even when original Task results have
 			// already been cleaned up, or the source slice now has another owner.
-			require.NoError(t, f.store.DeleteResult(f.ctx, defaultNS, f.sourceTask.Name))
+			require.NoError(t, f.store.DeleteResult(f.ctx, store.ResultKey{Namespace: defaultNS, TaskName: f.sourceTask.Name, TaskUID: string(f.sourceTask.UID)}))
 			f.slice.LastScanRunID = "later-run"
 			require.NoError(t, f.store.UpsertReviewSlice(f.ctx, f.slice))
 			restarted := &RepositoryScanReconciler{Client: f.client, Scheme: f.reconciler.Scheme, SecurityStore: f.store, ArtifactStore: f.store, ResultStore: f.store}
@@ -514,7 +514,7 @@ func TestReviewIngestionResumesFollowupWithoutRecounting(t *testing.T) {
 			dropped, _, err := f.store.ListDroppedFindings(f.ctx, store.DroppedFindingFilter{Namespace: defaultNS, ScanRunID: f.run.ID})
 			require.NoError(t, err)
 			require.Len(t, dropped, 1)
-			data, _, err := f.store.GetArtifact(f.ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: defaultNS, TaskName: f.sourceTask.Name}, Filename: security.ArtifactDroppedFindings})
+			data, _, err := f.store.GetArtifact(f.ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: defaultNS, TaskName: f.sourceTask.Name, TaskUID: string(f.sourceTask.UID)}, Filename: security.ArtifactDroppedFindings})
 			require.NoError(t, err)
 			require.JSONEq(t, receipt.DroppedFindingsJSON, string(data))
 			var tasks corev1alpha1.TaskList

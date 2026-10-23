@@ -92,6 +92,7 @@ func newRepositoryMonitorPausedAuthFixture(t *testing.T) *repositoryMonitorPause
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		WithInterceptorFuncs(interceptor.Funcs{
+			Create: assignTestUIDsOnCreate().Create,
 			Get: func(ctx context.Context, c crclient.WithWatch, key crclient.ObjectKey, obj crclient.Object, opts ...crclient.GetOption) error {
 				if _, ok := obj.(*corev1.Secret); ok && key.Name == "paused-runtime-auth" && f.scanError.Load() {
 					return errors.New("runtime auth lookup unavailable")
@@ -140,7 +141,7 @@ func newRepositoryMonitorPausedAuthFixture(t *testing.T) *repositoryMonitorPause
 	f.paused.Store(true)
 	f.inventory(t, "pause-before-completion")
 	result := fmt.Appendf(nil, `{"schemaVersion":"orka.issueImplementation.v1","issueNumber":42,"snapshotDigest":%q,"status":"patch_ready","summary":"Implemented the requested change."}`, item.SnapshotDigest)
-	if err := db.SaveResult(t.Context(), task.Namespace, task.Name, result); err != nil {
+	if err := db.SaveResult(t.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, result); err != nil {
 		t.Fatal(err)
 	}
 	markRepositoryMonitorTestTaskDelivered(t, t.Context(), cl, task.Name, task.Spec.Workspace.PushBranch, "head42")

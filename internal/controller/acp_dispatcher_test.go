@@ -1983,7 +1983,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		completed.Status.ResultRef == nil || !completed.Status.ResultRef.Available {
 		t.Fatalf("unexpected completed status: %#v", completed.Status)
 	}
-	result, err := persistence.GetResult(ctx, task.Namespace, task.Name)
+	result, err := persistence.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 	if err != nil {
 		t.Fatal(err)
 	}

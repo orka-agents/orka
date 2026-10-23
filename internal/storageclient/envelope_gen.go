@@ -321,9 +321,9 @@ func (p envelopedState) DeleteRepositoryMonitor(ctx context.Context, a1 string, 
 	})
 }
 
-func (p envelopedState) DeleteResult(ctx context.Context, a1 string, a2 string) error {
-	return p.ops.run(ctx, writeCall{method: "DeleteResult", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
-		return p.StateProvider.DeleteResult(ctx, a1, a2)
+func (p envelopedState) DeleteResult(ctx context.Context, a1 storagev1.ResultKey) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteResult", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteResult(ctx, a1)
 	})
 }
 
@@ -610,9 +610,9 @@ func (p envelopedState) SavePromptResultReceipt(ctx context.Context, a1 storagev
 	})
 }
 
-func (p envelopedState) SaveResult(ctx context.Context, a1 string, a2 string, a3 []byte) error {
-	return p.ops.run(ctx, writeCall{method: "SaveResult", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
-		return p.StateProvider.SaveResult(ctx, a1, a2, a3)
+func (p envelopedState) SaveResult(ctx context.Context, a1 storagev1.ResultKey, a2 []byte) error {
+	return p.ops.run(ctx, writeCall{method: "SaveResult", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.SaveResult(ctx, a1, a2)
 	})
 }
 

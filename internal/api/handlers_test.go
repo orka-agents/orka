@@ -235,7 +235,7 @@ func setupTestHandlersWithAuthzStore(
 	_ = gatewayv1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(withTestUIDs(objs...)...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
@@ -324,7 +324,7 @@ func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App
 	_ = gatewayv1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(withTestUIDs(objs...)...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
@@ -1379,7 +1379,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 			path: "/tasks/" + taskName + "/logs",
 			prepare: func(t *testing.T, ss *sqlite.Store) {
 				t.Helper()
-				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("logs")))
+				require.NoError(t, ss.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: taskName, TaskUID: taskName + "-uid"}, []byte("logs")))
 			},
 		},
 		{
@@ -1387,7 +1387,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 			path: "/tasks/" + taskName + "/result",
 			prepare: func(t *testing.T, ss *sqlite.Store) {
 				t.Helper()
-				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("result")))
+				require.NoError(t, ss.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: taskName, TaskUID: taskName + "-uid"}, []byte("result")))
 			},
 		},
 		{
@@ -1416,7 +1416,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 			path: "/tasks/" + taskName + "/artifacts/report.txt",
 			prepare: func(t *testing.T, ss *sqlite.Store) {
 				t.Helper()
-				require.NoError(t, ss.SaveArtifact(context.Background(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: taskName}, Filename: "report.txt", ContentType: "text/plain", Data: []byte("artifact")}))
+				require.NoError(t, ss.SaveArtifact(context.Background(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: taskName, TaskUID: taskName + "-uid"}, Filename: "report.txt", ContentType: "text/plain", Data: []byte("artifact")}))
 			},
 		},
 	}
@@ -2666,7 +2666,7 @@ func TestHandlers_GetTaskResult_Success(t *testing.T) {
 
 	handlers, app := setupTestHandlersWithObjects(task)
 	// Save result to store
-	require.NoError(t, handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("task result content")))
+	require.NoError(t, handlers.resultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "test-task", TaskUID: "test-task-uid"}, []byte("task result content")))
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/result", nil)
@@ -3659,7 +3659,7 @@ func TestHandlers_GetTaskResult_DefaultKey(t *testing.T) {
 	}
 
 	handlers, app := setupTestHandlersWithObjects(task)
-	handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("default key content")) //nolint:errcheck
+	handlers.resultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "test-task", TaskUID: "test-task-uid"}, []byte("default key content")) //nolint:errcheck
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/result", nil)
@@ -3692,10 +3692,10 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(withTestUIDs(task)...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content")) //nolint:errcheck
+	ss.SaveResult(context.Background(), store.ResultKey{Namespace: "watched-ns", TaskName: "test-task", TaskUID: "test-task-uid"}, []byte("task result content")) //nolint:errcheck
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -4849,7 +4849,7 @@ func TestHandlers_GetTaskLogs_ResultStoreAvailable(t *testing.T) {
 	}
 
 	handlers, app := setupTestHandlersWithObjects(task)
-	require.NoError(t, handlers.resultStore.SaveResult(context.Background(), "default", "done-task", []byte("log output here")))
+	require.NoError(t, handlers.resultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "done-task", TaskUID: "done-task-uid"}, []byte("log output here")))
 	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/done-task/logs", nil)

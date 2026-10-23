@@ -595,7 +595,7 @@ func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *tes
 			task := configureRecoveryJournalIdentity(t, fixture)
 			const result = "exact recovered result"
 			if test.storeResult {
-				if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte(result)); err != nil {
+				if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(result)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -628,7 +628,7 @@ func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *tes
 				updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
 				t.Fatalf("completed recovery Task status = %#v", updated.Status)
 			}
-			persisted, err := fixture.controlStore.GetResult(fixture.ctx, task.Namespace, task.Name)
+			persisted, err := fixture.controlStore.GetResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 			if err != nil || string(persisted) != result {
 				t.Fatalf("recovered result = %q, err=%v", persisted, err)
 			}
@@ -640,7 +640,7 @@ func TestACPDispatcherRetriesResultReferenceForSucceededAttempt(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionSucceeded)
 	defer fixture.close(t)
 
-	if err := fixture.controlStore.SaveResult(fixture.ctx, "default", "task", []byte("recovered result")); err != nil {
+	if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: "default", TaskName: "task", TaskUID: "33333333-3333-3333-3333-333333333333"}, []byte("recovered result")); err != nil {
 		t.Fatal(err)
 	}
 	rawClient, ok := fixture.kubeClient.(client.WithWatch)
@@ -721,7 +721,7 @@ func TestACPDispatcherRecoveryPreservesCompletionTimeThroughOutboxProjection(t *
 	}
 
 	const result = "recovered result must preserve historical completion time"
-	if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte(result)); err != nil {
+	if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(result)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -798,7 +798,7 @@ func TestACPDispatcherRecoversSettlingResultReceipt(t *testing.T) {
 			}
 			if test.hasStoredResult {
 				if err := fixture.controlStore.SaveResult(
-					fixture.ctx, task.Namespace, task.Name, []byte(test.storedResult),
+					fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(test.storedResult),
 				); err != nil {
 					t.Fatal(err)
 				}
@@ -822,7 +822,7 @@ func TestACPDispatcherRecoversSettlingResultReceipt(t *testing.T) {
 				updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
 				t.Fatalf("recovered result status = %#v", updated.Status)
 			}
-			persistedResult, err := fixture.controlStore.GetResult(fixture.ctx, task.Namespace, task.Name)
+			persistedResult, err := fixture.controlStore.GetResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 			if err != nil || string(persistedResult) != receiptResult {
 				t.Fatalf("recovered task result = %q, err=%v", persistedResult, err)
 			}
@@ -899,7 +899,7 @@ func TestACPDispatcherRestoredTaskPreservesJournaledCompletion(t *testing.T) {
 			task := configureRecoveryJournalIdentity(t, fixture)
 			appendRecoveryPromptTerminal(t, fixture, task, harnessv2.EventCompleted, false)
 			if err := fixture.controlStore.SaveResult(
-				fixture.ctx, task.Namespace, task.Name, []byte("exact recovered result"),
+				fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("exact recovered result"),
 			); err != nil {
 				t.Fatal(err)
 			}

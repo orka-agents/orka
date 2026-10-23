@@ -115,7 +115,7 @@ func TestTaskJobRevocationCleanupBeforeFinalizerRemoval(t *testing.T) {
 			authority := r.ResultStore.(store.TaskJobAuthorityStore)
 			identity := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: "retired-job-uid"}
 			require.NoError(t, authority.RevokeTaskJob(t.Context(), identity))
-			require.NoError(t, r.ResultStore.SaveResult(t.Context(), task.Namespace, task.Name, []byte("old result")))
+			require.NoError(t, r.ResultStore.SaveResult(t.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("old result")))
 			require.NoError(t, r.Delete(t.Context(), task))
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), task))
 			wantErr := errors.New("revocation cleanup unavailable")
@@ -128,7 +128,7 @@ func TestTaskJobRevocationCleanupBeforeFinalizerRemoval(t *testing.T) {
 					if current, ok := object.(*corev1alpha1.Task); ok && !controllerutil.ContainsFinalizer(current, labels.TaskFinalizer) {
 						finalizerRemoved = true
 						require.NoError(t, authority.CheckTaskJobAuthority(ctx, identity), "revocations must be reclaimed before finalizer removal")
-						_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+						_, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 						require.ErrorIs(t, err, store.ErrNotFound)
 					}
 					return c.Patch(ctx, object, patch, opts...)

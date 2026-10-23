@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -42,7 +43,8 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 	first, err := s.DatasetInfo()
 	require.NoError(t, err)
 	require.False(t, first.CanBootstrapSnapshotKey)
-	require.NoError(t, storageclienttest.NewEmbedded(t, s).SaveResult(ctx, "ns", "task", []byte("retained result")))
+	resultKey := store.ResultKey{Namespace: "ns", TaskName: "task", TaskUID: "task-uid"}
+	require.NoError(t, storageclienttest.NewEmbedded(t, s).SaveResult(ctx, resultKey, []byte("retained result")))
 	require.NoError(t, s.Close())
 	s, again, err := openControllerSQLiteStore(path, loader)
 	require.NoError(t, err)
@@ -50,7 +52,7 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 	info, err := s.DatasetInfo()
 	require.NoError(t, err)
 	require.Equal(t, first, info)
-	data, err := s.GetResult(ctx, "ns", "task")
+	data, err := s.GetResult(ctx, store.ResultKey{Namespace: "ns", TaskName: "task", TaskUID: "task-uid"})
 	require.NoError(t, err)
 	require.Equal(t, "retained result", string(data))
 	require.NoError(t, s.Close())
@@ -115,7 +117,7 @@ func TestControllerSQLiteBootstrapRejectsSchemaBeforeKeyLoader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "newer.db")
 	db, err := sqlite.NewDB(path)
 	require.NoError(t, err)
-	_, err = db.Exec(`PRAGMA user_version=3`)
+	_, err = db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, sqlite.SchemaVersion+1))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	called := false
@@ -167,5 +169,6 @@ func TestControllerSQLiteStoreRequiresWriteEnvelopes(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
-	require.ErrorIs(t, s.SaveResult(context.Background(), "tenant", "task", []byte("result")), store.ErrValidation)
+	key := store.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}
+	require.ErrorIs(t, s.SaveResult(context.Background(), key, []byte("result")), store.ErrValidation)
 }

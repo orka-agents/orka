@@ -20,20 +20,20 @@ func runResults(t *testing.T, newProvider StateFactory) {
 	t.Run("save get replace and isolate", func(t *testing.T) {
 		provider := newProvider(t)
 		ctx := t.Context()
-		_, err := provider.GetResult(ctx, "tenant-a", "task")
+		_, err := provider.GetResult(ctx, taskResultKey("tenant-a"))
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 
-		require.NoError(t, provider.SaveResult(ctx, "tenant-a", "task", []byte("first")))
-		require.NoError(t, provider.SaveResult(ctx, "tenant-a", "task", []byte("second")))
-		got, err := provider.GetResult(ctx, "tenant-a", "task")
+		require.NoError(t, provider.SaveResult(ctx, taskResultKey("tenant-a"), []byte("first")))
+		require.NoError(t, provider.SaveResult(ctx, taskResultKey("tenant-a"), []byte("second")))
+		got, err := provider.GetResult(ctx, taskResultKey("tenant-a"))
 		require.NoError(t, err)
 		require.Equal(t, []byte("second"), got)
 
-		_, err = provider.GetResult(ctx, "tenant-b", "task")
+		_, err = provider.GetResult(ctx, taskResultKey("tenant-b"))
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 
-		require.NoError(t, provider.DeleteResult(ctx, "tenant-a", "task"))
-		_, err = provider.GetResult(ctx, "tenant-a", "task")
+		require.NoError(t, provider.DeleteResult(ctx, taskResultKey("tenant-a")))
+		_, err = provider.GetResult(ctx, taskResultKey("tenant-a"))
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 	})
 
@@ -41,7 +41,7 @@ func runResults(t *testing.T, newProvider StateFactory) {
 		provider := newProvider(t)
 		ctx := t.Context()
 		receipt := storagev1.PromptResultReceipt{
-			AttemptID: "attempt-1", Namespace: "tenant-a", TaskName: "task",
+			AttemptID: "attempt-1", Namespace: "tenant-a", TaskName: "task", TaskUID: "task-uid",
 			OperationID: "operation-1", OperationDigest: storagev1.CanonicalBytesDigest([]byte("operation-1")),
 			Data: []byte("result bytes"),
 		}
@@ -66,7 +66,7 @@ func runResults(t *testing.T, newProvider StateFactory) {
 		invalid.OperationDigest = "not-a-digest"
 		require.ErrorIs(t, provider.SavePromptResultReceipt(ctx, invalid), storagev1.ErrValidation)
 
-		require.NoError(t, provider.DeleteResult(ctx, receipt.Namespace, receipt.TaskName))
+		require.NoError(t, provider.DeleteResult(ctx, storagev1.ResultKey{Namespace: receipt.Namespace, TaskName: receipt.TaskName, TaskUID: receipt.TaskUID}))
 		_, err = provider.GetPromptResultReceipt(ctx, receipt.AttemptID)
 		require.ErrorIs(t, err, storagev1.ErrNotFound, "Task result cleanup removes its receipts")
 	})

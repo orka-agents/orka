@@ -24,6 +24,7 @@ import (
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
@@ -32,7 +33,7 @@ const (
 	taskTerminalProjectionKind           = "TaskTerminalStatus"
 	acpControllerRestartRecoveredReason  = "ControllerRestartRecovered"
 	acpControllerRestartRecoveredMessage = "pre-submission attempt recovered under the new controller epoch"
-	acpRestoreIdentityChangedReason      = "RestoreIdentityChanged"
+	acpRestoreIdentityChangedReason      = taskmeta.RestoreIdentityChangedReason
 	acpRestoreIdentityChangedOperation   = "restore-identity-changed"
 	acpRestorePreSubmissionMessage       = "Task incarnation changed during restore before prompt submission; source execution was not replayed"
 	acpRestorePostWriteMessage           = "Task incarnation changed during restore after the prompt request-write boundary; outcome is unknown and was not replayed"
@@ -41,42 +42,11 @@ const (
 )
 
 func acpTaskControlUID(task *corev1alpha1.Task) types.UID {
-	if task == nil {
-		return ""
-	}
-	if acpTaskUsesRestoredSourceIdentity(task) {
-		binding := task.Status.AgentExecutionBinding
-		return binding.Task.UID
-	}
-	return task.UID
+	return taskmeta.DataUID(task)
 }
 
 func acpTaskUsesRestoredSourceIdentity(task *corev1alpha1.Task) bool {
-	if task == nil || task.Status.Execution == nil {
-		return false
-	}
-	switch task.Status.Phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-	default:
-		return false
-	}
-	binding := executionBinding(task)
-	if binding == nil || binding.Task.UID == "" || binding.Task.UID == task.UID ||
-		task.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpRestoreIdentityChangedReason) {
-		return false
-	}
-	switch task.Status.Execution.State {
-	case corev1alpha1.TaskExecutionStateSucceeded:
-		return task.Status.Execution.Outcome == corev1alpha1.TaskExecutionOutcomeSucceeded
-	case corev1alpha1.TaskExecutionStateFailed:
-		return task.Status.Execution.Outcome == corev1alpha1.TaskExecutionOutcomeFailed
-	case corev1alpha1.TaskExecutionStateCancelled:
-		return task.Status.Execution.Outcome == corev1alpha1.TaskExecutionOutcomeCancelled
-	case corev1alpha1.TaskExecutionStateOutcomeUnknown:
-		return task.Status.Execution.Outcome == corev1alpha1.TaskExecutionOutcomeOutcomeUnknown
-	default:
-		return false
-	}
+	return taskmeta.UsesRestoredSourceIdentity(task)
 }
 
 func acpTaskHasUnvalidatedSourceIdentity(task *corev1alpha1.Task) bool {
@@ -992,7 +962,7 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 	}
 	switch evidence.TerminalEvent {
 	case harnessv2.EventCompleted:
-		if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+		if _, err := d.ResultStore.GetResult(ctx, attemptResultKey(task, attempt)); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return attempt, nil
 			}
@@ -1087,7 +1057,7 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent}, evidence.CancellationReason,
 		)
 	}
-	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+	if _, err := d.ResultStore.GetResult(ctx, attemptResultKey(task, attempt)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return false, nil
 		}
@@ -1160,17 +1130,18 @@ func (d *ACPDispatcher) recoverSettlingResultTerminal(
 			return nil, err
 		}
 		if receipt.Namespace != task.Namespace || receipt.TaskName != task.Name ||
+			(receipt.TaskUID != "" && receipt.TaskUID != attempt.Key.TaskUID) ||
 			receipt.OperationID != operationID || receipt.OperationDigest != digest ||
 			attempt.LastOperationID != operationID || attempt.LastOperationDigest != digest {
 			return nil, nil
 		}
 		result = receipt.Data
-		if err := d.persistTaskResult(ctx, task, result); err != nil {
+		if err := d.persistTaskResult(ctx, attemptResultKey(task, attempt), result); err != nil {
 			return nil, err
 		}
 	case errors.Is(receiptErr, store.ErrNotFound):
 		var err error
-		result, err = d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		result, err = d.ResultStore.GetResult(ctx, attemptResultKey(task, attempt))
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil
 		}
@@ -2386,7 +2357,7 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 		case store.PromptDeliveryCancelledBeforePublish:
 			phase = corev1alpha1.TaskPhaseCancelled
 		}
-		result, resultErr := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		result, resultErr := d.ResultStore.GetResult(ctx, attemptResultKey(task, attempt))
 		if resultErr != nil {
 			return resultErr
 		}
@@ -2412,7 +2383,7 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 }
 
 func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, fence store.ControllerEpochFence) error {
-	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+	if _, err := d.ResultStore.GetResult(ctx, attemptResultKey(task, attempt)); err != nil {
 		return err
 	}
 	if err := d.publishTaskResultReference(ctx, task); err != nil {

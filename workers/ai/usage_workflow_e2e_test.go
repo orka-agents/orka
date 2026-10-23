@@ -696,7 +696,8 @@ func (f *usageWorkflowFixture) deliverImplementation(t *testing.T, task *corev1a
 	require.NoError(t, err)
 	data, err := common.FormatStructuredResult(&common.StructuredResult{Summary: string(result)})
 	require.NoError(t, err)
-	require.NoError(t, f.backend.SaveResult(t.Context(), task.Namespace, task.Name, data))
+	key := store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}
+	require.NoError(t, f.backend.SaveResult(t.Context(), key, data))
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	task.Status.CompletionTime = new(metav1.Now())
 	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}

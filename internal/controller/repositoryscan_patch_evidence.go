@@ -26,6 +26,7 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -145,10 +146,10 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 	// durable artifact never preserves the secret the remediation removed.
 	// Path and changed-file checks above ran on the unmodified diff.
 	diff = repositoryMonitorReviewContextSanitize(diff)
-	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(diff)}); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(diff)}); err != nil {
 		return patchVerificationResult{}, "", err
 	}
-	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: summaryName, ContentType: artifactContentTypeJSON, Data: summaryData}); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: summaryName, ContentType: artifactContentTypeJSON, Data: summaryData}); err != nil {
 		return patchVerificationResult{}, "", err
 	}
 	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
@@ -170,15 +171,15 @@ func (r *RepositoryScanReconciler) persistSanitizedPatchArtifacts(
 	if err != nil {
 		return err
 	}
-	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: summaryName, ContentType: artifactContentTypeJSON, Data: summaryData}); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: summaryName, ContentType: artifactContentTypeJSON, Data: summaryData}); err != nil {
 		return err
 	}
-	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName})
+	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: diffName})
 	if err != nil {
 		return err
 	}
 	if sanitized := repositoryMonitorReviewContextSanitize(string(diffData)); sanitized != string(diffData) {
-		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(sanitized)}); err != nil {
+		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(sanitized)}); err != nil {
 			return err
 		}
 	}
@@ -224,7 +225,7 @@ func (r *RepositoryScanReconciler) verifyArtifactDiffMatchesPublishedCommit(
 	if err != nil || reason != "" {
 		return reason, err
 	}
-	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName})
+	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: diffName})
 	if err != nil {
 		return "", err
 	}
@@ -394,7 +395,7 @@ func samePatchHunks(a, b string) bool {
 
 func (r *RepositoryScanReconciler) patchArtifactsPresent(ctx context.Context, task *corev1alpha1.Task, names ...string) (bool, error) {
 	for _, name := range names {
-		if _, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: name}); err != nil {
+		if _, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: name}); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return false, nil
 			}
@@ -662,7 +663,7 @@ func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.
 	}
 	var summary *security.PatchSummaryArtifact
 	if strings.TrimSpace(summaryArtifact) != "" {
-		if data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: summaryArtifact}); err == nil {
+		if data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: summaryArtifact}); err == nil {
 			var parsed security.PatchSummaryArtifact
 			if json.Unmarshal(data, &parsed) == nil {
 				summary = &parsed

@@ -139,6 +139,7 @@ type (
 	ArtifactMetadata                          = storagev1.ArtifactMetadata
 	ArtifactOwner                             = storagev1.ArtifactOwner
 	ArtifactKey                               = storagev1.ArtifactKey
+	ResultKey                                 = storagev1.ResultKey
 	SaveArtifactRequest                       = storagev1.SaveArtifactRequest
 	FencedError                               = storagev1.FencedError
 	TooLargeError                             = storagev1.TooLargeError
@@ -237,6 +238,7 @@ const (
 	MemoryProposalStatusArchived      = storagev1.MemoryProposalStatusArchived
 	MemoryProposalStatusApplied       = storagev1.MemoryProposalStatusApplied
 	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
+	MaxResultBytes                    = storagev1.MaxResultBytes
 )
 
 var (

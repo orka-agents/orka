@@ -23,9 +23,8 @@ type fakeResultStore struct {
 	data map[string][]byte
 }
 
-func (f *fakeResultStore) GetResult(_ context.Context, namespace, taskName string) ([]byte, error) {
-	key := namespace + "/" + taskName
-	d, ok := f.data[key]
+func (f *fakeResultStore) GetResult(_ context.Context, key store.ResultKey) ([]byte, error) {
+	d, ok := f.data[key.Namespace+"/"+key.TaskName]
 	if !ok {
 		return nil, store.ErrNotFound
 	}

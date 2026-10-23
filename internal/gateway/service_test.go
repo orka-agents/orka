@@ -257,7 +257,7 @@ func TestServiceEndToEndAndDuplicateSafety(t *testing.T) {
 	if task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Subject != "user-1" {
 		t.Fatalf("gateway Task requestedBy = %+v", task.Spec.RequestedBy)
 	}
-	if err := sqliteStore.SaveResult(ctx, "default", task.Name, []byte("final response")); err != nil {
+	if err := sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: task.Name, TaskUID: string(task.UID)}, []byte("final response")); err != nil {
 		t.Fatal(err)
 	}
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
@@ -339,7 +339,7 @@ func TestGatewayNativeAIAdmissionFIFOAndTerminalDelivery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, task.Name, session.ActiveTask)
 	require.Equal(t, string(task.UID), session.ActiveTaskUID)
-	require.NoError(t, ss.SaveResult(ctx, "default", task.Name, []byte("native answer")))
+	require.NoError(t, ss.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: task.Name, TaskUID: string(task.UID)}, []byte("native answer")))
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	require.NoError(t, service.Client.Status().Update(ctx, task))
@@ -706,7 +706,7 @@ func TestServicePreservesTraceAndDeliveryCorrelation(t *testing.T) {
 	if err := service.Client.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: event.TaskName}, task); err != nil {
 		t.Fatal(err)
 	}
-	if err := sqliteStore.SaveResult(context.Background(), "default", task.Name, []byte("traced response")); err != nil {
+	if err := sqliteStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: task.Name, TaskUID: string(task.UID)}, []byte("traced response")); err != nil {
 		t.Fatal(err)
 	}
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
@@ -2003,7 +2003,7 @@ func TestTerminalResultIsProjectedAfterEventDeadline(t *testing.T) {
 	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, task); err != nil {
 		t.Fatal(err)
 	}
-	if err := sqliteStore.SaveResult(ctx, "default", task.Name, []byte("completed before deadline")); err != nil {
+	if err := sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: task.Name, TaskUID: string(task.UID)}, []byte("completed before deadline")); err != nil {
 		t.Fatal(err)
 	}
 	completed := metav1.Now()
@@ -2093,11 +2093,11 @@ func TestSucceededTaskWithoutResultRefUsesPersistedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sqliteStore.SaveResult(ctx, "default", event.TaskName, []byte("persisted despite missing ref")); err != nil {
-		t.Fatal(err)
-	}
 	task := &corev1alpha1.Task{}
 	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: task.Name, TaskUID: string(task.UID)}, []byte("persisted despite missing ref")); err != nil {
 		t.Fatal(err)
 	}
 	completed := metav1.NewTime(time.Now().Add(-gatewayResultProjectionGrace - time.Second))
@@ -2403,7 +2403,7 @@ func TestTerminalProjectionRejectsReplacementTaskUID(t *testing.T) {
 	if err := service.Client.Create(ctx, replacement); err != nil {
 		t.Fatal(err)
 	}
-	if err := sqliteStore.SaveResult(ctx, "default", replacement.Name, []byte("replacement result")); err != nil {
+	if err := sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: replacement.Name, TaskUID: string(replacement.UID)}, []byte("replacement result")); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ProjectTerminals(ctx); err == nil {
@@ -2924,7 +2924,7 @@ func TestDeliveredResultDoesNotPatchMissingOrReplacementTask(t *testing.T) {
 			if err := service.Client.Get(ctx, key, task); err != nil {
 				t.Fatal(err)
 			}
-			if err := sqliteStore.SaveResult(ctx, task.Namespace, task.Name, []byte("delivered response")); err != nil {
+			if err := sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("delivered response")); err != nil {
 				t.Fatal(err)
 			}
 			task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
@@ -2991,7 +2991,7 @@ func TestDeliveredResultCommitsWhenTaskDisappearsDuringCorrelationPatch(t *testi
 	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, task); err != nil {
 		t.Fatal(err)
 	}
-	if err := sqliteStore.SaveResult(ctx, task.Namespace, task.Name, []byte("delivered response")); err != nil {
+	if err := sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("delivered response")); err != nil {
 		t.Fatal(err)
 	}
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
@@ -3043,7 +3043,7 @@ func TestDeliveredResultCommitsWhenTaskIsReplacedDuringCorrelationPatch(t *testi
 	if err := service.Client.Get(ctx, key, task); err != nil {
 		t.Fatal(err)
 	}
-	if err := sqliteStore.SaveResult(ctx, task.Namespace, task.Name, []byte("delivered response")); err != nil {
+	if err := sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("delivered response")); err != nil {
 		t.Fatal(err)
 	}
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded

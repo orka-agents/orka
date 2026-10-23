@@ -87,7 +87,9 @@ type WriteEnvelope struct {
 	// repeat it.
 	IssuedAt time.Time
 	// Sequence is the operation's issue order within Fence, starting at 1.
-	// Retries repeat it.
+	// Retries repeat it. Together with Fence.Epoch it is the write's order
+	// stamp, which orders whole-object replacements such as SaveResult and
+	// SaveArtifact by issue rather than by commit (see [ResultStore]).
 	Sequence uint64
 }
 

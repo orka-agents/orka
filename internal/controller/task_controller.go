@@ -56,6 +56,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	workerpkg "github.com/orka-agents/orka/internal/worker"
@@ -648,14 +649,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
-			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
+			if err := r.ResultStore.DeleteResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete result for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
-			if err := r.ArtifactStore.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}); err != nil {
+			if err := r.ArtifactStore.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
@@ -1859,7 +1860,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 					cs.Agent = child.Spec.AgentRef.Name
 				}
 				if child.Status.ResultRef != nil && child.Status.ResultRef.Available && r.ResultStore != nil {
-					result, err := r.ResultStore.GetResult(ctx, child.Namespace, child.Name)
+					result, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: child.Namespace, TaskName: child.Name, TaskUID: string(taskmeta.DataUID(&child))})
 					if err != nil {
 						log.Error(err, "failed to get child task result", "child", child.Name)
 						cs.Result = "(result fetch error)"
@@ -3097,7 +3098,7 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Check if result already exists in store (written by worker via HTTP)
-	_, err = r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	_, err = r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 	if err == nil {
 		// Result already exists (written by worker)
 		task.Status.ResultRef = &corev1alpha1.ResultReference{
@@ -3145,7 +3146,7 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		result = []byte(logs)
 	}
 
-	if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
+	if err := r.ResultStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, result); err != nil {
 		return fmt.Errorf("saving result: %w", err)
 	}
 

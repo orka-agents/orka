@@ -37,7 +37,7 @@ func TestSucceededGatewayTaskInvalidUTF8ResultSettlesBeforeDeliveryValidation(t 
 			require.Equal(t, string(task.UID), session.ActiveTaskUID)
 
 			result := []byte{'o', 'k', 0xff}
-			require.NoError(t, sqliteStore.SaveResult(ctx, task.Namespace, task.Name, result))
+			require.NoError(t, sqliteStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, result))
 			task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 			task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 			require.NoError(t, service.Client.Status().Update(ctx, task))

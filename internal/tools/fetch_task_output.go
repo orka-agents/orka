@@ -16,6 +16,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 )
 
 // FetchTaskOutputTool fetches the result/output of a completed task.
@@ -61,7 +62,7 @@ func (t *FetchTaskOutputTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult(internalErrorType, "result store not configured", "")
 	}
 
-	data, err := tc.ResultStore.GetResult(ctx, namespace, name)
+	data, err := tc.ResultStore.GetResult(ctx, store.ResultKey{Namespace: namespace, TaskName: name, TaskUID: string(taskmeta.DataUID(task))})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return ChatToolErrorResult(errTypeNotFound, "result not found in store", "The result may have been deleted")

@@ -47,7 +47,7 @@ func retainedSessionTaskForTerminalEvent(t *testing.T, phase corev1alpha1.TaskPh
 	}
 	r := newUnitReconciler(newTestScheme(), task)
 	r.DurableControlStore = r.ResultStore.(store.DurableControlStore)
-	if err := r.ResultStore.SaveResult(context.Background(), task.Namespace, task.Name, []byte("retained result")); err != nil {
+	if err := r.ResultStore.SaveResult(context.Background(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("retained result")); err != nil {
 		t.Fatal(err)
 	}
 	return r, task
@@ -95,7 +95,7 @@ func TestDeletingSessionTaskPublishesTerminalEventBeforeCleanup(t *testing.T) {
 				latest.Status.Execution.RuntimeSessionCleanupDigest != "" {
 				t.Fatalf("Task authority changed while Session cleanup was pending: %#v, %v", latest, err)
 			}
-			if result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil || string(result) != "retained result" {
+			if result, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}); err != nil || string(result) != "retained result" {
 				t.Fatalf("result removed before Session retirement: %q, %v", result, err)
 			}
 		})

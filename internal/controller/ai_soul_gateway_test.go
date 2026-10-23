@@ -126,7 +126,7 @@ func TestAIGatewaySoulRecoversAfterUnboundSourceFailures(t *testing.T) {
 	require.EqualValues(t, 1, next.Status.Attempts)
 	_, err = r.completeExecutedTask(ctx, next, corev1alpha1.TaskPhaseSucceeded, "")
 	require.NoError(t, err)
-	require.NoError(t, ss.SaveResult(ctx, next.Namespace, next.Name, []byte("answer")))
+	require.NoError(t, ss.SaveResult(ctx, store.ResultKey{Namespace: next.Namespace, TaskName: next.Name, TaskUID: string(next.UID)}, []byte("answer")))
 	require.NoError(t, service.ProjectTerminals(ctx))
 
 	continued := newAISoulGatewayTask(t, r, ss, "continued")
@@ -170,7 +170,7 @@ func TestAIGatewayNoSoulRemainsAbsenceOnly(t *testing.T) {
 	require.NoError(t, err)
 	_, err = r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "")
 	require.NoError(t, err)
-	require.NoError(t, ss.SaveResult(ctx, task.Namespace, task.Name, []byte("answer")))
+	require.NoError(t, ss.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("answer")))
 	require.NoError(t, service.ProjectTerminals(ctx))
 	next := newAISoulGatewayTask(t, r, ss, "no-soul-next")
 	state, err := ss.ReadSessionSoul(ctx, next.Namespace, next.Spec.SessionRef.Name, next.Name, string(next.UID))

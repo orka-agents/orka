@@ -86,7 +86,7 @@ func TestGatewayTaskMessageReceiptDoesNotProjectTerminal(t *testing.T) {
 			_, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "progress-2", "second update")
 			require.NoError(t, err)
 			task.Status.Phase = phase
-			require.NoError(t, db.SaveResult(t.Context(), task.Namespace, task.Name, []byte("final response")))
+			require.NoError(t, db.SaveResult(t.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("final response")))
 			require.NoError(t, s.Client.Status().Update(t.Context(), task))
 			require.NoError(t, s.ProjectTerminals(t.Context()))
 			require.NoError(t, s.DeliverOnce(t.Context()), "accepted messages drain even after terminal projection")
@@ -503,7 +503,7 @@ func TestGatewayTaskMessageRetriesReadinessLossImmediatelyBeforePOST(t *testing.
 					g.Status.ObservedGeneration = g.Generation
 				})
 				task.Status.Phase = phase
-				require.NoError(t, db.SaveResult(t.Context(), task.Namespace, task.Name, []byte("final response")))
+				require.NoError(t, db.SaveResult(t.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("final response")))
 				require.NoError(t, s.Client.Status().Update(t.Context(), task))
 				require.NoError(t, s.ProjectTerminals(t.Context()))
 				projected, err := db.GetGatewayEvent(t.Context(), event.Namespace, event.ID)

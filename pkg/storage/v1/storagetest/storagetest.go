@@ -36,6 +36,7 @@ type stateFamily struct {
 
 var stateFamilies = []stateFamily{
 	{"results", runResults},
+	{"result-identity", runResultIdentity},
 	{"plans", runPlans},
 	{"messages", runMessages},
 	{"sessions", runSessions},
@@ -81,6 +82,9 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory) {
 	t.Helper()
 	t.Run("artifacts", func(t *testing.T) {
 		runArtifacts(t, newProvider)
+	})
+	t.Run("artifact-identity", func(t *testing.T) {
+		runArtifactIdentity(t, newProvider)
 	})
 	t.Run("write-envelopes", func(t *testing.T) {
 		runWriteCatalog(t, newProvider, artifactWriteCases)

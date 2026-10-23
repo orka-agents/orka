@@ -1200,12 +1200,12 @@ func (s *Store) createImplementationJobWrite(ctx context.Context, job *store.Imp
 	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO implementation_jobs
 		 (id, monitor_namespace, monitor_name, repo, issue_number, plan_id, snapshot_digest, phase,
-		  attempt, branch, patch_artifact_id, pr_number, validation_state, task_name, mutation_task_name,
+		  attempt, branch, patch_artifact_id, pr_number, validation_state, task_name, task_uid, mutation_task_name,
 		  command_event_id, work_action_id, monitor_generation, error, created_at, updated_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.MonitorNamespace, job.MonitorName, job.Repo, job.IssueNumber, job.PlanID,
 		job.SnapshotDigest, job.Phase, job.Attempt, job.Branch, job.PatchArtifactID, job.PRNumber,
-		job.ValidationState, job.TaskName, job.MutationTaskName, job.CommandEventID, job.WorkActionID,
+		job.ValidationState, job.TaskName, job.TaskUID, job.MutationTaskName, job.CommandEventID, job.WorkActionID,
 		job.MonitorGeneration, job.Error, job.CreatedAt, job.UpdatedAt, job.CompletedAt,
 	)
 	return uniqueConflict(err)
@@ -1227,10 +1227,10 @@ func (s *Store) updateImplementationJobWrite(ctx context.Context, job *store.Imp
 	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE implementation_jobs SET repo = ?, issue_number = ?, plan_id = ?, snapshot_digest = ?, phase = ?,
 		 attempt = ?, branch = ?, patch_artifact_id = ?, pr_number = ?, validation_state = ?, task_name = ?,
-		 mutation_task_name = ?, command_event_id = ?, work_action_id = ?, monitor_generation = ?, error = ?,
+		 task_uid = ?, mutation_task_name = ?, command_event_id = ?, work_action_id = ?, monitor_generation = ?, error = ?,
 		 updated_at = ?, completed_at = ? WHERE monitor_namespace = ? AND id = ?`,
 		job.Repo, job.IssueNumber, job.PlanID, job.SnapshotDigest, job.Phase, job.Attempt, job.Branch,
-		job.PatchArtifactID, job.PRNumber, job.ValidationState, job.TaskName, job.MutationTaskName,
+		job.PatchArtifactID, job.PRNumber, job.ValidationState, job.TaskName, job.TaskUID, job.MutationTaskName,
 		job.CommandEventID, job.WorkActionID, job.MonitorGeneration, job.Error, job.UpdatedAt,
 		job.CompletedAt, job.MonitorNamespace, job.ID,
 	)
@@ -1245,7 +1245,7 @@ func (s *Store) updateImplementationJobWrite(ctx context.Context, job *store.Imp
 
 func implementationJobSelectSQL() string {
 	return `SELECT id, monitor_namespace, monitor_name, repo, issue_number, plan_id, snapshot_digest,
-	        phase, attempt, branch, patch_artifact_id, pr_number, validation_state, task_name,
+	        phase, attempt, branch, patch_artifact_id, pr_number, validation_state, task_name, task_uid,
 	        mutation_task_name, command_event_id, work_action_id, monitor_generation, error,
 	        created_at, updated_at, completed_at FROM implementation_jobs`
 }
@@ -1255,7 +1255,7 @@ func scanImplementationJob(r rowScanner) (store.ImplementationJob, error) {
 	var completedAt sql.NullTime
 	if err := r.Scan(&job.ID, &job.MonitorNamespace, &job.MonitorName, &job.Repo, &job.IssueNumber,
 		&job.PlanID, &job.SnapshotDigest, &job.Phase, &job.Attempt, &job.Branch, &job.PatchArtifactID,
-		&job.PRNumber, &job.ValidationState, &job.TaskName, &job.MutationTaskName, &job.CommandEventID,
+		&job.PRNumber, &job.ValidationState, &job.TaskName, &job.TaskUID, &job.MutationTaskName, &job.CommandEventID,
 		&job.WorkActionID, &job.MonitorGeneration, &job.Error, &job.CreatedAt, &job.UpdatedAt, &completedAt,
 	); err != nil {
 		return store.ImplementationJob{}, err

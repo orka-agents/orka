@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/test/fixtures/compatmodel"
 )
@@ -68,7 +69,7 @@ func newCompatRouterIntegration(t *testing.T) *compatRouterIntegration {
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, db.Close()) })
 		results := sqlite.NewStore(db, ":memory:")
-		require.NoError(t, results.SaveResult(t.Context(), namespace, "same-task", []byte("RESULT:"+namespace)))
+		require.NoError(t, results.SaveResult(t.Context(), store.ResultKey{Namespace: namespace, TaskName: "same-task", TaskUID: "same-task-uid"}, []byte("RESULT:"+namespace)))
 		kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace, UID: types.UID(namespace + "-uid")}},
 			&corev1alpha1.Provider{
@@ -78,11 +79,15 @@ func newCompatRouterIntegration(t *testing.T) *compatRouterIntegration {
 			},
 			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "same-secret", Namespace: namespace}, Data: map[string][]byte{"api-key": []byte("fixture-" + namespace)}},
 			&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "same-agent", Namespace: namespace}, Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: namespace + "-agent"}}},
-			&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "same-task", Namespace: namespace}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, ResultRef: &corev1alpha1.ResultReference{Available: true}}},
+			&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "same-task", Namespace: namespace, UID: "same-task-uid"}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, ResultRef: &corev1alpha1.ResultReference{Available: true}}},
 		).WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if _, ok := obj.(*authenticationv1.TokenReview); ok {
 					return authClient.Create(ctx, obj, opts...)
+				}
+				if obj.GetUID() == "" {
+					// The API server gives every object a UID.
+					obj.SetUID(types.UID(obj.GetName() + "-uid"))
 				}
 				if err := c.Create(ctx, obj, opts...); err != nil {
 					return err
@@ -96,7 +101,7 @@ func newCompatRouterIntegration(t *testing.T) *compatRouterIntegration {
 					if err := c.Status().Update(ctx, task); err != nil {
 						return err
 					}
-					return results.SaveResult(ctx, task.Namespace, task.Name, []byte("RESULT:"+namespace))
+					return results.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("RESULT:"+namespace))
 				}
 				return nil
 			},

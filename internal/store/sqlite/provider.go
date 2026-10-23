@@ -44,6 +44,7 @@ func (s *Store) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		SchemaVersion:   "sqlite/" + strconv.Itoa(version),
 		Limits: storagev1.ProviderLimits{
 			MaxArtifactBytes:      storagev1.MaxArtifactBytes,
+			MaxResultBytes:        storagev1.MaxResultBytes,
 			ReceiptRetention:      receiptRetention,
 			MaxReceiptResultBytes: maxReceiptResultBytes,
 		},

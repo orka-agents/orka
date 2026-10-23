@@ -77,9 +77,9 @@ func TestJoinedWriteTransactionKeepsItsOwnRollback(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	_, err = s.GetResult(ctx, "ns", "discarded")
+	_, err = s.GetResult(ctx, testResultKey("ns", "discarded"))
 	require.ErrorIs(t, err, store.ErrNotFound, "a joined method that rolls back leaves nothing behind")
-	_, err = s.GetResult(ctx, "ns", "kept")
+	_, err = s.GetResult(ctx, testResultKey("ns", "kept"))
 	require.NoError(t, err)
 }
 

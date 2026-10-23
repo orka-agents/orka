@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,8 +26,10 @@ func loadPriorSchemaFixture(t *testing.T) string {
 		TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body), SchemaVersion: 1, Body: body,
 	}))
 	require.NoError(t, s.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
-	require.NoError(t, s.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt", ContentType: "text/plain", Data: []byte("retained artifact")}))
-	_, err := s.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
+	_, err := db.Exec(`INSERT INTO artifacts(namespace, task_name, filename, content_type, size, data) VALUES('fixture', 'task', 'proof.txt', 'text/plain', 17, ?)`,
+		[]byte("retained artifact"))
+	require.NoError(t, err)
+	_, err = s.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	return path
@@ -77,8 +80,9 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
-	// The upgrade drops the empty harness v1 tables and adds an empty
-	// operation receipt table; every other table is unchanged.
+	// The upgrade drops the empty harness v1 tables, adds empty operation
+	// receipt and owner tombstone tables, and adds an empty Task UID and order
+	// stamp to existing results and artifacts; every other value is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
@@ -86,6 +90,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	}
 	require.NotContains(t, before, "operation_receipts")
 	before["operation_receipts"] = nil
+	before = upgradedApplicationRows(t, before)
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -105,7 +110,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	credential, err := s.GetConnectorCredential(t.Context(), testCredentialRef())
 	require.NoError(t, err)
 	require.True(t, credential.AccessToken == "fixture-token-not-a-credential", "connector plaintext changed")
-	data, contentType, err := s.GetArtifact(t.Context(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt"})
+	data, contentType, err := s.GetArtifact(t.Context(), store.ArtifactKey{Owner: testArtifactOwner("fixture", "task"), Filename: "proof.txt"})
 	require.NoError(t, err)
 	require.Equal(t, "retained artifact", string(data))
 	require.Equal(t, "text/plain", contentType)
@@ -113,7 +118,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, session.Messages, 1)
 	require.Equal(t, "retained conversation", session.Messages[0].Content)
-	require.NoError(t, s.SaveResult(t.Context(), "fixture", "new-task", []byte("new result")))
+	require.NoError(t, s.SaveResult(t.Context(), testResultKey("fixture", "new-task"), []byte("new result")))
 	require.NoError(t, s.Close())
 	reopened, err := OpenLockedStore(path)
 	require.NoError(t, err)
@@ -122,7 +127,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, info, again)
 	require.NoError(t, reopened.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
-	data, err = reopened.GetResult(t.Context(), "fixture", "new-task")
+	data, err = reopened.GetResult(t.Context(), testResultKey("fixture", "new-task"))
 	require.NoError(t, err)
 	require.Equal(t, "new result", string(data))
 }
@@ -207,7 +212,7 @@ func TestDatasetCompletionCheckpointBusyFailsClosedAndRetries(t *testing.T) {
 	s := setupDiskStore(t)
 	info, err := s.DatasetInfo()
 	require.NoError(t, err)
-	require.NoError(t, s.SaveResult(t.Context(), "ns", "task", []byte("retained")))
+	require.NoError(t, s.SaveResult(t.Context(), testResultKey("ns", "task"), []byte("retained")))
 	reader, err := sql.Open("sqlite", s.dbPath)
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
@@ -250,7 +255,7 @@ func TestDatasetUnbootstrappedDataRequiresExistingKey(t *testing.T) {
 
 func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 	for name, statement := range map[string]string{
-		"newer":               `PRAGMA user_version=3`,
+		"newer":               fmt.Sprintf(`PRAGMA user_version=%d`, SchemaVersion+1),
 		"older":               `PRAGMA user_version=1`,
 		"unknown":             `PRAGMA user_version=2147483647`,
 		"negative":            `PRAGMA user_version=-1`,
@@ -266,7 +271,7 @@ func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := setupDiskStore(t)
 			path := s.dbPath
-			require.NoError(t, s.SaveResult(t.Context(), "ns", "task", []byte("retained")))
+			require.NoError(t, s.SaveResult(t.Context(), testResultKey("ns", "task"), []byte("retained")))
 			_, err := s.db.Exec(statement)
 			require.NoError(t, err)
 			beforeSchema := storedSchemaSQL(t, s.db)
@@ -306,7 +311,7 @@ func TestDatasetRejectsCorruptFileWithoutReplacement(t *testing.T) {
 func TestDatasetFreshnessUsesTableTypeNotSQLFormatting(t *testing.T) {
 	s := setupDiskStore(t)
 	replaceSchemaObject(t, s.db, "results", "CREATE TABLE results (", "create\n table \"results\"(")
-	require.NoError(t, s.SaveResult(t.Context(), "ns", "task", []byte("retained")))
+	require.NoError(t, s.SaveResult(t.Context(), testResultKey("ns", "task"), []byte("retained")))
 	info, err := s.DatasetInfo()
 	require.NoError(t, err)
 	require.False(t, info.CanBootstrapSnapshotKey)

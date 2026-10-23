@@ -204,7 +204,7 @@ func TestBrokeredGatewayReplyPrepareOutsideWriterAndUnknownAfterEnqueue(t *testi
 	f.probe.beforeTransaction = func(ctx context.Context) error {
 		bounded, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
-		require.NoError(t, f.data.SaveResult(bounded, f.task.Namespace, "unrelated", []byte("progress")), "live preparation must leave writer available")
+		require.NoError(t, f.data.SaveResult(bounded, store.ResultKey{Namespace: f.task.Namespace, TaskName: "unrelated", TaskUID: "unrelated-uid"}, []byte("progress")), "live preparation must leave writer available")
 		transactions++
 		return nil
 	}

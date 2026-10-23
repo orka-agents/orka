@@ -151,9 +151,9 @@ func (s *lossyStore) ReleaseLockWithTokenUsage(ctx context.Context, namespace, n
 	})
 }
 
-func (s *lossyStore) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
+func (s *lossyStore) SaveResult(ctx context.Context, key storagev1.ResultKey, data []byte) error {
 	return s.intercept(ctx, "SaveResult", func(ctx context.Context) error {
-		return s.Store.SaveResult(ctx, namespace, taskName, data)
+		return s.Store.SaveResult(ctx, key, data)
 	})
 }
 
@@ -348,11 +348,11 @@ func TestLostResponseReturnsTheOriginalOutcome(t *testing.T) {
 func TestUnavailableWriteIsRetriedWithTheSameEnvelope(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnavailable, stepUnavailable)
-	if err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result")); err != nil {
+	if err := f.client.SaveResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result")); err != nil {
 		t.Fatalf("SaveResult: %v", err)
 	}
 	requireRetriedWithOneEnvelope(t, f, "SaveResult", 3)
-	if got, err := f.client.GetResult(t.Context(), "tenant", "task"); err != nil || string(got) != "result" {
+	if got, err := f.client.GetResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}); err != nil || string(got) != "result" {
 		t.Fatalf("result = %q, %v", got, err)
 	}
 }
@@ -364,7 +364,7 @@ func TestWriteEnvelopeFields(t *testing.T) {
 	f := newLossyFixture(t)
 	before := time.Now().UTC()
 	for _, data := range []string{"first", "second"} {
-		if err := f.client.SaveResult(t.Context(), "tenant", "task", []byte(data)); err != nil {
+		if err := f.client.SaveResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte(data)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -376,7 +376,7 @@ func TestWriteEnvelopeFields(t *testing.T) {
 		if err := envelope.Validate(); err != nil {
 			t.Fatalf("envelope %d: %v", i, err)
 		}
-		digest, err := storagev1.RequestDigest("SaveResult", "tenant", "task", []byte([]string{"first", "second"}[i]))
+		digest, err := storagev1.RequestDigest("SaveResult", storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte([]string{"first", "second"}[i]))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -409,13 +409,13 @@ func TestUnsettledWriteBlocksTheDatasetUntilItIsResolved(t *testing.T) {
 	if f.client.UnresolvedOperations() != 1 {
 		t.Fatalf("unresolved operations = %d, want 1", f.client.UnresolvedOperations())
 	}
-	if err := f.client.SaveResult(ctx, "tenant", "task", []byte("later")); !errors.Is(err, storagev1.ErrNotReady) {
+	if err := f.client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("later")); !errors.Is(err, storagev1.ErrNotReady) {
 		t.Fatalf("write while an outcome is unknown = %v, want ErrNotReady", err)
 	}
 	if calls := len(f.lossy.seen("SaveResult")); calls != 0 {
 		t.Fatalf("a refused write reached the store %d times", calls)
 	}
-	if _, err := f.client.GetResult(ctx, "tenant", "task"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := f.client.GetResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("read while an outcome is unknown = %v, want reads to keep working", err)
 	}
 
@@ -439,7 +439,7 @@ func TestUnsettledWriteBlocksTheDatasetUntilItIsResolved(t *testing.T) {
 	if inbox := f.inbox(t); len(inbox) != 1 {
 		t.Fatalf("inbox = %d messages, want the one committed message", len(inbox))
 	}
-	if err := f.client.SaveResult(ctx, "tenant", "task", []byte("later")); err != nil {
+	if err := f.client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("later")); err != nil {
 		t.Fatalf("write after resolution: %v", err)
 	}
 }
@@ -453,7 +453,7 @@ func TestUnknownOutcomeThatDidNotCommitIsAborted(t *testing.T) {
 	for range 100 {
 		f.lossy.plan("SaveResult", stepUnavailable)
 	}
-	err := f.client.SaveResult(ctx, "tenant", "task", []byte("result"))
+	err := f.client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	// Nothing committed and transient failures ended the attempts, so the
 	// write can run again as a new operation, as after ErrUnavailable.
 	if !errors.Is(err, storagev1.ErrOperationAborted) || !errors.Is(err, storagev1.ErrUnavailable) ||
@@ -464,10 +464,10 @@ func TestUnknownOutcomeThatDidNotCommitIsAborted(t *testing.T) {
 		t.Fatal("an aborted operation still blocks the dataset")
 	}
 	late := storagev1.WithWriteEnvelope(ctx, f.lossy.seen("SaveResult")[0])
-	if err := f.backend.SaveResult(late, "tenant", "task", []byte("result")); !errors.Is(err, storagev1.ErrOperationAborted) {
+	if err := f.backend.SaveResult(late, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result")); !errors.Is(err, storagev1.ErrOperationAborted) {
 		t.Fatalf("late arrival = %v, want ErrOperationAborted", err)
 	}
-	if _, err := f.backend.GetResult(ctx, "tenant", "task"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := f.backend.GetResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("result after abort = %v, want none", err)
 	}
 }
@@ -477,7 +477,7 @@ func TestUnknownOutcomeThatDidNotCommitIsAborted(t *testing.T) {
 func TestRefusalAfterAnUnknownOutcomeIsResolved(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnknown, stepRefuse)
-	err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result"))
+	err := f.client.SaveResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	if !errors.Is(err, store.ErrConflict) || !errors.Is(err, storagev1.ErrOperationAborted) {
 		t.Fatalf("SaveResult error = %v, want the refusal, resolved as aborted", err)
 	}
@@ -491,7 +491,7 @@ func TestRefusalAfterAnUnknownOutcomeIsResolved(t *testing.T) {
 func TestClockSkewRefusalIsNotReady(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.fail("SaveResult", fmt.Errorf("%w: issued ahead of the store clock", storagev1.ErrClockSkew))
-	err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result"))
+	err := f.client.SaveResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	if !errors.Is(err, storagev1.ErrNotReady) || !errors.Is(err, storagev1.ErrClockSkew) {
 		t.Fatalf("SaveResult error = %v, want ErrNotReady wrapping ErrClockSkew", err)
 	}
@@ -501,7 +501,7 @@ func TestClockSkewRefusalIsNotReady(t *testing.T) {
 // and runs once with that envelope.
 func TestCallerEnvelopeRunsUnchanged(t *testing.T) {
 	f := newLossyFixture(t)
-	digest, err := storagev1.RequestDigest("SaveResult", "tenant", "task", []byte("result"))
+	digest, err := storagev1.RequestDigest("SaveResult", storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestCallerEnvelopeRunsUnchanged(t *testing.T) {
 		IssuedAt: time.Now().UTC(), Sequence: 42,
 	}
 	f.lossy.plan("SaveResult", stepUnavailable)
-	err = f.client.SaveResult(storagev1.WithWriteEnvelope(t.Context(), envelope), "tenant", "task", []byte("result"))
+	err = f.client.SaveResult(storagev1.WithWriteEnvelope(t.Context(), envelope), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	if !errors.Is(err, storagev1.ErrUnavailable) {
 		t.Fatalf("caller-owned write = %v, want the provider's error without a retry", err)
 	}
@@ -551,7 +551,7 @@ func TestWritesWaitForTheirFence(t *testing.T) {
 	}
 	client.ops.fenceWait = 100 * time.Millisecond
 	ctx := t.Context()
-	if err := client.SaveResult(ctx, "tenant", "task", []byte("early")); !errors.Is(err, storagev1.ErrNotReady) {
+	if err := client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("early")); !errors.Is(err, storagev1.ErrNotReady) {
 		t.Fatalf("write without a fence source = %v, want ErrNotReady", err)
 	}
 	ran := false
@@ -567,12 +567,14 @@ func TestWritesWaitForTheirFence(t *testing.T) {
 	if err := client.BindFences(gate); !errors.Is(err, storagev1.ErrValidation) {
 		t.Fatalf("second BindFences = %v, want ErrValidation", err)
 	}
-	if err := client.SaveResult(ctx, "tenant", "task", []byte("early")); !errors.Is(err, storagev1.ErrNotReady) {
+	if err := client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("early")); !errors.Is(err, storagev1.ErrNotReady) {
 		t.Fatalf("write before the fence opens = %v, want ErrNotReady", err)
 	}
 	client.ops.fenceWait = 10 * time.Second
 	done := make(chan error, 1)
-	go func() { done <- client.SaveResult(ctx, "tenant", "task", []byte("result")) }()
+	go func() {
+		done <- client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
+	}()
 	select {
 	case err := <-done:
 		t.Fatalf("write finished before its fence opened: %v", err)
@@ -582,7 +584,7 @@ func TestWritesWaitForTheirFence(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("write after the fence opened: %v", err)
 	}
-	if got, err := backend.GetResult(ctx, "tenant", "task"); err != nil || string(got) != "result" {
+	if got, err := backend.GetResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}); err != nil || string(got) != "result" {
 		t.Fatalf("result = %q, %v", got, err)
 	}
 }
@@ -653,11 +655,11 @@ func TestTaskDataTransactionWritesUseTheFencesItCaptured(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = client.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
-		if err := client.SaveResult(ctx, "tenant", "task", []byte("result")); err != nil {
+		if err := client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result")); err != nil {
 			return err
 		}
 		return client.SaveArtifact(ctx, store.SaveArtifactRequest{
-			Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task"}, Filename: "a.txt", ContentType: "text/plain", Data: []byte("artifact"),
+			Owner: store.ArtifactOwner{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, Filename: "a.txt", ContentType: "text/plain", Data: []byte("artifact"),
 		})
 	})
 	if err != nil {
@@ -666,7 +668,7 @@ func TestTaskDataTransactionWritesUseTheFencesItCaptured(t *testing.T) {
 	if fences.calls != 2 {
 		t.Fatalf("fence source calls = %d, want one per contract before the transaction opened", fences.calls)
 	}
-	if got, err := backend.GetResult(t.Context(), "tenant", "task"); err != nil || string(got) != "result" {
+	if got, err := backend.GetResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}); err != nil || string(got) != "result" {
 		t.Fatalf("result = %q, %v", got, err)
 	}
 }
@@ -678,7 +680,7 @@ func TestUnsettledOutcomeHidesTheRefusalBehindIt(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnknown, stepRefuse)
 	f.lossy.fail("ResolveOperation", fmt.Errorf("%w: connection refused", storagev1.ErrUnavailable))
-	err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result"))
+	err := f.client.SaveResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	if !errors.Is(err, storagev1.ErrOutcomeUnknown) || errors.Is(err, store.ErrConflict) || errors.Is(err, storagev1.ErrUnavailable) {
 		t.Fatalf("SaveResult error = %v, want only ErrOutcomeUnknown", err)
 	}
@@ -735,7 +737,7 @@ func TestEmbeddedFamiliesRunAgainstAStrictStore(t *testing.T) {
 	}
 
 	err = client.WithTaskDataTransaction(ctx, func(ctx context.Context) error {
-		return client.SaveResult(ctx, "ns", "task", []byte("result"))
+		return client.SaveResult(ctx, storagev1.ResultKey{Namespace: "ns", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	})
 	if err != nil {
 		t.Fatalf("task-data transaction: %v", err)
@@ -769,7 +771,7 @@ func TestWriteWhoseCallEndsBeforeItsFenceOpensIsNotReady(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	err = client.SaveResult(ctx, "tenant", "task", []byte("result"))
+	err = client.SaveResult(ctx, storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	if !errors.Is(err, storagev1.ErrNotReady) || !errors.Is(err, context.DeadlineExceeded) || !store.IsTemporaryStorageError(err) {
 		t.Fatalf("write whose call ended before its fence opened = %v, want ErrNotReady wrapping the deadline", err)
 	}
@@ -780,7 +782,7 @@ func TestWriteWhoseCallEndsBeforeItsFenceOpensIsNotReady(t *testing.T) {
 func TestClockSkewAfterAnUnknownOutcomeStaysNotReady(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnknown, stepClockSkew)
-	err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result"))
+	err := f.client.SaveResult(t.Context(), storagev1.ResultKey{Namespace: "tenant", TaskName: "task", TaskUID: "task-uid"}, []byte("result"))
 	if !errors.Is(err, storagev1.ErrOperationAborted) || !errors.Is(err, storagev1.ErrNotReady) || !store.IsTemporaryStorageError(err) {
 		t.Fatalf("SaveResult error = %v, want an abort that still reads as not ready", err)
 	}

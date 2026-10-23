@@ -24,11 +24,12 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
 const (
-	maxResultSize                        = 10 << 20 // 10MB
+	maxResultSize                        = store.MaxResultBytes
 	defaultInternalTranscriptSearchLimit = 10
 	maxInternalTranscriptSearchLimit     = 50
 )
@@ -132,7 +133,7 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 	if err := withInternalTaskDataTransaction(c, h.resultStore, taskName, func(context.Context) error {
 		return authorizer.revalidateTaskCaller(c, authorizedTask)
 	}, func(ctx context.Context) error {
-		return h.resultStore.SaveResult(ctx, namespace, taskName, data)
+		return h.resultStore.SaveResult(ctx, store.ResultKey{Namespace: namespace, TaskName: taskName, TaskUID: string(taskmeta.DataUID(authorizedTask))}, data)
 	}); err != nil {
 		return err
 	}
@@ -249,7 +250,7 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 	if err := withInternalTaskDataTransaction(c, h.artifactStore, taskName, func(context.Context) error {
 		return h.internalCallerAuthorizer().revalidateTaskCaller(c, authorizedWorker)
 	}, func(ctx context.Context) error {
-		owner := store.ArtifactOwner{Namespace: namespace, TaskName: taskName, TaskUID: string(authorizedWorker.UID)}
+		owner := store.ArtifactOwner{Namespace: namespace, TaskName: taskName, TaskUID: string(taskmeta.DataUID(authorizedWorker))}
 		return h.artifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: owner, Filename: filename, ContentType: contentType, Data: data})
 	}); err != nil {
 		return err

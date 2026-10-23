@@ -121,12 +121,15 @@ func currentSchemaStatements() []string {
 			PRIMARY KEY (namespace, task_uid, job_uid)
 		)`,
 		`CREATE TABLE IF NOT EXISTS results (
-			namespace  TEXT NOT NULL,
-			task_name  TEXT NOT NULL,
-			data       BLOB NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (namespace, task_name)
+			namespace   TEXT NOT NULL,
+			task_name   TEXT NOT NULL,
+			data        BLOB NOT NULL,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			task_uid    TEXT NOT NULL DEFAULT '',
+			write_epoch INTEGER NOT NULL DEFAULT 0,
+			write_seq   INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (namespace, task_name, task_uid)
 		)`,
 		`CREATE TABLE IF NOT EXISTS prompt_result_receipts (
 			attempt_id       TEXT NOT NULL PRIMARY KEY,
@@ -135,7 +138,8 @@ func currentSchemaStatements() []string {
 			operation_id     TEXT NOT NULL,
 			operation_digest TEXT NOT NULL,
 			data             BLOB NOT NULL,
-			created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+			created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			task_uid         TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_prompt_result_receipts_task
 			ON prompt_result_receipts(namespace, task_name)`,
@@ -338,7 +342,10 @@ func currentSchemaStatements() []string {
 			size         INTEGER NOT NULL,
 			data         BLOB NOT NULL,
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (namespace, task_name, filename)
+			task_uid     TEXT NOT NULL DEFAULT '',
+			write_epoch  INTEGER NOT NULL DEFAULT 0,
+			write_seq    INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (namespace, task_name, task_uid, filename)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(namespace, task_name)`,
 		`CREATE TABLE IF NOT EXISTS security_scan_runs (
@@ -773,7 +780,8 @@ func currentSchemaStatements() []string {
 			error              TEXT NOT NULL DEFAULT '',
 			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			completed_at       TIMESTAMP
+			completed_at       TIMESTAMP,
+			task_uid           TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_implementation_jobs_monitor
 			ON implementation_jobs(monitor_namespace, monitor_name, issue_number, phase, updated_at DESC)`,
@@ -973,6 +981,7 @@ func currentSchemaStatements() []string {
 	statements = append(statements, agentExecutionSchemaStatements()...)
 	statements = append(statements, nativeSessionSchemaStatements()...)
 	statements = append(statements, connectorSchemaStatements()...)
+	statements = append(statements, taskOwnerSchemaStatements()...)
 	return append(statements, operationReceiptSchemaStatements()...)
 }
 
@@ -1067,6 +1076,9 @@ func (s *Store) Start(ctx context.Context) error {
 			s.updateDBSizeMetric()
 			if err := s.pruneExpiredOperationReceipts(ctx); err != nil && ctx.Err() == nil {
 				logger.Error(err, "Failed to prune expired operation receipts")
+			}
+			if err := s.pruneExpiredOwnerTombstones(ctx); err != nil && ctx.Err() == nil {
+				logger.Error(err, "Failed to prune expired result and artifact owner tombstones")
 			}
 		}
 	}

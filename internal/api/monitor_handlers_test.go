@@ -1016,10 +1016,13 @@ func TestGetRepositoryMonitorImplementationPatchPreview(t *testing.T) {
 		IssueNumber:      42,
 		Phase:            "patch_ready",
 		TaskName:         "impl-task",
+		TaskUID:          "impl-task-uid",
 		PatchArtifactID:  "orka-issue-42-summary.json",
 	}))
 	artifact := []byte(`{"schemaVersion":"orka.patch.v1","patchArtifactID":"orka-issue-42.diff","changedFiles":["internal/x.go"]}`)
-	require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "demo", TaskName: "impl-task"}, Filename: "orka-issue-42-summary.json", ContentType: "application/json", Data: artifact}))
+	require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "demo", TaskName: "impl-task", TaskUID: "impl-task-uid"}, Filename: "orka-issue-42-summary.json", ContentType: "application/json", Data: artifact}))
+	// A later Task with the same name never serves another Task's patch.
+	require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "demo", TaskName: "impl-task", TaskUID: "later-impl-task-uid"}, Filename: "orka-issue-42-summary.json", ContentType: "application/json", Data: []byte(`{"schemaVersion":"later"}`)}))
 
 	req := httptest.NewRequest(http.MethodGet, "/monitors/implementation-jobs/impl-preview/patch-preview?namespace=demo", nil)
 	resp, err := app.Test(req)
@@ -1031,6 +1034,46 @@ func TestGetRepositoryMonitorImplementationPatchPreview(t *testing.T) {
 	patch, ok := result["patch"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "orka.patch.v1", patch["schemaVersion"])
+}
+
+// A job recorded before it kept the Task UID serves the patch artifact of the
+// Task that holds its name now, and none once that Task is gone.
+func TestGetRepositoryMonitorImplementationPatchPreviewForJobWithoutTaskUID(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(fmt.Sprintf("live=%t", live), func(t *testing.T) {
+			var objects []crclient.Object
+			if live {
+				objects = append(objects, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-task", Namespace: "demo", UID: "impl-task-uid"}})
+			}
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, objects...)
+			body := fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},"agents":{}}}`, monitorTestRepoURL)
+			createReq := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+			createReq.Header.Set("Content-Type", "application/json")
+			createResp, err := app.Test(createReq)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusCreated, createResp.StatusCode)
+			require.NoError(t, handlers.repositoryMonitorStore.CreateImplementationJob(t.Context(), &store.ImplementationJob{
+				ID: "impl-preview", MonitorNamespace: "demo", MonitorName: "repo-monitor", IssueNumber: 42,
+				Phase: "patch_ready", TaskName: "impl-task", PatchArtifactID: "orka-issue-42-summary.json",
+			}))
+			artifact := []byte(`{"schemaVersion":"orka.patch.v1"}`)
+			require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "demo", TaskName: "impl-task", TaskUID: "impl-task-uid"}, Filename: "orka-issue-42-summary.json", ContentType: "application/json", Data: artifact}))
+
+			req := httptest.NewRequest(http.MethodGet, "/monitors/implementation-jobs/impl-preview/patch-preview?namespace=demo", nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			if !live {
+				require.Equal(t, http.StatusNotFound, resp.StatusCode)
+				return
+			}
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			var result map[string]any
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+			patch, ok := result["patch"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "orka.patch.v1", patch["schemaVersion"])
+		})
+	}
 }
 
 func TestCreateRepositoryMonitorCommandEventRejectsIssueTargetSHA(t *testing.T) {

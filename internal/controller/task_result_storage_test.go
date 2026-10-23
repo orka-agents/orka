@@ -23,7 +23,7 @@ type unacceptedResultStore struct {
 	err error
 }
 
-func (s *unacceptedResultStore) SaveResult(context.Context, string, string, []byte) error {
+func (s *unacceptedResultStore) SaveResult(context.Context, store.ResultKey, []byte) error {
 	return s.err
 }
 

@@ -23,7 +23,7 @@ type failingTaskDataCleanup struct {
 	err       error
 }
 
-func (s *failingTaskDataCleanup) DeleteResult(context.Context, string, string) error {
+func (s *failingTaskDataCleanup) DeleteResult(context.Context, store.ResultKey) error {
 	if s.operation == "result" {
 		return s.err
 	}

@@ -9,8 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// artifactOwner returns the artifact owner of a suite Task whose UID is
+// derived from its name.
 func artifactOwner(namespace, taskName string) storagev1.ArtifactOwner {
-	return storagev1.ArtifactOwner{Namespace: namespace, TaskName: taskName}
+	return storagev1.ArtifactOwner{Namespace: namespace, TaskName: taskName, TaskUID: taskName + "-uid"}
 }
 
 func artifactKey(namespace, taskName, filename string) storagev1.ArtifactKey {
@@ -94,22 +96,6 @@ func runArtifacts(t *testing.T, newProvider ArtifactFactory) {
 		data, _, err = provider.GetArtifact(ctx, artifactKey("tenant-a", "task", "kept.bin"))
 		require.NoError(t, err)
 		require.Equal(t, []byte("kept"), data, "a rejected write leaves the existing artifact")
-	})
-
-	t.Run("accepts the owning Task UID", func(t *testing.T) {
-		provider := newProvider(t)
-		ctx := t.Context()
-		owner := storagev1.ArtifactOwner{Namespace: "tenant-a", TaskName: "task", TaskUID: "task-uid-1"}
-		saveArtifact(t, provider, owner, "out.txt", "text/plain", []byte("v1"))
-		data, _, err := provider.GetArtifact(ctx, storagev1.ArtifactKey{Owner: owner, Filename: "out.txt"})
-		require.NoError(t, err)
-		require.Equal(t, []byte("v1"), data)
-		listed, err := provider.ListArtifacts(ctx, owner)
-		require.NoError(t, err)
-		require.Len(t, listed, 1)
-		require.NoError(t, provider.DeleteArtifacts(ctx, owner))
-		_, _, err = provider.GetArtifact(ctx, storagev1.ArtifactKey{Owner: owner, Filename: "out.txt"})
-		require.ErrorIs(t, err, storagev1.ErrNotFound)
 	})
 
 	t.Run("namespace and Task isolation", func(t *testing.T) {

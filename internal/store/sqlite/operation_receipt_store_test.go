@@ -99,10 +99,10 @@ func TestOperationReceiptsArePrunedAfterTheirRetention(t *testing.T) {
 	dataset := advanceTestEpoch(t, s, testWriteFence)
 
 	saveCtx, envelope := testEnvelope(t, ctx, dataset, "SaveResult", now, "ns", "task", []byte("first"))
-	require.NoError(t, s.SaveResult(saveCtx, "ns", "task", []byte("first")))
+	require.NoError(t, s.SaveResult(saveCtx, testResultKey("ns", "task"), []byte("first")))
 	for _, name := range []string{"a", "b"} {
 		deleteCtx, _ := testEnvelope(t, ctx, dataset, "DeleteResult", now, "ns", name)
-		require.NoError(t, s.DeleteResult(deleteCtx, "ns", name))
+		require.NoError(t, s.DeleteResult(deleteCtx, testResultKey("ns", name)))
 	}
 
 	now = now.Add(receiptRetention)
@@ -120,7 +120,7 @@ func TestOperationReceiptsArePrunedAfterTheirRetention(t *testing.T) {
 		RequestDigest: envelope.RequestDigest, IssuedAt: envelope.IssuedAt,
 	})
 	require.ErrorIs(t, err, storagev1.ErrOperationExpired, "a pruned receipt is not reported as an abort")
-	require.ErrorIs(t, s.SaveResult(saveCtx, "ns", "task", []byte("first")), storagev1.ErrOperationExpired,
+	require.ErrorIs(t, s.SaveResult(saveCtx, testResultKey("ns", "task"), []byte("first")), storagev1.ErrOperationExpired,
 		"once its receipt is gone, a late retry is refused rather than applied again")
 }
 
@@ -176,7 +176,7 @@ func TestWriteOperationInsideTaskDataTransaction(t *testing.T) {
 	conflicting := []store.SessionMessage{{ID: "m1", Role: "user", Content: "new"}, {ID: "m2", Role: "user", Content: "different"}}
 	err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		envelope, _ := storagev1.WriteEnvelopeFrom(saveCtx)
-		if err := s.SaveResult(storagev1.WithWriteEnvelope(txCtx, envelope), "ns", "task", []byte("result")); err != nil {
+		if err := s.SaveResult(storagev1.WithWriteEnvelope(txCtx, envelope), testResultKey("ns", "task"), []byte("result")); err != nil {
 			return err
 		}
 		appendCtx, _ := testEnvelope(t, txCtx, dataset, "AppendMessages", now, "ns", "session", conflicting)
@@ -189,9 +189,9 @@ func TestWriteOperationInsideTaskDataTransaction(t *testing.T) {
 	session, err := s.GetSession(ctx, "ns", "session")
 	require.NoError(t, err)
 	require.Len(t, session.Messages, 1, "a failed operation in an enclosing transaction leaves none of its writes")
-	require.NoError(t, s.SaveResult(ctx, "ns", "task", []byte("newer")))
-	require.NoError(t, s.SaveResult(saveCtx, "ns", "task", []byte("result")), "the receipt committed with the enclosing transaction")
-	data, err := s.GetResult(ctx, "ns", "task")
+	require.NoError(t, s.SaveResult(ctx, testResultKey("ns", "task"), []byte("newer")))
+	require.NoError(t, s.SaveResult(saveCtx, testResultKey("ns", "task"), []byte("result")), "the receipt committed with the enclosing transaction")
+	data, err := s.GetResult(ctx, testResultKey("ns", "task"))
 	require.NoError(t, err)
 	require.Equal(t, "newer", string(data), "the replay changed nothing")
 }
@@ -220,18 +220,18 @@ func TestRequireWriteEnvelopesRefusesWritesWithoutOne(t *testing.T) {
 	ctx := context.Background()
 	s := setupTestStore(t)
 	dataset := advanceTestEpoch(t, s, testWriteFence)
-	require.NoError(t, s.SaveResult(ctx, "ns", "lenient", []byte("ok")), "package tests may write without an envelope")
+	require.NoError(t, s.SaveResult(ctx, testResultKey("ns", "lenient"), []byte("ok")), "package tests may write without an envelope")
 
 	s.RequireWriteEnvelopes()
-	require.ErrorIs(t, s.SaveResult(ctx, "ns", "task", []byte("bare")), store.ErrValidation)
-	_, err := s.GetResult(ctx, "ns", "task")
+	require.ErrorIs(t, s.SaveResult(ctx, testResultKey("ns", "task"), []byte("bare")), store.ErrValidation)
+	_, err := s.GetResult(ctx, testResultKey("ns", "task"))
 	require.ErrorIs(t, err, store.ErrNotFound, "a refused write commits nothing")
-	_, err = s.GetResult(ctx, "ns", "lenient")
+	_, err = s.GetResult(ctx, testResultKey("ns", "lenient"))
 	require.NoError(t, err, "reads need no envelope")
 
 	enveloped, _ := testEnvelope(t, ctx, dataset, "SaveResult", time.Now().UTC(), "ns", "task", []byte("kept"))
-	require.NoError(t, s.SaveResult(enveloped, "ns", "task", []byte("kept")))
-	got, err := s.GetResult(ctx, "ns", "task")
+	require.NoError(t, s.SaveResult(enveloped, testResultKey("ns", "task"), []byte("kept")))
+	got, err := s.GetResult(ctx, testResultKey("ns", "task"))
 	require.NoError(t, err)
 	require.Equal(t, "kept", string(got))
 }

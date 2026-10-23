@@ -19,6 +19,7 @@ import (
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -1686,7 +1687,21 @@ func (h *Handlers) GetRepositoryMonitorImplementationPatchPreview(c fiber.Ctx) e
 	if strings.TrimSpace(job.TaskName) == "" || strings.TrimSpace(job.PatchArtifactID) == "" {
 		return fiber.NewError(fiber.StatusNotFound, "monitor implementation job has no patch artifact")
 	}
-	data, contentType, err := h.artifactStore.GetArtifact(c.Context(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: job.TaskName}, Filename: job.PatchArtifactID})
+	taskUID := job.TaskUID
+	if taskUID == "" {
+		// A job recorded before it kept the Task UID: the patch artifact
+		// belongs to the Task that holds the name now, if any.
+		task := &corev1alpha1.Task{}
+		if err := h.client.Get(c.Context(), client.ObjectKey{Namespace: namespace, Name: job.TaskName}, task); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fiber.NewError(fiber.StatusNotFound, "monitor implementation patch artifact not found")
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read monitor implementation task: %v", err))
+		}
+		taskUID = string(taskmeta.DataUID(task))
+	}
+	owner := store.ArtifactOwner{Namespace: namespace, TaskName: job.TaskName, TaskUID: taskUID}
+	data, contentType, err := h.artifactStore.GetArtifact(c.Context(), store.ArtifactKey{Owner: owner, Filename: job.PatchArtifactID})
 	if errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "monitor implementation patch artifact not found")
 	}

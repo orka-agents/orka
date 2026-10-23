@@ -61,18 +61,50 @@ type SessionMessage struct {
 // [ErrTooLarge].
 const MaxArtifactBytes = 10 << 20
 
+// MaxResultBytes is the largest Task result Orka stores, the same limit as the
+// worker result API. Every state.v1 provider accepts results, and prompt
+// result receipt data, up to this size and rejects larger ones with
+// [ErrTooLarge].
+const MaxResultBytes = 10 << 20
+
 // ArtifactOwner identifies the Task whose artifacts an operation addresses.
-// Requests are structs so the identity can grow, for example with the Job and
-// cleanup generation that let a provider refuse an old retry, without another
-// change to every method.
+// Requests are structs so the identity can grow without another change to
+// every method.
 type ArtifactOwner struct {
 	Namespace string
 	TaskName  string
-	// TaskUID is the owning Task's UID when the caller knows it. It is
-	// reserved: providers accept it and may ignore it until artifact identity
-	// is enforced, after which a write for an older Task with the same name
-	// must not overwrite or delete a newer Task's artifacts.
+	// TaskUID is the owning Task's UID. It is required: a request without it
+	// returns ErrValidation. Artifacts are bound to the UID, so an operation
+	// for an older Task with the same name never reads, overwrites or deletes
+	// a newer Task's artifacts (see [ArtifactStore]).
 	TaskUID string
+}
+
+// Validate checks that the owner names a namespace, a Task name and a Task
+// UID.
+func (o ArtifactOwner) Validate() error {
+	return validateTaskIdentity("artifact owner", o.Namespace, o.TaskName, o.TaskUID)
+}
+
+// ResultKey identifies the result of one Task. TaskUID is required, as for
+// [ArtifactOwner]: a result is bound to the UID of the Task that produced it
+// (see [ResultStore]).
+type ResultKey struct {
+	Namespace string
+	TaskName  string
+	TaskUID   string
+}
+
+// Validate checks that the key names a namespace, a Task name and a Task UID.
+func (k ResultKey) Validate() error {
+	return validateTaskIdentity("result key", k.Namespace, k.TaskName, k.TaskUID)
+}
+
+func validateTaskIdentity(what, namespace, taskName, taskUID string) error {
+	if namespace == "" || taskName == "" {
+		return ValidationErrorf("%s namespace and Task name are required", what)
+	}
+	return validateControlIdentifier(what+" Task UID", taskUID)
 }
 
 // ArtifactKey identifies one artifact file.
