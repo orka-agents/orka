@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -40,4 +43,33 @@ func TestTemporaryStorageErrorsAnswerServiceUnavailable(t *testing.T) {
 		require.Equal(t, http.StatusServiceUnavailable, response.StatusCode, path)
 		require.Equal(t, serviceUnavailableRetryAfterSeconds, response.Header.Get(fiber.HeaderRetryAfter), path)
 	}
+}
+
+// unacceptedEventStore refuses execution events, as the storage client does
+// while the controller's fence is not open.
+type unacceptedEventStore struct {
+	*storageclient.Client
+}
+
+func (unacceptedEventStore) AppendExecutionEvent(context.Context, *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	return nil, fmt.Errorf("append: %w", store.ErrNotReady)
+}
+
+// The worker execution event route answers a write the store has not
+// accepted yet with 503, not 500, so the worker retries it.
+func TestInternalSubmitExecutionEventAnswersServiceUnavailableWhileStorageIsNotReady(t *testing.T) {
+	eventStore := unacceptedEventStore{Client: newInternalExecutionEventStore(t)}
+	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
+	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// Memory routes map a temporary storage refusal to 503 before any other
+// storage error.
+func TestMemoryStoreErrorAnswersServiceUnavailableWhileStorageIsNotReady(t *testing.T) {
+	err := memoryStoreError("create memory", "memory", fmt.Errorf("create: %w", store.ErrOutcomeUnknown))
+	fiberErr, ok := errors.AsType[*fiber.Error](err)
+	require.True(t, ok)
+	require.Equal(t, fiber.StatusServiceUnavailable, fiberErr.Code)
 }

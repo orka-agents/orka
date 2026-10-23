@@ -165,7 +165,10 @@ func (o *operations) writeFence(ctx context.Context, contract string) (string, s
 	defer cancel()
 	notReady := func(cause error) error {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			// The call ended first; the write is still only not ready, so a
+			// caller can tell it from a definite failure.
+			return fmt.Errorf("%w: the controller epoch fence for %s did not open before the call ended: %w",
+				storagev1.ErrNotReady, contract, ctx.Err())
 		}
 		return fmt.Errorf("%w: the controller epoch fence for %s is not open: %w", storagev1.ErrNotReady, contract, cause)
 	}
@@ -337,10 +340,13 @@ func (o *operations) resolve(
 	case err == nil && outcome.State == storagev1.OperationCommitted:
 		return o.replay(resolveCtx, envelope, attempt)
 	case err == nil && outcome.State == storagev1.OperationAborted:
-		// The operation is settled: nothing committed. Keep a refusal that
-		// ended the attempts matchable, but not an earlier unknown outcome.
+		// The operation is settled: nothing committed, and it never will.
+		// When only transient failures ended the attempts, the write is
+		// as safe to run again as after ErrUnavailable, so it matches that
+		// too; a refusal that ended the attempts stays matchable instead.
 		if errors.Is(cause, storagev1.ErrOutcomeUnknown) || errors.Is(cause, storagev1.ErrUnavailable) {
-			return fmt.Errorf("%w: operation %s did not commit and never will (after %v)", storagev1.ErrOperationAborted, envelope.OperationID, cause)
+			return fmt.Errorf("%w: operation %s did not commit and never will (%w after %v)",
+				storagev1.ErrOperationAborted, envelope.OperationID, storagev1.ErrUnavailable, cause)
 		}
 		return fmt.Errorf("%w: operation %s did not commit and never will: %w", storagev1.ErrOperationAborted, envelope.OperationID, cause)
 	case err == nil:

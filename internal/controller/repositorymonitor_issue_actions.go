@@ -1632,6 +1632,11 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 			"allowedPaths":      task.Spec.Workspace.AllowedPaths,
 		})
 		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: patchArtifact, ContentType: artifactContentTypeJSON, Data: deliverySummary}); err != nil {
+			// A store that has not accepted the write yet is retried, not
+			// recorded as a blocked implementation.
+			if store.IsTemporaryStorageError(err) {
+				return "", "", "", err
+			}
 			return repositoryMonitorIssuePhaseBlocked, "", "patch_summary_artifact_save_failed", nil
 		}
 		copyRecord := *record
@@ -2180,6 +2185,9 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 	}
 	diffName := repositoryMonitorIssuePatchDiffArtifact(item.Number, record.ID)
 	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(sr.Diff)}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_diff_artifact_save_failed", nil
 	}
 	planID := ""
@@ -2204,6 +2212,9 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 	}
 	data, _ := json.Marshal(summary)
 	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), ContentType: artifactContentTypeJSON, Data: data}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_summary_artifact_save_failed", nil
 	}
 	return "", nil

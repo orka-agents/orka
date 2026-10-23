@@ -672,8 +672,11 @@ Reads and administrative methods reach the provider unchanged.
 - **Resolution.** When retrying cannot settle an unknown outcome, or a later
   attempt is refused, the client calls `ResolveOperation` once. A committed
   operation is attempted once more to read its result as a replay; an
-  aborted one returns `ErrOperationAborted`, joined with the refusal when
-  there was one. An operation the client cannot settle, because the store is
+  aborted one returns `ErrOperationAborted`, joined with the refusal when a
+  refusal ended the attempts, or with `ErrUnavailable` when only transient
+  failures did, because nothing committed and running it again is safe. An
+  error that leaves the outcome unknown matches only `ErrOutcomeUnknown`. An
+  operation the client cannot settle, because the store is
   unreachable, returns `ErrOutcomeUnknown` and joins the dataset's unresolved
   set: new writes to that dataset are refused with `ErrNotReady` while the
   client keeps resolving the set in the background. An operation that
@@ -685,10 +688,13 @@ Reads and administrative methods reach the provider unchanged.
   the fence their requests carry.
 - **Callers.** `store.IsTemporaryStorageError` matches `ErrNotReady`,
   `ErrUnavailable` and `ErrOutcomeUnknown`. The API answers them with 503 and
-  a `Retry-After` hint, in its shared error handler and in the gateway ingress,
-  gateway store and internal task-data paths. Task result collection
-  requeues the Task instead of completing it without its result, and gateway
-  admission no longer reads a fenced write as a Session ownership conflict.
+  a `Retry-After` hint, in its shared error handler, the gateway ingress,
+  gateway store and internal task-data paths, the worker message and
+  execution event routes, and the memory routes. Task result collection
+  requeues the Task instead of completing it without its result, repository
+  monitor implementations retry an artifact the store has not accepted
+  instead of blocking, and gateway admission no longer reads a fenced write
+  as a Session ownership conflict.
   The SQLite in-process store never returns `ErrUnavailable` or
   `ErrOutcomeUnknown`; those paths matter once a provider runs out of process.
 

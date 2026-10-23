@@ -450,8 +450,11 @@ func TestUnknownOutcomeThatDidNotCommitIsAborted(t *testing.T) {
 		f.lossy.plan("SaveResult", stepUnavailable)
 	}
 	err := f.client.SaveResult(ctx, "tenant", "task", []byte("result"))
-	if !errors.Is(err, storagev1.ErrOperationAborted) || store.IsTemporaryStorageError(err) {
-		t.Fatalf("SaveResult error = %v, want only ErrOperationAborted: the outcome is settled", err)
+	// Nothing committed and transient failures ended the attempts, so the
+	// write can run again as a new operation, as after ErrUnavailable.
+	if !errors.Is(err, storagev1.ErrOperationAborted) || !errors.Is(err, storagev1.ErrUnavailable) ||
+		errors.Is(err, storagev1.ErrOutcomeUnknown) {
+		t.Fatalf("SaveResult error = %v, want ErrOperationAborted and ErrUnavailable, not an unknown outcome", err)
 	}
 	if f.client.UnresolvedOperations() != 0 {
 		t.Fatal("an aborted operation still blocks the dataset")
