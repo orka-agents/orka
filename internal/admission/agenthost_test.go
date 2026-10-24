@@ -17,6 +17,8 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -145,4 +147,72 @@ func TestAgentHostChangingTheSecretKeyIsChecked(t *testing.T) {
 	// An explicit default key is the same selection.
 	request.Object = runtime.RawExtension{Raw: agentHostObjectWithKey(t, "alice-github", "token")}
 	require.True(t, validator.Handle(context.Background(), request).Allowed)
+}
+
+const testControllerUsername = "system:serviceaccount:orka-system:orka-controller-manager"
+
+func connectionHostRequest(t *testing.T, username, template string) ctrladmission.Request {
+	t.Helper()
+	host := &corev1alpha1.AgentHost{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "core.orka.ai/v1alpha1", Kind: "AgentHost"},
+		ObjectMeta: metav1.ObjectMeta{Name: "gh-alice", Namespace: "team"},
+		Spec: corev1alpha1.AgentHostSpec{
+			TemplateRef: corev1alpha1.AgentHostTemplateReference{Name: template},
+			GitHubTokenFrom: &corev1alpha1.AgentHostTokenSource{
+				ConnectionRef: corev1alpha1.LocalObjectReference{Name: "github-alice"},
+			},
+		},
+	}
+	raw, err := json.Marshal(host)
+	require.NoError(t, err)
+	return ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Operation: admissionv1.Create,
+		Namespace: "team",
+		Object:    runtime.RawExtension{Raw: raw},
+		UserInfo:  authenticationv1.UserInfo{Username: username},
+	}}
+}
+
+func newConnectionHostValidator(t *testing.T, objects ...client.Object) (*AgentHostValidator, *capturedAgentHostAuth) {
+	t.Helper()
+	validator := newAgentHostValidator(t, &capturedAgentHostAuth{templateErr: errors.New("no template use")})
+	validator.controllers = ExecutionModeConfig{ControllerUsernames: []string{testControllerUsername}}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	validator.reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	return validator, validator.authorizer.(*capturedAgentHostAuth)
+}
+
+func agentHostProviderObjects(template string) []client.Object {
+	return []client.Object{
+		&corev1alpha1.Connection{
+			ObjectMeta: metav1.ObjectMeta{Name: "github-alice", Namespace: "team"},
+			Spec:       corev1alpha1.ConnectionSpec{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
+		},
+		&corev1alpha1.ConnectorProvider{
+			ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: "team"},
+			Spec: corev1alpha1.ConnectorProviderSpec{
+				AgentHost: &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: template}},
+			},
+		},
+	}
+}
+
+// Only the controller creates a host fed by a Connection, from the template
+// its provider names, which needs no template use grant.
+func TestAgentHostFromAConnectionIsTheControllersOnly(t *testing.T) {
+	validator, authorizer := newConnectionHostValidator(t, agentHostProviderObjects("copilotd")...)
+	response := validator.Handle(context.Background(), connectionHostRequest(t, testControllerUsername, "copilotd"))
+	require.True(t, response.Allowed, response.Result)
+	require.Empty(t, authorizer.templates)
+
+	require.False(t, validator.Handle(context.Background(), connectionHostRequest(t, "alice@example.com", "copilotd")).Allowed,
+		"a person cannot point a host at a Connection")
+	require.False(t, validator.Handle(context.Background(), connectionHostRequest(t, testControllerUsername, "other")).Allowed,
+		"the template must be the one the provider names")
+
+	other, _ := newConnectionHostValidator(t, agentHostProviderObjects("other")...)
+	require.False(t, other.Handle(context.Background(), connectionHostRequest(t, testControllerUsername, "copilotd")).Allowed)
+	missing, _ := newConnectionHostValidator(t)
+	require.False(t, missing.Handle(context.Background(), connectionHostRequest(t, testControllerUsername, "copilotd")).Allowed)
 }

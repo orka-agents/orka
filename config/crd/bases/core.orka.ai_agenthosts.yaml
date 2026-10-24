@@ -58,6 +58,27 @@ spec:
           spec:
             description: AgentHostSpec requests one host from a template.
             properties:
+              githubTokenFrom:
+                description: |-
+                  GitHubTokenFrom takes the user's GitHub token from their Connection to
+                  an agent-host ConnectorProvider. Orka hands the host short-lived access
+                  tokens from it and replaces them before they expire. Only the controller
+                  sets it, when it creates the host for a Connection.
+                properties:
+                  connectionRef:
+                    description: ConnectionRef names the owner's Connection in this
+                      namespace.
+                    properties:
+                      name:
+                        description: Name is the referenced object name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - connectionRef
+                type: object
               githubTokenSecretRef:
                 description: |-
                   GitHubTokenSecretRef names the Secret holding the user's GitHub token,
@@ -106,6 +127,11 @@ spec:
             x-kubernetes-validations:
             - message: templateRef is immutable
               rule: self.templateRef == oldSelf.templateRef
+            - message: githubTokenSecretRef and githubTokenFrom are mutually exclusive
+              rule: '!has(self.githubTokenSecretRef) || !has(self.githubTokenFrom)'
+            - message: githubTokenFrom is immutable
+              rule: has(self.githubTokenFrom) == has(oldSelf.githubTokenFrom) && (!has(self.githubTokenFrom)
+                || self.githubTokenFrom == oldSelf.githubTokenFrom)
           status:
             description: AgentHostStatus reports the host's objects, lifecycle and
               readiness.
@@ -184,6 +210,24 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              github:
+                description: |-
+                  GitHub is the account a host fed by a Connection belongs to, pinned
+                  from its first token. A token for another account fails the host.
+                properties:
+                  id:
+                    description: ID is the account's numeric ID, which does not change
+                      when it is renamed.
+                    format: int64
+                    type: integer
+                  login:
+                    description: Login is the account's login when the host was created.
+                    maxLength: 39
+                    type: string
+                required:
+                - id
+                - login
                 type: object
               hostNamespace:
                 description: |-

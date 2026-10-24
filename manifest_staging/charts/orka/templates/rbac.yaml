@@ -17,10 +17,11 @@ rules:
     resources: ["connectorproviders"]
     verbs: ["get", "list", "watch", "update", "patch"]
   # Users create AgentHosts and operators author AgentHostTemplates; the
-  # controller only reads templates and manages hosts' finalizers and status.
+  # controller reads templates, manages hosts' finalizers and status, and
+  # creates the hosts of people who link an agent-host ConnectorProvider.
   - apiGroups: ["core.orka.ai"]
     resources: ["agenthosts"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agenthosttemplates"]
     verbs: ["get", "list", "watch"]

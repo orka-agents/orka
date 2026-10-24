@@ -129,8 +129,8 @@ rules:
   - core.orka.ai
   resources:
   - agenthosts
-  - connectorproviders
   verbs:
+  - create
   - get
   - list
   - patch
@@ -220,6 +220,16 @@ rules:
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - connectorproviders
+  verbs:
   - get
   - list
   - patch

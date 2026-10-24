@@ -50,6 +50,7 @@ type connectionView struct {
 type connectionAuthorizeView struct {
 	Connection   connectionView `json:"connection"`
 	AuthorizeURL string         `json:"authorizeURL"`
+	AgentHost    bool           `json:"agentHost"`
 }
 
 // connectionStateError is the API's state for a link that cannot be used.
@@ -87,6 +88,10 @@ func newConnectCmd() *cobra.Command {
 			if started.AuthorizeURL == "" {
 				fmt.Fprintf(out, "Connection %s to %s is already %s (%s)\n", started.Connection.Name, started.Connection.Provider, strings.ToLower(started.Connection.State), started.Connection.Mode) //nolint:errcheck
 				return nil
+			}
+			if started.AgentHost {
+				fmt.Fprintf(out, "Linking %s creates your Copilot environment on Orka. Code running there can read "+ //nolint:errcheck
+					"this account's token, whatever the link's mode.\n", args[0])
 			}
 			fmt.Fprintf(out, "Authorize %s (%s) at:\n%s\n", args[0], mode, started.AuthorizeURL) //nolint:errcheck
 			if noOpen {

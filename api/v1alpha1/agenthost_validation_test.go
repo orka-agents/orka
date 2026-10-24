@@ -86,3 +86,44 @@ func TestAgentHostTemplateSpecRefusesReordering(t *testing.T) {
 }
 
 const testTemplateImageDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// A host takes its token from a Secret or a Connection, never both, and a
+// Connection-fed host keeps its Connection for life.
+func TestAgentHostSpecTokenSourceRules(t *testing.T) {
+	validator, structural := loadSpecCELValidator(t, "core.orka.ai_agenthosts.yaml")
+	spec := func(secret, connection string) map[string]any {
+		value := map[string]any{"templateRef": map[string]any{"name": "copilotd"}}
+		if secret != "" {
+			value["githubTokenSecretRef"] = map[string]any{"name": secret}
+		}
+		if connection != "" {
+			value["githubTokenFrom"] = map[string]any{"connectionRef": map[string]any{"name": connection}}
+		}
+		return value
+	}
+	for _, test := range []struct {
+		name      string
+		new, old  map[string]any
+		wantError bool
+	}{
+		{name: "a Secret", new: spec("alice-github", "")},
+		{name: "a Connection", new: spec("", "github-alice")},
+		{name: "both", new: spec("alice-github", "github-alice"), wantError: true},
+		{name: "the same Connection", new: spec("", "github-alice"), old: spec("", "github-alice")},
+		{name: "another Connection", new: spec("", "github-bob"), old: spec("", "github-alice"), wantError: true},
+		{name: "a Connection added", new: spec("", "github-alice"), old: spec("", ""), wantError: true},
+		{name: "the Connection removed", new: spec("alice-github", ""), old: spec("", "github-alice"), wantError: true},
+		{name: "a Secret changed", new: spec("bob-github", ""), old: spec("alice-github", "")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var old any
+			if test.old != nil {
+				old = test.old
+			}
+			errs, _ := validator.Validate(t.Context(), nil, structural, test.new, old, celconfig.RuntimeCELCostBudget)
+			if (len(errs) != 0) != test.wantError {
+				t.Fatalf("errors = %v, want rejection %t", errs, test.wantError)
+			}
+		})
+	}
+}

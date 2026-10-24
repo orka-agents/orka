@@ -118,6 +118,8 @@ and serving the Agent Host Protocol from Orka itself.
 | # | Decision | Status |
 | --- | --- | --- |
 | [0035](0035-agent-hosts.md) | Run per-user agent hosts as Orka-owned Pods, relay first | Proposed |
+| [0036](0036-agent-hosts-from-connections.md) | Provision agent hosts from GitHub Connections | Proposed |
+| [0037](0037-github-sign-in.md) | Sign people in with GitHub | Proposed |
 
 ## Writing a new one
 

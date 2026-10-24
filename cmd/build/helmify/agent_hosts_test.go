@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -215,5 +216,55 @@ func TestStaticChartRejectsInvalidAgentHostValues(t *testing.T) {
 				t.Fatalf("helm render error = %v, want %q:\n%s", err, tt.want, output)
 			}
 		})
+	}
+}
+
+// Helm and Kustomize enforce the same AgentHost admission, and only the
+// controller whose identity the Deployment names may create a host fed by a
+// Connection.
+func TestStaticChartAgentHostPolicyMatchesSharedAdmission(t *testing.T) {
+	shared, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "policy", "workspace_class_use_policy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const policyKind = "kind: ValidatingAdmissionPolicy\n"
+	sharedDoc := requireRenderedDocument(t, string(shared), policyKind, "name: agenthost-template-use.orka.ai")
+	chart := requireHelmRender(t, "--show-only", "templates/workspace-class-use-policy.yaml")
+	chartDoc := requireRenderedDocument(t, chart, policyKind, "name: test-orka-agenthost-template-use")
+
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	var deployment appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(rendered), &deployment); err != nil {
+		t.Fatal(err)
+	}
+	controller := ""
+	for _, arg := range deployment.Spec.Template.Spec.Containers[0].Args {
+		if value, ok := strings.CutPrefix(arg, "--execution-mode-controller-usernames="); ok {
+			controller = value
+		}
+	}
+	if controller == "" || !strings.Contains(chartDoc, "request.userInfo.username == '"+controller+"'") {
+		t.Fatalf("the chart's AgentHost policy does not reserve Connection hosts to the controller %q", controller)
+	}
+	const kustomizeController = "system:serviceaccount:orka-system:orka-controller-manager"
+	var sharedPolicy, chartPolicy admissionregistrationv1.ValidatingAdmissionPolicy
+	sharedDoc = strings.ReplaceAll(sharedDoc, kustomizeController, controller)
+	if err := yaml.Unmarshal([]byte(sharedDoc), &sharedPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal([]byte(chartDoc), &chartPolicy); err != nil {
+		t.Fatal(err)
+	}
+	// The chart's controller check names one release's controller, so its
+	// policy covers only that release's namespace; with Kustomize there is
+	// one controller, whose watch namespace can change.
+	selector := chartPolicy.Spec.MatchConstraints.NamespaceSelector
+	releaseOnly := map[string]string{"kubernetes.io/metadata.name": "orka-test"}
+	if selector == nil || !reflect.DeepEqual(selector.MatchLabels, releaseOnly) || len(selector.MatchExpressions) != 0 {
+		t.Fatalf("the chart's AgentHost policy must cover only the release namespace: %+v", selector)
+	}
+	chartPolicy.Spec.MatchConstraints.NamespaceSelector = nil
+	if !reflect.DeepEqual(sharedPolicy.Spec, chartPolicy.Spec) {
+		t.Fatal("Helm and Kustomize enforce different AgentHost admission")
 	}
 }

@@ -204,6 +204,8 @@ func main() {
 		webhookServer,
 		admissionScheme,
 		controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
+		mgr.GetAPIReader(),
+		orkaadmission.ExecutionModeConfig{ControllerUsernames: controllerUsernames},
 	)
 	orkaadmission.RegisterExecutionModeWebhooks(
 		webhookServer,

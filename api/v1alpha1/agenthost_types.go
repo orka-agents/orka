@@ -339,6 +339,8 @@ type AgentHostSecretKeyReference struct {
 
 // AgentHostSpec requests one host from a template.
 // +kubebuilder:validation:XValidation:rule="self.templateRef == oldSelf.templateRef",message="templateRef is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.githubTokenSecretRef) || !has(self.githubTokenFrom)",message="githubTokenSecretRef and githubTokenFrom are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="has(self.githubTokenFrom) == has(oldSelf.githubTokenFrom) && (!has(self.githubTokenFrom) || self.githubTokenFrom == oldSelf.githubTokenFrom)",message="githubTokenFrom is immutable"
 type AgentHostSpec struct {
 	// TemplateRef selects an AgentHostTemplate in this namespace.
 	TemplateRef AgentHostTemplateReference `json:"templateRef"`
@@ -358,6 +360,29 @@ type AgentHostSpec struct {
 	// current, so the host sees a rotated token.
 	// +optional
 	GitHubTokenSecretRef *AgentHostSecretKeyReference `json:"githubTokenSecretRef,omitempty"`
+
+	// GitHubTokenFrom takes the user's GitHub token from their Connection to
+	// an agent-host ConnectorProvider. Orka hands the host short-lived access
+	// tokens from it and replaces them before they expire. Only the controller
+	// sets it, when it creates the host for a Connection.
+	// +optional
+	GitHubTokenFrom *AgentHostTokenSource `json:"githubTokenFrom,omitempty"`
+}
+
+// AgentHostTokenSource names where a host's GitHub token comes from.
+type AgentHostTokenSource struct {
+	// ConnectionRef names the owner's Connection in this namespace.
+	ConnectionRef LocalObjectReference `json:"connectionRef"`
+}
+
+// AgentHostGitHubAccount is the GitHub account a host's volume belongs to.
+type AgentHostGitHubAccount struct {
+	// ID is the account's numeric ID, which does not change when it is renamed.
+	ID int64 `json:"id"`
+
+	// Login is the account's login when the host was created.
+	// +kubebuilder:validation:MaxLength=39
+	Login string `json:"login"`
 }
 
 // AgentHostObjectReceipt records an object the controller created for a host.
@@ -426,6 +451,11 @@ type AgentHostStatus struct {
 	// IdleSince is when the host last reported becoming idle.
 	// +optional
 	IdleSince *metav1.Time `json:"idleSince,omitempty"`
+
+	// GitHub is the account a host fed by a Connection belongs to, pinned
+	// from its first token. A token for another account fails the host.
+	// +optional
+	GitHub *AgentHostGitHubAccount `json:"github,omitempty"`
 
 	// IdleSuspendedAt is when Orka suspended the host for being idle.
 	// +optional

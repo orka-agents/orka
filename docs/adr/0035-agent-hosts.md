@@ -10,7 +10,8 @@ Proposed. Adds `AgentHostTemplate` and `AgentHost`, which run one long-lived, si
 Execution-workspace backends (Agent Sandbox, Substrate) for suspension with less cold
 start and denser packing are left for a later record that reuses the host workload
 contract below. Serving AHP from Orka itself is a separate record (0034); this record
-does not depend on it.
+does not depend on it. [ADR 0036](0036-agent-hosts-from-connections.md) (proposed) adds
+hosts provisioned from GitHub Connections, with tokens Orka supplies and refreshes.
 
 ## Context
 

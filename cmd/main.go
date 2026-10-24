@@ -1184,6 +1184,8 @@ func main() {
 					webhookServer,
 					mgr.GetScheme(),
 					controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
+					mgr.GetAPIReader(),
+					orkaadmission.ExecutionModeConfig{ControllerUsernames: splitCommaList(executionModeControllerUsernames)},
 				)
 				setupLog.Info("registered AgentHost admission")
 			}
@@ -1385,15 +1387,20 @@ func main() {
 	// chatLinkedAccounts lets chat and the compatibility proxies run the
 	// GitHub built-ins as the signed-in person; nil until connectors exist.
 	var chatLinkedAccounts api.LinkedAccountsFactory
+	// hostCredentials feeds agent hosts from Connections; it shares the tool
+	// path's source, so the two never refresh the same grant twice.
+	var hostCredentials controller.AgentHostCredentials
 	if connectorsEnabled {
 		// Connection-mode outbound access resolves a person's credential only
 		// here, in the controller. Worker Pods keep a nil source and fail closed.
-		outboundAccessResolver.Connections = &credential.Source{
+		connectionCredentials := &credential.Source{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
 			Credentials: sqliteStore,
 			OAuth:       connectorOAuthClient,
 		}
+		outboundAccessResolver.Connections = connectionCredentials
+		hostCredentials = connectionCredentials
 		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
 			// Fresh point reads from the API server; namespace-wide scans
 			// (providers, the authoritative Connection listing) from the cache.
@@ -1897,10 +1904,24 @@ func main() {
 				Namespace: currentPodNamespace(),
 				PodLabels: controllerLabels,
 			},
-			IdleStatus: agenthost.HTTPStatusReader{},
+			IdleStatus:      agenthost.HTTPStatusReader{},
+			HostCredentials: hostCredentials,
+			GitHubAccounts:  agenthost.GitHubAccounts{},
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentHost")
 			os.Exit(1)
+		}
+		// With connectors, linking the agent-host provider gives a person a host.
+		if hostCredentials != nil {
+			if err := (&controller.AgentHostProvisioner{
+				Client:          mgr.GetClient(),
+				HostCredentials: hostCredentials,
+				GitHubAccounts:  agenthost.GitHubAccounts{},
+				Recorder:        mgr.GetEventRecorder("agenthost-provisioner"),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "AgentHostProvisioner")
+				os.Exit(1)
+			}
 		}
 	}
 

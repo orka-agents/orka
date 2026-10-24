@@ -117,15 +117,23 @@ spec:
       operations: ["CREATE", "UPDATE"]
       resources: ["agenthosts"]
   validations:
-  # templateRef is immutable, so only creation selects a template.
+  # templateRef is immutable, so only creation selects a template. A host
+  # fed by a Connection takes the template its provider names instead.
   - expression: >-
-      request.operation != 'CREATE' ||
+      request.operation != 'CREATE' || has(object.spec.githubTokenFrom) ||
       authorizer.group('core.orka.ai')
         .resource('agenthosttemplates')
         .namespace(request.namespace)
         .name(object.spec.templateRef.name)
         .check('use').allowed()
     message: caller is not authorized to use the selected AgentHostTemplate
+    reason: Forbidden
+  # Only the controller creates a host fed by a Connection; githubTokenFrom
+  # is immutable, so creation is the only time it is set.
+  - expression: >-
+      !has(object.spec.githubTokenFrom) || request.operation != 'CREATE' ||
+      request.userInfo.username == 'system:serviceaccount:orka-system:orka-controller-manager'
+    message: only the Orka controller may create an AgentHost that takes its token from a Connection
     reason: Forbidden
   # The controller copies the token Secret into the host, so only someone who
   # may read it may name it.
