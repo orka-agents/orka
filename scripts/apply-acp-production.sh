@@ -53,6 +53,7 @@ namespace_resource="${work_dir}/namespace.json"
 namespace_metadata_patch="${work_dir}/namespace-metadata-patch.json"
 existing_namespace="${work_dir}/existing-namespace.json"
 existing_controller="${work_dir}/existing-controller.json"
+existing_controller_pods="${work_dir}/existing-controller-pods.json"
 runtime_config="${work_dir}/runtime-images-configmap.json"
 admission_runtime_manifest="${work_dir}/admission-runtime-manifest.json"
 workload_manifest="${work_dir}/workload-manifest.json"
@@ -290,6 +291,42 @@ validate_existing_controller_identity() {
       select(startswith("--watch-namespace="))] == ["--watch-namespace=orka-system"])
   ' "${existing_controller}" >/dev/null; then
     echo "implicit, legacy, differently scoped, or opposite-mode controllers cannot be upgraded in place; settle or retire the existing installation and deploy harness-v2 in a fresh namespace" >&2
+    return 1
+  fi
+}
+
+# The controller Deployment uses the Recreate strategy, so its replacement Pod
+# starts only after every old Pod exits, and an old Pod's preStop upgrade drain
+# may use its whole termination grace period. Wait for the longest grace period
+# among the applied Deployment, the live Deployment captured by
+# validate_existing_controller_identity, and the existing controller Pods
+# (including any still terminating from an earlier rollout), plus a 3m startup
+# margin, and never less than 5m.
+controller_rollout_timeout() {
+  local selector
+  if ! selector="$(jq -er '
+    .items[0].spec.selector.matchLabels // {}
+    | select(length > 0)
+    | to_entries | map("\(.key)=\(.value)") | join(",")
+  ' "${controller_manifest}")"; then
+    echo "controller Deployment must select its Pods with matchLabels" >&2
+    return 1
+  fi
+  if ! "${kubectl}" -n orka-system get pods -l "${selector}" -o json >"${existing_controller_pods}"; then
+    echo "unable to inspect the existing orka-system/orka-controller-manager Pods" >&2
+    return 1
+  fi
+  if ! jq -enr \
+    --slurpfile applied "${controller_manifest}" \
+    --slurpfile live "${existing_controller}" \
+    --slurpfile pods "${existing_controller_pods}" '
+      [(($applied[0].items[0], $live[]) | .spec.template.spec.terminationGracePeriodSeconds),
+       ($pods[0].items[]? | .spec.terminationGracePeriodSeconds)]
+      | map(if . == null then 30 else . end)
+      | select(all(type == "number" and . >= 0 and . == floor))
+      | "\([max + 180, 300] | max)s"
+    '; then
+    echo "controller terminationGracePeriodSeconds must be a non-negative integer" >&2
     return 1
   fi
 }
@@ -606,6 +643,7 @@ EOF_ADMISSION_HANDLERS
 # desired generation without rotating an existing snapshot key.
 bash "${script_dir}/lib/ensure-static-mode-namespace.sh" "${kubectl}" orka-system harness-v2
 validate_existing_controller_identity
+controller_rollout_wait="$(controller_rollout_timeout)"
 # Preserve the immutable mode claim as an atomic precondition while converging
 # the remaining platform labels. This cannot relabel or adopt a namespace that
 # changes identity after the preflight.
@@ -624,4 +662,5 @@ render_admission_webhooks
 "${kubectl}" apply -f "${workload_prerequisite_manifest}"
 wait_for_workload_dependencies
 "${kubectl}" apply -f "${controller_manifest}"
-"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager --timeout=2m >/dev/null
+"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager \
+  --timeout="${controller_rollout_wait}" >/dev/null
