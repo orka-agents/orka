@@ -7,10 +7,16 @@ import (
 )
 
 func (s *Store) RevokeTaskJob(ctx context.Context, identity store.TaskJobIdentity) error {
+	return writeOperationErr(ctx, s, "RevokeTaskJob", func(ctx context.Context) error {
+		return s.revokeTaskJobWrite(ctx, identity)
+	})
+}
+
+func (s *Store) revokeTaskJobWrite(ctx context.Context, identity store.TaskJobIdentity) error {
 	if identity.Namespace == "" || identity.TaskUID == "" || identity.JobUID == "" {
 		return store.ValidationErrorf("task Job identity is incomplete")
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO task_job_revocations(namespace, task_uid, job_uid) VALUES (?, ?, ?)
 		 ON CONFLICT(namespace, task_uid, job_uid) DO NOTHING`,
 		identity.Namespace, identity.TaskUID, identity.JobUID,
@@ -22,15 +28,21 @@ func (s *Store) RevokeTaskJob(ctx context.Context, identity store.TaskJobIdentit
 // namespace generation replaces the removed Task generation, so in-flight
 // authorization cannot reuse its old generation after reclamation or name reuse.
 func (s *Store) DeleteTaskJobRevocations(ctx context.Context, namespace, taskName, taskUID string) error {
+	return writeOperationErr(ctx, s, "DeleteTaskJobRevocations", func(ctx context.Context) error {
+		return s.deleteTaskJobRevocationsWrite(ctx, namespace, taskName, taskUID)
+	})
+}
+
+func (s *Store) deleteTaskJobRevocationsWrite(ctx context.Context, namespace, taskName, taskUID string) error {
 	if namespace == "" || taskName == "" || taskUID == "" {
 		return store.ValidationErrorf("task identity is incomplete")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
+	if err := advanceTaskDataCleanupGeneration(ctx, tx.Tx, namespace); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM task_job_revocations WHERE namespace = ? AND task_uid = ?`, namespace, taskUID); err != nil {

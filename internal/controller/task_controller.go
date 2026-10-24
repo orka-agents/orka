@@ -655,7 +655,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
-			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
+			if err := r.ArtifactStore.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}

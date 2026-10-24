@@ -122,6 +122,12 @@ func (s *Store) ApplyScanTaskIngestion(ctx context.Context, ingestion *store.Sca
 }
 
 func (s *Store) CompleteScanTaskIngestion(ctx context.Context, task store.ScanTaskIdentity) error {
+	return writeOperationErr(ctx, s, "CompleteScanTaskIngestion", func(ctx context.Context) error {
+		return s.securityWriteStore(ctx).completeScanTaskIngestionWrite(ctx, task)
+	})
+}
+
+func (s *Store) completeScanTaskIngestionWrite(ctx context.Context, task store.ScanTaskIdentity) error {
 	result, err := s.securityDB().ExecContext(ctx, `UPDATE security_scan_task_ingestions SET completed = TRUE
 		WHERE namespace = ? AND scan_run_id = ? AND task_name = ? AND task_uid = ? AND repository_scan = ? AND stage = ? AND slice_id = ?`,
 		task.Namespace, task.ScanRunID, task.TaskName, task.TaskUID, task.RepositoryScan, task.Stage, task.SliceID)

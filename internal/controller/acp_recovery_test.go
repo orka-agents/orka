@@ -1635,7 +1635,7 @@ func TestDeletingRestoredACPTaskReclaimsSourcePromptAttemptAndRemovesFinalizer(t
 			if err != nil {
 				t.Fatal(err)
 			}
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1))
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1), persistence)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
 			if err != nil {
@@ -2947,7 +2947,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old")
+	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old", sqliteStore)
 	oldFence, err := oldEpochs.CurrentFence(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -3059,7 +3059,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new")
+	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new", sqliteStore)
 	defer stopNewEpoch()
 	newContinuity := newACPRecoveryContinuity(t, restartedStore, sqliteStore, control.SessionUID)
 	dispatcher := &ACPDispatcher{
@@ -3451,9 +3451,14 @@ func newACPRecoveryContinuity(t *testing.T, controls store.DurableControlStore, 
 	return continuity
 }
 
-func startACPRecoveryEpochManager(t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string) (*ControllerEpochManager, func()) {
+func startACPRecoveryEpochManager(
+	t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string, mirrors ...store.ControllerEpochMirror,
+) (*ControllerEpochManager, func()) {
 	t.Helper()
 	manager := NewControllerEpochManager(epochStore, holder)
+	for _, mirror := range mirrors {
+		manager.WithMirror(mirror)
+	}
 	epochCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- manager.Start(epochCtx) }()

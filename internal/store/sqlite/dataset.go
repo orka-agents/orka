@@ -87,39 +87,49 @@ func (s *Store) DatasetInfo() (DatasetInfo, error) {
 	if record.origin != datasetOriginNew || record.complete {
 		return info, nil
 	}
-	// Use SQLite's object type, not formatting of its CREATE statement. The
-	// validated layout may contain equivalent SQL with newlines/quoted names.
-	rows, err := tx.Query(`SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' AND name <> 'store_dataset'`)
+	populated, err := datasetHasRecords(context.Background(), tx)
 	if err != nil {
 		return DatasetInfo{}, err
+	}
+	info.CanBootstrapSnapshotKey = !populated
+	return info, nil
+}
+
+// datasetHasRecords reports whether any table other than the dataset identity
+// holds a row: an application, artifact or control record.
+func datasetHasRecords(ctx context.Context, tx *sql.Tx) (bool, error) {
+	// Use SQLite's object type, not formatting of its CREATE statement. The
+	// validated layout may contain equivalent SQL with newlines/quoted names.
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' AND name <> 'store_dataset'`)
+	if err != nil {
+		return false, err
 	}
 	var tables []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			_ = rows.Close()
-			return DatasetInfo{}, err
+			return false, err
 		}
 		tables = append(tables, name)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return DatasetInfo{}, err
+		return false, err
 	}
 	if err := rows.Close(); err != nil {
-		return DatasetInfo{}, err
+		return false, err
 	}
 	for _, name := range tables {
 		var populated bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM "` + strings.ReplaceAll(name, `"`, `""`) + `" LIMIT 1)`).Scan(&populated); err != nil {
-			return DatasetInfo{}, err
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM "`+strings.ReplaceAll(name, `"`, `""`)+`" LIMIT 1)`).Scan(&populated); err != nil {
+			return false, err
 		}
 		if populated {
-			return info, nil
+			return true, nil
 		}
 	}
-	info.CanBootstrapSnapshotKey = true
-	return info, nil
+	return false, nil
 }
 
 // completeDatasetBootstrap records successful key activation before controller
