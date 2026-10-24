@@ -389,3 +389,16 @@ A host that fails for a missing template or token has its Pod stopped and keeps 
 volume. When the token's Secret or Connection is gone, Orka also deletes its copy.
 
 Deleting an AgentHost removes every object Orka created for it, and only those.
+
+### The Copilot app cannot connect
+
+If a host is Ready but the Copilot app reports `Mission Control connect failed (HTTP 403)`,
+GitHub refused the connection before it reached the host. GitHub refuses every connection
+to a host while one of its sessions is in a repository you cannot push to, such as an
+archived one, so sessions in other repositories are blocked too. Restarting the host does
+not help: it registers again as the same environment.
+
+Restore push access to that repository, for example by unarchiving it, then connect and
+delete the session in the app. You can archive the repository again afterwards. If push
+access cannot come back, `orka host delete --yes` replaces the host with one that registers
+as a new environment, without the old host's sessions and clones.
