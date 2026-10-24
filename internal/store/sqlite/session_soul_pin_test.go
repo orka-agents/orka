@@ -19,7 +19,7 @@ func TestSessionSoulPinIsFencedHiddenAndIdempotent(t *testing.T) {
 	}
 	digest := agentcontext.Digest("frozen revision")
 	for range 2 {
-		if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "first", "first-uid", digest); err != nil {
+		if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "first", OwnerUID: "first-uid", Now: time.Now().UTC()}, digest); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -38,22 +38,22 @@ func TestSessionSoulPinIsFencedHiddenAndIdempotent(t *testing.T) {
 	if err := s.ReleaseLock(ctx, "team", "s", "first", "first-uid"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, "team", "s", "second", "second-uid"); err != nil {
+	if err := s.AcquireLock(ctx, "team", "s", "second", "second-uid", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "first", "first-uid", digest); !errors.Is(err, store.ErrConflict) {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "first", OwnerUID: "first-uid", Now: time.Now().UTC()}, digest); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("old owner pin error = %v", err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "second", "second-uid", agentcontext.Digest("different revision")); !errors.Is(err, store.ErrSessionConfigurationMismatch) {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "second", OwnerUID: "second-uid", Now: time.Now().UTC()}, agentcontext.Digest("different revision")); !errors.Is(err, store.ErrSessionConfigurationMismatch) {
 		t.Fatalf("different revision pin error = %v", err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "second", "second-uid", digest); err != nil {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "second", OwnerUID: "second-uid", Now: time.Now().UTC()}, digest); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReleaseLock(ctx, "team", "s", "second", "second-uid"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteSession(ctx, "team", "s"); err != nil {
+	if err := s.DeleteSession(ctx, "team", "s", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_messages WHERE namespace = 'team' AND session_name = 's'`).Scan(&anchors); err != nil || anchors != 0 {
@@ -75,7 +75,7 @@ func TestSessionSoulPinRejectsLegacyAndUnownedSessions(t *testing.T) {
 			owner, uid := "owner", "uid"
 			switch scenario {
 			case "legacy transcript":
-				if err := s.AppendMessagesWithLock(ctx, "team", "s", owner, uid, []store.SessionMessage{{Role: "user", Content: "legacy turn"}}); err != nil {
+				if err := s.AppendMessagesWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: owner, OwnerUID: uid, Now: time.Now().UTC()}, []store.SessionMessage{{Role: "user", Content: "legacy turn"}}); err != nil {
 					t.Fatal(err)
 				}
 			case "wrong name":
@@ -99,7 +99,7 @@ func TestSessionSoulPinRejectsLegacyAndUnownedSessions(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", owner, uid, agentcontext.Digest("persona")); err == nil {
+			if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: owner, OwnerUID: uid, Now: time.Now().UTC()}, agentcontext.Digest("persona")); err == nil {
 				t.Fatal("invalid pin was accepted")
 			}
 			var anchors int
@@ -118,15 +118,15 @@ func TestSessionSoulPinHonorsExistingCanonicalRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := agentcontext.Digest("existing revision")
-	if err := s.AppendMessagesWithLock(ctx, "team", "s", "owner", "uid", []store.SessionMessage{{
+	if err := s.AppendMessagesWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "owner", OwnerUID: "uid", Now: time.Now().UTC()}, []store.SessionMessage{{
 		ID: "existing-turn", Role: "user", Content: "existing prompt", Metadata: map[string]string{store.SessionSoulDigestMetadata: digest},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "owner", "uid", digest); err != nil {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "owner", OwnerUID: "uid", Now: time.Now().UTC()}, digest); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "owner", "uid", agentcontext.Digest("replacement")); !errors.Is(err, store.ErrSessionConfigurationMismatch) {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "owner", OwnerUID: "uid", Now: time.Now().UTC()}, agentcontext.Digest("replacement")); !errors.Is(err, store.ErrSessionConfigurationMismatch) {
 		t.Fatalf("canonical revision changed: %v", err)
 	}
 	var anchors int

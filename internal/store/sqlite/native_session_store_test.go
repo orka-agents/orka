@@ -140,13 +140,12 @@ func TestNativeSessionRejectsChatTurnWithoutChangingCheckpoint(t *testing.T) {
 			}
 			before, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
 			require.NoError(t, err)
-			created, err := s.AcquireChatTurn(t.Context(), &store.SessionRecord{
+			created, err := s.AcquireChatTurn(t.Context(), store.AcquireChatTurnRequest{Session: &store.SessionRecord{
 				Namespace: request.Namespace, Name: request.SessionName, SessionType: store.SessionTypeChat,
-			}, "unrelated-chat", time.Now().Add(time.Minute))
+			}, TurnID: "unrelated-chat", Now: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute)})
 			require.False(t, created)
 			require.ErrorIs(t, err, store.ErrConflict)
-			require.ErrorIs(t, s.AcquireLockUntil(t.Context(), request.Namespace, request.SessionName,
-				"timed-task", "timed-task-uid", time.Now().Add(time.Minute)), store.ErrValidation)
+			require.ErrorIs(t, s.AcquireLockUntil(t.Context(), request.Namespace, request.SessionName, "timed-task", "timed-task-uid", time.Now().UTC(), time.Now().Add(time.Minute)), store.ErrValidation)
 			after, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
 			require.NoError(t, err)
 			require.Equal(t, before, after)
@@ -157,7 +156,7 @@ func TestNativeSessionRejectsChatTurnWithoutChangingCheckpoint(t *testing.T) {
 			require.Zero(t, session.MessageCount)
 			require.Empty(t, session.Messages)
 			// Native Tasks use the ACP mutation lease, never a legacy Task lock.
-			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"), store.ErrValidation)
+			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid", time.Now().UTC()), store.ErrValidation)
 			require.NoError(t, s.ReleaseLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"))
 		})
 	}
@@ -246,7 +245,7 @@ func TestNativeSessionCleanupErasesPrivateStateAndPreventsResurrection(t *testin
 				require.ErrorIs(t, err, store.ErrConflict)
 				require.NoError(t, s.CompleteSessionCleanup(ctx, store.CompleteSessionCleanupRequest{Namespace: "tenant", SessionName: "deleted", OperationID: intent.OperationID, OperationDigest: intent.OperationDigest}))
 			} else {
-				require.NoError(t, s.DeleteSession(ctx, "tenant", "deleted"))
+				require.NoError(t, s.DeleteSession(ctx, "tenant", "deleted", time.Now().UTC()))
 			}
 			for _, table := range []string{"native_session_snapshots", "native_session_operations"} {
 				var count int
@@ -256,7 +255,7 @@ func TestNativeSessionCleanupErasesPrivateStateAndPreventsResurrection(t *testin
 			_, err = s.StageNativeSessionImport(ctx, request)
 			require.ErrorIs(t, err, store.ErrConflict)
 			require.ErrorIs(t, s.CreateSession(ctx, &store.SessionRecord{Namespace: "tenant", Name: "deleted", SessionType: "task"}), store.ErrConflict)
-			_, err = s.AcquireChatTurn(ctx, &store.SessionRecord{Namespace: "tenant", Name: "deleted", SessionType: store.SessionTypeChat}, "turn", time.Now().Add(time.Minute))
+			_, err = s.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: &store.SessionRecord{Namespace: "tenant", Name: "deleted", SessionType: store.SessionTypeChat}, TurnID: "turn", Now: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute)})
 			require.ErrorIs(t, err, store.ErrConflict)
 			var name string
 			err = s.db.QueryRow(`SELECT name FROM sessions WHERE namespace='tenant' AND name='deleted'`).Scan(&name)
@@ -286,7 +285,7 @@ func TestNativeSessionDeletedNameSurvivesRestart(t *testing.T) {
 	request := nativeImportFixture(t, "deleted-before-restart", "private")
 	_, err := s.StageNativeSessionImport(t.Context(), request)
 	require.NoError(t, err)
-	require.NoError(t, s.DeleteSession(t.Context(), request.Namespace, request.SessionName))
+	require.NoError(t, s.DeleteSession(t.Context(), request.Namespace, request.SessionName, time.Now().UTC()))
 	require.NoError(t, s.db.Close())
 	restarted := nativeTestStore(t, path)
 	_, err = restarted.StageNativeSessionImport(t.Context(), request)
@@ -439,11 +438,11 @@ func TestNativeSessionRejectsLegacyTaskMutation(t *testing.T) {
 			before, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
 			require.NoError(t, err)
 			require.ErrorIs(t, s.AppendMessages(t.Context(), request.Namespace, request.SessionName, []store.SessionMessage{{Role: "assistant", Content: "unowned legacy result"}}), store.ErrValidation)
-			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "legacy-task", "legacy-uid"), store.ErrValidation)
+			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "legacy-task", "legacy-uid", time.Now().UTC()), store.ErrValidation)
 			// A previously acquired or corrupt legacy lock must not authorize append.
 			_, err = s.db.ExecContext(t.Context(), `UPDATE sessions SET active_task='legacy-task',active_task_uid='legacy-uid' WHERE namespace=? AND name=?`, request.Namespace, request.SessionName)
 			require.NoError(t, err)
-			require.ErrorIs(t, s.AppendMessagesWithLock(t.Context(), request.Namespace, request.SessionName, "legacy-task", "legacy-uid", []store.SessionMessage{{Role: "assistant", Content: "legacy result"}}), store.ErrValidation)
+			require.ErrorIs(t, s.AppendMessagesWithLock(t.Context(), store.SessionOwnerWrite{Namespace: request.Namespace, Name: request.SessionName, OwnerName: "legacy-task", OwnerUID: "legacy-uid", Now: time.Now().UTC()}, []store.SessionMessage{{Role: "assistant", Content: "legacy result"}}), store.ErrValidation)
 			after, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
 			require.NoError(t, err)
 			require.Equal(t, before, after)
