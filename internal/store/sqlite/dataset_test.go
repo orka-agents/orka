@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,7 +91,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, info.ID)
 	require.False(t, info.CanBootstrapSnapshotKey)
-	require.Equal(t, before, applicationRows(t, s.db))
+	require.Equal(t, withSchema169Tables(before), applicationRows(t, s.db))
 	var version int
 	require.NoError(t, s.db.QueryRow(`PRAGMA user_version`).Scan(&version))
 	require.Equal(t, SchemaVersion, version)
@@ -247,7 +248,7 @@ func TestDatasetUnbootstrappedDataRequiresExistingKey(t *testing.T) {
 
 func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 	for name, statement := range map[string]string{
-		"newer":               `PRAGMA user_version=2`,
+		"newer":               fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion+1),
 		"unknown":             `PRAGMA user_version=2147483647`,
 		"negative":            `PRAGMA user_version=-1`,
 		"version reset":       `PRAGMA user_version=0`,

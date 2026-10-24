@@ -3,4 +3,6 @@ kind: Kustomization
 resources:
 - acp_workspace_lease_protection.yaml
 - gateway_task_protection.yaml
+- memory_backend_protection.yaml
 - namespace_mode_protection.yaml
+- task_worker_provenance.yaml

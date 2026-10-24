@@ -92,6 +92,9 @@ replacements:
       group: rbac.authorization.k8s.io
       version: v1
       kind: ClusterRoleBinding
+    # The provenance admitter binds Kubernetes controller Users, not a ServiceAccount.
+    reject:
+    - name: task-pod-provenance-admitter
     fieldPaths:
     - subjects.0.namespace
   - select:

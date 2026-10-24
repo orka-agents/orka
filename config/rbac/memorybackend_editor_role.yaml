@@ -1,0 +1,28 @@
+# This role is not used by Orka itself. It grants ordinary lifecycle/spec
+# management without permission to forge controller-owned status.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: memorybackend-editor-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get

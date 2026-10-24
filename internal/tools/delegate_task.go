@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,12 +25,8 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	"github.com/orka-agents/orka/internal/store"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/transactiontoken"
 	"go.opentelemetry.io/otel/trace"
-)
-
-const (
-	delegateRequestOperationField  = "operation"
-	delegateRequestParentTaskField = "parentTask"
 )
 
 // DelegateTaskSubjectTokenResolver resolves the exact subject token authorized
@@ -814,115 +809,55 @@ func (t *DelegateTaskTool) shouldPrepareChildTransactionToken(
 func (t *DelegateTaskTool) prepareChildTransactionToken(
 	ctx context.Context,
 	parentTask, childTask *corev1alpha1.Task,
-	operation, agent string,
-) error {
+) (*childTransactionTokenPreparation, error) {
 	toolCtx := GetToolContext(ctx)
 	if toolCtx == nil || !toolCtx.Brokered {
-		return prepareChildTransactionToken(ctx, t.k8sClient, parentTask, childTask, operation, agent)
+		return prepareChildTransactionToken(ctx, t.k8sClient, parentTask, childTask)
 	}
-	return t.prepareBrokeredChildTransactionToken(ctx, parentTask, childTask, operation, agent)
+	settings, enabled, err := t.brokeredChildTransactionTokenSettings(ctx, parentTask)
+	if err != nil || !enabled {
+		return nil, err
+	}
+	return prepareChildTransactionTokenWithSettings(ctx, t.k8sClient, parentTask, childTask, settings)
 }
 
-func (t *DelegateTaskTool) prepareBrokeredChildTransactionToken(
+// brokeredChildTransactionTokenSettings resolves the parent's request-scoped
+// subject token in the controller. The Task controller performs the actual
+// exchange once the child exists and owns its renewal authority.
+func (t *DelegateTaskTool) brokeredChildTransactionTokenSettings(
 	ctx context.Context,
-	parentTask, childTask *corev1alpha1.Task,
-	operation, agent string,
-) error {
+	parentTask *corev1alpha1.Task,
+) (childTransactionTokenSettings, bool, error) {
 	config := t.brokeredTransactionExchange
 	if config == nil {
-		return fmt.Errorf("brokered delegate_task transaction-token exchange configuration is not registered")
+		return childTransactionTokenSettings{}, false, fmt.Errorf("brokered delegate_task transaction-token exchange configuration is not registered")
 	}
 	if !config.TTS.Enabled() || parentTask == nil || parentTask.Spec.Transaction == nil {
-		return nil
-	}
-	if parentTask.UID == "" {
-		return fmt.Errorf("parent task UID is required for child transaction token exchange")
-	}
-	if err := requireSameNamespaceChildTokenExchange(parentTask, childTask); err != nil {
-		return err
-	}
-	if config.Exchanger == nil {
-		return fmt.Errorf("brokered delegate_task transaction-token exchanger is not configured")
+		return childTransactionTokenSettings{}, false, nil
 	}
 	if config.ResolveSubjectToken == nil {
-		return fmt.Errorf("brokered delegate_task request-scoped subject-token resolver is not configured")
+		return childTransactionTokenSettings{}, false, fmt.Errorf("brokered delegate_task request-scoped subject-token resolver is not configured")
 	}
-
 	scope := strings.TrimSpace(config.ChildScope)
 	if scope == "" {
-		return fmt.Errorf("context-token child scope is required when brokered TTS is enabled for child task tokens")
-	}
-	if err := validateChildTransactionScope(parentTask, scope); err != nil {
-		return err
+		return childTransactionTokenSettings{}, false, fmt.Errorf("context-token child scope is required when brokered TTS is enabled for child task tokens")
 	}
 	subjectToken, err := config.ResolveSubjectToken(ctx, parentTask, config.TTS.TokenSource)
 	if err != nil {
-		return fmt.Errorf("resolving brokered child transaction subject token: %w", err)
+		return childTransactionTokenSettings{}, false, fmt.Errorf("resolving brokered child transaction subject token: %w", err)
 	}
-	if strings.TrimSpace(subjectToken) == "" {
-		return fmt.Errorf("resolving brokered child transaction subject token: resolved token is empty")
+	subjectToken = strings.TrimSpace(subjectToken)
+	if subjectToken == "" {
+		return childTransactionTokenSettings{}, false, fmt.Errorf("resolving brokered child transaction subject token: resolved token is empty")
 	}
 	subjectTokenType := strings.TrimSpace(config.SubjectTokenType)
 	if subjectTokenType == "" {
 		subjectTokenType = contexttoken.SubjectTokenTypeForSource(config.TTS.TokenSource)
 	}
-
-	requestDetails := map[string]any{
-		delegateRequestOperationField:  operation,
-		delegateRequestParentTaskField: parentTask.Name,
-		namespaceField:                 childTask.Namespace,
+	if err := transactiontoken.ValidateSubjectTokenType(subjectTokenType); err != nil {
+		return childTransactionTokenSettings{}, false, err
 	}
-	if agent != "" {
-		requestDetails["agent"] = agent
-	}
-	if parentTask.Spec.Transaction.ID != "" {
-		requestDetails["txn"] = parentTask.Spec.Transaction.ID
-	}
-	token, err := config.Exchanger.Exchange(ctx, contexttoken.ExchangeRequest{
-		SubjectToken:     subjectToken,
-		SubjectTokenType: subjectTokenType,
-		Scope:            scope,
-		RequestedTTL:     config.TTS.ChildTokenTTL,
-		RequestDetails:   requestDetails,
-	})
-	if err != nil {
-		return fmt.Errorf("exchanging child transaction token: %w", err)
-	}
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return fmt.Errorf("exchanging child transaction token: TTS returned an empty token")
-	}
-
-	secretName, err := childTransactionTokenSecretName(parentTask.Name)
-	if err != nil {
-		return err
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            secretName,
-			Namespace:       childTask.Namespace,
-			OwnerReferences: childTokenSecretOwnerReferences(parentTask, childTask),
-			Labels: map[string]string{
-				labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
-			},
-			Annotations: map[string]string{
-				labels.AnnotationParentTaskName: parentTask.Name,
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"token": []byte(token),
-		},
-	}
-	if err := t.k8sClient.Create(ctx, secret); err != nil {
-		return fmt.Errorf("creating child transaction token secret: %w", err)
-	}
-	stampChildTransactionScope(childTask, scope)
-	if childTask.Annotations == nil {
-		childTask.Annotations = map[string]string{}
-	}
-	childTask.Annotations[labels.AnnotationTransactionTokenSecret] = secretName
-	return nil
+	return childTransactionTokenSettings{subjectToken: subjectToken, subjectTokenType: subjectTokenType, scope: scope}, true, nil
 }
 
 // Execute delegates a task to another agent
@@ -947,16 +882,21 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if err != nil {
 		return "", err
 	}
+	var childTokenPreparation *childTransactionTokenPreparation
 	if childTokenExchangeEnabled {
 		markChildTransactionTokenPending(childTask)
-		if err := t.prepareChildTransactionToken(ctx, dc.parentTask, childTask, "delegateTask", dc.args.Agent); err != nil {
+		childTokenPreparation, err = t.prepareChildTransactionToken(ctx, dc.parentTask, childTask)
+		if err != nil {
 			return "", err
+		}
+		if childTokenPreparation == nil {
+			return "", fmt.Errorf("child transaction token exchange became unavailable during preparation")
 		}
 	}
 
 	if err := t.k8sClient.Create(ctx, childTask); err != nil {
 		if childTokenExchangeEnabled {
-			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
+			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask, childTokenPreparation)
 		}
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}
@@ -964,12 +904,8 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	sealTaskCreate(ctx, GetToolContext(ctx), childTask)
 
 	if childTokenExchangeEnabled {
-		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, childTask); err != nil {
-			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask)
-			return "", err
-		}
-		if err := patchPreparedChildTransactionToken(ctx, t.k8sClient, childTask); err != nil {
-			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask)
+		if err := completeChildTransactionToken(ctx, t.k8sClient, childTask, childTokenPreparation); err != nil {
+			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask, childTokenPreparation)
 			return "", err
 		}
 	}
@@ -1012,34 +948,6 @@ func markChildTransactionTokenPending(childTask *corev1alpha1.Task) {
 	}
 	childTask.Annotations[labels.AnnotationTransactionTokenPending] = trueStr
 	childTask.Annotations[labels.AnnotationTransactionTokenPendingSince] = time.Now().Format(time.RFC3339Nano)
-}
-
-func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) error {
-	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": map[string]any{
-				labels.AnnotationTransactionTokenPending:      nil,
-				labels.AnnotationTransactionTokenPendingSince: nil,
-			},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("encoding child task transaction token metadata patch: %w", err)
-	}
-	target := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      childTask.Name,
-			Namespace: childTask.Namespace,
-		},
-	}
-	if err := k8sClient.Patch(ctx, target, client.RawPatch(types.MergePatchType, patch)); err != nil {
-		return fmt.Errorf("updating child task transaction token metadata: %w", err)
-	}
-	if childTask.Annotations != nil {
-		delete(childTask.Annotations, labels.AnnotationTransactionTokenPending)
-		delete(childTask.Annotations, labels.AnnotationTransactionTokenPendingSince)
-	}
-	return nil
 }
 
 // Ensure DelegateTaskTool implements Tool

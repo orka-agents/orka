@@ -30,6 +30,7 @@ import (
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -75,13 +76,31 @@ GET /api/v1/gateway-events/:id | get gateway.orka.ai:gatewayevents protected
 GET /api/v1/gateway-deliveries | list gateway.orka.ai:gatewaydeliveries
 GET /api/v1/gateway-deliveries/:id | get gateway.orka.ai:gatewaydeliveries protected
 POST /api/v1/gateway-deliveries/:id/retry | update gateway.orka.ai:gatewaydeliveries protected
+GET /api/v1/memory-backends | list core.orka.ai:memorybackends
+POST /api/v1/memory-backends | create core.orka.ai:memorybackends
+GET /api/v1/memory-backends/default | get core.orka.ai:memorybackends default
+PUT /api/v1/memory-backends/default | update core.orka.ai:memorybackends default
+DELETE /api/v1/memory-backends/default | delete core.orka.ai:memorybackends default
+GET /api/v1/memory-backends/default/status | get core.orka.ai:memorybackends default
+POST /api/v1/memory-backends/default/activate | update core.orka.ai:memorybackends default
+POST /api/v1/memory-backends/default/decommission | update core.orka.ai:memorybackends default
+POST /api/v1/memory-backends/default/force-orphan | update core.orka.ai:memorybackends default; delete core.orka.ai:memorybackends default
+POST /api/v1/memory-backends/default/restore-legacy | update core.orka.ai:memorybackends default; delete core.orka.ai:memorybackends default
+POST /api/v1/memory-backends/default/checkpoints | get core.orka.ai:memorybackends default; update core.orka.ai:memorybackends default
+POST /api/v1/memory-backends/default/purge | get core.orka.ai:memorybackends default; update core.orka.ai:memorybackends default
 GET /api/v1/memories | list core.orka.ai:memories
 POST /api/v1/memories | create core.orka.ai:memories
+POST /api/v1/memories/search | list core.orka.ai:memories
 GET /api/v1/memories/:id | get core.orka.ai:memories protected
 PUT /api/v1/memories/:id | update core.orka.ai:memories protected
 DELETE /api/v1/memories/:id | delete core.orka.ai:memories protected
 POST /api/v1/memories/:id/disable | update core.orka.ai:memories protected
 POST /api/v1/memories/:id/enable | update core.orka.ai:memories protected
+POST /api/v1/memories/:id/trust | update core.orka.ai:memories/trust protected
+GET /api/v1/memory-operations | list core.orka.ai:memoryoperations
+GET /api/v1/memory-operations/:id | get core.orka.ai:memoryoperations protected
+POST /api/v1/memory-operations/:id/retry | update core.orka.ai:memoryoperations protected; get core.orka.ai:memorybackends default; update core.orka.ai:memorybackends default
+POST /api/v1/memory-operations/:id/abandon | update core.orka.ai:memoryoperations protected; get core.orka.ai:memorybackends default; update core.orka.ai:memorybackends default
 GET /api/v1/memory-proposals | list core.orka.ai:memoryproposals
 POST /api/v1/memory-proposals | create core.orka.ai:memoryproposals
 GET /api/v1/memory-proposals/:id | get core.orka.ai:memoryproposals protected
@@ -326,9 +345,16 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 	f.store = sqlite.NewStore(f.db, ":memory:")
 	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "protected", Namespace: "default", Content: "protected-content"}))
 	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "protected", Namespace: "default", Type: "memory", Title: "protected-content", Content: "protected-content"}))
+	// Mirror production memory wiring: legacy governance changes are audited
+	// against the namespace identity the resolver reads.
+	memoryService := &memoryruntime.Service{
+		Legacy: f.store, Proposals: f.store, Governed: f.store,
+		Resolver: &memoryruntime.BackendResolver{Reader: f.kube, Store: f.store},
+	}
 	f.server = NewServer(f.kube, nil, ServerConfig{
 		WatchNamespace: "default", EnforceNamespaceIsolation: true, Clientset: f.clientset, APIReader: f.kube,
-		MemoryStore: f.store, MemoryProposalStore: f.store, SecurityStore: f.store, RepositoryMonitorStore: f.store,
+		MemoryStore: f.store, MemoryProposalStore: f.store, MemoryService: memoryService,
+		SecurityStore: f.store, RepositoryMonitorStore: f.store,
 		SessionStore: f.store, ResultStore: f.store, PlanStore: f.store, ArtifactStore: f.store,
 		ExecutionEventStore: f.store, GatewayEventStore: f.store, GatewayDeliveryStore: f.store,
 		Chat: ChatConfig{Enabled: true, Provider: "protected", Model: "fixture", MaxDuration: time.Second, MaxIterations: 1, MaxConcurrent: 2},

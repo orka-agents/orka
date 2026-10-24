@@ -262,6 +262,14 @@ make docker-push-workspace-publisher
 make docker-push-all
 ```
 
+### Out-of-tree memory adapters
+
+Provider-specific memory adapters, their container images, Helm charts, and
+provider release gates are intentionally outside the Orka repository.
+This repository retains the canonical `pkg/memory/v1` contract,
+`pkg/memory/v1/conformance` library, and `cmd/orka-memory-conformance` command used by
+all adapters.
+
 ## Local development with Kind
 
 ```bash

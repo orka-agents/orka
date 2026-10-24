@@ -182,6 +182,8 @@ type TaskReconciler struct {
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs/task-provenance,verbs=admit
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingadmissionpolicies;validatingadmissionpolicybindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
@@ -409,16 +411,21 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
 	}
 
-	// Handle based on current phase
+	// Handle based on current phase. Direct transaction-token Tasks retain their
+	// owner-bound renewal authority and cap every active phase's requeue at the
+	// next token rotation deadline.
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhasePending:
-		return r.handlePending(ctx, task)
+		if taskTransactionTokenPending(task) {
+			return r.handlePending(ctx, task)
+		}
+		return r.handleWithTaskTransactionTokenRefresh(ctx, task, r.handlePending)
 	case corev1alpha1.TaskPhaseScheduled:
-		return r.handleScheduled(ctx, task)
+		return r.handleWithTaskTransactionTokenRefresh(ctx, task, r.handleScheduled)
 	case corev1alpha1.TaskPhaseRunning:
-		return r.handleRunning(ctx, task)
+		return r.handleWithTaskTransactionTokenRefresh(ctx, task, r.handleRunning)
 	case corev1alpha1.TaskPhaseFinalizing:
-		return r.handleFinalizing(ctx, task)
+		return r.handleWithTaskTransactionTokenRefresh(ctx, task, r.handleFinalizing)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return r.handleCompleted(ctx, task)
 	}
@@ -606,6 +613,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		if err := r.cleanupOwnedTaskTransactionTokenSecret(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+
 		prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -971,13 +982,41 @@ func (r *TaskReconciler) handleTransactionTokenPending(ctx context.Context, task
 
 	elapsed := now.Sub(since)
 	if elapsed >= taskTransactionTokenPendingTimeout {
-		msg := fmt.Sprintf("delegated transaction token setup timed out after %s", taskTransactionTokenPendingTimeout)
+		if cleanupErr := r.cleanupOwnedTaskTransactionTokenSecret(ctx, task); cleanupErr != nil {
+			return ctrl.Result{}, cleanupErr
+		}
+		msg := fmt.Sprintf("transaction token setup timed out after %s", taskTransactionTokenPendingTimeout)
 		r.Recorder.Event(task, corev1.EventTypeWarning, "TransactionTokenPendingTimeout", msg)
 		return r.failTask(ctx, task, msg)
 	}
 
-	requeueAfter := min(taskTransactionTokenPendingTimeout-elapsed, time.Second)
-	log.Info("task is waiting for delegated transaction token setup", "pendingSince", since)
+	ready, fatal, setupErr := r.reconcilePendingTaskTransactionToken(ctx, task, now)
+	if setupErr != nil {
+		if !fatal {
+			return ctrl.Result{}, setupErr
+		}
+		log.Info("task-scoped transaction token setup failed; failing closed")
+		if cleanupErr := r.cleanupOwnedTaskTransactionTokenSecret(ctx, task); cleanupErr != nil {
+			return ctrl.Result{}, cleanupErr
+		}
+		msg := "task-scoped transaction token setup failed"
+		r.Recorder.Event(task, corev1.EventTypeWarning, "TransactionTokenSetupFailed", msg)
+		return r.failTask(ctx, task, msg)
+	}
+	if ready {
+		if err := r.clearPendingTaskTransactionToken(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("task-scoped transaction token setup completed")
+		// Continue through Pending now that the durable workload token and hidden
+		// renewal authority are both ready. RuntimeRef planning is persisted in
+		// this reconciliation so the next reconciliation can start the turn.
+		return r.handlePending(ctx, task)
+	}
+
+	remaining := time.Until(since.Add(taskTransactionTokenPendingTimeout))
+	requeueAfter := max(min(remaining, time.Second), time.Nanosecond)
+	log.Info("task is waiting for transaction token setup", "pendingSince", since)
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
@@ -2544,6 +2583,9 @@ func (r *TaskReconciler) quarantineFinalizingWorkspace(ctx context.Context, task
 
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	if err := r.cleanupOwnedTaskTransactionTokenSecret(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {

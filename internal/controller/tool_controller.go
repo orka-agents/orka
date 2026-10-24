@@ -266,7 +266,7 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) e
 		return fmt.Errorf("http.url is required")
 	}
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != urlSchemeHTTP && parsedURL.Scheme != "https") {
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != urlSchemeHTTP && parsedURL.Scheme != urlSchemeHTTPS) {
 		return fmt.Errorf("invalid http.url")
 	}
 	if parsedURL.User != nil {

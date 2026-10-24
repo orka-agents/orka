@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +29,11 @@ import (
 const (
 	kubernetesJobKind  = "Job"
 	kubernetesTaskKind = "Task"
+
+	internalMemoryTaskLocalKey       = "internalMemoryTask"
+	taskProvenancePolicyLabel        = "orka.ai/task-provenance-policy"
+	taskProvenancePolicyJobComponent = "job"
+	taskProvenancePolicyPodComponent = "pod"
 )
 
 type internalCallerAuthorizer struct {
@@ -239,9 +245,21 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 	userInfo *UserInfo,
 	namespace string,
 ) (*corev1alpha1.Task, error) {
+	task, _, _, err := a.resolveTaskWorkerChain(ctx, userInfo, namespace)
+	return task, err
+}
+
+// resolveTaskWorkerChain resolves the caller Pod through its controlling Job
+// to the Task whose status publishes that Job, returning all three objects so
+// route-specific checks can inspect the verified provenance chain.
+func (a internalCallerAuthorizer) resolveTaskWorkerChain(
+	ctx context.Context,
+	userInfo *UserInfo,
+	namespace string,
+) (*corev1alpha1.Task, *batchv1.Job, *corev1.Pod, error) {
 	pod, err := a.resolveCallerPod(ctx, userInfo, namespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	for _, owner := range pod.OwnerReferences {
 		if !validControllerOwnerReference(owner, batchv1.SchemeGroupVersion.String(), kubernetesJobKind) {
@@ -252,7 +270,7 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load caller job: %v", err))
+			return nil, nil, nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load caller job: %v", err))
 		}
 		if job.UID == "" || owner.UID != job.UID || !job.DeletionTimestamp.IsZero() {
 			continue
@@ -266,7 +284,7 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 				if apierrors.IsNotFound(err) {
 					continue
 				}
-				return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load caller task: %v", err))
+				return nil, nil, nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load caller task: %v", err))
 			}
 			if task.UID == "" || jobOwner.UID != task.UID {
 				continue
@@ -278,16 +296,16 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 				// Job creation precedes the status write that publishes its identity.
 				// Deny access until that write completes, but let a fast worker retry
 				// its result instead of treating the publication delay as permanent.
-				return nil, fiber.NewError(fiber.StatusServiceUnavailable, "task worker identity is not yet published")
+				return nil, nil, nil, fiber.NewError(fiber.StatusServiceUnavailable, "task worker identity is not yet published")
 			}
 			if strings.TrimSpace(task.Status.JobName) != job.Name || task.Status.JobUID == "" || task.Status.JobUID != string(job.UID) {
 				continue
 			}
 			recordInternalTaskJobAuthority(ctx, task)
-			return task, nil
+			return task, job, pod, nil
 		}
 	}
-	return nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
+	return nil, nil, nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
 }
 
 func validControllerOwnerReference(owner metav1.OwnerReference, apiVersion, kind string) bool {
@@ -350,6 +368,105 @@ func (a internalCallerAuthorizer) resolveActiveTaskCaller(c fiber.Ctx, namespace
 		return nil, fiber.NewError(fiber.StatusForbidden, "caller task is not active")
 	}
 	return task, nil
+}
+
+// verifyMemoryCaller binds an internal memory request to the active AI or
+// agent Task whose current worker Pod made it. Beyond the shared worker chain,
+// memory routes require the Job/Pod task provenance labels to agree with the
+// Task and the controller-only provenance admission policies to be active, so
+// a same-namespace workload cannot assume another Task's memory authority.
+func (a internalCallerAuthorizer) verifyMemoryCaller(c fiber.Ctx, namespace string) (*corev1alpha1.Task, error) {
+	if err := a.verifyNamespace(c, namespace); err != nil {
+		return nil, err
+	}
+	userInfo := GetUserInfo(c)
+	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview ||
+		serviceAccountNameFromUsername(userInfo.Username) == "" {
+		return nil, fiber.NewError(fiber.StatusForbidden, "internal memory caller must be a Kubernetes workload identity")
+	}
+	task, err := a.currentMemoryTaskWorker(c.Context(), userInfo, namespace)
+	if err != nil {
+		return nil, err
+	}
+	c.Locals(internalMemoryTaskLocalKey, task)
+	return task, nil
+}
+
+func (a internalCallerAuthorizer) currentMemoryTaskWorker(
+	ctx context.Context,
+	userInfo *UserInfo,
+	namespace string,
+) (*corev1alpha1.Task, error) {
+	if a.k8sReader == nil || userInfo == nil {
+		return nil, fiber.NewError(fiber.StatusForbidden, "current worker identity could not be verified")
+	}
+	task, job, pod, err := a.resolveTaskWorkerChain(ctx, userInfo, namespace)
+	if err != nil {
+		return nil, err
+	}
+	if !activeInternalWorkerTask(task) || !internalMemoryTaskProvenance(task, job, pod) ||
+		!a.legacyTaskProvenanceAdmitted(ctx, job, pod) {
+		return nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for an active task")
+	}
+	return task, nil
+}
+
+func internalMemoryTaskProvenance(task *corev1alpha1.Task, job *batchv1.Job, pod *corev1.Pod) bool {
+	if task == nil || job == nil || pod == nil {
+		return false
+	}
+	taskLabel := labels.SelectorValue(task.Name)
+	return (task.Spec.Type == corev1alpha1.TaskTypeAI || task.Spec.Type == corev1alpha1.TaskTypeAgent) &&
+		job.Labels[labels.LabelTask] == taskLabel && pod.Labels[labels.LabelTask] == taskLabel &&
+		taskUIDProvenanceMatches(task, job, pod, false)
+}
+
+func taskUIDProvenanceMatches(task *corev1alpha1.Task, job *batchv1.Job, pod *corev1.Pod, required bool) bool {
+	jobTaskUID := strings.TrimSpace(job.Labels[labels.LabelTaskUID])
+	podTaskUID := strings.TrimSpace(pod.Labels[labels.LabelTaskUID])
+	if jobTaskUID == "" && podTaskUID == "" {
+		return !required
+	}
+	return jobTaskUID == string(task.UID) && podTaskUID == string(task.UID)
+}
+
+func (a internalCallerAuthorizer) legacyTaskProvenanceAdmitted(ctx context.Context, job *batchv1.Job, pod *corev1.Pod) bool {
+	if a.k8sReader == nil || job == nil || pod == nil {
+		return false
+	}
+	// The policies allow the legacy provenance shape only when it is established
+	// by the authorized Orka Task and Kubernetes Job controllers. Requiring the
+	// policies to be currently active preserves that attestation while allowing
+	// Jobs and Pods created before the policies were installed to keep running
+	// through a mixed-version rollout.
+	return a.taskProvenancePolicyActive(ctx, taskProvenancePolicyJobComponent) &&
+		a.taskProvenancePolicyActive(ctx, taskProvenancePolicyPodComponent)
+}
+
+func (a internalCallerAuthorizer) taskProvenancePolicyActive(ctx context.Context, component string) bool {
+	policies := &admissionregistrationv1.ValidatingAdmissionPolicyList{}
+	if err := a.k8sReader.List(ctx, policies, client.MatchingLabels{taskProvenancePolicyLabel: component}); err != nil {
+		return false
+	}
+	bindings := &admissionregistrationv1.ValidatingAdmissionPolicyBindingList{}
+	if err := a.k8sReader.List(ctx, bindings, client.MatchingLabels{taskProvenancePolicyLabel: component}); err != nil {
+		return false
+	}
+	for i := range policies.Items {
+		policy := &policies.Items[i]
+		if !policy.DeletionTimestamp.IsZero() {
+			continue
+		}
+		for j := range bindings.Items {
+			binding := &bindings.Items[j]
+			if !binding.DeletionTimestamp.IsZero() || binding.Spec.PolicyName != policy.Name ||
+				!slices.Contains(binding.Spec.ValidationActions, admissionregistrationv1.Deny) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func (a internalCallerAuthorizer) coordinationTreeSessionReferences(

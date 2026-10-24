@@ -278,6 +278,8 @@ func currentSchemaStatements() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_source_proposal
 			ON memories(namespace, source_proposal_id)
 			WHERE source_proposal_id <> ''`,
+		// 168-to-169.sql appends the trailing apply/abandon columns with ALTER
+		// TABLE, so they must stay last and in this order.
 		`CREATE TABLE IF NOT EXISTS memory_proposals (
 			id          TEXT PRIMARY KEY,
 			namespace   TEXT NOT NULL,
@@ -297,7 +299,11 @@ func currentSchemaStatements() []string {
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			reviewed_at       TIMESTAMP,
-			applied_at        TIMESTAMP
+			applied_at        TIMESTAMP,
+			apply_operation_id           TEXT NOT NULL DEFAULT '',
+			application_abandoned_by     TEXT NOT NULL DEFAULT '',
+			application_abandoned_reason TEXT NOT NULL DEFAULT '',
+			application_abandoned_at     TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_status
 			ON memory_proposals(namespace, status, created_at DESC)`,
@@ -957,7 +963,8 @@ func currentSchemaStatements() []string {
 	statements = append(statements, usageSchema()...)
 	statements = append(statements, agentExecutionSchemaStatements()...)
 	statements = append(statements, nativeSessionSchemaStatements()...)
-	return append(statements, connectorSchemaStatements()...)
+	statements = append(statements, connectorSchemaStatements()...)
+	return append(statements, memoryGovernanceSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.

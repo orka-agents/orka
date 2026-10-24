@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -23,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -105,6 +108,117 @@ func TestInternalCallerAuthorizerVerifyTaskWorker(t *testing.T) {
 	}
 }
 
+func TestInternalCallerAuthorizerRejectsUntrustedWorkerProvenance(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.Task, *batchv1.Job, *corev1.Pod)
+	}{
+		{
+			name: "pod owner is not controller",
+			mutate: func(_ *corev1alpha1.Task, _ *batchv1.Job, pod *corev1.Pod) {
+				pod.OwnerReferences[0].Controller = nil
+			},
+		},
+		{
+			name: "pod owner api version is not exact",
+			mutate: func(_ *corev1alpha1.Task, _ *batchv1.Job, pod *corev1.Pod) {
+				pod.OwnerReferences[0].APIVersion = "batch/v1beta1"
+			},
+		},
+		{
+			name: "job owner is not controller",
+			mutate: func(_ *corev1alpha1.Task, job *batchv1.Job, _ *corev1.Pod) {
+				job.OwnerReferences[0].Controller = nil
+			},
+		},
+		{
+			name: "job task label is missing",
+			mutate: func(_ *corev1alpha1.Task, job *batchv1.Job, _ *corev1.Pod) {
+				job.Labels = nil
+			},
+		},
+		{
+			name: "job task UID label does not match",
+			mutate: func(_ *corev1alpha1.Task, job *batchv1.Job, _ *corev1.Pod) {
+				job.Labels[labels.LabelTaskUID] = "other-task-uid"
+			},
+		},
+		{
+			name: "task is not an AI or agent task",
+			mutate: func(task *corev1alpha1.Task, _ *batchv1.Job, _ *corev1.Pod) {
+				task.Spec.Type = corev1alpha1.TaskTypeContainer
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := internalCallerAuthScheme(t)
+			task := internalCallerAuthTask()
+			task.Spec.Type = corev1alpha1.TaskTypeAI
+			job := internalCallerAuthJob(task, "job-a", "job-uid")
+			pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
+			setTrustedInternalWorkerProvenance(task, job, pod)
+			tt.mutate(task, job, pod)
+			objects := append([]client.Object{task, job, pod}, internalCallerAuthProvenanceObjects(job.CreationTimestamp.Add(-time.Minute))...)
+			authorizer := internalCallerAuthorizer{
+				k8sReader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+			}
+
+			_, err := authorizer.currentMemoryTaskWorker(context.Background(), internalCallerAuthWorkerUser("pod-a", "pod-uid"), task.Namespace)
+			var fiberErr *fiber.Error
+			if !errors.As(err, &fiberErr) || fiberErr.Code != http.StatusForbidden {
+				t.Fatalf("currentMemoryTaskWorker() error = %v, want forbidden", err)
+			}
+		})
+	}
+}
+
+func TestInternalCallerAuthorizerAcceptsLegacyProvenanceWhenPoliciesAreActive(t *testing.T) {
+	scheme := internalCallerAuthScheme(t)
+	task := internalCallerAuthTask()
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	job := internalCallerAuthJob(task, "job-a", "job-uid")
+	pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
+	setTrustedInternalWorkerProvenance(task, job, pod)
+	delete(job.Labels, labels.LabelTaskUID)
+	delete(pod.Labels, labels.LabelTaskUID)
+	user := internalCallerAuthWorkerUser(pod.Name, string(pod.UID))
+	prePolicyReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()
+	if _, err := (internalCallerAuthorizer{k8sReader: prePolicyReader}).currentMemoryTaskWorker(context.Background(), user, task.Namespace); err == nil {
+		t.Fatal("legacy provenance without admission attestation was accepted")
+	}
+	provenance := internalCallerAuthProvenanceObjects(job.CreationTimestamp.Add(time.Minute))
+	objects := make([]runtime.Object, 0, 3+len(provenance))
+	objects = append(objects, task, job, pod)
+	for _, object := range provenance {
+		objects = append(objects, object)
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build()
+	if _, err := (internalCallerAuthorizer{k8sReader: reader}).currentMemoryTaskWorker(context.Background(), user, task.Namespace); err != nil {
+		t.Fatalf("pre-policy in-flight legacy provenance was rejected: %v", err)
+	}
+}
+
+func internalCallerAuthProvenanceObjects(createdAt time.Time) []client.Object {
+	objects := make([]client.Object, 0, 4)
+	policyTime := metav1.NewTime(createdAt)
+	for _, component := range []string{taskProvenancePolicyJobComponent, taskProvenancePolicyPodComponent} {
+		name := "task-" + component + "-provenance"
+		objects = append(objects,
+			&admissionregistrationv1.ValidatingAdmissionPolicy{ObjectMeta: metav1.ObjectMeta{
+				Name: name, CreationTimestamp: policyTime, Labels: map[string]string{taskProvenancePolicyLabel: component},
+			}},
+			&admissionregistrationv1.ValidatingAdmissionPolicyBinding{ObjectMeta: metav1.ObjectMeta{
+				Name: name, CreationTimestamp: policyTime, Labels: map[string]string{taskProvenancePolicyLabel: component},
+			}, Spec: admissionregistrationv1.ValidatingAdmissionPolicyBindingSpec{
+				PolicyName: name, ValidationActions: []admissionregistrationv1.ValidationAction{admissionregistrationv1.Deny},
+			}},
+		)
+	}
+	return objects
+}
+
 func TestSubmitResultRequiresCurrentTaskWorkerWithKubernetesClient(t *testing.T) {
 	scheme := internalCallerAuthScheme(t)
 	task := internalCallerAuthTask()
@@ -134,6 +248,7 @@ func internalCallerAuthScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, batchv1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
 	return scheme
 }
 

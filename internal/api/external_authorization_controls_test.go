@@ -283,16 +283,22 @@ func TestExternalAPIProposalAppliedMemoryRequiresNamedRead(t *testing.T) {
 	for _, link := range []string{"applied-memory-id", "source-proposal-id"} {
 		t.Run(link, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
-			proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "proposal", Status: "accepted"}
-			if link == "applied-memory-id" {
-				proposal.AppliedMemoryID = "protected"
-			} else {
-				memory, err := f.store.GetMemory(t.Context(), "default", "protected")
-				require.NoError(t, err)
-				memory.SourceProposalID = proposal.ID
-				require.NoError(t, f.store.UpdateMemory(t.Context(), memory))
-			}
+			// Proposal status and provenance are server-owned, so reach each
+			// existing-memory link through the store's own review and apply.
+			proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "protected-content"}
 			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+			}))
+			applied, err := f.store.ApplyMemoryProposal(t.Context(), store.MemoryProposalApply{Namespace: "default", ID: proposal.ID, AppliedBy: "applier"})
+			require.NoError(t, err)
+			if link == "source-proposal-id" {
+				// Leave only the memory's source-proposal link, as after an
+				// interrupted application.
+				_, err := f.db.ExecContext(t.Context(), `UPDATE memory_proposals SET status = 'accepted', applied_memory_id = '',
+					apply_operation_id = '', applied_by = '', applied_at = NULL WHERE namespace = 'default' AND id = ?`, proposal.ID)
+				require.NoError(t, err)
+			}
 			permissions := make([]authorizationv1.ResourceAttributes, 0, 3)
 			permissions = append(permissions,
 				authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memoryproposals", Verb: "apply", Name: "reference"},
@@ -304,7 +310,7 @@ func TestExternalAPIProposalAppliedMemoryRequiresNamedRead(t *testing.T) {
 			require.Equal(t, http.StatusForbidden, status, body)
 			require.NotContains(t, body, "protected-content")
 			require.Equal(t, before, f.changes(t))
-			read := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "get", Name: "protected"}
+			read := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "get", Name: applied.ID}
 			require.Equal(t, read, *f.reviews[len(f.reviews)-1].ResourceAttributes)
 			f.allowOnly(t, append(permissions, read)...)
 			status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/reference/apply", `{}`)

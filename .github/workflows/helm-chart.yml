@@ -134,14 +134,31 @@ jobs:
             /^  namespace: / { namespace = $2; next }
             END {
               finish_resource()
-              if (count != 14) {
-                printf "Expected 14 admission policies and bindings, found %d\n", count > "/dev/stderr"
+              if (count != 20) {
+                printf "Expected 20 admission policies and bindings, found %d\n", count > "/dev/stderr"
                 invalid = 1
               }
               exit invalid
             }
           ' manifest_staging/deploy/orka.yaml; then
             echo "Cluster-scoped admission resources in the raw installer are invalid." >&2
+            exit 1
+          fi
+          if ! awk '
+            /^---$/ { kind = ""; name = ""; next }
+            /^kind: / { kind = $2; next }
+            /^  name: / && name == "" {
+              name = $2
+              if (kind == "Deployment" && first_deployment == 0) first_deployment = NR
+              if ((kind == "ValidatingAdmissionPolicy" || kind == "ValidatingAdmissionPolicyBinding") &&
+                  (name == "orka-task-job-provenance" || name == "orka-task-pod-provenance")) {
+                provenance++
+                if (first_deployment != 0) late = 1
+              }
+            }
+            END { exit (provenance == 4 && !late) ? 0 : 1 }
+          ' manifest_staging/deploy/orka.yaml; then
+            echo "Task provenance admission policies and bindings must precede every Deployment in the raw installer." >&2
             exit 1
           fi
 
@@ -162,7 +179,14 @@ jobs:
           long_controller_webhook=$(mktemp)
           long_controller_webhook_service=$(mktemp)
           unsafe_render=$(mktemp)
-          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${long_controller_webhook}" "${long_controller_webhook_service}" "${unsafe_render}"' EXIT
+          secondary_memory_policy=$(mktemp)
+          secondary_task_worker_policy=$(mktemp)
+          secondary_task_provenance_rbac=$(mktemp)
+          secondary_store_pvc=$(mktemp)
+          external_store_render=$(mktemp)
+          memory_enabled_render=$(mktemp)
+          memory_error=$(mktemp)
+          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${long_controller_webhook}" "${long_controller_webhook_service}" "${unsafe_render}" "${secondary_memory_policy}" "${secondary_task_worker_policy}" "${secondary_task_provenance_rbac}" "${secondary_store_pvc}" "${external_store_render}" "${memory_enabled_render}" "${memory_error}"' EXIT
           if grep -Fq 'fake.workspace.orka.ai' manifest_staging/deploy/orka.yaml; then
             echo "The production installer must not contain external fake provider resources." >&2
             exit 1
@@ -250,6 +274,34 @@ jobs:
           helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             --show-only templates/rbac.yaml             > "${secondary_rbac}"
           helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             --show-only templates/serviceaccount.yaml             > "${secondary_serviceaccounts}"
           helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             --show-only templates/gateway-task-admission-policy.yaml             > "${secondary_gateway_policy}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/memory-backend-admission-policy.yaml > "${secondary_memory_policy}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/task-worker-provenance-policy.yaml > "${secondary_task_worker_policy}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/task-pod-provenance-rbac.yaml > "${secondary_task_provenance_rbac}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/store-pvc.yaml > "${secondary_store_pvc}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --set-string store.persistence.existingClaim=operator-store > "${external_store_render}"
+
+          memory_args=(
+            --set controller.memoryBackend.enabled=true
+            --set controller.memoryBackend.crdsReadyOverride=true
+            --set-string controller.memoryBackend.clusterId=cluster-a
+          )
+          helm template memory manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" "${memory_args[@]}" > "${memory_enabled_render}"
+          # Remote memory activation must stay unavailable in the foundation artifact.
+          assert_memory_render_fails() {
+            local expected=$1
+            shift
+            if helm template memory manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" "$@" >/dev/null 2>"${memory_error}"; then
+              echo "Helm accepted invalid MemoryBackend values: $*" >&2
+              exit 1
+            fi
+            grep -Fq -- "${expected}" "${memory_error}"
+          }
+          assert_memory_render_fails 'controller.memoryBackend.activationEnabled requires controller.memoryBackend.enabled' \
+            --set controller.memoryBackend.activationEnabled=true
+          assert_memory_render_fails 'controller.memoryBackend.activationEnabled is unavailable in the foundation release artifact' \
+            "${memory_args[@]}" --set controller.memoryBackend.activationEnabled=true
+          assert_memory_render_fails 'controller.memoryBackend.clusterId is required' \
+            --set controller.memoryBackend.enabled=true
 
           long_release=$(printf 'r%.0s' {1..53})
           helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             > "${long_render}"
@@ -265,6 +317,10 @@ jobs:
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
           grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
           grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
+          grep -Fq -- "--memory-backend-enabled=false" "${default_render}"
+          grep -Fq -- "--memory-backend-enabled=true" "${memory_enabled_render}"
+          grep -Fq -- "--memory-remote-activation-enabled=false" "${memory_enabled_render}"
+          grep -Fq -- "--memory-cluster-id=cluster-a" "${memory_enabled_render}"
           grep -Fq -- "--upstream-base-url=http://model-gateway.models.svc:8080" "${default_render}"
           if grep -Eq -- 'namespace: (models|vekil-system)$' "${default_render}"; then
             echo "The chart must not manage resources in the operator's model gateway namespace." >&2
@@ -300,7 +356,39 @@ jobs:
           grep -Fq -- "@${scm_name}.${NAMESPACE}.svc:8080" "${long_render}"
           grep -Fq -- "name: ${controller_webhook_service_name}" "${long_controller_webhook}"
           grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker@${controller_digest}" "${secondary_render}"
-          assert_controller_rbac_resources "${secondary_rbac}" agentruntimes branchclaims controllerepochs externaleffects promptattempts publications runtimepools runtimesessioncontrols substrateactorpools
+          assert_controller_rbac_resources "${secondary_rbac}" agentruntimes branchclaims controllerepochs externaleffects memorybackends promptattempts publications runtimepools runtimesessioncontrols substrateactorpools
+          grep -Eq 'resources: \[.*"memorybackends/finalizers"' "${secondary_rbac}"
+          grep -Fq 'memorybackends.core.orka.ai' "${secondary_rbac}"
+          grep -Fq 'resources: ["jobs/task-provenance"]' "${secondary_rbac}"
+          grep -Fq 'name: secondary-orka-memorybackend-finalizer-protection' "${secondary_memory_policy}"
+          grep -Fq ".subresource('finalizers')" "${secondary_memory_policy}"
+          grep -Fq 'name: secondary-orka-task-job-provenance' "${secondary_task_worker_policy}"
+          grep -Fq 'name: secondary-orka-task-pod-provenance' "${secondary_task_worker_policy}"
+          grep -Fq 'name: secondary-orka-task-job-provenance-preflight' "${secondary_task_worker_policy}"
+          grep -Fq 'name: secondary-orka-task-pod-provenance-preflight' "${secondary_task_worker_policy}"
+          test "$(grep -Fc 'helm.sh/hook: pre-install,pre-upgrade' "${secondary_task_worker_policy}")" -eq 4
+          test "$(grep -Fc 'helm.sh/hook-weight: "-20"' "${secondary_task_worker_policy}")" -eq 2
+          test "$(grep -Fc 'helm.sh/hook-weight: "-10"' "${secondary_task_worker_policy}")" -eq 2
+          grep -Fq ".subresource('task-provenance')" "${secondary_task_worker_policy}"
+          grep -Fq 'orka.ai/task-name' "${secondary_task_worker_policy}"
+          grep -Fq 'resources: ["pods/task-provenance"]' "${secondary_task_provenance_rbac}"
+          grep -Fq 'name: system:serviceaccount:kube-system:job-controller' "${secondary_task_provenance_rbac}"
+          grep -Fq 'name: secondary-orka-task-job-provenance-controller-preflight' "${secondary_task_provenance_rbac}"
+          grep -Fq 'name: secondary-orka-task-pod-provenance-admitter-preflight' "${secondary_task_provenance_rbac}"
+          test "$(grep -Fc 'helm.sh/hook: pre-install,pre-upgrade' "${secondary_task_provenance_rbac}")" -eq 4
+          test "$(grep -Fc 'helm.sh/hook-weight: "-40"' "${secondary_task_provenance_rbac}")" -eq 4
+          test "$(grep -Fc 'helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed' "${secondary_task_provenance_rbac}")" -eq 4
+          test "$(grep -Fc 'helm.sh/hook: pre-delete' "${secondary_task_provenance_rbac}")" -eq 4
+          test "$(grep -Fc 'helm.sh/hook-weight: "40"' "${secondary_task_provenance_rbac}")" -eq 2
+          test "$(grep -Fc 'helm.sh/hook-weight: "41"' "${secondary_task_provenance_rbac}")" -eq 2
+          test "$(grep -Fc 'helm.sh/hook-delete-policy: before-hook-creation' "${secondary_task_provenance_rbac}")" -eq 8
+          grep -Fq 'helm.sh/resource-policy: keep' "${secondary_store_pvc}"
+          grep -Fq 'claimName: operator-store' "${external_store_render}"
+          if grep -Fq '# Source: orka/templates/store-pvc.yaml' "${external_store_render}"; then
+            echo "Chart rendered a controller PVC while store.persistence.existingClaim was set." >&2
+            exit 1
+          fi
+          test "$(awk '$1 == "memory.orka.ai/release-stage:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)" = foundation
           assert_single_tokenrequest_rule "${secondary_rbac}" secondary-orka-controller
           if grep -Fq 'ai-worker-tokenrequest' manifest_staging/charts/orka/templates/rbac.yaml; then
             echo "AI workers must not receive an unrestricted TokenRequest ClusterRole." >&2
@@ -359,6 +447,7 @@ jobs:
           gatewaybindings.gateway.orka.ai
           gatewayclasses.gateway.orka.ai
           gateways.gateway.orka.ai
+          memorybackends.core.orka.ai
           outboundaccesspolicies.core.orka.ai
           promptattempts.core.orka.ai
           providers.core.orka.ai
@@ -424,6 +513,18 @@ jobs:
             --set providerProxy.enabled=true
 
           assert_all_orka_crds "after helm install"
+          preflight_rbac=(
+            clusterrole/orka-task-job-provenance-controller-preflight
+            clusterrolebinding/orka-task-job-provenance-controller-preflight
+            clusterrole/orka-task-pod-provenance-admitter-preflight
+            clusterrolebinding/orka-task-pod-provenance-admitter-preflight
+          )
+          for resource in "${preflight_rbac[@]}"; do
+            if kubectl get "${resource}" >/dev/null 2>&1; then
+              echo "Helm install retained completed preflight RBAC ${resource}." >&2
+              exit 1
+            fi
+          done
           NAMESPACE="${NAMESPACE}-static" scripts/static-mode-crd-validate.sh
 
           helm upgrade orka "${chart_package}" --namespace "${NAMESPACE}" --reuse-values
@@ -446,3 +547,17 @@ jobs:
 
           helm uninstall orka --namespace "${NAMESPACE}"
           assert_all_orka_crds "after helm uninstall"
+          for resource in \
+            clusterrole/orka-task-job-provenance-controller-preflight \
+            clusterrole/orka-task-pod-provenance-admitter-preflight; do
+            if resource_json=$(kubectl get "${resource}" -o json 2>/dev/null); then
+              jq -e '(.rules // []) | length == 0' <<<"${resource_json}" >/dev/null
+            fi
+          done
+          for resource in \
+            clusterrolebinding/orka-task-job-provenance-controller-preflight \
+            clusterrolebinding/orka-task-pod-provenance-admitter-preflight; do
+            if resource_json=$(kubectl get "${resource}" -o json 2>/dev/null); then
+              jq -e '(.subjects // []) | length == 0' <<<"${resource_json}" >/dev/null
+            fi
+          done

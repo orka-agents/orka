@@ -15,6 +15,27 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
+func TestStampTaskRequesterPreservesAttachedCompositeTransaction(t *testing.T) {
+	token := &ContextToken{
+		Profile: ContextTokenProfileTransactionToken, TransactionID: "txn-composite", Scope: ContextTokenScopeTaskCreate,
+		Scopes: []string{ContextTokenScopeTaskCreate}, Subject: "subject-a", Issuer: "https://issuer.example.test",
+		TransactionContext: map[string]any{"namespace": "default", "taskName": "task-a", "taskUID": "task-uid"},
+	}
+	task := &corev1alpha1.Task{}
+	stampTaskRequesterFromUserInfo(task, &UserInfo{
+		AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:worker", ContextToken: token,
+	})
+
+	// The ServiceAccount primary caller is a workload, not a signed-in requester.
+	if task.Spec.RequestedBy != nil || task.Annotations[labels.AnnotationRequestedBySource] != "" {
+		t.Fatalf("RequestedBy = %#v annotations = %v", task.Spec.RequestedBy, task.Annotations)
+	}
+	if task.Spec.Transaction == nil || task.Spec.Transaction.ID != token.TransactionID ||
+		task.Spec.Transaction.Context["taskName"] != "task-a" || task.Spec.Transaction.Context["taskUID"] != "task-uid" {
+		t.Fatalf("Transaction = %#v", task.Spec.Transaction)
+	}
+}
+
 func TestDigestMapNormalizesSetValuedContextClaimOrder(t *testing.T) {
 	first := map[string]any{
 		"allowedProviders": []any{"openai", "anthropic"},

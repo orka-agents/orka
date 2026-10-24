@@ -36,11 +36,14 @@ const (
 	contextAllowedToolsKey     = "allowedTools"
 	contextAllowedProvidersKey = "allowedProviders"
 	contextAllowedModelsKey    = "allowedModels"
+	contextTaskUIDKey          = "taskUID"
 )
 
 var safeTransactionContextKeys = []string{
 	"purpose",
 	toolNamespaceArg,
+	apiFieldTaskName,
+	contextTaskUIDKey,
 	contextTaskTypeKey,
 	contextAgentKey,
 	contextAllowedAgentsKey,
@@ -155,26 +158,31 @@ func requesterFromUserInfo(ui *UserInfo) *corev1alpha1.RequestedBy {
 }
 
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
-	if task == nil || ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
+	if task == nil || ui == nil {
 		return
 	}
 
-	if task.Annotations == nil {
-		task.Annotations = map[string]string{}
-	}
-	// Only controller identities may write this annotation, so it proves the
-	// requester below came from a verified sign-in rather than a worker.
-	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
-	task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
-		Subject:  ui.Subject,
-		Issuer:   ui.Issuer,
-		Username: ui.Username,
-		Email:    ui.Email,
-		Groups:   append([]string{}, ui.Groups...),
-		Roles:    append([]string{}, ui.Roles...),
+	if ui.AuthType == AuthTypeOIDC || ui.AuthType == AuthTypeContextToken {
+		if task.Annotations == nil {
+			task.Annotations = map[string]string{}
+		}
+		// Only controller identities may write this annotation, so it proves the
+		// requester below came from a verified sign-in rather than a worker.
+		task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
+		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
+			Subject:  ui.Subject,
+			Issuer:   ui.Issuer,
+			Username: ui.Username,
+			Email:    ui.Email,
+			Groups:   append([]string{}, ui.Groups...),
+			Roles:    append([]string{}, ui.Roles...),
+		}
 	}
 
-	if ui.AuthType == AuthTypeContextToken {
+	// A ServiceAccount caller carrying an independently verified, request-local
+	// transaction token keeps that transaction on the Task, but its workload
+	// identity is never stamped as a signed-in requester.
+	if ui.ContextToken != nil {
 		task.Spec.Transaction = taskTransactionFromContextToken(ui.ContextToken)
 		taskmeta.ApplyTransactionMetadata(&task.ObjectMeta, task.Spec.Transaction)
 	}

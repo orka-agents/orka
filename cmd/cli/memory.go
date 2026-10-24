@@ -28,6 +28,8 @@ func newMemoryCmd() *cobra.Command {
 	cmd.AddCommand(newMemoryEnableDisableCmd("enable"))
 	cmd.AddCommand(newMemoryEnableDisableCmd("disable"))
 	cmd.AddCommand(newMemoryProposalCmd())
+	cmd.AddCommand(newMemoryOperationCmd())
+	cmd.AddCommand(newMemoryBackendCmd())
 	return cmd
 }
 
@@ -50,12 +52,22 @@ func addMemoryFilterFlags(
 func newMemoryListCmd() *cobra.Command {
 	values := map[string]*string{}
 	var includeDisabled, includeDeleted bool
+	var cursor, continueToken string
 	var limit int
 	cmd := &cobra.Command{
 		Use:   cliListUse,
 		Short: "List memories",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			q := map[string]string{"limit": fmt.Sprintf("%d", limit)}
+			cursorValue := strings.TrimSpace(cursor)
+			continueValue := strings.TrimSpace(continueToken)
+			if cmd.Flags().Changed("cursor") && cmd.Flags().Changed("continue") && cursorValue != continueValue {
+				return fmt.Errorf("--cursor and --continue must match when both are set")
+			}
+			if cursorValue == "" {
+				cursorValue = continueValue
+			}
+			q := map[string]string{queryLimit: fmt.Sprintf("%d", limit)}
 			for _, key := range sortedKeys(ptrStringMap(values)) {
 				if v := strings.TrimSpace(*values[key]); v != "" {
 					q[key] = v
@@ -67,17 +79,48 @@ func newMemoryListCmd() *cobra.Command {
 			if includeDeleted {
 				q["includeDeleted"] = cliQueryTrue
 			}
+			if cursorValue != "" {
+				q["cursor"] = cursorValue
+			}
 			c := newClientFromCmd(cmd)
 			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/memories", q, nil)
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printMemoryList(cmd, result)
 		},
 	}
 	addOutputFlag(cmd, outputTable)
 	addMemoryFilterFlags(cmd, values, &includeDisabled, &includeDeleted, &limit)
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Cursor token for the next page")
+	cmd.Flags().StringVar(&continueToken, "continue", "", "Continue/cursor token for the next page")
 	return cmd
+}
+
+func printMemoryList(cmd *cobra.Command, result any) error {
+	format, err := outputFormat(cmd)
+	if err != nil {
+		return err
+	}
+	if err := printStructured(cmd, result); err != nil {
+		return err
+	}
+	if format != outputTable {
+		return nil
+	}
+	response, ok := result.(map[string]any)
+	if !ok {
+		return nil
+	}
+	next := strings.TrimSpace(nestedString(response, "metadata", "continue"))
+	if next != "" {
+		fmt.Fprintf( //nolint:errcheck
+			cmd.OutOrStdout(),
+			"Continue with --cursor %s (reuse the same filters and --limit).\n",
+			next,
+		)
+	}
+	return nil
 }
 
 func ptrStringMap(in map[string]*string) map[string]string {
@@ -91,28 +134,42 @@ func ptrStringMap(in map[string]*string) map[string]string {
 }
 
 func newMemoryGetCmd() *cobra.Command {
+	var includeDisabled bool
 	cmd := &cobra.Command{
 		Use:   cliGetByIDUse,
 		Short: "Get a memory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
-			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/memories/"+url.PathEscape(args[0]), nil, nil)
+			var query map[string]string
+			if includeDisabled {
+				query = map[string]string{"includeDisabled": cliQueryTrue}
+			}
+			result, err := c.DoJSON(
+				context.Background(),
+				http.MethodGet,
+				"/api/v1/memories/"+url.PathEscape(args[0]),
+				query,
+				nil,
+			)
 			if err != nil {
 				return err
 			}
 			return printDescribed(cmd, result, memoryDescribeRows)
 		},
 	}
+	cmd.Flags().BoolVar(&includeDisabled, "include-disabled", false, "Include disabled memory")
 	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
 func newMemoryCreateCmd() *cobra.Command {
 	var file, content, source, tags string
+	var mutation memoryMutationOptions
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a memory",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var body []byte
 			var err error
@@ -136,23 +193,24 @@ func newMemoryCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := c.DoJSON(context.Background(), http.MethodPost, "/api/v1/memories", nil, body)
+			response, err := executeMemoryMutation(cmd, c, http.MethodPost, "/api/v1/memories", nil, body, mutation)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Memory created: %s\n", metadataName(result)) //nolint:errcheck
-			return nil
+			return printMemoryMutationOutcome(cmd, "Memory created", "", response)
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to memory JSON/YAML body")
 	cmd.Flags().StringVar(&content, cliContentKey, "", "Memory content")
 	cmd.Flags().StringVar(&source, cliSourceCommand, "cli", "Memory source")
 	cmd.Flags().StringVar(&tags, "tags", "", "Comma-separated tags")
+	addMemoryMutationFlags(cmd, &mutation)
 	return cmd
 }
 
 func newMemoryUpdateCmd() *cobra.Command {
 	var file, content, source, tags string
+	var mutation memoryMutationOptions
 	cmd := &cobra.Command{
 		Use:   "update <id>",
 		Short: "Update a memory",
@@ -194,41 +252,54 @@ func newMemoryUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := c.DoJSON(
-				context.Background(),
+			response, err := executeMemoryMutation(
+				cmd,
+				c,
 				http.MethodPut,
 				"/api/v1/memories/"+url.PathEscape(args[0]),
 				query,
 				body,
+				mutation,
 			)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Memory updated: %s\n", metadataName(result)) //nolint:errcheck
-			return nil
+			return printMemoryMutationOutcome(cmd, "Memory updated", args[0], response)
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to memory JSON/YAML body")
 	cmd.Flags().StringVar(&content, cliContentKey, "", "Memory content")
 	cmd.Flags().StringVar(&source, cliSourceCommand, "", "Memory source")
 	cmd.Flags().StringVar(&tags, "tags", "", "Comma-separated tags")
+	addMemoryMutationFlags(cmd, &mutation)
 	return cmd
 }
 
 func newMemoryDeleteCmd() *cobra.Command {
-	return &cobra.Command{
+	var mutation memoryMutationOptions
+	cmd := &cobra.Command{
 		Use:   "delete <id>",
 		Short: "Delete a memory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
-			if err := c.DeleteResource(context.Background(), "/api/v1/memories/"+url.PathEscape(args[0]), nil); err != nil {
+			response, err := executeMemoryMutation(
+				cmd,
+				c,
+				http.MethodDelete,
+				"/api/v1/memories/"+url.PathEscape(args[0]),
+				nil,
+				nil,
+				mutation,
+			)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Memory deleted: %s\n", args[0]) //nolint:errcheck
-			return nil
+			return printMemoryMutationOutcome(cmd, "Memory deleted", args[0], response)
 		},
 	}
+	addMemoryMutationFlags(cmd, &mutation)
+	return cmd
 }
 
 func newMemoryEnableDisableCmd(action string) *cobra.Command {
@@ -265,6 +336,7 @@ func newMemoryProposalListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cliListUse,
 		Short: "List memory proposals",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			q := mergeQuery(
 				map[string]string{},
@@ -351,7 +423,8 @@ func newMemoryProposalReviewCmd() *cobra.Command {
 }
 
 func newMemoryProposalApplyCmd() *cobra.Command {
-	return &cobra.Command{
+	var mutation memoryMutationOptions
+	cmd := &cobra.Command{
 		Use:   "apply <id>",
 		Short: "Apply an accepted memory proposal",
 		Long:  "Apply an accepted memory proposal. The server records your signed-in identity as the applier.",
@@ -359,15 +432,18 @@ func newMemoryProposalApplyCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
 			path := "/api/v1/memory-proposals/" + url.PathEscape(args[0])
-			result, err := c.DoJSON(context.Background(), http.MethodPost, path+"/apply", nil, []byte("{}"))
+			response, err := executeMemoryMutation(cmd, c, http.MethodPost, path+"/apply", nil, []byte("{}"), mutation)
 			if err != nil {
 				return err
+			}
+			if response == nil || response.StatusCode == http.StatusAccepted {
+				return printMemoryMutationOutcome(cmd, "Memory proposal applied", args[0], response)
 			}
 			_, _ = fmt.Fprintf(
 				cmd.OutOrStdout(),
 				"Memory proposal applied: %s -> %s\n",
 				args[0],
-				metadataName(result),
+				memoryMutationResultSubject(response.Body, ""),
 			)
 			// Apply returns the memory; the proposal records who applied it. The
 			// apply already succeeded, so a failed read is only a warning.
@@ -382,6 +458,8 @@ func newMemoryProposalApplyCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addMemoryMutationFlags(cmd, &mutation)
+	return cmd
 }
 
 func newMemoryProposalArchiveCmd() *cobra.Command {

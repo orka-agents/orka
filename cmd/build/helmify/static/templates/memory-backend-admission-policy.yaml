@@ -1,0 +1,41 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-memorybackend-finalizer-protection
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["core.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["memorybackends"]
+  validations:
+    - expression: >-
+        !has(oldObject.metadata.finalizers) ||
+        !oldObject.metadata.finalizers.exists(f, f == 'memory.orka.ai/backend-protection') ||
+        (has(object.metadata.finalizers) && object.metadata.finalizers.exists(f, f == 'memory.orka.ai/backend-protection')) ||
+        authorizer.group('core.orka.ai')
+          .resource('memorybackends')
+          .subresource('finalizers')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('update').allowed()
+      message: the MemoryBackend protection finalizer may only be removed by the lifecycle controller
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-memorybackend-finalizer-protection
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: {{ include "orka.fullname" . }}-memorybackend-finalizer-protection
+  validationActions: [Deny]

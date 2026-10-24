@@ -3,10 +3,10 @@ package sqlite
 import (
 	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -177,7 +177,7 @@ func TestNewestHistoricalMigrationReproducesCurrentSchema(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 	steps := schemaMigrations()
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, steps[len(steps)-2:]))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, steps[len(steps)-3:]))
 	schema, err := readSchema(conn)
 	require.NoError(t, err)
 	require.NoError(t, validateSchema(schema, currentSchemaStatements()))
@@ -409,39 +409,63 @@ func readVersion1StoreState(t *testing.T, db *sql.DB, path string) version1Store
 	}
 }
 
-// Pins schemaVersion1StoreDB to what this release's production open path
-// writes, including whether the store may still mint a key. Once SchemaVersion
-// moves past 1 this release is historical: keep schemaVersion1StoreDB
-// unchanged and retire this comparison.
-func TestSchemaVersion1StoreMatchesProductionStore(t *testing.T) {
+// Every schema version 1 store that production could leave on disk upgrades
+// in place: same identity, same records, same bootstrap eligibility, and a
+// retained pre-upgrade backup. schemaVersion1StoreDB was pinned to the
+// version-1 production open path while SchemaVersion was 1.
+func TestOpenLockedStoreUpgradesSchemaVersion1Stores(t *testing.T) {
 	for _, state := range version1StoreStates {
 		t.Run(state.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "store.db")
-			if state.origin == datasetOriginAdopted {
-				var old *sql.DB
-				path, old = historicalSchemaDB(t, "abd2c040")
-				require.NoError(t, old.Close())
-			}
+			path, db := schemaVersion1StoreDB(t, state.origin, state.complete)
+			before, err := readDataset(db)
+			require.NoError(t, err)
+			beforeRows := applicationRows(t, db)
+			require.NoError(t, db.Close())
+
 			s, err := OpenLockedStore(path)
 			require.NoError(t, err)
 			defer func() { require.NoError(t, s.close()) }()
-			if state.complete {
-				require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
-			}
-			production := readVersion1StoreState(t, s.db, path)
-			require.Equal(t, state.canBootstrap, production.canBootstrap)
-
-			frozenPath, db := schemaVersion1StoreDB(t, state.origin, state.complete)
-			require.Equal(t, production, readVersion1StoreState(t, db, frozenPath))
+			require.Equal(t, version1StoreState{
+				fingerprint:  schema169,
+				version:      SchemaVersion,
+				origin:       state.origin,
+				complete:     state.complete,
+				canBootstrap: state.canBootstrap,
+			}, readVersion1StoreState(t, s.db, path))
+			after, err := readDataset(s.db)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			require.Equal(t, withSchema169Tables(beforeRows), applicationRows(t, s.db))
+			require.Len(t, migrationBackups(t, path), 1)
 		})
 	}
 }
 
+// A changed version-1 layout is refused without a backup or any change.
+func TestOpenLockedStoreRefusesChangedSchemaVersion1Store(t *testing.T) {
+	path, db := schemaVersion1StoreDB(t, datasetOriginAdopted, true)
+	_, err := db.Exec(`CREATE TABLE unexpected(value TEXT)`)
+	require.NoError(t, err)
+	before := storedSchemaSQL(t, db)
+	require.NoError(t, db.Close())
+
+	s, err := OpenLockedStore(path)
+	require.ErrorContains(t, err, "unsupported SQLite schema version 1")
+	require.Nil(t, s)
+	require.Empty(t, migrationBackups(t, path))
+	raw := rawMigrationDB(t, path)
+	require.Equal(t, before, storedSchemaSQL(t, raw))
+	version, err := readSchemaVersion(raw)
+	require.NoError(t, err)
+	require.Equal(t, 1, version)
+}
+
 // A 159-object fixture rebuilt from historical DDL plus 167-to-168.sql has the
-// current layout, but it is not a store this release writes. It passes the
+// version-1 layout, but it is not a store version 1 wrote. It passes the
 // version-0 migration gate and is adopted, while every real version-1 store is
-// refused there, so a future migration tested only on that fixture would pass
-// in tests and fail closed on real installations.
+// refused there and needs the separate upgradeVersion1Schema path, so a
+// migration tested only on that fixture would pass in tests and fail closed on
+// real installations.
 func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	_, fixture := historicalSchemaDB(t, "abd2c040")
 	_, err := fixture.Exec(migration166To167 + migration167To168)
@@ -456,7 +480,8 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	require.ErrorContains(t, err, "exactly one record")
 	conn, err := fixture.Conn(t.Context())
 	require.NoError(t, err)
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema168, nil))
+	steps := schemaMigrations()
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema168, steps[len(steps)-1:]))
 	require.NoError(t, conn.Close())
 
 	for _, state := range version1StoreStates {
@@ -472,8 +497,6 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema168, nil),
 				"unsupported SQLite schema version 1 before upgrade")
 			require.NoError(t, conn.Close())
-			validationErr := errors.New("validation failed")
-			require.ErrorIs(t, upgradeSchema(db, path, validationErr), validationErr)
 
 			require.Equal(t, backups, migrationBackups(t, path))
 			after, err := readDataset(db)
@@ -539,4 +562,15 @@ func checkSQLiteIntegrity(t *testing.T, db *sql.DB) {
 	defer func() { _ = rows.Close() }()
 	require.False(t, rows.Next(), "foreign key violation")
 	require.NoError(t, rows.Err())
+}
+
+// withSchema169Tables adds the empty tables 168-to-169.sql creates to rows
+// captured before an upgrade to the current layout.
+func withSchema169Tables(rows map[string][]string) map[string][]string {
+	for _, statement := range memoryGovernanceSchemaStatements() {
+		if definition, ok := strings.CutPrefix(statement, "CREATE TABLE IF NOT EXISTS "); ok {
+			rows[strings.Fields(definition)[0]] = nil
+		}
+	}
+	return rows
 }

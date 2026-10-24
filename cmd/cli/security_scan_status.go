@@ -135,7 +135,7 @@ func scanRunPhase(progress map[string]any) string {
 
 func scanRunSucceeded(phase string) bool {
 	switch phase {
-	case "succeeded", "completed":
+	case phaseSucceeded, "completed":
 		return true
 	default:
 		return false

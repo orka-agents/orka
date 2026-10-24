@@ -357,10 +357,11 @@ replacement with `--skip-crds`.
 ## Uninstall
 
 :::danger[Uninstall can delete stored data]
-Helm deletes the chart's persistent volume claims, including `orka-store` and
-`orka-workspace-publisher`. If their volumes use the `Delete` reclaim policy,
-Kubernetes also deletes the stored data. Back up the data and encryption key,
-and verify your recovery plan before uninstalling.
+Helm keeps the `orka-store` persistent volume claim (it is annotated
+`helm.sh/resource-policy: keep`) but deletes `orka-workspace-publisher`. If that
+volume uses the `Delete` reclaim policy, Kubernetes also deletes its data. Back up
+the data and encryption key, and verify your recovery plan before uninstalling.
+Delete the retained `orka-store` claim yourself only when you no longer need it.
 :::
 
 ```bash

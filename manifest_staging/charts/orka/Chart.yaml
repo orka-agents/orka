@@ -4,6 +4,8 @@ description: Kubernetes-native task execution platform with AI agent support
 type: application
 version: 0.0.0-dev
 appVersion: "v0.0.0-dev"
+annotations:
+  memory.orka.ai/release-stage: foundation
 keywords:
   - kubernetes
   - task-execution

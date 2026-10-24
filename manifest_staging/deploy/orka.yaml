@@ -646,6 +646,20 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - memories/trust
+  verbs:
+  - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memoryoperations
+  verbs:
+  - get
+  - list
+  - update
+- apiGroups:
+  - core.orka.ai
+  resources:
   - runtimepools
   - repositoryscans/slices
   - monitorcommands
@@ -731,6 +745,7 @@ rules:
   - sessions
   - memories
   - memoryproposals
+  - memoryoperations
   - providers
   - tools
   - runtimepools
@@ -1005,12 +1020,29 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingadmissionpolicies
+  - validatingadmissionpolicybindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - apiextensions.k8s.io
   resourceNames:
   - gatewaybindings.gateway.orka.ai
   - gatewayclasses.gateway.orka.ai
   - gateways.gateway.orka.ai
   - tasks.core.orka.ai
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - memorybackends.core.orka.ai
   resources:
   - customresourcedefinitions
   verbs:
@@ -1047,6 +1079,12 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs/task-provenance
+  verbs:
+  - admit
+- apiGroups:
   - coordination.k8s.io
   resources:
   - leases
@@ -1067,6 +1105,7 @@ rules:
   - connections
   - controllerepochs
   - externaleffects
+  - memorybackends
   - promptattempts
   - providers
   - publications
@@ -1096,6 +1135,7 @@ rules:
   - connectorproviders/finalizers
   - controllerepochs/finalizers
   - externaleffects/finalizers
+  - memorybackends/finalizers
   - outboundaccesspolicies/finalizers
   - promptattempts/finalizers
   - providers/finalizers
@@ -1120,6 +1160,7 @@ rules:
   - connectorproviders/status
   - controllerepochs/status
   - externaleffects/status
+  - memorybackends/status
   - outboundaccesspolicies/status
   - promptattempts/status
   - providers/status
@@ -1347,6 +1388,77 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-memorybackend-admin-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - '*'
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-memorybackend-editor-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-memorybackend-viewer-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
   name: orka-metrics-auth-role
 rules:
 - apiGroups:
@@ -1484,6 +1596,21 @@ rules:
   - tasks/approvals
   verbs:
   - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-task-pod-provenance-admitter
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods/task-provenance
+  verbs:
+  - admit
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -2308,6 +2435,25 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+  name: orka-task-pod-provenance-admitter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-task-pod-provenance-admitter
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: system:kube-controller-manager
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: system:serviceaccount:kube-system:job-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
   name: orka-v2-controller-cluster-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -2482,6 +2628,248 @@ spec:
     requests:
       storage: 2Gi
 ---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: job
+  name: orka-task-job-provenance
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - batch
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - jobs
+  validations:
+  - expression: |-
+      (variables.newJobTaskLabel == variables.oldJobTaskLabel &&
+
+       variables.newPodTaskLabel == variables.oldPodTaskLabel &&
+       variables.newJobTaskUID == variables.oldJobTaskUID &&
+       variables.newPodTaskUID == variables.oldPodTaskUID &&
+       variables.newJobCanonicalTaskLabel == variables.oldJobCanonicalTaskLabel &&
+       variables.newPodCanonicalTaskLabel == variables.oldPodCanonicalTaskLabel &&
+       variables.newJobTaskName == variables.oldJobTaskName &&
+       variables.newPodTaskName == variables.oldPodTaskName &&
+       variables.newTaskOwners == variables.oldTaskOwners) ||
+      (variables.newJobTaskLabel != '' &&
+
+       variables.newPodTaskLabel == variables.newJobTaskLabel &&
+       size(variables.newTaskOwners) == 1 &&
+       has(variables.newTaskOwners[0].controller) && variables.newTaskOwners[0].controller &&
+       size(variables.newTaskOwners[0].name) > 0 &&
+       size(variables.newTaskOwners[0].uid) > 0 &&
+       ((variables.newJobTaskUID == '' && variables.newPodTaskUID == '' &&
+         variables.newJobCanonicalTaskLabel == '' && variables.newPodCanonicalTaskLabel == '' &&
+         variables.newJobTaskName == '' && variables.newPodTaskName == '') ||
+        (variables.newJobTaskLabel == variables.newJobCanonicalTaskLabel &&
+         variables.newPodTaskLabel == variables.newPodCanonicalTaskLabel &&
+         variables.newJobCanonicalTaskLabel == variables.newPodCanonicalTaskLabel &&
+         variables.newJobTaskUID != '' && variables.newJobTaskUID == variables.newPodTaskUID &&
+         variables.newJobTaskUID == variables.newTaskOwners[0].uid &&
+         variables.newJobTaskName == variables.newTaskOwners[0].name &&
+         variables.newPodTaskName == variables.newTaskOwners[0].name)) &&
+       authorizer.group('batch')
+         .resource('jobs')
+         .subresource('task-provenance')
+         .namespace(request.namespace)
+         .name(object.metadata.name)
+         .check('admit').allowed())
+    message: Orka task Job provenance may only be established or changed by the Orka
+      task controller for the exact owning Task
+    reason: Forbidden
+  variables:
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task''] : '''''
+    name: newJobTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task''] :
+      '''''
+    name: oldJobTaskLabel
+  - expression: 'has(object.spec.template.metadata.labels) && ''orka.ai/task'' in
+      object.spec.template.metadata.labels ? object.spec.template.metadata.labels[''orka.ai/task'']
+      : '''''
+    name: newPodTaskLabel
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.labels)
+      && ''orka.ai/task'' in oldObject.spec.template.metadata.labels ? oldObject.spec.template.metadata.labels[''orka.ai/task'']
+      : '''''
+    name: oldPodTaskLabel
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task-uid'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task-uid''] : '''''
+    name: newJobTaskUID
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task-uid''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: oldJobTaskUID
+  - expression: 'has(object.spec.template.metadata.labels) && ''orka.ai/task-uid''
+      in object.spec.template.metadata.labels ? object.spec.template.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: newPodTaskUID
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.labels)
+      && ''orka.ai/task-uid'' in oldObject.spec.template.metadata.labels ? oldObject.spec.template.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: oldPodTaskUID
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-label'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-label''] : '''''
+    name: newJobCanonicalTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-label''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-label'']
+      : '''''
+    name: oldJobCanonicalTaskLabel
+  - expression: 'has(object.spec.template.metadata.annotations) && ''orka.ai/task-label''
+      in object.spec.template.metadata.annotations ? object.spec.template.metadata.annotations[''orka.ai/task-label'']
+      : '''''
+    name: newPodCanonicalTaskLabel
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.annotations)
+      && ''orka.ai/task-label'' in oldObject.spec.template.metadata.annotations ?
+      oldObject.spec.template.metadata.annotations[''orka.ai/task-label''] : '''''
+    name: oldPodCanonicalTaskLabel
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-name'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-name''] : '''''
+    name: newJobTaskName
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-name''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: oldJobTaskName
+  - expression: 'has(object.spec.template.metadata.annotations) && ''orka.ai/task-name''
+      in object.spec.template.metadata.annotations ? object.spec.template.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: newPodTaskName
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.annotations)
+      && ''orka.ai/task-name'' in oldObject.spec.template.metadata.annotations ? oldObject.spec.template.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: oldPodTaskName
+  - expression: 'has(object.metadata.ownerReferences) ? object.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''core.orka.ai/v1alpha1'' && o.kind == ''Task'') : []'
+    name: newTaskOwners
+  - expression: 'oldObject != null && has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''core.orka.ai/v1alpha1'' && o.kind == ''Task'') : []'
+    name: oldTaskOwners
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: pod
+  name: orka-task-pod-provenance
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - pods
+  validations:
+  - expression: |-
+      (variables.newTaskLabel == '' && variables.oldTaskLabel == '' &&
+
+       variables.newTaskUID == '' && variables.oldTaskUID == '' &&
+       variables.newCanonicalTaskLabel == '' && variables.oldCanonicalTaskLabel == '' &&
+       variables.newTaskName == '' && variables.oldTaskName == '') ||
+      (variables.newTaskLabel == variables.oldTaskLabel &&
+
+       variables.newTaskUID == variables.oldTaskUID &&
+       variables.newCanonicalTaskLabel == variables.oldCanonicalTaskLabel &&
+       variables.newTaskName == variables.oldTaskName &&
+       variables.newJobOwners == variables.oldJobOwners) ||
+      (variables.newTaskLabel != '' &&
+
+       size(variables.newJobOwners) == 1 &&
+       has(variables.newJobOwners[0].controller) && variables.newJobOwners[0].controller &&
+       size(variables.newJobOwners[0].name) > 0 &&
+       size(variables.newJobOwners[0].uid) > 0 &&
+       variables.newJobOwners[0].uid == variables.newJobControllerUID &&
+       variables.newJobOwners[0].name == variables.newJobName &&
+       ((variables.newTaskUID == '' && variables.newCanonicalTaskLabel == '' && variables.newTaskName == '') ||
+        (variables.newTaskLabel == variables.newCanonicalTaskLabel && variables.newTaskUID != '' && variables.newTaskName != '')) &&
+       authorizer.group('')
+         .resource('pods')
+         .subresource('task-provenance')
+         .namespace(request.namespace)
+         .name(object.metadata.name)
+         .check('admit').allowed())
+    message: Orka task Pod provenance may only be established or changed by the Kubernetes
+      Job controller
+    reason: Forbidden
+  variables:
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task''] : '''''
+    name: newTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task''] :
+      '''''
+    name: oldTaskLabel
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task-uid'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task-uid''] : '''''
+    name: newTaskUID
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task-uid''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: oldTaskUID
+  - expression: 'has(object.metadata.labels) && ''batch.kubernetes.io/controller-uid''
+      in object.metadata.labels ? object.metadata.labels[''batch.kubernetes.io/controller-uid'']
+      : '''''
+    name: newJobControllerUID
+  - expression: 'has(object.metadata.labels) && ''batch.kubernetes.io/job-name'' in
+      object.metadata.labels ? object.metadata.labels[''batch.kubernetes.io/job-name'']
+      : '''''
+    name: newJobName
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-label'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-label''] : '''''
+    name: newCanonicalTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-label''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-label'']
+      : '''''
+    name: oldCanonicalTaskLabel
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-name'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-name''] : '''''
+    name: newTaskName
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-name''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: oldTaskName
+  - expression: 'has(object.metadata.ownerReferences) ? object.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''batch/v1'' && o.kind == ''Job'') : []'
+    name: newJobOwners
+  - expression: 'oldObject != null && has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''batch/v1'' && o.kind == ''Job'') : []'
+    name: oldJobOwners
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: job
+  name: orka-task-job-provenance
+spec:
+  policyName: orka-task-job-provenance
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: pod
+  name: orka-task-pod-provenance
+spec:
+  policyName: orka-task-pod-provenance
+  validationActions:
+  - Deny
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -2654,6 +3042,8 @@ spec:
         - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
         - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
         - --gateway-enabled=true
+        - --memory-backend-enabled=false
+        - --memory-remote-activation-enabled=false
         - --gateway-pending-per-session=100
         - --gateway-max-records-per-gateway=1000
         - --gateway-max-rejected-records-per-gateway=250
@@ -3429,6 +3819,35 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-memorybackend-finalizer-protection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - UPDATE
+      resources:
+      - memorybackends
+  validations:
+  - expression: |-
+      !has(oldObject.metadata.finalizers) || !oldObject.metadata.finalizers.exists(f, f == 'memory.orka.ai/backend-protection') || (has(object.metadata.finalizers) && object.metadata.finalizers.exists(f, f == 'memory.orka.ai/backend-protection')) || authorizer.group('core.orka.ai')
+
+        .resource('memorybackends')
+        .subresource('finalizers')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('update').allowed()
+    message: the MemoryBackend protection finalizer may only be removed by the lifecycle
+      controller
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-namespace-mode-protection
 spec:
   failurePolicy: Fail
@@ -3572,6 +3991,15 @@ metadata:
   name: orka-gateway-task-protection
 spec:
   policyName: orka-gateway-task-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-memorybackend-finalizer-protection
+spec:
+  policyName: orka-memorybackend-finalizer-protection
   validationActions:
   - Deny
 ---

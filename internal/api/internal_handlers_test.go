@@ -21,6 +21,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -139,6 +140,79 @@ func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) 
 	})
 
 	return h, app, ss
+}
+
+func setupTestInternalMemoryHandlers(t *testing.T) (*InternalHandlers, *fiber.App, *sqlite.Store, *UserInfo) {
+	t.Helper()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "memory-task", UID: types.UID("task-uid")},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, JobName: "memory-job", JobUID: "job-uid"},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "default", Name: "memory-job", UID: types.UID("job-uid"),
+		OwnerReferences: []metav1.OwnerReference{{Kind: "Task", Name: task.Name, UID: task.UID}},
+	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "memory-pod", UID: types.UID("pod-uid"),
+			Labels:          map[string]string{labels.LabelTask: labels.SelectorValue(task.Name)},
+			OwnerReferences: []metav1.OwnerReference{{Kind: "Job", Name: job.Name, UID: job.UID}},
+		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
+	}
+	setTrustedInternalWorkerProvenance(task, job, pod)
+	objects := append([]client.Object{task, job, pod}, internalCallerAuthProvenanceObjects(job.CreationTimestamp.Add(-time.Minute))...)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
+		Client: kubeClient, APIReader: kubeClient, MemoryStore: ss, MemoryProposalStore: ss,
+		ContextTokenAuthorization: ContextTokenAuthorizationConfig{Mode: ContextTokenAuthorizationModeEnforce},
+	})
+	user := &UserInfo{
+		AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:worker", Namespace: "default",
+		Extra: map[string]authenticationv1.ExtraValue{
+			"authentication.kubernetes.io/pod-name": {pod.Name},
+			"authentication.kubernetes.io/pod-uid":  {string(pod.UID)},
+		},
+	}
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, user)
+		return c.Next()
+	})
+	return h, app, ss, user
+}
+
+func setTrustedInternalWorkerProvenance(task *corev1alpha1.Task, job *batchv1.Job, pod *corev1.Pod) {
+	controller := true
+	taskLabel := labels.SelectorValue(task.Name)
+	if job.CreationTimestamp.IsZero() {
+		job.CreationTimestamp = metav1.NewTime(time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC))
+	}
+	if pod.CreationTimestamp.IsZero() {
+		pod.CreationTimestamp = metav1.NewTime(job.CreationTimestamp.Add(time.Second))
+	}
+	job.Labels = map[string]string{labels.LabelTask: taskLabel, labels.LabelTaskUID: string(task.UID)}
+	job.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: task.UID,
+		Controller: &controller,
+	}}
+	pod.Labels = map[string]string{labels.LabelTask: taskLabel, labels.LabelTaskUID: string(task.UID)}
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name, UID: job.UID,
+		Controller: &controller,
+	}}
+	if pod.Spec.ServiceAccountName == "" {
+		pod.Spec.ServiceAccountName = "worker"
+	}
 }
 
 func TestSubmitPlan(t *testing.T) {
@@ -1231,7 +1305,8 @@ func TestSendMessageAdditional(t *testing.T) {
 }
 
 func TestInternalApplyMemoryProposal(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
+	h, app, ss, user := setupTestInternalMemoryHandlers(t)
+	user.ContextToken = internalMemoryTaskToken(ContextTokenScopeMemoryWrite, ContextTokenScopeMemoryOperate)
 	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
 
 	proposal := &store.MemoryProposal{
@@ -1271,7 +1346,8 @@ func TestInternalApplyMemoryProposal(t *testing.T) {
 }
 
 func TestInternalApplyMemoryProposalRejectsNamespaceMismatch(t *testing.T) {
-	h, app, _ := setupTestInternalHandlers()
+	h, app, _, user := setupTestInternalMemoryHandlers(t)
+	user.ContextToken = internalMemoryTaskToken(ContextTokenScopeMemoryWrite, ContextTokenScopeMemoryOperate)
 	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
 
 	body, _ := json.Marshal(map[string]string{"namespace": "other"})
@@ -1418,4 +1494,68 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 			require.NotContains(t, string(body), "future")
 		})
 	}
+}
+
+func TestInternalMemoryAuthorizationRequiresCurrentWorkerAndTaskScopedTxnScopes(t *testing.T) {
+	h, app, _, user := setupTestInternalMemoryHandlers(t)
+	app.Post("/internal/v1/memories/:namespace/search", h.SearchMemories)
+
+	body := []byte(`{"query":"","includeDisabled":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memories/default/search", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	user.ContextToken = &ContextToken{
+		Scopes: []string{ContextTokenScopeMemoryRead, ContextTokenScopeMemoryOperate},
+		TransactionContext: map[string]any{
+			"namespace": "default", "taskName": "memory-task", "taskUID": "task-uid",
+		},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/internal/v1/memories/default/search", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	remoteApp := fiber.New()
+	remoteApp.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, user)
+		return c.Next()
+	})
+	remoteApp.Get("/internal/v1/authorize/:namespace", func(c fiber.Ctx) error {
+		namespace, err := h.internalNamespace(c)
+		if err != nil {
+			return err
+		}
+		if err := h.authorizeInternalMemoryTask(c, namespace, "searchRemoteMemories",
+			h.memoryReadScopes(), h.memorySearchRemoteScopes()); err != nil {
+			return err
+		}
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+	resp, err = remoteApp.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/authorize/default", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	user.ContextToken.Scopes = append(user.ContextToken.Scopes, ContextTokenScopeMemorySearchRemote)
+	resp, err = remoteApp.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/authorize/default", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestInternalMemoryAuthorizationRejectsArbitrarySameNamespaceServiceAccount(t *testing.T) {
+	h, _, _, _ := setupTestInternalMemoryHandlers(t)
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:intruder", Namespace: "default",
+		})
+		return c.Next()
+	})
+	app.Get("/internal/v1/memories/:namespace", h.ListMemories)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }

@@ -15,6 +15,7 @@ rules:
   - sessions
   - memories
   - memoryproposals
+  - memoryoperations
   - providers
   - tools
   - runtimepools

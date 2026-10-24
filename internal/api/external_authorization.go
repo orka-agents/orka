@@ -19,6 +19,7 @@ const (
 	apiBodyNamespace
 	apiQueryThenBodyNamespace
 	apiBodyThenQueryNamespace
+	apiQueryThenMetadataNamespace
 	apiClusterScoped
 	apiUsageTeamNamespaces
 )
@@ -32,6 +33,38 @@ type apiResourcePermission struct {
 	resource  string
 	verb      string
 	nameParam string
+}
+
+// fixedObjectNamePrefix marks a nameParam that names one fixed object instead
+// of a route parameter, for singleton routes such as MemoryBackend/default.
+// Fiber route parameter names cannot start with it.
+const fixedObjectNamePrefix = "="
+
+func fixedObjectName(name string) string {
+	return fixedObjectNamePrefix + name
+}
+
+func (p apiResourcePermission) objectName(c fiber.Ctx) string {
+	if name, ok := strings.CutPrefix(p.nameParam, fixedObjectNamePrefix); ok {
+		return name
+	}
+	if p.nameParam == "" {
+		return ""
+	}
+	return c.Params(p.nameParam)
+}
+
+// memoryBackendPermission authorizes the fixed-name MemoryBackend/default.
+func memoryBackendPermission(verb string) apiResourcePermission {
+	return apiResourcePermission{corev1alpha1.GroupVersion.Group, "memorybackends", verb, fixedObjectName(corev1alpha1.MemoryBackendDefaultName)}
+}
+
+func memoryBackendAPIPolicy(verbs ...string) apiRoutePolicy {
+	policy := apiRoutePolicy{}
+	for _, verb := range verbs {
+		policy.permissions = append(policy.permissions, memoryBackendPermission(verb))
+	}
+	return policy
 }
 
 type apiRoutePolicy struct {
@@ -117,13 +150,37 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/gateway-deliveries/:id":        gatewayAPIPolicy("get", "gatewaydeliveries", "id"),
 	"POST /api/v1/gateway-deliveries/:id/retry": gatewayAPIPolicy("update", "gatewaydeliveries", "id"),
 
-	"GET /api/v1/memories":                     coreAPIPolicy("list", "memories", ""),
-	"POST /api/v1/memories":                    coreAPIPolicy("create", "memories", "").inNamespace(apiBodyNamespace),
-	"GET /api/v1/memories/:id":                 coreAPIPolicy("get", "memories", "id"),
-	"PUT /api/v1/memories/:id":                 coreAPIPolicy("update", "memories", "id").inNamespace(apiQueryThenBodyNamespace),
-	"DELETE /api/v1/memories/:id":              coreAPIPolicy("delete", "memories", "id"),
-	"POST /api/v1/memories/:id/disable":        coreAPIPolicy("update", "memories", "id"),
-	"POST /api/v1/memories/:id/enable":         coreAPIPolicy("update", "memories", "id"),
+	// MemoryBackend/default is a fixed-name singleton; its handlers repeat the
+	// same named checks and additionally require TokenReview authentication.
+	"GET /api/v1/memory-backends":                         coreAPIPolicy("list", "memorybackends", ""),
+	"POST /api/v1/memory-backends":                        coreAPIPolicy("create", "memorybackends", "").inNamespace(apiMetadataNamespace),
+	"GET /api/v1/memory-backends/default":                 memoryBackendAPIPolicy("get"),
+	"PUT /api/v1/memory-backends/default":                 memoryBackendAPIPolicy("update").inNamespace(apiQueryThenMetadataNamespace).withStoreID(),
+	"DELETE /api/v1/memory-backends/default":              memoryBackendAPIPolicy("delete"),
+	"GET /api/v1/memory-backends/default/status":          memoryBackendAPIPolicy("get"),
+	"POST /api/v1/memory-backends/default/activate":       memoryBackendAPIPolicy("update"),
+	"POST /api/v1/memory-backends/default/decommission":   memoryBackendAPIPolicy("update"),
+	"POST /api/v1/memory-backends/default/force-orphan":   memoryBackendAPIPolicy("update", "delete"),
+	"POST /api/v1/memory-backends/default/restore-legacy": memoryBackendAPIPolicy("update", "delete"),
+	"POST /api/v1/memory-backends/default/checkpoints":    memoryBackendAPIPolicy("get", "update"),
+	"POST /api/v1/memory-backends/default/purge":          memoryBackendAPIPolicy("get", "update"),
+
+	"GET /api/v1/memories":              coreAPIPolicy("list", "memories", ""),
+	"POST /api/v1/memories":             coreAPIPolicy("create", "memories", "").inNamespace(apiBodyNamespace),
+	"POST /api/v1/memories/search":      coreAPIPolicy("list", "memories", ""),
+	"GET /api/v1/memories/:id":          coreAPIPolicy("get", "memories", "id"),
+	"PUT /api/v1/memories/:id":          coreAPIPolicy("update", "memories", "id").inNamespace(apiQueryThenBodyNamespace),
+	"DELETE /api/v1/memories/:id":       coreAPIPolicy("delete", "memories", "id"),
+	"POST /api/v1/memories/:id/disable": coreAPIPolicy("update", "memories", "id"),
+	"POST /api/v1/memories/:id/enable":  coreAPIPolicy("update", "memories", "id"),
+	// Trust is a governance transition, not a content edit.
+	"POST /api/v1/memories/:id/trust":   coreAPIPolicy("update", "memories/trust", "id"),
+	"GET /api/v1/memory-operations":     coreAPIPolicy("list", "memoryoperations", ""),
+	"GET /api/v1/memory-operations/:id": coreAPIPolicy("get", "memoryoperations", "id"),
+	"POST /api/v1/memory-operations/:id/retry": coreAPIPolicy("update", "memoryoperations", "id",
+		memoryBackendPermission("get"), memoryBackendPermission("update")),
+	"POST /api/v1/memory-operations/:id/abandon": coreAPIPolicy("update", "memoryoperations", "id",
+		memoryBackendPermission("get"), memoryBackendPermission("update")),
 	"GET /api/v1/memory-proposals":             coreAPIPolicy("list", "memoryproposals", ""),
 	"POST /api/v1/memory-proposals":            coreAPIPolicy("create", "memoryproposals", "").inNamespace(apiBodyNamespace),
 	"GET /api/v1/memory-proposals/:id":         coreAPIPolicy("get", "memoryproposals", "id"),
@@ -312,10 +369,7 @@ func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	}
 	for _, namespace := range namespaces {
 		for _, permission := range policy.permissions {
-			name := ""
-			if permission.nameParam != "" {
-				name = c.Params(permission.nameParam)
-			}
+			name := permission.objectName(c)
 			if policy.trimStoreID {
 				name = strings.TrimSpace(name)
 			}
@@ -395,6 +449,10 @@ func (h *Handlers) externalRequestNamespace(c fiber.Ctx, policy apiRoutePolicy) 
 			if bodyNamespace != "" {
 				explicit = bodyNamespace
 			}
+		case apiQueryThenMetadataNamespace:
+			if explicit == "" {
+				explicit = metadataNamespace
+			}
 		}
 	}
 	// Proposal actions trim namespace in the store. Reject noncanonical input
@@ -432,7 +490,7 @@ func bindExternalNamespace(c fiber.Ctx, source apiNamespaceSource) (string, stri
 			return "", "", fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 		}
 		return hybrid.Namespace, hybrid.Metadata.Namespace, nil
-	case apiMetadataNamespace:
+	case apiMetadataNamespace, apiQueryThenMetadataNamespace:
 		if err := c.Bind().JSON(&manifest); err != nil {
 			return "", "", fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 		}

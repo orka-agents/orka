@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+const (
+	testRoleUser           = "user"
+	testRoleTool           = "tool"
+	testRoleSystem         = "system"
+	testCurrentTaskContent = "current task"
+)
+
 func Test_estimateTokens(t *testing.T) {
 	tests := []struct {
 		name string
@@ -186,7 +193,7 @@ func TestTruncateMessages(t *testing.T) {
 			t.Error("first message should be preserved")
 		}
 		// Should have a truncation note
-		if result[1].Role != "system" {
+		if result[1].Role != testRoleSystem {
 			t.Error("expected truncation note to have system role")
 		}
 		if !strings.Contains(result[1].Content, "truncated") {
@@ -221,7 +228,7 @@ func TestTruncateMessages(t *testing.T) {
 		if len(result) < 2 {
 			t.Fatalf("expected at least 2 messages, got %d", len(result))
 		}
-		if result[1].Role != "system" {
+		if result[1].Role != testRoleSystem {
 			t.Error("expected system role for truncation note")
 		}
 		if !strings.Contains(result[1].Content, "truncated") {
@@ -244,6 +251,148 @@ func TestTruncateMessages(t *testing.T) {
 			t.Errorf("expected 1 message, got %d", len(result))
 		}
 	})
+}
+
+func TestTruncateMessagesRecomputesDroppedMessageCountAfterMetadataDrops(t *testing.T) {
+	mandatory := Message{Role: testRoleSystem, Content: testRoleSystem}
+	initiallyDropped := Message{Role: "assistant", Content: strings.Repeat("x", 400)}
+	firstMetadataDrop := Message{Role: "assistant", Content: strings.Repeat("a", 40)}
+	secondMetadataDrop := Message{Role: "assistant", Content: strings.Repeat("b", 160)}
+	retained := Message{Role: "assistant", Content: strings.Repeat("c", 40)}
+	newest := Message{Role: testRoleUser, Content: testCurrentTaskContent}
+	messages := []Message{mandatory, initiallyDropped, firstMetadataDrop, secondMetadataDrop, retained, newest}
+
+	budget := estimateMessageTokens(mandatory) +
+		estimateMessageTokens(firstMetadataDrop) +
+		estimateMessageTokens(secondMetadataDrop) +
+		estimateMessageTokens(retained) +
+		estimateMessageTokens(newest) + 1
+	result := TruncateMessages(messages, budget)
+
+	if len(result) != 4 || result[0].Role != mandatory.Role || result[0].Content != mandatory.Content ||
+		result[2].Role != retained.Role || result[2].Content != retained.Content ||
+		result[3].Role != newest.Role || result[3].Content != newest.Content {
+		t.Fatalf("truncated messages = %#v, want mandatory, recomputed note, retained block, newest", result)
+	}
+	if result[1].Role != testRoleSystem || !strings.Contains(result[1].Content, "3 messages dropped") {
+		t.Fatalf("truncation note did not include every newly dropped message: %#v", result[1])
+	}
+	if got := estimatedMessagesTokens(result); got > budget {
+		t.Fatalf("truncated messages use %d tokens, budget %d", got, budget)
+	}
+}
+
+func TestTruncateMessagesRecomputesToolMetadataForEachAdditionalDroppedBlock(t *testing.T) {
+	toolBlock := func(id, name, path string, resultChars int) []Message {
+		return []Message{
+			{
+				Role: roleAssistant,
+				ToolCalls: []ToolCall{{
+					ID: id, Name: name, Arguments: json.RawMessage(fmt.Sprintf(`{"path":%q}`, path)),
+				}},
+			},
+			{Role: testRoleTool, Name: name, ToolCallID: id, Content: strings.Repeat("r", resultChars)},
+		}
+	}
+
+	mandatory := Message{Role: testRoleSystem, Content: testRoleSystem}
+	initiallyDropped := Message{Role: "assistant", Content: strings.Repeat("x", 400)}
+	firstDropped := toolBlock("drop-1", "first_dropped_tool", "first.go", 40)
+	secondDropped := toolBlock("drop-2", "second_dropped_tool", "second.go", 160)
+	retained := toolBlock("keep", "retained_tool", "retained.go", 40)
+	newest := Message{Role: testRoleUser, Content: testCurrentTaskContent}
+	messages := make([]Message, 0, 2+len(firstDropped)+len(secondDropped)+len(retained)+1)
+	messages = append(messages, mandatory, initiallyDropped)
+	messages = append(messages, firstDropped...)
+	messages = append(messages, secondDropped...)
+	messages = append(messages, retained...)
+	messages = append(messages, newest)
+
+	blocks := groupMessageBlocks(messages)
+	budget := blocks[0].tokens + blocks[2].tokens + blocks[3].tokens + blocks[4].tokens + blocks[5].tokens + 1
+	result := TruncateMessages(messages, budget)
+
+	if len(result) != 5 || result[0].Role != mandatory.Role || result[0].Content != mandatory.Content ||
+		len(result[2].ToolCalls) != 1 || result[2].ToolCalls[0].Name != "retained_tool" ||
+		result[3].ToolCallID != "keep" || result[4].Role != newest.Role || result[4].Content != newest.Content {
+		t.Fatalf("truncated messages did not preserve the newest atomic blocks: %#v", result)
+	}
+	note := result[1]
+	if note.Role != testRoleSystem ||
+		!strings.Contains(note.Content, "first_dropped_tool(first.go)") ||
+		!strings.Contains(note.Content, "second_dropped_tool(second.go)") ||
+		strings.Contains(note.Content, "retained_tool") {
+		t.Fatalf("truncation note did not describe the exact dropped prefix: %#v", note)
+	}
+	if got := estimatedMessagesTokens(result); got > budget {
+		t.Fatalf("truncated messages use %d tokens, budget %d", got, budget)
+	}
+}
+
+func estimatedMessagesTokens(messages []Message) int {
+	total := 0
+	for _, message := range messages {
+		total += estimateMessageTokens(message)
+	}
+	return total
+}
+
+func TestTruncateMessagesFreshPassiveToolDataFollowsTaskAndDropsAtomically(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "real task"},
+		{
+			Role: "assistant",
+			ToolCalls: []ToolCall{{
+				ID:        "synthetic-context",
+				Name:      "context_loader",
+				Arguments: json.RawMessage(`{"policy_label":"data-only"}`),
+			}},
+		},
+		{Role: "tool", Name: "context_loader", ToolCallID: "synthetic-context", Content: strings.Repeat("x", 100)},
+	}
+
+	result := TruncateMessages(msgs, estimateMessageTokens(msgs[0])+1)
+	if len(result) == 0 || result[0].Role != testRoleUser || result[0].Content != "real task" {
+		t.Fatalf("real task was not preserved as the initial boundary: %#v", result)
+	}
+	for i, message := range result {
+		if message.Role == testRoleTool {
+			t.Fatalf("synthetic tool result survived without its call at %d: %#v", i, result)
+		}
+		if message.Role == roleAssistant && len(message.ToolCalls) > 0 {
+			t.Fatalf("oversized passive-memory pair was only partially retained: %#v", result)
+		}
+	}
+}
+
+func TestTruncateMessagesHistoryRemainsUserFirstAndKeepsCurrentTask(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "initial question"},
+		{
+			Role: "assistant",
+			ToolCalls: []ToolCall{{
+				ID:        "synthetic-context",
+				Name:      "context_loader",
+				Arguments: json.RawMessage(`{"policy_label":"data-only"}`),
+			}},
+		},
+		{Role: "tool", Name: "context_loader", ToolCallID: "synthetic-context", Content: "untrusted data"},
+		{Role: "assistant", Content: strings.Repeat("x", 400)},
+		{Role: "user", Content: testCurrentTaskContent},
+	}
+
+	result := TruncateMessages(msgs, 20)
+	if len(result) < 2 || result[0].Role != testRoleUser || result[0].Content != "initial question" {
+		t.Fatalf("truncated history lost the initial user boundary: %#v", result)
+	}
+	if last := result[len(result)-1]; last.Role != testRoleUser || last.Content != "current task" {
+		t.Fatalf("truncated history lost the current task: %#v", result)
+	}
+	for i, message := range result {
+		if message.Role == testRoleTool && (i == 0 || result[i-1].Role != roleAssistant) {
+			t.Fatalf("orphaned tool result after truncation: %#v", result)
+		}
+	}
 }
 
 func TestExtractDroppedSummary(t *testing.T) {

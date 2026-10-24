@@ -698,22 +698,30 @@ func TestHandlers_ProviderListExistingObject(t *testing.T) {
 	require.Equal(t, "anthropic", body.Items[0].Name)
 }
 
-func TestHandlers_ProviderMutationRejectsContextTokenIdentity(t *testing.T) {
-	handlers, app := setupTestHandlers()
-	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeContextToken, Username: "txn"})
-		return c.Next()
-	})
-	app.Post("/providers", handlers.CreateProvider)
+func TestHandlers_ProviderMutationRejectsAttachedContextToken(t *testing.T) {
+	for _, authType := range []string{AuthTypeContextToken, AuthTypeTokenReview} {
+		t.Run(authType, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{
+					AuthType:     authType,
+					Username:     "txn",
+					ContextToken: &ContextToken{},
+				})
+				return c.Next()
+			})
+			app.Post("/providers", handlers.CreateProvider)
 
-	resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
-		"name": "openai",
-		"spec": map[string]any{
-			"type":      "openai",
-			"secretRef": map[string]any{"name": "openai-config"},
-		},
-	})
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+			resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
+				"name": "openai",
+				"spec": map[string]any{
+					"type":      "openai",
+					"secretRef": map[string]any{"name": "openai-config"},
+				},
+			})
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		})
+	}
 }
 
 func TestHandlers_ToolRESTMutationRejectsCredentialHeaders(t *testing.T) {
@@ -755,9 +763,12 @@ func TestHandlers_ProviderReadFiltersContextTokenRestrictions(t *testing.T) {
 	})
 	require.NoError(t, err)
 	handlers.contextTokenAuthorization = authz
+	// The composite caller's Kubernetes RBAC is allowed; only the attached
+	// transaction token's provider restriction filters the results.
+	handlers.clientset = allowingSubjectAccessReviewClient(t)
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			AuthType: AuthTypeContextToken,
+			AuthType: AuthTypeTokenReview,
 			ContextToken: &ContextToken{
 				Scopes:             []string{ContextTokenScopeProvidersUse},
 				TransactionContext: map[string]any{"allowedProviders": []any{"allowed"}},

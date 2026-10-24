@@ -946,6 +946,8 @@ func newEvalHTTPStub(t *testing.T) *evalHTTPStub {
 			_, _ = fmt.Fprint(w, `{"merged":true,"sha":"def456"}`)
 		case strings.HasSuffix(r.URL.Path, "/files"), (r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/reviews")):
 			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/internal/v1/memories/") && strings.HasSuffix(r.URL.Path, "/search"):
+			_, _ = fmt.Fprint(w, `{"items":[],"exhausted":true,"complete":true}`)
 		case r.Method == http.MethodPost || strings.Contains(r.URL.Path, "/issues/"):
 			_, _ = fmt.Fprint(w, `{"number":1,"id":1,"html_url":"https://github.com/testorg/testrepo/pull/1"}`)
 		case strings.Contains(r.URL.Path, "/pulls/"):
@@ -1488,8 +1490,11 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "worker memory limits",
-			limits: []string{"worker/recall_memory.limit minimum=0", "worker/search_transcript.limit minimum=0", "worker/search_transcript.max_snippet_length minimum=0"},
+			name: "worker memory limits",
+			limits: []string{
+				"worker/recall_memory.limit minimum=1", "worker/recall_memory.limit maximum=200",
+				"worker/search_transcript.limit minimum=0", "worker/search_transcript.max_snippet_length minimum=0",
+			},
 			check: func(t *testing.T) (bool, string) {
 				controller := newEvalHTTPStub(t)
 				t.Setenv(envOrkaControllerURL, controller.URL)
@@ -1499,7 +1504,10 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				search := func() (Tool, context.Context) { return workerTool("search_transcript", newFakeClient()) }
 				return evalAll(
 					func() (bool, string) {
-						return evalRejectsChange(recall, `{"query":"q","limit":0}`, `{"query":"q","limit":-1}`, "limit")
+						return evalRejectsChange(recall, `{"query":"q","limit":1}`, `{"query":"q","limit":0}`, "limit")
+					},
+					func() (bool, string) {
+						return evalRejectsChange(recall, `{"query":"q","limit":200}`, `{"query":"q","limit":201}`, "limit")
 					},
 					func() (bool, string) {
 						return evalRejectsChange(search, `{"query":"q","limit":0}`, `{"query":"q","limit":-1}`, "limit")

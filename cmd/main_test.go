@@ -33,6 +33,7 @@ import (
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/memorybackend"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 )
@@ -764,5 +765,55 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 	}
 	if !wiring.collector.NeedLeaderElection() {
 		t.Fatal("collector must remain a leader-elected cleanup runnable")
+	}
+}
+
+func TestFoundationMemoryReleaseRejectsActivation(t *testing.T) {
+	capabilities, err := memoryReleaseCapabilitiesForStage(memoryReleaseStageFoundation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.featureEpoch != memorybackend.FoundationFeatureEpoch {
+		t.Fatalf(
+			"foundation feature epoch = %d, want %d",
+			capabilities.featureEpoch,
+			memorybackend.FoundationFeatureEpoch,
+		)
+	}
+	if capabilities.activationAllowed {
+		t.Fatal("foundation release unexpectedly allows activation")
+	}
+	if err := validateMemoryFeatureGates(true, false, capabilities); err != nil {
+		t.Fatalf("foundation staging gate rejected: %v", err)
+	}
+	if err := validateMemoryFeatureGates(true, true, capabilities); err == nil ||
+		!strings.Contains(err.Error(), "foundation release artifact") {
+		t.Fatalf("foundation activation error = %v", err)
+	}
+}
+
+func TestActivationMemoryReleaseAdvertisesActivationEpoch(t *testing.T) {
+	capabilities, err := memoryReleaseCapabilitiesForStage(memoryReleaseStageActivation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.featureEpoch != memorybackend.ActivationFeatureEpoch {
+		t.Fatalf(
+			"activation feature epoch = %d, want %d",
+			capabilities.featureEpoch,
+			memorybackend.ActivationFeatureEpoch,
+		)
+	}
+	if !capabilities.activationAllowed {
+		t.Fatal("activation release did not allow activation")
+	}
+	if err := validateMemoryFeatureGates(true, true, capabilities); err != nil {
+		t.Fatalf("activation release gate rejected: %v", err)
+	}
+}
+
+func TestMemoryReleaseRejectsUnknownStage(t *testing.T) {
+	if _, err := memoryReleaseCapabilitiesForStage("operator-override"); err == nil {
+		t.Fatal("unknown memory release stage was accepted")
 	}
 }

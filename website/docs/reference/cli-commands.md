@@ -1166,12 +1166,14 @@ Usage:
   orka memory [command]
 
 Available Commands:
+  backend     Manage the namespace memory backend
   create      Create a memory
   delete      Delete a memory
   disable     Disable a memory
   enable      Enable a memory
   get         Get a memory
   list        List memories
+  operation   Inspect and manage durable memory operations
   proposal    Manage memory proposals
   update      Update a memory
 
@@ -1189,6 +1191,331 @@ Global Flags:
 Use "orka memory [command] --help" for more information about a command.
 ```
 
+## `orka memory backend`
+
+```text
+Manage the namespace memory backend
+
+Usage:
+  orka memory backend [command]
+
+Available Commands:
+  activate       Activate the namespace memory backend
+  checkpoint     Record a matched activation recovery receipt or runtime checkpoint
+  create         Create a staged memory backend
+  decommission   Decommission the namespace memory backend
+  delete         Delete a decommissioned or never-activated memory backend
+  force-orphan   Force-orphan the namespace memory backend
+  get            Get the memory backend
+  list           List memory backends
+  purge          Purge checkpoint-covered local memory retention state
+  restore-legacy Restore-legacy the namespace memory backend
+  status         Get effective memory backend status
+  update         Update the requested memory backend lifecycle or endpoint configuration
+
+Flags:
+  -h, --help   help for backend
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka memory backend [command] --help" for more information about a command.
+```
+
+## `orka memory backend activate`
+
+```text
+Activate the namespace memory backend
+
+Usage:
+  orka memory backend activate [flags]
+
+Flags:
+      --dry-run         Preview the operation without changing state
+  -h, --help            help for activate
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Required audit reason
+      --yes             Confirm the operation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend checkpoint`
+
+```text
+Record a matched activation recovery receipt or runtime checkpoint
+
+Usage:
+  orka memory backend checkpoint [flags]
+
+Flags:
+  -h, --help                     help for checkpoint
+      --manifest-digest string   SHA-256 digest of the matched recovery manifest
+      --max-sequence int         Maximum committed operation sequence covered by the checkpoint
+  -o, --output string            Output format: table, json, yaml (default "table")
+      --reason string            Required audit reason
+      --yes                      Confirm the checkpoint receipt
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend create`
+
+```text
+Create a staged memory backend
+
+Usage:
+  orka memory backend create [flags]
+
+Flags:
+      --endpoint string     External HTTPS memory adapter endpoint
+  -f, --file string         Path to MemoryBackend JSON/YAML
+  -h, --help                help for create
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --reason string       Required audit reason
+      --secret string       Bearer token Secret name
+      --secret-key string   Bearer token Secret key (default "token")
+      --store string        Pre-created provider store name
+      --yes                 Confirm backend creation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend decommission`
+
+```text
+Decommission the namespace memory backend
+
+Usage:
+  orka memory backend decommission [flags]
+
+Flags:
+      --dry-run         Preview the operation without changing state
+  -h, --help            help for decommission
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Required audit reason
+      --yes             Confirm the operation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend delete`
+
+```text
+Delete a decommissioned or never-activated memory backend
+
+Usage:
+  orka memory backend delete [flags]
+
+Flags:
+  -h, --help            help for delete
+      --reason string   Required audit reason
+      --yes             Confirm deletion
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend force-orphan`
+
+```text
+Force-orphan the namespace memory backend
+
+Usage:
+  orka memory backend force-orphan [flags]
+
+Flags:
+      --dry-run         Preview the operation without changing state
+  -h, --help            help for force-orphan
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Required audit reason
+      --yes             Confirm the operation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend get`
+
+```text
+Get the memory backend
+
+Usage:
+  orka memory backend get [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend list`
+
+```text
+List memory backends
+
+Usage:
+  orka memory backend list [flags]
+
+Flags:
+  -h, --help            help for list
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend purge`
+
+```text
+Purge checkpoint-covered local memory retention state
+
+Usage:
+  orka memory backend purge [flags]
+
+Flags:
+      --audit                  Purge eligible non-authoritative audit rows
+      --before string          Purge records older than this RFC3339 timestamp
+      --checkpoint-id string   Verified checkpoint ID covering the purge
+      --expired-idempotency    Purge expired idempotency records
+  -h, --help                   help for purge
+      --max-sequence int       Maximum operation sequence to purge (0 uses checkpoint watermark)
+  -o, --output string          Output format: table, json, yaml (default "table")
+      --payloads               Purge retained successful operation payloads
+      --reason string          Required audit reason
+      --receipts               Purge retained successful operation receipts
+      --tombstones             Purge eligible tombstones
+      --yes                    Confirm the retention purge
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend restore-legacy`
+
+```text
+Restore-legacy the namespace memory backend
+
+Usage:
+  orka memory backend restore-legacy [flags]
+
+Flags:
+      --dry-run         Preview the operation without changing state
+  -h, --help            help for restore-legacy
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Required audit reason
+      --yes             Confirm the operation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend status`
+
+```text
+Get effective memory backend status
+
+Usage:
+  orka memory backend status [flags]
+
+Flags:
+  -h, --help            help for status
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory backend update`
+
+```text
+Update the requested memory backend lifecycle or endpoint configuration
+
+Usage:
+  orka memory backend update [flags]
+
+Flags:
+  -f, --file string     Path to MemoryBackend JSON/YAML
+  -h, --help            help for update
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Required audit reason
+      --yes             Confirm backend update
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka memory create`
 
 ```text
@@ -1198,11 +1525,14 @@ Usage:
   orka memory create [flags]
 
 Flags:
-      --content string   Memory content
-  -f, --file string      Path to memory JSON/YAML body
-  -h, --help             help for create
-      --source string    Memory source (default "cli")
-      --tags string      Comma-separated tags
+      --content string           Memory content
+  -f, --file string              Path to memory JSON/YAML body
+  -h, --help                     help for create
+      --idempotency-key string   Stable idempotency key for safe retries (generated when omitted)
+      --source string            Memory source (default "cli")
+      --tags string              Comma-separated tags
+      --wait                     Wait for deferred remote materialization to finish
+      --wait-timeout duration    Maximum time to wait for deferred materialization (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1222,7 +1552,10 @@ Usage:
   orka memory delete <id> [flags]
 
 Flags:
-  -h, --help   help for delete
+  -h, --help                     help for delete
+      --idempotency-key string   Stable idempotency key for safe retries (generated when omitted)
+      --wait                     Wait for deferred remote materialization to finish
+      --wait-timeout duration    Maximum time to wait for deferred materialization (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1282,8 +1615,9 @@ Usage:
   orka memory get <id> [flags]
 
 Flags:
-  -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "table")
+  -h, --help               help for get
+      --include-disabled   Include disabled memory
+  -o, --output string      Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1304,6 +1638,8 @@ Usage:
 
 Flags:
       --agentName string     Filter by agentName
+      --continue string      Continue/cursor token for the next page
+      --cursor string        Cursor token for the next page
   -h, --help                 help for list
       --ids string           Filter by ids
       --include-deleted      Include deleted memories
@@ -1316,6 +1652,124 @@ Flags:
       --source string        Filter by source
       --tags string          Filter by tags
       --taskName string      Filter by taskName
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory operation`
+
+```text
+Inspect and manage durable memory operations
+
+Usage:
+  orka memory operation [command]
+
+Available Commands:
+  abandon     Abandon a memory operation
+  get         Get a memory operation
+  list        List memory operations
+  retry       Retry a memory operation
+
+Flags:
+  -h, --help   help for operation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka memory operation [command] --help" for more information about a command.
+```
+
+## `orka memory operation abandon`
+
+```text
+Abandon a memory operation
+
+Usage:
+  orka memory operation abandon <id> [flags]
+
+Flags:
+  -h, --help            help for abandon
+      --reason string   Required audit reason
+      --yes             Confirm the operation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory operation get`
+
+```text
+Get a memory operation
+
+Usage:
+  orka memory operation get <id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory operation list`
+
+```text
+List memory operations
+
+Usage:
+  orka memory operation list [flags]
+
+Flags:
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+  -h, --help              help for list
+      --limit int         Maximum number of operations (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --state string      Filter by operation state
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka memory operation retry`
+
+```text
+Retry a memory operation
+
+Usage:
+  orka memory operation retry <id> [flags]
+
+Flags:
+  -h, --help            help for retry
+      --reason string   Required audit reason
+      --yes             Confirm the operation
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1364,7 +1818,10 @@ Usage:
   orka memory proposal apply <id> [flags]
 
 Flags:
-  -h, --help   help for apply
+  -h, --help                     help for apply
+      --idempotency-key string   Stable idempotency key for safe retries (generated when omitted)
+      --wait                     Wait for deferred remote materialization to finish
+      --wait-timeout duration    Maximum time to wait for deferred materialization (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1474,11 +1931,14 @@ Usage:
   orka memory update <id> [flags]
 
 Flags:
-      --content string   Memory content
-  -f, --file string      Path to memory JSON/YAML body
-  -h, --help             help for update
-      --source string    Memory source
-      --tags string      Comma-separated tags
+      --content string           Memory content
+  -f, --file string              Path to memory JSON/YAML body
+  -h, --help                     help for update
+      --idempotency-key string   Stable idempotency key for safe retries (generated when omitted)
+      --source string            Memory source
+      --tags string              Comma-separated tags
+      --wait                     Wait for deferred remote materialization to finish
+      --wait-timeout duration    Maximum time to wait for deferred materialization (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

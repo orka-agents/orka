@@ -27,6 +27,14 @@ var (
 	signedURLQueryRe = regexp.MustCompile(`(?i)([?&](?:sig|signature|sas|x-amz-signature|x-amz-security-token|x-amz-credential|x-goog-signature|x-goog-credential)=)[^&#\s"'<>,;()\[\]]+`)
 )
 
+// SensitiveStringSlice redacts each string in values in place and returns it.
+func SensitiveStringSlice(values []string) []string {
+	for i := range values {
+		values[i] = SensitiveText(values[i])
+	}
+	return values
+}
+
 // SensitiveText replaces common credential and token shapes with a stable
 // placeholder suitable for persistence in durable memory and proposals. It is
 // intentionally conservative about preserving surrounding prose while removing

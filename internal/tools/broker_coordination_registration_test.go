@@ -514,15 +514,10 @@ func TestBrokeredDelegateTaskUsesRegisteredControllerTTSConfiguration(t *testing
 	if resolverCalls != 1 {
 		t.Fatalf("subject-token resolver calls = %d, want 1", resolverCalls)
 	}
-	if len(exchanger.requests) != 1 {
-		t.Fatalf("TTS exchange requests = %d, want 1", len(exchanger.requests))
-	}
-	request := exchanger.requests[0]
-	if request.SubjectToken != parentTransactionToken || request.Scope != childTransactionScope || request.RequestedTTL != 2*time.Minute {
-		t.Fatalf("TTS exchange request = %#v", request)
-	}
-	if request.SubjectTokenType != transactiontoken.SubjectTokenTypeTransactionToken {
-		t.Fatalf("subject token type = %q", request.SubjectTokenType)
+	// The Task controller exchanges the renewable child token; the tool only
+	// prepares the child-owned renewal authority.
+	if len(exchanger.requests) != 0 {
+		t.Fatalf("TTS exchange requests = %d, want 0 before the controller exchanges", len(exchanger.requests))
 	}
 
 	var delegated DelegateTaskResult
@@ -533,19 +528,21 @@ func TestBrokeredDelegateTaskUsesRegisteredControllerTTSConfiguration(t *testing
 	if err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: brokerTestNamespace, Name: delegated.TaskName}, child); err != nil {
 		t.Fatal(err)
 	}
+	if child.Annotations[labels.AnnotationTransactionTokenPending] != trueStr {
+		t.Fatal("delegated child is not gated pending controller exchange")
+	}
 	secretName := child.Annotations[labels.AnnotationTransactionTokenSecret]
 	if secretName == "" {
 		t.Fatal("delegated child is missing transaction-token Secret annotation")
 	}
-	secret := &corev1.Secret{}
-	if err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: brokerTestNamespace, Name: secretName}, secret); err != nil {
+	requireRenewableChildTransactionSecrets(t, k8sClient, child, secretName, parentTransactionToken)
+	authorities := &corev1.SecretList{}
+	if err := k8sClient.List(context.Background(), authorities, client.InNamespace(brokerTestNamespace),
+		client.MatchingLabels{labels.LabelPurpose: transactiontoken.AuthoritySecretPurpose}); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(secret.Data["token"]); got != "child-transaction-token" {
-		t.Fatalf("child transaction token = %q, want exchanged token", got)
-	}
-	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].UID != child.UID {
-		t.Fatalf("child transaction-token Secret owner = %#v, want child uid %s", secret.OwnerReferences, child.UID)
+	if got := string(authorities.Items[0].Data[transactiontoken.SubjectTokenTypeSecretKey]); got != transactiontoken.SubjectTokenTypeTransactionToken {
+		t.Fatalf("persisted subject token type = %q", got)
 	}
 }
 

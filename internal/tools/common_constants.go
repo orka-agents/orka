@@ -50,6 +50,8 @@ const (
 	githubCommitMessageField        = "commit_message"
 	agentRefField                   = "agentRef"
 	taskKindString                  = "Task"
+	taskNameCamelField              = "taskName"
+	agentNameCamelField             = "agentName"
 	cancelledStatusString           = "cancelled"
 	createAgentToolName             = "create_agent"
 	checkMessagesToolName           = "check_messages"

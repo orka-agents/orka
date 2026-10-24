@@ -56,7 +56,10 @@ func TestInternalGatewayMessageBudgetRevocationAndReceipts(t *testing.T) {
 			withdrawGatewayMessageCapability(t, f)
 		}, 200},
 		{"forged pod", func(t *testing.T, f *gatewayMessageAPIFixture) {
+			// Cached TokenReview identities are isolated copies; present a fresh
+			// token so the forged pod identity is actually reviewed.
 			f.user.Extra["authentication.kubernetes.io/pod-uid"] = authenticationv1.ExtraValue{"forged"}
+			f.token += "-forged"
 		}, 403},
 		{"forged origin", func(t *testing.T, f *gatewayMessageAPIFixture) {
 			f.task.Spec.RequestedBy = nil

@@ -408,8 +408,7 @@ func (r *ProviderResolver) soleReadyProvider(ctx context.Context, namespace, req
 // requestUsesContextToken reports whether the request authenticated with a
 // transaction context token, whose Provider visibility is scope-limited.
 func requestUsesContextToken(c fiber.Ctx) bool {
-	ui := GetUserInfo(c)
-	return ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil
+	return contextTokenFromUserInfo(GetUserInfo(c)) != nil
 }
 
 func requestRequiresExplicitProvider(c fiber.Ctx, authorization ContextTokenAuthorizationConfig) bool {

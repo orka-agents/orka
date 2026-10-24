@@ -400,8 +400,8 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 	tracing.StampTaskTraceContext(ctx, task)
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return ChatToolSuccess(map[string]any{
-			"agentName":      agent.Name,
-			"agentNamespace": agent.Namespace, messageField: fmt.Sprintf("Agent created, but task creation failed: %v", err),
+			agentNameCamelField: agent.Name,
+			"agentNamespace":    agent.Namespace, messageField: fmt.Sprintf("Agent created, but task creation failed: %v", err),
 		})
 	}
 	sealTaskCreate(ctx, tc, task)
@@ -409,10 +409,10 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 	tc.IncrementTasks()
 	tc.RecordCreatedTask(task)
 	return ChatToolSuccess(map[string]any{
-		"agentName":      agent.Name,
-		"agentNamespace": agent.Namespace,
-		"taskName":       task.Name,
-		"taskNamespace":  task.Namespace, messageField: "Agent created and task started",
+		agentNameCamelField: agent.Name,
+		"agentNamespace":    agent.Namespace,
+		taskNameCamelField:  task.Name,
+		"taskNamespace":     task.Namespace, messageField: "Agent created and task started",
 	})
 }
 

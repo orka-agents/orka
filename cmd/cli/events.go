@@ -24,9 +24,12 @@ import (
 )
 
 const (
-	cliNameKey = "name"
-	queryAfter = "after"
-	queryLimit = "limit"
+	cliNameKey  = "name"
+	queryAfter  = "after"
+	queryLimit  = "limit"
+	fieldReason = "reason"
+
+	phaseSucceeded = "succeeded"
 
 	approvalStatusPending = "pending"
 )
@@ -244,7 +247,7 @@ request. The full ID is sent to the server.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
-			body, _ := json.Marshal(map[string]string{"decision": decision, "reason": reason})
+			body, _ := json.Marshal(map[string]string{"decision": decision, fieldReason: reason})
 			decide := func(approvalID string) (any, error) {
 				path := "/api/v1/tasks/" + url.PathEscape(args[0]) +
 					"/approvals/" + url.PathEscape(approvalID) + "/decision"

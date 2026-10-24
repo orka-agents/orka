@@ -85,6 +85,45 @@ func TestTaskAccessContextTokenOnlyLoadSkipsNonContextTokenCallers(t *testing.T)
 	}
 }
 
+func TestTaskAccessContextTokenOnlyLoadAppliesCompositeTxnConstraints(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-a", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	handlers, app := setupTestHandlersWithObjects(task)
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: ContextTokenAuthorizationModeEnforce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlers.contextTokenAuthorization = cfg
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
+			ContextToken: &ContextToken{
+				Scopes:             []string{ContextTokenScopeTaskGet},
+				TransactionContext: map[string]any{"task": "default/other-task"},
+			},
+		})
+		return c.Next()
+	})
+	app.Get("/maybe/:id", func(c fiber.Ctx) error {
+		_, err := handlers.taskAccess().loadReadableForContextToken(c, "testRead", "default", c.Params("id"))
+		return err
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/maybe/task-a", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
 func TestTaskAccessPreservesTraceStoreMissingBeforeTaskLoad(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Get("/tasks/:id/trace", handlers.GetTaskTrace)

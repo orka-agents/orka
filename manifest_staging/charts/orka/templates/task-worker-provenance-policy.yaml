@@ -1,0 +1,223 @@
+{{- $root := . -}}
+{{- $fullname := include "orka.fullname" . -}}
+{{- range $variant := list (dict "suffix" "-preflight" "hook" true) (dict "suffix" "" "hook" false) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $fullname }}-task-job-provenance{{ $variant.suffix }}
+  labels:
+    {{- include "orka.labels" $root | nindent 4 }}
+    orka.ai/task-provenance-policy: job
+  annotations:
+    {{- if $variant.hook }}
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- else }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: newJobTaskLabel
+      expression: "has(object.metadata.labels) && 'orka.ai/task' in object.metadata.labels ? object.metadata.labels['orka.ai/task'] : ''"
+    - name: oldJobTaskLabel
+      expression: "oldObject != null && has(oldObject.metadata.labels) && 'orka.ai/task' in oldObject.metadata.labels ? oldObject.metadata.labels['orka.ai/task'] : ''"
+    - name: newPodTaskLabel
+      expression: "has(object.spec.template.metadata.labels) && 'orka.ai/task' in object.spec.template.metadata.labels ? object.spec.template.metadata.labels['orka.ai/task'] : ''"
+    - name: oldPodTaskLabel
+      expression: "oldObject != null && has(oldObject.spec.template.metadata.labels) && 'orka.ai/task' in oldObject.spec.template.metadata.labels ? oldObject.spec.template.metadata.labels['orka.ai/task'] : ''"
+    - name: newJobTaskUID
+      expression: "has(object.metadata.labels) && 'orka.ai/task-uid' in object.metadata.labels ? object.metadata.labels['orka.ai/task-uid'] : ''"
+    - name: oldJobTaskUID
+      expression: "oldObject != null && has(oldObject.metadata.labels) && 'orka.ai/task-uid' in oldObject.metadata.labels ? oldObject.metadata.labels['orka.ai/task-uid'] : ''"
+    - name: newPodTaskUID
+      expression: "has(object.spec.template.metadata.labels) && 'orka.ai/task-uid' in object.spec.template.metadata.labels ? object.spec.template.metadata.labels['orka.ai/task-uid'] : ''"
+    - name: oldPodTaskUID
+      expression: "oldObject != null && has(oldObject.spec.template.metadata.labels) && 'orka.ai/task-uid' in oldObject.spec.template.metadata.labels ? oldObject.spec.template.metadata.labels['orka.ai/task-uid'] : ''"
+    - name: newJobCanonicalTaskLabel
+      expression: "has(object.metadata.annotations) && 'orka.ai/task-label' in object.metadata.annotations ? object.metadata.annotations['orka.ai/task-label'] : ''"
+    - name: oldJobCanonicalTaskLabel
+      expression: "oldObject != null && has(oldObject.metadata.annotations) && 'orka.ai/task-label' in oldObject.metadata.annotations ? oldObject.metadata.annotations['orka.ai/task-label'] : ''"
+    - name: newPodCanonicalTaskLabel
+      expression: "has(object.spec.template.metadata.annotations) && 'orka.ai/task-label' in object.spec.template.metadata.annotations ? object.spec.template.metadata.annotations['orka.ai/task-label'] : ''"
+    - name: oldPodCanonicalTaskLabel
+      expression: "oldObject != null && has(oldObject.spec.template.metadata.annotations) && 'orka.ai/task-label' in oldObject.spec.template.metadata.annotations ? oldObject.spec.template.metadata.annotations['orka.ai/task-label'] : ''"
+    - name: newJobTaskName
+      expression: "has(object.metadata.annotations) && 'orka.ai/task-name' in object.metadata.annotations ? object.metadata.annotations['orka.ai/task-name'] : ''"
+    - name: oldJobTaskName
+      expression: "oldObject != null && has(oldObject.metadata.annotations) && 'orka.ai/task-name' in oldObject.metadata.annotations ? oldObject.metadata.annotations['orka.ai/task-name'] : ''"
+    - name: newPodTaskName
+      expression: "has(object.spec.template.metadata.annotations) && 'orka.ai/task-name' in object.spec.template.metadata.annotations ? object.spec.template.metadata.annotations['orka.ai/task-name'] : ''"
+    - name: oldPodTaskName
+      expression: "oldObject != null && has(oldObject.spec.template.metadata.annotations) && 'orka.ai/task-name' in oldObject.spec.template.metadata.annotations ? oldObject.spec.template.metadata.annotations['orka.ai/task-name'] : ''"
+    - name: newTaskOwners
+      expression: "has(object.metadata.ownerReferences) ? object.metadata.ownerReferences.filter(o, o.apiVersion == 'core.orka.ai/v1alpha1' && o.kind == 'Task') : []"
+    - name: oldTaskOwners
+      expression: "oldObject != null && has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences.filter(o, o.apiVersion == 'core.orka.ai/v1alpha1' && o.kind == 'Task') : []"
+  validations:
+    - expression: >-
+        (variables.newJobTaskLabel == variables.oldJobTaskLabel &&
+         variables.newPodTaskLabel == variables.oldPodTaskLabel &&
+         variables.newJobTaskUID == variables.oldJobTaskUID &&
+         variables.newPodTaskUID == variables.oldPodTaskUID &&
+         variables.newJobCanonicalTaskLabel == variables.oldJobCanonicalTaskLabel &&
+         variables.newPodCanonicalTaskLabel == variables.oldPodCanonicalTaskLabel &&
+         variables.newJobTaskName == variables.oldJobTaskName &&
+         variables.newPodTaskName == variables.oldPodTaskName &&
+         variables.newTaskOwners == variables.oldTaskOwners) ||
+        (variables.newJobTaskLabel != '' &&
+         variables.newPodTaskLabel == variables.newJobTaskLabel &&
+         size(variables.newTaskOwners) == 1 &&
+         has(variables.newTaskOwners[0].controller) && variables.newTaskOwners[0].controller &&
+         size(variables.newTaskOwners[0].name) > 0 &&
+         size(variables.newTaskOwners[0].uid) > 0 &&
+         ((variables.newJobTaskUID == '' && variables.newPodTaskUID == '' &&
+           variables.newJobCanonicalTaskLabel == '' && variables.newPodCanonicalTaskLabel == '' &&
+           variables.newJobTaskName == '' && variables.newPodTaskName == '') ||
+          (variables.newJobTaskLabel == variables.newJobCanonicalTaskLabel &&
+           variables.newPodTaskLabel == variables.newPodCanonicalTaskLabel &&
+           variables.newJobCanonicalTaskLabel == variables.newPodCanonicalTaskLabel &&
+           variables.newJobTaskUID != '' && variables.newJobTaskUID == variables.newPodTaskUID &&
+           variables.newJobTaskUID == variables.newTaskOwners[0].uid &&
+           variables.newJobTaskName == variables.newTaskOwners[0].name &&
+           variables.newPodTaskName == variables.newTaskOwners[0].name)) &&
+         authorizer.group('batch')
+           .resource('jobs')
+           .subresource('task-provenance')
+           .namespace(request.namespace)
+           .name(object.metadata.name)
+           .check('admit').allowed())
+      message: Orka task Job provenance may only be established or changed by the Orka task controller for the exact owning Task
+      reason: Forbidden
+---
+{{- end }}
+{{- range $variant := list (dict "suffix" "-preflight" "hook" true) (dict "suffix" "" "hook" false) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $fullname }}-task-job-provenance{{ $variant.suffix }}
+  labels:
+    {{- include "orka.labels" $root | nindent 4 }}
+    orka.ai/task-provenance-policy: job
+  annotations:
+    {{- if $variant.hook }}
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- else }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  policyName: {{ $fullname }}-task-job-provenance{{ $variant.suffix }}
+  validationActions: [Deny]
+---
+{{- end }}
+{{- range $variant := list (dict "suffix" "-preflight" "hook" true) (dict "suffix" "" "hook" false) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $fullname }}-task-pod-provenance{{ $variant.suffix }}
+  labels:
+    {{- include "orka.labels" $root | nindent 4 }}
+    orka.ai/task-provenance-policy: pod
+  annotations:
+    {{- if $variant.hook }}
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- else }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: newTaskLabel
+      expression: "has(object.metadata.labels) && 'orka.ai/task' in object.metadata.labels ? object.metadata.labels['orka.ai/task'] : ''"
+    - name: oldTaskLabel
+      expression: "oldObject != null && has(oldObject.metadata.labels) && 'orka.ai/task' in oldObject.metadata.labels ? oldObject.metadata.labels['orka.ai/task'] : ''"
+    - name: newTaskUID
+      expression: "has(object.metadata.labels) && 'orka.ai/task-uid' in object.metadata.labels ? object.metadata.labels['orka.ai/task-uid'] : ''"
+    - name: oldTaskUID
+      expression: "oldObject != null && has(oldObject.metadata.labels) && 'orka.ai/task-uid' in oldObject.metadata.labels ? oldObject.metadata.labels['orka.ai/task-uid'] : ''"
+    - name: newJobControllerUID
+      expression: "has(object.metadata.labels) && 'batch.kubernetes.io/controller-uid' in object.metadata.labels ? object.metadata.labels['batch.kubernetes.io/controller-uid'] : ''"
+    - name: newJobName
+      expression: "has(object.metadata.labels) && 'batch.kubernetes.io/job-name' in object.metadata.labels ? object.metadata.labels['batch.kubernetes.io/job-name'] : ''"
+    - name: newCanonicalTaskLabel
+      expression: "has(object.metadata.annotations) && 'orka.ai/task-label' in object.metadata.annotations ? object.metadata.annotations['orka.ai/task-label'] : ''"
+    - name: oldCanonicalTaskLabel
+      expression: "oldObject != null && has(oldObject.metadata.annotations) && 'orka.ai/task-label' in oldObject.metadata.annotations ? oldObject.metadata.annotations['orka.ai/task-label'] : ''"
+    - name: newTaskName
+      expression: "has(object.metadata.annotations) && 'orka.ai/task-name' in object.metadata.annotations ? object.metadata.annotations['orka.ai/task-name'] : ''"
+    - name: oldTaskName
+      expression: "oldObject != null && has(oldObject.metadata.annotations) && 'orka.ai/task-name' in oldObject.metadata.annotations ? oldObject.metadata.annotations['orka.ai/task-name'] : ''"
+    - name: newJobOwners
+      expression: "has(object.metadata.ownerReferences) ? object.metadata.ownerReferences.filter(o, o.apiVersion == 'batch/v1' && o.kind == 'Job') : []"
+    - name: oldJobOwners
+      expression: "oldObject != null && has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences.filter(o, o.apiVersion == 'batch/v1' && o.kind == 'Job') : []"
+  validations:
+    - expression: >-
+        (variables.newTaskLabel == '' && variables.oldTaskLabel == '' &&
+         variables.newTaskUID == '' && variables.oldTaskUID == '' &&
+         variables.newCanonicalTaskLabel == '' && variables.oldCanonicalTaskLabel == '' &&
+         variables.newTaskName == '' && variables.oldTaskName == '') ||
+        (variables.newTaskLabel == variables.oldTaskLabel &&
+         variables.newTaskUID == variables.oldTaskUID &&
+         variables.newCanonicalTaskLabel == variables.oldCanonicalTaskLabel &&
+         variables.newTaskName == variables.oldTaskName &&
+         variables.newJobOwners == variables.oldJobOwners) ||
+        (variables.newTaskLabel != '' &&
+         size(variables.newJobOwners) == 1 &&
+         has(variables.newJobOwners[0].controller) && variables.newJobOwners[0].controller &&
+         size(variables.newJobOwners[0].name) > 0 &&
+         size(variables.newJobOwners[0].uid) > 0 &&
+         variables.newJobOwners[0].uid == variables.newJobControllerUID &&
+         variables.newJobOwners[0].name == variables.newJobName &&
+         ((variables.newTaskUID == '' && variables.newCanonicalTaskLabel == '' && variables.newTaskName == '') ||
+          (variables.newTaskLabel == variables.newCanonicalTaskLabel && variables.newTaskUID != '' && variables.newTaskName != '')) &&
+         authorizer.group('')
+           .resource('pods')
+           .subresource('task-provenance')
+           .namespace(request.namespace)
+           .name(object.metadata.name)
+           .check('admit').allowed())
+      message: Orka task Pod provenance may only be established or changed by the Kubernetes Job controller
+      reason: Forbidden
+---
+{{- end }}
+{{- range $variant := list (dict "suffix" "-preflight" "hook" true) (dict "suffix" "" "hook" false) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $fullname }}-task-pod-provenance{{ $variant.suffix }}
+  labels:
+    {{- include "orka.labels" $root | nindent 4 }}
+    orka.ai/task-provenance-policy: pod
+  annotations:
+    {{- if $variant.hook }}
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- else }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  policyName: {{ $fullname }}-task-pod-provenance{{ $variant.suffix }}
+  validationActions: [Deny]
+{{- if not (eq $variant.suffix "") }}
+---
+{{- end }}
+{{- end }}

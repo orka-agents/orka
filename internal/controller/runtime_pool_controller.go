@@ -225,7 +225,7 @@ func (c RuntimePoolProviderProxyConfig) normalized() (runtimePoolProviderProxyCo
 		return runtimePoolProviderProxyConfig{}, fmt.Errorf("authenticated provider proxy base URL must address a Service in its configured namespace")
 	}
 	port := int32(80)
-	if parsed.Scheme == "https" {
+	if parsed.Scheme == urlSchemeHTTPS {
 		port = 443
 	}
 	if rawPort := parsed.Port(); rawPort != "" {

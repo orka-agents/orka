@@ -18,6 +18,7 @@ on:
         type: string
 
 env:
+  MEMORY_RELEASE_STAGE: foundation
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ${{ github.repository }}
 
@@ -63,6 +64,45 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.release_version }}
         run: scripts/validate-release-manifest.sh "${RELEASE_VERSION}"
+
+      - name: Validate memory release stage
+        run: |
+          set -euo pipefail
+
+          # The chart annotation, controller source gate, and this workflow must
+          # agree; a foundation artifact must never activate remote memory.
+          for chart in cmd/build/helmify/static manifest_staging/charts/orka charts/orka; do
+            chart_memory_release_stage=$(awk '$1 == "memory.orka.ai/release-stage:" { print $2; exit }' "${chart}/Chart.yaml")
+            if [[ "${chart_memory_release_stage}" != "${MEMORY_RELEASE_STAGE}" ]]; then
+              echo "${chart} requires memory stage ${MEMORY_RELEASE_STAGE}; found ${chart_memory_release_stage:-missing}." >&2
+              exit 1
+            fi
+          done
+          stage_constant="memoryReleaseStage${MEMORY_RELEASE_STAGE^}"
+          if ! grep -Eq "^[[:space:]]*memoryBuildReleaseStage[[:space:]]*=[[:space:]]*${stage_constant}[[:space:]]*$" cmd/main.go; then
+            echo "cmd/main.go must select the ${MEMORY_RELEASE_STAGE} memory release gate." >&2
+            exit 1
+          fi
+
+          if [[ "${MEMORY_RELEASE_STAGE}" == foundation ]]; then
+            foundation_activation_error=$(mktemp)
+            trap 'rm -f "${foundation_activation_error}"' EXIT
+            if helm template release-validation-foundation charts/orka \
+              --namespace orka-system \
+              --set-string controller.agentExecutionSnapshot.existingSecret=release-validation-snapshot \
+              --set-string controller.agentExecutionSnapshot.key=key \
+              --set-string webhooks.tls.existingSecret=release-validation-webhook-tls \
+              --set-string webhooks.caBundle=Y2E= \
+              --set controller.memoryBackend.enabled=true \
+              --set controller.memoryBackend.activationEnabled=true \
+              --set controller.memoryBackend.crdsReadyOverride=true \
+              --set-string controller.memoryBackend.clusterId=release-validation \
+              >/dev/null 2>"${foundation_activation_error}"; then
+              echo "Foundation release chart unexpectedly enabled remote memory activation." >&2
+              exit 1
+            fi
+            grep -Fq 'controller.memoryBackend.activationEnabled is unavailable in the foundation release artifact' "${foundation_activation_error}"
+          fi
 
       - name: Package promoted chart
         run: |

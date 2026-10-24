@@ -50,6 +50,16 @@ rules:
   resources:
   - memoryproposals
   verbs: [get, list, create, update, review, apply]
+# Trust changes and operation retry/abandon are memory governance. Retry and
+# abandon additionally require update on MemoryBackend/default.
+- apiGroups: [core.orka.ai]
+  resources:
+  - memories/trust
+  verbs: [update]
+- apiGroups: [core.orka.ai]
+  resources:
+  - memoryoperations
+  verbs: [get, list, update]
 - apiGroups: [core.orka.ai]
   resources:
   - runtimepools

@@ -511,6 +511,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	validationTask := opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task)
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
+	taskLabel := labels.SelectorValue(task.Name)
 
 	container, err := b.buildContainerWithOptions(ctx, task, agent, provider, opts)
 	if err != nil {
@@ -520,8 +521,13 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: task.Namespace,
+			Annotations: map[string]string{
+				labels.AnnotationTaskLabel: taskLabel,
+				labels.AnnotationTaskName:  task.Name,
+			},
 			Labels: map[string]string{
-				labels.LabelTask:     labels.SelectorValue(task.Name),
+				labels.LabelTask:     taskLabel,
+				labels.LabelTaskUID:  string(task.UID),
 				labels.LabelTaskType: string(task.Spec.Type),
 			},
 		},
@@ -529,8 +535,13 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 			BackoffLimit: new(int32(0)), // No retries at Job level, we handle retries in the controller
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						labels.AnnotationTaskLabel: taskLabel,
+						labels.AnnotationTaskName:  task.Name,
+					},
 					Labels: map[string]string{
-						labels.LabelTask:     labels.SelectorValue(task.Name),
+						labels.LabelTask:     taskLabel,
+						labels.LabelTaskUID:  string(task.UID),
 						labels.LabelTaskType: string(task.Spec.Type),
 					},
 				},
@@ -987,12 +998,20 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 		return envVars
 	}
 	for _, envVar := range task.Spec.Env {
-		if isReservedTaskTelemetryEnv(task, envVar.Name) {
+		if isReservedTaskWorkerEnv(task, envVar.Name) {
 			continue
 		}
 		envVars = append(envVars, envVar)
 	}
 	return envVars
+}
+
+func isReservedTaskWorkerEnv(task *corev1alpha1.Task, name string) bool {
+	if isReservedTaskTelemetryEnv(task, name) {
+		return true
+	}
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI && task.Spec.Transaction != nil &&
+		(name == workerenv.CodeExecBackend || strings.HasPrefix(name, workerenv.CodeExecBackend+"_"))
 }
 
 func isReservedTaskTelemetryEnv(task *corev1alpha1.Task, name string) bool {

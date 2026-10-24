@@ -1,0 +1,24 @@
+# This role is not used by Orka itself. It grants read-only visibility into
+# MemoryBackend desired and observed state.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: memorybackend-viewer-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get

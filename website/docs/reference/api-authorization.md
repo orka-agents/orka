@@ -34,7 +34,9 @@ use namespaced virtual resources in SubjectAccessReview requests. They need RBAC
 rules, but no new CRDs. `resource/subresource` notation maps to separate SAR
 resource and subresource fields and to the same slash-separated string in RBAC.
 
-- `sessions`, `memories`, and `memoryproposals` authorize their stored records.
+- `sessions`, `memories`, `memoryproposals`, and `memoryoperations` authorize
+  their stored records. `memories/trust` gates trust changes separately from
+  ordinary memory updates.
   Proposal `review` and `apply` are distinct custom verbs on `memoryproposals`,
   not CRUD updates. Applying also requires `create` on `memories`. Returning an
   already-applied memory requires `get` on its final referenced memory ID.
@@ -123,6 +125,7 @@ field wins where two fields are listed. Other request fields do not override it.
 | `B` | JSON `namespace`; query and metadata ignored |
 | `QB` | `namespace` query parameter, then JSON `namespace` |
 | `BQ` | JSON `namespace`, then `namespace` query parameter |
+| `QM` | `namespace` query parameter, then JSON `metadata.namespace` |
 | `cluster` | Empty SAR namespace; GatewayClass is cluster-scoped |
 
 A configured `--watch-namespace` is the only allowed target. An explicit mismatch
@@ -191,13 +194,31 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/gateway-deliveries` | `gateway.orka.ai` | `gatewaydeliveries` | `list` | empty | `Q` | `get gateway.orka.ai/gateways` with `gateway` query name, or unnamed `list gateways` without it |
 | `GET` | `/api/v1/gateway-deliveries/:id` | `gateway.orka.ai` | `gatewaydeliveries` | `get` | `:id` | `Q` | `get gateway.orka.ai/gateways` with record Gateway name |
 | `POST` | `/api/v1/gateway-deliveries/:id/retry` | `gateway.orka.ai` | `gatewaydeliveries` | `update` | `:id` | `Q` | `get` and `update` on `gateway.orka.ai/gateways` with record Gateway name |
+| `GET` | `/api/v1/memory-backends` | `core.orka.ai` | `memorybackends` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/memory-backends` | `core.orka.ai` | `memorybackends` | `create` | empty | `M` | none |
+| `GET` | `/api/v1/memory-backends/default` | `core.orka.ai` | `memorybackends` | `get` | `default` | `Q` | none |
+| `PUT` | `/api/v1/memory-backends/default` | `core.orka.ai` | `memorybackends` | `update` | `default` | `QM` | none |
+| `DELETE` | `/api/v1/memory-backends/default` | `core.orka.ai` | `memorybackends` | `delete` | `default` | `Q` | none |
+| `GET` | `/api/v1/memory-backends/default/status` | `core.orka.ai` | `memorybackends` | `get` | `default` | `Q` | none |
+| `POST` | `/api/v1/memory-backends/default/activate` | `core.orka.ai` | `memorybackends` | `update` | `default` | `Q` | none |
+| `POST` | `/api/v1/memory-backends/default/decommission` | `core.orka.ai` | `memorybackends` | `update` | `default` | `Q` | none |
+| `POST` | `/api/v1/memory-backends/default/force-orphan` | `core.orka.ai` | `memorybackends` | `update` | `default` | `Q` | `delete core.orka.ai/memorybackends` named `default` |
+| `POST` | `/api/v1/memory-backends/default/restore-legacy` | `core.orka.ai` | `memorybackends` | `update` | `default` | `Q` | `delete core.orka.ai/memorybackends` named `default` |
+| `POST` | `/api/v1/memory-backends/default/checkpoints` | `core.orka.ai` | `memorybackends` | `get` | `default` | `Q` | `update core.orka.ai/memorybackends` named `default` |
+| `POST` | `/api/v1/memory-backends/default/purge` | `core.orka.ai` | `memorybackends` | `get` | `default` | `Q` | `update core.orka.ai/memorybackends` named `default` |
 | `GET` | `/api/v1/memories` | `core.orka.ai` | `memories` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/memories` | `core.orka.ai` | `memories` | `create` | empty | `B` | none |
+| `POST` | `/api/v1/memories/search` | `core.orka.ai` | `memories` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/memories/:id` | `core.orka.ai` | `memories` | `get` | `:id` | `Q` | none |
 | `PUT` | `/api/v1/memories/:id` | `core.orka.ai` | `memories` | `update` | `:id` | `QB` | none |
 | `DELETE` | `/api/v1/memories/:id` | `core.orka.ai` | `memories` | `delete` | `:id` | `Q` | none |
 | `POST` | `/api/v1/memories/:id/disable` | `core.orka.ai` | `memories` | `update` | `:id` | `Q` | none |
 | `POST` | `/api/v1/memories/:id/enable` | `core.orka.ai` | `memories` | `update` | `:id` | `Q` | none |
+| `POST` | `/api/v1/memories/:id/trust` | `core.orka.ai` | `memories/trust` | `update` | `:id` | `Q` | none |
+| `GET` | `/api/v1/memory-operations` | `core.orka.ai` | `memoryoperations` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/memory-operations/:id` | `core.orka.ai` | `memoryoperations` | `get` | `:id` | `Q` | none |
+| `POST` | `/api/v1/memory-operations/:id/retry` | `core.orka.ai` | `memoryoperations` | `update` | `:id` | `Q` | `get` and `update` on `core.orka.ai/memorybackends` named `default` |
+| `POST` | `/api/v1/memory-operations/:id/abandon` | `core.orka.ai` | `memoryoperations` | `update` | `:id` | `Q` | `get` and `update` on `core.orka.ai/memorybackends` named `default` |
 | `GET` | `/api/v1/memory-proposals` | `core.orka.ai` | `memoryproposals` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/memory-proposals` | `core.orka.ai` | `memoryproposals` | `create` | empty | `B` | none |
 | `GET` | `/api/v1/memory-proposals/:id` | `core.orka.ai` | `memoryproposals` | `get` | `:id` | `Q` | none |

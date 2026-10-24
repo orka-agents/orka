@@ -67,7 +67,7 @@ func newDashboardCmd() *cobra.Command {
 				ns = cfg.Namespace
 			}
 			if ns == "" {
-				ns = "default"
+				ns = defaultNamespace
 			}
 
 			// Checked before a token is minted, so a server without the

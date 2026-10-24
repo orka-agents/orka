@@ -5,7 +5,9 @@ controller:
   # Fixed execution protocol identity. Only harness-v2 is supported.
   mode: harness-v2
 
-  # Number of controller replicas
+  # Number of controller replicas. Must be 1: the durable SQLite authority,
+  # including MemoryBackend state, is single-writer, and upgrades use a
+  # Recreate barrier between foundation and activation release artifacts.
   replicas: 1
 
   # Latest validated main build. Use commit-specific tags or digests for an
@@ -145,6 +147,28 @@ controller:
     pollInterval: 500ms
     batchSize: 25
 
+  # Namespaced remote memory control plane. Both gates are disabled by default.
+  # Apply the exact target MemoryBackend CRD before enabling this during an upgrade.
+  memoryBackend:
+    enabled: false
+    # The second release gate. The foundation chart artifact rejects true even
+    # when supplied with --set; a later activation release must carry the
+    # explicit activation source/chart gate.
+    activationEnabled: false
+    # Stable non-secret identity shared by all controller replicas.
+    clusterId: ""
+    # Offline rendering cannot use lookup; set only after separately applying/verifying the CRD.
+    crdsReadyOverride: false
+    validationTTL: 5m
+    probeTimeout: 15s
+    dispatcherInterval: 1s
+    dispatcherGlobalConcurrency: 16
+    dispatcherNamespaceConcurrency: 2
+    dispatcherGlobalRPS: 100
+    dispatcherNamespaceRPS: 10
+    dispatcherGlobalBurst: 16
+    dispatcherNamespaceBurst: 2
+
   # External ACP providers own compute; Orka owns runtime admission and retirement.
   executionWorkspace:
     dispatchEnabled: false
@@ -236,6 +260,8 @@ controller:
       agentWrite: ""
       memoryRead: ""
       memoryWrite: ""
+      memoryOperate: ""
+      memorySearchRemote: ""
       sessionRead: ""
       sessionWrite: ""
       securityRead: ""
@@ -507,6 +533,7 @@ store:
   path: /data/orka.db
   persistence:
     enabled: true        # ACP control records, gateway history, and Session state require durable RWO storage
+    existingClaim: ""    # optional pre-created PVC; chart-created PVCs are retained on uninstall
     size: 1Gi
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce

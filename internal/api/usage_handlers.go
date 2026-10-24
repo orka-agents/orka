@@ -150,10 +150,10 @@ func (h *Handlers) authorizeUsageContextToken(c fiber.Ctx) error {
 	// A counts-only archive cannot reconstruct effective Agent/Provider/tool
 	// policy after objects are deleted. Object-constrained tokens therefore
 	// cannot authorize an aggregate, even with list scopes.
-	if ui := GetUserInfo(c); h.contextTokenAuthorization.Enabled() && ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
-		for key := range ui.ContextToken.TransactionContext {
+	if token := contextTokenFromUserInfo(GetUserInfo(c)); h.contextTokenAuthorization.Enabled() && token != nil {
+		for key := range token.TransactionContext {
 			if key != toolNamespaceArg {
-				if err := h.handleContextTokenAuthorizationFailures(ui.ContextToken, "usageReport", []string{"usage reporting requires a token without object constraints"}); err != nil {
+				if err := h.handleContextTokenAuthorizationFailures(token, "usageReport", []string{"usage reporting requires a token without object constraints"}); err != nil {
 					return err
 				}
 				break
@@ -168,11 +168,11 @@ func (h *Handlers) usageTeams(c fiber.Ctx) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ui := GetUserInfo(c); h.contextTokenAuthorization.Enabled() && ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
-		if required, ok := contextString(ui.ContextToken.TransactionContext, toolNamespaceArg); ok {
+	if token := contextTokenFromUserInfo(GetUserInfo(c)); h.contextTokenAuthorization.Enabled() && token != nil {
+		if required, ok := contextString(token.TransactionContext, toolNamespaceArg); ok {
 			for _, team := range teams {
 				if team != required {
-					if err := h.handleContextTokenAuthorizationFailures(ui.ContextToken, "usageReport", []string{"namespace does not match token context"}); err != nil {
+					if err := h.handleContextTokenAuthorizationFailures(token, "usageReport", []string{"namespace does not match token context"}); err != nil {
 						return nil, err
 					}
 				}

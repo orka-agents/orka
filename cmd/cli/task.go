@@ -543,7 +543,7 @@ func waitForTaskPhase(
 			return err
 		}
 		switch strings.ToLower(phase) {
-		case "succeeded":
+		case phaseSucceeded:
 			fmt.Fprintf(out, "Task %s succeeded.\n", taskName) //nolint:errcheck
 			return nil
 		case "failed", "cancelled":

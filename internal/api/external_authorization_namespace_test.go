@@ -30,9 +30,11 @@ func TestExternalAPIAuthorizesResolvedNamespace(t *testing.T) {
 		{"runtime ignores flat namespace", "POST /api/v1/agent-runtimes", "/api/v1/agent-runtimes?namespace=other", `{"namespace":"other","metadata":{"name":"created","namespace":"default"}}`, http.StatusCreated},
 		{"runtime ignores wrong typed flat namespace", "POST /api/v1/agent-runtimes", "/api/v1/agent-runtimes", `{"namespace":42,"metadata":{"name":"created"}}`, http.StatusCreated},
 		{"runtime uses cross namespace metadata", "POST /api/v1/agent-runtimes", "/api/v1/agent-runtimes", `{"namespace":"default","metadata":{"name":"created","namespace":"other"}}`, http.StatusForbidden},
-		{"memory ignores metadata and query", "POST /api/v1/memories", "/api/v1/memories?namespace=other", `{"id":"created","content":"allowed","metadata":"ignored"}`, http.StatusCreated},
+		{"memory ignores query", "POST /api/v1/memories", "/api/v1/memories?namespace=other", `{"id":"created","content":"allowed"}`, http.StatusCreated},
+		{"memory rejects unknown fields after authorization", "POST /api/v1/memories", "/api/v1/memories?namespace=other", `{"id":"created","content":"allowed","metadata":"ignored"}`, http.StatusBadRequest},
 		{"memory uses body namespace", "POST /api/v1/memories", "/api/v1/memories?namespace=default", `{"id":"created","content":"denied","namespace":"other"}`, http.StatusForbidden},
-		{"memory update query wins", "PUT /api/v1/memories/:id", "/api/v1/memories/protected?namespace=default", `{"namespace":"other","content":"updated"}`, http.StatusOK},
+		{"memory update query and body agree", "PUT /api/v1/memories/:id", "/api/v1/memories/protected?namespace=default", `{"namespace":"default","content":"updated"}`, http.StatusOK},
+		{"memory update rejects conflicting body namespace", "PUT /api/v1/memories/:id", "/api/v1/memories/protected?namespace=default", `{"namespace":"other","content":"rejected"}`, http.StatusBadRequest},
 		{"memory update query denies", "PUT /api/v1/memories/:id", "/api/v1/memories/protected?namespace=other", `{"namespace":"default","content":"denied"}`, http.StatusForbidden},
 		{"proposal review body wins", "POST /api/v1/memory-proposals/:id/review", "/api/v1/memory-proposals/protected/review?namespace=other", `{"namespace":"default","status":"accepted"}`, http.StatusOK},
 		{"proposal review body denies", "POST /api/v1/memory-proposals/:id/review", "/api/v1/memory-proposals/protected/review?namespace=default", `{"namespace":"other","status":"accepted"}`, http.StatusForbidden},
@@ -57,6 +59,10 @@ func TestExternalAPIAuthorizesResolvedNamespace(t *testing.T) {
 			require.NotEmpty(t, f.reviews)
 			for _, review := range f.reviews {
 				require.Equal(t, "default", review.ResourceAttributes.Namespace)
+			}
+			if tc.status != http.StatusOK && tc.status != http.StatusCreated {
+				require.Equal(t, before, f.changes(t), "rejected request changed a record")
+				return
 			}
 			switch method + " " + tc.path {
 			case "PUT /api/v1/tools/protected?namespace=default":
