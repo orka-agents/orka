@@ -628,3 +628,57 @@ Create release-scoped static worker RoleBinding names.
 {{ printf "%s:%s" $repository $tag }}
 {{- end -}}
 {{- end }}
+
+{{/*
+Agent hosts are opt-in. Their Pods, volumes and Secrets
+live in a namespace the controller never shares with its watch or ACP runtime
+namespaces, and the orka-host-agent sidecar image must be immutable.
+*/}}
+{{- define "orka.agentHostsEnabled" -}}
+{{- if dig "agentHosts" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostNamespace" -}}
+{{- trim (toString (dig "agentHosts" "namespace" "" .Values.controller)) -}}
+{{- end }}
+
+{{- define "orka.agentHostAgentImage" -}}
+{{- $image := trim (toString (dig "agentHosts" "agentImage" "" .Values.controller)) -}}
+{{- if not $image -}}
+{{- if not .Values.controller.image.digest -}}
+{{- fail "controller.agentHosts.agentImage must name a digest-pinned image, or controller.image.digest must pin the controller image it defaults to" -}}
+{{- end -}}
+{{- $image = include "orka.imageRef" .Values.controller.image -}}
+{{- end -}}
+{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` $image) -}}
+{{- fail "controller.agentHosts.agentImage must be pinned by digest: <repository>@sha256:<digest>" -}}
+{{- end -}}
+{{- $image -}}
+{{- end }}
+
+{{- define "orka.validateAgentHosts" -}}
+{{- if include "orka.agentHostsEnabled" . -}}
+{{- $namespace := include "orka.agentHostNamespace" . -}}
+{{- if not $namespace -}}
+{{- fail "controller.agentHosts.namespace is required when controller.agentHosts.enabled=true" -}}
+{{- end -}}
+{{- if or (gt (len $namespace) 63) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` $namespace)) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must be a DNS-1123 label, as a namespace name is" $namespace) -}}
+{{- end -}}
+{{- if or (eq $namespace .Release.Namespace) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must differ from the Helm release namespace and controller.acpRuntime.namespace" $namespace) -}}
+{{- end -}}
+{{- $_ := include "orka.agentHostAgentImage" . -}}
+{{- end -}}
+{{- /* Without agent hosts the controller stops reconciling AgentHosts: their
+Pods keep running and their deletion never finishes. The CRD is checked
+first, so an upgrade from a release without it does not fail on the kind. */ -}}
+{{- if and .Release.IsUpgrade (not (include "orka.agentHostsEnabled" .)) -}}
+{{- if lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "agenthosts.core.orka.ai" -}}
+{{- $hosts := dig "items" list (lookup "core.orka.ai/v1alpha1" "AgentHost" .Release.Namespace "") -}}
+{{- if $hosts -}}
+{{- fail (printf "controller.agentHosts.enabled=false would leave %d AgentHost(s) in %s that nothing stops or cleans up; delete them, wait until they are gone, then upgrade" (len $hosts) .Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

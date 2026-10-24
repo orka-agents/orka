@@ -14,8 +14,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"math"
 	"os"
+	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
@@ -55,6 +59,7 @@ import (
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
+	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -357,6 +362,10 @@ func main() {
 	var outboundAccessTrustedTokenEndpointServices string
 	var enableTracing bool
 	var workspaceProviderAPIEnabled bool
+	var agentHostsEnabled bool
+	var agentHostNamespace string
+	var agentHostAgentImage string
+	var agentHostControllerPodLabels string
 	var tlsOpts []func(*tls.Config)
 
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
@@ -760,6 +769,16 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	acpUpgradeDrainOptions.BindFlags(flag.CommandLine)
+	flag.BoolVar(&agentHostsEnabled, "enable-agent-hosts", envBool("ORKA_ENABLE_AGENT_HOSTS"),
+		"Enable AgentHost and AgentHostTemplate: long-lived, single-user agent hosts on Orka-owned Pods.")
+	flag.StringVar(&agentHostNamespace, "agent-host-namespace",
+		envutil.String("ORKA_AGENT_HOST_NAMESPACE", "orka-agent-hosts"),
+		"Namespace for agent-host Pods, volumes, NetworkPolicies and Secrets; must differ from --watch-namespace.")
+	flag.StringVar(&agentHostAgentImage, "agent-host-agent-image", os.Getenv("ORKA_AGENT_HOST_AGENT_IMAGE"),
+		"Digest-pinned image with the orka-host-agent binary, normally the controller image; required with --enable-agent-hosts.")
+	flag.StringVar(&agentHostControllerPodLabels, "agent-host-controller-pod-labels",
+		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
+		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -787,6 +806,11 @@ func main() {
 	acpUpgradeDrainOptions.WatchNamespace = watchNamespace
 	if !enforceNamespaceIsolation {
 		fmt.Fprintln(os.Stderr, "--enforce-namespace-isolation=true is required for a static controller installation")
+		os.Exit(1)
+	}
+	if err := validateAgentHostConfig(agentHostsEnabled, agentHostNamespace, agentHostAgentImage,
+		watchNamespace, acpRuntimeNamespace, currentPodNamespace()); err != nil {
+		setupLog.Error(err, "invalid agent host configuration")
 		os.Exit(1)
 	}
 
@@ -1071,6 +1095,9 @@ func main() {
 		runtimeCacheNamespace,
 		controllerCacheNamespace,
 	)
+	if agentHostsEnabled {
+		mgrOptions.Cache = agentHostCacheOptions(mgrOptions.Cache, agentHostNamespace)
+	}
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
 	if err != nil {
@@ -1150,6 +1177,16 @@ func main() {
 				controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
 			)
 			setupLog.Info("registered Task and Tool workspace class use admission")
+			// Installs that serve admission from the controller also check
+			// AgentHost selections here; others use orka-admission.
+			if agentHostsEnabled {
+				orkaadmission.RegisterAgentHostWebhook(
+					webhookServer,
+					mgr.GetScheme(),
+					controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
+				)
+				setupLog.Info("registered AgentHost admission")
+			}
 		}
 
 		if taskProvenanceAdmissionEnabled {
@@ -1844,6 +1881,29 @@ func main() {
 		}
 	}
 
+	if agentHostsEnabled {
+		controllerLabels, err := parseExactLabels(agentHostControllerPodLabels)
+		if err != nil {
+			setupLog.Error(fmt.Errorf("--agent-host-controller-pod-labels: %w", err), "invalid agent host configuration")
+			os.Exit(1)
+		}
+		if err := (&controller.AgentHostReconciler{
+			Client:        mgr.GetClient(),
+			APIReader:     mgr.GetAPIReader(),
+			Scheme:        mgr.GetScheme(),
+			HostNamespace: strings.TrimSpace(agentHostNamespace),
+			AgentImage:    strings.TrimSpace(agentHostAgentImage),
+			Controller: agenthost.ControllerPeer{
+				Namespace: currentPodNamespace(),
+				PodLabels: controllerLabels,
+			},
+			IdleStatus: agenthost.HTTPStatusReader{},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentHost")
+			os.Exit(1)
+		}
+	}
+
 	if err := (&controller.AgentReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
@@ -2301,17 +2361,85 @@ func parseExactLabels(raw string) (map[string]string, error) {
 		key, value, ok := strings.Cut(entry, "=")
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
 		if !ok || key == "" || value == "" {
-			return nil, fmt.Errorf("provider proxy Pod label %q must be key=value", entry)
+			return nil, fmt.Errorf("label %q must be key=value", entry)
+		}
+		// Selectors built from these labels are refused by the API server
+		// when either part is malformed; refuse them at startup instead.
+		if problems := validation.IsQualifiedName(key); len(problems) > 0 {
+			return nil, fmt.Errorf("label key %q: %s", key, strings.Join(problems, "; "))
+		}
+		if problems := validation.IsValidLabelValue(value); len(problems) > 0 {
+			return nil, fmt.Errorf("label %q value %q: %s", key, value, strings.Join(problems, "; "))
 		}
 		if _, exists := result[key]; exists {
-			return nil, fmt.Errorf("provider proxy Pod label %q is duplicated", key)
+			return nil, fmt.Errorf("label %q is duplicated", key)
 		}
 		result[key] = value
 	}
 	if len(result) == 0 {
-		return nil, fmt.Errorf("at least one provider proxy Pod label is required")
+		return nil, fmt.Errorf("at least one label is required")
 	}
 	return result, nil
+}
+
+// agentHostImagePattern matches a digest-pinned image reference.
+var agentHostImagePattern = regexp.MustCompile(`^[^@\s]+@sha256:[a-f0-9]{64}$`)
+
+// validateAgentHostConfig rejects agent-host settings the controller cannot
+// serve. Agent-host Pods run user workloads under the restricted Pod Security
+// profile, so they never share the watch, ACP runtime or controller namespace.
+func validateAgentHostConfig(enabled bool, hostNamespace, agentImage string, reserved ...string) error {
+	if !enabled {
+		return nil
+	}
+	hostNamespace = strings.TrimSpace(hostNamespace)
+	if hostNamespace == "" {
+		return fmt.Errorf("--agent-host-namespace is required with --enable-agent-hosts")
+	}
+	if problems := validation.IsDNS1123Label(hostNamespace); len(problems) > 0 {
+		return fmt.Errorf("--agent-host-namespace %q is not a namespace name: %s", hostNamespace, strings.Join(problems, "; "))
+	}
+	for _, namespace := range reserved {
+		if hostNamespace == strings.TrimSpace(namespace) {
+			return fmt.Errorf("--agent-host-namespace %q is used by the controller or ACP runtimes", hostNamespace)
+		}
+	}
+	if !agentHostImagePattern.MatchString(strings.TrimSpace(agentImage)) {
+		return fmt.Errorf("--agent-host-agent-image must be pinned by digest with --enable-agent-hosts")
+	}
+	return nil
+}
+
+// agentHostCacheOptions adds the agent-host namespace to the cache for the
+// objects the AgentHost controller keeps there, on top of whatever namespaces
+// each type already caches.
+func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Options {
+	hostNamespace = strings.TrimSpace(hostNamespace)
+	if hostNamespace == "" || len(options.DefaultNamespaces) == 0 {
+		return options
+	}
+	if options.ByObject == nil {
+		options.ByObject = make(map[crclient.Object]cache.ByObject)
+	}
+	for _, object := range []crclient.Object{
+		&corev1.Pod{},
+		&corev1.Secret{},
+		&corev1.PersistentVolumeClaim{},
+		&networkingv1.NetworkPolicy{},
+	} {
+		key := object
+		namespaces := maps.Clone(options.DefaultNamespaces)
+		for candidate, byObject := range options.ByObject {
+			if reflect.TypeOf(candidate) == reflect.TypeOf(object) {
+				key = candidate
+				namespaces = maps.Clone(byObject.Namespaces)
+				break
+			}
+		}
+		namespaces[hostNamespace] = cache.Config{}
+		options.ByObject[key] = cache.ByObject{Namespaces: namespaces}
+	}
+	return options
 }
 
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {

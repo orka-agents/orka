@@ -1,0 +1,270 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: agenthosts.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    categories:
+    - orka
+    kind: AgentHost
+    listKind: AgentHostList
+    plural: agenthosts
+    shortNames:
+    - ah
+    singular: agenthost
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.templateRef.name
+      name: Template
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.podName
+      name: Pod
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentHost runs one long-lived, single-user agent host, such as an Agent Host
+          Protocol daemon, from an AgentHostTemplate on Orka-owned Pods.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AgentHostSpec requests one host from a template.
+            properties:
+              githubTokenSecretRef:
+                description: |-
+                  GitHubTokenSecretRef names the Secret holding the user's GitHub token,
+                  for templates that use one. Orka copies it to the host and keeps the copy
+                  current, so the host sees a rotated token.
+                properties:
+                  key:
+                    default: token
+                    description: Key is the data key holding the token.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the Secret name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              suspended:
+                description: |-
+                  Suspended stops the host's Pod and keeps its state volume and
+                  credentials. Setting it back to false starts the host again.
+                type: boolean
+              templateRef:
+                description: TemplateRef selects an AgentHostTemplate in this namespace.
+                properties:
+                  name:
+                    description: Name is the template name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              wakeRequestedAt:
+                description: |-
+                  WakeRequestedAt wakes a host that Orka suspended for being idle when it is
+                  later than status.idleSuspendedAt.
+                format: date-time
+                type: string
+            required:
+            - templateRef
+            type: object
+            x-kubernetes-validations:
+            - message: templateRef is immutable
+              rule: self.templateRef == oldSelf.templateRef
+          status:
+            description: AgentHostStatus reports the host's objects, lifecycle and
+              readiness.
+            properties:
+              conditions:
+                description: Conditions report readiness and problems.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              connectionSecretRef:
+                description: |-
+                  ConnectionSecretRef names the Secret in this namespace with the
+                  connection details for Standalone access.
+                properties:
+                  name:
+                    description: Name is the name of the Secret
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the Secret (defaults
+                      to Task namespace)
+                    type: string
+                required:
+                - name
+                type: object
+              hostNamespace:
+                description: |-
+                  HostNamespace is the namespace holding the host's objects, recorded at
+                  first reconcile and used for cleanup.
+                type: string
+              idleSince:
+                description: IdleSince is when the host last reported becoming idle.
+                format: date-time
+                type: string
+              idleSuspendedAt:
+                description: IdleSuspendedAt is when Orka suspended the host for being
+                  idle.
+                format: date-time
+                type: string
+              lastRestartTime:
+                description: LastRestartTime is when the controller last replaced
+                  a failed host Pod.
+                format: date-time
+                type: string
+              objects:
+                description: Objects are receipts for the objects the controller created.
+                items:
+                  description: |-
+                    AgentHostObjectReceipt records an object the controller created for a host.
+                    The nonce is recorded before creation and stamped on the object, so the
+                    controller adopts only objects it created.
+                  properties:
+                    kind:
+                      description: Kind is the object kind.
+                      type: string
+                    name:
+                      description: Name is the object name.
+                      type: string
+                    namespace:
+                      description: Namespace is the object's namespace. Empty means
+                        the host namespace.
+                      type: string
+                    nonce:
+                      description: Nonce is the creation nonce stamped on the object.
+                      type: string
+                    uid:
+                      description: UID is the created object's UID, once observed.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  - nonce
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  the controller observed.
+                format: int64
+                type: integer
+              phase:
+                description: Phase summarizes the host's lifecycle.
+                enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Suspended
+                - Failed
+                - Deleting
+                type: string
+              podName:
+                description: PodName is the host's Pod while it runs.
+                type: string
+              restarts:
+                description: |-
+                  Restarts counts consecutive replacements of a failed host Pod since it
+                  was last ready. Replacements back off exponentially.
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,9 @@
+# Opt-in host namespace for AgentHosts. Apply after the controller install and
+# before starting the controller with --enable-agent-hosts. The controller's
+# manager role is bound per namespace, so the AgentHost controller needs this
+# Role in the namespace --agent-host-namespace names.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - rbac.yaml

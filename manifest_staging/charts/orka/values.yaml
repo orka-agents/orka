@@ -193,6 +193,18 @@ controller:
   dashboard:
     enabled: false
 
+  # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
+  # Orka-owned Pods. Off by default.
+  agentHosts:
+    enabled: false
+    # Host Pods, volumes, NetworkPolicies and Secrets live here. The chart
+    # creates it with the restricted Pod Security profile; it must differ from
+    # the Helm release namespace and controller.acpRuntime.namespace.
+    namespace: orka-agent-hosts
+    # Digest-pinned image with the orka-host-agent sidecar. Empty uses the
+    # controller image, which then must be pinned with controller.image.digest.
+    agentImage: ""
+
   # OIDC/JWT authentication for external API requests
   oidc:
     # Issuer URL expected in bearer tokens. Requires audience when set.

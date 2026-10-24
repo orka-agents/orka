@@ -976,6 +976,15 @@ rules:
   - ""
   resources:
   - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumes
   - pods/status
   verbs:
@@ -1061,26 +1070,9 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
-  - agentruntimes
-  - agents
-  - branchclaims
-  - connections
-  - controllerepochs
-  - externaleffects
-  - promptattempts
-  - providers
-  - publications
-  - repositorymonitors
-  - repositoryscans
-  - runtimepools
-  - runtimesessioncontrols
-  - skills
-  - substrateactorpools
-  - tasks
-  - tools
+  - agenthosts
+  - connectorproviders
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -1089,6 +1081,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts/finalizers
   - agentruntimes/finalizers
   - agents/finalizers
   - branchclaims/finalizers
@@ -1113,6 +1106,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts/status
   - agentruntimes/status
   - agents/status
   - branchclaims/status
@@ -1139,20 +1133,39 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
-  - connectorproviders
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - core.orka.ai
-  resources:
+  - agenthosttemplates
   - outboundaccesspolicies
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentruntimes
+  - agents
+  - branchclaims
+  - connections
+  - controllerepochs
+  - externaleffects
+  - promptattempts
+  - providers
+  - publications
+  - repositorymonitors
+  - repositoryscans
+  - runtimepools
+  - runtimesessioncontrols
+  - skills
+  - substrateactorpools
+  - tasks
+  - tools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - core.orka.ai
@@ -3190,6 +3203,49 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-agenthost-template-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - agenthosts
+  validations:
+  - expression: |-
+      request.operation != 'CREATE' || authorizer.group('core.orka.ai')
+
+        .resource('agenthosttemplates')
+        .namespace(request.namespace)
+        .name(object.spec.templateRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected AgentHostTemplate
+    reason: Forbidden
+  - expression: |-
+      !has(object.spec.githubTokenSecretRef) || (request.operation == 'UPDATE' &&
+
+        has(oldObject.spec.githubTokenSecretRef) &&
+        oldObject.spec.githubTokenSecretRef.name == object.spec.githubTokenSecretRef.name &&
+        oldObject.spec.githubTokenSecretRef.?key.orValue('token') ==
+        object.spec.githubTokenSecretRef.?key.orValue('token')) ||
+      authorizer.group('')
+
+        .resource('secrets')
+        .namespace(request.namespace)
+        .name(object.spec.githubTokenSecretRef.name)
+        .check('get').allowed()
+    message: caller is not authorized to read the selected GitHub token Secret
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-checkpoint-source-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3545,6 +3601,15 @@ metadata:
   name: orka-acp-workspace-lease-protection
 spec:
   policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agenthost-template-use.orka.ai
+spec:
+  policyName: orka-agenthost-template-use.orka.ai
   validationActions:
   - Deny
 ---

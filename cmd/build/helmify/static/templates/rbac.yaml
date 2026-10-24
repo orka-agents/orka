@@ -16,14 +16,22 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["connectorproviders"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  # Users create AgentHosts and operators author AgentHostTemplates; the
+  # controller only reads templates and manages hosts' finalizers and status.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agenthosts"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agenthosttemplates"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
     verbs: ["get", "list", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status"]
+    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status", "agenthosts/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "runtimepools/finalizers", "promptattempts/finalizers", "runtimesessioncontrols/finalizers", "publications/finalizers", "controllerepochs/finalizers", "externaleffects/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers", "connectorproviders/finalizers", "connections/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "runtimepools/finalizers", "promptattempts/finalizers", "runtimesessioncontrols/finalizers", "publications/finalizers", "controllerepochs/finalizers", "externaleffects/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers", "connectorproviders/finalizers", "connections/finalizers", "agenthosts/finalizers"]
     verbs: ["update"]
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gateways", "gatewaybindings"]
@@ -215,6 +223,49 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if include "orka.agentHostsEnabled" . }}
+---
+# Agent-host Pods, volumes, NetworkPolicies and Secrets are confined to the host namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orka.controllerName" . }}-agent-host
+  namespace: {{ include "orka.agentHostNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    # Kept with the namespace: after controller.agentHosts.namespace changes,
+    # the controller still needs it to stop and delete the hosts left there.
+    helm.sh/resource-policy: keep
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerName" . }}-agent-host
+  namespace: {{ include "orka.agentHostNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orka.controllerName" . }}-agent-host
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 ---
 # Minimal cluster-scoped controller authority. Namespaced workload access is never bound here.
 apiVersion: rbac.authorization.k8s.io/v1

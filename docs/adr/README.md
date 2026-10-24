@@ -110,6 +110,15 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0019](0019-genai-semconv-constants-strategy.md) | Hand-roll GenAI semantic-convention constants | Accepted |
 | [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
 
+### Agent hosts and the Agent Host Protocol
+
+Long-lived, per-user agent hosts that clients such as the Copilot desktop app connect to,
+and serving the Agent Host Protocol from Orka itself.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0035](0035-agent-hosts.md) | Run per-user agent hosts as Orka-owned Pods, relay first | Proposed |
+
 ## Writing a new one
 
 Copy the shape of a recent record — [0028](0028-agent-sandbox-pvc-cold-resume.md) is a

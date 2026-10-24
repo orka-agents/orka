@@ -200,6 +200,11 @@ func main() {
 		admissionScheme,
 		controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
 	)
+	orkaadmission.RegisterAgentHostWebhook(
+		webhookServer,
+		admissionScheme,
+		controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
+	)
 	orkaadmission.RegisterExecutionModeWebhooks(
 		webhookServer,
 		admissionScheme,
