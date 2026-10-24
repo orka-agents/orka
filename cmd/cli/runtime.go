@@ -20,7 +20,7 @@ func newRuntimePoolCmd() *cobra.Command {
 }
 
 func newAgentRuntimeCmd() *cobra.Command {
-	return newCRUDResourceCmd(crudResourceSpec{
+	cmd := newCRUDResourceCmd(crudResourceSpec{
 		Use:          "agent-runtime",
 		Short:        "Manage external orka.harness.v2 AgentRuntime registrations",
 		BasePath:     "/api/v1/agent-runtimes",
@@ -28,6 +28,8 @@ func newAgentRuntimeCmd() *cobra.Command {
 		TablePrinter: printAgentRuntimeTable,
 		DescribeRows: agentRuntimeDescribeRows,
 	})
+	cmd.AddCommand(newAgentRuntimeRenderKagentCmd())
+	return cmd
 }
 
 func runtimePoolDescribeRows(pool map[string]any) []describeRow {

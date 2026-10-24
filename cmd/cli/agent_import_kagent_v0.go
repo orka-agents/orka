@@ -41,6 +41,7 @@ const (
 	kagentFieldAnnotations     = "annotations"
 	kagentFieldRuntime         = "runtime"
 	kagentFieldKind            = "kind"
+	kagentFieldAPIVersion      = "apiVersion"
 	kagentFieldInline          = "inline"
 	kagentFieldMemory          = "memory"
 	kagentFieldModelConfig     = "modelConfig"
@@ -50,7 +51,12 @@ const (
 	// kagentV0Container and kagentV0GoImage name the agent container and the
 	// Go ADK image repository kagent runs it from (both image variants).
 	kagentV0Container = "kagent"
-	kagentV0GoImage   = "golang-adk"
+	// kagentV0AppLabel is the app label value kagent puts on Agent pods, and
+	// kagentV0PodPort names their A2A port.
+	kagentV0AppLabel     = "kagent"
+	kagentV0PodPort      = "http"
+	kagentConditionReady = "Ready"
+	kagentV0GoImage      = "golang-adk"
 )
 
 // kagentConfigHashPattern matches the decimal uint64 kagent writes.
@@ -138,6 +144,9 @@ func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay, c
 	name := kagentString(agent, kagentFieldMetadata, cliNameKey)
 	var mode kagentMode
 	mode.Revision, mode.PinProblems = kagentV0Pin(agent, related.lookup("Deployment", namespace, name), name)
+	if mode.Revision != "" {
+		mode.ImageDigest, mode.ImageProblem = kagentV0ImageDigest(related, namespace, name, mode.Revision)
+	}
 	var reasons []string
 	if relay == "" {
 		reasons = append(reasons, "no relay was named (--relay-url)")
@@ -169,7 +178,71 @@ func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay, c
 		return mode
 	}
 	mode.Mode, mode.RelayOrigin = kagentModeGoverned, relay
+	for _, tool := range kagentV0Tools(agent) {
+		names, _ := kagentMap(tool, kagentFieldMCPServer)[kagentFieldToolNames].([]any)
+		mode.AnyTool = mode.AnyTool || len(names) == 0
+		for _, raw := range names {
+			if name, ok := raw.(string); ok {
+				mode.Tools = append(mode.Tools, name)
+			}
+		}
+	}
+	slices.Sort(mode.Tools)
+	mode.Tools = slices.Compact(mode.Tools)
 	return mode
+}
+
+// kagentV0ImageDigest returns the image digest the Agent's only pod reports
+// for the container that serves A2A. The pod must run hash, the config hash
+// the wrapper pins, because kagent's hash does not cover the image.
+func kagentV0ImageDigest(related kagentObjects, namespace, name, hash string) (string, string) {
+	var pods []map[string]any
+	prefix := kagentObjectKey("Pod", namespace, "")
+	for _, key := range slices.Sorted(maps.Keys(related)) {
+		labels := kagentMap(related[key], kagentFieldMetadata, "labels")
+		if strings.HasPrefix(key, prefix) && labels["app"] == kagentV0AppLabel && labels[kagentV0AppLabel] == name {
+			pods = append(pods, related[key])
+		}
+	}
+	switch {
+	case len(pods) == 0:
+		return "", "the Agent's pod is not in the input"
+	case len(pods) > 1:
+		return "", "the input holds more than one pod of the Agent; export it after the rollout finishes"
+	}
+	pod := pods[0]
+	if kagentString(pod, kagentFieldMetadata, "deletionTimestamp") != "" || kagentString(pod, "status", "phase") != "Running" {
+		return "", "the Agent's pod is not running"
+	}
+	if got := kagentString(pod, kagentFieldMetadata, kagentFieldAnnotations, kagentConfigHashAnnotation); got != hash {
+		return "", fmt.Sprintf("the Agent's pod runs config hash %q, not its Deployment's", got)
+	}
+	container := ""
+	containers, _ := kagentMap(pod, kagentFieldSpec)["containers"].([]any)
+	for _, raw := range containers {
+		c, _ := raw.(map[string]any)
+		ports, _ := c["ports"].([]any)
+		for _, rawPort := range ports {
+			if port, _ := rawPort.(map[string]any); port[cliNameKey] == kagentV0PodPort {
+				if container != "" {
+					return "", "the Agent's pod serves A2A from more than one container"
+				}
+				container, _ = c[cliNameKey].(string)
+			}
+		}
+	}
+	statuses, _ := kagentMap(pod, "status")["containerStatuses"].([]any)
+	for _, raw := range statuses {
+		status, _ := raw.(map[string]any)
+		if status[cliNameKey] != container || container == "" {
+			continue
+		}
+		imageID, _ := status["imageID"].(string)
+		if match := kagentImageDigestRef.FindStringSubmatch(imageID); match != nil {
+			return match[1], ""
+		}
+	}
+	return "", "the Agent's pod reports no image digest for its A2A container"
 }
 
 // kagentV0Pin returns the Deployment's config hash when the running Agent is
@@ -186,7 +259,7 @@ func kagentV0Pin(agent, deployment map[string]any, name string) (string, []strin
 	if !kagentConditionCurrent(agent, "Accepted", generation) {
 		problems = append(problems, "kagent has not accepted the Agent's current generation")
 	}
-	if !kagentConditionCurrent(agent, "Ready", generation) {
+	if !kagentConditionCurrent(agent, kagentConditionReady, generation) {
 		problems = append(problems, "the Agent is not Ready")
 	}
 	if deployment == nil {

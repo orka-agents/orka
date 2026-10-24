@@ -192,6 +192,8 @@ existing Agent is an error.
 
 Accepts kagent v1 (api.kagent.dev/v1alpha3) and kagent v0 (kagent.dev/v1alpha2)
 Agents, including lists from "kubectl get -o yaml". Other objects are skipped.
+kagent v1 support is experimental, and pinned to the kagent build it was
+verified against until kagent v1.0.0.
 
 Each Agent is reported as governed or observed. A governed Agent has every
 model and tool endpoint pointing at the relay named by --relay-url, so Orka
@@ -234,15 +236,23 @@ so --revision-egress and --revision-sources do not apply. Dispatch control
 requires the agents' Services to admit only kagent's controller, and the
 controller to admit only the wrapper brokers and the wrapped Agents.
 
-See the orka-runtime-kagent README for both install requirements. Include the
-Agents' related objects in the input so the import can check them: Harness,
-AgentTemplate, ModelConfig, and RemoteMCPServer for v1; the Agent's
-Deployment, and to govern it its config Secret and ModelConfig, for v0.
-Translating a v0 Agent reads its ModelConfig.
+See docs/kagent-install.md in orka-runtime-kagent for both install
+requirements. Include the Agents' related objects in the input so the import
+can check them: Harness, AgentTemplate, ModelConfig, and RemoteMCPServer for
+v1; the Agent's Deployment and pod, and to govern it its config Secret and
+ModelConfig, for v0. Translating a v0 Agent reads its ModelConfig.
 
 With --wrapper-config-dir, also writes each Agent's wrapper configuration,
 <name>.kagent.json, pinned to the Agent's latest successful revision (v1) or
-its Deployment's config hash (v0).
+its pod's config hash and image digest (v0).
+
+With --bundle-dir, writes each Agent's deployment bundle instead,
+<agent>/kagent.json and runtime.json, and names its AgentRuntime after the
+pinned configuration, <agent>-kagent-<digest>. A re-pin, after kagent
+recompiles the Agent or is upgraded, so gets a new runtime beside the old one.
+Run with --dry-run to write the bundle; deploy and register its runtime with
+Orka's scripts/kagent-runtime.sh; then run again without --dry-run to point
+the Orka Agent at it, which requires the AgentRuntime to be Ready.
 
 With --translate, converts each kagent Agent into a native Orka Agent that Orka
 runs itself, with no kagent at run time. Translation maps only these fields
@@ -276,21 +286,28 @@ Usage:
   orka agent import kagent -f <file> [flags]
 
 Flags:
-      --accepted-egress stringArray   Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)
-      --control-plane-url string      kagent controller base URL the wrapper calls (with --wrapper-config-dir); a governed kagent v0 Agent must persist sessions there
-      --dry-run                       Print the Orka Agent manifests instead of creating them
-  -f, --file string                   Path to kagent Agent YAML/JSON (use - for stdin)
-  -h, --help                          help for kagent
-      --model-upstream-model string   Model the relay calls for governed Agents
-      --model-upstream-url string     OpenAI-compatible base URL the relay serves governed Agents from
-      --provider-ref string           With --translate, the Orka Provider serving models that use a custom endpoint
-      --relay-url string              Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents
-      --revision-egress string        JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}
-      --revision-sources string       JSON object mapping each kagent revision to its source snapshot (kagent.agent_runtime_revision.source_snapshot)
-      --tool stringArray              With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)
-      --translate                     Convert the kagent Agents into native Orka Agents instead of wrapping them
-      --user-id-prefix string         Prefix of the per-session kagent user identity (with --wrapper-config-dir) (default "orka")
-      --wrapper-config-dir string     Write each Agent's wrapper configuration (<name>.kagent.json) to this directory
+      --accept-kagent-commit stringArray     kagent controller git commit, verified with the release gate, that the wrapper accepts besides the builds it was verified against (repeatable)
+      --accepted-egress stringArray          Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)
+      --allowed-tool stringArray             With --bundle-dir, an Orka tool every governed Agent may call through the relay, besides the tools its bindings name (repeatable; required when a binding names no tools)
+      --approval-required-tool stringArray   With --bundle-dir, an allowed Orka tool that needs an Orka approval (repeatable)
+      --bundle-dir string                    Write each Agent's deployment bundle (<agent>/kagent.json and runtime.json) to this directory, and name its runtime after the pinned configuration; without --dry-run, activate the bundles there, which must be deployed (<agent>/registration.uid)
+      --control-plane-url string             kagent controller base URL the wrapper calls (with --wrapper-config-dir); a governed kagent v0 Agent must persist sessions there
+      --dry-run                              Print the Orka Agent manifests instead of creating them
+  -f, --file string                          Path to kagent Agent YAML/JSON (use - for stdin)
+  -h, --help                                 help for kagent
+      --max-output-tokens int                Bound every model call of a governed Agent at this many output tokens (0: no bound)
+      --model-upstream-model string          Model the relay calls for governed Agents
+      --model-upstream-url string            OpenAI-compatible base URL the relay serves governed Agents from
+      --provider-ref string                  With --translate, the Orka Provider serving models that use a custom endpoint
+      --relay-url string                     Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents
+      --revision-egress string               JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}
+      --revision-sources string              JSON object mapping each kagent revision to its source snapshot (kagent.agent_runtime_revision.source_snapshot)
+      --runtime-revision int                 With --bundle-dir, a number that names new runtimes for unchanged configurations, to deploy them from new images
+      --tool stringArray                     With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)
+      --translate                            Convert the kagent Agents into native Orka Agents instead of wrapping them
+      --unreachable stringArray              host:port the wrapper broker must fail to connect to, such as Substrate's router or kagent's database (repeatable)
+      --user-id-prefix string                Prefix of the per-session kagent user identity (with --wrapper-config-dir) (default "orka")
+      --wrapper-config-dir string            Write each Agent's wrapper configuration (<name>.kagent.json) to this directory
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -352,11 +369,12 @@ Usage:
   orka agent-runtime [command]
 
 Available Commands:
-  create      Create an agent runtime resource from a manifest
-  delete      Delete an agent runtime resource
-  get         Get an agent runtime resource
-  list        List agent runtime resources
-  update      Update an agent runtime resource from a manifest
+  create        Create an agent runtime resource from a manifest
+  delete        Delete an agent runtime resource
+  get           Get an agent runtime resource
+  list          List agent runtime resources
+  render-kagent Render the Kubernetes objects of a wrapped kagent Agent's runtime
+  update        Update an agent runtime resource from a manifest
 
 Flags:
   -h, --help   help for agent-runtime
@@ -448,6 +466,57 @@ Flags:
   -h, --help              help for list
       --limit int         Maximum number of results (default 100)
   -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent-runtime render-kagent`
+
+```text
+Render one part of the runtime that serves a wrapped kagent Agent, from the
+deployment bundle "orka agent import kagent --bundle-dir" wrote for it. The
+output is a JSON List for kubectl apply.
+
+  workload      The ServiceAccount, broker ledger volume, Deployment, and
+                Service of this runtime, plus, for kagent v0, read access to
+                the Agent's pods. Apply it, then wait for the Deployment.
+  relay         A governed Agent's relay Service and NetworkPolicy. Their name
+                is part of the kagent Agent's config, so it is the same for
+                every runtime of the Agent; applying it moves the relay to
+                this runtime. Apply it before the registration: Orka's
+                conformance prompt reaches kagent, which calls the relay.
+  registration  The AgentRuntime. It needs --capabilities, the runtime's
+                GET /v2/capabilities answer, and --deployment-uid, the UID of
+                the runtime's Deployment, and is created once the Deployment
+                is ready. It opts into Orka's Kubernetes recovery, which
+                drains and restarts the runtime after an Orka controller
+                restart: annotate the Deployment with
+                orka.ai/agent-runtime-recovery-uid=<the AgentRuntime's UID>.
+
+The Secret <runtime>-auth must exist with the keys controller-token,
+capability-secret, and provider-token, and, for a governed Agent,
+model-upstream-token. It is never rendered.
+
+Usage:
+  orka agent-runtime render-kagent <bundle> [flags]
+
+Flags:
+      --capabilities string          With --part registration, the runtime's GET /v2/capabilities answer (file)
+      --configured-image string      Configured kagent source image, by digest (<repo>@sha256:<digest>); its digest is the profile's adapter digest
+      --controller-epoch int         Current Orka controller epoch (the orka-controller cepoch record)
+      --deployment-uid string        With --part registration, the UID of the runtime's Deployment, which Orka recovers
+  -h, --help                         help for render-kagent
+      --orka-api-url string          Orka API base URL the supervisor calls (default http://orka-api.<namespace>.svc:8080)
+      --part string                  Part to render: workload, relay, or registration (default "workload")
+      --runtime-image string         Orka kagent runtime image composed from it, by digest (<repo>@sha256:<digest>)
+      --storage-class string         StorageClass of the broker ledger volume (default: the cluster default)
+      --substrate-namespace string   With --part relay, the namespace of kagent v1's Substrate egress, which carries the Agent's calls to the relay (default "ate-system")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

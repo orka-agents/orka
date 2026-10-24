@@ -83,6 +83,23 @@ spec:
       - {name: kagent-token, projected: {sources: [{serviceAccountToken: {audience: kagent, path: kagent-token}}]}}
 status: {observedGeneration: 4, replicas: 1, updatedReplicas: 1, availableReplicas: 1}
 ---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-gov-5d4f8c9b7-x2v9q
+  namespace: kagent
+  labels: {app: kagent, kagent: probe-gov}
+  annotations: {kagent.dev/config-hash: "{{HASH}}"}
+spec:
+  containers:
+  - name: kagent
+    image: "cr.kagent.dev/kagent-dev/kagent/golang-adk:0.10.3"
+    ports: [{name: http, containerPort: 8080}]
+status:
+  phase: Running
+  containerStatuses:
+  - {name: kagent, imageID: "cr.kagent.dev/kagent-dev/kagent/golang-adk@` + governedV0Image + `"}
+---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata: {name: probe-gov, namespace: kagent, generation: 2}
@@ -103,6 +120,9 @@ status:
 }
 
 var governedV0Hash = kagentV0ConfigHash(governedV0Config)
+
+// governedV0Image is the image digest the fixture's Agent pod reports.
+const governedV0Image = "sha256:5ee9592cb7d959538d0f0fe36acf31ba3a06de084f84048b1459c3bdfafcda1f"
 
 var governedKagentV0Fixture = governedV0Input(governedV0Config, governedV0Hash)
 
@@ -447,6 +467,7 @@ func TestAgentImportKagentCmdWritesV0WrapperConfig(t *testing.T) {
       "namespace": "kagent"
     },
     "expectedRevision": "` + governedV0Hash + `",
+    "expectedImageDigest": "` + governedV0Image + `",
     "userIDPrefix": "orka"
   },
   "governed": {
