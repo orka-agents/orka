@@ -739,6 +739,41 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
 	}
 
+	t.Setenv(EnvProvider, providerKindKagent)
+	t.Setenv(EnvKagentAdapterDigest, testDigest("kagent-adapter"))
+	t.Setenv(EnvProviderProxyBaseURL, "http://127.0.0.1:8091")
+	kagentCfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kagentCfg.Provider.Kind != providerKindKagent || kagentCfg.Provider.AdapterName != kagentAdapterName ||
+		kagentCfg.Provider.AdapterDigest != testDigest("kagent-adapter") ||
+		len(kagentCfg.Capabilities.AdapterDigests) != 1 ||
+		kagentCfg.Capabilities.AdapterDigests[kagentAdapterName] != testDigest("kagent-adapter") {
+		t.Fatalf("unexpected kagent provider: provider=%#v capabilities=%#v", kagentCfg.Provider, kagentCfg.Capabilities)
+	}
+	if kagentCfg.ProviderProxy.UpstreamBaseURL != "http://127.0.0.1:8091/v1" || kagentCfg.CancelGrace != foundryCleanupTimeout {
+		t.Fatalf("kagent lifecycle broker wiring: upstream=%q cancelGrace=%s", kagentCfg.ProviderProxy.UpstreamBaseURL, kagentCfg.CancelGrace)
+	}
+	if kagentCfg.Capabilities.SupportsAgentSessionConfiguration || kagentCfg.Capabilities.SupportsFoundryRecovery ||
+		kagentCfg.Capabilities.Provider.SupportsPermissions || kagentCfg.Capabilities.Provider.SupportsBrokeredToolApprovals ||
+		!kagentCfg.Capabilities.Provider.SupportsTools {
+		t.Fatalf("unexpected kagent provider capabilities: %#v", kagentCfg.Capabilities)
+	}
+	t.Setenv(EnvBrokeredToolApprovalProfileDigest, string(kagentCfg.Fence.RuntimeProfileDigest))
+	if qualified, err := LoadConfigFromEnv(); err != nil || !qualified.Capabilities.Provider.SupportsBrokeredToolApprovals {
+		t.Fatalf("kagent brokered approval qualification was rejected: %v", err)
+	}
+	t.Setenv(EnvBrokeredToolApprovalProfileDigest, "")
+	// The kagent broker speaks the same lifecycle protocol, so it can be
+	// qualified for supervisor restart recovery.
+	t.Setenv(EnvFoundryRecoveryProfileDigest, string(kagentCfg.Fence.RuntimeProfileDigest))
+	if recovered, err := LoadConfigFromEnv(); err != nil || !recovered.Capabilities.SupportsFoundryRecovery {
+		t.Fatalf("kagent recovery qualification was rejected: %v", err)
+	}
+	t.Setenv(EnvFoundryRecoveryProfileDigest, "")
+	t.Setenv(EnvProviderProxyBaseURL, "")
+
 	t.Run("exact profile brokered approval qualification", testLoadConfigFromEnvBrokeredApprovalQualification)
 	t.Run("exact profile Foundry recovery qualification", testLoadConfigFromEnvFoundryRecoveryQualification)
 }

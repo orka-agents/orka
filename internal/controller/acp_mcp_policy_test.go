@@ -664,7 +664,7 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 		t.Fatal(err)
 	}
 	_, err = buildRuntimeSessionMCPConfiguration(context.Background(), reader, task, agent, approvalPlan.Profile)
-	if err == nil || !strings.Contains(err.Error(), "qualified AgentKit or Foundry runtime") {
+	if err == nil || !strings.Contains(err.Error(), "qualified AgentKit, Foundry, or kagent runtime") {
 		t.Fatalf("approval-required MCP configuration error = %v", err)
 	}
 }

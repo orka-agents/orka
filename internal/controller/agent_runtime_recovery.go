@@ -68,7 +68,7 @@ func validateAgentRuntimeBootWitness(witness agentRuntimeBootWitness, namespace 
 		capabilities.RuntimeInstanceID != string(witness.Fence.RuntimeInstanceID) || capabilities.Profile.Digest != string(witness.Fence.RuntimeProfileDigest) {
 		return fmt.Errorf("%w: enrolled boot ownership and runtime fences are inconsistent", store.ErrConflict)
 	}
-	if witness.FoundryBroker != nil && (capabilities.Profile.ProviderKind != agentRuntimeFoundryProvider || witness.FoundryBroker.Validate() != nil) {
+	if witness.FoundryBroker != nil && (!agentRuntimeUsesLifecycleBroker(capabilities.Profile.ProviderKind) || witness.FoundryBroker.Validate() != nil) {
 		return fmt.Errorf("%w: enrolled Foundry broker identity is invalid", store.ErrConflict)
 	}
 	return nil
@@ -195,7 +195,7 @@ func (r *AgentRuntimeReconciler) observeContainerRetirement(ctx context.Context,
 		return retired, err
 	}
 	provider := recoveryProviderKind(witness.Spec)
-	if !agentRuntimeLocalContainerRetirementAllowed(provider) && provider != agentRuntimeFoundryProvider {
+	if !agentRuntimeLocalContainerRetirementAllowed(provider) && !agentRuntimeUsesLifecycleBroker(provider) {
 		return false, nil
 	}
 	pod := &corev1.Pod{}
@@ -213,7 +213,7 @@ func (r *AgentRuntimeReconciler) observeContainerRetirement(ctx context.Context,
 	if err := r.validateAgentRuntimeRecoveryPodSpec(ctx, witness.Namespace, pod.Spec, witness.ContainerName, recoveryProviderKind(witness.Spec)); err != nil {
 		return false, err
 	}
-	if provider == agentRuntimeFoundryProvider {
+	if agentRuntimeUsesLifecycleBroker(provider) {
 		return r.observeFoundryContainerRetirement(ctx, witness, terminal, fence)
 	}
 	if err := r.persistBootRetirement(ctx, witness, agentRuntimeBootRetirement{Kind: "kubernetes-container-termination", ContainerTermination: terminal}, fence); err != nil {
@@ -398,7 +398,7 @@ type agentRuntimeBootObservation struct {
 }
 
 func recoveryFoundryBrokerIdentity(ctx context.Context, provider, registeredConfigurationDigest string, probe *harnessv2.Client, status *harnessv2.StatusResponse) (*harnessv2.FoundryBrokerIdentity, error) {
-	if provider != agentRuntimeFoundryProvider {
+	if !agentRuntimeUsesLifecycleBroker(provider) {
 		return nil, nil
 	}
 	capabilities, err := probe.Capabilities(ctx)
