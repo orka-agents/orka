@@ -41,7 +41,7 @@ RUN set -eu; \
     grep -Eq '"version":[[:space:]]*"1\.19\.0"' /src/packages/opencode/package.json; \
     printf '%s  %s\n' '625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b' /src/LICENSE | sha256sum -c -; \
     printf '%s  %s\n' 'b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812' /tmp/opencode-AGENTS.md | sha256sum -c -; \
-    printf '%s  %s\n' '0f876edfd5c73c4a99ffb0565c8ea3350a4db1167cc3ded7d8b50cc0fa061ff0' /tmp/orka-NOTICE.md | sha256sum -c -; \
+    printf '%s  %s\n' '05a3b1662be25b2ffe6fb9988ba704c16c6429fd71df821e6c5371cf5c9b226e' /tmp/orka-NOTICE.md | sha256sum -c -; \
     cp /src/LICENSE /artifacts/opencode-LICENSE; \
     cp /src/README.md /artifacts/opencode-README.md; \
     cp /tmp/opencode-AGENTS.md /artifacts/opencode-AGENTS.md; \
@@ -126,7 +126,7 @@ LABEL org.opencontainers.image.title="Orka ACP OpenCode runtime" \
       ai.orka.acp.ripgrep.binary.digest.amd64="sha256:af751db9b06d308fd5078aa973880cc8c75678289386bf1a6ee5faa614aa6f2d" \
       ai.orka.acp.ripgrep.binary.digest.arm64="sha256:d3febe5d02e2a15da0909200caeb5af0be65e58736331c2ab88b7086d62e942b" \
       ai.orka.acp.root-instruction.digest="sha256:b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812" \
-      ai.orka.notice.digest="sha256:0f876edfd5c73c4a99ffb0565c8ea3350a4db1167cc3ded7d8b50cc0fa061ff0"
+      ai.orka.notice.digest="sha256:05a3b1662be25b2ffe6fb9988ba704c16c6429fd71df821e6c5371cf5c9b226e"
 ENV HOME=/root \
     ORKA_ACP_PROVIDER=opencode \
     PATH=/usr/local/bin:/usr/bin:/bin
