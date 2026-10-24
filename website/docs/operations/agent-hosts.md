@@ -305,9 +305,10 @@ restart. Running the command again starts another invite with a new code. Invite
   account fails it with `GitHubIdentityChanged` and keeps the volume.
 - Disconnecting stops the host, deletes its token copy and keeps the AgentHost and its
   volume. Linking the same account again restarts the host on its volume.
-- Only a settled verdict stops a host: a disconnect, a decline, a refused provider, or a
-  grant that no longer covers the link. While a controller catches up with an edit, or a read fails, the
-  host keeps running on the token it has and gets no new one.
+- Settled failures such as a disconnect, a decline, a refused provider, a grant that no
+  longer covers the link, `GitHubIdentityChanged`, or `GitHubTokenNeverExpires` stop the
+  host. While a controller catches up with an edit, or a read fails, the host keeps
+  running on the token it has and gets no new one.
 - A suspended host keeps no token copy. Waking it writes a fresh one, after checking the
   account.
 - Only the controller may create a host fed by a Connection, and only from the template its
