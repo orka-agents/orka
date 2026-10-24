@@ -381,55 +381,92 @@ func TestHostLinkEndsWhenItsConnectionIsBeingDeleted(t *testing.T) {
 type failingHostCustody struct {
 	store.ConnectorCredentialStore
 	reads int
+	err   error
 }
 
 func (c *failingHostCustody) GetConnectorCredential(context.Context, store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
 	c.reads++
-	return store.ConnectorCredential{}, context.DeadlineExceeded
+	return store.ConnectorCredential{}, c.err
 }
 
-// A confirmed provider deletion ends the link even when custody is unavailable;
-// the storage outage alone must remain retryable while the provider is alive.
-func TestHostLinkProviderDeletionPrecedesCustodyFailure(t *testing.T) {
-	h := newHarness(t)
-	h.serveHosts("copilotd")
-	custody := &failingHostCustody{ConnectorCredentialStore: h.store}
-	h.source.Credentials = custody
-	check := func(want error) {
-		t.Helper()
-		if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, want) {
-			t.Fatalf("check = %v, want %v", err, want)
-		}
-		held, err := h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, 15*time.Minute)
-		if !errors.Is(err, want) || held != (HostCredential{}) {
-			t.Fatalf("credential error = %v, want %v and no credential", err, want)
-		}
-	}
-	check(context.DeadlineExceeded)
-	if custody.reads != 2 {
-		t.Fatalf("custody reads = %d, want 2 before deletion", custody.reads)
-	}
-	provider := &corev1alpha1.ConnectorProvider{}
-	key := types.NamespacedName{Namespace: testNamespace, Name: "github"}
-	if err := h.client.Get(context.Background(), key, provider); err != nil {
-		t.Fatal(err)
-	}
-	provider.Finalizers = append(provider.Finalizers, "test.orka.ai/held")
-	if err := h.client.Update(context.Background(), provider); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.client.Delete(context.Background(), provider); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.client.Get(context.Background(), key, provider); err != nil {
-		t.Fatal(err)
-	}
-	if provider.DeletionTimestamp.IsZero() {
-		t.Fatal("the finalizer must hold the deleting provider")
-	}
-	check(ErrHostLinkUnavailable)
-	if custody.reads != 2 {
-		t.Fatalf("custody reads = %d, want no reads after confirmed deletion", custody.reads)
+// Confirmed provider refusals end the link even when custody is unavailable.
+// Observation lag must still reach custody: missing custody ends the link,
+// while a storage outage alone remains retryable.
+func TestHostLinkProviderRefusalPrecedesCustodyFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		condition string
+		stale     bool
+	}{
+		{name: "deleting"},
+		{name: "refused", condition: corev1alpha1.ConnectorProviderConditionAccepted},
+		{name: "unresolved refs", condition: corev1alpha1.ConnectorProviderConditionResolvedRefs},
+		{name: "stale refusal", condition: corev1alpha1.ConnectorProviderConditionAccepted, stale: true},
+		{name: "stale refs", condition: corev1alpha1.ConnectorProviderConditionResolvedRefs, stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.serveHosts("copilotd")
+			custody := &failingHostCustody{ConnectorCredentialStore: h.store, err: context.DeadlineExceeded}
+			h.source.Credentials = custody
+			check := func(want error) {
+				t.Helper()
+				if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, want) {
+					t.Fatalf("check = %v, want %v", err, want)
+				}
+				held, err := h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, 15*time.Minute)
+				if !errors.Is(err, want) || held != (HostCredential{}) {
+					t.Fatalf("credential error = %v, want %v and no credential", err, want)
+				}
+			}
+			check(context.DeadlineExceeded)
+			if custody.reads != 2 {
+				t.Fatalf("custody reads = %d, want 2 before refusal", custody.reads)
+			}
+			provider := &corev1alpha1.ConnectorProvider{}
+			key := types.NamespacedName{Namespace: testNamespace, Name: "github"}
+			if err := h.client.Get(context.Background(), key, provider); err != nil {
+				t.Fatal(err)
+			}
+			if tc.condition == "" {
+				provider.Finalizers = append(provider.Finalizers, "test.orka.ai/held")
+			} else {
+				generation := provider.Generation
+				if tc.stale {
+					generation--
+				}
+				meta.SetStatusCondition(&provider.Status.Conditions, metav1.Condition{
+					Type: tc.condition, Status: metav1.ConditionFalse, Reason: "Refused", ObservedGeneration: generation,
+				})
+			}
+			if err := h.client.Update(context.Background(), provider); err != nil {
+				t.Fatal(err)
+			}
+			if tc.condition == "" {
+				if err := h.client.Delete(context.Background(), provider); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.client.Get(context.Background(), key, provider); err != nil {
+					t.Fatal(err)
+				}
+				if provider.DeletionTimestamp.IsZero() {
+					t.Fatal("the finalizer must hold the deleting provider")
+				}
+			}
+			if tc.stale {
+				check(context.DeadlineExceeded)
+				custody.err = store.ErrNotFound
+				check(ErrHostLinkUnavailable)
+				if custody.reads != 6 {
+					t.Fatalf("custody reads = %d, want 6 while provider status lags", custody.reads)
+				}
+			} else {
+				check(ErrHostLinkUnavailable)
+				if custody.reads != 2 {
+					t.Fatalf("custody reads = %d, want no reads after confirmed refusal", custody.reads)
+				}
+			}
+		})
 	}
 }
 
