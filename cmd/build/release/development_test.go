@@ -316,8 +316,9 @@ func TestDevelopmentPinnedValuesRenderEveryBuiltImage(t *testing.T) {
 		Images map[string]string `json:"images"`
 	}
 	must(t, readJSON(filepath.Join(directory, "images.json"), &manifest))
-	for _, ref := range manifest.Images {
-		if !strings.Contains(string(output), ref) {
+	// The chart never renders the kagent runtime: the orka CLI deploys it.
+	for name, ref := range manifest.Images {
+		if name != kagentRuntimeImage && !strings.Contains(string(output), ref) {
 			t.Errorf("pinned chart does not select %s", ref)
 		}
 	}

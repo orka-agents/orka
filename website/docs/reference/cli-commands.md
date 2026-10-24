@@ -250,9 +250,10 @@ With --bundle-dir, writes each Agent's deployment bundle instead,
 <agent>/kagent.json and runtime.json, and names its AgentRuntime after the
 pinned configuration, <agent>-kagent-<digest>. A re-pin, after kagent
 recompiles the Agent or is upgraded, so gets a new runtime beside the old one.
-Run with --dry-run to write the bundle; deploy and register its runtime with
-Orka's scripts/kagent-runtime.sh; then run again without --dry-run to point
-the Orka Agent at it, which requires the AgentRuntime to be Ready.
+Run with --dry-run to write the bundle, deploy its runtime with
+"orka agent-runtime kagent deploy", then point the Orka Agent at it with
+"orka agent-runtime kagent activate", which runs this import again without
+--dry-run and requires the AgentRuntime to be Ready.
 
 With --translate, converts each kagent Agent into a native Orka Agent that Orka
 runs itself, with no kagent at run time. Translation maps only these fields
@@ -372,6 +373,7 @@ Available Commands:
   create        Create an agent runtime resource from a manifest
   delete        Delete an agent runtime resource
   get           Get an agent runtime resource
+  kagent        Deploy, activate, and retire the runtimes of wrapped kagent Agents
   list          List agent runtime resources
   render-kagent Render the Kubernetes objects of a wrapped kagent Agent's runtime
   update        Update an agent runtime resource from a manifest
@@ -452,6 +454,148 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
+## `orka agent-runtime kagent`
+
+```text
+Run wrapped kagent Agents from the deployment bundles that
+"orka agent import kagent --dry-run --bundle-dir <dir>" writes. A bundle names
+its runtime after the configuration it pins, so re-pinning an Agent, after
+kagent recompiles it or after an upgrade, deploys a new runtime beside the old
+one, which keeps serving its sessions until it is retired:
+
+  1. deploy    the new runtime, and wait until Orka reports it Ready;
+  2. activate  it, pointing the Orka Agent at it;
+  3. retire    the Agent's older runtimes.
+
+These commands work in --namespace, by default orka-system, where the
+runtimes, their relays, and by default the Orka controller run; unlike other
+orka commands, they never fall back to the namespace orka config or kubeconfig
+names. They need Kubernetes access to it (--kubeconfig and --context) and, for
+activate, the Orka API, which activate finds like "orka agent import kagent":
+through kubeconfig's current context, unless --server and --token name it.
+Each command holds a lock per Agent it changes, the ConfigMap
+<agent>-kagent-lock; a run that was killed leaves its lock, which you delete
+once no run is left.
+
+Usage:
+  orka agent-runtime kagent [command]
+
+Available Commands:
+  activate    Point the Orka Agents at their deployed runtimes
+  deploy      Deploy and register the runtime of one bundle
+  retire      Delete the Agent's other runtimes
+
+Flags:
+      --context string   kubeconfig context (default: the current context)
+  -h, --help             help for kagent
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka agent-runtime kagent [command] --help" for more information about a command.
+```
+
+## `orka agent-runtime kagent activate`
+
+```text
+Point the Orka Agents at their runtimes by running the import again
+without --dry-run, with the flags that wrote the bundles, after --. The command
+passes --bundle-dir, the directory of <bundle>, itself. It switches every Agent
+in the import's input, and only if all of their runtimes are Ready, so deploy
+them all first. It refuses while the relay of a governed Agent bundled beside
+<bundle> selects another runtime. The import creates the Agents in the runtimes'
+namespace, so pass -n before --, and the Orka API and token flags too, which
+activate checks before running the import.
+
+Usage:
+  orka agent-runtime kagent activate <bundle> -- <import flags> [flags]
+
+Flags:
+  -h, --help   help for activate
+
+Global Flags:
+      --context string          kubeconfig context (default: the current context)
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent-runtime kagent deploy`
+
+```text
+Deploy the runtime of <bundle>, a directory the import wrote
+(<bundle-dir>/<agent>), register it with Orka under Kubernetes recovery, and
+wait until Orka reports it Ready.
+
+The runtime runs Orka's kagent runtime image, by default the one released
+with this CLI, and mounts the bundle's kagent.json from a ConfigMap. A
+deployed runtime keeps its image; to run another, re-pin under a new
+--runtime-revision.
+
+A governed Agent needs --model-upstream-token-file, Orka's credential for its
+model upstream, which the runtime keeps. Its relay moves to the new runtime
+before registration, because Orka's conformance prompt calls it, and back if
+deploy fails before the runtime is Ready. Until activation, governed turns on
+the old runtime fail their tool and model calls.
+
+Usage:
+  orka agent-runtime kagent deploy <bundle> [flags]
+
+Flags:
+      --controller-namespace string        Namespace of the Orka controller (default: --namespace)
+  -h, --help                               help for deploy
+      --image string                       Orka kagent runtime image, by tag or digest (default: the image released with this CLI)
+      --model-upstream-token-file string   File holding Orka's credential for a governed Agent's model upstream
+      --orka-api-url string                Orka API base URL the supervisor calls (default http://orka-api.<namespace>.svc:8080)
+      --ready-timeout duration             How long to wait for the runtime to be Ready (default 5m0s)
+      --storage-class string               StorageClass of the broker ledger volume (default: the cluster default)
+      --substrate-namespace string         Namespace of kagent v1's Substrate egress, which carries the Agent's calls to the relay (default "ate-system")
+
+Global Flags:
+      --context string          kubeconfig context (default: the current context)
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent-runtime kagent retire`
+
+```text
+Delete every runtime of the bundle's Agent and kagent Agent except the
+bundle's own, which the Orka Agent must use. Orka drains each one first, so
+this waits until its sessions are done. It refuses while a governed Agent's
+relay selects another runtime. Running it again finishes an earlier retire
+that stopped: it also finds runtimes whose registration is gone but whose
+objects are left.
+
+Usage:
+  orka agent-runtime kagent retire <bundle> [flags]
+
+Flags:
+  -h, --help                      help for retire
+      --retire-timeout duration   How long to wait for each old runtime to drain (default 30m0s)
+
+Global Flags:
+      --context string          kubeconfig context (default: the current context)
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka agent-runtime list`
 
 ```text
@@ -483,9 +627,10 @@ Render one part of the runtime that serves a wrapped kagent Agent, from the
 deployment bundle "orka agent import kagent --bundle-dir" wrote for it. The
 output is a JSON List for kubectl apply.
 
-  workload      The ServiceAccount, broker ledger volume, Deployment, and
-                Service of this runtime, plus, for kagent v0, read access to
-                the Agent's pods. Apply it, then wait for the Deployment.
+  workload      The ServiceAccount, configuration ConfigMap, broker ledger
+                volume, Deployment, and Service of this runtime, plus, for
+                kagent v0, read access to the Agent's pods. Apply it, then
+                wait for the Deployment.
   relay         A governed Agent's relay Service and NetworkPolicy. Their name
                 is part of the kagent Agent's config, so it is the same for
                 every runtime of the Agent; applying it moves the relay to
@@ -503,18 +648,20 @@ The Secret <runtime>-auth must exist with the keys controller-token,
 capability-secret, and provider-token, and, for a governed Agent,
 model-upstream-token. It is never rendered.
 
+"orka agent-runtime kagent deploy" renders and applies every part itself.
+
 Usage:
   orka agent-runtime render-kagent <bundle> [flags]
 
 Flags:
+      --adapter-digest string        Digest of the kagent adapter image the runtime image was built on (its ai.orka.acp.adapter.digest label)
       --capabilities string          With --part registration, the runtime's GET /v2/capabilities answer (file)
-      --configured-image string      Configured kagent source image, by digest (<repo>@sha256:<digest>); its digest is the profile's adapter digest
       --controller-epoch int         Current Orka controller epoch (the orka-controller cepoch record)
       --deployment-uid string        With --part registration, the UID of the runtime's Deployment, which Orka recovers
   -h, --help                         help for render-kagent
+      --image string                 Orka kagent runtime image, by digest (<repo>@sha256:<digest>)
       --orka-api-url string          Orka API base URL the supervisor calls (default http://orka-api.<namespace>.svc:8080)
       --part string                  Part to render: workload, relay, or registration (default "workload")
-      --runtime-image string         Orka kagent runtime image composed from it, by digest (<repo>@sha256:<digest>)
       --storage-class string         StorageClass of the broker ledger volume (default: the cluster default)
       --substrate-namespace string   With --part relay, the namespace of kagent v1's Substrate egress, which carries the Agent's calls to the relay (default "ate-system")
 

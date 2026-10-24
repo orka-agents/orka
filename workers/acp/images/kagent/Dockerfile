@@ -1,29 +1,32 @@
 # syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-ARG KAGENT_RUNTIME_IMAGE
-ARG KAGENT_ADAPTER_DIGEST
+# The kagent runtime adapter Orka releases this runtime on, pinned by digest.
+# The tag names the adapter commit; the image index digest makes every
+# supported platform immutable. Each runtime mounts its Agent's kagent.json at
+# /agent; the adapter refuses a file whose SHA-256 is not the profile's agent
+# configuration digest.
+ARG KAGENT_ADAPTER_IMAGE=ghcr.io/orka-agents/orka-runtime-kagent:sha-864c905b168cec14bfe04f96d177361966882789@sha256:123e7249f7c40ea0aefc531b79a761c2a139b4730b9bb4d0bbbe7ac3e8bd8de8
+ARG KAGENT_ADAPTER_DIGEST=sha256:123e7249f7c40ea0aefc531b79a761c2a139b4730b9bb4d0bbbe7ac3e8bd8de8
 
-FROM --platform=$TARGETPLATFORM ${KAGENT_RUNTIME_IMAGE} AS kagent
+FROM --platform=$TARGETPLATFORM ${KAGENT_ADAPTER_IMAGE} AS kagent
 
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
-ARG KAGENT_RUNTIME_IMAGE
+ARG KAGENT_ADAPTER_IMAGE
 ARG KAGENT_ADAPTER_DIGEST
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 COPY --from=kagent /orka-runtime-kagent /out/orka-runtime-kagent
-COPY --from=kagent /agent/kagent.json /out/agent/kagent.json
 RUN set -eu; \
-    case "$KAGENT_RUNTIME_IMAGE" in *@sha256:*) ;; *) echo "KAGENT_RUNTIME_IMAGE must be digest-pinned" >&2; exit 1 ;; esac; \
-    digest="${KAGENT_RUNTIME_IMAGE##*@sha256:}"; \
+    case "$KAGENT_ADAPTER_IMAGE" in *@sha256:*) ;; *) echo "KAGENT_ADAPTER_IMAGE must be digest-pinned" >&2; exit 1 ;; esac; \
+    digest="${KAGENT_ADAPTER_IMAGE##*@sha256:}"; \
     test "${#digest}" -eq 64; \
-    case "$digest" in *[!0-9a-f]*) echo "KAGENT_RUNTIME_IMAGE must use a lowercase sha256 digest" >&2; exit 1 ;; esac; \
-    test "$KAGENT_ADAPTER_DIGEST" = "sha256:$digest" || { echo "KAGENT_ADAPTER_DIGEST must equal the kagent source image digest" >&2; exit 1; }; \
+    case "$digest" in *[!0-9a-f]*) echo "KAGENT_ADAPTER_IMAGE must use a lowercase sha256 digest" >&2; exit 1 ;; esac; \
+    test "$KAGENT_ADAPTER_DIGEST" = "sha256:$digest" || { echo "KAGENT_ADAPTER_DIGEST must equal the adapter image digest" >&2; exit 1; }; \
     test -x /out/orka-runtime-kagent; \
-    test -s /out/agent/kagent.json; \
     test "$TARGETOS" = linux; \
     case "$TARGETARCH" in amd64|arm64) ;; *) exit 1 ;; esac; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
@@ -32,20 +35,20 @@ RUN set -eu; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
       go build -buildvcs=false -trimpath -ldflags='-s -w' \
       -o /out/orka-acp-exec-helper ./cmd/orka-acp-exec-helper; \
-    mkdir -p /out/sessions; \
+    mkdir -p /out/sessions /out/agent; \
     chmod 0711 /out/sessions; \
-    chmod 0555 /out/agent /out/orka-runtime-kagent; \
-    chmod 0444 /out/agent/kagent.json
+    chmod 0555 /out/agent /out/orka-runtime-kagent
 
-# The configured source image supplies a static ACP child and its immutable
-# kagent target and model. kagent identity belongs only to the broker sidecar.
-FROM --platform=$TARGETPLATFORM ${KAGENT_RUNTIME_IMAGE}
+# The adapter image supplies the static ACP child and the broker. kagent
+# identity belongs only to the broker sidecar; the configuration is mounted.
+FROM --platform=$TARGETPLATFORM ${KAGENT_ADAPTER_IMAGE}
 ARG KAGENT_ADAPTER_DIGEST
 LABEL org.opencontainers.image.title="Orka ACP kagent runtime" \
       org.opencontainers.image.description="Orka harness v2 supervisor with a kagent ACP child" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
       ai.orka.acp.provider="kagent" \
-      ai.orka.acp.adapter.name="kagent-serve-acp"
+      ai.orka.acp.adapter.name="kagent-serve-acp" \
+      ai.orka.acp.adapter.digest="${KAGENT_ADAPTER_DIGEST}"
 ENV ORKA_ACP_PROVIDER=kagent \
     ORKA_ACP_KAGENT_ADAPTER_DIGEST=${KAGENT_ADAPTER_DIGEST}
 COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime

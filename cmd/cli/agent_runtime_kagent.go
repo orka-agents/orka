@@ -65,21 +65,35 @@ const (
 	kagentPartWorkload     = "workload"
 	kagentPartRelay        = "relay"
 	kagentPartRegistration = "registration"
+	// kagentAdapterDigestLabel is the runtime image label naming the digest
+	// of the adapter image it was built on.
+	kagentAdapterDigestLabel = "ai.orka.acp.adapter.digest"
+	// kagentConfigDir is where both containers mount the Agent's kagent.json.
+	kagentConfigDir = "/agent"
 )
 
-var kagentPinnedImage = regexp.MustCompile(`^[^\s@]+@(sha256:[0-9a-f]{64})$`)
+var (
+	kagentPinnedImage = regexp.MustCompile(`^[^\s@]+@(sha256:[0-9a-f]{64})$`)
+	kagentDigest      = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+)
 
 // kagentRenderOptions are the inputs that are not in the bundle.
 type kagentRenderOptions struct {
-	ConfiguredImage string
-	RuntimeImage    string
+	// Image is Orka's kagent runtime image, by digest, and AdapterDigest the
+	// digest of the adapter image it was built on: the profile's adapter
+	// identity.
+	Image           string
+	AdapterDigest   string
 	ControllerEpoch int64
 	Namespace       string
 	OrkaAPIURL      string
 	StorageClass    string
 	Part            string
-	Capabilities    string
-	DeploymentUID   string
+	// Capabilities is a file holding the runtime's GET /v2/capabilities
+	// answer, which CapabilitiesJSON holds once read.
+	Capabilities     string
+	CapabilitiesJSON []byte
+	DeploymentUID    string
 	// SubstrateNamespace is where kagent v1's Substrate egress runs.
 	SubstrateNamespace string
 }
@@ -93,9 +107,10 @@ func newAgentRuntimeRenderKagentCmd() *cobra.Command {
 deployment bundle "orka agent import kagent --bundle-dir" wrote for it. The
 output is a JSON List for kubectl apply.
 
-  workload      The ServiceAccount, broker ledger volume, Deployment, and
-                Service of this runtime, plus, for kagent v0, read access to
-                the Agent's pods. Apply it, then wait for the Deployment.
+  workload      The ServiceAccount, configuration ConfigMap, broker ledger
+                volume, Deployment, and Service of this runtime, plus, for
+                kagent v0, read access to the Agent's pods. Apply it, then
+                wait for the Deployment.
   relay         A governed Agent's relay Service and NetworkPolicy. Their name
                 is part of the kagent Agent's config, so it is the same for
                 every runtime of the Agent; applying it moves the relay to
@@ -111,7 +126,9 @@ output is a JSON List for kubectl apply.
 
 The Secret <runtime>-auth must exist with the keys controller-token,
 capability-secret, and provider-token, and, for a governed Agent,
-model-upstream-token. It is never rendered.`,
+model-upstream-token. It is never rendered.
+
+"orka agent-runtime kagent deploy" renders and applies every part itself.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			namespace, _ := cmd.Flags().GetString(cliNamespaceQuery)
@@ -125,8 +142,8 @@ model-upstream-token. It is never rendered.`,
 			return encoder.Encode(list)
 		},
 	}
-	cmd.Flags().StringVar(&options.ConfiguredImage, "configured-image", "", "Configured kagent source image, by digest (<repo>@sha256:<digest>); its digest is the profile's adapter digest")
-	cmd.Flags().StringVar(&options.RuntimeImage, "runtime-image", "", "Orka kagent runtime image composed from it, by digest (<repo>@sha256:<digest>)")
+	cmd.Flags().StringVar(&options.Image, "image", "", "Orka kagent runtime image, by digest (<repo>@sha256:<digest>)")
+	cmd.Flags().StringVar(&options.AdapterDigest, "adapter-digest", "", "Digest of the kagent adapter image the runtime image was built on (its "+kagentAdapterDigestLabel+" label)")
 	cmd.Flags().Int64Var(&options.ControllerEpoch, "controller-epoch", 0, "Current Orka controller epoch (the orka-controller cepoch record)")
 	cmd.Flags().StringVar(&options.OrkaAPIURL, "orka-api-url", "", "Orka API base URL the supervisor calls (default http://orka-api.<namespace>.svc:8080)")
 	cmd.Flags().StringVar(&options.StorageClass, "storage-class", "", "StorageClass of the broker ledger volume (default: the cluster default)")
@@ -178,14 +195,30 @@ func renderKagentRuntime(dir string, options kagentRenderOptions) (map[string]an
 	if err != nil {
 		return nil, err
 	}
+	if options.Part == kagentPartRegistration && options.Capabilities != "" {
+		if options.CapabilitiesJSON, err = readKagentCapabilities(options.Capabilities); err != nil {
+			return nil, err
+		}
+	}
+	items, err := renderKagentPart(bundle, config, options)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{kagentFieldAPIVersion: "v1", kagentFieldKind: "List", "items": items}, nil
+}
+
+// renderKagentPart renders one part of a bundle's runtime as typed objects.
+func renderKagentPart(bundle kagentBundle, config []byte, options kagentRenderOptions) ([]any, error) {
 	if options.Namespace == "" {
 		return nil, fmt.Errorf("--namespace names where the runtime and its AgentRuntime live")
 	}
-	match := kagentPinnedImage.FindStringSubmatch(options.ConfiguredImage)
-	if match == nil || kagentPinnedImage.FindStringSubmatch(options.RuntimeImage) == nil {
-		return nil, fmt.Errorf("--configured-image and --runtime-image must be pinned by digest (<repo>@sha256:<digest>)")
+	if kagentPinnedImage.FindStringSubmatch(options.Image) == nil {
+		return nil, fmt.Errorf("--image must be pinned by digest (<repo>@sha256:<digest>)")
 	}
-	profile, err := kagentRuntimeProfileFor(bundle, config, match[1])
+	if !kagentDigest.MatchString(options.AdapterDigest) {
+		return nil, fmt.Errorf("--adapter-digest must be a sha256 digest")
+	}
+	profile, err := kagentRuntimeProfileFor(bundle, config, options.AdapterDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +228,7 @@ func renderKagentRuntime(dir string, options kagentRenderOptions) (map[string]an
 		if options.ControllerEpoch <= 0 {
 			return nil, fmt.Errorf("--controller-epoch must be the current Orka controller epoch")
 		}
-		if items, err = kagentWorkload(bundle, profile, options); err != nil {
+		if items, err = kagentWorkload(bundle, config, profile, options); err != nil {
 			return nil, err
 		}
 	case kagentPartRelay:
@@ -214,7 +247,16 @@ func renderKagentRuntime(dir string, options kagentRenderOptions) (map[string]an
 	default:
 		return nil, fmt.Errorf("--part must be workload, relay, or registration")
 	}
-	return map[string]any{kagentFieldAPIVersion: "v1", kagentFieldKind: "List", "items": items}, nil
+	return items, nil
+}
+
+func readKagentCapabilities(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close() //nolint:errcheck
+	return io.ReadAll(io.LimitReader(file, 1<<20))
 }
 
 // kagentRuntimeProfileFor computes the v2 profile, its MCP policy, and the
@@ -378,9 +420,10 @@ func kagentSecretEnv(name, secret, key string) corev1.EnvVar {
 // kagentWorkload renders the runtime's own objects. The pod runs exactly the
 // supervisor and broker containers, mounts no service account token except
 // v0's into the broker, and keeps the ledger on a broker-only volume.
-func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options kagentRenderOptions) ([]any, error) {
+func kagentWorkload(bundle kagentBundle, config []byte, profile kagentRuntimeProfile, options kagentRenderOptions) ([]any, error) {
 	name, namespace := bundle.Runtime, options.Namespace
-	secret, account, claim := name+"-auth", name+"-broker", name+"-ledger"
+	secret, account, claim, configMap := name+"-auth", name+"-broker", name+"-ledger", name+"-config"
+	configMount := corev1.VolumeMount{Name: "agent-config", MountPath: kagentConfigDir, ReadOnly: true}
 	orkaAPI := options.OrkaAPIURL
 	if orkaAPI == "" {
 		orkaAPI = "http://orka-api." + namespace + ".svc:8080"
@@ -412,7 +455,7 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 		"ORKA_ACP_SESSION_BASE_DIR":             "/sessions",
 	})
 	supervisor := corev1.Container{
-		Name: kagentSupervisorContainer, Image: options.RuntimeImage, ImagePullPolicy: corev1.PullIfNotPresent, Env: kagentEnv(values),
+		Name: kagentSupervisorContainer, Image: options.Image, ImagePullPolicy: corev1.PullIfNotPresent, Env: kagentEnv(values),
 		Ports:           []corev1.ContainerPort{{Name: kagentControlPortName, ContainerPort: kagentControlPort}},
 		SecurityContext: kagentSecurityContext(0, "CHOWN", "KILL", "SETGID", "SETUID"),
 		Resources:       kagentResources("100m", "256Mi", "2", "2Gi"),
@@ -420,7 +463,7 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 			{Name: "supervisor-auth", MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
 			{Name: "supervisor-provider", MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
 			{Name: "supervisor-sessions", MountPath: "/sessions"}, {Name: "supervisor-tmp", MountPath: "/tmp"},
-			{Name: "supervisor-home", MountPath: "/home/worker"},
+			{Name: "supervisor-home", MountPath: "/home/worker"}, configMount,
 		},
 	}
 	for _, field := range []string{"uid", cliNameKey, cliNamespaceQuery} {
@@ -429,8 +472,9 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 	}
 	kagentWithProbes(&supervisor, corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/v2/health", Port: intstr.FromString(kagentControlPortName)}})
 	broker := corev1.Container{
-		Name: kagentBrokerContainer, Image: options.ConfiguredImage, ImagePullPolicy: corev1.PullIfNotPresent,
-		Args: []string{"--protocol", kagentBrokerContainer, "--config", "/agent/kagent.json"},
+		Name: kagentBrokerContainer, Image: options.Image, ImagePullPolicy: corev1.PullIfNotPresent,
+		Command: []string{"/orka-runtime-kagent"},
+		Args:    []string{"--protocol", kagentBrokerContainer, "--config", kagentConfigDir + "/" + kagentBundleConfigFile},
 		Env: append(kagentEnv(map[string]string{
 			"ORKA_KAGENT_BROKER_ADDR":                    "127.0.0.1:8091",
 			"ORKA_KAGENT_BROKER_STATE_DIR":               "/broker-state/ledger",
@@ -439,7 +483,7 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 		}), kagentSecretEnv("ORKA_KAGENT_BROKER_BEARER_TOKEN", secret, "provider-token")),
 		SecurityContext: kagentSecurityContext(kagentBrokerUID),
 		Resources:       kagentResources("50m", "64Mi", "1", "256Mi"),
-		VolumeMounts:    []corev1.VolumeMount{{Name: "broker-state", MountPath: "/broker-state"}},
+		VolumeMounts:    []corev1.VolumeMount{{Name: "broker-state", MountPath: "/broker-state"}, configMount},
 	}
 	kagentWithProbes(&broker, corev1.ProbeHandler{Exec: &corev1.ExecAction{
 		Command: []string{"/orka-runtime-kagent", "--protocol", kagentBrokerContainer, "--health-check"}}})
@@ -453,9 +497,17 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 		kagentSecretVolume("supervisor-provider", secret, "provider-token"),
 		kagentEmptyDir("supervisor-sessions", "4Gi"), kagentEmptyDir("supervisor-tmp", "512Mi"), kagentEmptyDir("supervisor-home", "256Mi"),
 		{Name: "broker-state", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}}},
+		{Name: "agent-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: configMap}, DefaultMode: ptr.To[int32](0o444),
+			Items: []corev1.KeyToPath{{Key: kagentBundleConfigFile, Path: kagentBundleConfigFile}}}}},
 	}
 	items := []any{&corev1.ServiceAccount{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
-		ObjectMeta: kagentMeta(bundle, account, namespace, labels), AutomountServiceAccountToken: new(false)}}
+		ObjectMeta: kagentMeta(bundle, account, namespace, labels), AutomountServiceAccountToken: new(false)},
+		// The exact bytes the profile's agent configuration digest pins; both
+		// processes refuse any others. Immutable, like the profile.
+		&corev1.ConfigMap{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+			ObjectMeta: kagentMeta(bundle, configMap, namespace, labels), Immutable: new(true),
+			BinaryData: map[string][]byte{kagentBundleConfigFile: config}}}
 	if bundle.KagentVersion == kagentVersionV0 {
 		// The v0 broker pins the Agent's pod, so it alone reads pods in the
 		// Agent's namespace with its pod's service account.
@@ -567,17 +619,9 @@ func kagentRelayPeer(bundle kagentBundle, options kagentRenderOptions) networkin
 
 // kagentRegistration renders the AgentRuntime once the runtime answers.
 func kagentRegistration(bundle kagentBundle, profile kagentRuntimeProfile, options kagentRenderOptions) (*corev1alpha1.AgentRuntime, error) {
-	if options.Capabilities == "" {
+	raw := options.CapabilitiesJSON
+	if len(raw) == 0 {
 		return nil, fmt.Errorf("--part registration needs --capabilities, the runtime's GET /v2/capabilities answer")
-	}
-	file, err := os.Open(options.Capabilities)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close() //nolint:errcheck
-	raw, err := io.ReadAll(io.LimitReader(file, 1<<20))
-	if err != nil {
-		return nil, err
 	}
 	var capabilities struct {
 		RuntimeProfileDigest            string                                                    `json:"runtimeProfileDigest"`

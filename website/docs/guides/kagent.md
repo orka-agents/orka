@@ -65,13 +65,23 @@ refused in both modes, because a wrapped Agent cannot answer them.
 kagent ships without NetworkPolicies, and its default authentication accepts
 any caller's user ID. Before wrapping Agents, apply the policies in
 [Prepare your kagent install](https://github.com/orka-agents/orka-runtime-kagent/blob/main/docs/kagent-install.md)
-for your kagent version. At minimum, admit only kagent's
-controller to Substrate's actor router (v1) and to kagent's database, and, for
-v0, admit only the controller and the adapter to Agent pods. List those
-components with `--unreachable`: the adapter refuses turns while it can
-connect to one.
+for your kagent version. At minimum, admit only kagent's controller to
+Substrate's actor router (v1) and to kagent's database, and, for v0, admit
+only the controller and the adapter to Agent pods. List those components with
+`--unreachable`: the adapter refuses turns while it can connect to one.
 
 ## Deploy and re-pin
+
+You need the `orka` CLI and access to the cluster; nothing is built.
+`activate` reaches the Orka API like other `orka` commands: through the
+server you configure or pass with `--server`, or else by port-forwarding
+the API Service with `kubectl`. Each
+runtime runs Orka's kagent runtime image, by default the one released with
+your CLI (`ghcr.io/orka-agents/orka/acp-kagent-runtime:<version>`), and
+mounts its Agent's `kagent.json` from a ConfigMap. The adapter refuses a
+configuration whose digest the runtime's profile does not pin. A development
+build of the CLI has no released image, so pass `--image`; each `main` commit
+publishes `ghcr.io/orka-agents/orka/acp-kagent-runtime:sha-<full-commit>`.
 
 The adapter pins the exact Agent it wraps: kagent v1's compiled revision, or
 kagent v0's config hash and image digest. Changing kagent's Helm
@@ -90,74 +100,82 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
      --unreachable kagent-postgresql.kagent.svc:5432
    ```
 
-   A governed Agent's tool policy lists the tools its bindings name, plus any
+   The dry run reports each Agent as observed or governed, and why. A
+   governed Agent's tool policy lists the tools its bindings name, plus any
    you add with `--allowed-tool`. If a binding names none, kagent calls
    whatever the relay lists, so name the Orka tools it may call with
-   `--allowed-tool`. Mark the ones that need an
-   Orka approval with `--approval-required-tool`.
+   `--allowed-tool`. Mark the ones that need an Orka approval with
+   `--approval-required-tool`.
 
-2. Build, deploy, and register the runtime of every Agent in the export:
+2. Deploy and register the runtime of every Agent in the export:
 
    ```bash
-   KUBECTL_CONTEXT=<context> WRAPPER_SRC=<orka-runtime-kagent checkout> IMAGE_REPO=<registry> \
-     scripts/kagent-runtime.sh deploy bundle/<agent>
+   orka agent-runtime kagent deploy bundle/<agent> --context <context> -n orka-system
    ```
 
-   A governed Agent also needs `MODEL_UPSTREAM_TOKEN_FILE`, Orka's credential
-   for the model upstream. A runtime keeps the credential it was deployed
-   with: to rotate it, re-pin under a new `--runtime-revision`, and the
-   script refuses to redeploy a runtime with a different one. Set `CONTROLLER_NAMESPACE` when the Orka
-   controller runs in another namespace than the runtimes. A governed Agent's
-   relay Service and NetworkPolicy may serve only that Agent and its kagent
-   Agent, so the script refuses ones another Agent's deploy created, and ones
-   it did not create. To let the Agent use such objects, label them
-   `orka.ai/kagent-agent=<agent>` and annotate them
-   `orka.ai/kagent-source='<kagent apiVersion> <kagent namespace>/<kagent name>'`, such as
-   `'kagent.dev/v1alpha2 kagent/probe'`, the value the Orka Agent carries. The script waits until Orka reports the
-   AgentRuntime Ready. Orka's conformance check sends a prompt that calls the
-   relay, so the script moves a governed Agent's relay to the new runtime
-   first, and back if deploying fails before the runtime is Ready. Until you
-   activate the new runtime, governed turns on the old runtime fail their
-   tool and model calls.
+   It waits until Orka reports the AgentRuntime Ready. A governed Agent also
+   needs `--model-upstream-token-file`, Orka's credential for the model
+   upstream. A runtime keeps the credential and the image it was deployed
+   with: to change either, re-pin under a new `--runtime-revision`. Use
+   `--image` for another runtime image, and `--controller-namespace` when the
+   Orka controller runs in another namespace than the runtimes.
 
-3. Point the Orka Agent at the new runtime, with the import arguments that
-   wrote the bundle, minus `--dry-run`:
+   Orka's conformance check sends a prompt that calls the relay, so deploy
+   moves a governed Agent's relay to the new runtime first, and back if it
+   fails before the runtime is Ready. Until you activate the new runtime,
+   governed turns on the old one fail their tool and model calls. A governed
+   Agent's relay Service and NetworkPolicy may serve only that Agent and its
+   kagent Agent, so deploy refuses ones another Agent's deploy created, and
+   ones it did not create. To let the Agent use such objects, label them
+   `orka.ai/kagent-agent=<agent>` and annotate them
+   `orka.ai/kagent-source='<kagent apiVersion> <kagent namespace>/<kagent name>'`,
+   such as `'kagent.dev/v1alpha2 kagent/probe'`, the value the Orka Agent
+   carries.
+
+3. Point the Orka Agent at the new runtime, with the import flags that wrote
+   the bundle, minus `--dry-run`, after `--`:
 
    ```bash
-   KUBECTL_CONTEXT=<context> scripts/kagent-runtime.sh activate bundle/<agent> -- \
+   orka agent-runtime kagent activate bundle/<agent> --context <context> -n orka-system -- \
      -f export.yaml <the other import flags>
    ```
 
-   The script passes `--bundle-dir`, the bundle's directory, itself.
-
-   The import switches every Agent in the export, and refuses unless all of
-   their runtimes are Ready, and unless these arguments pin exactly the
-   bundles in the directory, which are the ones you deployed. `deploy`
-   records each runtime's AgentRuntime UID in its bundle
-   (`registration.uid`), and the import refuses a runtime with another UID,
-   such as one in another cluster than the deploy targeted. The script also
-   refuses while the relay of a governed Agent in the bundle directory selects
-   another runtime, for example after you deployed a newer one; deploying the
-   bundle again moves the relay back.
+   The command passes `--bundle-dir` itself, and `-n`: the import creates the
+   Orka Agents in the runtimes' namespace. It reaches the Orka API like the
+   import does, through kubeconfig's current context, so when `--context`
+   names another one, also pass that cluster's Orka API with `--server` and
+   `--token`. Pass the Orka API and token flags before `--`, where the
+   command checks them. The import switches every Agent
+   in the export, and refuses unless all of their runtimes are Ready, and
+   unless these flags pin exactly the bundles you deployed. `deploy` records
+   each runtime's AgentRuntime UID in its bundle (`registration.uid`), and the
+   import refuses a runtime with another UID, such as one in another cluster.
+   Activate also refuses while the relay of a governed Agent in the bundle
+   directory selects another runtime; deploying that bundle again moves it
+   back.
 
 4. Retire the Agent's older runtimes. Orka drains each one first, so this
-   waits until their sessions are done. It refuses while a governed Agent's
-   relay selects another runtime. If it stops before it is done, run it
-   again: it also finds runtimes whose registration is gone but whose
-   objects are left:
+   waits until their sessions are done:
 
    ```bash
-   KUBECTL_CONTEXT=<context> scripts/kagent-runtime.sh retire bundle/<agent>
+   orka agent-runtime kagent retire bundle/<agent> --context <context> -n orka-system
    ```
 
-Re-pinning is the same four steps. Each script command holds a lock per
-Agent it changes, the ConfigMap `<agent>-kagent-lock`, so runs for one Agent
-never overlap. A run that was killed leaves its lock; delete the ConfigMap
-once no run is left.
+   It refuses while a governed Agent's relay selects another runtime. If it
+   stops before it is done, run it again: it also finds runtimes whose
+   registration is gone but whose objects are left.
+
+Re-pinning is the same four steps. Each command holds a lock per Agent it
+changes, the ConfigMap `<agent>-kagent-lock`, so runs for one Agent never
+overlap. A run that was killed leaves its lock; delete the ConfigMap once no
+run is left.
 
 The supervisor reads Orka's controller epoch once, when it starts, and Orka
-marks a runtime with an older epoch not Ready. The rendered registration
-therefore opts into `deployment.kubernetesRecovery`: after an Orka controller
-restart, Orka drains each runtime and restarts its supervisor with the new
-epoch, with no step on your part. See
+marks a runtime with an older epoch not Ready. The registration therefore
+opts into `deployment.kubernetesRecovery`: after an Orka controller restart,
+Orka drains each runtime and restarts its supervisor with the new epoch, with
+no step on your part. See
 [Bring your own AgentRuntime](bring-your-own-agent-runtime.md#kubernetes-recovery).
+
+To manage the objects yourself, for example from GitOps,
+`orka agent-runtime render-kagent` renders each part of a runtime.

@@ -297,6 +297,10 @@ jobs:
             image_suffix: "/acp-opencode-runtime"
             dockerfile: workers/acp/images/opencode/Dockerfile
             context: .
+          - image: acp-kagent-runtime
+            image_suffix: "/acp-kagent-runtime"
+            dockerfile: workers/acp/images/kagent/Dockerfile
+            context: .
           - image: workspace-publisher
             image_suffix: "/workspace-publisher"
             dockerfile: workers/publisher/Dockerfile
@@ -433,6 +437,14 @@ jobs:
             image_suffix: "/acp-opencode-runtime"
             platform: linux/arm64
             platform_slug: linux-arm64
+          - image: acp-kagent-runtime
+            image_suffix: "/acp-kagent-runtime"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: acp-kagent-runtime
+            image_suffix: "/acp-kagent-runtime"
+            platform: linux/arm64
+            platform_slug: linux-arm64
           - image: workspace-publisher
             image_suffix: "/workspace-publisher"
             platform: linux/amd64
@@ -506,6 +518,8 @@ jobs:
             image_suffix: "/acp-copilot-runtime"
           - image: acp-opencode-runtime
             image_suffix: "/acp-opencode-runtime"
+          - image: acp-kagent-runtime
+            image_suffix: "/acp-kagent-runtime"
           - image: workspace-publisher
             image_suffix: "/workspace-publisher"
     steps:

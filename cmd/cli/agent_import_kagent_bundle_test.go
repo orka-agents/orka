@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +13,7 @@ import (
 	"testing"
 )
 
-const testConfiguredImage = "registry.example/kagent-configured@sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
+const testAdapterDigest = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
 const testRuntimeImage = "registry.example/kagent-runtime@sha256:" + "2222222222222222222222222222222222222222222222222222222222222222"
 
 func kagentBundleArgs(path, dir string, extra ...string) []string {
@@ -274,7 +275,7 @@ func TestRenderKagentRuntime(t *testing.T) {
 	}
 	bundleDir := filepath.Join(dir, "probe-gov")
 	bundle, config := readBundle(t, bundleDir)
-	options := kagentRenderOptions{ConfiguredImage: testConfiguredImage, RuntimeImage: testRuntimeImage, ControllerEpoch: 3,
+	options := kagentRenderOptions{Image: testRuntimeImage, AdapterDigest: testAdapterDigest, ControllerEpoch: 3,
 		Namespace: "orka-system", Part: kagentPartWorkload}
 	workload := renderBundle(t, bundleDir, options)
 	deployment := findKind(workload, "Deployment")
@@ -308,10 +309,15 @@ func TestRenderKagentRuntime(t *testing.T) {
 	if !bytes.Contains(mustJSON(t, workload), []byte(`"value":"3"`)) || !bytes.Contains(mustJSON(t, workload), []byte(bundle.ConfigDigest)) {
 		t.Fatal("the supervisor is missing the controller epoch or configuration digest")
 	}
-	if _, err := renderKagentRuntime(bundleDir, kagentRenderOptions{ConfiguredImage: "registry.example/kagent:latest", RuntimeImage: testRuntimeImage,
+	if _, err := renderKagentRuntime(bundleDir, kagentRenderOptions{Image: "registry.example/kagent:latest", AdapterDigest: testAdapterDigest,
 		ControllerEpoch: 3, Namespace: "orka-system", Part: kagentPartWorkload}); err == nil || !strings.Contains(err.Error(), "pinned by digest") {
 		t.Fatalf("a tag-only image = %v", err)
 	}
+	if _, err := renderKagentRuntime(bundleDir, kagentRenderOptions{Image: testRuntimeImage, AdapterDigest: "latest",
+		ControllerEpoch: 3, Namespace: "orka-system", Part: kagentPartWorkload}); err == nil || !strings.Contains(err.Error(), "--adapter-digest") {
+		t.Fatalf("an adapter digest that is not a digest = %v", err)
+	}
+	checkRenderedConfig(t, workload, bundle, config, containers)
 
 	checkRenderedRelay(t, bundleDir, bundle, options)
 	checkRenderedRegistration(t, bundleDir, bundle, config, options)
@@ -324,6 +330,33 @@ func TestRenderKagentRuntime(t *testing.T) {
 	}
 	if _, err := renderKagentRuntime(bundleDir, options); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("an edited bundle = %v", err)
+	}
+}
+
+// The runtime image carries no Agent configuration: both containers mount
+// the bundle's exact kagent.json from an immutable ConfigMap, and the broker
+// runs the adapter from the same image.
+func checkRenderedConfig(t *testing.T, workload []map[string]any, bundle kagentBundle, config []byte, containers []any) {
+	t.Helper()
+	configMap := findKind(workload, "ConfigMap")
+	encoded, _ := kagentMap(configMap, "binaryData")[kagentBundleConfigFile].(string)
+	if kagentString(configMap, "metadata", "name") != bundle.Runtime+"-config" || configMap["immutable"] != true ||
+		encoded != base64.StdEncoding.EncodeToString(config) {
+		t.Fatalf("config map = %v", configMap)
+	}
+	for _, raw := range containers {
+		container, _ := raw.(map[string]any)
+		mounted := false
+		for _, mount := range container["volumeMounts"].([]any) {
+			m, _ := mount.(map[string]any)
+			mounted = mounted || (m["name"] == "agent-config" && m["mountPath"] == kagentConfigDir && m["readOnly"] == true)
+		}
+		if container["image"] != testRuntimeImage || !mounted {
+			t.Fatalf("container %v does not run the runtime image with the configuration mounted", container["name"])
+		}
+		if container["name"] == kagentBrokerContainer && strings.Join(toStrings(container["command"]), " ") != "/orka-runtime-kagent" {
+			t.Fatalf("broker command = %v", container["command"])
+		}
 	}
 }
 

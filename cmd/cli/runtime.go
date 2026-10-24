@@ -28,7 +28,7 @@ func newAgentRuntimeCmd() *cobra.Command {
 		TablePrinter: printAgentRuntimeTable,
 		DescribeRows: agentRuntimeDescribeRows,
 	})
-	cmd.AddCommand(newAgentRuntimeRenderKagentCmd())
+	cmd.AddCommand(newAgentRuntimeRenderKagentCmd(), newAgentRuntimeKagentCmd())
 	return cmd
 }
 

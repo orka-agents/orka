@@ -88,7 +88,7 @@ The chart defaults to `0.0.0-dev`, the latest validated `main` build, not
 necessarily your checkout. Keep the overrides above for a feature branch or older
 commit. The Development Images workflow publishes `sha-<full-commit>` image tags
 and a `development-images-<full-commit>` artifact with `images.json` and
-`values.json`; using that values file pins all nine images to the matching build.
+`values.json`; using that values file pins the chart's eight images to the matching build.
 
 Tagged controller, publisher, and native worker images use `Always` pull policy.
 Changing a registry tag does not restart existing Pods. Coding-runtime tags are

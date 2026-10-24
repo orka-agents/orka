@@ -20,6 +20,7 @@ var developmentDockerfiles = map[string]string{
 	claudeRuntimeImage:   "workers/acp/images/claude/Dockerfile",
 	copilotRuntimeImage:  "workers/acp/images/copilot/Dockerfile",
 	opencodeRuntimeImage: "workers/acp/images/opencode/Dockerfile",
+	kagentRuntimeImage:   "workers/acp/images/kagent/Dockerfile",
 	publisherImage:       "workers/publisher/Dockerfile",
 }
 
