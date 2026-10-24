@@ -457,6 +457,17 @@ type AgentHostStatus struct {
 	// +optional
 	GitHub *AgentHostGitHubAccount `json:"github,omitempty"`
 
+	// ObservedConnectionUID identifies the Connection whose grant the
+	// controller last delivered to this host. It fences a recreated link.
+	// +optional
+	ObservedConnectionUID string `json:"observedConnectionUID,omitempty"`
+
+	// ObservedGrantSequence is the consent grant last delivered from that
+	// Connection. It contains no credential material.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ObservedGrantSequence int64 `json:"observedGrantSequence,omitempty"`
+
 	// IdleSuspendedAt is when Orka suspended the host for being idle.
 	// +optional
 	IdleSuspendedAt *metav1.Time `json:"idleSuspendedAt,omitempty"`

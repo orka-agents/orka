@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/connectors"
 )
 
@@ -421,6 +422,92 @@ func TestStaticChartAgentHostGitHubRendersTheProviderAndTemplate(t *testing.T) {
 	}
 }
 
+func TestStaticChartAgentHostTemplateImagesMatchRuntimePolicy(t *testing.T) {
+	args := append(agentHostGitHubValues(
+		"--set", "controller.agentHosts.github.clientSecret.existingSecret=github-app"),
+		"--show-only", "templates/agent-host-github.yaml")
+	rendered := requireHelmRender(t, args...)
+	var defaults corev1alpha1.AgentHostTemplate
+	document := requireRenderedDocument(t, rendered, "kind: AgentHostTemplate\n")
+	if err := yaml.Unmarshal([]byte(document), &defaults); err != nil {
+		t.Fatal(err)
+	}
+	if err := agenthost.ValidateTemplate(&defaults); err != nil {
+		t.Fatalf("the default template is invalid: %v", err)
+	}
+
+	const repository = "registry.example.com/agent-host"
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, field := range []string{"copilotdImage", "hostImage"} {
+		t.Run(field, func(t *testing.T) {
+			for _, tt := range []struct {
+				name  string
+				image string
+				valid bool
+			}{
+				{"digest only", repository + "@" + digest, true},
+				{"tag and digest", repository + ":v1@" + digest, true},
+				{"tag only", repository + ":v1", false},
+				{"no tag or digest", repository, false},
+				{"empty", "", false},
+				{"missing repository", "@" + digest, false},
+				{"short digest", repository + "@sha256:" + strings.Repeat("a", 63), false},
+				{"uppercase digest", repository + "@sha256:" + strings.Repeat("A", 64), false},
+				{"wrong algorithm", repository + "@sha512:" + strings.Repeat("a", 128), false},
+				{"leading whitespace", " " + repository + "@" + digest, false},
+				{"trailing whitespace", repository + "@" + digest + " ", false},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					want := defaults.DeepCopy()
+					if field == "copilotdImage" {
+						want.Spec.InitContainers[0].Image = tt.image
+					} else {
+						want.Spec.Containers[0].Image = tt.image
+					}
+					if err := agenthost.ValidateTemplate(want); (err == nil) != tt.valid {
+						t.Fatalf("runtime validation = %v, want valid=%t", err, tt.valid)
+					}
+					setting := "controller.agentHosts.template." + field
+					output, err := helmTemplateStaticChart(t, append(args, "--set-string", setting+"="+tt.image)...)
+					if !tt.valid {
+						message := setting + " must be pinned by digest"
+						if err == nil || !strings.Contains(output, message) {
+							t.Fatalf("helm render error = %v, want %q:\n%s", err, message, output)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("valid image override does not render: %v\n%s", err, output)
+					}
+					var got corev1alpha1.AgentHostTemplate
+					document := requireRenderedDocument(t, output, "kind: AgentHostTemplate\n")
+					if err := yaml.Unmarshal([]byte(document), &got); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got.Spec, want.Spec) {
+						t.Fatal("the image override must change only the selected container image")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestStaticChartAgentHostTemplateImagesIgnoredWhenDisabled(t *testing.T) {
+	for _, enabled := range []string{"false", "true"} {
+		t.Run("agent hosts enabled="+enabled, func(t *testing.T) {
+			// Without the GitHub provider, no chart-managed template uses these images.
+			rendered := requireHelmRender(t,
+				"--set", "controller.agentHosts.enabled="+enabled,
+				"--set-string", "controller.agentHosts.template.copilotdImage=registry.example.com/copilotd:latest",
+				"--set-string", "controller.agentHosts.template.hostImage=registry.example.com/host:latest")
+			if strings.Contains(rendered, "kind: AgentHostTemplate\n") {
+				t.Fatal("a disabled GitHub provider must not render an agent-host template")
+			}
+		})
+	}
+}
+
 func TestStaticChartAgentHostGitHubRefusesIncompleteSettings(t *testing.T) {
 	for name, args := range map[string][]string{
 		"no client secret": agentHostGitHubValues(),
@@ -510,6 +597,9 @@ func TestStaticChartAgentHostGitHubRendersFromReusedValues(t *testing.T) {
 	}
 	if template.Name != "copilotd" || !reflect.DeepEqual(template.Spec, sample.Spec) {
 		t.Fatal("without template values the chart must render the default copilotd template")
+	}
+	if err := agenthost.ValidateTemplate(&template); err != nil {
+		t.Fatalf("the template from reused values is invalid: %v", err)
 	}
 	var provider corev1alpha1.ConnectorProvider
 	reusedProvider := requireRenderedDocument(t, rendered, "kind: ConnectorProvider\n")

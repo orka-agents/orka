@@ -40,6 +40,8 @@ type HostCredential struct {
 	// an expiry GitHub set from a deadline Orka chose for a token it was
 	// handed without one.
 	Refreshable bool
+	// ConnectionUID binds the grant sequence to this incarnation of the link.
+	ConnectionUID string
 }
 
 // HostCredential returns the access token for the agent host fed by the named
@@ -86,6 +88,7 @@ func (s *Source) HostCredential(ctx context.Context, namespace, name string, hor
 		Version:       credential.Version,
 		GrantSequence: credential.GrantSequence,
 		Refreshable:   credential.RefreshToken != "",
+		ConnectionUID: string(connection.UID),
 	}, nil
 }
 

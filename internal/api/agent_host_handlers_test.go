@@ -36,6 +36,7 @@ const agentHostTestNamespace = "team"
 type agentHostAPI struct {
 	t        *testing.T
 	client   client.Client
+	reader   client.Reader
 	app      *fiber.App
 	identity *UserInfo
 }
@@ -84,8 +85,12 @@ func newAgentHostAPI(t *testing.T, objects ...client.Object) *agentHostAPI {
 
 // rebuild serves the routes from h.client.
 func (h *agentHostAPI) rebuild() {
+	reader := h.reader
+	if reader == nil {
+		reader = h.client
+	}
 	handlers := NewHandlers(HandlersConfig{
-		Client: h.client, APIReader: h.client, WatchNamespace: agentHostTestNamespace,
+		Client: h.client, APIReader: reader, WatchNamespace: agentHostTestNamespace,
 		Connectors: ConnectorConfig{Enabled: true},
 	})
 	app := fiber.New()
@@ -137,7 +142,11 @@ func TestOwnAgentHostIsTheCallersOnly(t *testing.T) {
 	// controller's, and the API never serves it.
 	stray := linkedHost("gh-stray", "alice")
 	stray.Spec.GitHubTokenFrom.ConnectionRef.Name = "github-someone-else"
-	h := newAgentHostAPI(t, linkedHost("gh-alice", "alice"), linkedHost("gh-bob", "bob"), stray)
+	aliceHost, bobHost := linkedHost("gh-alice", "alice"), linkedHost("gh-bob", "bob")
+	aliceHost.Status.ObservedConnectionUID, aliceHost.Status.ObservedGrantSequence = "alice-link", 1
+	bobHost.Status.ObservedConnectionUID, bobHost.Status.ObservedGrantSequence = "bob-link", 1
+	h := newAgentHostAPI(t, aliceHost, bobHost, stray,
+		readyHostConnection(aliceHost, "alice-link", 1), readyHostConnection(bobHost, "bob-link", 1))
 
 	status, alice := h.do(http.MethodGet, "/api/v1/agent-hosts/me")
 	if status != http.StatusOK || alice.Name != "gh-alice" || alice.Environment != "orka-gh-alice" || !alice.Ready || alice.GitHubLogin != "alice" {
@@ -260,6 +269,105 @@ func TestOwnAgentHostWritesAreFencedToTheHostThatWasChecked(t *testing.T) {
 				t.Fatal("the replacement host must be untouched")
 			}
 		})
+	}
+}
+
+func readyHostConnection(host *corev1alpha1.AgentHost, uid string, grant int64) *corev1alpha1.Connection {
+	connection := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: host.Spec.GitHubTokenFrom.ConnectionRef.Name, Namespace: host.Namespace, UID: types.UID(uid), Generation: 1,
+		},
+		Status: corev1alpha1.ConnectionStatus{GrantSequence: grant},
+	}
+	for _, kind := range []string{corev1alpha1.ConnectionConditionReady, corev1alpha1.ConnectionConditionProviderResolved,
+		corev1alpha1.ConnectionConditionScopesGranted} {
+		connection.Status.Conditions = append(connection.Status.Conditions, metav1.Condition{
+			Type: kind, Status: metav1.ConditionTrue, Reason: "Linked", ObservedGeneration: 1,
+		})
+	}
+	return connection
+}
+
+// A Ready condition from an earlier consent, or an older Connection with the
+// same name, cannot make a freshly linked account look ready.
+func TestOwnAgentHostRequiresCurrentConnectionGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		uid      string
+		grant    int64
+		missing  bool
+		unlinked bool
+		deleting bool
+		want     bool
+	}{
+		{name: "not observed"},
+		{name: "previous consent", uid: "current-link", grant: 1},
+		{name: "recreated link", uid: "old-link", grant: 2},
+		{name: "different grant", uid: "current-link", grant: 3},
+		{name: "missing link", uid: "current-link", grant: 2, missing: true},
+		{name: "unlinked", uid: "current-link", grant: 2, unlinked: true},
+		{name: "deleting", uid: "current-link", grant: 2, deleting: true},
+		{name: "current grant", uid: "current-link", grant: 2, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := linkedHost("gh-alice", "alice")
+			host.Status.ObservedConnectionUID = tc.uid
+			host.Status.ObservedGrantSequence = tc.grant
+			objects := []client.Object{host}
+			if !tc.missing {
+				connection := readyHostConnection(host, "current-link", 2)
+				if tc.unlinked {
+					connection.Status.Conditions[0].Status = metav1.ConditionFalse
+				}
+				if tc.deleting {
+					now := metav1.Now()
+					connection.DeletionTimestamp = &now
+					connection.Finalizers = []string{"test.orka.ai/held"}
+				}
+				objects = append(objects, connection)
+			}
+			h := newAgentHostAPI(t, objects...)
+			status, response := h.do(http.MethodGet, "/api/v1/agent-hosts/me")
+			if status != http.StatusOK || response.Ready != tc.want {
+				t.Fatalf("status = %d, ready = %v, want %v", status, response.Ready, tc.want)
+			}
+		})
+	}
+}
+
+func TestOwnAgentHostReadsTheCurrentGrantWithoutTheInformerCache(t *testing.T) {
+	host := linkedHost("gh-alice", "alice")
+	host.Status.ObservedConnectionUID, host.Status.ObservedGrantSequence = "current-link", 1
+	h := newAgentHostAPI(t, host, readyHostConnection(host, "current-link", 1))
+	h.reader = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, inner client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if err := inner.Get(ctx, key, object, opts...); err != nil {
+				return err
+			}
+			if connection, ok := object.(*corev1alpha1.Connection); ok {
+				connection.Status.GrantSequence = 2
+			}
+			return nil
+		},
+	})
+	h.rebuild()
+	if status, response := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || response.Ready {
+		t.Fatalf("cached grant advertised as ready: status = %d, ready = %v", status, response.Ready)
+	}
+}
+
+func TestOwnAgentHostReadFailureCannotAdvertiseReadiness(t *testing.T) {
+	host := linkedHost("gh-alice", "alice")
+	host.Status.ObservedConnectionUID, host.Status.ObservedGrantSequence = "current-link", 1
+	h := newAgentHostAPI(t, host, readyHostConnection(host, "current-link", 1))
+	h.reader = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return context.DeadlineExceeded
+		},
+	})
+	h.rebuild()
+	if status, response := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusInternalServerError || response.Ready {
+		t.Fatalf("unverified grant advertised as ready: status = %d, ready = %v", status, response.Ready)
 	}
 }
 

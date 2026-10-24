@@ -52,6 +52,9 @@ func TestHostCredentialReturnsTheAccessTokenAndRefreshesBeforeExpiry(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if held.ConnectionUID != string(h.connection.UID) || held.GrantSequence != h.connection.Status.GrantSequence {
+		t.Fatalf("grant identity = %q/%d, want %q/%d", held.ConnectionUID, held.GrantSequence, h.connection.UID, h.connection.Status.GrantSequence)
+	}
 	if held.AccessToken != "ghu_held" || h.refresher.calls.Load() != 0 {
 		t.Fatalf("held = %+v, refreshes = %d", held, h.refresher.calls.Load())
 	}

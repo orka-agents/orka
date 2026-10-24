@@ -713,7 +713,7 @@ Global Flags:
 ## `orka connect`
 
 ```text
-Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link to become ready. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
+Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link and any agent host to become ready within one timeout. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
 
 Usage:
   orka connect <provider> [flags]
@@ -723,7 +723,7 @@ Flags:
       --mode string        Link mode: readOnly or readWrite (write tools ask for approval) (default "readOnly")
       --no-open            Print the consent URL without opening a browser
       --no-wait            Return as soon as consent has started
-      --timeout duration   How long to wait for the link to become ready (default 5m0s)
+      --timeout duration   Total time to wait for the link and any agent host to become ready (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
