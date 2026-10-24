@@ -119,13 +119,14 @@ func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 		}
 		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("load connector provider: %w", err)
 	}
-	// Deletion is a settled refusal even when custody cannot be read. Check
-	// it first so a storage outage cannot keep a host running on its old token.
-	if !provider.DeletionTimestamp.IsZero() {
-		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider is being deleted")
-	}
 	if provider.Spec.AgentHost == nil {
 		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider no longer serves agent hosts")
+	}
+	// A settled refusal, including deletion, needs no custody read. A storage
+	// outage must not keep a host running after its provider refused it.
+	judged, accepted := providerVerdict(provider)
+	if judged && !accepted {
+		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider is not accepted")
 	}
 	ref, err = connectors.CredentialRef(connection)
 	if err != nil {
@@ -138,14 +139,10 @@ func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 	if err != nil {
 		return nil, ref, store.ConnectorCredential{}, err
 	}
-	// Only a verdict stops a host. A provider status that does not describe
-	// the provider's current spec, or that records a check it could not
-	// complete, is retried, and no token is handed out meanwhile.
-	switch judged, accepted := providerVerdict(provider); {
-	case !judged:
+	// An unobserved or inconclusive status is retryable, but only after
+	// custody: missing credentials already prove that the link has ended.
+	if !judged {
 		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("connector provider %q has not judged its latest change", provider.Name)
-	case !accepted:
-		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider is not accepted")
 	}
 	// The provider just read is accepted, so a mismatch with it is a
 	// verdict too; a failed read above is retried.
