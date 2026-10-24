@@ -378,6 +378,61 @@ func TestHostLinkEndsWhenItsConnectionIsBeingDeleted(t *testing.T) {
 	}
 }
 
+type failingHostCustody struct {
+	store.ConnectorCredentialStore
+	reads int
+}
+
+func (c *failingHostCustody) GetConnectorCredential(context.Context, store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
+	c.reads++
+	return store.ConnectorCredential{}, context.DeadlineExceeded
+}
+
+// A confirmed provider deletion ends the link even when custody is unavailable;
+// the storage outage alone must remain retryable while the provider is alive.
+func TestHostLinkProviderDeletionPrecedesCustodyFailure(t *testing.T) {
+	h := newHarness(t)
+	h.serveHosts("copilotd")
+	custody := &failingHostCustody{ConnectorCredentialStore: h.store}
+	h.source.Credentials = custody
+	check := func(want error) {
+		t.Helper()
+		if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, want) {
+			t.Fatalf("check = %v, want %v", err, want)
+		}
+		held, err := h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, 15*time.Minute)
+		if !errors.Is(err, want) || held != (HostCredential{}) {
+			t.Fatalf("credential error = %v, want %v and no credential", err, want)
+		}
+	}
+	check(context.DeadlineExceeded)
+	if custody.reads != 2 {
+		t.Fatalf("custody reads = %d, want 2 before deletion", custody.reads)
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	key := types.NamespacedName{Namespace: testNamespace, Name: "github"}
+	if err := h.client.Get(context.Background(), key, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Finalizers = append(provider.Finalizers, "test.orka.ai/held")
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Get(context.Background(), key, provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider.DeletionTimestamp.IsZero() {
+		t.Fatal("the finalizer must hold the deleting provider")
+	}
+	check(ErrHostLinkUnavailable)
+	if custody.reads != 2 {
+		t.Fatalf("custody reads = %d, want no reads after confirmed deletion", custody.reads)
+	}
+}
+
 // A provider read that fails is retried, never taken for a link that stopped
 // authorizing the host: a host is stopped only for a provider it has read.
 func TestHostLinkReadFailuresAreRetried(t *testing.T) {

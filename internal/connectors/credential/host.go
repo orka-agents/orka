@@ -119,6 +119,11 @@ func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 		}
 		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("load connector provider: %w", err)
 	}
+	// Deletion is a settled refusal even when custody cannot be read. Check
+	// it first so a storage outage cannot keep a host running on its old token.
+	if !provider.DeletionTimestamp.IsZero() {
+		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider is being deleted")
+	}
 	if provider.Spec.AgentHost == nil {
 		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider no longer serves agent hosts")
 	}
