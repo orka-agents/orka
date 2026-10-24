@@ -96,7 +96,7 @@ func TestReserveTaskSettlesFrozenWorkspaceCredentialBlocked(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "credential-blocked-controller")
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "credential-blocked-controller", sqliteStore)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
 			if err != nil {

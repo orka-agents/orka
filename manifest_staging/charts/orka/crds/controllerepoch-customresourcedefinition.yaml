@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.version
       name: Version
       type: integer
+    - jsonPath: .status.storageRecovery.reason
+      name: Storage Hold
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -76,6 +79,69 @@ spec:
               acquiredAt:
                 format: date-time
                 type: string
+              conditions:
+                description: |-
+                  Conditions include StorageRecoveryRequired, which is True while the
+                  installation is held for storage recovery.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               epoch:
                 format: int64
                 minimum: 1
@@ -92,6 +158,139 @@ spec:
               requestDigest:
                 pattern: ^sha256:[a-f0-9]{64}$
                 type: string
+              storageEpochs:
+                description: |-
+                  StorageEpochs records, for each storage contract, the dataset that
+                  serves it, the controller epoch that dataset acknowledged and the
+                  highest write watermark it acknowledged. At takeover, and whenever a
+                  dataset's database restarted or switched, Orka compares the dataset with
+                  this record; a dataset behind it has lost acknowledged writes, and Orka
+                  holds the installation for storage recovery.
+                items:
+                  description: |-
+                    StorageEpochAcknowledgement is what one storage contract's dataset
+                    acknowledged to this installation.
+                  properties:
+                    acknowledgedAt:
+                      description: AcknowledgedAt is when Orka recorded Epoch.
+                      format: date-time
+                      type: string
+                    contract:
+                      description: Contract is the storage contract, such as state.v1
+                        or artifacts.v1.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    datasetId:
+                      description: DatasetID identifies the dataset that serves the
+                        contract.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    epoch:
+                      description: Epoch is the controller epoch the dataset acknowledged.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    watermarkAcknowledgedAt:
+                      description: WatermarkAcknowledgedAt is when Orka recorded WriteWatermark.
+                      format: date-time
+                      type: string
+                    writeWatermark:
+                      description: WriteWatermark is the highest write watermark the
+                        dataset acknowledged.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                  required:
+                  - acknowledgedAt
+                  - contract
+                  - datasetId
+                  - epoch
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - contract
+                x-kubernetes-list-type: map
+              storageRecovery:
+                description: |-
+                  StorageRecovery is the installation's storage recovery hold. While it is
+                  set, Orka refuses every storage write and control-store change, creates
+                  no Jobs and reports no Task success. An operator releases it, after
+                  recovering storage, by setting the storage.orka.ai/recovery-acknowledged
+                  annotation of this object to the hold's ID.
+                properties:
+                  acknowledgedDatasetId:
+                    description: |-
+                      AcknowledgedDatasetID identifies the dataset that acknowledged Contract
+                      before.
+                    maxLength: 253
+                    type: string
+                  acknowledgedEpoch:
+                    description: |-
+                      AcknowledgedEpoch and StoredEpoch are the controller epoch the dataset
+                      acknowledged and the one it held.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  acknowledgedWatermark:
+                    description: |-
+                      AcknowledgedWatermark and StoredWatermark are the write watermark the
+                      dataset acknowledged and the one it held.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  contract:
+                    description: Contract is the storage contract whose dataset Orka
+                      was checking.
+                    maxLength: 64
+                    type: string
+                  datasetId:
+                    description: DatasetID identifies the dataset that serves Contract
+                      now.
+                    maxLength: 253
+                    type: string
+                  durability:
+                    description: Durability is the durability class the dataset reported.
+                    maxLength: 64
+                    type: string
+                  id:
+                    description: |-
+                      ID identifies the hold. Setting the storage.orka.ai/recovery-acknowledged
+                      annotation to it releases this hold and no other.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  message:
+                    description: Message describes what Orka found.
+                    maxLength: 1024
+                    type: string
+                  raisedAt:
+                    description: RaisedAt is when Orka recorded the hold.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: Reason says what Orka found.
+                    enum:
+                    - EpochRegressed
+                    - WatermarkRegressed
+                    - DatasetChanged
+                    - UnsafeSwitch
+                    type: string
+                  storedEpoch:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  storedWatermark:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                required:
+                - id
+                - raisedAt
+                - reason
+                type: object
               updatedAt:
                 format: date-time
                 type: string

@@ -710,6 +710,11 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		if errors.Is(err, store.ErrDuplicateMismatch) {
 			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
 		}
+		// A replaced controller's write is fenced, which also matches
+		// ErrConflict; it says nothing about Session ownership.
+		if errors.Is(err, store.ErrFenced) {
+			return nil, fmt.Errorf("persist accepted gateway event: %w", err)
+		}
 		if errors.Is(err, store.ErrConflict) {
 			return s.admitRejectedEvent(ctx, baseEvent, "the selected Session is owned by another source")
 		}

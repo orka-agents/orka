@@ -655,7 +655,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
-			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
+			if err := r.ArtifactStore.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
@@ -1495,6 +1495,14 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// While storage is held for recovery, Orka starts no work. No storage
+	// write or control-store change guards a Job's creation, so the hold is
+	// checked before anything is prepared for it.
+	if holdErr := r.ControllerEpochManager.StorageHold(); holdErr != nil {
+		log.Info("not creating the Task Job while storage is held for recovery", "reason", holdErr.Error())
+		return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+	}
+
 	latest := &corev1alpha1.Task{}
 	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
@@ -1697,7 +1705,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// deletion between the reads must not turn a skipped freshness check into
 	// a new execution from stale inputs.
 	if !existingGatewayJob {
-		err = r.Create(ctx, job)
+		// The hold is checked again at the creation itself: a hold raised
+		// while the Job was prepared either waits for this creation or
+		// refuses it.
+		err = r.ControllerEpochManager.AdmitWork(ctx, func(ctx context.Context) error {
+			return r.Create(ctx, job)
+		})
+		if errors.Is(err, store.ErrStorageRecoveryRequired) || errors.Is(err, store.ErrNotReady) {
+			log.Info("not creating the Task Job while storage is held for recovery", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+		}
 	}
 	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
 		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
@@ -2769,7 +2786,7 @@ func (r *TaskReconciler) beginTaskFinalization(
 	log := logf.FromContext(ctx)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result before workspace finalization")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 	}
@@ -2824,7 +2841,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		// A result the store has not accepted yet, or may have saved, is
+		// collected again on the next attempt rather than dropped.
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 		// Continue anyway, result collection is best-effort
@@ -4823,6 +4842,9 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	// Collect result from this iteration (best-effort)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect iteration result")
+		if store.IsTemporaryStorageError(err) {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
