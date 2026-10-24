@@ -37,8 +37,8 @@ const (
 )
 
 // AgentHostProvisioner gives each person who links the agent-host provider
-// their own AgentHost, named after their GitHub login (ADR 0036). It only
-// creates hosts: the AgentHost reconciler feeds and stops them, and nothing
+// their own AgentHost, named after their GitHub login (ADR 0036), and records
+// their provider. The AgentHost reconciler feeds and stops them, and nothing
 // deletes one when its Connection goes.
 type AgentHostProvisioner struct {
 	client.Client
@@ -53,6 +53,22 @@ func (r *AgentHostProvisioner) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, connection); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// Only the person's canonical link may provision or identify their host.
+	subject := connection.Spec.Subject
+	if connection.Name != connectors.ConnectionName(connection.Spec.ProviderRef.Name, subject.Issuer, subject.Subject) {
+		return ctrl.Result{}, nil
+	}
+	// Retained hosts need their full provider name before the Connection is
+	// removed, even if the link or provider no longer qualifies for a host.
+	hosts := &corev1alpha1.AgentHostList{}
+	if err := r.List(ctx, hosts, client.InNamespace(connection.Namespace)); err != nil {
+		return ctrl.Result{}, err
+	}
+	for i := range hosts.Items {
+		if fedBy(&hosts.Items[i], connection) {
+			return ctrl.Result{}, r.recordHostProvider(ctx, &hosts.Items[i], connection.Spec.ProviderRef.Name)
+		}
+	}
 	if !connectors.ConnectionLinked(connection) || connection.Status.GrantSequence == 0 ||
 		connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] == corev1alpha1.ConnectionAgentHostDeclined {
 		return ctrl.Result{}, nil
@@ -61,23 +77,11 @@ func (r *AgentHostProvisioner) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	// Only the person's one canonical link to the provider gets a host, so a
-	// re-link finds the same host again.
-	subject := connection.Spec.Subject
-	if provider.Spec.AgentHost == nil || connection.Name != connectors.ConnectionName(provider.Name, subject.Issuer, subject.Subject) {
+	if provider.Spec.AgentHost == nil {
 		return ctrl.Result{}, nil
 	}
 	if conflict, err := r.providerConflict(ctx, provider); err != nil || conflict {
 		return ctrl.Result{}, err
-	}
-	hosts := &corev1alpha1.AgentHostList{}
-	if err := r.List(ctx, hosts, client.InNamespace(connection.Namespace)); err != nil {
-		return ctrl.Result{}, err
-	}
-	for i := range hosts.Items {
-		if fedBy(&hosts.Items[i], connection) {
-			return ctrl.Result{}, nil
-		}
 	}
 
 	template := provider.Spec.AgentHost.TemplateRef.Name
@@ -122,13 +126,27 @@ func (r *AgentHostProvisioner) Reconcile(ctx context.Context, req ctrl.Request) 
 			// Deleting the other host enqueues nothing for this link.
 			return ctrl.Result{RequeueAfter: agentHostResync}, nil
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.recordHostProvider(ctx, existing, connection.Spec.ProviderRef.Name)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	r.event(connection, corev1.EventTypeNormal, "AgentHostCreated", fmt.Sprintf("created AgentHost %q", host.Name))
 	return ctrl.Result{}, nil
+}
+
+// recordHostProvider also upgrades hosts created before the annotation existed.
+func (r *AgentHostProvisioner) recordHostProvider(ctx context.Context, host *corev1alpha1.AgentHost, provider string) error {
+	if host.Annotations[connectors.AgentHostProviderAnnotation] == provider {
+		return nil
+	}
+	base := host.DeepCopy()
+	if host.Annotations == nil {
+		host.Annotations = map[string]string{}
+	}
+	host.Annotations[connectors.AgentHostProviderAnnotation] = provider
+	// Do not patch a replacement host or overwrite concurrent metadata changes.
+	return r.Patch(ctx, host, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // providerConflict reports whether another provider in the namespace also

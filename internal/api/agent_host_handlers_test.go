@@ -21,12 +21,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/controller"
 )
 
 const agentHostTestNamespace = "team"
@@ -325,6 +327,51 @@ func TestOwnAgentHostOutlivesALongNamedProvider(t *testing.T) {
 	h.identity = person("alice")
 	if status, host := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || host.Name != "gh-alice-old" {
 		t.Fatalf("get: %d %+v, want the kept host", status, host)
+	}
+}
+
+// An upgraded provisioner repairs a legacy host while its Connection still
+// exists, so losing a long-named provider cannot strand self-service cleanup.
+func TestOwnAgentHostOutlivesBackfilledProvider(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{
+		Name: "github-enterprise-cloud-agent-hosts-for-the-platform-team", Namespace: agentHostTestNamespace,
+	}}
+	connection := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: connectors.ConnectionName(provider.Name, connectorTestIssuer, "alice"), Namespace: agentHostTestNamespace,
+		},
+		Spec: corev1alpha1.ConnectionSpec{
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: provider.Name},
+			Subject:     corev1alpha1.ConnectionSubject{Issuer: connectorTestIssuer, Subject: "alice"},
+		},
+	}
+	kept := linkedHost("gh-alice-old", "alice")
+	kept.Spec.GitHubTokenFrom.ConnectionRef.Name = connection.Name
+	h := newAgentHostAPI(t, kept, connection, provider)
+	provisioner := &controller.AgentHostProvisioner{Client: h.client}
+	if _, err := provisioner.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(connection)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range []client.Object{connection, provider} {
+		if err := h.client.Delete(context.Background(), object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.identity = person("bob")
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		if status, _ := h.do(method, "/api/v1/agent-hosts/me"); status != http.StatusNotFound {
+			t.Fatalf("bob %s: %d, want 404", method, status)
+		}
+	}
+	h.identity = person("alice")
+	if status, host := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || host.Name != kept.Name {
+		t.Fatalf("get: %d %+v, want the kept host", status, host)
+	}
+	if status, _ := h.do(http.MethodDelete, "/api/v1/agent-hosts/me"); status != http.StatusAccepted {
+		t.Fatalf("delete: %d, want 202", status)
+	}
+	if _, ok := h.host(kept.Name); ok {
+		t.Fatal("the kept host must be deleted")
 	}
 }
 
