@@ -87,34 +87,43 @@ func (s *Store) HasSessionCleanupFenceForUID(ctx context.Context, sessionUID str
 	if sessionUID == "" {
 		return false, nil
 	}
-	var count int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM session_cleanup_completions WHERE session_uid = ?`, sessionUID,
-	).Scan(&count); err != nil {
-		return false, err
-	}
-	if count > 0 {
-		return true, nil
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT plan FROM session_cleanup_intents`)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close() //nolint:errcheck
-	for rows.Next() {
-		var encoded []byte
-		if err := rows.Scan(&encoded); err != nil {
-			return false, err
+	// Completion replaces the intent in one commit, so both are read from one
+	// snapshot; otherwise a cleanup finishing between the two reads would leave
+	// the UID looking unfenced.
+	var fenced bool
+	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var count int
+		if err := q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM session_cleanup_completions WHERE session_uid = ?`, sessionUID,
+		).Scan(&count); err != nil {
+			return err
 		}
-		var intent store.SessionCleanupIntent
-		if err := json.Unmarshal(encoded, &intent); err != nil {
-			return false, err
+		if count > 0 {
+			fenced = true
+			return nil
 		}
-		if intent.SessionUID == sessionUID {
-			return true, nil
+		rows, err := q.QueryContext(ctx, `SELECT plan FROM session_cleanup_intents`)
+		if err != nil {
+			return err
 		}
-	}
-	return false, rows.Err()
+		defer rows.Close() //nolint:errcheck
+		for rows.Next() {
+			var encoded []byte
+			if err := rows.Scan(&encoded); err != nil {
+				return err
+			}
+			var intent store.SessionCleanupIntent
+			if err := json.Unmarshal(encoded, &intent); err != nil {
+				return err
+			}
+			if intent.SessionUID == sessionUID {
+				fenced = true
+				return nil
+			}
+		}
+		return rows.Err()
+	})
+	return fenced, err
 }
 
 // GetSessionCleanupIdentity returns the Kubernetes Session UID already bound
