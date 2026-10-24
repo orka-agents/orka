@@ -30,13 +30,13 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	require.NoError(t, writer.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		// The database callback excludes cleanup before any payload is read
 		// or written. Network authorization runs before this callback.
-		cleanupErr := cleanup.DeleteArtifacts(ctx, "ns", "task")
+		cleanupErr := cleanup.DeleteArtifacts(ctx, testArtifactOwner("ns", "task"))
 		require.Error(t, cleanupErr)
 		require.True(t, isSQLiteRetryableError(cleanupErr))
-		if err := writer.SaveResult(txCtx, "ns", "task", []byte("result")); err != nil {
+		if err := writer.SaveResult(txCtx, testResultKey("ns", "task"), []byte("result")); err != nil {
 			return err
 		}
-		if err := writer.SaveArtifact(txCtx, "ns", "task", "output.txt", "text/plain", []byte("artifact")); err != nil {
+		if err := writer.SaveArtifact(txCtx, store.SaveArtifactRequest{Owner: testArtifactOwner("ns", "task"), Filename: "output.txt", ContentType: "text/plain", Data: []byte("artifact")}); err != nil {
 			return err
 		}
 		if err := writer.SavePlan(txCtx, "ns", "task", &store.PlanState{Summary: "plan"}); err != nil {
@@ -44,10 +44,10 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 		}
 		return writer.SendMessage(txCtx, &store.Message{Namespace: "ns", FromTask: "task", ToTask: "peer", ParentTask: "parent", Content: "message"})
 	}))
-	result, err := cleanup.GetResult(ctx, "ns", "task")
+	result, err := cleanup.GetResult(ctx, testResultKey("ns", "task"))
 	require.NoError(t, err)
 	require.Equal(t, "result", string(result))
-	artifacts, err := cleanup.ListArtifacts(ctx, "ns", "task")
+	artifacts, err := cleanup.ListArtifacts(ctx, testArtifactOwner("ns", "task"))
 	require.NoError(t, err)
 	require.Len(t, artifacts, 1)
 	plan, err := cleanup.GetPlan(ctx, "ns", "task")
@@ -57,13 +57,13 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, messages, 1)
 
-	require.NoError(t, cleanup.DeleteResult(ctx, "ns", "task"))
-	require.NoError(t, cleanup.DeleteArtifacts(ctx, "ns", "task"))
+	require.NoError(t, cleanup.DeleteResult(ctx, testResultKey("ns", "task")))
+	require.NoError(t, cleanup.DeleteArtifacts(ctx, testArtifactOwner("ns", "task")))
 	require.NoError(t, cleanup.DeletePlan(ctx, "ns", "task"))
 	require.NoError(t, cleanup.DeleteTaskMessages(ctx, "ns", "task"))
-	_, err = cleanup.GetResult(ctx, "ns", "task")
+	_, err = cleanup.GetResult(ctx, testResultKey("ns", "task"))
 	require.ErrorIs(t, err, store.ErrNotFound)
-	artifacts, err = cleanup.ListArtifacts(ctx, "ns", "task")
+	artifacts, err = cleanup.ListArtifacts(ctx, testArtifactOwner("ns", "task"))
 	require.NoError(t, err)
 	require.Empty(t, artifacts)
 	_, err = cleanup.GetPlan(ctx, "ns", "task")
@@ -78,8 +78,10 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 		name    string
 		cleanup func(context.Context, *Store) error
 	}{
-		{"result", func(ctx context.Context, s *Store) error { return s.DeleteResult(ctx, "ns", "task") }},
-		{"artifact", func(ctx context.Context, s *Store) error { return s.DeleteArtifacts(ctx, "ns", "task") }},
+		{"result", func(ctx context.Context, s *Store) error { return s.DeleteResult(ctx, testResultKey("ns", "task")) }},
+		{"artifact", func(ctx context.Context, s *Store) error {
+			return s.DeleteArtifacts(ctx, testArtifactOwner("ns", "task"))
+		}},
 		{"plan", func(ctx context.Context, s *Store) error { return s.DeletePlan(ctx, "ns", "task") }},
 		{"messages", func(ctx context.Context, s *Store) error { return s.DeleteTaskMessages(ctx, "ns", "task") }},
 		{"parent messages", func(ctx context.Context, s *Store) error { return s.DeleteParentMessages(ctx, "ns", "parent") }},
@@ -111,15 +113,15 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
 	s := newAgentExecutionTestStore(t)
 	err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "", func(ctx context.Context) error {
-		if err := s.SaveResult(ctx, "ns", "other-task", []byte("unrelated write")); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns", "other-task"), []byte("unrelated write")); err != nil {
 			return err
 		}
-		return s.DeleteResult(ctx, "other-namespace", "task")
+		return s.DeleteResult(ctx, testResultKey("other-namespace", "task"))
 	}, func(ctx context.Context) error {
-		return s.SaveResult(ctx, "ns", "task", []byte("authorized write"))
+		return s.SaveResult(ctx, testResultKey("ns", "task"), []byte("authorized write"))
 	})
 	require.NoError(t, err)
-	result, err := s.GetResult(t.Context(), "ns", "task")
+	result, err := s.GetResult(t.Context(), testResultKey("ns", "task"))
 	require.NoError(t, err)
 	require.Equal(t, "authorized write", string(result))
 }
@@ -172,13 +174,13 @@ func TestTaskDataTransactionRollsBackRejectedMutation(t *testing.T) {
 	ctx := context.Background()
 	denied := errors.New("task identity changed")
 	err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
-		if err := s.SaveResult(txCtx, "ns", "task", []byte("stale")); err != nil {
+		if err := s.SaveResult(txCtx, testResultKey("ns", "task"), []byte("stale")); err != nil {
 			return err
 		}
 		return denied
 	})
 	require.ErrorIs(t, err, denied)
-	_, err = s.GetResult(ctx, "ns", "task")
+	_, err = s.GetResult(ctx, testResultKey("ns", "task"))
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
 

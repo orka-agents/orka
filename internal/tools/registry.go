@@ -119,7 +119,7 @@ type ToolContext struct {
 	RepositoryValidationBindings RepositoryValidationBindingStore
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
-		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
+		GetResult(ctx context.Context, key store.ResultKey) ([]byte, error)
 	}
 	// MessageStore for inter-agent messaging when tools execute in-process from the controller broker.
 	MessageStore TaskMessageStore

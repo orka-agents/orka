@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/stretchr/testify/require"
@@ -94,7 +95,9 @@ func TestControllerSQLiteBootstrapBothKeyModes(t *testing.T) {
 				})
 				require.NoError(t, err)
 				require.True(t, bytes.Equal(body, snapshot.Body), "snapshot changed")
-				require.NoError(t, s.SaveResult(t.Context(), "ns", "new", []byte("after adoption")))
+				client := storageclienttest.NewEmbedded(t, s)
+				resultKey := store.ResultKey{Namespace: "ns", TaskName: "new", TaskUID: "new-uid"}
+				require.NoError(t, client.SaveResult(t.Context(), resultKey, []byte("after adoption")))
 				require.NoError(t, s.Close())
 			}
 			s, _, err := openControllerSQLiteStore(path, load)
@@ -103,7 +106,7 @@ func TestControllerSQLiteBootstrapBothKeyModes(t *testing.T) {
 			info, err := s.DatasetInfo()
 			require.NoError(t, err)
 			require.Equal(t, identity, info.ID)
-			data, err := s.GetResult(t.Context(), "ns", "new")
+			data, err := s.GetResult(t.Context(), store.ResultKey{Namespace: "ns", TaskName: "new", TaskUID: "new-uid"})
 			require.NoError(t, err)
 			require.Equal(t, "after adoption", string(data))
 		})

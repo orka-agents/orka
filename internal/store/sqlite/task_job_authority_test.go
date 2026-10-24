@@ -28,7 +28,7 @@ func TestTaskJobRevocationSerializesAcrossConnections(t *testing.T) {
 		err := controller.RevokeTaskJob(t.Context(), identity)
 		require.Error(t, err)
 		require.True(t, isSQLiteRetryableError(err), "the transition must wait for already-authorized data access")
-		return data.SaveResult(ctx, "ns", "task", []byte("authorized result"))
+		return data.SaveResult(ctx, testResultKey("ns", "task"), []byte("authorized result"))
 	}))
 	require.NoError(t, controller.RevokeTaskJob(t.Context(), identity))
 	require.NoError(t, controller.RevokeTaskJob(t.Context(), identity))
@@ -36,7 +36,7 @@ func TestTaskJobRevocationSerializesAcrossConnections(t *testing.T) {
 		return data.CheckTaskJobAuthority(ctx, identity)
 	})
 	require.ErrorIs(t, err, store.ErrTaskJobRevoked)
-	require.NoError(t, data.DeleteResult(t.Context(), "ns", "task"))
+	require.NoError(t, data.DeleteResult(t.Context(), testResultKey("ns", "task")))
 	require.ErrorIs(t, data.CheckTaskJobAuthority(t.Context(), identity), store.ErrTaskJobRevoked)
 	identity.JobUID = "next-job-uid"
 	require.NoError(t, data.CheckTaskJobAuthority(t.Context(), identity))
@@ -88,7 +88,7 @@ func TestTaskFinalizationReclaimsGenerationRows(t *testing.T) {
 	for index := range 25 {
 		name := "finished-" + strconv.Itoa(index)
 		require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", name, allow, allow))
-		require.NoError(t, s.DeleteResult(t.Context(), "ns", name))
+		require.NoError(t, s.DeleteResult(t.Context(), testResultKey("ns", name)))
 		require.NoError(t, s.DeleteTaskJobRevocations(t.Context(), "ns", name, "uid-"+name))
 	}
 	var count int

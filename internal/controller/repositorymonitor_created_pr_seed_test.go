@@ -162,7 +162,7 @@ func newRepositoryMonitorCreatedPRSeedFixture(t *testing.T, enabled, suspended b
 	t.Cleanup(server.Close)
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	f.r = &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, ResultStore: db, ArtifactStore: db, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "create-pr-implement", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorIssueKind, Number: 42, Intent: repositoryMonitorCommandIntentImplement, Status: repositoryMonitorCommandAccepted}
 	if err := db.CreateCommandEvent(t.Context(), command); err != nil {
@@ -178,7 +178,7 @@ func newRepositoryMonitorCreatedPRSeedFixture(t *testing.T, enabled, suspended b
 		t.Fatal(err)
 	}
 	result := fmt.Appendf(nil, `{"schemaVersion":"orka.issueImplementation.v1","issueNumber":42,"snapshotDigest":%q,"status":"patch_ready","summary":"Implemented the requested change."}`, item.SnapshotDigest)
-	if err := db.SaveResult(t.Context(), task.Namespace, task.Name, result); err != nil {
+	if err := db.SaveResult(t.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, result); err != nil {
 		t.Fatal(err)
 	}
 	// PR discovery must use a fresh read, even if its head changed after delivery.
@@ -257,7 +257,7 @@ func (f *repositoryMonitorCreatedPRSeedFixture) completeReview(t *testing.T, tas
 		payload["findings"] = []map[string]any{}
 		payload["summary"] = "Change reviewed."
 	})
-	if err := f.r.ResultStore.SaveResult(t.Context(), task.Namespace, task.Name, result); err != nil {
+	if err := f.r.ResultStore.SaveResult(t.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, result); err != nil {
 		t.Fatal(err)
 	}
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded

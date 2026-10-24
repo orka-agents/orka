@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/publisher"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestSecurityPatchDecorationPreservesEditedPublisherBody(t *testing.T) {
@@ -63,7 +64,7 @@ func TestIngestPatchTaskBindsPublishedFileModes(t *testing.T) {
 			server, response := newPatchCommitServerWithPullRequest(t, []repositoryScanCommitFileResponse{tc.file}, &seenToken)
 			response.commitDiff = tc.diff
 			fixture := patchFixtureWithForgeSecret(t, "file-modes", server, true)
-			if err := fixture.store.SaveResult(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, repositoryScanPatchResultEnvelope(fixture, []string{"app.py"})); err != nil {
+			if err := fixture.store.SaveResult(ctx, store.ResultKey{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, repositoryScanPatchResultEnvelope(fixture, []string{"app.py"})); err != nil {
 				t.Fatal(err)
 			}
 			if tc.artifact != "" {
@@ -79,7 +80,7 @@ func TestIngestPatchTaskBindsPublishedFileModes(t *testing.T) {
 			}
 			assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
 			diffName, _ := patchArtifactNames(fixture.finding.ID)
-			data, _, err := fixture.store.GetArtifact(ctx, task.Namespace, task.Name, diffName)
+			data, _, err := fixture.store.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName})
 			if err != nil || string(data) != tc.diff {
 				t.Fatal("verified artifact did not preserve the published file-mode transition")
 			}

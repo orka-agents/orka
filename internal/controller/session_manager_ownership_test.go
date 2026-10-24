@@ -90,9 +90,9 @@ type sessionOwnershipChangingResultStore struct {
 	beforeRead func()
 }
 
-func (s sessionOwnershipChangingResultStore) GetResult(ctx context.Context, namespace, name string) ([]byte, error) {
+func (s sessionOwnershipChangingResultStore) GetResult(ctx context.Context, key store.ResultKey) ([]byte, error) {
 	s.beforeRead()
-	return s.ResultStore.GetResult(ctx, namespace, name)
+	return s.ResultStore.GetResult(ctx, key)
 }
 
 func TestSessionManagerAppendMessagesFencesOwnershipDuringResultRead(t *testing.T) {
@@ -106,7 +106,7 @@ func TestSessionManagerAppendMessagesFencesOwnershipDuringResultRead(t *testing.
 		Status: corev1alpha1.TaskStatus{ResultRef: &corev1alpha1.ResultReference{Available: true}},
 	}
 	require.NoError(t, manager.AcquireLock(ctx, task))
-	require.NoError(t, ss.SaveResult(ctx, task.Namespace, task.Name, []byte("stale response")))
+	require.NoError(t, ss.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("stale response")))
 	session := &store.SessionRecord{Namespace: "default", Name: "session", SessionType: "task"}
 	results := sessionOwnershipChangingResultStore{ResultStore: ss, beforeRead: func() {
 		require.NoError(t, manager.ReleaseLock(ctx, task))

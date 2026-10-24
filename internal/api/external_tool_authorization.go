@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -398,16 +399,23 @@ func (deniedExternalToolSubResource) Apply(context.Context, runtime.ApplyConfigu
 
 type externalToolResultReader struct {
 	reader interface {
-		GetResult(context.Context, string, string) ([]byte, error)
+		GetResult(context.Context, store.ResultKey) ([]byte, error)
 	}
 	client client.Client
 }
 
-func (r *externalToolResultReader) GetResult(ctx context.Context, namespace, taskName string) ([]byte, error) {
-	if err := r.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: taskName}, &corev1alpha1.Task{}); err != nil {
+// GetResult reads the result only while the caller may read the Task and the
+// key still names the Task's data: its UID, or the source UID of a restored
+// Task (see taskmeta.DataUID).
+func (r *externalToolResultReader) GetResult(ctx context.Context, key store.ResultKey) ([]byte, error) {
+	task := &corev1alpha1.Task{}
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: key.TaskName}, task); err != nil {
 		return nil, err
 	}
-	return r.reader.GetResult(ctx, namespace, taskName)
+	if string(taskmeta.DataUID(task)) != key.TaskUID {
+		return nil, store.ErrNotFound
+	}
+	return r.reader.GetResult(ctx, key)
 }
 
 type externalToolSessionDeleter struct {

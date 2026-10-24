@@ -49,6 +49,8 @@ import (
 	"github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/usage"
@@ -182,14 +184,16 @@ func assertUsageWorkflowTotals(t *testing.T, summary usage.Summary, phase corev1
 	}
 }
 
+// usageWorkflowStore is the storage client over SQLite, as production wires
+// every consumer, with test hooks for readiness and the poll cutoff.
 type usageWorkflowStore struct {
-	*sqlite.Store
+	*storageclient.Client
 	refreshNow bool
 	apiReady   atomic.Bool
 }
 
 func (s *usageWorkflowStore) HealthCheck(ctx context.Context) error {
-	if err := s.Store.HealthCheck(ctx); err != nil {
+	if err := s.Client.HealthCheck(ctx); err != nil {
 		return err
 	}
 	s.apiReady.Store(true)
@@ -204,7 +208,7 @@ func (s *usageWorkflowStore) ListUsagePullRequestLinks(
 	if s.refreshNow {
 		before = time.Now().UTC().Add(time.Second)
 	}
-	return s.Store.ListUsagePullRequestLinks(ctx, namespace, monitorUID, before, limit)
+	return s.Client.ListUsagePullRequestLinks(ctx, namespace, monitorUID, before, limit)
 }
 
 type usageWorkflowFixture struct {
@@ -339,7 +343,8 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 	var err error
 	f.db, err = sqlite.NewDB(f.dbPath)
 	require.NoError(t, err)
-	f.backend = &usageWorkflowStore{Store: sqlite.NewStore(f.db, f.dbPath)}
+	storage := storageclienttest.NewEmbedded(t, sqlite.NewStore(f.db, f.dbPath))
+	f.backend = &usageWorkflowStore{Client: storage}
 	sessions := controller.NewSessionManager(f.backend)
 	f.reconciler = &controller.RepositoryMonitorReconciler{
 		Client: f.kube, APIReader: f.kube, Scheme: f.scheme, Store: f.backend, ResultStore: f.backend,
@@ -691,7 +696,8 @@ func (f *usageWorkflowFixture) deliverImplementation(t *testing.T, task *corev1a
 	require.NoError(t, err)
 	data, err := common.FormatStructuredResult(&common.StructuredResult{Summary: string(result)})
 	require.NoError(t, err)
-	require.NoError(t, f.backend.SaveResult(t.Context(), task.Namespace, task.Name, data))
+	key := store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}
+	require.NoError(t, f.backend.SaveResult(t.Context(), key, data))
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	task.Status.CompletionTime = new(metav1.Now())
 	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}

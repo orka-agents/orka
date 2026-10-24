@@ -204,29 +204,29 @@ type fakeResultStore struct {
 	errOnGet error
 }
 
-func (f *fakeResultStore) SaveResult(_ context.Context, namespace, taskName string, data []byte) error {
+func (f *fakeResultStore) SaveResult(_ context.Context, key store.ResultKey, data []byte) error {
 	if f.data == nil {
 		f.data = make(map[string][]byte)
 	}
-	f.data[namespace+"/"+taskName] = data
+	f.data[key.Namespace+"/"+key.TaskName] = data
 	return nil
 }
 
-func (f *fakeResultStore) GetResult(_ context.Context, namespace, taskName string) ([]byte, error) {
+func (f *fakeResultStore) GetResult(_ context.Context, key store.ResultKey) ([]byte, error) {
 	if f.errOnGet != nil {
 		return nil, f.errOnGet
 	}
 	if f.data == nil {
 		return nil, store.ErrNotFound
 	}
-	d, ok := f.data[namespace+"/"+taskName]
+	d, ok := f.data[key.Namespace+"/"+key.TaskName]
 	if !ok {
 		return nil, store.ErrNotFound
 	}
 	return d, nil
 }
 
-func (f *fakeResultStore) DeleteResult(_ context.Context, _, _ string) error {
+func (f *fakeResultStore) DeleteResult(context.Context, store.ResultKey) error {
 	return nil
 }
 

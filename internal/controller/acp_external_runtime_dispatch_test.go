@@ -36,6 +36,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 type externalACPDispatchFixture struct {
@@ -392,7 +393,7 @@ func newExternalACPDispatchFixtureWithOptions(
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(ctx)
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -825,7 +826,7 @@ func TestACPDispatcherExecutesExternalRuntimeTask(t *testing.T) {
 		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded {
 		t.Fatalf("completed external Task status = %#v", completed.Status)
 	}
-	result, err := fixture.persistence.GetResult(fixture.ctx, completed.Namespace, completed.Name)
+	result, err := fixture.persistence.GetResult(fixture.ctx, store.ResultKey{Namespace: completed.Namespace, TaskName: completed.Name, TaskUID: string(completed.UID)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1230,7 +1231,7 @@ func TestACPDispatcherCancellationPreservesCompletedStreamResult(t *testing.T) {
 				if completed.Status.Delivery == nil || completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeReadValidated {
 					t.Fatalf("completed result not read-validated: %v", completed.Status.Delivery)
 				}
-				result, err := fixture.persistence.GetResult(fixture.ctx, completed.Namespace, completed.Name)
+				result, err := fixture.persistence.GetResult(fixture.ctx, store.ResultKey{Namespace: completed.Namespace, TaskName: completed.Name, TaskUID: string(completed.UID)})
 				if err != nil || string(result) != "from runtime" {
 					t.Fatalf("completed result = %q, err=%v", result, err)
 				}
@@ -1283,7 +1284,7 @@ func TestACPDispatcherCompletedExternalPromptValidatesWorkspaceAfterCancellation
 	if cancellingReader.deadline.IsZero() || cancellingReader.deadline.After(deltaRequest.Metadata.ExpiresAt) {
 		t.Fatalf("workspace validation deadline = %s, must be bounded by operation expiry %s", cancellingReader.deadline, deltaRequest.Metadata.ExpiresAt)
 	}
-	result, err := fixture.persistence.GetResult(fixture.ctx, completed.Namespace, completed.Name)
+	result, err := fixture.persistence.GetResult(fixture.ctx, store.ResultKey{Namespace: completed.Namespace, TaskName: completed.Name, TaskUID: string(completed.UID)})
 	if err != nil || string(result) != "from runtime" {
 		t.Fatalf("completed result = %q, err=%v", result, err)
 	}

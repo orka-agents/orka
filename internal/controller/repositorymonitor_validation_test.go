@@ -158,7 +158,7 @@ func TestRepositoryMonitorPostRepairUnavailableValidationPublishesOnlyWhenExhaus
 			task := repositoryMonitorReviewIngestTestTask(monitorName+"-task", monitorName, 1, repositoryMonitorTestHeadSHA)
 			task.Annotations[labels.AnnotationRepositoryValidationImage] = repositoryMonitorValidationTestImage
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: monitor.Namespace}, Data: map[string][]byte{"token": []byte("test-token")}}
-			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task, secret).Build()
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
 
 			completedAt := time.Now().Add(-time.Minute)
@@ -401,7 +401,7 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 				objects = append(objects, validationTask, repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, secretCommand))
 				seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, boundCommand)
 			}
-			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 
 			item := &store.MonitorItem{
@@ -413,11 +413,11 @@ func TestRepositoryMonitorReviewValidationGatesPassedVerdict(t *testing.T) {
 			if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
 				t.Fatal(err)
 			}
-			if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+			if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: reviewTask.Namespace, TaskName: reviewTask.Name, TaskUID: string(reviewTask.UID)}, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
 				t.Fatal(err)
 			}
 			if validationTask != nil && validationTask.Status.ResultRef != nil && validationTask.Status.ResultRef.Available {
-				if err := monitorStore.SaveResult(ctx, validationTask.Namespace, validationTask.Name, []byte("go test ./...: ok")); err != nil {
+				if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: validationTask.Namespace, TaskName: validationTask.Name, TaskUID: string(validationTask.UID)}, []byte("go test ./...: ok")); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -489,7 +489,7 @@ func TestRepositoryMonitorPendingValidationRequeuesReviewIngestion(t *testing.T)
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, reviewTask, validationTask, commandSecret).
+		WithObjects(monitor, reviewTask, validationTask, commandSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore,
@@ -503,7 +503,7 @@ func TestRepositoryMonitorPendingValidationRequeuesReviewIngestion(t *testing.T)
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: reviewTask.Namespace, TaskName: reviewTask.Name, TaskUID: string(reviewTask.UID)}, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -551,7 +551,7 @@ func TestRepositoryMonitorValidationCleanupDeletesBoundSecretWhenChildTaskIsAbse
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, commandSecret).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, commandSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
 	record := &store.ReviewRecord{ValidationTask: validationTask.Name}
 
@@ -577,7 +577,7 @@ func TestRepositoryMonitorValidationCleanupDeletesBoundSecretWhenChildTaskIsTerm
 	validationTask.Finalizers = []string{"test.orka.ai/hold-termination"}
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	if err := k8sClient.Delete(ctx, validationTask); err != nil {
 		t.Fatalf("mark validation task for deletion: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestRepositoryMonitorValidationCleanupRetriesBindingStoreFailure(t *testing
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, repositoryMonitorTestHeadSHA)
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, commandSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	bindingErr := errors.New("temporary validation binding store outage")
 	reconciler := &RepositoryMonitorReconciler{
 		Client: k8sClient,
@@ -658,7 +658,7 @@ func TestRepositoryMonitorValidationCleanupLeavesUnboundTaskUntouched(t *testing
 			reviewTask := repositoryMonitorReviewIngestTestTask(monitor.Name+"-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
 			repositoryMonitorBindValidationForTest(reviewTask)
 			validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, phase, repositoryMonitorTestHeadSHA)
-			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(monitor, reviewTask, validationTask).Build()
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(monitor, reviewTask, validationTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
 
 			cleaned, err := reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, &store.ReviewRecord{ValidationTask: validationTask.Name})
@@ -691,7 +691,7 @@ func TestRepositoryMonitorValidationCleanupSettlesForeignTaskCollision(t *testin
 	foreignTask.OwnerReferences = nil
 	foreignTask.Labels = map[string]string{labels.LabelCreatedBy: "foreign-controller"}
 	foreignTask.Annotations = nil
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, foreignTask, commandSecret).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, foreignTask, commandSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
 
 	cleaned, err := reconciler.cleanupRepositoryMonitorValidationTask(ctx, monitor, reviewTask, &store.ReviewRecord{ValidationTask: validationTask.Name})
@@ -718,7 +718,7 @@ func TestRepositoryMonitorRejectedReviewCancelsAndCleansValidationTask(t *testin
 	reviewTask.Status.Message = "review runtime failed"
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseRunning, repositoryMonitorTestHeadSHA)
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(monitor, reviewTask, validationTask).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(monitor, reviewTask, validationTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	item := &store.MonitorItem{
 		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
@@ -773,7 +773,7 @@ func TestRepositoryMonitorReviewValidationMissingBoundChildStaysRetryable(t *tes
 	expectedChild := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhasePending, repositoryMonitorTestHeadSHA)
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, expectedChild, repositoryMonitorValidationTestCommand)
 
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	item := &store.MonitorItem{
 		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
@@ -784,7 +784,7 @@ func TestRepositoryMonitorReviewValidationMissingBoundChildStaysRetryable(t *tes
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: reviewTask.Namespace, TaskName: reviewTask.Name, TaskUID: string(reviewTask.UID)}, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -822,13 +822,13 @@ func TestRepositoryMonitorReviewValidationRequiresTaskImageBinding(t *testing.T)
 	monitor.Spec.Validation.Image = repositoryMonitorValidationTestImage
 	reviewTask := repositoryMonitorReviewIngestTestTask("missing-validation-binding-review", monitor.Name, 1, repositoryMonitorTestHeadSHA)
 	reviewTask.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: repositoryMonitorTestRepoURL, Ref: repositoryMonitorTestHeadSHA}
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: repositoryMonitorTestHeadSHA, LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: reviewTask.Name}
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: reviewTask.Namespace, TaskName: reviewTask.Name, TaskUID: string(reviewTask.UID)}, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatal(err)
 	}
 	handled, err := reconciler.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, item, reviewTask)
@@ -869,7 +869,7 @@ func TestRepositoryMonitorReviewValidationIgnoresUnexpectedMatchingTasks(t *test
 	unexpected.UID = types.UID("unexpected-validation-task")
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 	commandSecret := repositoryMonitorValidationCommandSecretForTest(reviewTask, validationTask, repositoryMonitorValidationTestCommand)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, unexpected, commandSecret).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask, unexpected, commandSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: k8sClient, Scheme: scheme, Store: monitorStore}
 
 	result, pending, err := reconciler.repositoryMonitorReviewValidation(ctx, monitor, reviewTask)
@@ -893,7 +893,7 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 	validationTask := repositoryMonitorValidationTaskForTest(monitor, reviewTask, corev1alpha1.TaskPhaseSucceeded, repositoryMonitorTestHeadSHA)
 	seedRepositoryMonitorValidationBindingForTest(t, ctx, monitorStore, monitor, reviewTask, validationTask, repositoryMonitorValidationTestCommand)
 
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, reviewTask, validationTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	bindingErr := errors.New("temporary validation binding store outage")
 	reconciler := &RepositoryMonitorReconciler{
 		Client:      k8sClient,
@@ -910,7 +910,7 @@ func TestRepositoryMonitorReviewValidationBindingStoreFailureStaysRetryableAndSk
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if err := monitorStore.SaveResult(ctx, reviewTask.Namespace, reviewTask.Name, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: reviewTask.Namespace, TaskName: reviewTask.Name, TaskUID: string(reviewTask.UID)}, repositoryMonitorReviewResultEnvelope(t, 1, repositoryMonitorTestHeadSHA, repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1004,6 +1004,7 @@ func repositoryMonitorValidationTaskForTest(monitor *corev1alpha1.RepositoryMoni
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      tools.RepositoryValidationTaskName(reviewTask),
+			UID:       types.UID(tools.RepositoryValidationTaskName(reviewTask) + "-uid"),
 			Namespace: reviewTask.Namespace,
 			Labels: map[string]string{
 				labels.LabelCreatedBy:         "repository-monitor",

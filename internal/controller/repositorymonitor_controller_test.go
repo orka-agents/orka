@@ -73,7 +73,7 @@ func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -130,7 +130,7 @@ func TestRepositoryMonitorReconcileSkipsNoOpIdleStatusPatch(t *testing.T) {
 		Client: fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-			WithObjects(repositoryMonitorControllerObjects(monitor)...).
+			WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 			Build(),
 	}
 	reconciler := &RepositoryMonitorReconciler{Client: countingClient, Scheme: scheme, Store: monitorStore}
@@ -181,7 +181,7 @@ func TestRepositoryMonitorReconcileQueuesDueScheduledRun(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -250,7 +250,7 @@ func TestRepositoryMonitorReconcileDoesNotQueueScheduledRunWhenActiveRunExists(t
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -305,7 +305,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedRunBeforeInvalidSchedule(t *te
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -399,7 +399,7 @@ func TestRepositoryMonitorReconcilePreservesLatestFailedRunStatus(t *testing.T) 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 
 	completedAt := time.Now().Add(-1 * time.Minute)
@@ -465,7 +465,7 @@ func TestRepositoryMonitorReconcileReplaysLatestSuccessfulRunStatus(t *testing.T
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 
 	completedAt := time.Now().Add(-1 * time.Minute).Round(time.Second)
@@ -548,7 +548,7 @@ func TestRepositoryMonitorReconcileRecoversStaleRunningRun(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID:               "stale-run",
@@ -623,7 +623,7 @@ func TestRepositoryMonitorReconcileKeepsFreshRunningRunActive(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID:               "fresh-run",
@@ -682,7 +682,7 @@ func TestRepositoryMonitorReconcileMarksRunFailedWhenStartEventWriteFails(t *tes
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID:               "run-event-failure",
@@ -784,7 +784,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1048,7 +1048,7 @@ func TestRepositoryMonitorReconcileExpiredReviewedHeadRespectsMaxPerRun(t *testi
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1149,6 +1149,7 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 	pendingReviewTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pending-review-task",
+			UID:       "pending-review-task-uid",
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
@@ -1156,7 +1157,7 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, pendingReviewTask)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, pendingReviewTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1248,7 +1249,7 @@ func TestRepositoryMonitorReconcileCreatesTaskForQueuedItemMissingBackingTask(t 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1351,6 +1352,7 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 	collidingTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      collidingTaskName,
+			UID:       types.UID(collidingTaskName + "-uid"),
 			Namespace: "default",
 			Labels: map[string]string{
 				labels.LabelManaged:           "true",
@@ -1384,7 +1386,7 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, collidingTask)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, collidingTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1451,7 +1453,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	server := newRepositoryMonitorReviewContextUnavailableServer(t)
 	t.Cleanup(server.Close)
@@ -1519,14 +1521,14 @@ func TestRepositoryMonitorReconcileKeepsSucceededBackingTaskPendingWithoutTypedR
 		},
 	}
 	completedReviewTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "completed-review-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "completed-review-task", UID: "completed-review-task-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, completedReviewTask)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, completedReviewTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1590,9 +1592,9 @@ func TestRepositoryMonitorIngestDowngradesPassedVerdictWithoutCompleteContext(t 
 		SchemaVersion: repositoryMonitorReviewContextSchemaVersion, Repo: "orka-agents/orka", PRNumber: 91, HeadSHA: "head91",
 		ContextUnavailable: repositoryMonitorReviewContextErrorTimeout,
 	}) + "\n"
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, task).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
-	if err := monitorStore.SaveResult(ctx, "default", task.Name, repositoryMonitorReviewResultEnvelope(t, 91, "head91", repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: task.Name, TaskUID: string(task.UID)}, repositoryMonitorReviewResultEnvelope(t, 91, "head91", repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatal(err)
 	}
 	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "91", Number: 91, State: repositoryMonitorItemStateOpen, HeadSHA: "head91", BaseBranch: "main", LastVerdict: repositoryMonitorRunPhaseQueued, LastReviewID: task.Name}
@@ -1633,7 +1635,7 @@ func TestRepositoryMonitorReconcileIngestsTypedReviewResult(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:      cl,
@@ -1653,7 +1655,7 @@ func TestRepositoryMonitorReconcileIngestsTypedReviewResult(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "completed-review-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: "completed-review-task", TaskUID: "completed-review-task-uid"}, repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -1723,7 +1725,7 @@ func TestRepositoryMonitorReconcileSkippedReviewResultDoesNotMarkHeadFresh(t *te
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:      cl,
@@ -1743,7 +1745,7 @@ func TestRepositoryMonitorReconcileSkippedReviewResultDoesNotMarkHeadFresh(t *te
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "skipped-review-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorVerdictSkipped)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: "skipped-review-task", TaskUID: "skipped-review-task-uid"}, repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorVerdictSkipped)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -1787,7 +1789,7 @@ func TestRepositoryMonitorReviewPublishDisabledSkipsWithoutGitHubCall(t *testing
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
 	seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, "publish-disabled", "publish-disabled-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges))
@@ -1852,7 +1854,7 @@ func TestRepositoryMonitorReviewPublishPostsCommentReviewWithInlineFindings(t *t
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
 	result := repositoryMonitorReviewResultEnvelopeWith(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges, func(payload map[string]any) {
@@ -2052,7 +2054,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-				WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+				WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 				Build()
 			reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
 			result := repositoryMonitorReviewResultEnvelopeWith(t, 1, reviewHeadSHA, tt.verdict, tt.mutatePayload)
@@ -2121,7 +2123,7 @@ func TestRepositoryMonitorReviewPublishRetriesReviewRecordWithoutTerminalPublish
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
 	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
@@ -2189,7 +2191,7 @@ func TestRepositoryMonitorReviewPublishRetriesRecoverableSkippedRecord(t *testin
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
 	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
@@ -2275,7 +2277,7 @@ func TestRepositoryMonitorReviewPublishWaitsBeforeRetryingRecentRecoverableSkip(
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
 	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
@@ -2362,7 +2364,7 @@ func TestRepositoryMonitorReviewPublishGitHubPermissionFailureCreatesFailedRecor
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
 	seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, "publish-forbidden", "publish-forbidden-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges))
@@ -2402,7 +2404,7 @@ func TestRepositoryMonitorReconcileRetriesTransientReviewResultReadError(t *test
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	readErr := errors.New("sqlite busy")
 	reconciler := &RepositoryMonitorReconciler{
@@ -2464,7 +2466,7 @@ func TestRepositoryMonitorReconcileRejectsMalformedReviewResult(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
@@ -2479,7 +2481,7 @@ func TestRepositoryMonitorReconcileRejectsMalformedReviewResult(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "malformed-review-task", []byte("not a review result")); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: "malformed-review-task", TaskUID: "malformed-review-task-uid"}, []byte("not a review result")); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -2509,7 +2511,7 @@ func TestRepositoryMonitorReconcileRejectsStaleReviewResult(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
@@ -2524,7 +2526,7 @@ func TestRepositoryMonitorReconcileRejectsStaleReviewResult(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "stale-review-task", repositoryMonitorReviewResultEnvelope(t, 3, "oldsha", repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: "stale-review-task", TaskUID: "stale-review-task-uid"}, repositoryMonitorReviewResultEnvelope(t, 3, "oldsha", repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -2554,7 +2556,7 @@ func TestRepositoryMonitorReconcileRejectsReviewTaskBindingMismatch(t *testing.T
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
@@ -2569,7 +2571,7 @@ func TestRepositoryMonitorReconcileRejectsReviewTaskBindingMismatch(t *testing.T
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "mismatched-review-task", repositoryMonitorReviewResultEnvelope(t, 4, "sha4", repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: "mismatched-review-task", TaskUID: "mismatched-review-task-uid"}, repositoryMonitorReviewResultEnvelope(t, 4, "sha4", repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -2609,7 +2611,7 @@ func TestRepositoryMonitorReconcileForkPullRequestTaskUsesHeadRepoWithoutBaseSec
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2678,7 +2680,7 @@ func TestRepositoryMonitorReconcileSameRepoSSHMonitorUsesHTTPSCloneURL(t *testin
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2743,7 +2745,7 @@ func TestRepositoryMonitorReconcileMissingHeadRepoDoesNotAttachBaseSecret(t *tes
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2818,7 +2820,7 @@ func TestRepositoryMonitorReconcileProcessesPublicInventoryWithoutGitSecret(t *t
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2875,7 +2877,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedRunWhenSuspended(t *testing.T)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2945,7 +2947,7 @@ func TestRepositoryMonitorReconcileTargetedRunPreservesRepositoryWideStatusCount
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -3062,7 +3064,7 @@ func TestRepositoryMonitorReconcileStaleExactEventDoesNotRewriteCurrentPullReque
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -3138,7 +3140,7 @@ func TestRepositoryMonitorStaleHeadCommandBlocksWorkAction(t *testing.T) {
 	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 2, `{"number":2,"title":"Current head","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2"},"head":{"ref":"targeted","sha":"new-sha"},"labels":[]}`)
 	t.Cleanup(server.Close)
 	monitor, secret := repositoryMonitorInventoryTestObjects("stale-head-command")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "2", Number: 2, State: repositoryMonitorItemStateOpen, HeadSHA: "new-sha", LastVerdict: repositoryMonitorRunPhaseQueued}); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
@@ -3180,12 +3182,13 @@ func TestRepositoryMonitorStopCommandBypassesStaleHeadAndCancelsTask(t *testing.
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "stale-stop", Namespace: defaultNS}}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "active-review", Namespace: defaultNS, Labels: map[string]string{
-		labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
-		labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
-		labels.LabelGitHubNumber:      labels.SelectorValue("42"),
-	}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "active-review",
+		UID: "active-review-uid", Namespace: defaultNS, Labels: map[string]string{
+			labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+			labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
+			labels.LabelGitHubNumber:      labels.SelectorValue("42"),
+		}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "42", Number: 42, State: repositoryMonitorItemStateOpen, HeadSHA: "new-head"}); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
@@ -3240,7 +3243,7 @@ func TestRepositoryMonitorResumeCommandRequiresLiveUnblockedTarget(t *testing.T)
 	t.Cleanup(server.Close)
 	monitor, secret := repositoryMonitorInventoryTestObjects("resume-live-validation")
 	monitor.Spec.Policy.PauseLabels = []string{"hold"}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "42", Number: 42, State: repositoryMonitorItemStateOpen, HeadSHA: "head42", RepairState: repositoryMonitorRepairPhaseFailed, SkipReason: repositoryMonitorIssueSkipStoppedByCommand}); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
@@ -3284,7 +3287,7 @@ func TestRepositoryMonitorUnknownStopTargetDoesNotCreateOpenInventoryItem(t *tes
 	}))
 	t.Cleanup(server.Close)
 	monitor, secret := repositoryMonitorInventoryTestObjects("unknown-stop-target")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-stop-unknown", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 404, Intent: repositoryMonitorCommandIntentStop, Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
@@ -3359,7 +3362,7 @@ func TestRepositoryMonitorReconcileFullInventoryRetiresMissingPullRequests(t *te
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -3446,7 +3449,7 @@ func TestRepositoryMonitorReconcileFailsUnsupportedRunTargetKind(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
@@ -3631,7 +3634,7 @@ func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	now := time.Now()
@@ -3869,6 +3872,7 @@ func repositoryMonitorReviewIngestTestTask(name, monitorName string, prNumber in
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
+			UID:       types.UID(name + "-uid"),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: corev1alpha1.GroupVersion.String(),
 				Kind:       "RepositoryMonitor",
@@ -3905,7 +3909,7 @@ type transientGetResultErrorStore struct {
 	err error
 }
 
-func (s transientGetResultErrorStore) GetResult(_ context.Context, _, _ string) ([]byte, error) {
+func (s transientGetResultErrorStore) GetResult(context.Context, store.ResultKey) ([]byte, error) {
 	return nil, s.err
 }
 
@@ -4089,7 +4093,7 @@ func seedRepositoryMonitorQueuedReview(t *testing.T, ctx context.Context, monito
 	if !ok {
 		t.Fatalf("monitorStore does not implement ResultStore")
 	}
-	if err := resultStore.SaveResult(ctx, "default", taskName, result); err != nil {
+	if err := resultStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: taskName, TaskUID: taskName + "-uid"}, result); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 }
@@ -4297,7 +4301,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidRepoURLWithoutPersistingMetadat
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4349,7 +4353,7 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4388,7 +4392,7 @@ func TestRepositoryMonitorReconcileRejectsLegacyValidationCommandsWithoutPersist
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4427,7 +4431,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidValidationImageWithoutPersistin
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4466,7 +4470,7 @@ func TestRepositoryMonitorReconcileAllowsRequireGreenCI(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4502,7 +4506,7 @@ func TestRepositoryMonitorReconcileRejectsMissingReviewerWithoutPersistingMetada
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4598,7 +4602,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidReviewerAgentWithoutPersistingM
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-				WithObjects(objects...).
+				WithObjects(objects...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 				Build()
 			reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4649,7 +4653,7 @@ func TestRepositoryMonitorValidationAllowsCodexReviewer(t *testing.T) {
 		corev1alpha1.AgentRuntimeCodex,
 		"",
 	)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	// Codex reviewers run in the native read-only agent mode, so monitor
 	// validation accepts them.
@@ -4681,7 +4685,7 @@ func TestRepositoryMonitorValidationAllowsOpenCodeReviewerWithoutSecret(t *testi
 			},
 		},
 	}
-	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()}
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()}
 	reason, message, err := reconciler.validateRepositoryMonitorReviewerAgent(ctx, monitor)
 	if err != nil || reason != "" || message != "" {
 		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
@@ -4719,7 +4723,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidGitSecretWithoutPersistingMetad
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4780,7 +4784,7 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -4904,7 +4908,7 @@ func TestRepositoryMonitorIssueContentDigestIgnoresOrkaLabels(t *testing.T) {
 func TestRepositoryMonitorMutationResultAcceptsPushEnvelope(t *testing.T) {
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "mutation-envelope", Namespace: "default"}}
 	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "77", Number: 77, SnapshotDigest: "sha256:issue77"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "mutation-task", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-mutation"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "mutation-task", UID: "mutation-task-uid", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-mutation"}}}
 	raw := []byte(`{"version":1,"summary":"pushed","baseSHA":"base","headSHA":"head","pushBranch":"orka/issue-77"}`)
 
 	record := repositoryMonitorActionRecordFromTask(monitor, item, task, repositoryMonitorIssueActionMutateToPR, raw)
@@ -5084,13 +5088,13 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 	}
 	monitor, secret := repositoryMonitorInventoryTestObjects("issue-pr-reuse")
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, GitHubAPIBaseURL: server.URL}
 	prURL, prNumber, origin, err := reconciler.createIssueImplementationPullRequest(
 		context.Background(),
 		monitor,
 		&store.MonitorItem{Number: 77, Title: "Add health endpoint"},
-		&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task"}},
+		&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task", UID: "implementation-task-uid"}},
 		headBranch,
 		"",
 	)
@@ -5126,7 +5130,7 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "77", Number: 77, Title: "Metrics", State: "open", SnapshotDigest: "sha256:issue77"}
@@ -5349,7 +5353,7 @@ func TestRepositoryMonitorReconcileInventoriesIssues(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-issues", MonitorNamespace: "default", MonitorName: "issue-inventory", Trigger: "manual", Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
@@ -5403,7 +5407,7 @@ func TestRepositoryMonitorIssueTriageTaskQueuesAndIngestsActionRecord(t *testing
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
 	processedAt := time.Now()
@@ -5425,7 +5429,7 @@ func TestRepositoryMonitorIssueTriageTaskQueuesAndIngestsActionRecord(t *testing
 		t.Fatalf("item after queue = %#v, want triage queued with task", item)
 	}
 	result := fmt.Appendf(nil, `{"schemaVersion":"orka.issueTriage.v1","repo":"orka-agents/orka","issueNumber":22,"snapshotDigest":%q,"verdict":"actionable","confidence":"high","category":"bug","priority":"P2","recommendedLane":"research_then_plan","risk":"medium","summary":"Ready to research."}`, item.SnapshotDigest)
-	if err := monitorStore.SaveResult(ctx, "default", item.LastActionTaskName, result); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: item.LastActionTaskName, TaskUID: item.LastActionTaskName + "-uid"}, result); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 	var task corev1alpha1.Task
@@ -5523,7 +5527,7 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, ArtifactStore: monitorStore, GitHubAPIBaseURL: server.URL}
 
@@ -5565,7 +5569,7 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 		"proposedPullRequestTitle": "feat(api): add fake\nhealth\x00 endpoint",
 	})
 	implBytes, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: string(agentResult)})
-	if err := monitorStore.SaveResult(ctx, "default", implTaskName, implBytes); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: implTaskName, TaskUID: implTaskName + "-uid"}, implBytes); err != nil {
 		t.Fatalf("SaveResult(implementation) error = %v", err)
 	}
 	var implementationTask corev1alpha1.Task
@@ -5614,7 +5618,7 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Phase != repositoryMonitorIssuePhasePROpened || jobs[0].PRNumber != 177 || jobs[0].Branch != branch || jobs[0].PatchArtifactID == "" {
 		t.Fatalf("implementation job final = %#v, want direct ACP delivery on branch %q with summary artifact", jobs, branch)
 	}
-	artifact, contentType, err := monitorStore.GetArtifact(ctx, "default", implTaskName, jobs[0].PatchArtifactID)
+	artifact, contentType, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: implTaskName, TaskUID: implTaskName + "-uid"}, Filename: jobs[0].PatchArtifactID})
 	if err != nil || contentType != "application/json" || !strings.Contains(string(artifact), "orka.issueImplementation.delivery.v1") {
 		t.Fatalf("delivery summary artifact = %q, %q, %v", artifact, contentType, err)
 	}
@@ -5698,7 +5702,7 @@ func TestRepositoryMonitorImplementationBudgetPaginatesAllJobs(t *testing.T) {
 func TestRepositoryMonitorIssueImplementationRecordBindsFinalizedDiffIdentity(t *testing.T) {
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "vekil-ui", Namespace: "default"}}
 	item := &store.MonitorItem{Number: 44, SnapshotDigest: "sha256:test"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-impl"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task", UID: "implementation-task-uid", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-impl"}}}
 	agentJSON := `{"schemaVersion":"orka.issueImplementation.v1","status":"patch_ready","summary":"Implemented Windows tray support."}`
 	raw, err := common.FormatStructuredResult(&common.StructuredResult{
 		Summary: agentJSON,
@@ -5739,7 +5743,7 @@ func TestRepositoryMonitorIssueImplementationRecordBindsFinalizedDiffIdentity(t 
 func TestRepositoryMonitorIssueImplementationRecordRejectsMalformedSuccess(t *testing.T) {
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "malformed-impl", Namespace: "default"}}
 	item := &store.MonitorItem{Number: 44, SnapshotDigest: "sha256:test"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-impl"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task", UID: "implementation-task-uid", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-impl"}}}
 	raw, err := common.FormatStructuredResult(&common.StructuredResult{
 		Summary: "I changed the files but did not return the required JSON.",
 		Diff:    "diff --git a/README.md b/README.md\n",
@@ -5757,7 +5761,7 @@ func TestRepositoryMonitorIssueImplementationRecordRejectsMalformedSuccess(t *te
 func TestRepositoryMonitorIssueImplementationRecordPreservesBlockedFinalizedStatus(t *testing.T) {
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "blocked-impl", Namespace: "default"}}
 	item := &store.MonitorItem{Number: 44, SnapshotDigest: "sha256:test"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-impl"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "implementation-task", UID: "implementation-task-uid", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-impl"}}}
 	raw, err := common.FormatStructuredResult(&common.StructuredResult{Summary: `{"schemaVersion":"orka.issueImplementation.v1","status":"blocked","summary":"Needs decomposition."}`})
 	if err != nil {
 		t.Fatalf("FormatStructuredResult() error = %v", err)
@@ -5771,7 +5775,7 @@ func TestRepositoryMonitorIssueImplementationRecordPreservesBlockedFinalizedStat
 func TestRepositoryMonitorIssueActionRecordExtractsFencedJSON(t *testing.T) {
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "vekil-ui", Namespace: "default"}}
 	item := &store.MonitorItem{Number: 44, SnapshotDigest: "sha256:test"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plan-task", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-plan"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plan-task", UID: "plan-task-uid", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-plan"}}}
 	raw := []byte("Based on my analysis:\n\n```json\n{\n  \"schemaVersion\": \"orka.issuePlan.v1\",\n  \"repo\": \"sozercan/vekil\",\n  \"issueNumber\": 44,\n  \"snapshotDigest\": \"sha256:test\",\n  \"status\": \"ready\",\n  \"summary\": \"Plan ready\",\n  \"acceptanceCriteria\": [],\n  \"steps\": [],\n  \"validationCommands\": [],\n  \"allowedFiles\": [],\n  \"risk\": \"medium\",\n  \"categories\": [],\n  \"requiresHumanApproval\": true\n}\n```\n")
 
 	record := repositoryMonitorActionRecordFromTask(monitor, item, task, repositoryMonitorIssueActionPlan, raw)
@@ -5823,7 +5827,7 @@ func TestRepositoryMonitorIssueImplementContinuesAfterAutoApprovedPlan(t *testin
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, ArtifactStore: monitorStore, GitHubAPIBaseURL: server.URL}
 
@@ -5859,7 +5863,7 @@ func TestRepositoryMonitorIssueImplementContinuesAfterAutoApprovedPlan(t *testin
 	}
 
 	planResult := fmt.Sprintf(`{"schemaVersion":"orka.issuePlan.v1","repo":"orka-agents/orka","issueNumber":44,"snapshotDigest":%q,"status":"ready","summary":"Small plan","acceptanceCriteria":[],"steps":["edit"],"validationCommands":[],"allowedFiles":["README.md"],"risk":"low","categories":[],"requiresHumanApproval":false}`, item.SnapshotDigest)
-	if err := monitorStore.SaveResult(ctx, "default", planTaskName, []byte(planResult)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: planTaskName, TaskUID: planTaskName + "-uid"}, []byte(planResult)); err != nil {
 		t.Fatalf("SaveResult(plan) error = %v", err)
 	}
 	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, planTaskName)
@@ -5955,7 +5959,7 @@ func TestRepositoryMonitorPullRequestFixCommandQueuesRepairTask(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
 	processedAt := time.Now()
@@ -6095,7 +6099,7 @@ func TestRepositoryMonitorIssueStopPreventsLateImplementationMutation(t *testing
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, ArtifactStore: monitorStore, GitHubAPIBaseURL: server.URL}
 
@@ -6171,7 +6175,7 @@ func TestRepositoryMonitorIssueStopPreventsLateImplementationMutation(t *testing
 		"files":          []string{"internal/late.go"},
 	}
 	lateBytes, _ := json.Marshal(lateResult)
-	if err := monitorStore.SaveResult(ctx, "default", implTaskName, lateBytes); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: implTaskName, TaskUID: implTaskName + "-uid"}, lateBytes); err != nil {
 		t.Fatalf("SaveResult(late implementation) error = %v", err)
 	}
 	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, implTaskName)
@@ -6252,7 +6256,7 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 	monitor.Spec.Owner = "sozercan"
 	monitor.Spec.Repository = "orka"
 	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 55, SnapshotDigest: "sha256:test"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-task", Namespace: "default"}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-task", UID: "impl-task-uid", Namespace: "default"}}
 	record := &store.ActionRecord{ID: "act-impl", CommandEventID: "cmd-impl"}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore, ArtifactStore: monitorStore}
 	missingFiles := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/internal/x.go b/internal/x.go\n"}
@@ -6272,7 +6276,7 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 		Diff:    "diff --git a/schema.sql b/schema.sql\n--- a/schema.sql\n+++ b/schema.sql\n@@ -1 +1 @@\n--- initialize schema\n+-- initialize schema safely\n",
 		Files:   []string{"schema.sql"},
 	}
-	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, &store.ActionRecord{ID: "act-header-like", CommandEventID: "cmd-header-like"}, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-header-like", Namespace: "default"}}, headerLikeHunk); got != "" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, &store.ActionRecord{ID: "act-header-like", CommandEventID: "cmd-header-like"}, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-header-like", UID: "impl-header-like-uid", Namespace: "default"}}, headerLikeHunk); got != "" {
 		t.Fatalf("header-like hunk patch reason = %q, want empty", got)
 	}
 	missingGitHeader := &common.StructuredResult{BaseSHA: "base", Diff: "--- a/.github/workflows/pwn.yml\n+++ b/.github/workflows/pwn.yml\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"docs/safe.md"}}
@@ -6312,10 +6316,10 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, valid); got != "" {
 		t.Fatalf("valid patch reason = %q, want empty", got)
 	}
-	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")); err != nil {
+	if _, _, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "impl-task", TaskUID: "impl-task-uid"}, Filename: repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")}); err != nil {
 		t.Fatalf("diff artifact missing: %v", err)
 	}
-	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")); err != nil {
+	if _, _, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "impl-task", TaskUID: "impl-task-uid"}, Filename: repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")}); err != nil {
 		t.Fatalf("summary artifact missing: %v", err)
 	}
 }
@@ -6333,10 +6337,10 @@ func TestRepositoryMonitorIssuePatchRejectsInjectedRuntimeCredential(t *testing.
 	opaqueValue := strings.Repeat("z", 24) + "-opaque"
 	runtimeConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "implementation-runtime-config", Namespace: defaultNS}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(opaqueValue)}}
 	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "opaque-implementer", Namespace: defaultNS}, Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}, SecretRef: &corev1.LocalObjectReference{Name: runtimeConfig.Name}}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, runtimeConfig).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, runtimeConfig).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	monitor := repositoryMonitorReviewIngestTestMonitor("opaque-patch-credential")
 	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 55, SnapshotDigest: "sha256:test"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-opaque", Namespace: defaultNS, Annotations: map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-opaque", UID: "impl-opaque-uid", Namespace: defaultNS, Annotations: map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}}}
 	record := &store.ActionRecord{ID: "act-opaque", CommandEventID: "cmd-opaque"}
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, ArtifactStore: monitorStore}
 	result := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/config.txt b/config.txt\n--- a/config.txt\n+++ b/config.txt\n@@ -0,0 +1 @@\n+" + opaqueValue + "\n", Files: []string{"config.txt"}}
@@ -6378,27 +6382,28 @@ func TestRepositoryMonitorIssueImplementationResultRedactsRuntimeCredentialBefor
 		_, _ = w.Write([]byte(`{"id":5501,"html_url":"https://github.com/orka-agents/orka/issues/55#issuecomment-5501"}`))
 	}))
 	t.Cleanup(server.Close)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig, gitSecret).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig, gitSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	monitor := repositoryMonitorReviewIngestTestMonitor("implementation-result-redaction")
 	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecret.Name}
 	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "55", Number: 55, SnapshotDigest: "sha256:redact", WorkflowPhase: repositoryMonitorIssuePhaseImplementing, LastActionKind: repositoryMonitorIssueActionImplementation, LastActionTaskName: "impl-redact"}
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
 	}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-redact", Namespace: defaultNS, Annotations: map[string]string{
-		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
-		repositoryMonitorIssueAnnotationCommandID:              "cmd-redact",
-		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
-		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
-		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-pinned-runtime",
-		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
-	}}, Spec: corev1alpha1.TaskSpec{SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-redact",
+		UID: "impl-redact-uid", Namespace: defaultNS, Annotations: map[string]string{
+			repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+			repositoryMonitorIssueAnnotationCommandID:              "cmd-redact",
+			labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+			repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+			repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-pinned-runtime",
+			repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+		}}, Spec: corev1alpha1.TaskSpec{SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
 	summary, _ := json.Marshal(map[string]any{"schemaVersion": "orka.issueImplementation.v1", "status": "patch_ready", "summary": "leaked " + credential})
 	raw, err := common.FormatStructuredResult(&common.StructuredResult{Summary: string(summary), BaseSHA: "base", Diff: "diff --git a/internal/x.go b/internal/x.go\n--- a/internal/x.go\n+++ b/internal/x.go\n@@ -1 +1 @@\n-old\n+" + credential + "\n", Files: []string{"internal/x.go"}})
 	if err != nil {
 		t.Fatalf("FormatStructuredResult() error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, task.Namespace, task.Name, raw); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, raw); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, ResultStore: monitorStore, ArtifactStore: monitorStore, GitHubAPIBaseURL: server.URL}
@@ -6413,7 +6418,7 @@ func TestRepositoryMonitorIssueImplementationResultRedactsRuntimeCredentialBefor
 	if strings.Contains(record.PayloadJSON, credential) || strings.Contains(record.Summary, credential) {
 		t.Fatalf("credential persisted in action record: %#v", record)
 	}
-	durableResult, err := monitorStore.GetResult(ctx, task.Namespace, task.Name)
+	durableResult, err := monitorStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 	if err != nil {
 		t.Fatalf("GetResult() error = %v", err)
 	}
@@ -6442,17 +6447,18 @@ func TestRepositoryMonitorStoredImplementationRecordIsRedactedBeforeApply(t *tes
 	immutable := true
 	credential := strings.Repeat("r", 24) + "-stored"
 	runtimeConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "stored-runtime", Namespace: defaultNS, UID: "uid-stored-runtime"}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(credential)}, Immutable: &immutable}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	monitor := repositoryMonitorReviewIngestTestMonitor("stored-implementation-redaction")
 	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "56", Number: 56, SnapshotDigest: "sha256:stored"}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-stored", Namespace: defaultNS, Annotations: map[string]string{
-		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
-		repositoryMonitorIssueAnnotationCommandID:              "cmd-stored",
-		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
-		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
-		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-stored-runtime",
-		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
-	}}, Spec: corev1alpha1.TaskSpec{SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-stored",
+		UID: "impl-stored-uid", Namespace: defaultNS, Annotations: map[string]string{
+			repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+			repositoryMonitorIssueAnnotationCommandID:              "cmd-stored",
+			labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+			repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+			repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-stored-runtime",
+			repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+		}}, Spec: corev1alpha1.TaskSpec{SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}}
 	raw, _ := json.Marshal(map[string]any{
 		"schemaVersion": "orka.issueImplementation.v1", "issueNumber": item.Number,
 		"snapshotDigest": item.SnapshotDigest, "status": "patch_ready", "summary": "stored " + credential,
@@ -6461,7 +6467,7 @@ func TestRepositoryMonitorStoredImplementationRecordIsRedactedBeforeApply(t *tes
 	if err := monitorStore.CreateActionRecord(ctx, record); err != nil {
 		t.Fatalf("CreateActionRecord() error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, task.Namespace, task.Name, raw); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, raw); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, ResultStore: monitorStore}
@@ -6476,7 +6482,7 @@ func TestRepositoryMonitorStoredImplementationRecordIsRedactedBeforeApply(t *tes
 	if err != nil || strings.Contains(stored.PayloadJSON, credential) || stored.Verdict != repositoryMonitorPatchSensitiveContentReason {
 		t.Fatalf("stored action record = %#v err=%v", stored, err)
 	}
-	result, err := monitorStore.GetResult(ctx, task.Namespace, task.Name)
+	result, err := monitorStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 	if err != nil || strings.Contains(string(result), credential) {
 		t.Fatalf("stored result = %q err=%v", result, err)
 	}
@@ -6491,14 +6497,15 @@ func TestRepositoryMonitorIssuePatchScansPinnedCredentialWithoutCurrentAgent(t *
 	immutable := true
 	credential := strings.Repeat("p", 24) + "-pinned"
 	runtimeConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pinned-runtime", Namespace: defaultNS, UID: "uid-pinned-runtime"}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(credential)}, Immutable: &immutable}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig).Build()
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-pinned", Namespace: defaultNS, Annotations: map[string]string{
-		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
-		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
-		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
-		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-pinned-runtime",
-		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
-	}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "removed-agent"}, SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-pinned",
+		UID: "impl-pinned-uid", Namespace: defaultNS, Annotations: map[string]string{
+			labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+			repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+			repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+			repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-pinned-runtime",
+			repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+		}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "removed-agent"}, SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}}
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	contains, err := reconciler.repositoryMonitorPatchContainsRuntimeCredential(ctx, task, "safe prefix "+credential+" safe suffix")
 	if err != nil || !contains {
@@ -6520,6 +6527,7 @@ func TestRepositoryMonitorIssuePatchCredentialLookupErrorRemainsRetryable(t *tes
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithInterceptorFuncs(interceptor.Funcs{
+			Create: assignTestUIDsOnCreate().Create,
 			Get: func(ctx context.Context, c crclient.WithWatch, key crclient.ObjectKey, obj crclient.Object, opts ...crclient.GetOption) error {
 				if _, ok := obj.(*corev1alpha1.Agent); ok {
 					return lookupErr
@@ -6536,7 +6544,7 @@ func TestRepositoryMonitorIssuePatchCredentialLookupErrorRemainsRetryable(t *tes
 	if err := monitorStore.CreateImplementationJob(ctx, &store.ImplementationJob{ID: repositoryMonitorImplementationJobID("impl-retry"), MonitorNamespace: defaultNS, MonitorName: monitor.Name, IssueNumber: item.Number, SnapshotDigest: item.SnapshotDigest, Phase: repositoryMonitorIssuePhaseImplementationQueued, TaskName: "impl-retry", CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("CreateImplementationJob() error = %v", err)
 	}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-retry", Namespace: defaultNS, Annotations: map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "implementer"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-retry", UID: "impl-retry-uid", Namespace: defaultNS, Annotations: map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "implementer"}}}
 	diff := "diff --git a/internal/x.go b/internal/x.go\n--- a/internal/x.go\n+++ b/internal/x.go\n@@ -1 +1 @@\n-old\n+new\n"
 	payload, err := common.FormatStructuredResult(&common.StructuredResult{Summary: `{"schemaVersion":"orka.issueImplementation.v1","status":"patch_ready","summary":"safe patch"}`, BaseSHA: "base", Diff: diff, Files: []string{"internal/x.go"}})
 	if err != nil {
@@ -6616,8 +6624,8 @@ func TestRepositoryMonitorRepairPolicyBlocksDisabledAndBudgets(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
-	presentTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "present-task", Namespace: "default"}}
-	orphanReconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(presentTask).Build(), Store: monitorStore}
+	presentTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "present-task", UID: "present-task-uid", Namespace: "default"}}
+	orphanReconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(presentTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build(), Store: monitorStore}
 	if reason, countPR, countHead, err := orphanReconciler.repositoryMonitorRepairPolicy(ctx, orphanMonitor, "orka-agents/orka", pr, "replacement-repair", repositoryMonitorCommandIntentFix); err != nil || reason != "" || countPR != 0 || countHead != 0 {
 		t.Fatalf("orphan queued job consumed repair budget: reason=%q countPR=%d countHead=%d err=%v", reason, countPR, countHead, err)
 	}
@@ -7152,7 +7160,7 @@ func TestRepositoryMonitorRequireGreenCIGatesReviewQueue(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
 	processedAt := time.Now()
@@ -7196,7 +7204,7 @@ func TestRepositoryMonitorValidationAllowsCodexPlanner(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-planner", Namespace: "default"},
 		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(planner).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(planner).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	reason, message, err := reconciler.validateRepositoryMonitorIssueReadOnlyAgents(ctx, monitor)
 	if err != nil || reason != "" || message != "" {
@@ -7230,7 +7238,7 @@ func TestRepositoryMonitorValidationAllowsOpenCodeIssueReadOnlyRolesWithoutSecre
 				},
 			}
 			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: role + "-monitor", Namespace: "default"}}
-			reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()}
+			reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()}
 			reason, message, err := reconciler.validateRepositoryMonitorIssueReadOnlyAgent(
 				ctx, monitor, role, &corev1alpha1.AgentReference{Name: role},
 			)
@@ -7254,7 +7262,7 @@ func TestRepositoryMonitorPlanResultRejectsMalformedCategories(t *testing.T) {
 }
 
 func TestRepositoryMonitorFailedTaskSummaryDoesNotExposeStatusMessage(t *testing.T) {
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plan-task"}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed, Message: "mount secret production-token failed"}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plan-task", UID: "plan-task-uid"}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed, Message: "mount secret production-token failed"}}
 	summary := repositoryMonitorIssueFailedTaskSummary(repositoryMonitorIssueActionPlan, task)
 	if strings.Contains(summary, "production-token") || strings.Contains(summary, "mount secret") {
 		t.Fatalf("public summary leaked task status message: %q", summary)
@@ -7263,7 +7271,7 @@ func TestRepositoryMonitorFailedTaskSummaryDoesNotExposeStatusMessage(t *testing
 
 func TestRepositoryMonitorFailedTaskSummaryExplainsWorkspaceValidationFailure(t *testing.T) {
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "impl-task"},
+		ObjectMeta: metav1.ObjectMeta{Name: "impl-task", UID: "impl-task-uid"},
 		Status: corev1alpha1.TaskStatus{
 			Phase:   corev1alpha1.TaskPhaseFailed,
 			Message: "ACP delivery failed: workspace validation failed before a trusted delta was established: workspace delta contains secret-like file content: docs/private-config.md",
@@ -7319,7 +7327,7 @@ func TestRepositoryMonitorValidationRejectsCopilotImplementer(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "copilot-implementer", Namespace: "default"},
 		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot}},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(implementer).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(implementer).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
 	if err != nil || reason != repositoryMonitorReasonUnsupportedImplementerAgent || !strings.Contains(message, "cannot use copilot") {
@@ -7339,7 +7347,7 @@ func TestRepositoryMonitorValidationRejectsBuiltInImplementerSecretRef(t *testin
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
 	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeClaude, "provider-runtime")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
 	if err != nil || reason != repositoryMonitorReasonImplementerAuthInvalid || !strings.Contains(message, "must omit spec.secretRef") {
@@ -7359,7 +7367,7 @@ func TestRepositoryMonitorValidationAllowsCredentialFreeImplementer(t *testing.T
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
 	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
 	if err != nil || reason != "" || message != "" {
@@ -7390,7 +7398,7 @@ func TestRepositoryMonitorValidationRejectsRuntimeRefImplementer(t *testing.T) {
 			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
 		}},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(implementer).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(implementer).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
 	if err != nil || reason != repositoryMonitorReasonUnsupportedImplementerAgent || !strings.Contains(message, "cannot use runtimeRef") {
@@ -7408,7 +7416,7 @@ func TestRepositoryMonitorValidationRejectsRuntimeRefReadOnlyAgents(t *testing.T
 	externalReviewer.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
 	externalPlanner := repositoryMonitorControllerTestAgent("external-planner", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret)
 	externalPlanner.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(externalReviewer, externalPlanner).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(externalReviewer, externalPlanner).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
 
 	reviewerMonitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "review-monitor", Namespace: "default"}}
@@ -7462,7 +7470,7 @@ func TestRepositoryMonitorUnresolvedPlanBlocksImplementation(t *testing.T) {
 	pullRequestsEnabled := false
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gitConfig).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gitConfig).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	command := &store.CommandEvent{ID: "cmd-implement-needs-human", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 44, Intent: repositoryMonitorCommandIntentImplement, Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
@@ -7470,7 +7478,7 @@ func TestRepositoryMonitorUnresolvedPlanBlocksImplementation(t *testing.T) {
 	}
 	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "44", Number: 44, State: repositoryMonitorItemStateOpen, SnapshotDigest: "sha256:test", WorkflowPhase: repositoryMonitorIssuePhasePlanning, LastCommandIntent: command.Intent}
 	record := &store.ActionRecord{ID: "act-needs-human-plan", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, ActionKind: repositoryMonitorIssueActionPlan, SnapshotDigest: item.SnapshotDigest, TaskName: "plan-needs-human", CommandEventID: command.ID, Verdict: repositoryMonitorReviewVerdictNeedsHuman, Summary: "Plan requires approval.", PayloadJSON: `{"schemaVersion":"orka.issuePlan.v1","status":"needs_human","risk":"high","categories":["security"],"requiresHumanApproval":true,"summary":"Plan requires approval."}`, CreatedAt: time.Now()}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: record.TaskName, Namespace: monitor.Namespace, Annotations: map[string]string{labels.AnnotationMonitorRunID: "run-needs-human"}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: record.TaskName, UID: types.UID(record.TaskName + "-uid"), Namespace: monitor.Namespace, Annotations: map[string]string{labels.AnnotationMonitorRunID: "run-needs-human"}}}
 
 	handled, err := reconciler.applyIssueActionRecord(ctx, monitor, item, record, task)
 	if err != nil || !handled {
@@ -7525,7 +7533,7 @@ func TestRepositoryMonitorIssueStatusCommentRecreatesDeletedComment(t *testing.T
 	}))
 	t.Cleanup(server.Close)
 	forgeSecret := repositoryMonitorControllerTestSecret(repositoryMonitorTestForgeCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("forge-token")})
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gitSecret, forgeSecret).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gitSecret, forgeSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, GitHubAPIBaseURL: server.URL}
 	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "44", Number: 44, State: "open", SnapshotDigest: "sha256:test", WorkflowPhase: repositoryMonitorIssuePhaseBlocked, StatusCommentID: "deleted", StatusCommentURL: "https://example.test/deleted"}
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
@@ -7562,7 +7570,7 @@ func TestRepositoryMonitorUpdateBranchNoChangeUsesFrozenBaseBranchTip(t *testing
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-no-change")
 	monitor.Spec.Branch = "release"
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	ok, err := reconciler.repositoryMonitorHeadContainsBase(ctx, monitor, &store.RepairJob{Repo: "orka-agents/orka", BaseSHA: "stale-base-sha", BaseBranch: "main", HeadSHA: "head-sha"})
 	if err != nil || ok {
@@ -7587,7 +7595,7 @@ func TestRepositoryMonitorUpdateBranchNoChangeLegacyJobUsesCapturedBaseSHA(t *te
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-no-change-legacy")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	ok, err := reconciler.repositoryMonitorHeadContainsBase(ctx, monitor, &store.RepairJob{Repo: "orka-agents/orka", BaseSHA: "captured-base-sha", HeadSHA: "head-sha"})
 	if err != nil || !ok {
@@ -7608,7 +7616,7 @@ func TestRepositoryMonitorUpdateBranchRejectsMonitorRepositoryChange(t *testing.
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-repository-change")
 	monitor.Spec.RepoURL = "https://github.com/other/repository"
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-repository-change", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	run := &store.MonitorRun{ID: "run-update-repository-change", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA}
@@ -7722,7 +7730,7 @@ func TestRepositoryMonitorUpdateBranchKeepsAcceptedMutationRetryableWhenProjecti
 			_ = corev1alpha1.AddToScheme(scheme)
 			_ = corev1.AddToScheme(scheme)
 			monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-projection-" + strings.ReplaceAll(projection, " ", "-"))
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			failingStore := failingUpdateBranchProjectionStore{RepositoryMonitorStore: monitorStore, projection: projection, mutationStatus: repositoryMonitorAutomergeStatePending}
 			reconciler := &RepositoryMonitorReconciler{Client: client, Store: failingStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 			command := &store.CommandEvent{ID: "cmd-update-projection-" + strings.ReplaceAll(projection, " ", "-"), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
@@ -7771,7 +7779,7 @@ func TestRepositoryMonitorUpdateBranchDoesNotUseLegacyReadCredential(t *testing.
 	_ = corev1.AddToScheme(scheme)
 	monitor, readSecret := repositoryMonitorInventoryTestObjects("update-branch-forge-required")
 	monitor.Spec.ForgeCredentialRef = nil
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, readSecret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, readSecret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-forge-required", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha"}
 	run := &store.MonitorRun{ID: "run-update-forge-required", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA}
@@ -7803,7 +7811,7 @@ func TestRepositoryMonitorUpdateBranchRequeuesAcceptedMutationAfterCancellation(
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-cancelled-pending")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-cancelled-pending", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
@@ -7971,7 +7979,7 @@ func TestRepositoryMonitorUpdateBranchPreservesSucceededMutationWhenBaseAdvances
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-succeeded-base-advance")
 	monitor.Spec.ForgeCredentialRef = nil
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-succeeded-base-advance", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	run := &store.MonitorRun{ID: "run-update-succeeded-base-advance", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA}
@@ -8055,7 +8063,7 @@ func TestRepositoryMonitorUpdateBranchReconcilesAcceptedMutationBeforeBlockedLab
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-pending-blocked")
 	monitor.Spec.ForgeCredentialRef = nil
 	monitor.Spec.Policy.PauseLabels = []string{"do-not-merge"}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-pending-blocked", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
@@ -8165,7 +8173,7 @@ func TestRepositoryMonitorUpdateBranchUsesNativeMutationAndWaitsForLiveBase(t *t
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-native")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-42", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
@@ -8248,7 +8256,7 @@ func TestRepositoryMonitorUpdateBranchRetriesTransientMutationError(t *testing.T
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-retry")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-retry", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
@@ -8310,7 +8318,7 @@ func TestRepositoryMonitorUpdateBranchRetriesCleanSubmittingMutation(t *testing.
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-clean-submitting")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-clean-submitting", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	run := &store.MonitorRun{ID: "run-update-clean-submitting", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorTriggerLabelCommand, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 42, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now()}
@@ -8361,7 +8369,7 @@ func TestRepositoryMonitorUpdateBranchReconcilesAmbiguousTransportErrorWithoutRe
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-ambiguous-transport")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-ambiguous-transport", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
@@ -8422,7 +8430,7 @@ func TestRepositoryMonitorUpdateBranchStartsTimeoutAfterAcceptedMutation(t *test
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-timeout-origin")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-timeout-origin", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	run := &store.MonitorRun{ID: "run-update-timeout-origin", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 42, TargetSHA: command.HeadSHA}
@@ -8531,7 +8539,7 @@ func TestRepositoryMonitorUpdateBranchCompletesAfterPRAutoMerge(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-automerge")
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: client, Store: monitorStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	command := &store.CommandEvent{ID: "cmd-update-automerge", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now()}
 	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {

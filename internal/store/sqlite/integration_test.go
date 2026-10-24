@@ -44,7 +44,7 @@ func TestIntegration_DiskPersistence(t *testing.T) {
 	for cycle := range 3 {
 		taskName := fmt.Sprintf("task-%d", cycle)
 		content := "saved result for " + taskName
-		require.NoError(t, s.SaveResult(ctx, "ns", taskName, []byte(content)))
+		require.NoError(t, s.SaveResult(ctx, testResultKey("ns", taskName), []byte(content)))
 		require.NoError(t, s.AppendMessages(ctx, "ns", "session", []store.SessionMessage{
 			{Role: "user", Content: content, SourceType: "task", SourceRef: taskName},
 		}))
@@ -79,7 +79,7 @@ func TestIntegration_DiskPersistence(t *testing.T) {
 		s = NewStore(db, s.dbPath)
 		for previous := range cycle + 1 {
 			name := fmt.Sprintf("task-%d", previous)
-			data, err := s.GetResult(ctx, "ns", name)
+			data, err := s.GetResult(ctx, testResultKey("ns", name))
 			require.NoError(t, err)
 			require.Equal(t, "saved result for "+name, string(data))
 		}
@@ -182,11 +182,11 @@ func TestIntegration_LargeResult(t *testing.T) {
 		data[i] = byte(i % 256)
 	}
 
-	if err := s.SaveResult(ctx, "ns", "big-task", data); err != nil {
+	if err := s.SaveResult(ctx, testResultKey("ns", "big-task"), data); err != nil {
 		t.Fatalf("SaveResult 5MB: %v", err)
 	}
 
-	got, err := s.GetResult(ctx, "ns", "big-task")
+	got, err := s.GetResult(ctx, testResultKey("ns", "big-task"))
 	if err != nil {
 		t.Fatalf("GetResult 5MB: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 			defer wg.Done()
 			for j := range readsPerWriter {
 				key := fmt.Sprintf("task-%d-%d", i, j)
-				if err := s.SaveResult(ctx, "ns", key, fmt.Appendf(nil, "data-%d-%d", i, j)); err != nil {
+				if err := s.SaveResult(ctx, testResultKey("ns", key), fmt.Appendf(nil, "data-%d-%d", i, j)); err != nil {
 					t.Errorf("concurrent SaveResult %s: %v", key, err)
 				}
 			}
@@ -320,7 +320,7 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			// Read results (may or may not exist yet)
-			s.GetResult(ctx, "ns", fmt.Sprintf("task-%d-0", i)) //nolint:errcheck
+			s.GetResult(ctx, testResultKey("ns", fmt.Sprintf("task-%d-0", i))) //nolint:errcheck
 			// Read sessions
 			s.ListSessions(ctx, "ns") //nolint:errcheck
 			// Read transcript
@@ -334,7 +334,7 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 	for i := range writers {
 		for j := range readsPerWriter {
 			key := fmt.Sprintf("task-%d-%d", i, j)
-			got, err := s.GetResult(ctx, "ns", key)
+			got, err := s.GetResult(ctx, testResultKey("ns", key))
 			if err != nil {
 				t.Errorf("GetResult %s: %v", key, err)
 				continue
@@ -435,7 +435,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 
 	// 5. Save result
 	result := []byte(`{"status": "success", "output": "hello world"}`)
-	if err := s.SaveResult(ctx, ns, taskName, result); err != nil {
+	if err := s.SaveResult(ctx, testResultKey(ns, taskName), result); err != nil {
 		t.Fatalf("SaveResult: %v", err)
 	}
 
@@ -470,7 +470,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	}
 
 	// 9. Verify result
-	gotResult, err := s.GetResult(ctx, ns, taskName)
+	gotResult, err := s.GetResult(ctx, testResultKey(ns, taskName))
 	if err != nil {
 		t.Fatalf("GetResult: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	}
 
 	// 10. Cleanup: delete task result and session
-	if err := s.DeleteResult(ctx, ns, taskName); err != nil {
+	if err := s.DeleteResult(ctx, testResultKey(ns, taskName)); err != nil {
 		t.Fatalf("DeleteResult: %v", err)
 	}
 	if err := s.DeleteSession(ctx, ns, sessionName); err != nil {
@@ -487,7 +487,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	}
 
 	// Verify cleanup
-	_, err = s.GetResult(ctx, ns, taskName)
+	_, err = s.GetResult(ctx, testResultKey(ns, taskName))
 	if err != store.ErrNotFound {
 		t.Errorf("result after delete: got %v, want ErrNotFound", err)
 	}
@@ -513,7 +513,7 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 
 	for _, ns := range namespaces {
 		// Each namespace gets its own result and session
-		if err := s.SaveResult(ctx, ns, "shared-task", []byte("data-"+ns)); err != nil {
+		if err := s.SaveResult(ctx, testResultKey(ns, "shared-task"), []byte("data-"+ns)); err != nil {
 			t.Fatalf("SaveResult %s: %v", ns, err)
 		}
 		if err := s.CreateSession(ctx, &store.SessionRecord{
@@ -530,7 +530,7 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 
 	// Verify isolation: each namespace sees only its own data
 	for _, ns := range namespaces {
-		got, err := s.GetResult(ctx, ns, "shared-task")
+		got, err := s.GetResult(ctx, testResultKey(ns, "shared-task"))
 		if err != nil {
 			t.Fatalf("GetResult %s: %v", ns, err)
 		}
@@ -559,13 +559,13 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 	if err := s.DeleteSession(ctx, "team-a", "shared-session"); err != nil {
 		t.Fatalf("DeleteSession team-a: %v", err)
 	}
-	if err := s.DeleteResult(ctx, "team-a", "shared-task"); err != nil {
+	if err := s.DeleteResult(ctx, testResultKey("team-a", "shared-task")); err != nil {
 		t.Fatalf("DeleteResult team-a: %v", err)
 	}
 
 	// team-b and team-c still have their data
 	for _, ns := range []string{"team-b", "team-c"} {
-		if _, err := s.GetResult(ctx, ns, "shared-task"); err != nil {
+		if _, err := s.GetResult(ctx, testResultKey(ns, "shared-task")); err != nil {
 			t.Errorf("GetResult %s after team-a delete: %v", ns, err)
 		}
 		if _, err := s.GetSession(ctx, ns, "shared-session"); err != nil {
@@ -603,10 +603,10 @@ func TestIntegration_BinaryData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := s.SaveResult(ctx, "ns", "binary-"+tt.name, tt.data); err != nil {
+			if err := s.SaveResult(ctx, testResultKey("ns", "binary-"+tt.name), tt.data); err != nil {
 				t.Fatalf("SaveResult: %v", err)
 			}
-			got, err := s.GetResult(ctx, "ns", "binary-"+tt.name)
+			got, err := s.GetResult(ctx, testResultKey("ns", "binary-"+tt.name))
 			if err != nil {
 				t.Fatalf("GetResult: %v", err)
 			}
@@ -667,7 +667,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	ctx := context.Background()
 
 	// Write data before shutdown
-	if err := s.SaveResult(ctx, "ns", "pre-shutdown", []byte("important")); err != nil {
+	if err := s.SaveResult(ctx, testResultKey("ns", "pre-shutdown"), []byte("important")); err != nil {
 		t.Fatalf("SaveResult: %v", err)
 	}
 
@@ -694,7 +694,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	defer db2.Close() //nolint:errcheck
 	s2 := NewStore(db2, dbPath)
 
-	got, err := s2.GetResult(ctx, "ns", "pre-shutdown")
+	got, err := s2.GetResult(ctx, testResultKey("ns", "pre-shutdown"))
 	if err != nil {
 		t.Fatalf("GetResult after shutdown: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestIntegration_DBSizeMetric(t *testing.T) {
 
 	// Write some data to ensure the file has measurable size
 	for i := range 100 {
-		if err := s.SaveResult(ctx, "ns", fmt.Sprintf("task-%d", i), []byte(strings.Repeat("x", 1024))); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns", fmt.Sprintf("task-%d", i)), []byte(strings.Repeat("x", 1024))); err != nil {
 			t.Fatalf("SaveResult: %v", err)
 		}
 	}

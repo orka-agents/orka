@@ -98,7 +98,7 @@ func repositoryScanExternalRuntimePolicySkew(
 	apiReader := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(agent.DeepCopy(), currentRuntime).
-		WithObjects(objects...).
+		WithObjects(objects...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	return agent, cachedRuntime, apiReader
 }
@@ -239,6 +239,7 @@ func TestRepositoryScanReconcileTreatsCancelledPipelineTasksAsTerminalFailures(t
 				TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task"},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              taskName,
+					UID:               types.UID(taskName + "-uid"),
 					Namespace:         defaultNS,
 					CreationTimestamp: metav1.NewTime(completed.Add(-time.Minute)),
 					Labels:            taskLabels,
@@ -275,7 +276,7 @@ func TestRepositoryScanReconcileTreatsCancelledPipelineTasksAsTerminalFailures(t
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-				WithObjects(repositoryScanTestObjects(scan, task)...).
+				WithObjects(repositoryScanTestObjects(scan, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 				Build()
 			reconciler := &RepositoryScanReconciler{
 				Client:        cl,
@@ -380,7 +381,8 @@ func TestRepositoryScanReconcileDatesFailedRunWithoutTaskCompletionTime(t *testi
 	task := &corev1alpha1.Task{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: taskName, Namespace: defaultNS,
+			Name: taskName,
+			UID:  types.UID(taskName + "-uid"), Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget: labels.SelectorValue(scanName),
 				labels.LabelSecurityScanID: runID,
@@ -397,7 +399,7 @@ func TestRepositoryScanReconcileDatesFailedRunWithoutTaskCompletionTime(t *testi
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, task)...).Build()
+		WithObjects(repositoryScanTestObjects(scan, task)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore}
 
 	before := time.Now().Add(-time.Second)
@@ -472,6 +474,7 @@ func TestLatestOwnedScanPipelineRunIDIgnoresPatchAndValidationTasks(t *testing.T
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "kaset-manual-old",
+				UID:               "kaset-manual-old-uid",
 				CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:00:00Z")),
 				Labels: map[string]string{
 					labels.LabelSecurityTarget: "kaset",
@@ -541,6 +544,7 @@ func newSucceededSecurityTask(name, scanID, stage string, completed metav1.Time)
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: defaultNS,
+			UID:       types.UID(name + "-uid"),
 			Labels:    labelsMap,
 		},
 		Status: corev1alpha1.TaskStatus{
@@ -612,12 +616,12 @@ func saveMapperArtifactWithContexts(t *testing.T, store *sqlitestore.Store, task
 	if err != nil {
 		t.Fatalf("json.Marshal(review slices) error = %v", err)
 	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactSlices, "application/json", data); err != nil {
+	if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: security.ArtifactSlices, ContentType: "application/json", Data: data}); err != nil {
 		t.Fatalf("SaveArtifact(slices) error = %v", err)
 	}
 	for _, slice := range artifact.Slices {
 		_, contextJSON, _ := testReviewContext(t, slice.ID, reviewSlicePaths(slice)...)
-		if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ReviewContextArtifactName(slice.ID), "application/json", []byte(contextJSON)); err != nil {
+		if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: security.ReviewContextArtifactName(slice.ID), ContentType: "application/json", Data: []byte(contextJSON)}); err != nil {
 			t.Fatalf("SaveArtifact(review context %s) error = %v", slice.ID, err)
 		}
 	}
@@ -684,7 +688,7 @@ func saveFindingsTaskResult(
 	if err != nil {
 		t.Fatalf("json.Marshal(findings result) error = %v", err)
 	}
-	if err := store.SaveResult(context.Background(), task.Namespace, task.Name, data); err != nil {
+	if err := store.SaveResult(context.Background(), storepkg.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, data); err != nil {
 		t.Fatalf("SaveResult(findings) error = %v", err)
 	}
 	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
@@ -771,6 +775,7 @@ func newReviewResultRetryFixture(t *testing.T) *reviewResultRetryFixture {
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "retry-scan-review-source",
+			UID:       "retry-scan-review-source-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelManaged:         "true",
@@ -797,14 +802,14 @@ func newReviewResultRetryFixture(t *testing.T) *reviewResultRetryFixture {
 	if err := controllerutil.SetControllerReference(scan, sourceTask, scheme); err != nil {
 		t.Fatalf("SetControllerReference() error = %v", err)
 	}
-	if err := securityStore.SaveResult(ctx, sourceTask.Namespace, sourceTask.Name, []byte(`{"not":"the required findings envelope"}`)); err != nil {
+	if err := securityStore.SaveResult(ctx, storepkg.ResultKey{Namespace: sourceTask.Namespace, TaskName: sourceTask.Name, TaskUID: string(sourceTask.UID)}, []byte(`{"not":"the required findings envelope"}`)); err != nil {
 		t.Fatalf("SaveResult(malformed) error = %v", err)
 	}
 	analysisAgent, analysisRuntime := repositoryScanExternalRuntimeFixtures(scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence"})
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, sourceTask, analysisAgent, analysisRuntime)...).
+		WithObjects(repositoryScanTestObjects(scan, sourceTask, analysisAgent, analysisRuntime)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore, ResultStore: securityStore}
 
@@ -959,7 +964,7 @@ func TestIngestReviewTaskMalformedRetryExhaustsWithoutAttemptTwo(t *testing.T) {
 		t.Fatalf("ingestScanTask(source) error = %v", err)
 	}
 	retryTask := fixture.getRetryTask(t)
-	if err := fixture.store.SaveResult(fixture.ctx, retryTask.Namespace, retryTask.Name, []byte(`{"still":"invalid"}`)); err != nil {
+	if err := fixture.store.SaveResult(fixture.ctx, storepkg.ResultKey{Namespace: retryTask.Namespace, TaskName: retryTask.Name, TaskUID: string(retryTask.UID)}, []byte(`{"still":"invalid"}`)); err != nil {
 		t.Fatalf("SaveResult(retry malformed) error = %v", err)
 	}
 	retryTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
@@ -1006,7 +1011,7 @@ func TestIngestReviewTaskMalformedRetryExhaustsWithoutAttemptTwo(t *testing.T) {
 
 func TestIngestReviewTaskRejectsConflictingDeterministicRetry(t *testing.T) {
 	fixture := newReviewResultRetryFixture(t)
-	conflict := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: fixture.retryTaskName(), Namespace: defaultNS}}
+	conflict := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: fixture.retryTaskName(), UID: types.UID(fixture.retryTaskName() + "-uid"), Namespace: defaultNS}}
 	if err := fixture.client.Create(fixture.ctx, conflict); err != nil {
 		t.Fatalf("Create(conflicting retry) error = %v", err)
 	}
@@ -1187,7 +1192,7 @@ func saveValidationTaskResult(
 	if err != nil {
 		t.Fatalf("json.Marshal(validation result) error = %v", err)
 	}
-	if err := store.SaveResult(context.Background(), task.Namespace, task.Name, data); err != nil {
+	if err := store.SaveResult(context.Background(), storepkg.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, data); err != nil {
 		t.Fatalf("SaveResult(validation) error = %v", err)
 	}
 	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
@@ -1206,6 +1211,7 @@ func TestIngestMapperTaskPersistsReviewSlices(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-mapper",
+			UID:       "kaset-mapper-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget: "kaset",
@@ -1286,6 +1292,7 @@ func TestIngestMapperTaskSelectsIncrementalSlicesFromChangedFiles(t *testing.T) 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-incremental-mapper",
+			UID:       "kaset-incremental-mapper-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget: "kaset",
@@ -1410,6 +1417,7 @@ func TestMapperReingestPreservesReviewedSliceForCurrentRun(t *testing.T) {
 	mapperTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-mapper-reingest",
+			UID:       "kaset-mapper-reingest-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget: "kaset",
@@ -1447,6 +1455,7 @@ func TestMapperReingestPreservesReviewedSliceForCurrentRun(t *testing.T) {
 	reviewTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-review-reingest",
+			UID:       "kaset-review-reingest-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget:  "kaset",
@@ -1553,7 +1562,7 @@ func TestRepositoryScanCustomPolicyIncludedInReviewPrompt(t *testing.T) {
 	targetTask.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
 	scan.Spec.Branch = "release"
 	scan.Spec.SubPath = "services/new"
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, policyConfig, targetTask, analysisAgent, cachedRuntime)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, policyConfig, targetTask, analysisAgent, cachedRuntime)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: repositoryScanRuntimePolicySkewReader{Reader: cl, policyReader: apiReader}, Scheme: scheme, SecurityStore: store}
 	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", TaskName: targetTask.Name, Mode: "initial", Phase: scanRunPhaseRunning}
 	if err := store.CreateScanRun(ctx, run); err != nil {
@@ -1616,7 +1625,7 @@ func TestRepositoryScanCustomPolicyMissingConfigMapFails(t *testing.T) {
 			CustomScanInstructionsRef: &corev1alpha1.PolicyConfigMapKeyRef{Name: "missing", Key: "policy"},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: setupControllerSQLiteStore(t)}
 	if err := reconciler.createScanRun(ctx, scan, "initial", "", ""); err == nil || !strings.Contains(err.Error(), "customScanInstructionsRef") {
 		t.Fatalf("createScanRun() error = %v, want missing custom policy error", err)
@@ -1654,6 +1663,7 @@ func TestRepositoryScanIdempotencySkipsDuplicateActiveRun(t *testing.T) {
 	existingTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "existing-pipeline",
+			UID:       "existing-pipeline-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
@@ -1663,7 +1673,7 @@ func TestRepositoryScanIdempotencySkipsDuplicateActiveRun(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, existingTask)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, existingTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
 	if err := reconciler.createScanRun(ctx, scan, scanModeIncremental, "base", ""); err != nil {
 		t.Fatalf("createScanRun() error = %v", err)
@@ -1697,7 +1707,7 @@ func TestRepositoryScanIdempotencyMarksOrphanedRunFailedAndStartsReplacement(t *
 	analysisAgent, cachedRuntime, apiReader := repositoryScanExternalRuntimePolicySkew(
 		scheme, scan.Spec.AnalysisAgentRef.Name, []string{"read_evidence"}, scan,
 	)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, analysisAgent, cachedRuntime).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, analysisAgent, cachedRuntime).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: repositoryScanRuntimePolicySkewReader{Reader: cl, policyReader: apiReader}, Scheme: scheme, SecurityStore: store}
 	if err := reconciler.createScanRun(ctx, scan, scanModeIncremental, "base", ""); err != nil {
 		t.Fatalf("createScanRun() error = %v", err)
@@ -1749,7 +1759,7 @@ func TestRepositoryScanReconcileRejectsInvalidScheduleBeforeInitialRun(t *testin
 				Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhasePending},
 			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-				WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).Build()
+				WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: setupControllerSQLiteStore(t)}
 
 			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}); err != nil {
@@ -1791,7 +1801,7 @@ func TestRepositoryScanReconcileReportsMissingAnalysisAgent(t *testing.T) {
 		},
 		Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhasePending},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: setupControllerSQLiteStore(t)}
 	reconcile := func() ctrl.Result {
 		t.Helper()
@@ -1856,7 +1866,7 @@ func TestCreateScanRunConcurrentReconcilesCreateOnePipeline(t *testing.T) {
 		},
 	}
 	analysisAgent := repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, analysisAgent).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, analysisAgent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore}
 
 	start := make(chan struct{})
@@ -1918,7 +1928,7 @@ func TestProgressLatestScanRunStartsReviewTasksForPendingSlices(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, analysisAgent)...).
+		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, analysisAgent)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryScanReconciler{
 		Client:        cl,
@@ -2015,7 +2025,7 @@ func TestProgressLatestScanRunFailsMapperArtifactValidationProblem(t *testing.T)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask)...).
+		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryScanReconciler{
 		Client:        cl,
@@ -2101,7 +2111,7 @@ func TestProgressLatestScanRunRetriesPendingSlicesWithoutTasks(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, reviewTask, analysisAgent)...).
+		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, reviewTask, analysisAgent)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryScanReconciler{
 		Client:        cl,
@@ -2268,7 +2278,7 @@ func TestProgressLatestScanRunCompletesNoopIncrementalWhenNoSlicesMatch(t *testi
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask)...).
+		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryScanReconciler{
 		Client:        cl,
@@ -2373,7 +2383,7 @@ func TestRefreshScanRunStatusKeepsReviewRunRunningWithPendingSlices(t *testing.T
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, reviewTask)...).
+		WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, reviewTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryScanReconciler{
 		Client:        cl,
@@ -2500,6 +2510,7 @@ func TestIngestReviewTaskRejectsMismatchedV2SliceID(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-review-mismatched-slice",
+			UID:       "kaset-review-mismatched-slice-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget:  "kaset",
@@ -2606,6 +2617,7 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-review-slice",
+			UID:       "kaset-review-slice-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget:  "kaset",
@@ -2740,7 +2752,7 @@ func TestIngestReviewTaskPersistsFilterDroppedDiagnosticsBeforeCap(t *testing.T)
 	if err := store.UpsertReviewSlice(ctx, reviewSlice); err != nil {
 		t.Fatalf("UpsertReviewSlice() error = %v", err)
 	}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "kaset-review-filter", Namespace: defaultNS, Labels: map[string]string{labels.LabelSecurityTarget: "kaset", labels.LabelSecurityScanID: "scan_review_filter", labels.LabelSecurityMode: "initial", labels.LabelSecurityStage: security.StageReview, labels.LabelSecuritySliceID: "slice_filter"}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "kaset-review-filter", UID: "kaset-review-filter-uid", Namespace: defaultNS, Labels: map[string]string{labels.LabelSecurityTarget: "kaset", labels.LabelSecurityScanID: "scan_review_filter", labels.LabelSecurityMode: "initial", labels.LabelSecurityStage: security.StageReview, labels.LabelSecuritySliceID: "slice_filter"}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
 	findings := security.FindingsV2Artifact{SchemaVersion: security.SchemaVersionFindingsV2, Repository: security.FindingsV2Repository{RepoURL: "https://github.com/example/repo", Branch: "main", HeadSHA: "trusted-head"}, Scan: security.FindingsV2Scan{Mode: "initial", SliceID: "slice_filter", Summary: "filter then cap"}, Findings: []security.FindingsV2Finding{
 		{Title: "Docs-only rate limit", Category: "rate-limit", Severity: "medium", Confidence: "high", Summary: "Documentation says rate limiting is missing.", Remediation: "Document it.", Evidence: []security.FindingsV2EvidenceRef{{Path: "docs/security.md", StartLine: 1, EndLine: 1}}},
 		{Title: "Unsafe API behavior", Category: "authz", Severity: "high", Confidence: "high", Summary: "Attacker-controlled request crosses auth trust boundary.", Remediation: "Add server-side authorization.", Evidence: []security.FindingsV2EvidenceRef{{Path: "internal/api/security.go", StartLine: 2, EndLine: 3}}},
@@ -2797,7 +2809,7 @@ func TestIngestReviewTaskChecksPolicyDriftBeforeFilteringFindings(t *testing.T) 
 		},
 	}
 	policyConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: defaultNS, Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"policy": "changed policy"}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(repositoryScanTestObjects(scan, policyConfig)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(repositoryScanTestObjects(scan, policyConfig)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store, ArtifactStore: store, ResultStore: store}
 	run := &storepkg.ScanRun{ID: "scan_review_drift", Namespace: defaultNS, RepositoryScan: "kaset", TaskName: "kaset-review-drift", Mode: "initial", Phase: scanRunPhaseRunning, PolicyDigest: "sha256:old", StartedAt: time.Now()}
 	if err := store.CreateScanRun(ctx, run); err != nil {
@@ -2808,7 +2820,7 @@ func TestIngestReviewTaskChecksPolicyDriftBeforeFilteringFindings(t *testing.T) 
 	if err := store.UpsertReviewSlice(ctx, reviewSlice); err != nil {
 		t.Fatalf("UpsertReviewSlice() error = %v", err)
 	}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "kaset-review-drift", Namespace: defaultNS, Labels: map[string]string{labels.LabelSecurityTarget: "kaset", labels.LabelSecurityScanID: run.ID, labels.LabelSecurityMode: "initial", labels.LabelSecurityStage: security.StageReview, labels.LabelSecuritySliceID: "slice_docs"}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "kaset-review-drift", UID: "kaset-review-drift-uid", Namespace: defaultNS, Labels: map[string]string{labels.LabelSecurityTarget: "kaset", labels.LabelSecurityScanID: run.ID, labels.LabelSecurityMode: "initial", labels.LabelSecurityStage: security.StageReview, labels.LabelSecuritySliceID: "slice_docs"}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
 	findings := security.FindingsV2Artifact{SchemaVersion: security.SchemaVersionFindingsV2, Repository: security.FindingsV2Repository{RepoURL: "https://github.com/example/repo", Branch: "main"}, Scan: security.FindingsV2Scan{Mode: "initial", SliceID: "slice_docs", Summary: "docs only"}, Findings: []security.FindingsV2Finding{{Title: "Docs-only rate limit", Category: "rate-limit", Severity: "medium", Confidence: "high", Summary: "Documentation says rate limiting is missing.", Remediation: "Document it.", Evidence: []security.FindingsV2EvidenceRef{{Path: "docs/security.md", StartLine: 1, EndLine: 1}}}}}
 	saveFindingsTaskResult(t, store, task, scan.Name, run.ID, run.PolicyDigest, reviewSlice.ReviewContextHash, reviewSlice.ID, findings)
 
@@ -2889,6 +2901,7 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-review-slice-old",
+			UID:       "kaset-review-slice-old-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget:  "kaset",
@@ -2914,7 +2927,7 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal(manifest) error = %v", err)
 	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ReviewContextArtifactName("slice_api"), "application/json", manifestData); err != nil {
+	if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: security.ReviewContextArtifactName("slice_api"), ContentType: "application/json", Data: manifestData}); err != nil {
 		t.Fatalf("SaveArtifact(manifest) error = %v", err)
 	}
 	findings := security.FindingsV2Artifact{
@@ -2942,7 +2955,7 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal(findings) error = %v", err)
 	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindingsV2, "application/json", findingsData); err != nil {
+	if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: security.ArtifactFindingsV2, ContentType: "application/json", Data: findingsData}); err != nil {
 		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
 	}
 
@@ -3150,6 +3163,7 @@ func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-validation-fnd_validate",
+			UID:       "kaset-validation-fnd_validate-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget:    "kaset",
@@ -3217,6 +3231,7 @@ func TestIngestValidationTaskIgnoresPriorFindingOccurrence(t *testing.T) {
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "kaset-validation-prior-occurrence",
+					UID:       "kaset-validation-prior-occurrence-uid",
 					Namespace: defaultNS,
 					Labels: map[string]string{
 						labels.LabelSecurityScanID:    "scan_old",
@@ -3298,6 +3313,7 @@ func TestIngestValidationTaskRedirectsDuplicateResultToCanonicalFinding(t *testi
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-validation-fnd_validation_alias",
+			UID:       "kaset-validation-fnd_validation_alias-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget:    scan.Name,
@@ -3375,6 +3391,7 @@ func TestIngestValidationTaskDoesNotRedirectPriorAliasOccurrenceToCanonical(t *t
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "kaset-validation-prior-alias",
+			UID:       "kaset-validation-prior-alias-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityScanID:    alias.ScanRunID,
@@ -3430,6 +3447,7 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "kaset-incremental-old",
+			UID:               "kaset-incremental-old-uid",
 			Namespace:         defaultNS,
 			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:00:00Z")),
 			Labels: map[string]string{
@@ -3449,6 +3467,7 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "kaset-manual-threat-model-new",
+			UID:               "kaset-manual-threat-model-new-uid",
 			Namespace:         defaultNS,
 			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:05:00Z")),
 			Labels: map[string]string{
@@ -3469,6 +3488,7 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "kaset-manual-mapper-new",
+			UID:               "kaset-manual-mapper-new-uid",
 			Namespace:         defaultNS,
 			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:06:00Z")),
 			Labels: map[string]string{
@@ -3486,7 +3506,7 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, oldTask, newTask, mapperTask)...).
+		WithObjects(repositoryScanTestObjects(scan, oldTask, newTask, mapperTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 
 	reconciler := &RepositoryScanReconciler{
@@ -3564,6 +3584,7 @@ func TestCreateScanRunDoesNotAdoptUnreservedTask(t *testing.T) {
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
+			UID:       types.UID(taskName + "-uid"),
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
 				labels.LabelManaged:        "true",
@@ -3586,7 +3607,7 @@ func TestCreateScanRunDoesNotAdoptUnreservedTask(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(repositoryScanTestObjects(scan, existingTask, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))...).
+		WithObjects(repositoryScanTestObjects(scan, existingTask, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 
 	reconciler := &RepositoryScanReconciler{
@@ -3824,7 +3845,7 @@ func savePatchStructuredResult(t *testing.T, fixture patchIngestFixture, sr *com
 	if err != nil {
 		t.Fatalf("FormatStructuredResult() error = %v", err)
 	}
-	if err := fixture.store.SaveResult(context.Background(), fixture.proposal.Namespace, fixture.proposal.TaskName, result); err != nil {
+	if err := fixture.store.SaveResult(context.Background(), storepkg.ResultKey{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, result); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 }
@@ -3834,7 +3855,7 @@ func savePatchArtifacts(t *testing.T, fixture patchIngestFixture, diff string, c
 	ctx := context.Background()
 	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
 	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName, "text/x-diff", []byte(diff)); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: diffName, ContentType: "text/x-diff", Data: []byte(diff)}); err != nil {
 		t.Fatalf("SaveArtifact(diff) error = %v", err)
 	}
 	summary := security.PatchSummaryArtifact{
@@ -3848,7 +3869,7 @@ func savePatchArtifacts(t *testing.T, fixture patchIngestFixture, diff string, c
 	if err != nil {
 		t.Fatalf("json.Marshal(summary) error = %v", err)
 	}
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: summaryName, ContentType: "application/json", Data: data}); err != nil {
 		t.Fatalf("SaveArtifact(summary) error = %v", err)
 	}
 }
@@ -3858,14 +3879,14 @@ func savePatchArtifactsWithSummary(t *testing.T, fixture patchIngestFixture, dif
 	ctx := context.Background()
 	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
 	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName, "text/x-diff", []byte(diff)); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: diffName, ContentType: "text/x-diff", Data: []byte(diff)}); err != nil {
 		t.Fatalf("SaveArtifact(diff) error = %v", err)
 	}
 	data, err := json.Marshal(summary)
 	if err != nil {
 		t.Fatalf("json.Marshal(summary) error = %v", err)
 	}
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: summaryName, ContentType: "application/json", Data: data}); err != nil {
 		t.Fatalf("SaveArtifact(summary) error = %v", err)
 	}
 }
@@ -4016,7 +4037,7 @@ func TestIngestPatchTaskSanitizesPreexistingDiffArtifact(t *testing.T) {
 	assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
 
 	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
-	diffData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName)
+	diffData, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: diffName})
 	if err != nil {
 		t.Fatalf("GetArtifact(diff) error = %v", err)
 	}
@@ -4024,7 +4045,7 @@ func TestIngestPatchTaskSanitizesPreexistingDiffArtifact(t *testing.T) {
 		t.Fatalf("stored diff artifact = %q, want the removed credential redacted", string(diffData))
 	}
 	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
-	summaryData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName)
+	summaryData, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: summaryName})
 	if err != nil {
 		t.Fatalf("GetArtifact(summary) error = %v", err)
 	}
@@ -4761,7 +4782,7 @@ func TestMergeExistingFindingReconcilesLegacyTargetKeyFromFrozenRunTarget(t *tes
 			if err := corev1alpha1.AddToScheme(scheme); err != nil {
 				t.Fatalf("AddToScheme() error = %v", err)
 			}
-			reconciler := &RepositoryScanReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacyTask).Build(), SecurityStore: securityStore}
+			reconciler := &RepositoryScanReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacyTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build(), SecurityStore: securityStore}
 			if err := securityStore.CreateScanRun(ctx, &storepkg.ScanRun{ID: "scan_legacy", Namespace: defaultNS, RepositoryScan: scan.Name, TaskName: legacyTask.Name, Mode: "initial", Phase: scanRunPhaseSucceeded, StartedAt: time.Now()}); err != nil {
 				t.Fatalf("CreateScanRun(legacy) error = %v", err)
 			}
@@ -4829,7 +4850,7 @@ func TestMergeExistingFindingReconcilesLegacyRunTargetWhenRefConfigured(t *testi
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
-	reconciler := &RepositoryScanReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacyTask).Build(), SecurityStore: securityStore}
+	reconciler := &RepositoryScanReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacyTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build(), SecurityStore: securityStore}
 	if err := securityStore.CreateScanRun(ctx, &storepkg.ScanRun{ID: "scan_legacy", Namespace: defaultNS, RepositoryScan: scan.Name, TaskName: legacyTask.Name, Mode: "initial", Phase: scanRunPhaseSucceeded, StartedAt: time.Now()}); err != nil {
 		t.Fatalf("CreateScanRun(legacy) error = %v", err)
 	}
@@ -5587,7 +5608,7 @@ func TestRefreshScanRunStatusResolvesUnseenFindingAfterRemediationPRMerged(t *te
 	threatTask.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
 	reviewTask.Labels[labels.LabelSecuritySliceID] = "slice_api"
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testPatchForgeSecretName, Namespace: defaultNS}, Data: map[string][]byte{defaultACPWorkspaceCredentialKey: []byte("forge-token-value")}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, secret, threatTask, mapperTask, reviewTask)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, secret, threatTask, mapperTask, reviewTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	run := &storepkg.ScanRun{ID: "scan_current", Namespace: defaultNS, RepositoryScan: scan.Name, TaskName: threatTask.Name, Mode: "initial", Phase: scanRunPhaseRunning, ReviewedSliceCount: 1, HeadCommit: testRepositoryScanHeadSHA, StartedAt: time.Now()}
 	if err := securityStore.CreateScanRun(ctx, run); err != nil {
@@ -5688,7 +5709,7 @@ func TestRefreshScanRunStatusUsesFrozenTaskTargetAfterSpecChanges(t *testing.T) 
 	reviewTask := newSucceededSecurityTask("kaset-frozen-review", "scan_frozen", security.StageReview, completed)
 	reviewTask.Labels[labels.LabelSecuritySliceID] = "slice_api"
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testPatchForgeSecretName, Namespace: defaultNS}, Data: map[string][]byte{defaultACPWorkspaceCredentialKey: []byte("forge-token-value")}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, secret, threatTask, mapperTask, reviewTask)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, secret, threatTask, mapperTask, reviewTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	run := &storepkg.ScanRun{ID: "scan_frozen", Namespace: defaultNS, RepositoryScan: scan.Name, TaskName: threatTask.Name, Mode: "initial", Phase: scanRunPhaseRunning, ReviewedSliceCount: 1, HeadCommit: testRepositoryScanHeadSHA, StartedAt: time.Now()}
 	if err := securityStore.CreateScanRun(ctx, run); err != nil {
@@ -5771,7 +5792,7 @@ func TestRefreshScanRunStatusRetriesMergedPRLookup(t *testing.T) {
 	threatTask.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
 	reviewTask.Labels[labels.LabelSecuritySliceID] = "slice_api"
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testPatchForgeSecretName, Namespace: defaultNS}, Data: map[string][]byte{defaultACPWorkspaceCredentialKey: []byte("forge-token-value")}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, secret, threatTask, mapperTask, reviewTask)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, secret, threatTask, mapperTask, reviewTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	run := &storepkg.ScanRun{ID: "scan_retry", Namespace: defaultNS, RepositoryScan: scan.Name, TaskName: threatTask.Name, Mode: "initial", Phase: scanRunPhaseRunning, ReviewedSliceCount: 1, HeadCommit: testRepositoryScanHeadSHA, StartedAt: time.Now()}
 	if err := securityStore.CreateScanRun(ctx, run); err != nil {
@@ -5842,7 +5863,7 @@ func TestRefreshScanRunStatusRetriesMergedResolutionAfterForgeCredentialReturns(
 	mapperTask := newSucceededSecurityTask("kaset-credential-retry-mapper", "scan_credential_retry", security.StageMapper, completed)
 	reviewTask := newSucceededSecurityTask("kaset-credential-retry-review", "scan_credential_retry", security.StageReview, completed)
 	reviewTask.Labels[labels.LabelSecuritySliceID] = "slice_api"
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, reviewTask)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, threatTask, mapperTask, reviewTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	run := &storepkg.ScanRun{ID: "scan_credential_retry", Namespace: defaultNS, RepositoryScan: scan.Name, TaskName: threatTask.Name, Mode: "initial", Phase: scanRunPhaseRunning, ReviewedSliceCount: 1, HeadCommit: testRepositoryScanHeadSHA, StartedAt: time.Now()}
 	if err := securityStore.CreateScanRun(ctx, run); err != nil {
@@ -5956,7 +5977,7 @@ func testResolveMergedFindingsScopesRunToReviewedSlices(t *testing.T, mode strin
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testPatchForgeSecretName, Namespace: defaultNS}, Data: map[string][]byte{defaultACPWorkspaceCredentialKey: []byte("forge-token-value")}}
 	legacyTask := newSucceededSecurityTask("legacy-resolution-review", "scan_old", security.StageReview, metav1.Now())
 	legacyTask.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, legacyTask).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, legacyTask).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, SecurityStore: securityStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	run := &storepkg.ScanRun{ID: "scan_scoped", Namespace: defaultNS, RepositoryScan: scan.Name, Mode: mode, Phase: scanRunPhaseSucceeded, HeadCommit: testRepositoryScanHeadSHA}
 	if err := securityStore.CreateScanRun(ctx, &storepkg.ScanRun{ID: "scan_old", Namespace: defaultNS, RepositoryScan: scan.Name, TaskName: legacyTask.Name, Mode: "initial", Phase: scanRunPhaseSucceeded, StartedAt: time.Now()}); err != nil {
@@ -6067,7 +6088,7 @@ func TestResolveMergedFindingsCollectsAllPagesBeforeMutation(t *testing.T) {
 		},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testPatchForgeSecretName, Namespace: defaultNS}, Data: map[string][]byte{defaultACPWorkspaceCredentialKey: []byte("forge-token-value")}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: kubeClient, SecurityStore: securityStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	run := &storepkg.ScanRun{ID: "scan_current", Namespace: defaultNS, RepositoryScan: scan.Name, Mode: "initial", Phase: scanRunPhaseSucceeded, ReviewedSliceCount: 1, HeadCommit: testRepositoryScanHeadSHA}
 	reviewSlice := reviewedSliceWithContext(t, scan.Name, run.ID, "slice_all", "all.go")
@@ -6158,7 +6179,7 @@ func TestResolveMergedFindingsSkipsSlicesWithDroppedResults(t *testing.T) {
 	}
 	scan := &corev1alpha1.RepositoryScan{ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS}, Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/kaset", ForgeCredentialRef: &corev1.LocalObjectReference{Name: testPatchForgeSecretName}}}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testPatchForgeSecretName, Namespace: defaultNS}, Data: map[string][]byte{defaultACPWorkspaceCredentialKey: []byte("forge-token-value")}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, SecurityStore: securityStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	run := &storepkg.ScanRun{ID: "scan_dropped", Namespace: defaultNS, RepositoryScan: scan.Name, Mode: "initial", Phase: scanRunPhaseSucceeded, ReviewedSliceCount: 2, HeadCommit: testRepositoryScanHeadSHA}
 	for sliceID, path := range map[string]string{"slice_dropped": "fnd_dropped_slice.go", "slice_clean": "fnd_clean_slice.go"} {
@@ -6206,7 +6227,7 @@ func TestRefreshScanRunStatusSetsLastScanAtOnFailedRun(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "ts-fail", Namespace: defaultNS},
 		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore}
 
 	completed := mustParseTime(t, "2026-05-07T22:41:22Z")
@@ -6243,7 +6264,7 @@ func TestRefreshScanRunStatusSetsBothTimestampsOnSuccess(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "ts-ok", Namespace: defaultNS},
 		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore}
 
 	completed := mustParseTime(t, "2026-05-07T23:00:00Z")
@@ -6337,6 +6358,7 @@ func TestEnqueueAutoValidationTasksScopesActiveTaskToFindingOccurrence(t *testin
 	priorTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "prior-validation",
+			UID:       "prior-validation-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
@@ -6348,7 +6370,7 @@ func TestEnqueueAutoValidationTasksScopesActiveTaskToFindingOccurrence(t *testin
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	analysisAgent := repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, priorTask, analysisAgent).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, priorTask, analysisAgent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	securityStore := setupControllerSQLiteStore(t)
 	priorFinding := &storepkg.Finding{
 		ID:               "fnd_reopened",
@@ -6433,6 +6455,7 @@ func TestEnqueueAutoValidationTasksHonorsRunCapAcrossExistingTasks(t *testing.T)
 	existing := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "existing-validation",
+			UID:       "existing-validation-uid",
 			Namespace: defaultNS,
 			Labels: map[string]string{
 				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
@@ -6441,7 +6464,7 @@ func TestEnqueueAutoValidationTasksHonorsRunCapAcrossExistingTasks(t *testing.T)
 			},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, existing)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, existing)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme}
 	findings := []*storepkg.Finding{{ID: "fnd_new", Namespace: defaultNS, RepositoryScan: "kaset", ScanRunID: "scan_run", Severity: "critical", Confidence: "high"}}
 	if err := reconciler.enqueueAutoValidationTasks(ctx, scan, findings); err != nil {
@@ -6476,7 +6499,7 @@ func TestRepositoryScanPolicyDigestDriftFailsReviewTaskCreation(t *testing.T) {
 		},
 	}
 	policyConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: defaultNS, Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"policy": "new policy text"}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(repositoryScanTestObjects(scan, policyConfig)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(repositoryScanTestObjects(scan, policyConfig)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
 	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", Mode: "initial", Phase: scanRunPhaseRunning, PolicyDigest: "sha256:old"}
 	if err := store.CreateScanRun(ctx, run); err != nil {
@@ -6526,7 +6549,7 @@ func TestRepositoryScanPolicyDigestDriftFailsValidationTaskCreationWithoutRequeu
 		},
 	}
 	policyConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: defaultNS, Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"policy": "new policy text"}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(repositoryScanTestObjects(scan, policyConfig)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(repositoryScanTestObjects(scan, policyConfig)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
 	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", Mode: "initial", Phase: scanRunPhaseRunning, PolicyDigest: "sha256:old"}
 	if err := store.CreateScanRun(ctx, run); err != nil {
@@ -6572,7 +6595,7 @@ func TestRepositoryScanValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 	analysisAgent, cachedRuntime, apiReader := repositoryScanExternalRuntimePolicySkew(
 		scheme, scan.Spec.AnalysisAgentRef.Name, []string{},
 	)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: repositoryScanRuntimePolicySkewReader{Reader: cl, policyReader: apiReader}, Scheme: scheme, SecurityStore: securityStore}
 	finding := &storepkg.Finding{
 		ID: "finding-runtime", Namespace: defaultNS, RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
@@ -6617,7 +6640,7 @@ func TestRepositoryScanUnreadablePolicyRefFailsMapperTaskCreation(t *testing.T) 
 			CustomScanInstructionsRef: &corev1alpha1.PolicyConfigMapKeyRef{Name: "missing-policy"},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
 	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", Mode: "initial", Phase: scanRunPhaseRunning}
 	if err := store.CreateScanRun(ctx, run); err != nil {
@@ -6783,7 +6806,7 @@ func TestIngestPatchTaskDerivesArtifactsFromV2ResultAndPublishedCommit(t *testin
 		{Filename: "tests/test_app.py", Status: "added", Additions: 1, Patch: "@@ -0,0 +1 @@\n+def test_safe(): pass"},
 	}, &seenToken)
 	fixture := patchFixtureWithForgeSecret(t, "v2-envelope", server, true)
-	if err := fixture.store.SaveResult(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, repositoryScanPatchResultEnvelope(fixture, []string{"app.py", "tests/test_app.py"})); err != nil {
+	if err := fixture.store.SaveResult(ctx, storepkg.ResultKey{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, repositoryScanPatchResultEnvelope(fixture, []string{"app.py", "tests/test_app.py"})); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 	task := patchTaskForFixture(fixture, true)
@@ -6797,7 +6820,7 @@ func TestIngestPatchTaskDerivesArtifactsFromV2ResultAndPublishedCommit(t *testin
 		t.Fatalf("GitHub request authorization = %q, want the forge token", seenToken)
 	}
 	diffName, summaryName := patchArtifactNames(fixture.finding.ID)
-	diff, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName)
+	diff, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: diffName})
 	if err != nil {
 		t.Fatalf("GetArtifact(diff) error = %v", err)
 	}
@@ -6805,7 +6828,7 @@ func TestIngestPatchTaskDerivesArtifactsFromV2ResultAndPublishedCommit(t *testin
 		!strings.Contains(string(diff), "diff --git a/tests/test_app.py b/tests/test_app.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_app.py\n") {
 		t.Fatalf("derived diff = %q", diff)
 	}
-	summaryData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName)
+	summaryData, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: summaryName})
 	if err != nil {
 		t.Fatalf("GetArtifact(summary) error = %v", err)
 	}
@@ -6865,7 +6888,7 @@ func TestIngestPatchTaskV2ResultFailsClosed(t *testing.T) {
 			if tc.result != nil {
 				result = tc.result(fixture)
 			}
-			if err := fixture.store.SaveResult(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, result); err != nil {
+			if err := fixture.store.SaveResult(ctx, storepkg.ResultKey{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, result); err != nil {
 				t.Fatalf("SaveResult() error = %v", err)
 			}
 			if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
@@ -6873,7 +6896,7 @@ func TestIngestPatchTaskV2ResultFailsClosed(t *testing.T) {
 			}
 			assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
 			diffName, _ := patchArtifactNames(fixture.finding.ID)
-			if _, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName); err == nil {
+			if _, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName, TaskUID: "uid-" + fixture.proposal.TaskName}, Filename: diffName}); err == nil {
 				t.Fatal("a failed proposal must not persist a diff artifact")
 			}
 			proposals, _ := fixture.store.ListPatchProposals(ctx, fixture.proposal.Namespace, fixture.finding.ID)
@@ -7003,7 +7026,7 @@ func TestIngestPatchTaskSecondReconcileAcceptsSanitizedStoredDiff(t *testing.T) 
 	// First reconcile derives and persists the sanitized artifacts.
 	task := patchTaskForFixture(fixture, true)
 	envelope := `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"` + fixture.finding.ID + `","summary":"rotated credential","changedFiles":["config.env"],"risk":"low"}`
-	if err := fixture.store.SaveResult(ctx, task.Namespace, task.Name, []byte(envelope)); err != nil {
+	if err := fixture.store.SaveResult(ctx, storepkg.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(envelope)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}

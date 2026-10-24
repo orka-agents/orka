@@ -45,7 +45,7 @@ func TestSubmitResultWaitsForJobIdentityPublication(t *testing.T) {
 		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser(pod.Name, string(pod.UID)))
 		submitErr := h.SubmitResult(c)
 		if requests.Add(1) == 1 {
-			_, resultErr := data.GetResult(c.Context(), task.Namespace, task.Name)
+			_, resultErr := data.GetResult(c.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 			// Publish only after the first submission has passed through the real
 			// handler, reproducing a worker that finishes before the status write.
 			current := &corev1alpha1.Task{}
@@ -78,7 +78,7 @@ func TestSubmitResultWaitsForJobIdentityPublication(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, fiberErr.Code)
 	require.NoError(t, submitErr)
 	require.EqualValues(t, 2, requests.Load())
-	saved, err := data.GetResult(t.Context(), task.Namespace, task.Name)
+	saved, err := data.GetResult(t.Context(), store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 	require.NoError(t, err)
 	require.Equal(t, result, saved)
 }

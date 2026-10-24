@@ -119,7 +119,7 @@ func TestRecoveredPublicationSessionFinalizationUsesDurableDelivery(t *testing.T
 		ExpectedCommitSHA: prepared.CommitSHA, ObservedRemote: store.RemoteRefState{SHA: prepared.CommitSHA}, VerifiedAt: now,
 	}
 	publication = transitionACPPublicationForTest(t, controls, fence, publication, store.PublicationVerifiedExact, "verify", now, nil, nil, verified, "")
-	if err := controls.SaveResult(ctx, task.Namespace, task.Name, []byte("published one change")); err != nil {
+	if err := controls.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("published one change")); err != nil {
 		t.Fatal(err)
 	}
 	client := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
@@ -221,7 +221,7 @@ func TestRecoveredSessionFinalizationRejectsMismatchedDeliveryFallback(t *testin
 					RequestDigest: attempt.RequestDigest,
 				}, Delivery: test.delivery.DeepCopy()},
 			}
-			if err := controls.SaveResult(ctx, task.Namespace, task.Name, []byte("completed")); err != nil {
+			if err := controls.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("completed")); err != nil {
 				t.Fatal(err)
 			}
 			dispatcher := &ACPDispatcher{Store: controls, ResultStore: controls, Sessions: continuity}

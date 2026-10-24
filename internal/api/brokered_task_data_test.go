@@ -74,7 +74,7 @@ func TestBrokeredDataSerializesWithPromptSettlement(t *testing.T) {
 				bounded, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 				defer cancel()
 				// Authorization must still leave the SQLite writer available.
-				require.NoError(t, fixture.data.SaveResult(bounded, fixture.task.Namespace, "unrelated", []byte("progress")))
+				require.NoError(t, fixture.data.SaveResult(bounded, store.ResultKey{Namespace: fixture.task.Namespace, TaskName: "unrelated", TaskUID: "unrelated-uid"}, []byte("progress")))
 				return checkSettlementBlocked(ctx)
 			}
 			fixture.probe.inTransaction = checkSettlementBlocked

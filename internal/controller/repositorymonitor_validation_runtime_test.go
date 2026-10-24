@@ -483,7 +483,7 @@ func TestRepositoryMonitorValidationClassificationOutageRetriesOrdinaryTaskCompl
 	}
 	reconciler := newUnitReconciler(repositoryMonitorValidationRuntimeScheme(t), task)
 	reconciler.RepositoryValidationBindings = repositoryMonitorValidationBindingErrorStore{err: bindingErr}
-	if err := reconciler.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte("ordinary output")); err != nil {
+	if err := reconciler.ResultStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("ordinary output")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -554,17 +554,17 @@ type repositoryMonitorValidationResultStoreProbe struct {
 	deletes int
 }
 
-func (s *repositoryMonitorValidationResultStoreProbe) SaveResult(context.Context, string, string, []byte) error {
+func (s *repositoryMonitorValidationResultStoreProbe) SaveResult(context.Context, store.ResultKey, []byte) error {
 	s.saves++
 	return nil
 }
 
-func (s *repositoryMonitorValidationResultStoreProbe) GetResult(context.Context, string, string) ([]byte, error) {
+func (s *repositoryMonitorValidationResultStoreProbe) GetResult(context.Context, store.ResultKey) ([]byte, error) {
 	s.gets++
 	return nil, store.ErrNotFound
 }
 
-func (s *repositoryMonitorValidationResultStoreProbe) DeleteResult(context.Context, string, string) error {
+func (s *repositoryMonitorValidationResultStoreProbe) DeleteResult(context.Context, store.ResultKey) error {
 	s.deletes++
 	return nil
 }

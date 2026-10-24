@@ -41,7 +41,7 @@ func repositoryScanRunTestClient(t *testing.T, objects ...client.Object) client.
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	return fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}, &corev1alpha1.Task{}).WithObjects(objects...).Build()
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}, &corev1alpha1.Task{}).WithObjects(objects...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 }
 
 func TestRepositoryScanReconcileRetiresStaleIdentityBeforeIngestion(t *testing.T) {
@@ -75,7 +75,8 @@ func TestRepositoryScanReconcileRetiresStaleIdentityBeforeIngestion(t *testing.T
 			require.NoError(t, db.CreateScanRun(ctx, run))
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: run.TaskName, Namespace: scan.Namespace,
+					Name: run.TaskName,
+					UID:  types.UID(run.TaskName + "-uid"), Namespace: scan.Namespace,
 					Labels: map[string]string{
 						labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: run.ID,
 						labels.LabelSecurityStage: security.StageThreatModel,
@@ -88,10 +89,10 @@ func TestRepositoryScanReconcileRetiresStaleIdentityBeforeIngestion(t *testing.T
 				RepositoryScan: scan.Name, ScanID: run.ID, PolicyDigest: run.PolicyDigest, ThreatModel: "# Stale threat model",
 			})
 			require.NoError(t, err)
-			require.NoError(t, db.SaveResult(ctx, scan.Namespace, task.Name, result))
+			require.NoError(t, db.SaveResult(ctx, store.ResultKey{Namespace: scan.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, result))
 			objects := repositoryScanTestObjects(scan, task, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))
 			task.OwnerReferences[0].UID = types.UID(tt.uid)
-			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).WithObjects(objects...).Build()
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).WithObjects(objects...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db, ResultStore: db}
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
 			_, err = r.Reconcile(ctx, request)
@@ -143,7 +144,7 @@ func TestRepositoryScanDeletionReleasesRunReservation(t *testing.T) {
 		RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation, Phase: scanRunPhasePending,
 	}
 	require.NoError(t, db.CreateScanRun(ctx, run))
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).WithObjects(scan).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).WithObjects(scan).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	require.NoError(t, cl.Delete(ctx, scan))
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)})
@@ -166,7 +167,7 @@ func TestRepositoryScanStatusRejectsChangedIdentity(t *testing.T) {
 	current := &corev1alpha1.RepositoryScan{ObjectMeta: metav1.ObjectMeta{
 		Name: "edited-scan", Namespace: defaultNS, UID: "current-uid", Generation: 2,
 	}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(current).WithObjects(current).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(current).WithObjects(current).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	r := &RepositoryScanReconciler{Client: cl}
 	stale := current.DeepCopy()
 	stale.Generation = 1
@@ -186,7 +187,7 @@ func TestRepositoryScanStatusRejectsChangedRunBindingBeforeMutation(t *testing.T
 		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 1},
 		Status:     corev1alpha1.RepositoryScanStatus{LastScanID: "scan_manual", Phase: repositoryScanPhaseScanning},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(current).WithObjects(current).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(current).WithObjects(current).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	r := &RepositoryScanReconciler{Client: cl}
 	stale := current.DeepCopy()
 	stale.Status = corev1alpha1.RepositoryScanStatus{}
@@ -328,8 +329,8 @@ func TestRepositoryScanReconcileUsesLiveCompletionForSchedule(t *testing.T) {
 	stale.Status.LastSuccessfulScanAt = &metav1.Time{Time: completed.Add(-2 * time.Hour)}
 	stale.Status.LastProcessedCommit = "previous-head"
 	agent := repositoryScanTestAgent(current.Spec.AnalysisAgentRef.Name)
-	cached := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(stale).WithObjects(stale, agent).Build()
-	live := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(current).WithObjects(current, agent).Build()
+	cached := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(stale).WithObjects(stale, agent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
+	live := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(current).WithObjects(current, agent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	r := &RepositoryScanReconciler{Client: cached, APIReader: live, Scheme: scheme, SecurityStore: db}
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(current)})
 	require.NoError(t, err)
@@ -595,7 +596,8 @@ func TestCurrentRepositoryScanTasksIgnoresLateTasksFromOlderRun(t *testing.T) {
 	newer.ID, newer.Phase, newer.StartedAt = "scan_new", scanRunPhaseSucceeded, time.Now()
 	require.NoError(t, db.CreateScanRun(ctx, &newer))
 	late := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
-		Name: "late", Namespace: scan.Namespace,
+		Name: "late",
+		UID:  "late-uid", Namespace: scan.Namespace,
 		Labels: map[string]string{labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: old.ID, labels.LabelSecurityStage: security.StageMapper},
 	}}
 	repositoryScanTestObjects(scan, late)
@@ -1258,7 +1260,7 @@ func TestRepositoryScanRecoversOrphanedStatusBinding(t *testing.T) {
 			patch.Name, patch.UID = "patch", "patch-uid"
 			patch.Labels[labels.LabelSecurityStage] = security.StagePatch
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).
-				WithObjects(scan, orphan, foreign, terminal, validation, patch, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).Build()
+				WithObjects(scan, orphan, foreign, terminal, validation, patch, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			r := &RepositoryScanReconciler{Client: cl, APIReader: cl, Scheme: scheme, SecurityStore: db}
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
 			for range 2 {
@@ -1327,7 +1329,7 @@ func TestMapperStageTaskReplayValidatesRunAndSpec(t *testing.T) {
 	targetTask.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
 	run.TaskName = targetTask.Name
 	require.NoError(t, db.CreateScanRun(ctx, run))
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, targetTask)...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, targetTask)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
 	require.NoError(t, r.createMapperTask(ctx, scan, run))
 	require.NoError(t, r.createMapperTask(ctx, scan, run))

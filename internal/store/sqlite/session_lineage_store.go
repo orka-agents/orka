@@ -21,10 +21,16 @@ import (
 // this idempotent payload projection runs. A conflicting row is an integrity
 // failure to repair explicitly, never a SQLite decision about Session owner.
 func (s *Store) ProjectSessionLineage(ctx context.Context, lineage store.SessionLineage) (*store.SessionLineage, error) {
+	return writeOperation(ctx, s, "ProjectSessionLineage", nil, func(ctx context.Context) (*store.SessionLineage, error) {
+		return s.projectSessionLineageWrite(ctx, lineage)
+	})
+}
+
+func (s *Store) projectSessionLineageWrite(ctx context.Context, lineage store.SessionLineage) (*store.SessionLineage, error) {
 	if err := lineage.Validate(); err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin session lineage claim: %w", err)
 	}
@@ -70,7 +76,7 @@ func (s *Store) GetSessionLineage(ctx context.Context, namespace, sessionName st
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(sessionName) == "" {
 		return nil, store.ValidationErrorf("session lineage namespace and session name are required")
 	}
-	lineage, err := scanSessionLineage(s.db.QueryRowContext(ctx, sessionLineageSelectSQL+`
+	lineage, err := scanSessionLineage(s.taskDataExecutor(ctx).QueryRowContext(ctx, sessionLineageSelectSQL+`
 		WHERE namespace = ? AND session_name = ?`, namespace, sessionName))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound

@@ -41,7 +41,9 @@ Object counts alone do not establish compatibility.
 | 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables and add dataset metadata. |
 | 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata. |
 | 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata. |
-| 159 objects (current), schema version 1 | Dataset identity layout | Validate schema, version and identity; no migration or automatic backup. |
+| 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table and the controller epoch advance and installation columns, then take the schema version 2 step; keep the dataset identity, records and key bootstrap state. |
+| 161 objects, schema version 2 | Operation receipt layout | Rebuild the results and artifacts tables with the Task UID in their keys, add the Task UID to prompt result receipts and implementation jobs, and add result and artifact deletion tombstones; keep the dataset identity, records and key bootstrap state. |
+| 167 objects (current), schema version 3 | Task UID layout | Validate schema, version and identity; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
@@ -49,14 +51,23 @@ lineages. If either table holds records, or a Session lineage uses
 `harness v1 ... records`; that store belongs to an unsupported harness v1
 installation.
 
-The five historical source layouts have SQLite `user_version = 0`. A nonzero
-marker on an otherwise historical layout is refused rather than adopted.
+The five historical source layouts have SQLite `user_version = 0` and upgrade
+to the current layout in one transaction, ending with the schema version 3
+objects. A schema version 1 or 2 store keeps its identity row and upgrades in
+place, after the same automatic backup. A nonzero marker on any other layout is
+refused rather than adopted.
+
+The schema version 3 step copies every stored result and artifact into the
+rebuilt tables, so it takes time in proportion to the stored result and
+artifact bytes and briefly needs free space for a second copy of them. Results
+and artifacts stored before it have no Task UID; they stay readable by the
+Task that holds their name until that Task is deleted.
 
 ### Dataset identity and key bootstrap
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 1` records this metadata layout; the controller also checks
+`PRAGMA user_version = 3` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 

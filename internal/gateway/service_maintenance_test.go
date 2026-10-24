@@ -71,7 +71,7 @@ func TestServiceStartDispatchesAndDeliversDuringBlockedMaintenance(t *testing.T)
 			t.Fatal(err)
 		}
 		const result = "response delivered while retention cleanup is blocked"
-		if err := db.SaveResult(ctx, task.Namespace, task.Name, []byte(result)); err != nil {
+		if err := db.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(result)); err != nil {
 			t.Fatal(err)
 		}
 		task.Status.Phase = corev1alpha1.TaskPhaseSucceeded

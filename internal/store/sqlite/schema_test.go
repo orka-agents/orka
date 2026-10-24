@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -63,7 +64,7 @@ func TestNewDBRejectsIncompatibleSchemaWithoutChangingData(t *testing.T) {
 				_, err = db.Exec(test.statement)
 				require.NoError(t, err)
 			}
-			require.NoError(t, NewStore(db, dbPath).SaveResult(ctx, "ns", "task", []byte("saved result")))
+			require.NoError(t, NewStore(db, dbPath).SaveResult(ctx, testResultKey("ns", "task"), []byte("saved result")))
 			before := storedSchemaSQL(t, db)
 			require.NoError(t, db.Close())
 			info, err := os.Stat(dbPath)
@@ -82,7 +83,7 @@ func TestNewDBRejectsIncompatibleSchemaWithoutChangingData(t *testing.T) {
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = raw.Close() })
 				require.Equal(t, before, storedSchemaSQL(t, raw))
-				data, err := NewStore(raw, dbPath).GetResult(ctx, "ns", "task")
+				data, err := NewStore(raw, dbPath).GetResult(ctx, testResultKey("ns", "task"))
 				require.NoError(t, err)
 				require.Equal(t, "saved result", string(data))
 				require.NoError(t, raw.Close())
@@ -116,14 +117,18 @@ func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 	legacy, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = legacy.Close() })
-	statements := currentSchemaStatements()
-	preNative := append(statements[:len(statements)-len(nativeSessionSchemaStatements())-len(connectorSchemaStatements())], connectorSchemaStatements()...)
+	var preNative []string
+	for _, statement := range currentSchemaStatements() {
+		if !slices.Contains(nativeSessionSchemaStatements(), statement) {
+			preNative = append(preNative, statement)
+		}
+	}
 	for _, statement := range preNative {
 		_, err := legacy.Exec(statement)
 		require.NoError(t, err)
 	}
 	store := NewStore(legacy, path)
-	require.NoError(t, store.SaveResult(t.Context(), "ns", "task", []byte("retained result")))
+	require.NoError(t, store.SaveResult(t.Context(), testResultKey("ns", "task"), []byte("retained result")))
 	_, err = legacy.Exec(`INSERT INTO sessions(namespace,name,session_type,message_count) VALUES('ns','retained-session','task',1)`)
 	require.NoError(t, err)
 	_, err = legacy.Exec(`INSERT INTO session_messages(namespace,session_name,message_id,sort_order,role,content) VALUES('ns','retained-session','stable-message',1,'assistant','retained conversation')`)
@@ -139,7 +144,7 @@ func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, before, storedSchemaSQL(t, raw))
 		preserved := NewStore(raw, path)
-		result, err := preserved.GetResult(t.Context(), "ns", "task")
+		result, err := preserved.GetResult(t.Context(), testResultKey("ns", "task"))
 		require.NoError(t, err)
 		require.Equal(t, "retained result", string(result))
 		session, err := preserved.GetSession(t.Context(), "ns", "retained-session")
@@ -154,11 +159,11 @@ func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 
 func TestInitializeCurrentSchemaDoesNotWrite(t *testing.T) {
 	s := setupDiskStore(t)
-	require.NoError(t, s.SaveResult(context.Background(), "ns", "task", []byte("saved result")))
+	require.NoError(t, s.SaveResult(context.Background(), testResultKey("ns", "task"), []byte("saved result")))
 	_, err := s.db.Exec(`PRAGMA query_only = ON`)
 	require.NoError(t, err)
 	require.NoError(t, initializeSchema(s.db))
-	data, err := s.GetResult(context.Background(), "ns", "task")
+	data, err := s.GetResult(context.Background(), testResultKey("ns", "task"))
 	require.NoError(t, err)
 	require.Equal(t, "saved result", string(data))
 }

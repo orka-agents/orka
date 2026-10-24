@@ -123,9 +123,6 @@ var _ = Describe("Task Controller", func() {
 			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 
-			// Save result to store
-			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("some-result"))).To(Succeed())
-
 			// Create the task with finalizer
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
@@ -140,6 +137,10 @@ var _ = Describe("Task Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			resultKey := store.ResultKey{Namespace: ns, TaskName: taskName, TaskUID: string(task.UID)}
+
+			// Save result to store
+			Expect(r.ResultStore.SaveResult(ctx, resultKey, []byte("some-result"))).To(Succeed())
 
 			// Set result ref in status
 			task.Status.ResultRef = &corev1alpha1.ResultReference{
@@ -160,7 +161,7 @@ var _ = Describe("Task Controller", func() {
 			Expect(result).To(Equal(ctrl.Result{}))
 
 			// Result should be deleted from store
-			_, err = r.ResultStore.GetResult(ctx, ns, taskName)
+			_, err = r.ResultStore.GetResult(ctx, resultKey)
 			Expect(err).To(HaveOccurred())
 
 			// Task should be gone (finalizer removed → deletion completes)
@@ -1244,12 +1245,13 @@ var _ = Describe("Task Controller", func() {
 			ns := defaultNS
 
 			// Save result to store
-			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("hello world"))).To(Succeed())
+			Expect(r.ResultStore.SaveResult(ctx, store.ResultKey{Namespace: ns, TaskName: taskName, TaskUID: taskName + "-uid"}, []byte("hello world"))).To(Succeed())
 
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
 					Namespace: ns,
+					UID:       types.UID(taskName + "-uid"),
 				},
 			}
 
@@ -1267,6 +1269,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "nonexistent-task",
 					Namespace: defaultNS,
+					UID:       "nonexistent-task-uid",
 				},
 			}
 
@@ -2319,9 +2322,6 @@ var _ = Describe("Task Controller", func() {
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
-			// Save result to store
-			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("task output"))).To(Succeed())
-
 			// Create task
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2336,6 +2336,10 @@ var _ = Describe("Task Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Save result to store
+			resultKey := store.ResultKey{Namespace: ns, TaskName: taskName, TaskUID: string(task.UID)}
+			Expect(r.ResultStore.SaveResult(ctx, resultKey, []byte("task output"))).To(Succeed())
 
 			// Complete the task – collectResult should pick up the store result
 			_, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done")
