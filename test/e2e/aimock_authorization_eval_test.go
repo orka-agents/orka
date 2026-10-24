@@ -624,6 +624,7 @@ func authorizationExpectForgeUnchanged(before fakeforge.State) {
 type aimockAuthorityEval struct {
 	apiCancel                   context.CancelFunc
 	apiPF                       *exec.Cmd
+	apiPort                     int
 	issuerURL, localURL, apiURL string
 	deployment                  string
 	containerIndex              int
@@ -631,8 +632,34 @@ type aimockAuthorityEval struct {
 }
 
 func setupAimockAuthorityEval() *aimockAuthorityEval {
+	authority := deployAimockAuthority(18127, 18128)
+	args := authorizationReplaceFlags(authority.originalArgs, map[string]string{
+		"context-token-profile":          "transaction-token",
+		"context-token-issuer":           authority.issuerURL,
+		"context-token-audience":         aimockauthority.Audience,
+		"context-token-jwks-url":         authority.issuerURL + "/.well-known/jwks.json",
+		"context-token-authz-mode":       "enforce",
+		"context-token-headers":          "Txn-Token",
+		"context-token-tts-endpoint":     authority.issuerURL + "/token_endpoint",
+		"context-token-tts-audience":     aimockauthority.Audience,
+		"context-token-tts-token-source": "incoming", "context-token-child-scope": authorizationChildScope,
+	})
+	authority.patchArgs(args)
+	authority.connectAPI()
+	DeferCleanup(func() {
+		stopPortForward(authority.apiCancel, authority.apiPF)
+		authority.apiCancel, authority.apiPF = nil, nil
+	})
+	return authority
+}
+
+// deployAimockAuthority runs the synthetic authority, port-forwards its
+// loopback-only observer to observerPort, and records the controller's args
+// so the caller can patch them. Cleanup restores those args and removes the
+// authority. connectAPI port-forwards the controller API to apiPort.
+func deployAimockAuthority(observerPort, apiPort int) *aimockAuthorityEval {
 	issuerURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8080", aimockAuthorityName, namespace)
-	authority := &aimockAuthorityEval{issuerURL: issuerURL}
+	authority := &aimockAuthorityEval{issuerURL: issuerURL, apiPort: apiPort}
 	DeferCleanup(deleteE2EObjects, "deployment,service", aimockAuthorityName)
 	selector := map[string]any{"app.kubernetes.io/name": aimockAuthorityName}
 	ExpectWithOffset(1, applyManifestJSON(map[string]any{"apiVersion": "v1", "kind": "List", "items": []any{
@@ -693,7 +720,7 @@ func setupAimockAuthorityEval() *aimockAuthorityEval {
 		pf,
 		err = startHTTPPortForwardAndWait(namespace,
 		aimockAuthorityName,
-		18127,
+		observerPort,
 		8081,
 		"/healthz")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
@@ -712,23 +739,6 @@ func setupAimockAuthorityEval() *aimockAuthorityEval {
 	ExpectWithOffset(1, authority.containerIndex).To(BeNumerically(">=", 0))
 	authority.currentArgs = slices.Clone(authority.originalArgs)
 	DeferCleanup(func() { authority.patchArgs(authority.originalArgs) })
-	args := authorizationReplaceFlags(authority.originalArgs, map[string]string{
-		"context-token-profile":          "transaction-token",
-		"context-token-issuer":           authority.issuerURL,
-		"context-token-audience":         aimockauthority.Audience,
-		"context-token-jwks-url":         authority.issuerURL + "/.well-known/jwks.json",
-		"context-token-authz-mode":       "enforce",
-		"context-token-headers":          "Txn-Token",
-		"context-token-tts-endpoint":     authority.issuerURL + "/token_endpoint",
-		"context-token-tts-audience":     aimockauthority.Audience,
-		"context-token-tts-token-source": "incoming", "context-token-child-scope": authorizationChildScope,
-	})
-	authority.patchArgs(args)
-	authority.connectAPI()
-	DeferCleanup(func() {
-		stopPortForward(authority.apiCancel, authority.apiPF)
-		authority.apiCancel, authority.apiPF = nil, nil
-	})
 	return authority
 }
 
@@ -791,7 +801,7 @@ func (a *aimockAuthorityEval) connectAPI() {
 		stopPortForward(a.apiCancel, a.apiPF)
 	}
 	var err error
-	a.apiURL, a.apiCancel, a.apiPF, err = startControllerAPIPortForward(18128)
+	a.apiURL, a.apiCancel, a.apiPF, err = startControllerAPIPortForward(a.apiPort)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 }
 

@@ -1086,3 +1086,26 @@ func TestPrepareCodexHomeDisablesResponsesWebSockets(t *testing.T) {
 		t.Fatalf("config.toml lacks the update opt-out:\n%s", config)
 	}
 }
+
+func TestPermissionTimeoutFromEnv(t *testing.T) {
+	for _, test := range []struct {
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{value: "", want: 0},
+		{value: "20m", want: 20 * time.Minute},
+		{value: "1h", want: time.Hour},
+		{value: "30s", wantErr: true},
+		{value: "2h", wantErr: true},
+		{value: "soon", wantErr: true},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			t.Setenv(EnvPermissionTimeout, test.value)
+			got, err := permissionTimeoutFromEnv()
+			if (err != nil) != test.wantErr || got != test.want {
+				t.Fatalf("permissionTimeoutFromEnv() = %s, %v; want %s, error %v", got, err, test.want, test.wantErr)
+			}
+		})
+	}
+}

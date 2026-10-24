@@ -37,11 +37,15 @@ type ProviderCapabilities struct {
 	Models                        []string `json:"models,omitempty"`
 	SupportsPermissions           bool     `json:"supportsPermissions"`
 	SupportsBrokeredToolApprovals bool     `json:"supportsBrokeredToolApprovals,omitempty"`
-	SupportsCancel                bool     `json:"supportsCancel"`
-	SupportsTools                 bool     `json:"supportsTools"`
-	SupportsImages                bool     `json:"supportsImages,omitempty"`
-	SupportsAudio                 bool     `json:"supportsAudio,omitempty"`
-	SupportsEmbeddedResources     bool     `json:"supportsEmbeddedResources,omitempty"`
+	// SupportsNativePermissionAsk reports that the runtime can launch a
+	// RuntimeSession in NativePermissionsAsk mode and names each resulting
+	// permission request's native tool from structured fields.
+	SupportsNativePermissionAsk bool `json:"supportsNativePermissionAsk,omitempty"`
+	SupportsCancel              bool `json:"supportsCancel"`
+	SupportsTools               bool `json:"supportsTools"`
+	SupportsImages              bool `json:"supportsImages,omitempty"`
+	SupportsAudio               bool `json:"supportsAudio,omitempty"`
+	SupportsEmbeddedResources   bool `json:"supportsEmbeddedResources,omitempty"`
 }
 
 func (c ProviderCapabilities) Validate() error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,7 +91,16 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, info.ID)
 	require.False(t, info.CanBootstrapSnapshotKey)
-	require.Equal(t, before, applicationRows(t, s.db))
+	// The upgrade also adds the empty Agent Host Protocol tables.
+	after := applicationRows(t, s.db)
+	for table, rows := range after {
+		if _, existed := before[table]; !existed {
+			require.True(t, strings.HasPrefix(table, "ahp_"), table)
+			require.Empty(t, rows, table)
+			delete(after, table)
+		}
+	}
+	require.Equal(t, before, after)
 	var version int
 	require.NoError(t, s.db.QueryRow(`PRAGMA user_version`).Scan(&version))
 	require.Equal(t, SchemaVersion, version)
@@ -247,7 +257,7 @@ func TestDatasetUnbootstrappedDataRequiresExistingKey(t *testing.T) {
 
 func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 	for name, statement := range map[string]string{
-		"newer":               `PRAGMA user_version=2`,
+		"newer":               fmt.Sprintf(`PRAGMA user_version=%d`, SchemaVersion+1),
 		"unknown":             `PRAGMA user_version=2147483647`,
 		"negative":            `PRAGMA user_version=-1`,
 		"version reset":       `PRAGMA user_version=0`,

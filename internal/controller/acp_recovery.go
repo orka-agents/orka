@@ -2091,7 +2091,7 @@ func recoveredTerminalExecutionReasonMessage(
 	case store.PromptExecutionCancelled:
 		state = corev1alpha1.TaskExecutionStateCancelled
 		outcome = corev1alpha1.TaskExecutionOutcomeCancelled
-		defaultReason = "Cancelled"
+		defaultReason = acpTaskCancelledReason
 		defaultMessage = "prompt cancelled"
 	case store.PromptExecutionOutcomeUnknown:
 		state = corev1alpha1.TaskExecutionStateOutcomeUnknown

@@ -16,10 +16,11 @@ Approvals appear in three places:
 | Native autonomous coordinators (`type: ai`) | Custom Tools listed in `coordination.approvalRequiredTools`, and requests the agent makes with `request_approval`. The Task parks until a decision arrives. | [Autonomous tasks](autonomous-tasks.md#human-approvals) |
 | External runtimes, such as AgentKit and Foundry agents | Orka-executed tools in the runtime's `approvalRequiredTools`. The tool call stays open while it waits. | This page |
 | Linked accounts | Every write tool that acts through a person's [connector](connectors.md) | Automatic |
+| Built-in runtimes (Codex, Claude, Copilot, OpenCode) | The runtime's own requests to run a tool, for a Task with `agentRuntime.permissionDecisions: Requester`. The prompt waits while the request is held. | [Permission requests](#permission-requests-from-built-in-runtimes) |
 
 People decide in the Task's **Approvals** tab in the dashboard, with `orka task approve` and
-`orka task decline`, or through the API. The rest of this page covers the external-runtime
-path.
+`orka task decline`, or through the API. Most of this page covers the external-runtime
+path; the last section covers built-in runtimes' permission requests.
 
 ## Approvals for external runtimes
 
@@ -30,7 +31,8 @@ its real result to the waiting agent.
 
 This applies to tools executed by Orka for qualified AgentKit and Foundry
 `orka.harness.v2` runtimes. Runtime-native shell and file permissions are a
-separate capability.
+separate capability; see
+[Permission requests from built-in runtimes](#permission-requests-from-built-in-runtimes).
 
 :::tip[Video demo]
 Watch [Human approval before an agent takes action](https://www.youtube.com/watch?v=KgzcvW1WznE).
@@ -188,3 +190,53 @@ cancellation, and after expiry. Run it for both a direct AgentKit registration
 and an AgentKit agent hosted behind the Foundry bridge. Local deterministic
 model or hosted-process runs prove those transports; Azure-hosted acceptance
 also requires the deployed Foundry gateway and the configured hosted version.
+
+## Permission requests from built-in runtimes
+
+Built-in runtimes ask Orka before they run some tools, and by default Orka answers each
+request from the Task's frozen tool policy. In that default, a runtime runs the shell commands
+and file changes the policy allows without asking. To have a person decide instead, set:
+
+```yaml
+spec:
+  agentRuntime:
+    permissionDecisions: Requester
+```
+
+- Orka then launches the runtime so that it asks before every shell command and every file
+  write or edit the policy allows, including read-only commands. Tools outside the policy
+  stay removed or denied, exactly as in the default. Only the built-in runtimes can be
+  launched this way; a Task that sets `Requester` for an external AgentRuntime is rejected
+  before it runs.
+- Orka names each request from the runtime's structured description of the call, such as
+  its kind and arguments, never from its display title. A request it cannot name is refused.
+- Orka still refuses whatever the policy refuses. A request the policy would allow is held
+  for the Task's requester instead: the approvals list shows it with `kind: permission`,
+  the tool name, the runtime's description of the call and the offered `options`, and the
+  Task reports `WaitingForApproval`.
+- Only the Task's requester may decide it: the person whose verified OIDC or context-token
+  sign-in created the Task, recorded in `spec.requestedBy`. Other reviewers, including
+  ServiceAccounts with `update` on `tasks/approvals`, receive HTTP 403. A Task without a
+  verified requester has every such request refused.
+- `approve` answers the runtime's allow-once option and `decline` its reject-once option.
+  Orka never chooses an "always" option, so every later call asks again.
+- A held request expires ten seconds before the runtime's own permission timeout, or at the
+  Task deadline if that is sooner, and is then refused. The runtime waits five minutes by
+  default; set the controller's `--acp-permission-timeout` (between 1m and 1h) to give people
+  longer. Runtime Pods take the new value when their RuntimePool is replaced.
+- When the prompt ends or is cancelled first, the request is recorded as `cancelled`. A
+  request held when the controller restarts cannot be decided afterwards, because the run
+  it belonged to ended.
+- The setting is part of each Task, not of the runtime profile, so it never moves a Task to
+  another RuntimePool. A Session's runtime session, however, is launched in one mode: when a
+  turn's setting differs from the previous turn's, Orka retires the runtime session and
+  starts a new one from the Session transcript and its verified branch, as it does when the
+  tool policy changes. That turn starts slower and the agent keeps only what the transcript
+  carries. Orka never reuses a runtime session launched in the other mode.
+- How a declined request ends depends on the runtime. Claude Code tells the model and
+  continues. Copilot and OpenCode end the turn; OpenCode also declines its other pending
+  requests. Codex ends the turn as cancelled. Codex runs commands without a terminal in this
+  mode, so input written to an approved command cannot run commands nobody approved, and
+  Claude Code is limited to Orka's native tools.
+- A brokered tool that already requires an approval at the broker is not asked about again
+  at the runtime's prompt.

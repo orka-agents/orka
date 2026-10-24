@@ -143,12 +143,18 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is at prompt capacity", nil, true)
 		return
 	}
+	redactor := s.sessionCredentialRedactor(state)
 	prompt := &promptState{
 		request:              request,
 		operation:            operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now),
 		lease:                request.Lease,
 		startedAt:            now,
 		permissionRequestIDs: make(map[harnessv2.PermissionRequestID]struct{}),
+		live:                 r.Header.Get(harnessv2.LiveUpdatesHeader) == "1",
+		redactor:             redactor,
+		assistantRedaction:   redactor.stream(),
+		thoughtRedaction:     redactor.stream(),
+		rawInputs:            make(map[string]string),
 	}
 	state.prompt = prompt
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
@@ -251,7 +257,11 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		if streamBroken {
 			return
 		}
-		if err := encoder.Encode(event); err != nil {
+		err := prompt.redactor.scrubEvent(&event)
+		if err == nil {
+			err = encoder.Encode(event)
+		}
+		if err != nil {
 			updateKind := ""
 			if event.Update != nil {
 				updateKind = string(event.Update.Kind)
@@ -275,15 +285,15 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		_, _ = runtimeSession.CancelPrompt(context.Background(), string(request.Metadata.PromptID))
 	}
 	mapAndEncode := func(event acp.PromptEvent) {
-		mapped, mapErr := s.mapRuntimeEvent(state, prompt, event)
+		mapped, mapErr := s.mapRuntimeEvents(state, prompt, event)
 		if mapErr != nil {
 			markStreamBroken("event-map", string(event.Type), "", event.Sequence, mapErr)
 			deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
 			_, _ = runtimeSession.CancelPrompt(context.Background(), string(request.Metadata.PromptID))
 			return
 		}
-		if mapped != nil {
-			encodeEvent(*mapped)
+		for _, event := range mapped {
+			encodeEvent(event)
 		}
 	}
 	mapAndEncode(first)
@@ -314,6 +324,10 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 				mapAndEncode(pending)
 			}
 		}
+	}
+	// Text held back for a possible credential prefix ends with the stream.
+	for _, held := range s.flushTextRedaction(state, prompt) {
+		encodeEvent(held)
 	}
 	result := <-run.Result
 	if result.Err != nil {
@@ -919,6 +933,13 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
+	}
+	if !permission.expiresAt.After(now) {
+		// The runtime's own permission timer already answered this request; a
+		// late answer must not reach it and poison the session.
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "permission request expired", nil, false)
+		return
 	}
 	replay := reserveOperationReplayLocked(state, request.Metadata, now)
 	mutations := state.promptMutations
@@ -2109,11 +2130,14 @@ func (s *Server) poisonSession(state *sessionState, _ string) {
 	}
 }
 
-func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event acp.PromptEvent) (*harnessv2.Event, error) {
+// mapRuntimeEvents maps one runtime event to the harness events it produces:
+// usually one, none while a text stream holds back a possible credential
+// prefix or for a notification that maps to nothing, or several when redacted
+// text exceeds one event's bound. Identities are assigned as events are
+// produced.
+func (s *Server) mapRuntimeEvents(state *sessionState, prompt *promptState, event acp.PromptEvent) ([]harnessv2.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prompt.sequence++
-	identity := eventIdentity(s.cfg.Fence, state.descriptor, prompt.request.Metadata, prompt.sequence, event.Timestamp)
 	switch event.Type {
 	case acp.PromptEventAccepted:
 		if state.mcpProxy == nil || state.mcpProxy.markRunning(prompt.request.Metadata.PromptID, event.Timestamp) != nil {
@@ -2124,7 +2148,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		recordPromptAdmissionLocked(state, prompt)
 		state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
 		state.descriptor.LastTransitionAt = event.Timestamp
-		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
+		return []harnessv2.Event{s.identifiedLocked(state, prompt, event.Timestamp, harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1, LiveUpdates: prompt.live,
+		}})}, nil
 	case acp.PromptEventUpdate:
 		var toolPolicy harnessv2.MCPToolPolicy
 		if state.mcpProxy != nil {
@@ -2133,31 +2159,36 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		if err := prompt.rememberToolCallName(event.Update, state.profile.ProviderKind, toolPolicy); err != nil {
 			return nil, err
 		}
-		update, text, ok, err := mapACPUpdate(event.Update)
+		update, text, ok, err := mapACPUpdateWithOptions(event.Update, acpUpdateOptions{
+			live: prompt.live, rawInputs: prompt.rawInputs, exact: prompt.redactor.replace,
+			workspaceRoot: state.paths.Workspace,
+		})
 		if err != nil {
-			prompt.sequence--
 			return nil, err
 		}
 		if text != "" {
 			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
 		}
 		if !ok {
-			prompt.sequence--
+			// A notification that maps to nothing does not end a text stream:
+			// its held text may still complete a credential.
 			return nil, nil
 		}
-		mapped := &harnessv2.Event{
-			Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity, Update: update,
+		if stream, streamed := prompt.textRedaction(update); streamed {
+			return s.textUpdateEventsLocked(state, prompt, update.Kind, stream.write(updateText(update)), event.Timestamp), nil
 		}
-		if err := boundACPToolContentToEventLine(mapped, s.cfg.Capabilities.Limits.MaxEventLineBytes); err != nil {
-			prompt.sequence--
+		prompt.redactUpdate(update)
+		mapped := s.identifiedLocked(state, prompt, event.Timestamp, harnessv2.Event{Type: harnessv2.EventUpdate, Update: update})
+		if err := boundACPToolContentToEventLine(&mapped, s.cfg.Capabilities.Limits.MaxEventLineBytes); err != nil {
 			return nil, err
 		}
-		return mapped, nil
+		return []harnessv2.Event{mapped}, nil
 	case acp.PromptEventPermissionRequested:
 		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), state.profile.ProviderKind)
 		if err != nil {
 			return nil, err
 		}
+		prompt.redactor.redactPermission(permission)
 		name, known := prompt.toolCallNames[permission.ToolCallID]
 		if known {
 			if permission.ToolName != "" && permission.ToolName != name {
@@ -2167,6 +2198,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		if state.mcpProxy != nil {
 			policy := state.mcpProxy.configuration.ToolPolicy
+			if permission.ToolName == "" && !known {
+				permission.ToolName = askPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration, event.Permission.Request.ToolCall)
+			}
 			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, policy, permission.ToolName)
 			if state.profile.ProviderKind == providerKindCodex && !known {
 				if descriptor, allowed := policy.Descriptor(permission.ToolName); allowed && descriptor.Source.Brokered() {
@@ -2195,7 +2229,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			requestID: permission.RequestID, toolCallID: permission.ToolCallID, toolName: permission.ToolName,
 			title: permission.Title, requestedAt: event.Timestamp, expiresAt: permission.ExpiresAt, options: options,
 		}
-		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventPermissionRequested, Identity: identity, PermissionRequested: permission}, nil
+		return []harnessv2.Event{s.identifiedLocked(state, prompt, event.Timestamp, harnessv2.Event{
+			Type: harnessv2.EventPermissionRequested, PermissionRequested: permission,
+		})}, nil
 	default:
 		return nil, fmt.Errorf("unsupported runtime prompt event %q", event.Type)
 	}
@@ -2275,6 +2311,7 @@ func (s *Server) buildTerminalEventLocked(
 	switch result.Outcome {
 	case acp.PromptOutcomeCompleted:
 		text, _ := prompt.terminalResultText()
+		text = prompt.redactor.replace(text)
 		if strings.TrimSpace(text) == "" {
 			text = "Prompt completed without textual output."
 		}
@@ -2313,7 +2350,7 @@ func (s *Server) buildTerminalEventLocked(
 		event.Failed = &harnessv2.FailedEvent{
 			StopReason: failedEventStopReason(result.StopReason),
 			Code:       code,
-			Message:    message,
+			Message:    prompt.redactor.replace(message),
 			Retryable:  false,
 		}
 	}

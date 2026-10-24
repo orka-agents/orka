@@ -36,12 +36,13 @@ Object counts alone do not establish compatibility.
 
 | Source layout | Representative revision | Transition |
 | --- | --- | --- |
-| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
-| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
-| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables and add dataset metadata. |
-| 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata. |
-| 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata. |
-| 159 objects (current), schema version 1 | Dataset identity layout | Validate schema, version and identity; no migration or automatic backup. |
+| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes, then remove the empty harness v1 tables, add dataset metadata and add the empty Agent Host Protocol tables. |
+| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes, then remove the empty harness v1 tables, add dataset metadata and add the empty Agent Host Protocol tables. |
+| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables, add dataset metadata and add the empty Agent Host Protocol tables. |
+| 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata and the empty Agent Host Protocol tables. |
+| 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata and the empty Agent Host Protocol tables. |
+| 159 objects, schema version 1 | [`282e6c3d`](https://github.com/orka-agents/orka/commit/282e6c3d07185a8a90b2b1da5b41bd40d147467e), #863 | Add the empty Agent Host Protocol tables and indexes, keep the dataset identity as it is, and record schema version 2. |
+| 168 objects (current), schema version 2 | Agent Host Protocol layout | Validate schema, version and identity; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
@@ -49,14 +50,15 @@ lineages. If either table holds records, or a Session lineage uses
 `harness v1 ... records`; that store belongs to an unsupported harness v1
 installation.
 
-The five historical source layouts have SQLite `user_version = 0`. A nonzero
-marker on an otherwise historical layout is refused rather than adopted.
+The five historical layouts without dataset metadata have SQLite
+`user_version = 0`, and the dataset identity layout has `user_version = 1`. A
+version marker on any other layout is refused rather than adopted.
 
 ### Dataset identity and key bootstrap
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 1` records this metadata layout; the controller also checks
+`PRAGMA user_version = 2` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 

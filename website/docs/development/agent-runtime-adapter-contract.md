@@ -137,6 +137,23 @@ and deletion revoke the authority and cancel in-flight calls. Consequential
 calls reserve a durable `ExternalEffect` identity and may replay only a
 committed matching response.
 
+## Native permission launch mode
+
+The MCP policy configuration in a RuntimeSession create carries
+`nativePermissions`. Omitted, the runtime may launch the provider with the
+policy's native grants pre-approved. `ask` requires the provider to send an ACP
+permission request before every policy-allowed native tool that acts, which
+means shell commands and file writes or edits, and to name each request's
+native tool from structured fields only. Tools outside the policy stay excluded
+exactly as in the pre-approved mode. A runtime that can launch this way
+advertises `provider.supportsNativePermissionAsk`; the controller sends `ask`
+only to such a runtime, and a supervisor rejects `ask` it cannot honor. The
+value is part of the session's launch configuration: every prompt's
+`mcpAuthorization.nativePermissions` must equal it, and the controller binds
+it into the RuntimeSession identity, so a change recreates the session rather
+than reusing a provider launched the other way. Only the built-in runtimes
+advertise it; Tasks that need it are rejected for external runtimes.
+
 ## Brokered tool approvals
 
 Qualified AgentKit and Foundry adapters advertise

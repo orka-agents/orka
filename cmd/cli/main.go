@@ -60,6 +60,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newDashboardCmd())
 	cmd.AddCommand(newConnectCmd())
 	cmd.AddCommand(newConnectionCmd())
+	cmd.AddCommand(newAHPCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newConfigCmd())
 	cmd.AddCommand(newAgentCmd())

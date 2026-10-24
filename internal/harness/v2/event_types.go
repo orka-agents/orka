@@ -3,6 +3,8 @@ package v2
 import (
 	"encoding/json"
 	"fmt"
+	"path"
+	"strings"
 	"time"
 )
 
@@ -136,6 +138,11 @@ type AcceptedEvent struct {
 	AcceptedAt time.Time   `json:"acceptedAt"`
 	Lease      PromptLease `json:"lease"`
 	ACPVersion string      `json:"acpVersion"`
+	// LiveUpdates confirms that the runtime honors the LiveUpdatesHeader for
+	// this prompt: it streams the live-update kinds and fields and redacts
+	// every event's content before it leaves the runtime. A consumer must not
+	// show a prompt's content live without it.
+	LiveUpdates bool `json:"liveUpdates,omitempty"`
 }
 
 func (e AcceptedEvent) Validate() error {
@@ -150,8 +157,20 @@ func (e AcceptedEvent) Validate() error {
 
 type UpdateKind string
 
+// LiveUpdatesHeader, set to "1" on a start-prompt request, asks the runtime
+// to stream the live-update kinds and fields: assistant thoughts and a tool
+// call's name, raw input and file edits. A runtime that does not know the
+// header ignores it and streams the base kinds, and a runtime never sends
+// live updates to a client that did not ask, so neither side's strict
+// decoding meets fields it does not know. A runtime that honors the header
+// confirms it with AcceptedEvent.LiveUpdates.
+const LiveUpdatesHeader = "X-Orka-Live-Updates"
+
 const (
 	UpdateAssistantMessageChunk UpdateKind = "assistant_message_chunk"
+	// UpdateAssistantThoughtChunk carries the agent's reasoning. A supervisor
+	// sends it only to a controller that asked for live updates.
+	UpdateAssistantThoughtChunk UpdateKind = "assistant_thought_chunk"
 	UpdateToolCall              UpdateKind = "tool_call"
 	UpdateToolCallUpdate        UpdateKind = "tool_call_update"
 	UpdatePlan                  UpdateKind = "plan"
@@ -183,6 +202,93 @@ type ToolCallUpdate struct {
 	// intentionally omitted to satisfy a transport bound. Receivers must retain
 	// truncation state instead of treating the missing content as complete.
 	ContentOmitted bool `json:"contentOmitted,omitempty"`
+	// Name, RawInput and Diffs are live-update fields, sent only to a
+	// controller that asked for them. Name is the tool's own identity when the
+	// adapter reports one; Title stays the display text.
+	Name string `json:"name,omitempty"`
+	// RawInput is the tool's input as a JSON value, redacted.
+	RawInput json.RawMessage `json:"rawInput,omitempty"`
+	// Diffs are the file edits the tool reports, redacted.
+	Diffs []ToolCallDiff `json:"diffs,omitempty"`
+	// DiffsOmitted reports that one or more of the tool's file edits were not
+	// sent: outside the workspace, or over the update bound. Text content is
+	// unaffected.
+	DiffsOmitted bool `json:"diffsOmitted,omitempty"`
+}
+
+// ToolCallDiff is one file edit a tool reports.
+type ToolCallDiff struct {
+	// Path is the file's path relative to the runtime session's workspace
+	// root, in canonical slash form with no ".." segments.
+	Path string `json:"path"`
+	// OldText is the file's previous content; nil for a new file.
+	OldText *string `json:"oldText,omitempty"`
+	NewText string  `json:"newText"`
+}
+
+const (
+	// MaxToolCallRawInputBytes bounds a tool call's raw input.
+	MaxToolCallRawInputBytes = 16 << 10
+	// MaxToolCallDiffs bounds the file edits in one tool call update.
+	MaxToolCallDiffs = 16
+	// MaxToolCallDiffBytes bounds the text of all edits in one update.
+	MaxToolCallDiffBytes = 256 << 10
+)
+
+// ValidateWorkspaceRelativePath checks a file path relative to a workspace
+// root: required, bounded, canonical slash form, not absolute, no NUL and no
+// ".." segments.
+func ValidateWorkspaceRelativePath(value string) error {
+	if err := validateBoundedString("workspace path", value, true, MaxResourceURIBytes); err != nil {
+		return err
+	}
+	if strings.ContainsRune(value, 0) {
+		return fmt.Errorf("workspace path must not contain NUL")
+	}
+	if strings.HasPrefix(value, "/") {
+		return fmt.Errorf("workspace path must be relative")
+	}
+	if value == "." || value == ".." || strings.HasPrefix(value, "../") || path.Clean(value) != value {
+		return fmt.Errorf("workspace path must be canonical and stay inside the workspace")
+	}
+	return nil
+}
+
+func validateToolCallLiveFields(u ToolCallUpdate) error {
+	if err := validateBoundedString("tool call name", u.Name, false, 253); err != nil {
+		return err
+	}
+	if len(u.RawInput) > 0 {
+		if len(u.RawInput) > MaxToolCallRawInputBytes {
+			return fmt.Errorf("tool call raw input exceeds %d bytes", MaxToolCallRawInputBytes)
+		}
+		if !json.Valid(u.RawInput) {
+			return fmt.Errorf("tool call raw input must be JSON")
+		}
+	}
+	if len(u.Diffs) > MaxToolCallDiffs {
+		return fmt.Errorf("tool call diff count exceeds %d", MaxToolCallDiffs)
+	}
+	total := 0
+	for i, diff := range u.Diffs {
+		if err := ValidateWorkspaceRelativePath(diff.Path); err != nil {
+			return fmt.Errorf("tool call diff %d: %w", i, err)
+		}
+		old := ""
+		if diff.OldText != nil {
+			old = *diff.OldText
+		}
+		for _, text := range []string{old, diff.NewText} {
+			if err := validateBoundedString("tool call diff text", text, false, MaxToolCallDiffBytes); err != nil {
+				return fmt.Errorf("tool call diff %d: %w", i, err)
+			}
+			total += len(text)
+		}
+	}
+	if total > MaxToolCallDiffBytes {
+		return fmt.Errorf("tool call diffs exceed %d bytes", MaxToolCallDiffBytes)
+	}
+	return nil
 }
 
 func (u ToolCallUpdate) Validate() error {
@@ -211,7 +317,7 @@ func (u ToolCallUpdate) Validate() error {
 			return fmt.Errorf("tool call content block %d: %w", i, err)
 		}
 	}
-	return nil
+	return validateToolCallLiveFields(u)
 }
 
 type PlanEntryStatus string
@@ -311,6 +417,7 @@ func (u DiagnosticUpdate) Validate() error {
 type UpdateEvent struct {
 	Kind             UpdateKind             `json:"kind"`
 	AssistantMessage *AssistantMessageChunk `json:"assistantMessage,omitempty"`
+	AssistantThought *AssistantMessageChunk `json:"assistantThought,omitempty"`
 	ToolCall         *ToolCallUpdate        `json:"toolCall,omitempty"`
 	Plan             *PlanUpdate            `json:"plan,omitempty"`
 	Usage            *UsageUpdate           `json:"usage,omitempty"`
@@ -318,7 +425,8 @@ type UpdateEvent struct {
 }
 
 func (e UpdateEvent) Validate() error {
-	if !exactlyOne(e.AssistantMessage != nil, e.ToolCall != nil, e.Plan != nil, e.Usage != nil, e.Diagnostic != nil) {
+	if !exactlyOne(e.AssistantMessage != nil, e.AssistantThought != nil, e.ToolCall != nil, e.Plan != nil,
+		e.Usage != nil, e.Diagnostic != nil) {
 		return fmt.Errorf("update event must carry exactly one typed payload")
 	}
 	switch e.Kind {
@@ -330,6 +438,11 @@ func (e UpdateEvent) Validate() error {
 			return fmt.Errorf("assistant message chunk is required")
 		}
 		return validateBoundedString("assistant message chunk", e.AssistantMessage.Text, false, MaxProtocolStringBytes)
+	case UpdateAssistantThoughtChunk:
+		if e.AssistantThought == nil || e.AssistantThought.Text == "" {
+			return fmt.Errorf("assistant thought update requires a non-empty assistantThought payload")
+		}
+		return validateBoundedString("assistant thought chunk", e.AssistantThought.Text, false, MaxProtocolStringBytes)
 	case UpdateToolCall, UpdateToolCallUpdate:
 		if e.ToolCall == nil {
 			return fmt.Errorf("tool call update requires toolCall payload")

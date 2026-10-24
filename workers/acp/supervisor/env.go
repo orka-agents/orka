@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/orka-agents/orka/internal/acp"
@@ -97,6 +98,7 @@ const (
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
 	openCodePermissionAllow     = "allow"
+	openCodePermissionAsk       = "ask"
 	openCodePermissionDeny      = "deny"
 	openCodeRootInstructionPath = "/opt/opencode/AGENTS.md"
 
@@ -128,6 +130,10 @@ const (
 	defaultWorkspaceArtifactDownloadBytes int64 = artifactcap.DefaultWorkspaceArtifactMaxBytes
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
+
+// EnvPermissionTimeout is how long a runtime waits for the answer to a
+// permission request, as a Go duration. Empty keeps the default.
+const EnvPermissionTimeout = "ORKA_ACP_PERMISSION_TIMEOUT"
 
 // EnvBrokeredToolApprovalProfileDigest opts an operator-qualified, immutable
 // runtime profile into brokered approvals. Provider identity alone is not proof
@@ -311,6 +317,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	permissionTimeout, err := permissionTimeoutFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	bootID := strings.TrimSpace(os.Getenv(EnvSupervisorBootID))
 	if bootID == "" {
 		bootID = uuid.NewString()
@@ -355,6 +365,7 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
+		PermissionTimeout:             permissionTimeout,
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -380,6 +391,13 @@ func providerAdapterDigests(provider string) map[string]string {
 // externalSandbox policy keeps the runtime Pod as the enforcement boundary.
 const codexAgentModeOrkaExternal = "orka-external"
 
+// codexAgentModeOrkaExternalAsk is the Orka-patched agent mode an ask session
+// launches: the same external sandbox under Codex's untrusted approval policy.
+const codexAgentModeOrkaExternalAsk = "orka-external-ask"
+
+// codexAskApprovalPolicy is the approval policy of the asking agent mode.
+const codexAskApprovalPolicy = "untrusted"
+
 var providerNativeToolNames = []string{
 	providerToolBash, providerToolEdit, providerToolGlob, providerToolGrep,
 	providerToolRead, providerToolWebFetch, providerToolWebSearch, providerToolWrite,
@@ -393,6 +411,20 @@ type providerNativePolicy struct {
 func (p providerNativePolicy) allows(name string) bool {
 	_, ok := p.allowed[name]
 	return ok
+}
+
+// grants reports whether the frozen policy lets the provider run one Orka
+// native tool; an unrestricted policy grants every one of them.
+func (p providerNativePolicy) grants(name string) bool {
+	return p.unrestricted || p.allows(name)
+}
+
+// nativePermissionsAsk reports whether the session must be launched so the
+// provider asks before each policy-allowed native tool that acts. The mode
+// changes only how those tools launch: a policy that allows none of them
+// launches exactly as in the pre-approved mode.
+func nativePermissionsAsk(request harnessv2.CreateRuntimeSessionRequest) bool {
+	return request.MCPConfiguration.NativePermissions == harnessv2.NativePermissionsAsk
 }
 
 func providerSessionPolicy(
@@ -413,7 +445,12 @@ func providerSessionPolicy(
 		request.Profile.Model != model || request.AgentConfiguration.Model != model {
 		return providerNativePolicy{}, fmt.Errorf("provider session configuration does not match runtime profile")
 	}
-	toolPolicy := request.MCPConfiguration.ToolPolicy
+	return nativePolicyFor(provider, request.MCPConfiguration.ToolPolicy)
+}
+
+// nativePolicyFor reads the native grants of one frozen tool policy the way
+// the provider's session projection launches them.
+func nativePolicyFor(provider string, toolPolicy harnessv2.MCPToolPolicy) (providerNativePolicy, error) {
 	unrestricted := toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash
 	if provider == providerKindCodex || provider == providerKindCopilot {
 		unrestricted = acp.BuiltInRuntimeNativePolicyUnrestricted(provider, toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
@@ -448,7 +485,7 @@ func providerNativePolicyLists(policy providerNativePolicy) ([]string, []string)
 	allowed := make([]string, 0, len(providerNativeToolNames))
 	disallowed := make([]string, 0, len(providerNativeToolNames))
 	for _, name := range providerNativeToolNames {
-		if policy.allows(name) {
+		if policy.grants(name) {
 			allowed = append(allowed, name)
 		} else {
 			disallowed = append(disallowed, name)
@@ -470,6 +507,7 @@ func codexSessionProjection(
 	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) {
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
+	ask := nativePermissionsAsk(request) && codexLaunchesAsk(policy)
 	config := codexBaseConfig(model, proxy.BaseURL)
 	if request.NativeRestore != nil {
 		// Do not inherit imported approval or sandbox settings during resume.
@@ -477,6 +515,9 @@ func codexSessionProjection(
 		// explicitly applies the orka-external agent mode's externalSandbox;
 		// the RuntimeSession boundary, not this fallback, governs workspace writes.
 		config["approval_policy"] = "on-request"
+		if ask {
+			config["approval_policy"] = codexAskApprovalPolicy
+		}
 		config["sandbox_mode"] = "read-only"
 	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -484,6 +525,12 @@ func codexSessionProjection(
 	}
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		config["model_reasoning_effort"] = effort
+	}
+	if ask {
+		// Without a TTY a command's stdin is closed, so input written to an
+		// approved process (write_stdin) cannot run further commands that
+		// were never asked about (verified with Codex 0.160.0).
+		config["features"] = map[string]any{"unified_exec_tty": false}
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
@@ -500,7 +547,17 @@ func codexSessionProjection(
 	// unconditionally by the controller, the supervisor owns the read-intent
 	// workspace so shell writes fail with EACCES, and the read-intent
 	// workspace delta classification fails any turn that modifies it anyway.
-	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
+	projection := ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}
+	if ask {
+		// The asking agent mode keeps the external sandbox but applies
+		// Codex's untrusted approval policy to every turn, so Codex asks
+		// before each command and each file change. An adapter without the
+		// mode would silently start in its default mode, so the session must
+		// report the mode as current or creation fails.
+		projection.Environment["INITIAL_AGENT_MODE"] = codexAgentModeOrkaExternalAsk
+		projection.RequiredModeID = codexAgentModeOrkaExternalAsk
+	}
+	return projection, nil
 }
 
 // codexBaseConfig is the Codex configuration every session starts from. The
@@ -574,10 +631,22 @@ func claudeSessionProjection(
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
-	if !policy.unrestricted {
+	ask := nativePermissionsAsk(request)
+	if !policy.unrestricted || ask {
+		// An ask session always names its tools: Claude Code's default
+		// preset also offers tools outside Orka's native tool model, some of
+		// which act without asking.
 		allowed, disallowed := providerNativePolicyLists(policy)
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
+	}
+	if ask {
+		// Claude Code (verified through 2.1.293) runs read-only Bash commands
+		// without asking in its default permission mode. A tool-wide ask rule
+		// makes it ask before every call of each acting tool, and it still
+		// asks when workspace settings set bypassPermissions, add allow rules,
+		// or a hook allows the call. It offers only allow-once and reject-once.
+		options["settings"] = map[string]any{"permissions": map[string]any{"ask": claudeAskTools}}
 	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -585,6 +654,10 @@ func claudeSessionProjection(
 	}
 	return ProviderSessionProjection{Environment: environment, NewSessionMeta: meta}, nil
 }
+
+// claudeAskTools are the acting native tools an ask session's rule covers.
+// A rule for a tool the session does not offer has no effect.
+var claudeAskTools = []string{providerToolBash, providerToolEdit, providerToolWrite}
 
 var copilotToolIDs = map[string][]string{
 	providerToolBash:      {openCodeToolBash, "list_bash", "read_bash", "stop_bash", "write_bash"},
@@ -644,12 +717,18 @@ func copilotSessionProjection(
 	// Copilot 1.0.96 supplies display titles, not structured tool names, in
 	// permission requests. Project the frozen native grants into CLI permission
 	// rules instead of treating those titles as authority. Exclusions above
-	// still remove every native tool outside the effective policy.
-	if policy.unrestricted || policy.allows(providerToolBash) {
-		args = append(args, "--allow-tool=shell")
-	}
-	if policy.unrestricted || policy.allows(providerToolEdit) || policy.allows(providerToolWrite) {
-		args = append(args, "--allow-tool=write")
+	// still remove every native tool outside the effective policy. An ask
+	// session leaves both rules out, so the CLI asks before every shell
+	// command and file write; copilotAskPermissionToolName then names each
+	// request from its structured kind, which only one tool group the launch
+	// kept can produce.
+	if !nativePermissionsAsk(request) {
+		if policy.grants(providerToolBash) {
+			args = append(args, "--allow-tool=shell")
+		}
+		if policy.grants(providerToolEdit) || policy.grants(providerToolWrite) {
+			args = append(args, "--allow-tool=write")
+		}
 	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
 		if descriptor.Source.Brokered() {
@@ -906,16 +985,27 @@ func openCodeSessionConfig(
 		"webfetch":           openCodePermissionDeny,
 		"websearch":          openCodePermissionDeny,
 	}
+	// An ask session asks before every policy-allowed shell command and file
+	// mutation. OpenCode (verified through 1.19.0) asks for bash even for
+	// read-only commands, and asks for write, edit and apply_patch under the
+	// single edit permission.
+	actingAction := openCodePermissionAllow
+	if nativePermissionsAsk(request) {
+		actingAction = openCodePermissionAsk
+	}
 	for _, permission := range []string{openCodeToolBash, openCodeToolGlob, openCodeToolGrep, "read"} {
-		if openCodeToolPolicyAllows(toolPolicy, permission) {
-			permissions[permission] = openCodePermissionAllow
-		} else {
+		switch {
+		case !openCodeToolPolicyAllows(toolPolicy, permission):
 			permissions[permission] = openCodePermissionDeny
+		case permission == openCodeToolBash:
+			permissions[permission] = actingAction
+		default:
+			permissions[permission] = openCodePermissionAllow
 		}
 	}
 	mutationAction := openCodePermissionDeny
 	if openCodeMutationPolicyAllows(toolPolicy) {
-		mutationAction = openCodePermissionAllow
+		mutationAction = actingAction
 	}
 	for _, permission := range []string{openCodeToolApplyPatch, openCodeToolEdit, openCodeToolWrite} {
 		permissions[permission] = mutationAction
@@ -1120,6 +1210,21 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
 		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+func permissionTimeoutFromEnv() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvPermissionTimeout))
+	if raw == "" {
+		return 0, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration", EnvPermissionTimeout)
+	}
+	if err := acp.ValidatePermissionTimeout(timeout); err != nil {
+		return 0, fmt.Errorf("%s: %w", EnvPermissionTimeout, err)
+	}
+	return timeout, nil
 }
 
 func nativeSessionMaxBytesFromEnv() (int, error) {

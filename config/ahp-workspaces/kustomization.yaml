@@ -1,0 +1,11 @@
+# Opt-in namespace for AHP workspaces. Apply after the controller install and
+# before starting the controller with --ahp-workspace-image. Each AHP user gets
+# one Pod here: git checkouts of their projects and sessions, and their
+# terminals. The Pods hold no credentials and accept no inbound traffic.
+# Helm installs render the same objects with controller.ahp.workspaceImage.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - networkpolicy.yaml

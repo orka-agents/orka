@@ -54,7 +54,9 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -66,6 +68,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
@@ -260,6 +263,10 @@ func main() {
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
 	var connectorsEnabled bool
+	var ahpAPIEnabled bool
+	var ahpTokenMaxTTL time.Duration
+	var ahpBackendConfig api.AHPBackendConfig
+	var ahpWorkspaceConnectorProvider string
 	var dashboardEnabled bool
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
@@ -289,6 +296,7 @@ func main() {
 	var claimNamespaceModeEnabled bool
 	var executionModeControllerUsernames string
 	var acpIdlePoolTTL time.Duration
+	var acpPermissionTimeout time.Duration
 	var acpCodexRuntimeImage string
 	var acpClaudeRuntimeImage string
 	var acpCopilotRuntimeImage string
@@ -464,6 +472,25 @@ func main() {
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.BoolVar(&ahpAPIEnabled, "enable-ahp-api", envBool("ORKA_ENABLE_AHP_API"),
+		"Serve the Agent Host Protocol at /ahp and the AHP connection token routes, offering Orka's built-in runtimes as AHP agents.")
+	flag.DurationVar(&ahpTokenMaxTTL, "ahp-token-max-ttl", ahphost.DefaultMaxTokenTTL,
+		"Longest lifetime an AHP connection token may be minted with.")
+	flag.StringVar(&ahpBackendConfig.GitCredentialSecret, "ahp-git-credential-secret", os.Getenv("ORKA_AHP_GIT_CREDENTIAL_SECRET"),
+		"Secret in each AHP user's namespace whose token key clones and publishes their github.com repositories; it is never sent to another host. Without it, AHP sessions clone public repositories read-only.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceClass, "ahp-workspace-class", os.Getenv("ORKA_AHP_WORKSPACE_CLASS"),
+		"ExecutionWorkspaceClass for session-scoped AHP workspaces, so a session's files stay warm between turns. Empty publishes each write turn and starts the next from it.")
+	flag.DurationVar(&ahpBackendConfig.TurnTimeout, "ahp-turn-timeout", 2*time.Hour,
+		"Timeout of each AHP turn's Task.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceNamespace, "ahp-workspace-namespace",
+		envutil.String("ORKA_AHP_WORKSPACE_NAMESPACE", "orka-ahp-workspaces"),
+		"Namespace for AHP users' workspace Pods: git checkouts of their projects and sessions, and their terminals.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceImage, "ahp-workspace-image", os.Getenv("ORKA_AHP_WORKSPACE_IMAGE"),
+		"Digest-pinned image with sh and git for AHP workspaces. Empty disables workspaces and terminals.")
+	flag.DurationVar(&ahpBackendConfig.WorkspaceIdleTimeout, "ahp-workspace-idle-timeout", 4*time.Hour,
+		"Remove an AHP workspace this long after its last use when no shell or turn runs and nothing in it is unpushed. Zero keeps workspaces until their user's last session ends.")
+	flag.StringVar(&ahpWorkspaceConnectorProvider, "ahp-workspace-connector-provider", os.Getenv("ORKA_AHP_WORKSPACE_CONNECTOR_PROVIDER"),
+		"ConnectorProvider, in each user's namespace, whose github.com links give that user's AHP workspace read access to their private repositories. Requires --connectors-enabled. Empty keeps workspaces to public repositories.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
@@ -522,6 +549,9 @@ func main() {
 		"Maximum active tasks per namespace (0 = unlimited).")
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
+	flag.DurationVar(&acpPermissionTimeout, "acp-permission-timeout", envDurationDefault("ORKA_ACP_PERMISSION_TIMEOUT", 0),
+		"How long an ACP runtime waits for the answer to a permission request, between 1m and 1h. "+
+			"Tasks whose requester decides permission requests get at most this long to answer. Zero keeps the 5m default.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
 		"Codex ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpClaudeRuntimeImage, "acp-claude-runtime-image", os.Getenv("ORKA_ACP_CLAUDE_RUNTIME_IMAGE"),
@@ -1345,17 +1375,30 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if strings.TrimSpace(ahpWorkspaceConnectorProvider) != "" && !connectorsEnabled {
+		setupLog.Error(nil, "--ahp-workspace-connector-provider requires --connectors-enabled")
+		os.Exit(1)
+	}
 	// chatLinkedAccounts lets chat and the compatibility proxies run the
 	// GitHub built-ins as the signed-in person; nil until connectors exist.
 	var chatLinkedAccounts api.LinkedAccountsFactory
 	if connectorsEnabled {
 		// Connection-mode outbound access resolves a person's credential only
 		// here, in the controller. Worker Pods keep a nil source and fail closed.
-		outboundAccessResolver.Connections = &credential.Source{
+		connectionSource := &credential.Source{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
 			Credentials: sqliteStore,
 			OAuth:       connectorOAuthClient,
+		}
+		outboundAccessResolver.Connections = connectionSource
+		if provider := strings.TrimSpace(ahpWorkspaceConnectorProvider); provider != "" {
+			// A person's workspace reads their repositories with their own
+			// linked account, and only from github.com.
+			ahpBackendConfig.RepositoryCredential = func(ctx context.Context, namespace, issuer, subject string) (string, error) {
+				linked, err := connectionSource.ResolveGitHubPersonCredential(ctx, namespace, provider, issuer, subject, api.AHPWorkspaceTokenHorizon)
+				return linked.AccessToken, err
+			}
 		}
 		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
 			// Fresh point reads from the API server; namespace-wide scans
@@ -1385,6 +1428,8 @@ func main() {
 	acpAdmissionGate := controller.NewACPAdmissionGate()
 	sessionManager := controller.NewSessionManager(sqliteStore)
 	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
+	// The ACP dispatcher publishes running Tasks' events here for in-process consumers.
+	liveEvents := liveevents.NewBroker(0)
 
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
@@ -1546,6 +1591,13 @@ func main() {
 	runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 	runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
 	runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
+	if acpPermissionTimeout != 0 {
+		if err := acp.ValidatePermissionTimeout(acpPermissionTimeout); err != nil {
+			setupLog.Error(err, "invalid --acp-permission-timeout")
+			os.Exit(1)
+		}
+		runtimePoolReconciler.PermissionTimeout = acpPermissionTimeout
+	}
 	runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 		BaseURL:         acpProviderProxyBaseURL,
 		Namespace:       acpProviderProxyNamespace,
@@ -1653,6 +1705,7 @@ func main() {
 		IdlePoolTTL:          acpIdlePoolTTL,
 		MCPRegistry:          acpMCPRegistry,
 		PromptLeases:         acpPromptLeases,
+		LiveEvents:           liveEvents,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
@@ -1964,19 +2017,40 @@ func main() {
 		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
 		connectorToolEffects = kubeControlStore
 	}
+	oidcConfig := api.OIDCConfig{
+		Issuer:          oidcIssuer,
+		Audience:        oidcAudience,
+		JWKSURL:         oidcJWKSURL,
+		AllowedSubjects: splitCommaList(oidcAllowedSubjects),
+		Namespace:       oidcNamespace,
+	}
+	var ahpHost *ahphost.Host
+	if ahpAPIEnabled {
+		if err := validateAHPSignIn(oidcConfig); err != nil {
+			setupLog.Error(err, "invalid AHP configuration")
+			os.Exit(1)
+		}
+		if err := validateAHPWorkspace(ahpBackendConfig, watchNamespace, controlNamespace); err != nil {
+			setupLog.Error(err, "invalid AHP workspace configuration")
+			os.Exit(1)
+		}
+		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL, api.AHPTokenOwnerCheck(oidcConfig))
+		if err != nil {
+			setupLog.Error(err, "unable to set up the AHP host")
+			os.Exit(1)
+		}
+		if err := mgr.Add(ahpHost); err != nil {
+			setupLog.Error(err, "unable to add the AHP host")
+			os.Exit(1)
+		}
+	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
 		NativeSessionMaxBytes:     nativeSessionMaxBytes,
 		WatchNamespace:            watchNamespace,
 		ExecutionMode:             mode,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
-		OIDC: api.OIDCConfig{
-			Issuer:          oidcIssuer,
-			Audience:        oidcAudience,
-			JWKSURL:         oidcJWKSURL,
-			AllowedSubjects: splitCommaList(oidcAllowedSubjects),
-			Namespace:       oidcNamespace,
-		},
+		OIDC:                      oidcConfig,
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
 		ResultStore:               sqliteStore,
@@ -1992,6 +2066,7 @@ func main() {
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
 		ExecutionEventStore:       sqliteStore,
+		LiveEvents:                liveEvents,
 		GatewayEventStore:         sqliteStore,
 		GatewayDeliveryStore:      sqliteStore,
 		GatewayService:            gatewayService,
@@ -2002,6 +2077,9 @@ func main() {
 		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Connectors:                connectorConfig,
+		AHP:                       ahpHost,
+		AHPBackend:                ahpBackendFor(ahpHost, ahpBackendConfig),
+		RESTConfig:                mgr.GetConfig(),
 		ConnectorTools: api.ConnectorToolExecutionConfig{
 			Enabled:                          connectorsEnabled,
 			OutboundAccess:                   outboundAccessResolver,

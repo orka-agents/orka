@@ -4,6 +4,7 @@
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
+{{- include "orka.validateAHP" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -181,6 +182,31 @@ spec:
             {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
+            {{- end }}
+            {{- if include "orka.ahpEnabled" . }}
+            {{- with .Values.controller.ahp }}
+            - --enable-ahp-api=true
+            {{- if .tokenMaxTTL }}
+            - {{ printf "--ahp-token-max-ttl=%s" (toString .tokenMaxTTL) | quote }}
+            {{- end }}
+            {{- if .turnTimeout }}
+            - {{ printf "--ahp-turn-timeout=%s" (toString .turnTimeout) | quote }}
+            {{- end }}
+            {{- if .gitCredentialSecret }}
+            - {{ printf "--ahp-git-credential-secret=%s" .gitCredentialSecret | quote }}
+            {{- end }}
+            {{- if .workspaceClass }}
+            - {{ printf "--ahp-workspace-class=%s" .workspaceClass | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if include "orka.ahpWorkspacesEnabled" . }}
+            - {{ printf "--ahp-workspace-namespace=%s" (include "orka.ahpWorkspaceNamespace" .) | quote }}
+            - {{ printf "--ahp-workspace-image=%s" (include "orka.ahpWorkspaceImage" .) | quote }}
+            - {{ printf "--ahp-workspace-idle-timeout=%s" (toString .Values.controller.ahp.workspaceIdleTimeout) | quote }}
+            {{- if .Values.controller.ahp.workspaceConnectorProvider }}
+            - {{ printf "--ahp-workspace-connector-provider=%s" .Values.controller.ahp.workspaceConnectorProvider | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}

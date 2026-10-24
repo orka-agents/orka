@@ -8,14 +8,18 @@ artifact store, with one active controller.
 ## Dataset metadata
 
 `store_dataset` contains exactly one canonical, nonzero UUID, an origin (`new` or
-`adopted`), and a bootstrap-completion flag. `PRAGMA user_version = 1` identifies
-this metadata layout. Opening a database still validates every table and index
+`adopted`), and a bootstrap-completion flag. `PRAGMA user_version` identifies the
+metadata layout: 1 for the dataset identity layout, 2 once the Agent Host Protocol
+tables are added. Opening a database still validates every table and index
 definition: a version marker alone cannot establish compatibility.
 
 Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
-process lock and one `BEGIN IMMEDIATE` transaction. The final 167-to-168 transition
-adds the metadata table and records an adopted identity. Missing or malformed
+process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition adds
+the metadata table and records an adopted identity; the 168-to-169 transition adds
+the empty Agent Host Protocol tables. A schema version 1 store takes only the
+168-to-169 transition, keeps its identity row unchanged and adds no rows, so its
+key-bootstrap decision is the same afterwards. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy

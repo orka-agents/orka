@@ -818,6 +818,19 @@ const (
 	AgentRuntimeOpencode AgentRuntimeType = "opencode"
 )
 
+// PermissionDecisionMode selects who answers an agent's permission requests.
+// +kubebuilder:validation:Enum=Policy;Requester
+type PermissionDecisionMode string
+
+const (
+	// PermissionDecisionsPolicy answers every permission request from the
+	// frozen tool policy.
+	PermissionDecisionsPolicy PermissionDecisionMode = "Policy"
+	// PermissionDecisionsRequester holds each permission request the frozen
+	// tool policy would allow for the Task's verified requester to decide.
+	PermissionDecisionsRequester PermissionDecisionMode = "Requester"
+)
+
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.
 // Runtime type and credentials come from the referenced Agent CRD.
 // Unknown fields reach admission so removed fields are rejected.
@@ -840,16 +853,32 @@ type AgentRuntimeSpec struct {
 	// AllowBash enables the agent to run bash commands (overrides Agent default)
 	// +optional
 	AllowBash *bool `json:"allowBash,omitempty"`
+
+	// PermissionDecisions selects who answers the permission requests an ACP
+	// runtime sends before running a tool. Policy, the default, answers each
+	// request from the frozen tool policy, and built-in runtimes run the native
+	// tools that policy allows without asking. Requester launches the built-in
+	// runtime so it asks before every shell command and file change the policy
+	// allows; it still refuses what that policy refuses, but holds every request
+	// it would allow for the Task's verified requester to approve or decline
+	// through the Task approvals API. A request nobody answers before it expires
+	// is refused. Requester requires a built-in runtime on the harness v2 path;
+	// other Tasks are rejected. It never enters the runtime profile, but a
+	// Session's runtime session is launched in one mode: a turn with the other
+	// value starts a new runtime session from the Session transcript.
+	// +optional
+	PermissionDecisions PermissionDecisionMode `json:"permissionDecisions,omitempty"`
 }
 
 // MarshalJSON preserves the distinction between an omitted task tool override
 // and an explicitly empty deny-all override.
 func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 	type agentRuntimeSpecJSON struct {
-		MaxTurns        *int32    `json:"maxTurns,omitempty"`
-		AllowedTools    *[]string `json:"allowedTools,omitempty"`
-		DisallowedTools []string  `json:"disallowedTools,omitempty"`
-		AllowBash       *bool     `json:"allowBash,omitempty"`
+		MaxTurns            *int32                 `json:"maxTurns,omitempty"`
+		AllowedTools        *[]string              `json:"allowedTools,omitempty"`
+		DisallowedTools     []string               `json:"disallowedTools,omitempty"`
+		AllowBash           *bool                  `json:"allowBash,omitempty"`
+		PermissionDecisions PermissionDecisionMode `json:"permissionDecisions,omitempty"`
 	}
 	var allowedTools *[]string
 	if in.AllowedTools != nil {
@@ -857,10 +886,11 @@ func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 		allowedTools = &tools
 	}
 	return json.Marshal(agentRuntimeSpecJSON{
-		MaxTurns:        in.MaxTurns,
-		AllowedTools:    allowedTools,
-		DisallowedTools: in.DisallowedTools,
-		AllowBash:       in.AllowBash,
+		MaxTurns:            in.MaxTurns,
+		AllowedTools:        allowedTools,
+		DisallowedTools:     in.DisallowedTools,
+		AllowBash:           in.AllowBash,
+		PermissionDecisions: in.PermissionDecisions,
 	})
 }
 

@@ -1162,3 +1162,78 @@ func TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody(t *testing.T) {
 		t.Fatalf("custody reads = %d refreshes = %d, want none", counting.reads, h.refresher.calls.Load())
 	}
 }
+
+func TestResolveGitHubPersonCredential(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	if _, err := h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, "someone-else", time.Minute); !errors.Is(err, ErrNoPersonConnection) {
+		t.Fatalf("another person's link err = %v", err)
+	}
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	got, err := h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, testSubject, 10*time.Minute)
+	if err != nil || got.AccessToken != "gho_fresh" || h.refresher.calls.Load() != 0 {
+		t.Fatalf("fresh credential = %+v err = %v calls = %d", got, err, h.refresher.calls.Load())
+	}
+	// A token that would expire within the horizon is refreshed first.
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)})
+	got, err = h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, testSubject, 10*time.Minute)
+	if err != nil || got.AccessToken != "gho_new" || h.refresher.calls.Load() != 1 {
+		t.Fatalf("refreshed credential = %+v err = %v calls = %d", got, err, h.refresher.calls.Load())
+	}
+	// A link that is not Ready serves nothing.
+	live := h.reload()
+	live.Status.Conditions[0].Status = metav1.ConditionFalse
+	if err := h.client.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, testSubject, time.Minute); err == nil {
+		t.Fatal("a link that is not ready must not serve a credential")
+	}
+}
+
+func TestResolveGitHubPersonCredentialRefusesOtherIssuers(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.AuthorizeURL = "https://ghe.example.com/login/oauth/authorize"
+	provider.Spec.OAuth.TokenURL = "https://ghe.example.com/login/oauth/access_token"
+	if err := h.client.Update(ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, testSubject, time.Minute); err == nil {
+		t.Fatal("a provider that does not issue github.com tokens must not serve them")
+	}
+}
+
+// A Connection deleted and recreated under the same name while its credential
+// is refreshed is another person's consent, even at the same grant sequence.
+func TestResolveGitHubPersonCredentialRefusesAReplacedConnection(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)})
+	h.refresher.onRefresh = func() {
+		h.refresher.onRefresh = nil
+		live := h.reload()
+		replacement := live.DeepCopy()
+		replacement.ResourceVersion = ""
+		replacement.UID = "uid-2"
+		if err := h.client.Delete(ctx, live); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.client.Create(ctx, replacement); err != nil {
+			t.Fatal(err)
+		}
+		replacement.Status = live.Status
+		if err := h.client.Status().Update(ctx, replacement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, testSubject, 10*time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "replaced") {
+		t.Fatalf("a replaced Connection served a credential: err = %v", err)
+	}
+}

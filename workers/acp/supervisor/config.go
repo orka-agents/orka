@@ -43,6 +43,10 @@ type ProviderSessionProjection struct {
 	// wrote into the ACP agent message stream instead of its own log. Nil
 	// forwards every chunk.
 	AgentDiagnosticFilter *AgentDiagnosticFilter
+	// RequiredModeID is the ACP session mode the adapter must report as
+	// current whenever it creates or resumes the provider session. Empty
+	// accepts any mode.
+	RequiredModeID string
 }
 
 // AgentDiagnosticFilter recognizes assistant text chunks that are provider

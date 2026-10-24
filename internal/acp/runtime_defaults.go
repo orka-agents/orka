@@ -36,6 +36,14 @@ var builtInRuntimeNativeTools = map[string][]string{
 	"opencode": {nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolApplyPatch, nativeToolBash, nativeToolGlob, nativeToolGrep},
 }
 
+// BuiltInRuntimeSupportsNativePermissionAsk reports whether a built-in
+// runtime can be launched to ask before every policy-allowed native tool that
+// acts, so the controller can hold those requests for a Task's requester.
+func BuiltInRuntimeSupportsNativePermissionAsk(provider string) bool {
+	_, ok := builtInRuntimeNativeTools[strings.ToLower(strings.TrimSpace(provider))]
+	return ok
+}
+
 // BuiltInRuntimeNativeToolNames returns the provider-native tool names owned by
 // one built-in ACP runtime. Callers receive a copy so policy tables remain
 // immutable.

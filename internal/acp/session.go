@@ -17,7 +17,21 @@ const (
 	DefaultBufferedEvents     = 256
 	DefaultBufferedEventBytes = 32 << 20
 	DefaultInitializeTimeout  = 60 * time.Second
+
+	// MinPermissionTimeout and MaxPermissionTimeout bound how long a runtime
+	// waits for the answer to a permission request. A person may answer one,
+	// so the window is configurable; it can never be unbounded.
+	MinPermissionTimeout = time.Minute
+	MaxPermissionTimeout = time.Hour
 )
+
+// ValidatePermissionTimeout checks a configured permission timeout.
+func ValidatePermissionTimeout(timeout time.Duration) error {
+	if timeout < MinPermissionTimeout || timeout > MaxPermissionTimeout {
+		return fmt.Errorf("permission timeout must be between %s and %s", MinPermissionTimeout, MaxPermissionTimeout)
+	}
+	return nil
+}
 
 // ErrPromptCancellationPending rejects admission until an earlier session-scoped
 // cancellation write finishes. The prompt has not been accepted and may be retried.
@@ -43,6 +57,10 @@ type RuntimeSessionConfig struct {
 	Process        ProcessConfig
 	MCPServers     []MCPServer
 	NewSessionMeta Meta
+	// RequiredModeID, when set, is the session mode the adapter must report as
+	// current in its session/new and session/resume responses. An adapter that
+	// fell back to another mode fails creation or the in-place resume.
+	RequiredModeID string
 	// ResumeSessionID requests an installed native provider session. Failure to
 	// advertise or complete resume must fail creation without session/new.
 	ResumeSessionID string
@@ -310,7 +328,7 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		if !capabilities.SessionCapability(SessionCapabilityResume) {
 			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume support"))
 		}
-		_, err := process.Client().ResumeSession(initCtx, ResumeSessionRequest{
+		resumed, err := process.Client().ResumeSession(initCtx, ResumeSessionRequest{
 			SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 			MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 		})
@@ -319,6 +337,9 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		}
 		session.capabilities = capabilities
 		session.providerSessionID = cfg.ResumeSessionID
+		if err := verifySessionMode(resumed.Modes, cfg.RequiredModeID); err != nil {
+			return nil, initializationFailed(session, err)
+		}
 		return session, nil
 	}
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
@@ -333,7 +354,25 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	// failed creation never sends session/close for an empty session ID.
 	session.capabilities = capabilities
 	session.providerSessionID = newSession.SessionID
+	if err := verifySessionMode(newSession.Modes, cfg.RequiredModeID); err != nil {
+		return nil, initializationFailed(session, err)
+	}
 	return session, nil
+}
+
+// verifySessionMode checks the current mode an adapter reported for a
+// created or resumed provider session.
+func verifySessionMode(modes json.RawMessage, required string) error {
+	if required == "" {
+		return nil
+	}
+	var state struct {
+		CurrentModeID string `json:"currentModeId"`
+	}
+	if len(modes) == 0 || json.Unmarshal(modes, &state) != nil || state.CurrentModeID != required {
+		return fmt.Errorf("ACP adapter did not start the provider session in the required %q mode", required)
+	}
+	return nil
 }
 
 // launchAdapter starts one adapter child and completes the ACP handshake:
@@ -581,6 +620,10 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 	if resumed.SessionID != "" && resumed.SessionID != s.providerSessionID {
 		_ = stopProcessBestEffort(process, cfg.CancelGrace)
 		return nil, AgentCapabilities{}, fmt.Errorf("ACP session/resume bound a different provider session")
+	}
+	if err := verifySessionMode(resumed.Modes, cfg.RequiredModeID); err != nil {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, err
 	}
 	return process, capabilities, nil
 }

@@ -31,6 +31,10 @@ const testJSONRPCKey = "jsonrpc"
 const linuxGOOS = "linux"
 
 const providerProxyCanaryMode = "provider-proxy-canary"
+
+// credentialEchoMode makes the fake agent echo its provider credential through
+// every update channel.
+const credentialEchoMode = "credential-echo"
 const providerProjectionCanaryMode = "provider-projection-canary"
 const providerProjectionCanaryValue = "projected"
 const assistantBurstMode = "assistant-burst"
@@ -407,10 +411,23 @@ func TestSupervisorCreateAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode prompt events: %v\n%s", err, response.Body.String())
 	}
-	if len(events) != 3 || events[0].Type != harnessv2.EventAccepted || events[1].Type != harnessv2.EventUpdate || events[2].Type != harnessv2.EventCompleted {
+	// Assistant text arrives in one or more updates: a suffix that could begin
+	// a session credential is held until the stream ends.
+	last := len(events) - 1
+	if len(events) < 3 || events[0].Type != harnessv2.EventAccepted || events[last].Type != harnessv2.EventCompleted {
 		t.Fatalf("unexpected event sequence: %#v", events)
 	}
-	if got := events[2].Completed.Result.Content[0].Text; got != "hello from ACP" {
+	var streamed strings.Builder
+	for _, event := range events[1:last] {
+		if event.Type != harnessv2.EventUpdate || event.Update == nil || event.Update.AssistantMessage == nil {
+			t.Fatalf("unexpected event sequence: %#v", events)
+		}
+		streamed.WriteString(event.Update.AssistantMessage.Text)
+	}
+	if streamed.String() != "hello from ACP" {
+		t.Fatalf("streamed text = %q", streamed.String())
+	}
+	if got := events[last].Completed.Result.Content[0].Text; got != "hello from ACP" {
 		t.Fatalf("result text = %q", got)
 	}
 
@@ -905,12 +922,18 @@ func TestSupervisorUsesCodexFinalAnswerAsTerminalResult(t *testing.T) {
 		),
 	}
 	for _, event := range events {
-		mapped, err := server.mapRuntimeEvent(state, prompt, event)
+		// An oversized chunk is split into pieces within the per-event bound.
+		mapped, err := server.mapRuntimeEvents(state, prompt, event)
 		if err != nil {
 			t.Fatalf("map phased assistant event: %v", err)
 		}
-		if mapped == nil || mapped.Update == nil || mapped.Update.AssistantMessage == nil {
+		if len(mapped) == 0 || mapped[0].Update == nil || mapped[0].Update.AssistantMessage == nil {
 			t.Fatalf("phased assistant event was not visible: %#v", mapped)
+		}
+		for _, piece := range mapped {
+			if err := piece.Update.Validate(); err != nil {
+				t.Fatalf("assistant piece is invalid: %v", err)
+			}
 		}
 	}
 	if !prompt.assistantOverflow || !prompt.finalAnswerSeen || prompt.finalAnswerOverflow {
@@ -1132,7 +1155,7 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		Environment: map[string]string{"GO_WANT_SUPERVISOR_ACP_HELPER": "1", "SUPERVISOR_ACP_HELPER_MODE": mode},
 		AdapterName: "fake-acp", AdapterDigest: testDigest("adapter"),
 	}
-	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode {
+	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode || mode == credentialEchoMode {
 		provider.EnvironmentForSession = func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
 			config, err := json.Marshal(map[string]string{"openai_base_url": proxy.BaseURL})
 			if err != nil {
@@ -1373,6 +1396,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 		sessionID = testNativeThreadID
 	}
 	var promptID json.RawMessage
+	var sessionCWD string
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
@@ -1421,6 +1445,12 @@ func TestSupervisorACPHelper(t *testing.T) {
 			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{}})
 		case acp.MethodSessionNew:
+			var newSession struct {
+				CWD string `json:"cwd"`
+			}
+			if json.Unmarshal(message.Params, &newSession) == nil && newSession.CWD != "" {
+				sessionCWD = newSession.CWD
+			}
 			if strings.HasPrefix(mode, "native-resume") {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "error": map[string]any{"code": -32602, "message": "unexpected session/new during native restore"}})
 				continue
@@ -1481,6 +1511,12 @@ func TestSupervisorACPHelper(t *testing.T) {
 						"data": map[string]any{"service": "session", "errorName": "APIError", "detail": "provider-secret-must-not-leak"},
 					},
 				})
+				promptID = nil
+				continue
+			}
+			if mode == credentialEchoMode {
+				writeCredentialEchoUpdates(writer, sessionID, sessionCWD, strings.TrimSpace(os.Getenv("CODEX_API_KEY")))
+				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{"stopReason": acp.StopReasonEndTurn}})
 				promptID = nil
 				continue
 			}
