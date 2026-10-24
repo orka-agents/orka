@@ -184,7 +184,7 @@ func TestEventSecretRedactionPersistedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal content: %v", err)
 	}
-	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+	if _, err := orkaClient(t, s).AppendExecutionEvent(ctx, &store.ExecutionEvent{
 		Namespace:   "default",
 		StreamType:  store.ExecutionEventStreamTypeTask,
 		StreamID:    "task-redact-store",
