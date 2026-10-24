@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -38,8 +40,21 @@ func NewDB(path string) (*sql.DB, error) {
 	return newDB(path, false)
 }
 
+// sqliteDSN makes the driver write and read every time.Time in UTC. SQL
+// compares stored times as text, so one zone keeps those comparisons correct
+// and satisfies the storage contract's UTC rule whatever zone a caller used.
+// Rows written earlier in another zone are read back in UTC, but their stored
+// text keeps its offset, so SQL comparisons with them can still be wrong.
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_timezone=UTC"
+}
+
 func newDB(path string, allowMigration bool) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -957,7 +972,8 @@ func currentSchemaStatements() []string {
 	statements = append(statements, usageSchema()...)
 	statements = append(statements, agentExecutionSchemaStatements()...)
 	statements = append(statements, nativeSessionSchemaStatements()...)
-	return append(statements, connectorSchemaStatements()...)
+	statements = append(statements, connectorSchemaStatements()...)
+	return append(statements, operationReceiptSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.
@@ -973,6 +989,10 @@ type Store struct {
 	// completed by this process's first custody operation.
 	pendingWALTruncate atomic.Bool
 
+	// requireWriteEnvelopes refuses a contract write without a write
+	// envelope. Production sets it; package tests may write without one.
+	requireWriteEnvelopes atomic.Bool
+
 	// snapshotCipher encrypts immutable agent execution snapshot bodies at
 	// rest. Snapshot persistence fails closed while it is nil.
 	snapshotCipher *AgentExecutionSnapshotCipher
@@ -987,6 +1007,14 @@ type Store struct {
 	// archiveMemoryProposalAfterActiveRead is a test hook used to coordinate
 	// multi-connection proposal-archive races after an active proposal is read.
 	archiveMemoryProposalAfterActiveRead func()
+
+	// clock, when set by a test, replaces the provider clock that measures
+	// operation age and receipt retention.
+	clock func() time.Time
+
+	// writeState, when set by a test, replaces the dataset write state, which
+	// is always ready for an open SQLite store.
+	writeState func() storagev1.DatasetState
 }
 
 // NewStore creates a new Store backed by the given SQLite database.
@@ -1037,6 +1065,9 @@ func (s *Store) Start(ctx context.Context) error {
 			return s.close()
 		case <-ticker.C:
 			s.updateDBSizeMetric()
+			if err := s.pruneExpiredOperationReceipts(ctx); err != nil && ctx.Err() == nil {
+				logger.Error(err, "Failed to prune expired operation receipts")
+			}
 		}
 	}
 }

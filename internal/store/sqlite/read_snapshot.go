@@ -1,0 +1,36 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+)
+
+// readSnapshot runs read against one consistent snapshot, so a read that
+// issues several queries cannot observe a commit between them. Inside a
+// task-data transaction it reuses that transaction. Otherwise it opens a
+// transaction, which in WAL mode fixes its snapshot at the first query, and
+// rolls it back afterwards.
+func (s *Store) readSnapshot(ctx context.Context, read func(taskDataExecutor) error) error {
+	if tx := s.taskDataTx(ctx); tx != nil {
+		return read(tx)
+	}
+	return readInTransaction(ctx, s.db, func(tx *sql.Tx) error { return read(tx) })
+}
+
+// securityReadSnapshot is readSnapshot for the security family, which reuses
+// a scan ingestion transaction rather than a task-data one.
+func (s *Store) securityReadSnapshot(ctx context.Context, read func(securityDB) error) error {
+	if s.securityTx != nil {
+		return read(s.securityTx)
+	}
+	return readInTransaction(ctx, s.db, func(tx *sql.Tx) error { return read(tx) })
+}
+
+func readInTransaction(ctx context.Context, db *sql.DB, read func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	return read(tx)
+}
