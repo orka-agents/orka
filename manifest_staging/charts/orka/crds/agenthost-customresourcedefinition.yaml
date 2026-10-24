@@ -280,10 +280,22 @@ spec:
                 maxItems: 16
                 type: array
                 x-kubernetes-list-type: atomic
+              observedConnectionUID:
+                description: |-
+                  ObservedConnectionUID identifies the Connection whose grant the
+                  controller last delivered to this host. It fences a recreated link.
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the most recent spec generation
                   the controller observed.
                 format: int64
+                type: integer
+              observedGrantSequence:
+                description: |-
+                  ObservedGrantSequence is the consent grant last delivered from that
+                  Connection. It contains no credential material.
+                format: int64
+                minimum: 0
                 type: integer
               phase:
                 description: Phase summarizes the host's lifecycle.

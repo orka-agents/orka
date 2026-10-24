@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -49,7 +51,11 @@ func (h *Handlers) GetOwnAgentHost(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(agentHostResponse(host))
+	response, err := h.currentAgentHostResponse(c.Context(), host)
+	if err != nil {
+		return err
+	}
+	return c.JSON(response)
 }
 
 // WakeOwnAgentHost serves POST /api/v1/agent-hosts/me/wake. It wakes a host
@@ -179,6 +185,32 @@ func linksTo(host *corev1alpha1.AgentHost, issuer, subject string) bool {
 		}
 	}
 	return false
+}
+
+// currentAgentHostResponse refuses a Ready condition from an older link or
+// consent. Read the Connection without the informer cache, which may still
+// describe the preceding grant after a caller finishes its new consent.
+func (h *Handlers) currentAgentHostResponse(ctx context.Context, host *corev1alpha1.AgentHost) (AgentHostResponse, error) {
+	response := agentHostResponse(host)
+	if !response.Ready || host.Spec.GitHubTokenFrom == nil {
+		return response, nil
+	}
+	connection := &corev1alpha1.Connection{}
+	key := types.NamespacedName{Namespace: host.Namespace, Name: host.Spec.GitHubTokenFrom.ConnectionRef.Name}
+	err := h.providerReader().Get(ctx, key, connection)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return AgentHostResponse{}, fiber.NewError(fiber.StatusInternalServerError, "could not verify the agent host's current Connection")
+	}
+	if err == nil && connection.DeletionTimestamp.IsZero() && connectors.ConnectionLinked(connection) &&
+		connection.UID != "" && connection.Status.GrantSequence > 0 &&
+		host.Status.ObservedConnectionUID == string(connection.UID) && host.Status.ObservedGrantSequence == connection.Status.GrantSequence {
+		return response, nil
+	}
+	response.Ready = false
+	response.Phase = corev1alpha1.AgentHostPhaseProvisioning
+	response.Reason = "ConnectionPending"
+	response.Message = "waiting for the host to reconcile its current Connection"
+	return response, nil
 }
 
 func agentHostResponse(host *corev1alpha1.AgentHost) AgentHostResponse {

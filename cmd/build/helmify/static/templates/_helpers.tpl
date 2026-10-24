@@ -642,6 +642,13 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- trim (toString (dig "agentHosts" "namespace" "" .Values.controller)) -}}
 {{- end }}
 
+{{/* Match the digest pin required by agenthost.ValidateTemplate. */}}
+{{- define "orka.validateAgentHostImage" -}}
+{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (toString .ref)) -}}
+{{- fail (printf "%s must be pinned by digest: <repository>@sha256:<digest>" .name) -}}
+{{- end -}}
+{{- end }}
+
 {{- define "orka.agentHostAgentImage" -}}
 {{- $image := trim (toString (dig "agentHosts" "agentImage" "" .Values.controller)) -}}
 {{- if not $image -}}
@@ -650,9 +657,7 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- end -}}
 {{- $image = include "orka.imageRef" .Values.controller.image -}}
 {{- end -}}
-{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` $image) -}}
-{{- fail "controller.agentHosts.agentImage must be pinned by digest: <repository>@sha256:<digest>" -}}
-{{- end -}}
+{{- $_ := include "orka.validateAgentHostImage" (dict "name" "controller.agentHosts.agentImage" "ref" $image) -}}
 {{- $image -}}
 {{- end }}
 
@@ -746,7 +751,11 @@ maps, and must render as a fresh install would. The defaults match values.yaml.
   "copilotdImage" "ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f"
   "hostImage" "mcr.microsoft.com/devcontainers/go:1@sha256:8f1c83128e4bce9d745b1dc0f28f8c027e303d3886e2434966ff135296c41770" -}}
 {{- $set := dig "agentHosts" "template" dict .Values.controller -}}
-{{- toYaml (mergeOverwrite $defaults (deepCopy $set)) -}}
+{{- $template := mergeOverwrite $defaults (deepCopy $set) -}}
+{{- range $name := list "copilotdImage" "hostImage" -}}
+{{- $_ := include "orka.validateAgentHostImage" (dict "name" (printf "controller.agentHosts.template.%s" $name) "ref" (get $template $name)) -}}
+{{- end -}}
+{{- toYaml $template -}}
 {{- end }}
 
 {{/*
