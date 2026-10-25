@@ -1396,7 +1396,7 @@ Global Flags:
 ## `orka login`
 
 ```text
-Sign in to Orka with your GitHub account. You approve a code on github.com, Orka checks you are in an allowed org or team, links your GitHub account, and starts your Copilot environment unless you pass --no-host. The session is saved in your Orka config and renews itself.
+Sign in to Orka with your GitHub account. You approve a code on github.com, Orka checks you are in an allowed org or team, links your GitHub account, and starts your Copilot environment unless you pass --no-host. The session replaces the token and namespace saved in your Orka config, and renews itself.
 
 Usage:
   orka login [flags]
