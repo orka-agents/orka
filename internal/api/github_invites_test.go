@@ -377,9 +377,16 @@ func TestInviteRevokesWithTheIssuingAppAfterAnAppChange(t *testing.T) {
 // A valid rotated secret must remain available for revocation even when the
 // provider's disclosed settings changed and the creation secret was revoked.
 func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
-	for _, change := range []string{"scopes", "host template"} {
+	for _, change := range []string{
+		"scopes", "host template", "secret reference", "secret reference with missing original",
+		"secret reference before provider readiness", "another app's secret reference",
+	} {
 		t.Run(change, func(t *testing.T) {
 			h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
+			wantSecret := "rotated-test-secret"
+			if change == "another app's secret reference" {
+				wantSecret = "client-secret-value"
+			}
 			var attempts atomic.Int32
 			var revoked atomic.Bool
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +396,7 @@ func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
 				}
 				attempts.Add(1)
 				id, secret, ok := r.BasicAuth()
-				if !ok || id != "client-id" || secret != "rotated-test-secret" {
+				if !ok || id != "client-id" || secret != wantSecret {
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
@@ -412,17 +419,40 @@ func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				secret.Data["clientSecret"] = []byte("rotated-test-secret")
-				if err := h.client.Update(ctx, secret); err != nil {
-					t.Error(err)
-					return
+				changedReference := strings.Contains(change, "secret reference")
+				if changedReference {
+					replacement := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{Name: "replacement-github-oauth", Namespace: connectorTestNamespace},
+						Data:       map[string][]byte{"clientSecret": []byte("rotated-test-secret")},
+					}
+					if err := h.client.Create(ctx, replacement); err != nil {
+						t.Error(err)
+						return
+					}
+					if change == "secret reference with missing original" {
+						if err := h.client.Delete(ctx, secret); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+				} else {
+					secret.Data["clientSecret"] = []byte("rotated-test-secret")
+					if err := h.client.Update(ctx, secret); err != nil {
+						t.Error(err)
+						return
+					}
 				}
 				provider := &corev1alpha1.ConnectorProvider{}
 				if err := h.client.Get(ctx, types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
 					t.Error(err)
 					return
 				}
-				if change == "scopes" {
+				if changedReference {
+					provider.Spec.OAuth.ClientSecretRef.Name = "replacement-github-oauth"
+					if change == "another app's secret reference" {
+						provider.Spec.OAuth.ClientID = "another-app"
+					}
+				} else if change == "scopes" {
 					provider.Spec.OAuth.Scopes.Read = append(provider.Spec.OAuth.Scopes.Read, "read:org")
 				} else {
 					provider.Spec.AgentHost.TemplateRef.Name = "another-template"
@@ -430,6 +460,9 @@ func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
 				provider.Generation++
 				if err := h.client.Update(ctx, provider); err != nil {
 					t.Error(err)
+					return
+				}
+				if change == "secret reference before provider readiness" {
 					return
 				}
 				for i := range provider.Status.Conditions {
@@ -444,12 +477,16 @@ func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
 				t.Fatalf("create invite: status = %d", status)
 			}
 			outcome := h.inviteOutcome(invite.ID)
+			wantRefusal := "provider changed"
+			if change == "secret reference with missing original" {
+				wantRefusal = "App is not configured"
+			}
 			if outcome.State != InviteRefused || outcome.Connection != "" ||
-				!strings.Contains(outcome.Message, "provider changed") || !strings.Contains(outcome.Message, "was revoked") {
+				!strings.Contains(outcome.Message, wantRefusal) || !strings.Contains(outcome.Message, "was revoked") {
 				t.Fatalf("outcome = %+v", outcome)
 			}
 			if !revoked.Load() || attempts.Load() != 1 {
-				t.Fatalf("revoked = %v, attempts = %d; want revocation with the current secret on the first attempt", revoked.Load(), attempts.Load())
+				t.Fatalf("revoked = %v, attempts = %d; want revocation with the issuing app on the first attempt", revoked.Load(), attempts.Load())
 			}
 		})
 	}

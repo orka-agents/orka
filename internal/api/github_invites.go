@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -225,18 +226,32 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	// person who may not sign in, or left unused, are revoked with the app's
 	// credentials. The outcome says whether GitHub confirmed it.
 	revoke := func(tokens ...string) (note string, failed bool) {
+		revokeCtx, cancelRevocation := context.WithTimeout(context.Background(), inviteCompletionTimeout)
+		defer cancelRevocation()
+		revocation := oauth
+		// Rotation may move the Secret reference, not just change its data.
+		// Revocation can use that reference before the provider is ready,
+		// but never takes credentials from a different GitHub app. This
+		// candidate is only for cleanup; it cannot authorize the changed invite.
+		current := &corev1alpha1.ConnectorProvider{}
+		if err := h.providerReader().Get(revokeCtx, client.ObjectKeyFromObject(provider), current); err == nil &&
+			current.Spec.OAuth.ClientID == created.ClientID {
+			if latest, err := h.providerOAuthConfig(revokeCtx, current); err == nil {
+				revocation = latest
+			}
+		}
 		attempted := false
 		for _, token := range tokens {
 			if token == "" {
 				continue
 			}
 			attempted = true
-			err := cfg.GitHub.DeleteToken(context.Background(), oauth.ClientID, oauth.ClientSecret, token)
+			err := cfg.GitHub.DeleteToken(revokeCtx, revocation.ClientID, revocation.ClientSecret, token)
 			// A secret changed while the invite was pending need not be the
 			// one that issued the token; the one read at creation is tried
 			// too.
-			if err != nil && (created.ClientID != oauth.ClientID || created.ClientSecret != oauth.ClientSecret) {
-				err = cfg.GitHub.DeleteToken(context.Background(), created.ClientID, created.ClientSecret, token)
+			if err != nil && (created.ClientID != revocation.ClientID || created.ClientSecret != revocation.ClientSecret) {
+				err = cfg.GitHub.DeleteToken(revokeCtx, created.ClientID, created.ClientSecret, token)
 			}
 			if err != nil {
 				log.Error(err, "could not revoke an invite's GitHub token", "invite", id)
