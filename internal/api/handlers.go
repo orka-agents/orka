@@ -131,6 +131,7 @@ type Handlers struct {
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
 	githubSignIn              GitHubSignInConfig
+	invites                   *githubInvites
 	// oidcEnabled says whether OIDC sign-in is configured, for clients
 	// choosing how to sign in.
 	oidcEnabled        bool
@@ -209,6 +210,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
 		githubSignIn:              cfg.GitHubSignIn,
+		invites:                   &githubInvites{},
 		oidcEnabled:               cfg.OIDCEnabled,
 		ahp:                       cfg.AHP,
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,

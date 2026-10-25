@@ -43,6 +43,8 @@ const signInTestUserID = "852750"
 type revocations struct {
 	mu     sync.Mutex
 	tokens []string
+	// fail makes GitHub refuse every revocation.
+	fail bool
 }
 
 func (r *revocations) list() []string {
@@ -71,8 +73,12 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 			if r.Method == http.MethodDelete {
 				if revoked != nil {
 					revoked.mu.Lock()
+					defer revoked.mu.Unlock()
+					if revoked.fail {
+						w.WriteHeader(http.StatusBadGateway)
+						return
+					}
 					revoked.tokens = append(revoked.tokens, body.AccessToken)
-					revoked.mu.Unlock()
 				}
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -87,6 +93,8 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				"ghu_alice_refreshed": {"id": 852750, "login": "alice"}, "ghu_alice_left": {"id": 852750, "login": "alice"},
 				"ghu_bob": {"id": 1002, "login": "bob"}, "ghu_bob_refreshed": {"id": 1002, "login": "bob"},
 				"ghu_alice_unanswered": {"id": 852750, "login": "alice"},
+				// Alice's account, renamed after an earlier check.
+				"ghu_alice_renamed_refreshed": {"id": 852750, "login": "alice-renamed"},
 			}
 			user, known := users[body.AccessToken]
 			if !known {
@@ -102,7 +110,7 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				// GitHub cannot answer for this token.
 				w.WriteHeader(http.StatusBadGateway)
 				return
-			case "Bearer ghu_alice", "Bearer ghu_alice_renewed", "Bearer ghu_alice_refreshed":
+			case "Bearer ghu_alice", "Bearer ghu_alice_renewed", "Bearer ghu_alice_refreshed", "Bearer ghu_alice_renamed_refreshed":
 				_ = json.NewEncoder(w).Encode(map[string]string{"state": "active"})
 				return
 			}
