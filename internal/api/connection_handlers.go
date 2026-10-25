@@ -326,8 +326,8 @@ func (h *Handlers) connectorIdentity(c fiber.Ctx, action connectorAction) (*User
 	if ui == nil {
 		return nil, fiber.NewError(fiber.StatusUnauthorized, "missing authenticated identity")
 	}
-	if ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken {
-		return nil, fiber.NewError(fiber.StatusForbidden, "connectors require a verified OIDC or context-token identity")
+	if ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken && ui.AuthType != AuthTypeGitHubSession {
+		return nil, fiber.NewError(fiber.StatusForbidden, "connectors require a verified OIDC, context-token or GitHub sign-in identity")
 	}
 	if strings.TrimSpace(ui.Subject) == "" || strings.TrimSpace(ui.Issuer) == "" {
 		return nil, fiber.NewError(fiber.StatusForbidden, "connectors require an identity with issuer and subject")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,6 +32,11 @@ const (
 	agentHostReasonGitHubIdentityChanged   = "GitHubIdentityChanged"
 	agentHostReasonGitHubTokenNeverExpires = "GitHubTokenNeverExpires"
 )
+
+// A sign-in that just succeeded also supersedes this reason on a host kept
+// from before: its account is a member again. The host recovers at its next
+// reconcile.
+const agentHostReasonGitHubMembershipEnded = "GitHubMembershipEnded"
 
 // agentHostReadyPollInterval paces waiting for a host after linking.
 var agentHostReadyPollInterval = 2 * time.Second
@@ -180,12 +186,14 @@ func printAgentHost(out io.Writer, host agentHostView) {
 
 // waitForAgentHost waits until the host fed by connection, the link just made
 // to a provider that serves agent hosts, is ready, and says how the Copilot
-// app lists it.
-func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, connection string) error {
+// app lists it. A Failed host is waited on only for a reason the new link
+// clears or one of the stale reasons.
+func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, connection string, stale ...string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "Waiting for your agent host...") //nolint:errcheck
-	// The last failure seen that the new link may clear: it is waited out,
-	// and reported if the wait ends on it.
+	woken := false
+	// The last failure seen that the new link or sign-in may clear: it is
+	// waited out, and reported if the wait ends on it.
 	var failed *agentHostView
 	for {
 		host, err := getOwnAgentHost(ctx, c)
@@ -198,12 +206,23 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		case err == nil && host.Connection != connection:
 		// A host being deleted is not the one to use; its replacement follows.
 		case err == nil && host.Deleting:
+		// An operator's suspension is theirs to lift, and is checked first: a
+		// host just suspended can still report the Ready of its last run. A
+		// host that idled out is woken once, as 'orka host wake' would.
+		case err == nil && host.OperatorSuspended:
+			return fmt.Errorf("an operator suspended your agent host %s; ask them to resume it", host.Name)
 		case err == nil && host.Ready:
 			fmt.Fprintf(out, "Host ready: %s. Pick it in the Copilot app's Environments.\n", host.Environment) //nolint:errcheck
 			return nil
+		case err == nil && host.Suspended && !woken:
+			if _, err := c.DoJSON(ctx, http.MethodPost, agentHostAPIPath+"/wake", nil, nil); err != nil {
+				return agentHostError(err)
+			}
+			woken = true
+			fmt.Fprintln(out, "Your agent host idled out; waking it.") //nolint:errcheck
 		// A host kept from an earlier link still shows the failure that link
 		// left until the controller sees the new one.
-		case err == nil && host.Phase == agentHostPhaseFailed && linkMayClear(host.Reason):
+		case err == nil && host.Phase == agentHostPhaseFailed && (linkMayClear(host.Reason) || slices.Contains(stale, host.Reason)):
 			failed = &host
 		case err == nil && host.Phase == agentHostPhaseFailed:
 			return fmt.Errorf("your agent host %s failed: %s: %s", host.Name, host.Reason, host.Message)

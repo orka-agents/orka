@@ -105,6 +105,8 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// GitHubSignIn signs people in with GitHub and issues Orka sessions.
+	GitHubSignIn GitHubSignInConfig
 	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
 	// leaves /ahp unrouted and the token routes answering 501.
 	AHP *ahphost.Host
@@ -217,6 +219,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
 		Connectors:                config.Connectors,
+		GitHubSignIn:              config.GitHubSignIn,
+		OIDCEnabled:               config.OIDC.Enabled(),
 		AHP:                       config.AHP,
 		SubstrateMCPProxy:         config.SubstrateMCPProxy,
 	})
@@ -457,7 +461,16 @@ func (s *Server) setupRoutes() {
 		s.app.Get(ahpEndpointPath, ahpEndpoint(s.config.AHP))
 	}
 
-	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
+	// GitHub sign-in: clients read how to sign in, and trade a GitHub token
+	// for a session, before they hold any Orka credential.
+	s.app.Get("/api/v1/auth/config", s.handlers.GetAuthConfig)
+	s.app.Post("/api/v1/auth/github", s.handlers.SignInWithGitHub)
+
+	authConfig := AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens}
+	if s.config.GitHubSignIn.Enabled {
+		authConfig.Sessions = s.config.GitHubSignIn.authenticateSession
+	}
+	externalAuth := NewAuthMiddleware(s.client, authConfig)
 
 	// API v1 group
 	api := s.externalAPIGroup("/api/v1", externalAuth)
@@ -642,6 +655,8 @@ func (s *Server) setupRoutes() {
 	api.Delete("/connections/:name", s.handlers.DeleteConnection)
 	api.Post("/connections/:name/authorize", s.handlers.AuthorizeConnection)
 	api.Post("/connections/:name/complete", s.handlers.CompleteConnection)
+	api.Post("/auth/session/renew", s.handlers.RenewSession)
+	api.Delete("/auth/session", s.handlers.SignOut)
 	api.Get("/agent-hosts/me", s.handlers.GetOwnAgentHost)
 	api.Post("/agent-hosts/me/wake", s.handlers.WakeOwnAgentHost)
 	api.Delete("/agent-hosts/me", s.handlers.DeleteOwnAgentHost)

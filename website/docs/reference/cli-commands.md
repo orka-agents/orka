@@ -35,6 +35,8 @@ Available Commands:
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
   host          See and manage your agent host for the Copilot app
+  login         Sign in to Orka with GitHub
+  logout        End your Orka session from orka login
   memory        Manage durable memory
   models        List compatible model IDs
   monitor       Manage repository monitors
@@ -1359,6 +1361,49 @@ Usage:
 
 Flags:
   -h, --help   help for wake
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka login`
+
+```text
+Sign in to Orka with your GitHub account. You approve a code on github.com, Orka checks you are in an allowed org or team, links your GitHub account, and starts your Copilot environment unless you pass --no-host. The session replaces the token and namespace saved in your Orka config, and renews itself.
+
+Usage:
+  orka login [flags]
+
+Flags:
+  -h, --help               help for login
+      --no-host            Link GitHub without starting a Copilot environment on Orka
+      --no-open            Print the GitHub URL without opening a browser
+      --timeout duration   How long to wait for the code to be approved and the host to start (default 15m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka logout`
+
+```text
+End your Orka session from orka login
+
+Usage:
+  orka logout [flags]
+
+Flags:
+  -h, --help   help for logout
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

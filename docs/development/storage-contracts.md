@@ -15,8 +15,8 @@ the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 6` identifies this layout, which adds the Agent Host
-Protocol tables to the version 5 metadata layout. Opening a database
+`PRAGMA user_version = 7` identifies this layout, which adds the GitHub sign-in
+session table to the version 6 Agent Host Protocol layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -28,16 +28,19 @@ the epoch advance columns, the 169-to-170 transition adds the binding columns,
 the 170-to-171 transition makes a `retry_pending` work action own its dedupe
 key, the 171-to-172 transition adds the write stamp columns of results and
 artifacts, the 172-to-173 transition adds the empty Agent Host Protocol tables,
-and the upgrade records an adopted identity. A store at an earlier schema
+the 173-to-174 transition adds the empty GitHub sign-in session table, and the
+upgrade records an adopted identity. A store at an earlier schema
 version upgrades through numbered version steps under the same lock, backup and
 transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
 169-to-170 and 170-to-171 objects, the 171-to-172 columns and the 172-to-173
-tables, a version-2 store gains the 169-to-170 columns, the 170-to-171 index,
-the 171-to-172 columns and the 172-to-173 tables, a version-3 store gains the
-170-to-171 index, the 171-to-172 columns and the 172-to-173 tables, a version-4
-store gains the 171-to-172 columns and the 172-to-173 tables, a version-5 store
-gains the empty 172-to-173 tables, and all keep their identity row, records and
-bootstrap state unchanged. Before the 170-to-171 index is rebuilt, a
+and 173-to-174 tables, a version-2 store gains the 169-to-170 columns, the
+170-to-171 index, the 171-to-172 columns and the 172-to-173 and 173-to-174
+tables, a version-3 store gains the 170-to-171 index, the 171-to-172 columns and
+the 172-to-173 and 173-to-174 tables, a version-4 store gains the 171-to-172
+columns and the 172-to-173 and 173-to-174 tables, a version-5 store gains the
+empty 172-to-173 and 173-to-174 tables, a version-6 store gains the empty
+173-to-174 table, and all keep their identity row, records and bootstrap state
+unchanged. Before the 170-to-171 index is rebuilt, a
 `retry_pending` work action that shares its dedupe key with a queued, leased or
 running action, or with a newer `retry_pending` one, is cancelled with reason
 `dedupe_superseded`. Existing results and artifacts get the write stamp (0, 0).
