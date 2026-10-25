@@ -71,7 +71,7 @@ func newLoginCmd() *cobra.Command {
 		Short: "Sign in to Orka with GitHub",
 		Long: "Sign in to Orka with your GitHub account. You approve a code on github.com, Orka checks you are in an " +
 			"allowed org or team, links your GitHub account, and starts your Copilot environment unless you pass " +
-			"--no-host. The session is saved in your Orka config and renews itself.",
+			"--no-host. The session replaces the token and namespace saved in your Orka config, and renews itself.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			server, err := loginServer(cmd)
@@ -90,6 +90,12 @@ func newLoginCmd() *cobra.Command {
 			}
 			if options.GitHub.AgentHost && !noHost {
 				fmt.Fprintln(out, "Signing in starts your Copilot environment on Orka. Code running there can read your GitHub token.") //nolint:errcheck
+			}
+			// Said before the code is shown, while stopping keeps the
+			// saved token: logout clears the session and never restores it.
+			if saved := loadConfig(); saved.Token != "" && saved.TokenKind != tokenKindGitHubSession {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Signing in replaces the token and namespace saved in your Orka config. "+ //nolint:errcheck
+					"Press Ctrl-C now to keep them; after signing in, pass them with --token and --namespace.")
 			}
 			github := githubauth.Client{WebURL: githubWebURL, MinPollInterval: githubPollFloor}
 			code, err := github.StartDeviceFlow(ctx, options.GitHub.ClientID)

@@ -516,6 +516,55 @@ func TestLoginDeclinesAHostItDidNotDisclose(t *testing.T) {
 	}
 }
 
+// Signing in over a token saved by hand says, before the code, that the token
+// will be replaced. Signing in over a session says nothing.
+func TestLoginWarnsBeforeReplacingASavedToken(t *testing.T) {
+	fakeGitHubDeviceFlow(t)
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/config":
+			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app", "agentHost": false}}) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "namespace": "orka-system"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer orka.Close()
+	const warning = "Signing in replaces the token and namespace saved in your Orka config."
+	later := time.Now().Add(10 * time.Hour)
+	for _, tc := range []struct {
+		name  string
+		saved orkaConfig
+		warns bool
+	}{
+		{name: "token set by hand", saved: orkaConfig{Server: orka.URL, Token: "oidc-token", Namespace: "team-a"}, warns: true},
+		{name: "session", saved: orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession,
+			TokenExpiresAt: &later, SessionLogin: "alice"}},
+		{name: "nothing saved", saved: orkaConfig{Server: orka.URL}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			if err := saveConfig(tc.saved); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--timeout", "10s")
+			if err != nil {
+				t.Fatalf("login: %v %q", err, out)
+			}
+			warned, code := strings.Index(out, warning), strings.Index(out, "enter the code")
+			if (warned >= 0) != tc.warns || (tc.warns && warned > code) {
+				t.Fatalf("want warning %v, before the code:\n%s", tc.warns, out)
+			}
+			if cfg := loadConfig(); cfg.Token != "orka_s_session" || cfg.Namespace != "orka-system" {
+				t.Fatalf("config = %+v", cfg)
+			}
+		})
+	}
+}
+
 // Readers never see a partly written config while another command saves it.
 func TestConfigSavesAreAtomic(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
