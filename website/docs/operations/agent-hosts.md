@@ -189,17 +189,49 @@ Bind it to the same person, in the host namespace.
 
 ### Hosts from GitHub Connections
 
-With [connectors](../guides/connectors.md) enabled, people can get a host by linking
-GitHub, with no Secret and no Kubernetes access. An operator adds a template to one GitHub
-`ConnectorProvider` in the watch namespace, backed by a GitHub App with expiring user
-tokens:
+With [connectors](../guides/connectors.md), people get a host by linking GitHub: no Secret,
+no YAML and no Kubernetes access. Create a GitHub App with expiring user tokens and the
+callback URL `<callbackBaseUrl>/api/v1/connections/callback`, then install with:
 
 ```yaml
-spec:
-  # ...the provider's OAuth settings, as in Connectors
-  agentHost:
-    templateRef:
-      name: copilotd
+controller:
+  connectors:
+    enabled: true
+    callbackBaseUrl: https://orka.example.com
+  agentHosts:
+    enabled: true
+    github:
+      enabled: true
+      clientID: Iv23...
+      clientSecret:
+        existingSecret: github-app   # or value: <the client secret>
+```
+
+The chart renders the `github` ConnectorProvider and the `copilotd` template it names;
+`controller.agentHosts.template` sets the template's images, storage and resources. The
+template's spec is immutable: to change it on an existing install, delete the
+AgentHostTemplate, then upgrade, and hosts move to the new one on their volumes. Without the
+chart, add `spec.agentHost.templateRef` to a GitHub provider yourself.
+
+People's Connections outlive an uninstall, and a provider is deleted only once no Connection
+references it. So Helm keeps the provider, the template and a client Secret the chart created
+when you uninstall or turn `github` off, and reinstalling the same release adopts them. To
+remove them, do it while the controller runs, since it finishes their deletion: delete the
+Connections that reference the provider, wait until they are gone, then delete the three.
+After an uninstall, reinstall first.
+
+To reach Orka with no domain, set `ingress.enabled: true`, `ingress.className: tailscale`
+and `ingress.tls: [{hosts: [orka]}]` with the Tailscale Kubernetes operator installed: the
+API and dashboard are then served at `https://orka.<tailnet>.ts.net` on your tailnet.
+
+Each person then runs `orka connect github`, or links GitHub on the dashboard's Connectors
+page. `orka connect` waits for the host and prints the environment to pick in the Copilot
+app. Afterwards:
+
+```bash
+orka host status         # the host, its phase, and why it is not ready
+orka host wake           # start it after it idled out
+orka host delete --yes   # delete it and its volume; while linked, a fresh one follows
 ```
 
 - The provider needs no tools. A dedicated GitHub App with only the permissions the host
@@ -319,3 +351,16 @@ A host that fails for a missing template or token has its Pod stopped and keeps 
 volume. When the token's Secret or Connection is gone, Orka also deletes its copy.
 
 Deleting an AgentHost removes every object Orka created for it, and only those.
+
+### The Copilot app cannot connect
+
+If a host is Ready but the Copilot app reports `Mission Control connect failed (HTTP 403)`,
+GitHub refused the connection before it reached the host. GitHub refuses every connection
+to a host while one of its sessions is in a repository you cannot push to, such as an
+archived one, so sessions in other repositories are blocked too. Restarting the host does
+not help: it registers again as the same environment.
+
+Restore push access to that repository, for example by unarchiving it, then connect and
+delete the session in the app. You can archive the repository again afterwards. If push
+access cannot come back, `orka host delete --yes` replaces the host with one that registers
+as a new environment, without the old host's sessions and clones.

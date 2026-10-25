@@ -286,7 +286,7 @@ func (r *AgentHostReconciler) reconcileHost(
 		return ctrl.Result{}, agentHostFailed(agentHostReasonHostAgentUnavailable,
 			"the controller has no host agent image; set --agent-host-agent-image")
 	}
-	githubToken, tokenSource, err := r.githubToken(ctx, host, names, template)
+	githubToken, err := r.githubToken(ctx, host, names, template)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -295,7 +295,7 @@ func (r *AgentHostReconciler) reconcileHost(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	stopping, err := r.reconcileGitHubTokenCopy(ctx, host, names, githubToken, tokenSource)
+	stopping, err := r.reconcileGitHubTokenCopy(ctx, host, names, githubToken.value, githubToken.source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -331,11 +331,15 @@ func (r *AgentHostReconciler) reconcileHost(
 	if err := r.reconcileConnectionSecret(ctx, host, names, template, connectionToken); err != nil {
 		return ctrl.Result{}, err
 	}
-	result, err := r.reconcilePod(ctx, host, names, template, tokenSource)
-	if err == nil && host.Spec.GitHubTokenFrom != nil && (result.RequeueAfter == 0 || result.RequeueAfter > agentHostResync) {
-		// Come back before the token is due for refresh, and to notice a
-		// rotation whose notification was lost.
-		result.RequeueAfter = agentHostResync
+	result, err := r.reconcilePod(ctx, host, names, template, githubToken.source)
+	if err == nil && host.Spec.GitHubTokenFrom != nil {
+		host.Status.ObservedConnectionUID = githubToken.connectionUID
+		host.Status.ObservedGrantSequence = githubToken.grantSequence
+		if result.RequeueAfter == 0 || result.RequeueAfter > agentHostResync {
+			// Come back before the token is due for refresh, and to notice a
+			// rotation whose notification was lost.
+			result.RequeueAfter = agentHostResync
+		}
 	}
 	return result, err
 }
@@ -363,19 +367,28 @@ func (r *AgentHostReconciler) hostTemplate(ctx context.Context, host *corev1alph
 	return template, nil
 }
 
-// githubToken returns the user's token when the template uses one, or nil,
-// and where it comes from: a Secret name and key, or a Connection. Admission
-// checks that whoever set githubTokenSecretRef may read that Secret, and
-// that only the controller sets githubTokenFrom.
+// agentHostToken carries a token and its safe source metadata for one reconcile.
+// The grant observation is persisted only after token delivery and Pod reconciliation.
+type agentHostToken struct {
+	value         []byte
+	source        string
+	connectionUID string
+	grantSequence int64
+}
+
+// githubToken returns the user's token and its source metadata, or an empty
+// value when the template does not use one. Admission checks that whoever
+// set githubTokenSecretRef may read that Secret, and that only the controller
+// sets githubTokenFrom.
 func (r *AgentHostReconciler) githubToken(
 	ctx context.Context,
 	host *corev1alpha1.AgentHost,
 	names agenthost.Names,
 	template *corev1alpha1.AgentHostTemplate,
-) ([]byte, string, error) {
+) (agentHostToken, error) {
 	policy := template.Spec.GitHubToken
 	if policy == "" || policy == corev1alpha1.AgentHostCredentialNone {
-		return nil, "", nil
+		return agentHostToken{}, nil
 	}
 	if host.Spec.GitHubTokenFrom != nil {
 		return r.connectionToken(ctx, host, names)
@@ -383,10 +396,10 @@ func (r *AgentHostReconciler) githubToken(
 	ref := host.Spec.GitHubTokenSecretRef
 	if ref == nil {
 		if policy == corev1alpha1.AgentHostCredentialRequired {
-			return nil, "", agentHostFailed(agentHostReasonGitHubTokenRequired,
+			return agentHostToken{}, agentHostFailed(agentHostReasonGitHubTokenRequired,
 				"template %q requires spec.githubTokenSecretRef", template.Name)
 		}
-		return nil, "", nil
+		return agentHostToken{}, nil
 	}
 	key := ref.Key
 	if key == "" {
@@ -395,15 +408,15 @@ func (r *AgentHostReconciler) githubToken(
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: host.Namespace, Name: ref.Name}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, "", agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q does not exist", ref.Name)
+			return agentHostToken{}, agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q does not exist", ref.Name)
 		}
-		return nil, "", err
+		return agentHostToken{}, err
 	}
 	token := bytes.TrimSpace(secret.Data[key])
 	if len(token) == 0 {
-		return nil, "", agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q has no data at key %q", ref.Name, key)
+		return agentHostToken{}, agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q has no data at key %q", ref.Name, key)
 	}
-	return token, ref.Name + "/" + key, nil
+	return agentHostToken{value: token, source: ref.Name + "/" + key}, nil
 }
 
 // checkHostLink fails a host whose Connection can no longer feed it.
@@ -438,44 +451,47 @@ func (r *AgentHostReconciler) connectionToken(
 	ctx context.Context,
 	host *corev1alpha1.AgentHost,
 	names agenthost.Names,
-) ([]byte, string, error) {
+) (agentHostToken, error) {
 	name := host.Spec.GitHubTokenFrom.ConnectionRef.Name
 	held, err := r.HostCredentials.HostCredential(ctx, host.Namespace, name, agentHostTokenHorizon)
 	if errors.Is(err, credential.ErrHostLinkUnavailable) {
-		return nil, "", agentHostFailed(agentHostReasonConnectionUnavailable, "%v", err)
+		return agentHostToken{}, agentHostFailed(agentHostReasonConnectionUnavailable, "%v", err)
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf("get the host's token from Connection %s: %w", name, err)
+		return agentHostToken{}, fmt.Errorf("get the host's token from Connection %s: %w", name, err)
 	}
 	// Code in the host can read its token, so it gets only one that expires:
 	// a leaked copy then stops working on its own.
 	if held.ExpiresAt.IsZero() {
-		return nil, "", agentHostFailed(agentHostReasonGitHubTokenNeverExpires,
+		return agentHostToken{}, agentHostFailed(agentHostReasonGitHubTokenNeverExpires,
 			"Connection %s holds a GitHub token that never expires; turn on user-token expiration in the GitHub App, then link again", name)
 	}
 	token := []byte(held.AccessToken)
 	holds, err := r.tokenCopyHolds(ctx, names, token)
 	if err != nil {
-		return nil, "", err
+		return agentHostToken{}, err
 	}
 	if host.Status.GitHub == nil || !holds {
 		account, err := r.GitHubAccounts.Account(ctx, held.AccessToken)
 		if err != nil {
-			return nil, "", err
+			return agentHostToken{}, err
 		}
 		if pinned := host.Status.GitHub; pinned != nil && pinned.ID != account.ID {
-			return nil, "", agentHostFailed(agentHostReasonGitHubIdentityChanged,
+			return agentHostToken{}, agentHostFailed(agentHostReasonGitHubIdentityChanged,
 				"Connection %s now links GitHub account %q, but the host belongs to %q; reconnect with %q, or delete the AgentHost",
 				name, account.Login, pinned.Login, pinned.Login)
 		}
 		if host.Status.GitHub == nil {
 			host.Status.GitHub = &account
 			if err := r.Status().Update(ctx, host); err != nil {
-				return nil, "", err
+				return agentHostToken{}, err
 			}
 		}
 	}
-	return token, "connection:" + name, nil
+	return agentHostToken{
+		value: token, source: "connection:" + name,
+		connectionUID: held.ConnectionUID, grantSequence: held.GrantSequence,
+	}, nil
 }
 
 // tokenCopyHolds says whether the host's token copy already holds token.

@@ -8,14 +8,17 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -87,8 +90,105 @@ func TestProvisionerGivesALinkItsHostOnce(t *testing.T) {
 		host.Spec.GitHubTokenFrom == nil || host.Spec.GitHubTokenFrom.ConnectionRef.Name != connection.Name {
 		t.Fatalf("host = %s %+v", host.Name, host.Spec)
 	}
+	if got := host.Annotations[connectors.AgentHostProviderAnnotation]; got != "github" {
+		t.Fatalf("the host records provider %q, want github", got)
+	}
 	if len(host.OwnerReferences) != 0 {
 		t.Fatal("deleting a Connection must never delete its host")
+	}
+}
+
+// Retained hosts need the full provider name before their Connection goes,
+// including hosts that no longer qualify for provisioning.
+func TestProvisionerBackfillsExistingHostProvider(t *testing.T) {
+	for _, state := range []string{"linked", "unlinked", "declined", "provider gone", "create race", "noncanonical"} {
+		t.Run(state, func(t *testing.T) {
+			provider := hostProvider("github-enterprise-cloud-agent-hosts-for-the-platform-team")
+			connection := linkedConnection(provider.Name)
+			host := testHost()
+			host.Name = "gh-alice"
+			host.Annotations = map[string]string{"orka.ai/keep": "unchanged"}
+			host.Spec.GitHubTokenSecretRef = nil
+			host.Spec.GitHubTokenFrom = &corev1alpha1.AgentHostTokenSource{
+				ConnectionRef: corev1alpha1.LocalObjectReference{Name: connection.Name},
+			}
+			want := provider.Name
+			switch state {
+			case "unlinked":
+				connection.Status = corev1alpha1.ConnectionStatus{}
+			case "declined":
+				connection.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
+			case "noncanonical":
+				connection.Spec.Subject.Subject = "bob"
+				want = ""
+			}
+			p, c := newProvisioner(t, connection, provider, host)
+			if state == "provider gone" {
+				if err := c.Delete(context.Background(), provider); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == "create race" {
+				hidden := false
+				p.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+					List: func(ctx context.Context, inner client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*corev1alpha1.AgentHostList); ok && !hidden {
+							hidden = true
+							return nil
+						}
+						return inner.List(ctx, list, opts...)
+					},
+				})
+			}
+			provision(t, p, connection)
+			hosts := hostsIn(t, c)
+			if len(hosts) != 1 {
+				t.Fatalf("hosts = %d, want the existing host only", len(hosts))
+			}
+			got := hosts[0]
+			if got.Annotations[connectors.AgentHostProviderAnnotation] != want {
+				t.Fatalf("provider = %q, want %q", got.Annotations[connectors.AgentHostProviderAnnotation], want)
+			}
+			if got.Annotations["orka.ai/keep"] != "unchanged" || !reflect.DeepEqual(got.Spec, host.Spec) {
+				t.Fatal("backfill must preserve other annotations and the host spec")
+			}
+			provision(t, p, connection)
+			if next := hostsIn(t, c)[0]; next.ResourceVersion != got.ResourceVersion {
+				t.Fatal("an already recorded provider must not cause another write")
+			}
+		})
+	}
+}
+
+func TestProvisionerBackfillRetriesConcurrentChanges(t *testing.T) {
+	connection := linkedConnection("github")
+	host := testHost()
+	host.Spec.GitHubTokenSecretRef = nil
+	host.Spec.GitHubTokenFrom = &corev1alpha1.AgentHostTokenSource{
+		ConnectionRef: corev1alpha1.LocalObjectReference{Name: connection.Name},
+	}
+	p, c := newProvisioner(t, connection, hostProvider("github"), host)
+	p.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, inner client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			current := &corev1alpha1.AgentHost{}
+			if err := inner.Get(ctx, client.ObjectKeyFromObject(object), current); err != nil {
+				return err
+			}
+			current.Annotations = map[string]string{"orka.ai/concurrent": "kept"}
+			if err := inner.Update(ctx, current); err != nil {
+				return err
+			}
+			return inner.Patch(ctx, object, patch, opts...)
+		},
+	})
+	if _, err := p.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(connection)}); !apierrors.IsConflict(err) {
+		t.Fatalf("backfill error = %v, want a conflict to retry", err)
+	}
+	p.Client = c
+	provision(t, p, connection)
+	got := hostsIn(t, c)[0]
+	if got.Annotations[connectors.AgentHostProviderAnnotation] != "github" || got.Annotations["orka.ai/concurrent"] != "kept" {
+		t.Fatalf("retry did not preserve concurrent metadata: %v", got.Annotations)
 	}
 }
 

@@ -174,6 +174,9 @@ PUT /api/v1/connections/:name | identity
 DELETE /api/v1/connections/:name | identity
 POST /api/v1/connections/:name/authorize | identity
 POST /api/v1/connections/:name/complete | identity
+GET /api/v1/agent-hosts/me | identity
+POST /api/v1/agent-hosts/me/wake | identity
+DELETE /api/v1/agent-hosts/me | identity
 GET /api/v1/secrets | list :secrets
 POST /api/v1/chat | create core.orka.ai:chats
 GET /api/v1/chat/config | get core.orka.ai:chats/config

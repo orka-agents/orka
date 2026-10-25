@@ -35,6 +35,8 @@ type HostCredential struct {
 	// Version changes whenever custody holds new material.
 	Version       int64
 	GrantSequence int64
+	// ConnectionUID binds the grant sequence to this incarnation of the link.
+	ConnectionUID string
 }
 
 // HostCredential returns the access token for the agent host fed by the named
@@ -80,6 +82,7 @@ func (s *Source) HostCredential(ctx context.Context, namespace, name string, hor
 		ExpiresAt:     credential.ExpiresAt,
 		Version:       credential.Version,
 		GrantSequence: credential.GrantSequence,
+		ConnectionUID: string(connection.UID),
 	}, nil
 }
 

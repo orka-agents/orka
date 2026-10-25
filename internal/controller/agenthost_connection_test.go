@@ -19,6 +19,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -34,7 +36,9 @@ type fakeHostCredentials struct {
 	// broken makes every call fail as a store outage would.
 	broken bool
 	// connection is the Connection that feeds hosts; empty means testHostConnection.
-	connection string
+	connection    string
+	connectionUID string
+	grantSequence int64
 	// neverExpires hands out a token without an expiry.
 	neverExpires bool
 }
@@ -43,7 +47,7 @@ func (f *fakeHostCredentials) HostCredential(_ context.Context, namespace, name 
 	if err := f.CheckHostLink(context.Background(), namespace, name); err != nil {
 		return credential.HostCredential{}, err
 	}
-	held := credential.HostCredential{AccessToken: f.token}
+	held := credential.HostCredential{AccessToken: f.token, ConnectionUID: f.connectionUID, GrantSequence: f.grantSequence}
 	if !f.neverExpires {
 		held.ExpiresAt = time.Now().Add(8 * time.Hour)
 	}
@@ -90,7 +94,7 @@ func newConnectionHostHarness(t *testing.T) (*agentHostHarness, *fakeHostCredent
 	t.Helper()
 	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
 		connectionHost())
-	credentials := &fakeHostCredentials{token: "ghu_first"}
+	credentials := &fakeHostCredentials{token: "ghu_first", connectionUID: "current-link", grantSequence: 1}
 	accounts := fakeGitHubAccounts{"ghu_first": alice}
 	h.reconciler.HostCredentials = credentials
 	h.reconciler.GitHubAccounts = accounts
@@ -154,6 +158,46 @@ func TestAgentHostTakesItsTokenFromItsConnection(t *testing.T) {
 	}
 	if after, _ := h.pod(); after.UID != pod.UID {
 		t.Fatal("a refreshed token must not restart the host")
+	}
+}
+
+func TestAgentHostRecordsDeliveredConnectionGrant(t *testing.T) {
+	h, credentials, accounts := newConnectionHostHarness(t)
+	h.settle()
+	check := func(uid string, grant int64) {
+		t.Helper()
+		status := h.host().Status
+		if status.ObservedConnectionUID != uid || status.ObservedGrantSequence != grant {
+			t.Fatalf("observed link = %q grant = %d, want %q grant %d", status.ObservedConnectionUID, status.ObservedGrantSequence, uid, grant)
+		}
+	}
+	check("current-link", 1)
+	credentials.token, credentials.grantSequence = "ghu_second", 2
+	accounts["ghu_second"] = alice
+	h.reconciler.Client = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
+		Update: func(ctx context.Context, inner client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+			if _, ok := object.(*corev1.Secret); ok && object.GetName() == h.names().GitHubTokenSecret {
+				return errors.New("token copy update failed")
+			}
+			return inner.Update(ctx, object, opts...)
+		},
+	})
+	if _, err := h.reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(h.host())}); err == nil {
+		t.Fatal("expected token copy update failure")
+	}
+	check("current-link", 1)
+	h.reconciler.Client = h.client
+	h.settle()
+	check("current-link", 2)
+	credentials.connectionUID, credentials.grantSequence = "recreated-link", 1
+	h.settle()
+	check("recreated-link", 1)
+	credentials.token, credentials.grantSequence = "ghu_other", 2
+	accounts["ghu_other"] = corev1alpha1.AgentHostGitHubAccount{ID: 2002, Login: "other"}
+	h.settle()
+	check("recreated-link", 1)
+	if ready := agentHostReady(h.host()); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != agentHostReasonGitHubIdentityChanged {
+		t.Fatalf("a refused grant must not retain readiness: %+v", ready)
 	}
 }
 

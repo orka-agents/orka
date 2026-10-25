@@ -204,6 +204,40 @@ controller:
     # Digest-pinned image with the orka-host-agent sidecar. Empty uses the
     # controller image, which then must be pinned with controller.image.digest.
     agentImage: ""
+    # Give each person who links GitHub their own host, fed by their link
+    # (ADR 0036). Needs controller.connectors and a GitHub App with expiring
+    # user tokens whose callback URL is controller.connectors.callbackBaseUrl
+    # + /api/v1/connections/callback. The chart renders the GitHub
+    # ConnectorProvider and the host template below.
+    github:
+      enabled: false
+      # Name people link with, as in `orka connect github`.
+      providerName: github
+      displayName: GitHub
+      # The GitHub App's client ID.
+      clientID: ""
+      # The app's client secret: name an existing Secret, or give the value
+      # and the chart stores it in a Secret.
+      clientSecret:
+        existingSecret: ""
+        key: clientSecret
+        value: ""
+    # The copilotd template those hosts run, from
+    # config/samples/core_v1alpha1_agenthosttemplate.yaml. Its spec is
+    # immutable: to change these values on an existing install, delete the
+    # AgentHostTemplate, then upgrade; hosts move to it on their volumes.
+    template:
+      name: copilotd
+      copilotdImage: ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f
+      hostImage: mcr.microsoft.com/devcontainers/go:1@sha256:8f1c83128e4bce9d745b1dc0f28f8c027e303d3886e2434966ff135296c41770
+      storage: 20Gi
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          cpu: "4"
+          memory: 8Gi
 
   # OIDC/JWT authentication for external API requests
   oidc:
@@ -463,6 +497,19 @@ github:
 service:
   type: ClusterIP
   port: 8080
+
+# Ingress to the Orka API, for `orka` and the dashboard. With the Tailscale
+# Kubernetes operator, className: tailscale and tls.hosts: [orka] serve
+# https://orka.<tailnet>.ts.net to the tailnet with no domain to buy. The
+# metrics port is never exposed.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Empty serves every host name the controller in className answers.
+  host: ""
+  # For example [{hosts: [orka]}] with Tailscale, or hosts plus secretName.
+  tls: []
 
 # ServiceAccount configuration
 serviceAccount:

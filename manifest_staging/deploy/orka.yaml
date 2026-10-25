@@ -1078,8 +1078,26 @@ rules:
   - core.orka.ai
   resources:
   - agenthosts
+  - agentruntimes
+  - agents
+  - branchclaims
+  - connections
+  - controllerepochs
+  - externaleffects
+  - promptattempts
+  - providers
+  - publications
+  - repositorymonitors
+  - repositoryscans
+  - runtimepools
+  - runtimesessioncontrols
+  - skills
+  - substrateactorpools
+  - tasks
+  - tools
   verbs:
   - create
+  - delete
   - get
   - list
   - patch
@@ -1145,34 +1163,6 @@ rules:
   verbs:
   - get
   - list
-  - watch
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - agentruntimes
-  - agents
-  - branchclaims
-  - connections
-  - controllerepochs
-  - externaleffects
-  - promptattempts
-  - providers
-  - publications
-  - repositorymonitors
-  - repositoryscans
-  - runtimepools
-  - runtimesessioncontrols
-  - skills
-  - substrateactorpools
-  - tasks
-  - tools
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - core.orka.ai
