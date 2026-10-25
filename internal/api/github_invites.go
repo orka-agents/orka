@@ -265,9 +265,8 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	current, err := h.signInProvider(ctx)
 	if err != nil || current.UID != provider.UID || current.Generation != provider.Generation ||
 		connectors.ProviderAuthorityDigest(current) != connectors.ProviderAuthorityDigest(provider) {
-		// The app may have changed with the provider: the token is revoked
-		// with the credentials of the app that issued it.
-		oauth = created
+		// Keep the freshly read secret for the issuing app; revoke falls
+		// back to the creation credentials if the current ones do not work.
 		refuse("the GitHub provider changed while the invite was pending", tokens.AccessToken)
 		return
 	}

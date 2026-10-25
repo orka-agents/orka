@@ -374,6 +374,87 @@ func TestInviteRevokesWithTheIssuingAppAfterAnAppChange(t *testing.T) {
 	}
 }
 
+// A valid rotated secret must remain available for revocation even when the
+// provider's disclosed settings changed and the creation secret was revoked.
+func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
+	for _, change := range []string{"scopes", "host template"} {
+		t.Run(change, func(t *testing.T) {
+			h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
+			var attempts atomic.Int32
+			var revoked atomic.Bool
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/applications/client-id/token" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				attempts.Add(1)
+				id, secret, ok := r.BasicAuth()
+				if !ok || id != "client-id" || secret != "rotated-test-secret" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				var body struct {
+					AccessToken string `json:"access_token"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.AccessToken != "ghu_alice" {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				revoked.Store(true)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(api.Close)
+			h.handlers.githubSignIn.GitHub.APIURL = api.URL
+			gh.onApprove = func() {
+				ctx := context.Background()
+				secret := &corev1.Secret{}
+				if err := h.client.Get(ctx, types.NamespacedName{Namespace: connectorTestNamespace, Name: "github-oauth"}, secret); err != nil {
+					t.Error(err)
+					return
+				}
+				secret.Data["clientSecret"] = []byte("rotated-test-secret")
+				if err := h.client.Update(ctx, secret); err != nil {
+					t.Error(err)
+					return
+				}
+				provider := &corev1alpha1.ConnectorProvider{}
+				if err := h.client.Get(ctx, types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+					t.Error(err)
+					return
+				}
+				if change == "scopes" {
+					provider.Spec.OAuth.Scopes.Read = append(provider.Spec.OAuth.Scopes.Read, "read:org")
+				} else {
+					provider.Spec.AgentHost.TemplateRef.Name = "another-template"
+				}
+				provider.Generation++
+				if err := h.client.Update(ctx, provider); err != nil {
+					t.Error(err)
+					return
+				}
+				for i := range provider.Status.Conditions {
+					provider.Status.Conditions[i].ObservedGeneration = provider.Generation
+				}
+				if err := h.client.Status().Update(ctx, provider); err != nil {
+					t.Error(err)
+				}
+			}
+			status, invite := h.invite("alice")
+			if status != http.StatusCreated {
+				t.Fatalf("create invite: status = %d", status)
+			}
+			outcome := h.inviteOutcome(invite.ID)
+			if outcome.State != InviteRefused || outcome.Connection != "" ||
+				!strings.Contains(outcome.Message, "provider changed") || !strings.Contains(outcome.Message, "was revoked") {
+				t.Fatalf("outcome = %+v", outcome)
+			}
+			if !revoked.Load() || attempts.Load() != 1 {
+				t.Fatalf("revoked = %v, attempts = %d; want revocation with the current secret on the first attempt", revoked.Load(), attempts.Load())
+			}
+		})
+	}
+}
+
 // An app secret changed to a wrong value while the code was pending fails
 // the invite's checks, and the approved token is revoked with the secret
 // read when the invite was created.
