@@ -133,6 +133,25 @@ func newConnectorTestHarnessWithContextTokens(t *testing.T, objects ...runtime.O
 	return buildConnectorTestHarness(t, authz, objects...)
 }
 
+// refreshFixture answers a refresh_token grant. GitHub sign-in uses the
+// refresh token it is given once: each fixture person's refresh token yields
+// their own new tokens.
+func refreshFixture(w http.ResponseWriter, refreshToken string) {
+	// An expiry with no refresh token beside it, which GitHub never issues.
+	if refreshToken == "ghr_alice_final" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "ghu_alice_refreshed", "token_type": "bearer", "expires_in": 28800})
+		return
+	}
+	person := map[string]string{"ghr_alice": "alice", "ghr_bob": "bob"}[refreshToken]
+	if person == "" {
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_refresh_token"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"access_token": "ghu_" + person + "_refreshed", "refresh_token": "ghr_" + person + "_2", "token_type": "bearer", "expires_in": 28800,
+	})
+}
+
 func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConfig, objects ...runtime.Object) *connectorTestHarness {
 	t.Helper()
 	harness := &connectorTestHarness{t: t, contextTokenAuthorization: authz}
@@ -209,6 +228,10 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 		}
 		if r.URL.Path != "/token" {
 			http.NotFound(w, r)
+			return
+		}
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			refreshFixture(w, r.PostForm.Get("refresh_token"))
 			return
 		}
 		if r.PostForm.Get("code") != "good-code" || r.PostForm.Get("code_verifier") == "" {

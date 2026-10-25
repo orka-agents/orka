@@ -119,6 +119,10 @@ type AuthConfig struct {
 	// listener cannot be replayed against an audience-bound listener.
 	TokenReviewAudiences []string
 
+	// Sessions authenticates Orka session tokens from GitHub sign-in; nil
+	// refuses them.
+	Sessions func(ctx context.Context, token string) (*UserInfo, error)
+
 	// ReportTokenReviewUnavailable opts TokenReview-only listeners into returning
 	// 503 when the backend request or status reports a failure, without authenticating the caller.
 	// Explicit authentication denials still return 401. The default preserves historical
@@ -188,6 +192,9 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			if cfg.ReportTokenReviewUnavailable && errors.Is(err, errTokenReviewUnavailable) {
 				return fiber.NewError(fiber.StatusServiceUnavailable, "token authentication is temporarily unavailable")
 			}
+			if errors.Is(err, errSessionStoreUnavailable) {
+				return fiber.NewError(fiber.StatusServiceUnavailable, "session authentication is temporarily unavailable; retry")
+			}
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
 		}
 
@@ -199,6 +206,14 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 }
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
+	// An Orka session token is never tried as an OIDC or ServiceAccount
+	// token, and never sent to the TokenReview API.
+	if strings.HasPrefix(token, sessionTokenPrefix) {
+		if cfg.Sessions == nil {
+			return nil, errors.New("sign-in sessions are not enabled")
+		}
+		return cfg.Sessions(ctx, token)
+	}
 	if !cfg.OIDC.Enabled() {
 		return validateToken(ctx, c, token, cfg.TokenReviewAudiences...)
 	}
@@ -236,6 +251,10 @@ func authenticateContextToken(ctx context.Context, token string, profile Context
 }
 
 var errTokenReviewUnavailable = errors.New("TokenReview backend unavailable")
+
+// errSessionStoreUnavailable is a sign-in session lookup that failed without
+// an answer; it is reported as 503, never as an invalid token.
+var errSessionStoreUnavailable = errors.New("session store unavailable")
 
 // validateToken validates a ServiceAccount token using TokenReview with caching.
 func validateToken(ctx context.Context, c client.Client, token string, audiences ...string) (*UserInfo, error) {

@@ -192,6 +192,18 @@ spec:
             # admits only these Pods from the release namespace.
             - --agent-host-controller-pod-labels=orka.ai/network-role=controller
             {{- end }}
+            {{- if include "orka.githubSignInEnabled" . }}
+            {{- $signIn := .Values.controller.githubSignIn }}
+            - --github-sign-in-enabled=true
+            - {{ printf "--github-sign-in-provider=%s" (include "orka.agentHostGitHub" . | fromYaml).providerName | quote }}
+            {{- with $signIn.allowedOrgs }}
+            - {{ printf "--github-sign-in-allowed-orgs=%s" (join "," .) | quote }}
+            {{- end }}
+            {{- with $signIn.allowedTeams }}
+            - {{ printf "--github-sign-in-allowed-teams=%s" (join "," .) | quote }}
+            {{- end }}
+            - {{ printf "--github-sign-in-create-hosts=%t" (ne $signIn.createHosts false) | quote }}
+            {{- end }}
             {{- if include "orka.ahpEnabled" . }}
             {{- with .Values.controller.ahp }}
             - --enable-ahp-api=true

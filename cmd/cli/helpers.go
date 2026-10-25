@@ -44,6 +44,15 @@ type orkaConfig struct {
 	Server    string `yaml:"server,omitempty"`
 	Token     string `yaml:"token,omitempty"`
 	Namespace string `yaml:"namespace,omitempty"`
+	// TokenKind is github-session for a session from orka login, which
+	// renews itself and is sent only to SessionServer, the server that
+	// issued it: changing Server never redirects it.
+	TokenKind      string     `yaml:"tokenKind,omitempty"`
+	TokenExpiresAt *time.Time `yaml:"tokenExpiresAt,omitempty"`
+	SessionServer  string     `yaml:"sessionServer,omitempty"`
+	// SessionLogin is the GitHub login the session signed in. A renewal
+	// keeps it, so a successor is told from another person's session.
+	SessionLogin string `yaml:"sessionLogin,omitempty"`
 }
 
 // portForwardCache holds cached port-forward connection info to avoid re-creating on every command.
@@ -119,8 +128,12 @@ func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Clien
 	if server == "" {
 		server = cfg.Server
 	}
+	session := false
 	if token == "" {
 		token = cfg.Token
+		if cfg.TokenKind == tokenKindGitHubSession {
+			token, session = configuredSession(cmd, server, cfg), true
+		}
 	}
 	if ns == "" {
 		ns = cfg.Namespace
@@ -130,7 +143,9 @@ func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Clien
 	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
 	if token == "" || ns == "" {
 		kc := extractKubeContext(kubeconfigPath)
-		if token == "" {
+		// A session withheld from this server is not replaced by a
+		// Kubernetes credential, which would reach that server instead.
+		if token == "" && !session {
 			token = kc.token
 		}
 		if ns == "" {
@@ -201,6 +216,10 @@ func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Clien
 	}
 
 	c := client.NewWithNamespace(server, token, ns)
+	if session && token != "" {
+		// A session goes only to its own server: never through a redirect.
+		c.HTTPClient = noRedirectClient
+	}
 	if txnToken == "" && txnTokenFile != "" {
 		data, err := readFileOrStdin(txnTokenFile)
 		if err != nil {
@@ -440,7 +459,22 @@ func saveConfig(cfg orkaConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(path, data, 0o600)
+	// A private temporary file renamed over the config, which os.Rename
+	// replaces on every platform: a concurrent reader never sees a partial
+	// config, and on Unix sees the old one or the new one.
+	file, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	if err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("save config: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return os.Rename(file.Name(), path)
 }
 
 // maskToken shows only the first 4 chars + *** for security.

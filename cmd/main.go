@@ -71,6 +71,7 @@ import (
 	"github.com/orka-agents/orka/internal/envutil"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/githubauth"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
@@ -268,6 +269,8 @@ func main() {
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
 	var connectorsEnabled bool
+	var githubSignInEnabled, githubSignInCreateHosts bool
+	var githubSignInProvider, githubSignInAllowedOrgs, githubSignInAllowedTeams string
 	var ahpAPIEnabled bool
 	var ahpTokenMaxTTL time.Duration
 	var ahpBackendConfig api.AHPBackendConfig
@@ -481,6 +484,16 @@ func main() {
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.BoolVar(&githubSignInEnabled, "github-sign-in-enabled", false,
+		"Sign people in with GitHub (orka login) and issue Orka sessions. Needs --connectors-enabled and an allow-list.")
+	flag.StringVar(&githubSignInProvider, "github-sign-in-provider", "github",
+		"ConnectorProvider in the watch namespace whose GitHub App signs people in; a sign-in links the person through it.")
+	flag.StringVar(&githubSignInAllowedOrgs, "github-sign-in-allowed-orgs", "",
+		"Comma-separated GitHub orgs whose active members may sign in.")
+	flag.StringVar(&githubSignInAllowedTeams, "github-sign-in-allowed-teams", "",
+		"Comma-separated org/team slugs whose active members may sign in.")
+	flag.BoolVar(&githubSignInCreateHosts, "github-sign-in-create-hosts", true,
+		"Give each person who signs in with GitHub an agent host; false records every sign-in as declining one.")
 	flag.BoolVar(&ahpAPIEnabled, "enable-ahp-api", envBool("ORKA_ENABLE_AHP_API"),
 		"Serve the Agent Host Protocol at /ahp and the AHP connection token routes, offering Orka's built-in runtimes as AHP agents.")
 	flag.DurationVar(&ahpTokenMaxTTL, "ahp-token-max-ttl", ahphost.DefaultMaxTokenTTL,
@@ -1449,6 +1462,36 @@ func main() {
 			return controller.LiveLinkedAccountsWithCache(mgr.GetAPIReader(), mgr.GetClient(), tools.DefaultRegistry, outboundAccessResolver.Connections, namespace, requester)
 		}
 	}
+	// GitHub sign-in (ADR 0037) admits only members of its allow-list, and
+	// links each person through the agent-host provider's GitHub App.
+	var githubSignIn api.GitHubSignInConfig
+	if githubSignInEnabled {
+		allowed, err := githubauth.ParseAllowed(githubSignInAllowedOrgs, githubSignInAllowedTeams)
+		switch {
+		case err != nil:
+			setupLog.Error(err, "invalid GitHub sign-in allow-list")
+			os.Exit(1)
+		case allowed.Empty():
+			setupLog.Error(errors.New("no org or team is allowed"), "GitHub sign-in needs --github-sign-in-allowed-orgs or --github-sign-in-allowed-teams")
+			os.Exit(1)
+		case !connectorsEnabled || hostCredentials == nil:
+			setupLog.Error(errors.New("connectors are disabled"), "GitHub sign-in needs --connectors-enabled: each sign-in links the person's account")
+			os.Exit(1)
+		case strings.TrimSpace(githubSignInProvider) == "":
+			setupLog.Error(errors.New("no provider"), "GitHub sign-in needs --github-sign-in-provider")
+			os.Exit(1)
+		case githubSignInCreateHosts && !agentHostsEnabled:
+			setupLog.Error(errors.New("agent hosts are disabled"),
+				"GitHub sign-in creates agent hosts only with --enable-agent-hosts; pass --github-sign-in-create-hosts=false to sign in without them")
+			os.Exit(1)
+		}
+		githubSignIn = api.GitHubSignInConfig{
+			Enabled: true, Provider: strings.TrimSpace(githubSignInProvider), Allowed: allowed,
+			CreateHosts: githubSignInCreateHosts, Sessions: sqliteStore, Credentials: hostCredentials,
+		}
+		setupLog.Info("GitHub sign-in enabled", "provider", githubSignIn.Provider,
+			"allowedOrgs", len(allowed.Orgs), "allowedTeams", len(allowed.Teams))
+	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
 		APIReader: mgr.GetAPIReader(),
@@ -1959,6 +2002,7 @@ func main() {
 			IdleStatus:      agenthost.HTTPStatusReader{},
 			HostCredentials: hostCredentials,
 			GitHubAccounts:  agenthost.GitHubAccounts{},
+			Membership:      agentHostMembership(githubSignIn),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentHost")
 			os.Exit(1)
@@ -2157,6 +2201,7 @@ func main() {
 		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Connectors:                connectorConfig,
+		GitHubSignIn:              githubSignIn,
 		AHP:                       ahpHost,
 		AHPBackend:                ahpBackendFor(ahpHost, ahpBackendConfig),
 		RESTConfig:                mgr.GetConfig(),
@@ -2724,4 +2769,15 @@ func validateAgentExecutionSnapshotOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+// agentHostMembership checks a host's refreshed token against the GitHub
+// sign-in allow-list, or nothing without GitHub sign-in.
+func agentHostMembership(signIn api.GitHubSignInConfig) controller.GitHubMembershipChecker {
+	if !signIn.Enabled {
+		return nil
+	}
+	return func(ctx context.Context, token, login string) error {
+		return signIn.GitHub.RequireMember(ctx, token, login, signIn.Allowed)
+	}
 }

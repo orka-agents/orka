@@ -275,6 +275,23 @@ controller:
     # connectors enabled. Empty keeps workspaces to public repositories.
     workspaceConnectorProvider: ""
 
+  # Sign people in with GitHub: `orka login` (ADR 0037). It uses the
+  # agent-host GitHub App (controller.agentHosts.github), which also needs the
+  # device flow enabled. Only active members of the allowed orgs or teams sign
+  # in, and each sign-in links the person's account, which starts their agent
+  # host unless they pass --no-host or GitHub gave a token that never expires.
+  # A sign-in session reaches only the person's own link, agent host and
+  # connection routes. Every other API route, minting AHP tokens included,
+  # still needs OIDC or Kubernetes credentials.
+  githubSignIn:
+    enabled: false
+    # GitHub orgs whose active members may sign in.
+    allowedOrgs: []
+    # Teams, as org/team, whose active members may sign in.
+    allowedTeams: []
+    # false links every sign-in without starting an agent host.
+    createHosts: true
+
   # OIDC/JWT authentication for external API requests
   oidc:
     # Issuer URL expected in bearer tokens. Requires audience when set.

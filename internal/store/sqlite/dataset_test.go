@@ -91,11 +91,12 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, info.ID)
 	require.False(t, info.CanBootstrapSnapshotKey)
-	// The upgrade also adds the empty Agent Host Protocol tables.
+	// The upgrade also adds the empty Agent Host Protocol and sign-in session
+	// tables.
 	after := applicationRows(t, s.db)
 	for table, rows := range after {
 		if _, existed := before[table]; !existed {
-			require.True(t, strings.HasPrefix(table, "ahp_"), table)
+			require.True(t, strings.HasPrefix(table, "ahp_") || table == "auth_sessions", table)
 			require.Empty(t, rows, table)
 			delete(after, table)
 		}
