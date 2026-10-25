@@ -179,6 +179,52 @@ func TestConnectWaitsThroughARelinkWithAStdinToken(t *testing.T) {
 	}
 }
 
+func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
+	previous := invitePollInterval
+	invitePollInterval = time.Millisecond
+	t.Cleanup(func() { invitePollInterval = previous })
+	polls := 0
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Invites act in the namespace the controller watches; the CLI's
+		// default namespace would be refused.
+		if r.URL.Query().Has("namespace") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == agentHostInvitesAPIPath:
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"id": "abc", "login": body["login"], "state": "Pending", "userCode": "ABCD-1234", //nolint:errcheck
+				"verificationURI": "https://github.com/login/device", "expiresAt": time.Now().Add(15 * time.Minute), "agentHost": true})
+		case r.Method == http.MethodGet && r.URL.Path == agentHostInvitesAPIPath+"/abc":
+			polls++
+			state := "Pending"
+			if polls >= 2 {
+				state = "Accepted"
+			}
+			json.NewEncoder(w).Encode(map[string]any{"id": "abc", "login": "carol", "state": state, "message": "linked; Orka is starting their Copilot environment"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	out, err := runHostCLI(t, handler, "host", "invite", "carol", "--timeout", "5s")
+	if err != nil || !strings.Contains(out, "Ask carol to open https://github.com/login/device and enter the code ABCD-1234") ||
+		!strings.Contains(out, "code running there can read their GitHub token") || !strings.Contains(out, "carol accepted") {
+		t.Fatalf("invite: %v %q", err, out)
+	}
+
+	// Waiting less than the invite lasts names where its outcome appears,
+	// and that running the command again starts another invite.
+	polls = -1 << 30
+	_, err = runHostCLI(t, handler, "host", "invite", "carol", "--timeout", "20ms")
+	if err == nil || !strings.Contains(err.Error(), agentHostInvitesAPIPath+"/abc") || !strings.Contains(err.Error(), "creates another invite") {
+		t.Fatalf("stopping early: %v", err)
+	}
+}
+
 // A relink finds the host still showing a failure the new link clears, such
 // as the other GitHub account the earlier link gave, and waits for it. A
 // failure that outlasts the wait is reported, and so is a wait the deadline

@@ -55,6 +55,7 @@ const sidebars = {
           label: 'Connect people and tools',
           collapsed: false,
           items: [
+            'guides/copilot-app',
             'guides/chat',
             'guides/ui',
             'reference/openai-compat',

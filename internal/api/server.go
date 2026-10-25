@@ -567,6 +567,8 @@ func (s *Server) setupRoutes() {
 	api.Get("/agent-hosts/me", s.handlers.GetOwnAgentHost)
 	api.Post("/agent-hosts/me/wake", s.handlers.WakeOwnAgentHost)
 	api.Delete("/agent-hosts/me", s.handlers.DeleteOwnAgentHost)
+	api.Post("/agent-hosts/invites", s.handlers.CreateInvite)
+	api.Get("/agent-hosts/invites/:id", s.handlers.GetInvite)
 
 	// AHP connection tokens. Every handler re-checks that the caller is a
 	// verified human identity and owns the token.

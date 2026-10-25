@@ -1292,6 +1292,7 @@ Usage:
 
 Available Commands:
   delete      Delete your agent host and its volume
+  invite      Invite someone who cannot reach Orka to a Copilot environment
   status      Show your agent host
   wake        Start your agent host after it idled out
 
@@ -1320,6 +1321,27 @@ Usage:
 Flags:
   -h, --help   help for delete
       --yes    Confirm deleting the host and its volume
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host invite`
+
+```text
+Start GitHub's device flow for a GitHub login. Pass the code on; once that person approves it with that GitHub account, and is in an allowed org or team, Orka links their account and starts their Copilot environment. They need only a browser and the Copilot app. Needs Kubernetes credentials allowed to create agenthosts.
+
+Usage:
+  orka host invite <github-login> [flags]
+
+Flags:
+  -h, --help               help for invite
+      --timeout duration   How long to wait for the invited person (default 16m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

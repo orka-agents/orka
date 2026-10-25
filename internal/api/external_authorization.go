@@ -244,15 +244,18 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/agent-hosts/me":       {identityOnly: true},
 	"POST /api/v1/agent-hosts/me/wake": {identityOnly: true},
 	"DELETE /api/v1/agent-hosts/me":    {identityOnly: true},
-	"GET /api/v1/secrets":              {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
-	"POST /api/v1/chat":                coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
-	"GET /api/v1/chat/config":          coreAPIPolicy("get", "chats/config", ""),
-	"DELETE /api/v1/chat/:sessionId":   coreAPIPolicy("delete", "sessions", "sessionId"),
-	"POST /openai/v1/responses":        coreAPIPolicy("create", "chats", ""),
-	"POST /openai/v1/chat/completions": coreAPIPolicy("create", "chats", ""),
-	"GET /openai/v1/models":            coreAPIPolicy("list", "providers", ""),
-	"POST /anthropic/v1/messages":      coreAPIPolicy("create", "chats", ""),
-	"GET /anthropic/v1/models":         coreAPIPolicy("list", "providers", ""),
+	// Inviting someone to a host is an operator's act: create on agenthosts.
+	"POST /api/v1/agent-hosts/invites":    coreAPIPolicy("create", "agenthosts", ""),
+	"GET /api/v1/agent-hosts/invites/:id": coreAPIPolicy("create", "agenthosts", ""),
+	"GET /api/v1/secrets":                 {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
+	"POST /api/v1/chat":                   coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
+	"GET /api/v1/chat/config":             coreAPIPolicy("get", "chats/config", ""),
+	"DELETE /api/v1/chat/:sessionId":      coreAPIPolicy("delete", "sessions", "sessionId"),
+	"POST /openai/v1/responses":           coreAPIPolicy("create", "chats", ""),
+	"POST /openai/v1/chat/completions":    coreAPIPolicy("create", "chats", ""),
+	"GET /openai/v1/models":               coreAPIPolicy("list", "providers", ""),
+	"POST /anthropic/v1/messages":         coreAPIPolicy("create", "chats", ""),
+	"GET /anthropic/v1/models":            coreAPIPolicy("list", "providers", ""),
 
 	// AHP token routes are identity-only like Connections: the handlers
 	// require a verified OIDC or context-token owner and refuse ServiceAccounts.

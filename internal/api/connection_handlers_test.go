@@ -142,7 +142,7 @@ func refreshFixture(w http.ResponseWriter, refreshToken string) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "ghu_alice_refreshed", "token_type": "bearer", "expires_in": 28800})
 		return
 	}
-	person := map[string]string{"ghr_alice": "alice", "ghr_bob": "bob"}[refreshToken]
+	person := map[string]string{"ghr_alice": "alice", "ghr_bob": "bob", "ghr_alice_renamed": "alice_renamed"}[refreshToken]
 	if person == "" {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_refresh_token"})
 		return
