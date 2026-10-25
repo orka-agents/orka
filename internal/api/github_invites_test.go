@@ -374,6 +374,34 @@ func TestInviteRevokesWithTheIssuingAppAfterAnAppChange(t *testing.T) {
 	}
 }
 
+// inviteRevocationAPI accepts only the expected issuing-app credentials.
+func inviteRevocationAPI(t *testing.T, wantSecret string, attempts *atomic.Int32, revoked *atomic.Bool) string {
+	t.Helper()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/applications/client-id/token" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		attempts.Add(1)
+		id, secret, ok := r.BasicAuth()
+		if !ok || id != "client-id" || secret != wantSecret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var body struct {
+			AccessToken string `json:"access_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.AccessToken != "ghu_alice" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		revoked.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(api.Close)
+	return api.URL
+}
+
 // A valid rotated secret must remain available for revocation even when the
 // provider's disclosed settings changed and the creation secret was revoked.
 func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
@@ -389,29 +417,7 @@ func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
 			}
 			var attempts atomic.Int32
 			var revoked atomic.Bool
-			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodDelete || r.URL.Path != "/applications/client-id/token" {
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				attempts.Add(1)
-				id, secret, ok := r.BasicAuth()
-				if !ok || id != "client-id" || secret != wantSecret {
-					w.WriteHeader(http.StatusUnauthorized)
-					return
-				}
-				var body struct {
-					AccessToken string `json:"access_token"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.AccessToken != "ghu_alice" {
-					w.WriteHeader(http.StatusBadRequest)
-					return
-				}
-				revoked.Store(true)
-				w.WriteHeader(http.StatusNoContent)
-			}))
-			t.Cleanup(api.Close)
-			h.handlers.githubSignIn.GitHub.APIURL = api.URL
+			h.handlers.githubSignIn.GitHub.APIURL = inviteRevocationAPI(t, wantSecret, &attempts, &revoked)
 			gh.onApprove = func() {
 				ctx := context.Background()
 				secret := &corev1.Secret{}

@@ -228,18 +228,7 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 	revoke := func(tokens ...string) (note string, failed bool) {
 		revokeCtx, cancelRevocation := context.WithTimeout(context.Background(), inviteCompletionTimeout)
 		defer cancelRevocation()
-		revocation := oauth
-		// Rotation may move the Secret reference, not just change its data.
-		// Revocation can use that reference before the provider is ready,
-		// but never takes credentials from a different GitHub app. This
-		// candidate is only for cleanup; it cannot authorize the changed invite.
-		current := &corev1alpha1.ConnectorProvider{}
-		if err := h.providerReader().Get(revokeCtx, client.ObjectKeyFromObject(provider), current); err == nil &&
-			current.Spec.OAuth.ClientID == created.ClientID {
-			if latest, err := h.providerOAuthConfig(revokeCtx, current); err == nil {
-				revocation = latest
-			}
-		}
+		revocation := h.inviteRevocationConfig(revokeCtx, provider, created.ClientID, oauth)
 		attempted := false
 		for _, token := range tokens {
 			if token == "" {
@@ -333,6 +322,22 @@ func (h *Handlers) completeInvite(id, login string, provider *corev1alpha1.Conne
 		}
 	}
 	h.invites.finish(id, InviteAccepted, message, connection.Name)
+}
+
+// inviteRevocationConfig follows a rotated Secret reference only for cleanup.
+// The provider need not be ready, but must still identify the issuing app.
+// The candidate cannot authorize the changed invite.
+func (h *Handlers) inviteRevocationConfig(ctx context.Context, provider *corev1alpha1.ConnectorProvider,
+	issuingClientID string, fallback connectors.OAuthProviderConfig) connectors.OAuthProviderConfig {
+	revocation := fallback
+	current := &corev1alpha1.ConnectorProvider{}
+	if err := h.providerReader().Get(ctx, client.ObjectKeyFromObject(provider), current); err == nil &&
+		current.Spec.OAuth.ClientID == issuingClientID {
+		if latest, err := h.providerOAuthConfig(ctx, current); err == nil {
+			revocation = latest
+		}
+	}
+	return revocation
 }
 
 // inviteIdentity checks that the approved tokens are the invited login's and,
