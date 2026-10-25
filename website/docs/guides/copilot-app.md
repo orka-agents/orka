@@ -320,6 +320,7 @@ Good to know:
 | `orka host invite` answers 403 | Apply the Role in [Invite someone who can't reach Orka](#invite-someone-who-cant-reach-orka). |
 | `helm install` says the agent image must be pinned | Set `controller.image.digest` as shown in [Step 2](#step-2-install-orka). |
 | The environment isn't ready | `orka host status` says why. [Agent hosts](../operations/agent-hosts.md#troubleshooting) lists every reason. |
+| The environment is ready, but the Copilot app says `Mission Control connect failed (HTTP 403)` | GitHub blocks the whole environment while one of its sessions is in a repository you can no longer push to, such as an archived one. [The Copilot app cannot connect](../operations/agent-hosts.md#the-copilot-app-cannot-connect) shows how to get back in. |
 
 ## Learn more
 
