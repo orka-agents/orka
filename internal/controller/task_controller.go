@@ -14,6 +14,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	cron "github.com/robfig/cron/v3"
+	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
@@ -32,71 +62,10 @@ import (
 	workerpkg "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
-	cron "github.com/robfig/cron/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"io"
-	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
-	"maps"
-	"reflect"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"slices"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 )
-
-// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
-// sessions is a virtual resource: the API server authorizes session endpoints with a
-// SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
-// +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
-// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
-// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
-// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
-// +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
-// The Events-v1 retention recorder needs write verbs: recording emits create
-// and patch requests that the read-only grant rejects at the API server.
-// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
 
 const (
 	taskTerminalMessage = "task is terminal"
@@ -206,61 +175,39 @@ type TaskReconciler struct {
 	trustedServiceCleanupDone         bool
 }
 
-// sessionTypeReader reads a Session's type without loading its transcript.
-type sessionTypeReader interface {
-	GetSessionType(ctx context.Context, namespace, name string) (string, error)
-}
-
-type resolvedApprovalWorkerEnvPayload int
-
-const (
-	resolvedApprovalWorkerEnvFullPayload resolvedApprovalWorkerEnvPayload = iota
-	resolvedApprovalWorkerEnvNoPreviewPayload
-	resolvedApprovalWorkerEnvCompactPayload
-)
-
-// missingToolPolicyGrace bounds how long a native dispatch waits for an
-// OutboundAccessPolicy that one of the Task's Tools references but that does
-// not exist. Tools are classified strictly (a missing policy cannot be judged
-// connector-backed or not), so the wait is retried for a while in case the
-// policy is being applied, and then the Task fails with the reason rather
-// than staying Pending without one.
-const missingToolPolicyGrace = 2 * time.Minute
-
-// podWaitingMessagePrefix marks a Running Task message that reports why its
-// Pod cannot start, so the controller can clear it once the Pod moves on.
-const podWaitingMessagePrefix = "pod waiting: "
-
-type trustedServiceReadCleanupRunnable struct {
-	reconciler *TaskReconciler
-}
-
-const (
-	DefaultAIWorkerClusterRoleName        = "orka-ai-worker-role"
-	DefaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
-	DefaultContainerWorkerClusterRoleName = "orka-container-worker-role"
-
-	maxWorkerRoleBindingNameLength = 253
-	workerRoleBindingHashLength    = 10
-
-	managedByLabelKey                         = "app.kubernetes.io/managed-by"
-	managedByLabelValue                       = "orka"
-	orkaManagedByLabelKey                     = "orka.ai/managed-by"
-	trustedServiceReaderLabelKey              = "orka.ai/trusted-service-reader"
-	trustedServiceReaderTaskNamespaceLabelKey = "orka.ai/trusted-service-reader-for"
-	trustedServiceReaderLabelValue            = booleanTrueValue
-)
-
-type workerRBACSpec struct {
-	serviceAccountName string
-	clusterRoleName    string
-	roleBindingName    string
-}
-
-const (
-	waitingForApprovalReasonPending  = "ApprovalPending"
-	waitingForApprovalReasonResolved = "ApprovalResolved"
-)
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
+// sessions is a virtual resource: the API server authorizes session endpoints with a
+// SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
+// The Events-v1 retention recorder needs write verbs: recording emits create
+// and patch requests that the read-only grant rejects at the API server.
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
 
 // updateStatusWithRetry updates the task status with retry on conflict.
 // It re-fetches the task on conflict, applies the mutate function, and retries.
@@ -376,9 +323,6 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		log.Error(err, "unable to fetch Task")
 		return ctrl.Result{}, err
 	}
-	if task.Spec.Enforcement != nil {
-		return ctrl.Result{}, fmt.Errorf("enforcement admission is not integrated at this series prefix")
-	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -468,6 +412,20 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
 	}
 
+	if len(task.Status.EnforcementBindings) > 0 {
+		keepJobUID := ""
+		if task.Status.Phase == corev1alpha1.TaskPhaseRunning {
+			keepJobUID = task.Status.JobUID
+		}
+		cleaned, err := r.cleanupNativeEnforcement(ctx, task, keepJobUID)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !cleaned {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
+
 	// Handle based on current phase
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhasePending:
@@ -550,6 +508,11 @@ func taskSessionName(task *corev1alpha1.Task) string {
 		return ""
 	}
 	return strings.TrimSpace(task.Spec.SessionRef.Name)
+}
+
+// sessionTypeReader reads a Session's type without loading its transcript.
+type sessionTypeReader interface {
+	GetSessionType(ctx context.Context, namespace, name string) (string, error)
 }
 
 // chatSessionEventAttribution names the chat Session a Task without a
@@ -732,21 +695,20 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
-		// Clean up execution timeline events before allowing a future task with the
-		// same namespace/name to expose stale history.
-		if r.ExecutionEventStore != nil {
-			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
-				log.Error(err, "failed to delete execution events", "task", task.Name)
-				return ctrl.Result{}, err
-			}
-		}
-
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
 			return ctrl.Result{}, err
 		}
 		if waitingForJob {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+
+		cleaned, err := r.cleanupNativeEnforcement(ctx, task, "")
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !cleaned {
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 
@@ -764,6 +726,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 			if err := authority.DeleteTaskJobRevocations(ctx, task.Namespace, task.Name, string(task.UID)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete task Job revocations: %w", err)
+			}
+		}
+
+		// Enforcement cleanup can repair admission events. Erase the stream only
+		// after that repair, before a future Task may reuse the same name.
+		if r.ExecutionEventStore != nil {
+			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
+				log.Error(err, "failed to delete execution events", "task", task.Name)
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -791,6 +762,13 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 //nolint:gocyclo // Pending routing keeps every mutually exclusive execution path in one auditable state machine.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if err := r.validateTaskEnforcement(task); err != nil {
+		if statusErr := r.markEnforcement(ctx, task, metav1.ConditionFalse, "EnforcementRefused", err.Error(), enforcement.RefusalNeeds(err)...); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return r.failTask(ctx, task, err.Error())
+	}
 
 	if outcome := task.Status.ExecutionOutcome; outcome != nil {
 		log.Info("refusing to replay task with immutable execution outcome", "outcome", outcome.Phase)
@@ -1357,6 +1335,14 @@ func marshalResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) (
 	return string(data), true, nil
 }
 
+type resolvedApprovalWorkerEnvPayload int
+
+const (
+	resolvedApprovalWorkerEnvFullPayload resolvedApprovalWorkerEnvPayload = iota
+	resolvedApprovalWorkerEnvNoPreviewPayload
+	resolvedApprovalWorkerEnvCompactPayload
+)
+
 func resolvedApprovalsLikelyFitWorkerEnv(
 	values []approvals.ResolvedApproval,
 	payload resolvedApprovalWorkerEnvPayload,
@@ -1511,6 +1497,14 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 	status := strings.TrimSpace(approval.Status)
 	return status != "" && status != approvals.StatusApproved
 }
+
+// missingToolPolicyGrace bounds how long a native dispatch waits for an
+// OutboundAccessPolicy that one of the Task's Tools references but that does
+// not exist. Tools are classified strictly (a missing policy cannot be judged
+// connector-backed or not), so the wait is retried for a while in case the
+// policy is being applied, and then the Task fails with the reason rather
+// than staying Pending without one.
+const missingToolPolicyGrace = 2 * time.Minute
 
 // boundMissingToolPolicy handles a dispatch error caused by a missing
 // OutboundAccessPolicy: within the grace period dispatch is retried shortly,
@@ -1799,6 +1793,15 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			Reason:             "JobCreated",
 			Message:            fmt.Sprintf("Job %s created", job.Name),
 		})
+		if t.Spec.Enforcement != nil {
+			t.Status.EnforcementOutcome = enforcement.Outcome("EnforcementPending")
+			t.Status.EnforcementOutcome.ObservedGeneration = t.Generation
+			meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+				Type: ConditionTypeEnforcementReady, Status: metav1.ConditionFalse,
+				LastTransitionTime: now, ObservedGeneration: t.Generation,
+				Reason: "EnforcementPending", Message: "waiting for the prepared worker container",
+			})
+		}
 		transitionedToRunning = true
 	}); err != nil {
 		log.Error(err, "failed to update status")
@@ -1812,13 +1815,15 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			execevents.ExecutionEventSeverityInfo,
 			fmt.Sprintf("Job %s created", jobName),
 		)
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskStarted,
-			execevents.ExecutionEventSeverityInfo,
-			fmt.Sprintf("Task started with Job %s", jobName),
-		)
+		if task.Spec.Enforcement == nil {
+			_ = r.recordTaskLifecycleEvent(
+				ctx,
+				task,
+				execevents.ExecutionEventTypeTaskStarted,
+				execevents.ExecutionEventSeverityInfo,
+				fmt.Sprintf("Task started with Job %s", jobName),
+			)
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -1976,6 +1981,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 
+	if result, handled, err := r.reconcileNativeEnforcement(ctx, task, job); handled || err != nil {
+		return result, err
+	}
+
 	// Check Job status
 	if job.Status.Succeeded > 0 {
 		// Check if this is an autonomous task that should continue iterating
@@ -2084,6 +2093,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
+
+// podWaitingMessagePrefix marks a Running Task message that reports why its
+// Pod cannot start, so the controller can clear it once the Pod moves on.
+const podWaitingMessagePrefix = "pod waiting: "
 
 // podWaitingMessage reports a container waiting state that keeps the Pod from
 // starting, such as an image pull failure.
@@ -3848,6 +3861,10 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	return nil
 }
 
+type trustedServiceReadCleanupRunnable struct {
+	reconciler *TaskReconciler
+}
+
 func (r *trustedServiceReadCleanupRunnable) Start(ctx context.Context) error {
 	if r == nil || r.reconciler == nil {
 		return errors.New("trusted Service RBAC cleanup reconciler is required")
@@ -3886,6 +3903,28 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1alpha1.Task{}).
 		Named("task").
 		Complete(r)
+}
+
+const (
+	DefaultAIWorkerClusterRoleName        = "orka-ai-worker-role"
+	DefaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
+	DefaultContainerWorkerClusterRoleName = "orka-container-worker-role"
+
+	maxWorkerRoleBindingNameLength = 253
+	workerRoleBindingHashLength    = 10
+
+	managedByLabelKey                         = "app.kubernetes.io/managed-by"
+	managedByLabelValue                       = "orka"
+	orkaManagedByLabelKey                     = "orka.ai/managed-by"
+	trustedServiceReaderLabelKey              = "orka.ai/trusted-service-reader"
+	trustedServiceReaderTaskNamespaceLabelKey = "orka.ai/trusted-service-reader-for"
+	trustedServiceReaderLabelValue            = booleanTrueValue
+)
+
+type workerRBACSpec struct {
+	serviceAccountName string
+	clusterRoleName    string
+	roleBindingName    string
 }
 
 // workerRBACSpecs binds cluster-scoped worker roles into each task namespace.
@@ -4659,6 +4698,11 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
 }
+
+const (
+	waitingForApprovalReasonPending  = "ApprovalPending"
+	waitingForApprovalReasonResolved = "ApprovalResolved"
+)
 
 func approvalTargetName(approval approvals.Approval) string {
 	if approval.TargetTool != "" {

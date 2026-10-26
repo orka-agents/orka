@@ -982,6 +982,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - create
@@ -998,12 +1005,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/log
-  verbs:
-  - get
 - apiGroups:
   - ""
   resources:

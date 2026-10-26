@@ -23,7 +23,7 @@ func (r *RuntimePoolReconciler) runtimePoolEnvironment(pool *corev1alpha1.Runtim
 	if nativeSessionMaxBytes == 0 {
 		nativeSessionMaxBytes = harnessv2.DefaultMaxNativeSessionBytes
 	}
-	return []corev1.EnvVar{
+	environment := []corev1.EnvVar{
 		{Name: "ORKA_ACP_LISTEN_ADDRESS", Value: ":8080"},
 		{Name: "ORKA_ACP_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
 		{Name: "ORKA_ACP_POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
@@ -59,4 +59,8 @@ func (r *RuntimePoolReconciler) runtimePoolEnvironment(pool *corev1alpha1.Runtim
 		{Name: "ORKA_ACP_SESSION_BASE_DIR", Value: "/sessions"},
 		{Name: "ORKA_NATIVE_SESSION_MAX_BYTES", Value: strconv.Itoa(nativeSessionMaxBytes)},
 	}
+	if cfg.profile.EnforcementRequirementDigest != "" {
+		environment = append(environment, corev1.EnvVar{Name: "ORKA_ACP_ENFORCEMENT_REQUIREMENT_DIGEST", Value: cfg.profile.EnforcementRequirementDigest})
+	}
+	return environment
 }

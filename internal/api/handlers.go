@@ -951,6 +951,9 @@ func parseTaskLogTailLines(raw string) (int64, error) {
 
 // GetTaskResult gets the result of a task
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
+	// Clients check this on an authenticated absent-Task probe before submitting
+	// a requirement. It advertises protocol support, not provider readiness.
+	c.Set("Orka-Task-Enforcement", "container-v1")
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/enforcement"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 )
@@ -184,10 +185,26 @@ func (a internalCallerAuthorizer) verifyUsageWriter(ctx context.Context, userInf
 	if err != nil {
 		return err
 	}
+	command := "/worker"
+	if task.Spec.Enforcement != nil {
+		requirement, err := enforcement.TaskRequirement(task)
+		if err != nil {
+			return fiber.NewError(fiber.StatusForbidden, "worker enforcement requirement invalid")
+		}
+		digest, err := enforcement.RequirementDigest(requirement)
+		if err != nil {
+			return fiber.NewError(fiber.StatusForbidden, "worker enforcement identity unavailable")
+		}
+		approved, err := enforcement.PodApproved(pod, string(pod.UID), "worker", digest)
+		if err != nil || !approved {
+			return fiber.NewError(fiber.StatusForbidden, "worker container enforcement not admitted")
+		}
+		command = "/worker-enforced"
+	}
 	// Check the immutable Pod command as well as the current Task spec. A
 	// container Task must not gain accounting authority through a type change.
 	for _, container := range pod.Spec.Containers {
-		if container.Name == "worker" && slices.Equal(container.Command, []string{"/worker"}) &&
+		if container.Name == "worker" && slices.Equal(container.Command, []string{command}) &&
 			slices.Equal(container.Args, []string{"--mode=ai"}) {
 			return nil
 		}
