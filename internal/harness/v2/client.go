@@ -267,6 +267,25 @@ func (c *Client) CreateRuntimeSession(ctx context.Context, request CreateRuntime
 	return &response, nil
 }
 
+func (c *Client) LaunchRuntimeSession(ctx context.Context, sessionID RuntimeSessionID, request LaunchRuntimeSessionRequest) (*LaunchRuntimeSessionResponse, error) {
+	const operation = "launch_runtime_session"
+	if err := request.ValidateAt(time.Now().UTC()); err != nil {
+		return nil, c.validationError(operation, err)
+	}
+	relative, err := RuntimeSessionLaunchPath(sessionID)
+	if err != nil {
+		return nil, c.validationError(operation, err)
+	}
+	var response LaunchRuntimeSessionResponse
+	if err := c.mutateJSON(ctx, operation, http.MethodPut, relative, request.Metadata, request, &response); err != nil {
+		return nil, err
+	}
+	if err := response.ValidateFor(sessionID, request); err != nil {
+		return nil, c.protocolError(operation, 0, err)
+	}
+	return &response, nil
+}
+
 func (c *Client) FinalizeRuntimeSessionPublication(ctx context.Context, sessionID RuntimeSessionID, request FinalizeRuntimeSessionPublicationRequest) (*FinalizeRuntimeSessionPublicationResponse, error) {
 	const operation = "finalize_runtime_session_publication"
 	if err := request.ValidateAt(time.Now().UTC()); err != nil {
@@ -475,6 +494,7 @@ func (c *Client) getJSONWithCapability(ctx context.Context, operation, relative 
 	setCommonHeaders(req, "application/json")
 	if operation == "capabilities" {
 		req.Header.Set(NativeSessionLimitsHeader, "1")
+		req.Header.Set(SessionPreparationHeader, "1")
 	}
 	if authenticated {
 		req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
@@ -565,6 +585,7 @@ func (c *Client) mutateJSON(
 	req.Header.Set("Content-Type", "application/json")
 	if operation == "capture_native_session" {
 		req.Header.Set(NativeSessionLimitsHeader, "1")
+		req.Header.Set(SessionPreparationHeader, "1")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	req.Header.Set(OperationCapabilityHeader, capability)

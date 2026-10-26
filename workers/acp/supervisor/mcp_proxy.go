@@ -101,7 +101,7 @@ func newMCPProxy(broker MCPBroker) (*mcpProxy, error) {
 	if broker == nil {
 		return nil, fmt.Errorf("controller MCP broker is required")
 	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := ListenTCP("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen on MCP loopback: %w", err)
 	}

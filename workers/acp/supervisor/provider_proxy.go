@@ -250,7 +250,7 @@ func newProviderProxy(cfg ProviderProxyConfig) (*providerProxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := ListenTCP("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen on provider proxy loopback: %w", err)
 	}

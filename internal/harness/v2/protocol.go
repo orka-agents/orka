@@ -204,6 +204,7 @@ type CapabilitiesResponse struct {
 	SupportsAgentSessionConfiguration bool                            `json:"supportsAgentSessionConfiguration,omitempty"`
 	SupportsNativeSessions            bool                            `json:"supportsNativeSessions,omitempty"`
 	SupportsFoundryRecovery           bool                            `json:"supportsFoundryRecovery,omitempty"`
+	SupportsSessionPreparation        bool                            `json:"supportsSessionPreparation,omitempty"`
 }
 
 func (r CapabilitiesResponse) Validate() error {
