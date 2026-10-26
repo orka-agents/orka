@@ -188,6 +188,47 @@ spec:
                 - Allow
                 - Forbid
                 type: string
+              enforcement:
+                description: |-
+                  Enforcement is the complete immutable requirement for this Task's runtime
+                  container. It is never inherited from an Agent or rewritten by Orka.
+                properties:
+                  format:
+                    description: Format identifies the provider-interpreted policy
+                      format.
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                  mode:
+                    description: Mode has no advisory fallback.
+                    enum:
+                    - enforce
+                    type: string
+                  policy:
+                    description: |-
+                      Policy contains unchanged opaque bytes (base64 in JSON/YAML).
+                      The decoded policy is additionally bounded to 512 KiB at admission.
+                    format: byte
+                    maxLength: 699052
+                    minLength: 1
+                    type: string
+                  requiredCapabilities:
+                    description: RequiredCapabilities must all be covered by the mandatory
+                      providers.
+                    items:
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    maxItems: 32
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                required:
+                - format
+                - mode
+                - policy
+                - requiredCapabilities
+                type: object
               env:
                 description: Env is a list of environment variables to set in the
                   container
@@ -1975,6 +2016,9 @@ spec:
                 || self.transaction == oldSelf.transaction)
             - message: type is immutable
               rule: self.type == oldSelf.type
+            - message: enforcement is immutable
+              rule: has(self.enforcement) == has(oldSelf.enforcement) && (!has(self.enforcement)
+                || self.enforcement == oldSelf.enforcement)
             - message: effective workspace intent is immutable
               rule: '(has(self.workspace) && has(self.workspace.intent) ? self.workspace.intent
                 : (self.type == ''agent'' ? ''read'' : self.type)) == (has(oldSelf.workspace)
@@ -2536,6 +2580,123 @@ spec:
                     ''DeliveredSuperseded'', ''ReadValidated'', ''NoChange'', ''CancelledBeforePublish'',
                     ''ReadOnlyWorkspaceModified'', ''DeliveryConflict'', ''CredentialBlocked'',
                     ''PublicationOutcomeUnknown'']) || has(self.outcome)'
+              enforcementAdmission:
+                description: |-
+                  EnforcementAdmission retains the last verified policy/container admission
+                  after physical cleanup. Conditions report its outcome; this is not live proof.
+                properties:
+                  bindingID:
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  requirementDigest:
+                    type: string
+                required:
+                - bindingID
+                - observedGeneration
+                - requirementDigest
+                type: object
+              enforcementBindings:
+                description: |-
+                  EnforcementBindings retain physical cleanup obligations across retries,
+                  cancellation and deletion until the runtime stops each target and every
+                  mandatory provider confirms retirement.
+                items:
+                  description: |-
+                    ContainerEnforcementBinding retains cleanup intent independently of the
+                    current Task attempt or a consuming runtime session. It contains no policy,
+                    private credential, kernel readback or provider-specific target handle.
+                  properties:
+                    admitted:
+                      description: |-
+                        Admitted records the controller's durable release decision, not a live
+                        provider assertion or permission to detach controls.
+                      type: boolean
+                    bindingID:
+                      type: string
+                    containerID:
+                      type: string
+                    containerName:
+                      type: string
+                    jobUID:
+                      description: JobUID is present only for Job-owned native workers.
+                      type: string
+                    nodeName:
+                      type: string
+                    nodeUID:
+                      type: string
+                    podName:
+                      type: string
+                    podNamespace:
+                      type: string
+                    podUID:
+                      type: string
+                    providerSetDigest:
+                      type: string
+                    published:
+                      description: |-
+                        Published records observation of the exact Pod release annotation, not
+                        worker consumption or successful execution. It survives Pod removal so
+                        admission-event repair cannot lose its supporting receipt.
+                      type: boolean
+                    requirementDigest:
+                      type: string
+                  required:
+                  - bindingID
+                  - containerID
+                  - containerName
+                  - nodeName
+                  - nodeUID
+                  - podName
+                  - podNamespace
+                  - podUID
+                  - providerSetDigest
+                  - requirementDigest
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - bindingID
+                x-kubernetes-list-type: map
+              enforcementOutcome:
+                description: EnforcementOutcome contains only safe explanatory metadata
+                  for blocked admission.
+                properties:
+                  needs:
+                    items:
+                      description: EnforcementNeed is a safe explanatory identifier,
+                        never provider prose or authority.
+                      enum:
+                      - complete-policy
+                      - supported-format
+                      - configured-backend
+                      - supported-target
+                      - supported-runtime
+                      - mandatory-capability-coverage
+                      - provider-recovery
+                      - prepared-container
+                      - stopped-previous-container
+                      - operator-configuration
+                      - admission-recovery
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: set
+                  observedGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  reason:
+                    enum:
+                    - EnforcementPending
+                    - EnforcementAdmissionPending
+                    - EnforcementRefused
+                    - EnforcementUncertain
+                    type: string
+                required:
+                - observedGeneration
+                - reason
+                type: object
               execution:
                 description: |-
                   Execution reports the durable execution state and terminal outcome for the

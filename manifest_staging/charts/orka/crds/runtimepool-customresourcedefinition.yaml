@@ -319,6 +319,12 @@ spec:
                         minLength: 1
                         pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$
                         type: string
+                      enforcementRequirementDigest:
+                        description: |-
+                          EnforcementRequirementDigest pins the complete requirement, not current
+                          enforcement proof. Absence preserves ordinary pool identity.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
                       mcpConfigurationDigest:
                         description: MCPConfigurationDigest freezes prompt-scoped
                           broker/MCP configuration.
@@ -840,6 +846,57 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
+              enforcementBinding:
+                description: |-
+                  EnforcementBinding retains physical cleanup intent independently of
+                  consuming Tasks and sessions. Replacement waits for its retirement.
+                properties:
+                  admitted:
+                    description: |-
+                      Admitted records the controller's durable release decision, not a live
+                      provider assertion or permission to detach controls.
+                    type: boolean
+                  bindingID:
+                    type: string
+                  containerID:
+                    type: string
+                  containerName:
+                    type: string
+                  jobUID:
+                    description: JobUID is present only for Job-owned native workers.
+                    type: string
+                  nodeName:
+                    type: string
+                  nodeUID:
+                    type: string
+                  podName:
+                    type: string
+                  podNamespace:
+                    type: string
+                  podUID:
+                    type: string
+                  providerSetDigest:
+                    type: string
+                  published:
+                    description: |-
+                      Published records observation of the exact Pod release annotation, not
+                      worker consumption or successful execution. It survives Pod removal so
+                      admission-event repair cannot lose its supporting receipt.
+                    type: boolean
+                  requirementDigest:
+                    type: string
+                required:
+                - bindingID
+                - containerID
+                - containerName
+                - nodeName
+                - nodeUID
+                - podName
+                - podNamespace
+                - podUID
+                - providerSetDigest
+                - requirementDigest
+                type: object
               lifecycle:
                 description: Lifecycle is the explicit pool lifecycle.
                 enum:

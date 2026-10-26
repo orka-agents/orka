@@ -16,20 +16,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/enforcement"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	orkametrics "github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"io"
-	"maps"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"reflect"
-	"regexp"
-	"slices"
-	"strconv"
-	"strings"
-	"time"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -43,20 +37,38 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
+	"maps"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
-	orkametrics "github.com/orka-agents/orka/internal/metrics"
-	"github.com/orka-agents/orka/internal/store"
-	storekube "github.com/orka-agents/orka/internal/store/kube"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
 )
+
+// +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces;configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+
+// reconcileDeletingWorkspaceRuntimePool routes deletion through the same
+// authenticated scale-to-zero state machine as idle shutdown. The local spec
+// override is never persisted; it only closes admission and proves quiescence
+// before finalization removes the provider workload and isolation boundary.
 
 const (
 	baselineField = "baseline"
@@ -184,12 +196,6 @@ type RuntimePoolProviderProxyConfig struct {
 	BearerTokenFile string
 }
 
-func (c RuntimePoolProviderProxyConfig) String() string {
-	return fmt.Sprintf("{BaseURL:%q Namespace:%q PodLabels:%v BearerToken:[redacted]}", c.BaseURL, c.Namespace, c.PodLabels)
-}
-
-func (c RuntimePoolProviderProxyConfig) GoString() string { return c.String() }
-
 type runtimePoolProviderProxyConfig struct {
 	baseURL         string
 	namespace       string
@@ -198,6 +204,108 @@ type runtimePoolProviderProxyConfig struct {
 	token           []byte
 	tokenGeneration string
 }
+
+// RuntimePoolReconciler reconciles controller-owned built-in ACP runtime pools.
+type RuntimePoolReconciler struct {
+	client.Client
+	APIReader client.Reader
+	Scheme    *k8sruntime.Scheme
+	// ControlStore preserves native boot witnesses independently of Pod lifetime.
+	ControlStore store.DurableControlStore
+
+	// Enforcement retains operator-owned provider routes for physical cleanup.
+	Enforcement enforcement.Coordinator
+
+	// RuntimeNamespace is used when spec.runtimeNamespace is empty.
+	RuntimeNamespace string
+	// ControllerNamespace is the namespace allowed to reach the runtime control port.
+	ControllerNamespace string
+	// ControllerAPIURL is the exact internal artifact/broker API base URL.
+	ControllerAPIURL string
+	// ControllerAPIPort is the controller Pod target port allowed by the runtime egress policy.
+	ControllerAPIPort int32
+	// WorkspaceArtifactMaxBytes is the Publisher-advertised maximum inbound
+	// workspace artifact size propagated to every built-in runtime.
+	WorkspaceArtifactMaxBytes int64
+	// NativeSessionMaxBytes bounds encoded native session bundles in every built-in runtime.
+	// Zero selects the default 8 MiB policy.
+	NativeSessionMaxBytes int
+	// ProviderProxy is the authenticated, NetworkPolicy-confined provider boundary.
+	ProviderProxy RuntimePoolProviderProxyConfig
+	// ControllerEpoch is a test/static override. Production uses Epochs.
+	ControllerEpoch int64
+	// Epochs supplies the current durable leader epoch.
+	Epochs *ControllerEpochManager
+	// EnablePDB protects a serving singleton from voluntary disruption.
+	EnablePDB bool
+	// EnableTelemetry projects non-secret trace exporter settings into supervisors.
+	EnableTelemetry bool
+	// AllowedImages is the controller-configured immutable image allowlist for
+	// built-in pools. RuntimePool is controller-owned; its public spec cannot be
+	// used to select an arbitrary privileged supervisor image.
+	AllowedImages ACPRuntimeImages
+	// CleanupOnly keeps deletion finalization active while ACP runtime admission
+	// is disabled without adding finalizers or creating runtime resources.
+	CleanupOnly bool
+	// WorkspaceCleanupOnly disables external workspace admission while keeping
+	// ordinary Deployment-backed pools and exact workspace cleanup active.
+	WorkspaceCleanupOnly bool
+	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
+	// fault marker projected into built-in runtime supervisors.
+	E2EPromptWriteAmbiguityMarker string
+	// ToolboxPolicy configures how frozen profile toolboxes are bound into
+	// runtime Pods. Pools whose profile carries toolboxes fail closed with
+	// ToolboxUnavailable when the policy cannot honor them.
+	ToolboxPolicy ACPToolboxPolicy
+
+	// WorkspaceCredentialSeeder overrides the external runtime credential
+	// bootstrap PUT for tests. Production seeds the exact attested Pod endpoint
+	// directly after provider materialization is verified.
+	WorkspaceCredentialSeeder func(ctx context.Context, endpoint, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) (alreadyComplete bool, err error)
+
+	SupervisorClient RuntimePoolSupervisorClient
+	HTTPClient       *http.Client
+	Rand             io.Reader
+	Now              func() time.Time
+}
+
+type runtimePoolConfig struct {
+	namespace             string
+	baseName              string
+	labels                map[string]string
+	controllerEpoch       int64
+	maxResidentSessions   int32
+	maxRunningPrompts     int32
+	nativeSessionMaxBytes int
+	protocol              corev1alpha1.RuntimePoolProtocolVersion
+	profile               harnessv2.RuntimeProfile
+	providerProxy         runtimePoolProviderProxyConfig
+}
+
+type runtimePoolBootstrapInstanceBinding struct {
+	AuthSecretUID types.UID `json:"authSecretUID"`
+	WorkloadUID   types.UID `json:"workloadUID"`
+}
+
+type runtimePoolPostProbeFence func(
+	context.Context,
+	*corev1alpha1.RuntimePoolActiveInstanceStatus,
+) (ctrl.Result, bool, error)
+
+// runtimePoolConflictRequeue is how soon a reconcile that lost the status
+// optimistic lock re-reads the pool.
+const runtimePoolConflictRequeue = time.Second
+
+type runtimePoolHTTPSupervisorClient struct {
+	client *http.Client
+	now    func() time.Time
+}
+
+func (c RuntimePoolProviderProxyConfig) String() string {
+	return fmt.Sprintf("{BaseURL:%q Namespace:%q PodLabels:%v BearerToken:[redacted]}", c.BaseURL, c.Namespace, c.PodLabels)
+}
+
+func (c RuntimePoolProviderProxyConfig) GoString() string { return c.String() }
 
 // Validate verifies that the provider boundary is complete and cluster-local.
 func (c RuntimePoolProviderProxyConfig) Validate() error {
@@ -310,75 +418,6 @@ func validateRuntimePoolProviderToken(token []byte) error {
 	}
 	return nil
 }
-
-// RuntimePoolReconciler reconciles controller-owned built-in ACP runtime pools.
-type RuntimePoolReconciler struct {
-	client.Client
-	APIReader client.Reader
-	Scheme    *k8sruntime.Scheme
-	// ControlStore preserves native boot witnesses independently of Pod lifetime.
-	ControlStore store.DurableControlStore
-
-	// RuntimeNamespace is used when spec.runtimeNamespace is empty.
-	RuntimeNamespace string
-	// ControllerNamespace is the namespace allowed to reach the runtime control port.
-	ControllerNamespace string
-	// ControllerAPIURL is the exact internal artifact/broker API base URL.
-	ControllerAPIURL string
-	// ControllerAPIPort is the controller Pod target port allowed by the runtime egress policy.
-	ControllerAPIPort int32
-	// WorkspaceArtifactMaxBytes is the Publisher-advertised maximum inbound
-	// workspace artifact size propagated to every built-in runtime.
-	WorkspaceArtifactMaxBytes int64
-	// NativeSessionMaxBytes bounds encoded native session bundles in every built-in runtime.
-	// Zero selects the default 8 MiB policy.
-	NativeSessionMaxBytes int
-	// ProviderProxy is the authenticated, NetworkPolicy-confined provider boundary.
-	ProviderProxy RuntimePoolProviderProxyConfig
-	// ControllerEpoch is a test/static override. Production uses Epochs.
-	ControllerEpoch int64
-	// Epochs supplies the current durable leader epoch.
-	Epochs *ControllerEpochManager
-	// EnablePDB protects a serving singleton from voluntary disruption.
-	EnablePDB bool
-	// EnableTelemetry projects non-secret trace exporter settings into supervisors.
-	EnableTelemetry bool
-	// AllowedImages is the controller-configured immutable image allowlist for
-	// built-in pools. RuntimePool is controller-owned; its public spec cannot be
-	// used to select an arbitrary privileged supervisor image.
-	AllowedImages ACPRuntimeImages
-	// CleanupOnly keeps deletion finalization active while ACP runtime admission
-	// is disabled without adding finalizers or creating runtime resources.
-	CleanupOnly bool
-	// WorkspaceCleanupOnly disables external workspace admission while keeping
-	// ordinary Deployment-backed pools and exact workspace cleanup active.
-	WorkspaceCleanupOnly bool
-	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
-	// fault marker projected into built-in runtime supervisors.
-	E2EPromptWriteAmbiguityMarker string
-	// ToolboxPolicy configures how frozen profile toolboxes are bound into
-	// runtime Pods. Pools whose profile carries toolboxes fail closed with
-	// ToolboxUnavailable when the policy cannot honor them.
-	ToolboxPolicy ACPToolboxPolicy
-
-	// WorkspaceCredentialSeeder overrides the external runtime credential
-	// bootstrap PUT for tests. Production seeds the exact attested Pod endpoint
-	// directly after provider materialization is verified.
-	WorkspaceCredentialSeeder func(ctx context.Context, endpoint, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) (alreadyComplete bool, err error)
-
-	SupervisorClient RuntimePoolSupervisorClient
-	HTTPClient       *http.Client
-	Rand             io.Reader
-	Now              func() time.Time
-}
-
-// +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces;configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the singleton Deployment and publishes exact-Pod pool status.
 //
@@ -515,29 +554,6 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.reconcileRuntimePoolScaleDown(ctx, pool, cfg, deployment, pods, readyPods, authSecret, status)
 	}
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, pods, readyPods, authSecret, status)
-}
-
-// reconcileDeletingWorkspaceRuntimePool routes deletion through the same
-// authenticated scale-to-zero state machine as idle shutdown. The local spec
-// override is never persisted; it only closes admission and proves quiescence
-// before finalization removes the provider workload and isolation boundary.
-
-type runtimePoolConfig struct {
-	namespace             string
-	baseName              string
-	labels                map[string]string
-	controllerEpoch       int64
-	maxResidentSessions   int32
-	maxRunningPrompts     int32
-	nativeSessionMaxBytes int
-	protocol              corev1alpha1.RuntimePoolProtocolVersion
-	profile               harnessv2.RuntimeProfile
-	providerProxy         runtimePoolProviderProxyConfig
-}
-
-type runtimePoolBootstrapInstanceBinding struct {
-	AuthSecretUID types.UID `json:"authSecretUID"`
-	WorkloadUID   types.UID `json:"workloadUID"`
 }
 
 func (r *RuntimePoolReconciler) runtimePoolConfig(pool *corev1alpha1.RuntimePool) (runtimePoolConfig, error) {
@@ -997,11 +1013,6 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		ctx, pool, cfg, pods, readyPods, authSecret, status, nil,
 	)
 }
-
-type runtimePoolPostProbeFence func(
-	context.Context,
-	*corev1alpha1.RuntimePoolActiveInstanceStatus,
-) (ctrl.Result, bool, error)
 
 //nolint:gocyclo // Serving reconciliation rechecks every post-probe fence before admitting sessions.
 func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
@@ -3467,10 +3478,6 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxPodDrained(
 	return true, nil
 }
 
-// runtimePoolConflictRequeue is how soon a reconcile that lost the status
-// optimistic lock re-reads the pool.
-const runtimePoolConflictRequeue = time.Second
-
 func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -3924,11 +3931,6 @@ func mergeStringMap(destination, source map[string]string) map[string]string {
 	}
 	maps.Copy(destination, source)
 	return destination
-}
-
-type runtimePoolHTTPSupervisorClient struct {
-	client *http.Client
-	now    func() time.Time
 }
 
 func (c *runtimePoolHTTPSupervisorClient) Probe(ctx context.Context, endpoint, bearerToken string, capabilitySecret []byte) (RuntimePoolProbeResult, error) {
