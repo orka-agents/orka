@@ -19,14 +19,17 @@ import (
 
 const (
 	// Base worker env vars used by all worker types.
-	TaskName          = "ORKA_TASK_NAME"
-	TaskNamespace     = "ORKA_TASK_NAMESPACE"
-	ResultEndpoint    = "ORKA_RESULT_ENDPOINT"
-	ResultStdout      = "ORKA_RESULT_STDOUT"
-	ResultStdoutToken = "ORKA_RESULT_STDOUT_TOKEN"
-	ControllerURL     = "ORKA_CONTROLLER_URL"
-	Command           = "ORKA_COMMAND"
-	AgentName         = "ORKA_AGENT_NAME"
+	TaskName                     = "ORKA_TASK_NAME"
+	TaskNamespace                = "ORKA_TASK_NAMESPACE"
+	ResultEndpoint               = "ORKA_RESULT_ENDPOINT"
+	ResultStdout                 = "ORKA_RESULT_STDOUT"
+	ResultStdoutToken            = "ORKA_RESULT_STDOUT_TOKEN"
+	ControllerURL                = "ORKA_CONTROLLER_URL"
+	Command                      = "ORKA_COMMAND"
+	AgentName                    = "ORKA_AGENT_NAME"
+	EnforcementRequirementDigest = "ORKA_ENFORCEMENT_REQUIREMENT_DIGEST"
+	WorkerPodName                = "ORKA_WORKER_POD_NAME"
+	WorkerPodUID                 = "ORKA_WORKER_POD_UID"
 
 	// Task relationship env vars.
 	PriorTask           = "ORKA_PRIOR_TASK"
