@@ -159,6 +159,10 @@ func isUnsupportedAPIError(err error) bool {
 		switch apiErr.StatusCode {
 		case http.StatusNotFound, http.StatusMethodNotAllowed:
 			return true
+		case http.StatusBadRequest:
+			if isUnsupportedResponsesToolsMessage(apiErr.Message) {
+				return true
+			}
 		case 403:
 			if isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message) {
 				return true
@@ -176,6 +180,10 @@ func isUnsupportedAPIError(err error) bool {
 		switch providerErr.StatusCode {
 		case http.StatusNotFound, http.StatusMethodNotAllowed:
 			return true
+		case http.StatusBadRequest:
+			if isUnsupportedResponsesToolsMessage(providerErr.Message) {
+				return true
+			}
 		case 403:
 			if isUnsupportedAPIMessage(providerErr.Message) {
 				return true
@@ -193,6 +201,10 @@ func isUnsupportedAPIError(err error) bool {
 	return strings.Contains(msg, "404") ||
 		strings.Contains(msg, "Not Found") ||
 		isUnsupportedAPIMessage(msg)
+}
+
+func isUnsupportedResponsesToolsMessage(message string) bool {
+	return strings.Contains(strings.ToLower(message), "tool use is not supported in responses api")
 }
 
 func isCustomOpenAIBaseURL(providerType, baseURL string) bool {
@@ -1061,7 +1073,23 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		send := newStreamSender(ctx, ch)
 		params := buildResponsesParams(req)
 		params.Model = p.requestModel(req.Model)
-		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, params), p.TelemetryProviderName(), send, req.ResponsesInput)
+		emitted, fallback := false, false
+		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, params), p.TelemetryProviderName(), func(chunk llm.StreamChunk) bool {
+			if !emitted && chunk.Error != nil && isUnsupportedAPIError(chunk.Error) {
+				fallback = true
+				return false
+			}
+			emitted = true
+			return send(chunk)
+		}, req.ResponsesInput)
+		if fallback {
+			p.mode.Store(int32(apiModeChatCompletions))
+			for chunk := range p.streamChatCompletions(ctx, req) {
+				if !send(chunk) {
+					return
+				}
+			}
+		}
 	}()
 	return ch
 }
